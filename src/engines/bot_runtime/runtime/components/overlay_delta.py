@@ -351,6 +351,7 @@ def build_overlay_delta(
     *,
     max_payload_items: int = _OVERLAY_PAYLOAD_FALLBACK_POINT_LIMIT,
     force: bool = False,
+    force_full: bool = False,
 ) -> Optional[Dict[str, Any]]:
     previous_entries = cache.get("overlay_entries")
     previous_fingerprints = cache.get("overlay_fingerprints")
@@ -382,16 +383,21 @@ def build_overlay_delta(
         and set(previous_entries.keys()) == set(next_entries.keys())
         and all(previous_fingerprints.get(key) == next_fingerprints.get(key) for key in next_entries.keys())
     )
-    if unchanged and not force:
+    if unchanged and not force and not force_full:
         return None
 
     next_seq = previous_seq + 1
     ops: list[Dict[str, Any]] = []
-    removed_keys = [key for key in previous_order if key not in next_entries]
-    for key in removed_keys:
-        ops.append({"op": "remove", "key": key})
-    for key in next_order:
-        if previous_fingerprints.get(key) != next_fingerprints.get(key):
+    if force_full:
+        for key in next_order:
+            ops.append({"op": "upsert", "key": key, "overlay": next_entries[key]})
+    else:
+        removed_keys = [key for key in previous_order if key not in next_entries]
+        for key in removed_keys:
+            ops.append({"op": "remove", "key": key})
+        for key in next_order:
+            if previous_fingerprints.get(key) == next_fingerprints.get(key):
+                continue
             previous_overlay = previous_entries.get(key)
             next_overlay = next_entries[key]
             patch = None
@@ -411,12 +417,15 @@ def build_overlay_delta(
     cache["overlay_fingerprints"] = next_fingerprints
     cache["overlay_order"] = next_order
     cache["overlay_commit_seq"] = next_seq
-    return {
+    delta = {
         "overlay_commit_seq": next_seq,
         "base_overlay_commit_seq": previous_seq,
         "overlay_commit_seq_status": "overlay_scoped",
         "ops": ops,
     }
+    if force_full:
+        delta["checkpoint_kind"] = "full_state"
+    return delta
 
 
 def overlay_delta_op_counts(delta: Mapping[str, Any]) -> Dict[str, int]:

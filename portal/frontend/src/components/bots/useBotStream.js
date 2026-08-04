@@ -51,7 +51,7 @@ export function resolveBotsStreamMutation(eventType, payload) {
   return null
 }
 
-export function useBotStream({ replaceBots, upsertBot, mergeBotRuntime, removeBot }) {
+export function useBotStream({ replaceBots, upsertBot, mergeBotRuntime, removeBot, enabled = true }) {
   const [botStreamState, setBotStreamState] = useState('idle')
   const [hasReceivedSnapshot, setHasReceivedSnapshot] = useState(false)
   const botStreamRef = useRef(null)
@@ -70,6 +70,11 @@ export function useBotStream({ replaceBots, upsertBot, mergeBotRuntime, removeBo
   })
 
   useEffect(() => {
+    if (!enabled) {
+      setBotStreamState('idle')
+      setHasReceivedSnapshot(false)
+      return undefined
+    }
     const source = openBotsStream()
     if (!source) {
       loggerRef.current.info('bot_stream_unavailable')
@@ -127,7 +132,7 @@ export function useBotStream({ replaceBots, upsertBot, mergeBotRuntime, removeBo
         botStreamRef.current = null
       }
     }
-  }, [])
+  }, [enabled])
 
   return { state: botStreamState, hasReceivedSnapshot }
 }

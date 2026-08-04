@@ -697,6 +697,21 @@ function normalizeOverlayProjection(value) {
     : null
 }
 
+function normalizeOverlayValidity(value) {
+  const source = value && typeof value === 'object' ? value : {}
+  const status = String(source.status || 'valid').trim().toLowerCase()
+  return {
+    status: status === 'invalid' ? 'invalid' : 'valid',
+    invalid_reason: String(source.invalid_reason || '').trim() || null,
+    invalid_detail: String(source.invalid_detail || '').trim() || null,
+    invalidated_at_run_seq: toPositiveInt(source.invalidated_at_run_seq),
+    gap_expected_overlay_commit_seq: toNonNegativeInt(source.gap_expected_overlay_commit_seq),
+    gap_observed_base_overlay_commit_seq: toNonNegativeInt(source.gap_observed_base_overlay_commit_seq),
+    gap_observed_overlay_commit_seq: toPositiveInt(source.gap_observed_overlay_commit_seq),
+    recovered_at_run_seq: toPositiveInt(source.recovered_at_run_seq),
+  }
+}
+
 function mergeScopedCursors(base, patch) {
   const baseCursors = base && typeof base === 'object' ? base : {}
   const patchCursors = patch && typeof patch === 'object' ? patch : {}
@@ -752,6 +767,7 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
     runtime: source.runtime && typeof source.runtime === 'object' ? { ...source.runtime } : {},
     continuity: normalizeContinuity(source.continuity),
     overlay_projection: normalizeOverlayProjection(source.overlay_projection),
+    overlay_validity: normalizeOverlayValidity(source.overlay_validity),
     live_cursors: normalizeScopedCursors(source, { seq: normalizedSeq, trades: recentTrades }),
   }
 }
@@ -824,6 +840,11 @@ export function createRunStore(runBootstrap, { symbolStateLimit = DEFAULT_SYMBOL
     acc[normalized.trade_id] = normalized
     return acc
   }, {})
+  const openTradePositionSeqByTrade = Object.values(openTradesIndex).reduce((acc, trade) => {
+    const seq = positionCommitSeq(trade)
+    if (seq) acc[trade.trade_id] = seq
+    return acc
+  }, {})
   const selectedSymbolKey = normalizeSeriesKey(navigation?.selected_symbol_key || '')
   const selectedSymbolPayload = runBootstrap?.selected_symbol && typeof runBootstrap.selected_symbol === 'object'
     ? runBootstrap.selected_symbol
@@ -871,6 +892,7 @@ export function createRunStore(runBootstrap, { symbolStateLimit = DEFAULT_SYMBOL
     faults: [],
     symbolIndex,
     openTradesIndex,
+    openTradePositionSeqByTrade,
     symbolStates,
     symbolStateOrder,
     selectedSymbolKey: selectedSymbolKey || null,
@@ -964,15 +986,20 @@ export function applyOpenTradesDelta(store, message) {
   store = gated.store
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
   const openTradesIndex = { ...(store?.openTradesIndex || {}) }
+  const positionCursors = { ...(store?.openTradePositionSeqByTrade || {}) }
   ;(Array.isArray(payload.upserts) ? payload.upserts : []).forEach((trade) => {
     const normalized = normalizeTrade(trade)
     if (!normalized) return
     const incomingPositionSeq = positionCommitSeq(normalized)
-    const existingPositionSeq = positionCommitSeq(openTradesIndex[normalized.trade_id])
+    const existingPositionSeq = Math.max(
+      Number(positionCommitSeq(openTradesIndex[normalized.trade_id]) || 0),
+      Number(positionCursors[normalized.trade_id] || 0),
+    )
     if (incomingPositionSeq && existingPositionSeq && incomingPositionSeq <= existingPositionSeq) {
       return
     }
     openTradesIndex[normalized.trade_id] = normalized
+    if (incomingPositionSeq) positionCursors[normalized.trade_id] = incomingPositionSeq
   })
   ;(Array.isArray(payload.removals) ? payload.removals : []).forEach((removal) => {
     const tradeId = typeof removal === 'object' && removal !== null
@@ -986,12 +1013,18 @@ export function applyOpenTradesDelta(store, message) {
     if (removalPositionSeq && existingPositionSeq && removalPositionSeq < existingPositionSeq) {
       return
     }
+    positionCursors[tradeId] = Math.max(
+      Number(positionCursors[tradeId] || 0),
+      Number(existingPositionSeq || 0),
+      Number(removalPositionSeq || 0),
+    )
     delete openTradesIndex[tradeId]
   })
   return {
     ...store,
     seq: Math.max(Number(store?.seq || 0), Number(message?.scope_seq || 0)),
     openTradesIndex,
+    openTradePositionSeqByTrade: positionCursors,
   }
 }
 
@@ -1268,6 +1301,13 @@ export function applyOverlayDeltaMessage(store, message) {
       return null
     }
     const currentOverlayCommitSeq = Number(current.live_cursors?.overlay_commit_seq || 0) || 0
+    const overlayValidity = normalizeOverlayValidity(payload.overlay_validity)
+    if (overlayValidity.status === 'invalid') {
+      next.overlays = []
+      next.overlay_validity = overlayValidity
+      return next
+    }
+    const isFullCheckpoint = String(payload.checkpoint_kind || '').trim().toLowerCase() === 'full_state'
     if (currentOverlayCommitSeq > 0 && clock.overlayCommitSeq <= currentOverlayCommitSeq) {
       warnDroppedStaleSymbolDelta(next.symbol_key, message, 'stale_overlay_commit_seq', {
         current_overlay_commit_seq: currentOverlayCommitSeq,
@@ -1275,7 +1315,7 @@ export function applyOverlayDeltaMessage(store, message) {
       })
       return null
     }
-    if (currentOverlayCommitSeq > 0 && clock.baseOverlayCommitSeq !== currentOverlayCommitSeq) {
+    if (!isFullCheckpoint && currentOverlayCommitSeq > 0 && clock.baseOverlayCommitSeq !== currentOverlayCommitSeq) {
       warnDroppedStaleSymbolDelta(next.symbol_key, message, 'overlay_base_mismatch', {
         current_overlay_commit_seq: currentOverlayCommitSeq,
         base_overlay_commit_seq: clock.baseOverlayCommitSeq,
@@ -1284,7 +1324,7 @@ export function applyOverlayDeltaMessage(store, message) {
       return null
     }
     if (Array.isArray(payload.ops)) {
-      next.overlays = applyOverlayDelta(next.overlays || [], { ops: payload.ops })
+      next.overlays = applyOverlayDelta(isFullCheckpoint ? [] : (next.overlays || []), { ops: payload.ops })
       next.live_cursors = {
         ...next.live_cursors,
         overlay_commit_seq: clock.overlayCommitSeq,
@@ -1293,6 +1333,7 @@ export function applyOverlayDeltaMessage(store, message) {
       next.overlay_commit_seq = clock.overlayCommitSeq
       next.overlay_commit_seq_status = clock.status
       next.overlay_projection = normalizeOverlayProjection(payload.projection)
+      next.overlay_validity = overlayValidity
     }
     return next
   })

@@ -262,6 +262,50 @@ test('run deltas and selected-symbol bootstrap stay on separate client boundarie
   assert.equal(getSelectedSymbolState(store).symbol_key, 'instrument-btc|1m')
 })
 
+test('run close tombstone blocks a late open-trade packet', () => {
+  let store = createRunStore(runBootstrapPayload())
+  store = applyOpenTradesDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 21,
+    payload: {
+      upserts: [{
+        trade_id: 'trade-late',
+        symbol_key: 'instrument-btc|1m',
+        status: 'open',
+        position_commit_seq: 1,
+      }],
+      removals: [],
+    },
+  })
+  store = applyOpenTradesDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 22,
+    scope_seq: 22,
+    payload: {
+      upserts: [],
+      removals: [{ trade_id: 'trade-late', position_commit_seq: 2 }],
+    },
+  })
+  store = applyOpenTradesDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 23,
+    scope_seq: 23,
+    payload: {
+      upserts: [{
+        trade_id: 'trade-late',
+        symbol_key: 'instrument-btc|1m',
+        status: 'open',
+        position_commit_seq: 1,
+      }],
+      removals: [],
+    },
+  })
+
+  assert.equal(store.openTradesIndex['trade-late'], undefined)
+  assert.equal(store.openTradePositionSeqByTrade['trade-late'], 2)
+})
+
 test('run health warning summary stays run-scoped and only maps matching symbol warnings to selected runtime', () => {
   let store = createRunStore(runBootstrapPayload())
   store = applySelectedSymbolBootstrap(store, selectedSymbolBootstrapPayload())
@@ -449,6 +493,75 @@ test('stale overlay commit delta is ignored even with a newer stream sequence', 
   assert.equal(store.lastStreamSeq, 22)
   assert.equal(selected.live_cursors.overlay_commit_seq, 2)
   assert.equal(selected.overlays.some((entry) => entry.overlay_id === 'overlay-stale'), false)
+})
+
+test('overlay invalidation clears only overlays and preserves selected-symbol facts', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload({ overlayCommitSeq: 5 }).selected_symbol
+  let store = createRunStore(payload)
+  const before = getSelectedSymbolState(store)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 8,
+      base_overlay_commit_seq: 7,
+      overlay_commit_seq_status: 'overlay_scoped',
+      overlay_validity: {
+        status: 'invalid',
+        invalid_reason: 'overlay_clock_gap',
+        gap_expected_overlay_commit_seq: 5,
+        gap_observed_base_overlay_commit_seq: 7,
+        gap_observed_overlay_commit_seq: 8,
+      },
+      ops: [],
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(selected.overlays.length, 0)
+  assert.equal(selected.overlay_validity.status, 'invalid')
+  assert.equal(selected.overlay_validity.invalid_reason, 'overlay_clock_gap')
+  assert.deepEqual(selected.candles, before.candles)
+  assert.deepEqual(selected.recent_trades, before.recent_trades)
+})
+
+test('full overlay checkpoint recovers an invalid layer without matching the stale base', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload({ overlayCommitSeq: 5 }).selected_symbol
+  payload.selected_symbol.current.overlay_validity = { status: 'invalid', invalid_reason: 'overlay_clock_gap' }
+  payload.selected_symbol.current.overlays = []
+  let store = createRunStore(payload)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 20,
+      base_overlay_commit_seq: 19,
+      overlay_commit_seq_status: 'overlay_scoped',
+      checkpoint_kind: 'full_state',
+      overlay_validity: { status: 'valid', recovered_at_run_seq: 26 },
+      ops: [{
+        op: 'upsert',
+        key: 'overlay-checkpoint',
+        overlay: { type: 'ema_overlay', payload: { values: [10, 11] } },
+      }],
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(selected.overlay_validity.status, 'valid')
+  assert.equal(selected.live_cursors.overlay_commit_seq, 20)
+  assert.equal(selected.overlays.length, 1)
+  assert.equal(selected.overlays[0].overlay_id, 'overlay-checkpoint')
 })
 
 test('selected-symbol snapshot overlay cursor guards post-bootstrap overlay deltas', () => {

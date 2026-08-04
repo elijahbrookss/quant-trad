@@ -293,7 +293,7 @@ def test_overlay_history_does_not_invent_evidence_for_old_runs() -> None:
     assert evidence["reason_codes"] == ["overlay_timeline_not_retained"]
 
 
-def test_forced_overlay_delta_emits_noop_terminal_checkpoint() -> None:
+def test_forced_overlay_delta_emits_full_terminal_checkpoint() -> None:
     cache: dict[str, object] = {}
     overlay = {
         "overlay_id": "indicator.main",
@@ -302,15 +302,15 @@ def test_forced_overlay_delta_emits_noop_terminal_checkpoint() -> None:
     }
 
     first = build_overlay_delta(cache, [overlay])
-    terminal = build_overlay_delta(cache, [overlay], force=True)
+    terminal = build_overlay_delta(cache, [overlay], force=True, force_full=True)
 
     assert first is not None
-    assert terminal == {
-        "overlay_commit_seq": 2,
-        "base_overlay_commit_seq": 1,
-        "overlay_commit_seq_status": "overlay_scoped",
-        "ops": [],
-    }
+    assert terminal is not None
+    assert terminal["overlay_commit_seq"] == 2
+    assert terminal["base_overlay_commit_seq"] == 1
+    assert terminal["overlay_commit_seq_status"] == "overlay_scoped"
+    assert terminal["checkpoint_kind"] == "full_state"
+    assert terminal["ops"] == [{"op": "upsert", "key": "indicator.main", "overlay": first["ops"][0]["overlay"]}]
 
 
 def test_terminal_overlay_timeline_is_loaded_once_and_sliced_without_lookahead(

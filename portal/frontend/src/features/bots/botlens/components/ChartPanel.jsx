@@ -278,6 +278,8 @@ export const ChartPanel = memo(function ChartPanel({
     tradeEvidence.complete_for_loaded_candles ?? tradeEvidence.complete_for_returned_candles,
   )
   const overlayEvidence = model.overlayEvidence || {}
+  const overlayValidity = model.overlayValidity || { status: 'valid' }
+  const overlaysInvalid = overlayValidity.status === 'invalid'
   const overlayCoverageComplete = Boolean(
     overlayEvidence.complete_for_loaded_candles
       ?? overlayEvidence.complete_for_returned_candles,
@@ -337,6 +339,24 @@ export const ChartPanel = memo(function ChartPanel({
         </div>
         <SymbolSelectorPanel model={symbolSelector} onSelectSymbol={onSelectSymbol} />
       </div>
+
+      {overlaysInvalid ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-400/20 bg-amber-400/[0.06] px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-amber-100">Overlay layer unavailable for this interval</p>
+            <p className="mt-1 text-xs leading-5 text-slate-400">
+              Retained overlay evidence has a gap. Candles, decisions, and trades remain available.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-white/20 hover:bg-white/[0.08] hover:text-white"
+            onClick={() => navigator.clipboard?.writeText(JSON.stringify(overlayValidity, null, 2))}
+          >
+            Copy details
+          </button>
+        </div>
+      ) : null}
 
       <OverlayToggleBar
         overlays={overlayOptions}

@@ -93,6 +93,9 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
         payload["last_useful_progress_at"] = source.get("last_useful_progress_at")
     if source.get("progress_state"):
         payload["progress_state"] = source.get("progress_state")
+    if source.get("progress") is not None:
+        payload["progress"] = source.get("progress")
+        payload["progress_unit"] = "fraction"
     if isinstance(source.get("degraded"), Mapping) and source.get("degraded"):
         payload["degraded"] = dict(source.get("degraded"))
     if isinstance(source.get("churn"), Mapping) and source.get("churn"):
@@ -140,6 +143,7 @@ def _symbol_overlay_cursor_payload(state: SymbolProjectionSnapshot) -> Dict[str,
     payload = {
         "overlay_commit_seq": overlay_commit_seq,
         "overlay_commit_seq_status": overlay_commit_seq_status,
+        "overlay_validity": state.overlays.validity_payload(),
         "overlay_projection": (
             dict(state.overlays.overlay_projection)
             if isinstance(state.overlays.overlay_projection, Mapping)
@@ -793,6 +797,12 @@ class BotLensTransport:
                     "overlay_commit_seq": delta.overlay_ops.get("overlay_commit_seq"),
                     "base_overlay_commit_seq": delta.overlay_ops.get("base_overlay_commit_seq"),
                     "overlay_commit_seq_status": delta.overlay_ops.get("overlay_commit_seq_status"),
+                    "checkpoint_kind": delta.overlay_ops.get("checkpoint_kind"),
+                    "overlay_validity": (
+                        dict(delta.overlay_ops.get("overlay_validity"))
+                        if isinstance(delta.overlay_ops.get("overlay_validity"), Mapping)
+                        else None
+                    ),
                     "projection": (
                         dict(delta.overlay_ops.get("projection"))
                         if isinstance(delta.overlay_ops.get("projection"), Mapping)
@@ -978,7 +988,14 @@ class BotLensTransport:
                         event_time=delta.event_time,
                         payload={
                             "upserts": [dict(entry) for entry in delta.upserts],
-                            "removals": [str(entry) for entry in delta.removals if str(entry).strip()],
+                            "removals": [
+                                {
+                                    "trade_id": str(entry),
+                                    "position_commit_seq": delta.removal_position_commit_seq.get(str(entry)),
+                                }
+                                for entry in delta.removals
+                                if str(entry).strip()
+                            ],
                         },
                     )
                 )

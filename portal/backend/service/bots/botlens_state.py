@@ -76,6 +76,30 @@ class SymbolOverlaysState:
     overlay_commit_seq: int = 0
     overlay_commit_seq_status: Optional[str] = None
     overlay_projection: Optional[Dict[str, Any]] = None
+    validity_status: str = "valid"
+    invalid_reason: Optional[str] = None
+    invalid_detail: Optional[str] = None
+    invalidated_at_run_seq: Optional[int] = None
+    gap_expected_overlay_commit_seq: Optional[int] = None
+    gap_observed_base_overlay_commit_seq: Optional[int] = None
+    gap_observed_overlay_commit_seq: Optional[int] = None
+    recovered_at_run_seq: Optional[int] = None
+
+    def validity_payload(self) -> Dict[str, Any]:
+        return {
+            key: value
+            for key, value in {
+                "status": self.validity_status,
+                "invalid_reason": self.invalid_reason,
+                "invalid_detail": self.invalid_detail,
+                "invalidated_at_run_seq": self.invalidated_at_run_seq,
+                "gap_expected_overlay_commit_seq": self.gap_expected_overlay_commit_seq,
+                "gap_observed_base_overlay_commit_seq": self.gap_observed_base_overlay_commit_seq,
+                "gap_observed_overlay_commit_seq": self.gap_observed_overlay_commit_seq,
+                "recovered_at_run_seq": self.recovered_at_run_seq,
+            }.items()
+            if value not in (None, "", [], {})
+        }
 
 
 @dataclass(frozen=True)
@@ -177,6 +201,7 @@ class RunHealthState:
     runtime_state: Optional[str] = None
     last_useful_progress_at: Optional[str] = None
     progress_state: Optional[str] = None
+    progress: Optional[float] = None
     degraded: Dict[str, Any] = field(default_factory=dict)
     churn: Dict[str, Any] = field(default_factory=dict)
     pressure: Dict[str, Any] = field(default_factory=dict)
@@ -207,6 +232,9 @@ class RunHealthState:
             payload["last_useful_progress_at"] = self.last_useful_progress_at
         if self.progress_state:
             payload["progress_state"] = self.progress_state
+        if self.progress is not None:
+            payload["progress"] = self.progress
+            payload["progress_unit"] = "fraction"
         if self.degraded:
             payload["degraded"] = dict(self.degraded)
         if self.churn:
@@ -370,6 +398,7 @@ class RunOpenTradesDelta:
     event_time: Any
     upserts: Tuple[Dict[str, Any], ...]
     removals: Tuple[str, ...]
+    removal_position_commit_seq: Dict[str, int] = field(default_factory=dict)
 
 
 SymbolConcernDelta = (
@@ -707,6 +736,7 @@ def _build_run_health_state(
     runtime_state: Any = _UNSET,
     last_useful_progress_at: Any = _UNSET,
     progress_state: Any = _UNSET,
+    progress: Any = _UNSET,
     degraded: Any = _UNSET,
     churn: Any = _UNSET,
     pressure: Any = _UNSET,
@@ -732,6 +762,15 @@ def _build_run_health_state(
         else _iso_or_none(last_useful_progress_at)
     )
     next_progress_state = state.progress_state if progress_state is _UNSET else (str(progress_state or "").strip() or None)
+    if progress is _UNSET:
+        next_progress = state.progress
+    elif progress is None:
+        next_progress = None
+    else:
+        try:
+            next_progress = min(max(float(progress), 0.0), 1.0)
+        except (TypeError, ValueError):
+            next_progress = state.progress
     next_degraded = dict(state.degraded) if degraded is _UNSET else _mapping_copy(degraded)
     next_churn = dict(state.churn) if churn is _UNSET else _mapping_copy(churn)
     next_pressure = dict(state.pressure) if pressure is _UNSET else _mapping_copy(pressure)
@@ -760,6 +799,7 @@ def _build_run_health_state(
         runtime_state=next_runtime_state,
         last_useful_progress_at=next_last_useful_progress_at,
         progress_state=next_progress_state,
+        progress=next_progress,
         degraded=next_degraded,
         churn=next_churn,
         pressure=next_pressure,
@@ -1293,6 +1333,7 @@ def empty_run_health_state() -> RunHealthState:
         runtime_state=None,
         last_useful_progress_at=None,
         progress_state=None,
+        progress=None,
         degraded={},
         churn={},
         pressure={},
@@ -1385,6 +1426,40 @@ def read_symbol_projection_snapshot(payload: Any, *, symbol_key: str) -> SymbolP
                 if isinstance(_mapping(concerns.get("overlays")).get("overlay_projection"), Mapping)
                 else None
             ),
+            validity_status=(
+                str(_mapping(_mapping(concerns.get("overlays")).get("validity")).get("status") or "valid")
+                .strip()
+                .lower()
+                or "valid"
+            ),
+            invalid_reason=(
+                str(_mapping(_mapping(concerns.get("overlays")).get("validity")).get("invalid_reason") or "").strip()
+                or None
+            ),
+            invalid_detail=(
+                str(_mapping(_mapping(concerns.get("overlays")).get("validity")).get("invalid_detail") or "").strip()
+                or None
+            ),
+            invalidated_at_run_seq=_overlay_clock_int(
+                _mapping(_mapping(concerns.get("overlays")).get("validity")).get("invalidated_at_run_seq"),
+                0,
+            ) or None,
+            gap_expected_overlay_commit_seq=_overlay_clock_int(
+                _mapping(_mapping(concerns.get("overlays")).get("validity")).get("gap_expected_overlay_commit_seq"),
+                0,
+            ) or None,
+            gap_observed_base_overlay_commit_seq=_overlay_clock_int(
+                _mapping(_mapping(concerns.get("overlays")).get("validity")).get("gap_observed_base_overlay_commit_seq"),
+                -1,
+            ),
+            gap_observed_overlay_commit_seq=_overlay_clock_int(
+                _mapping(_mapping(concerns.get("overlays")).get("validity")).get("gap_observed_overlay_commit_seq"),
+                0,
+            ) or None,
+            recovered_at_run_seq=_overlay_clock_int(
+                _mapping(_mapping(concerns.get("overlays")).get("validity")).get("recovered_at_run_seq"),
+                0,
+            ) or None,
         ),
         signals=SymbolSignalsState(signals=_copy_entries(entry for entry in _mapping(concerns.get("signals")).get("items", []) if isinstance(entry, Mapping))),
         decisions=SymbolDecisionsState(decisions=_copy_entries(entry for entry in _mapping(concerns.get("decisions")).get("items", []) if isinstance(entry, Mapping))),
@@ -1471,6 +1546,11 @@ def read_run_projection_snapshot(payload: Any, *, bot_id: str, run_id: str) -> R
             runtime_state=str(health_payload.get("runtime_state") or "").strip() or None,
             last_useful_progress_at=_iso_or_none(health_payload.get("last_useful_progress_at")),
             progress_state=str(health_payload.get("progress_state") or "").strip() or None,
+            progress=(
+                min(max(float(health_payload.get("progress")), 0.0), 1.0)
+                if health_payload.get("progress") is not None
+                else None
+            ),
             degraded=_mapping(health_payload.get("degraded")),
             churn=_mapping(health_payload.get("churn")),
             pressure=_mapping(health_payload.get("pressure")),
@@ -1521,6 +1601,7 @@ def serialize_symbol_projection_snapshot(state: SymbolProjectionSnapshot) -> Dic
                             if isinstance(state.overlays.overlay_projection, Mapping)
                             else None
                         ),
+                        "validity": state.overlays.validity_payload(),
                     }.items()
                     if key == "items" or value not in (None, "", [], {})
                 },
@@ -1839,26 +1920,83 @@ def apply_symbol_overlay_projector(
             continue
         overlay_ops = _mapping(event.context.to_dict().get("overlay_delta"))
         overlay_projection = _mapping(overlay_ops.get("projection"))
-        next_state = SymbolOverlaysState(
-            overlays=apply_overlay_delta(next_state.overlays, overlay_ops),
-            overlay_commit_seq=_overlay_clock_int(
-                overlay_ops.get("overlay_commit_seq"),
-                next_state.overlay_commit_seq,
-            ),
-            overlay_commit_seq_status=str(
-                overlay_ops.get("overlay_commit_seq_status")
-                or next_state.overlay_commit_seq_status
-                or ""
-            ).strip()
-            or None,
-            overlay_projection=dict(overlay_projection) if overlay_projection else next_state.overlay_projection,
-        )
+        overlay_commit_seq = _overlay_clock_int(overlay_ops.get("overlay_commit_seq"), 0)
+        base_overlay_commit_seq = _overlay_clock_int(overlay_ops.get("base_overlay_commit_seq"), -1)
+        checkpoint_kind = str(overlay_ops.get("checkpoint_kind") or "").strip().lower()
+        is_full_checkpoint = checkpoint_kind == "full_state"
+        if overlay_commit_seq <= int(next_state.overlay_commit_seq or 0):
+            continue
+
+        invalid_reason: Optional[str] = None
+        invalid_detail: Optional[str] = None
+        if not is_full_checkpoint and next_state.validity_status != "valid":
+            continue
+        if not is_full_checkpoint and base_overlay_commit_seq != int(next_state.overlay_commit_seq or 0):
+            invalid_reason = "overlay_clock_gap"
+            invalid_detail = (
+                "Overlay evidence is incomplete: expected base commit "
+                f"{int(next_state.overlay_commit_seq or 0)} but received {base_overlay_commit_seq}."
+            )
+        try:
+            projected_overlays = (
+                apply_overlay_delta((), overlay_ops)
+                if is_full_checkpoint
+                else (
+                    apply_overlay_delta(next_state.overlays, overlay_ops)
+                    if invalid_reason is None
+                    else ()
+                )
+            )
+        except ValueError as exc:
+            invalid_reason = "overlay_delta_invalid"
+            invalid_detail = str(exc)
+            projected_overlays = ()
+
+        if invalid_reason is not None:
+            next_state = SymbolOverlaysState(
+                overlays=(),
+                overlay_commit_seq=next_state.overlay_commit_seq,
+                overlay_commit_seq_status=next_state.overlay_commit_seq_status,
+                overlay_projection=next_state.overlay_projection,
+                validity_status="invalid",
+                invalid_reason=invalid_reason,
+                invalid_detail=invalid_detail,
+                invalidated_at_run_seq=int(batch.seq),
+                gap_expected_overlay_commit_seq=int(next_state.overlay_commit_seq or 0),
+                gap_observed_base_overlay_commit_seq=base_overlay_commit_seq,
+                gap_observed_overlay_commit_seq=overlay_commit_seq,
+                recovered_at_run_seq=next_state.recovered_at_run_seq,
+            )
+            emitted_ops = {
+                **dict(overlay_ops),
+                "ops": [],
+                "overlay_validity": next_state.validity_payload(),
+            }
+        else:
+            was_invalid = next_state.validity_status != "valid"
+            next_state = SymbolOverlaysState(
+                overlays=projected_overlays,
+                overlay_commit_seq=overlay_commit_seq,
+                overlay_commit_seq_status=str(
+                    overlay_ops.get("overlay_commit_seq_status")
+                    or next_state.overlay_commit_seq_status
+                    or ""
+                ).strip()
+                or None,
+                overlay_projection=dict(overlay_projection) if overlay_projection else next_state.overlay_projection,
+                validity_status="valid",
+                recovered_at_run_seq=(int(batch.seq) if was_invalid else next_state.recovered_at_run_seq),
+            )
+            emitted_ops = {
+                **dict(overlay_ops),
+                "overlay_validity": next_state.validity_payload(),
+            }
         deltas.append(
             OverlayDelta(
                 symbol_key=symbol_key,
                 seq=batch.seq,
                 event_time=_iso_or_none(event.event_ts) or batch.event_time,
-                overlay_ops=dict(overlay_ops),
+                overlay_ops=emitted_ops,
             )
         )
     return next_state, tuple(deltas)
@@ -2134,6 +2272,7 @@ def apply_run_health_projector(
                 runtime_state=observability.get("runtime_state", _UNSET),
                 last_useful_progress_at=observability.get("last_useful_progress_at", _UNSET),
                 progress_state=observability.get("progress_state", _UNSET),
+                progress=observability.get("progress", _UNSET),
                 degraded=observability.get("degraded", _UNSET),
                 churn=lifecycle_churn,
                 pressure=observability.get("pressure", _UNSET),
@@ -2171,6 +2310,7 @@ def apply_run_health_projector(
             runtime_state=context.get("runtime_state", _UNSET),
             last_useful_progress_at=context.get("last_useful_progress_at", _UNSET),
             progress_state=context.get("progress_state", _UNSET),
+            progress=context.get("progress", _UNSET),
             degraded=context.get("degraded", _UNSET),
             churn=health_churn,
             pressure=context.get("pressure", _UNSET),
@@ -2228,6 +2368,7 @@ def apply_run_open_trades_projector(
             continue
         upserts: Tuple[Dict[str, Any], ...] = ()
         removals: Tuple[str, ...] = ()
+        removal_position_commit_seq: Dict[str, int] = {}
         trade_id = str(trade_entry.get("trade_id") or "").strip()
         if not trade_id:
             continue
@@ -2247,6 +2388,9 @@ def apply_run_open_trades_projector(
             if trade_id in next_entries:
                 next_entries.pop(trade_id, None)
                 removals = (trade_id,)
+                position_seq = _position_commit_seq_value(trade_entry)
+                if position_seq is not None:
+                    removal_position_commit_seq[trade_id] = position_seq
         if upserts or removals:
             deltas.append(
                 RunOpenTradesDelta(
@@ -2254,6 +2398,7 @@ def apply_run_open_trades_projector(
                     event_time=_iso_or_none(event.event_ts) or batch.event_time,
                     upserts=upserts,
                     removals=removals,
+                    removal_position_commit_seq=removal_position_commit_seq,
                 )
             )
     return RunOpenTradesState(entries=next_entries, closed_trades=next_closed_trades), tuple(deltas)

@@ -27,6 +27,8 @@ from ..components.overlay_delta import (
 
 logger = logging.getLogger(__name__)
 
+_OVERLAY_FULL_CHECKPOINT_EVERY_COMMITS = 20
+
 BOTLENS_FACT_RUNTIME_STATE = "runtime_state_observed"
 BOTLENS_FACT_SERIES_STATE = "series_state_observed"
 BOTLENS_FACT_CANDLE_UPSERTED = "candle_upserted"
@@ -738,6 +740,7 @@ class RuntimePushStreamMixin:
         *,
         force: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        next_commit_seq = int(cache.get("overlay_commit_seq") or 0) + 1
         return build_overlay_delta(
             cache,
             overlays,
@@ -750,6 +753,10 @@ class RuntimePushStreamMixin:
                 or BOTLENS_FACT_STREAM_OVERLAY_POINT_LIMIT
             ),
             force=force,
+            force_full=bool(
+                force
+                or next_commit_seq % _OVERLAY_FULL_CHECKPOINT_EVERY_COMMITS == 0
+            ),
         )
 
     def _overlay_payload_metrics(self, payload: Mapping[str, Any]) -> Tuple[int, int]:
@@ -892,6 +899,16 @@ class RuntimePushStreamMixin:
             return None
 
     @staticmethod
+    def _compact_runtime_state_progress(value: Any) -> Optional[float]:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric != numeric or numeric in {float("inf"), float("-inf")}:
+            return None
+        return round(min(max(numeric, 0.0), 1.0), 8)
+
+    @staticmethod
     def _compact_runtime_state_text(value: Any) -> Optional[str]:
         text = str(value or "").strip()
         return text or None
@@ -986,6 +1003,10 @@ class RuntimePushStreamMixin:
             value = self._compact_runtime_state_int(snapshot.get(field))
             if value is not None:
                 runtime[field] = value
+        progress = self._compact_runtime_state_progress(snapshot.get("progress"))
+        if progress is not None:
+            runtime["progress"] = progress
+            runtime["progress_unit"] = "fraction"
         if normalized_warnings:
             runtime["warnings"] = normalized_warnings
         runtime["warning_count"] = len(normalized_warnings)

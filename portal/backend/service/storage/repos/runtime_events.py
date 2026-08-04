@@ -17,7 +17,7 @@ from engines.bot_runtime.runtime.components.step_trace_rollup import (
     merge_step_rollup_rows,
 )
 from engines.bot_runtime.runtime.event_types import RUNTIME_PREFIX
-from sqlalchemy import and_, or_, text, tuple_
+from sqlalchemy import Integer, and_, cast, or_, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ...observability import payload_size_bytes
@@ -1681,6 +1681,173 @@ def list_bot_runtime_events(
             if len(rows) < batch_limit:
                 break
     return matched_rows
+
+
+def list_botlens_overlay_replay_headers(
+    *,
+    bot_id: str,
+    run_id: str,
+    series_key: str,
+    max_seq: int | None = None,
+) -> List[Dict[str, Any]]:
+    """Return the smallest evidence needed to plan one overlay replay."""
+
+    if not db.available:
+        return []
+    normalized_series_key = _normalize_botlens_series_key(series_key)
+    delta = BotRunEventRecord.payload["context"]["overlay_delta"]
+    overlay_seq = cast(delta["overlay_commit_seq"].astext, Integer)
+    base_overlay_seq = cast(delta["base_overlay_commit_seq"].astext, Integer)
+    checkpoint_kind = delta["checkpoint_kind"].astext
+    with db.session() as session:
+        query = (
+            select(
+                BotRunEventRecord.id,
+                BotRunEventRecord.event_id,
+                BotRunEventRecord.run_seq,
+                BotRunEventRecord.seq,
+                BotRunEventRecord.event_time,
+                BotRunEventRecord.known_at,
+                overlay_seq.label("overlay_commit_seq"),
+                base_overlay_seq.label("base_overlay_commit_seq"),
+                checkpoint_kind.label("checkpoint_kind"),
+            )
+            .where(BotRunEventRecord.bot_id == str(bot_id))
+            .where(BotRunEventRecord.run_id == str(run_id))
+            .where(BotRunEventRecord.series_key == normalized_series_key)
+            .where(BotRunEventRecord.event_name == "OVERLAY_STATE_CHANGED")
+        )
+        if max_seq is not None:
+            query = query.where(BotRunEventRecord.run_seq <= int(max_seq))
+        rows = (
+            session.execute(
+                query.order_by(
+                    overlay_seq.asc(),
+                    BotRunEventRecord.run_seq.asc(),
+                    BotRunEventRecord.id.asc(),
+                )
+            )
+            .mappings()
+            .all()
+        )
+    return [
+        {
+            "id": int(row["id"] or 0),
+            "event_id": str(row["event_id"] or ""),
+            "run_seq": int(row["run_seq"] or 0),
+            "seq": int(row["seq"] or 0),
+            "event_time": row["event_time"],
+            "known_at": row["known_at"],
+            "overlay_commit_seq": int(row["overlay_commit_seq"] or 0),
+            "base_overlay_commit_seq": int(row["base_overlay_commit_seq"] or 0),
+            "checkpoint_kind": str(row["checkpoint_kind"] or "").strip().lower() or None,
+        }
+        for row in rows
+    ]
+
+
+def list_bot_runtime_events_by_event_ids(event_ids: Sequence[str]) -> List[Dict[str, Any]]:
+    wanted = sorted({str(event_id or "").strip() for event_id in event_ids if str(event_id or "").strip()})
+    if not wanted or not db.available:
+        return []
+    with db.session() as session:
+        rows = (
+            session.execute(
+                select(BotRunEventRecord)
+                .where(BotRunEventRecord.event_id.in_(wanted))
+                .order_by(_runtime_order_expression().asc(), BotRunEventRecord.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+    return [_project_runtime_event_row(row.to_dict()) for row in rows]
+
+
+def list_botlens_symbol_projection_seed_rows(
+    *,
+    bot_id: str,
+    run_id: str,
+    series_key: str,
+    max_seq: int | None = None,
+    decision_limit: int = 120,
+    signal_limit: int = 120,
+    trade_limit: int = 240,
+    diagnostic_limit: int = 60,
+    candle_limit: int = 320,
+) -> List[Dict[str, Any]]:
+    """Return a bounded canonical seed for one selected-symbol projector."""
+
+    if not db.available:
+        return []
+    normalized_series_key = _normalize_botlens_series_key(series_key)
+
+    def bounded_query(session: Any, event_names: Sequence[str], limit: int) -> list[BotRunEventRecord]:
+        query = (
+            select(BotRunEventRecord)
+            .where(BotRunEventRecord.bot_id == str(bot_id))
+            .where(BotRunEventRecord.run_id == str(run_id))
+            .where(BotRunEventRecord.series_key == normalized_series_key)
+            .where(BotRunEventRecord.event_name.in_(tuple(event_names)))
+        )
+        if max_seq is not None:
+            query = query.where(BotRunEventRecord.run_seq <= int(max_seq))
+        return list(
+            session.execute(
+                query.order_by(BotRunEventRecord.run_seq.desc(), BotRunEventRecord.id.desc())
+                .limit(max(int(limit or 0), 1))
+            )
+            .scalars()
+            .all()
+        )
+
+    with db.session() as session:
+        rows: list[BotRunEventRecord] = []
+        rows.extend(bounded_query(session, ("SERIES_METADATA_REPORTED",), 1))
+        rows.extend(bounded_query(session, ("SERIES_STATS_REPORTED",), 1))
+        rows.extend(bounded_query(session, ("CANDLE_OBSERVED",), candle_limit))
+        rows.extend(bounded_query(session, ("PROVISIONAL_CANDLE_UPDATED",), 1))
+        rows.extend(bounded_query(session, ("SIGNAL_EMITTED",), signal_limit))
+        rows.extend(bounded_query(session, ("DECISION_EMITTED",), decision_limit))
+        rows.extend(bounded_query(session, ("DIAGNOSTIC_RECORDED",), diagnostic_limit))
+
+        ranked_trades = (
+            select(
+                BotRunEventRecord.id.label("event_row_id"),
+                func.row_number()
+                .over(
+                    partition_by=BotRunEventRecord.trade_id,
+                    order_by=(BotRunEventRecord.run_seq.desc(), BotRunEventRecord.id.desc()),
+                )
+                .label("trade_rank"),
+            )
+            .where(BotRunEventRecord.bot_id == str(bot_id))
+            .where(BotRunEventRecord.run_id == str(run_id))
+            .where(BotRunEventRecord.series_key == normalized_series_key)
+            .where(BotRunEventRecord.event_name.in_(("TRADE_OPENED", "TRADE_UPDATED", "TRADE_CLOSED")))
+            .where(BotRunEventRecord.trade_id.isnot(None))
+        )
+        if max_seq is not None:
+            ranked_trades = ranked_trades.where(BotRunEventRecord.run_seq <= int(max_seq))
+        ranked_trades_sq = ranked_trades.subquery()
+        trade_rows = (
+            session.execute(
+                select(BotRunEventRecord)
+                .join(ranked_trades_sq, ranked_trades_sq.c.event_row_id == BotRunEventRecord.id)
+                .where(ranked_trades_sq.c.trade_rank == 1)
+                .order_by(BotRunEventRecord.run_seq.desc(), BotRunEventRecord.id.desc())
+                .limit(max(int(trade_limit or 0), 1))
+            )
+            .scalars()
+            .all()
+        )
+        rows.extend(trade_rows)
+
+    deduped = {int(row.id or 0): row for row in rows}
+    ordered = sorted(
+        deduped.values(),
+        key=lambda row: (int(row.run_seq or 0), int(row.id or 0)),
+    )
+    return [_project_runtime_event_row(row.to_dict()) for row in ordered]
 
 
 def list_botlens_run_evidence(run_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:

@@ -825,11 +825,13 @@ class TestRunProjectorSymbolNotification:
         async def scenario() -> None:
             import portal.backend.service.bots.bot_service as bot_service
 
-            published: list[tuple[str, dict[str, Any]]] = []
+            published: list[tuple[str, str, dict[str, Any]]] = []
             monkeypatch.setattr(
                 bot_service,
                 "publish_runtime_update",
-                lambda bot_id, runtime: published.append((bot_id, dict(runtime))),
+                lambda bot_id, runtime, *, run_id: published.append(
+                    (bot_id, run_id, dict(runtime))
+                ),
             )
             monkeypatch.setattr(run_mod, "load_domain_projection_batches", lambda **_kwargs: ())
 
@@ -857,8 +859,9 @@ class TestRunProjectorSymbolNotification:
             )
 
             assert published
-            bot_id, payload = published[-1]
+            bot_id, run_id, payload = published[-1]
             assert bot_id == "bot-1"
+            assert run_id == "run-1"
             assert payload["run_id"] == "run-1"
             assert payload["open_trade_count"] == 1
             assert payload["trade_count"] == 1
@@ -870,9 +873,9 @@ class TestRunProjectorSymbolNotification:
             await projector._process_symbol_notification(stats_notification)
 
             assert published
-            assert published[-1][1]["open_trade_count"] == 1
-            assert published[-1][1]["stats"]["total_trades"] == 3
-            assert published[-1][1]["stats"]["net_pnl"] == 7.5
+            assert published[-1][2]["open_trade_count"] == 1
+            assert published[-1][2]["stats"]["total_trades"] == 3
+            assert published[-1][2]["stats"]["net_pnl"] == 7.5
 
         asyncio.run(scenario())
 

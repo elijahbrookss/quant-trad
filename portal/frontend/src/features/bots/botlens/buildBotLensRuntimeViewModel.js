@@ -653,6 +653,10 @@ export function buildBotLensRuntimeViewModel({
   const overlayProjection = selectedSymbolState?.overlay_projection
     || selectedSymbolState?.live_cursors?.overlay_projection
     || null
+  const overlayValidity = selectedSymbolState?.overlay_validity
+    && typeof selectedSymbolState.overlay_validity === 'object'
+    ? selectedSymbolState.overlay_validity
+    : { status: 'valid' }
   const boundedOverlayCount = (Array.isArray(chartOverlays) ? chartOverlays : [])
     .filter((overlay) => String(overlay?.detail_level || '').trim().toLowerCase().startsWith('bounded_'))
     .length
@@ -821,6 +825,7 @@ export function buildBotLensRuntimeViewModel({
       historyEvidenceSource: chartHistory?.evidenceSource || null,
       tradeEvidence: chartHistory?.tradeEvidence || null,
       overlayEvidence: chartHistory?.overlayEvidence || null,
+      overlayValidity,
       hasMoreBefore: chartHistory?.range?.has_more_before !== false,
       historyCount: Number(chartHistory?.candles?.length || 0),
       cacheCount: Number(chartHistoryCacheCount || 0),
@@ -922,6 +927,7 @@ export function buildBotLensRuntimeViewModel({
           { key: 'transport', label: 'Transport Eligible', value: formatBooleanState(transportEligible) },
           { key: 'decisions', label: 'Ledger Events', value: String(decisionCount) },
           { key: 'history', label: 'Chart History', value: humanizeToken(retrievalPanels.chart.historyStatus) },
+          { key: 'overlays', label: 'Overlay Evidence', value: humanizeToken(overlayValidity.status || 'valid') },
           { key: 'cache', label: 'Chart Cache', value: String(retrievalPanels.chart.cacheCount) },
         ],
         notices,

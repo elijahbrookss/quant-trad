@@ -462,6 +462,11 @@ def _durable_overlay_delta(value: Any) -> Dict[str, Any]:
         "overlay_commit_seq": overlay_commit_seq,
         "base_overlay_commit_seq": base_overlay_commit_seq,
         "overlay_commit_seq_status": overlay_commit_seq_status,
+        "checkpoint_kind": (
+            "full_state"
+            if str(payload.get("checkpoint_kind") or "").strip().lower() == "full_state"
+            else None
+        ),
         "projection": durable_projection or None,
         "ops": durable_ops,
         "op_counts": op_counts or None,
@@ -1462,6 +1467,7 @@ class HealthStatusReportedContext(BotLensDomainContextBase):
     runtime_state: Optional[str] = None
     last_useful_progress_at: Optional[str] = None
     progress_state: Optional[str] = None
+    progress: Optional[float] = None
     degraded: Dict[str, Any] | None = None
     churn: Dict[str, Any] | None = None
     pressure: Dict[str, Any] | None = None
@@ -1511,6 +1517,11 @@ class HealthStatusReportedContext(BotLensDomainContextBase):
         object.__setattr__(self, "runtime_state", _optional_text(self.runtime_state))
         object.__setattr__(self, "last_useful_progress_at", _optional_text(self.last_useful_progress_at))
         object.__setattr__(self, "progress_state", _optional_text(self.progress_state))
+        if self.progress is not None:
+            progress = _finite_float(self.progress, field_name="context.progress")
+            if progress < 0.0 or progress > 1.0:
+                raise ValueError("context.progress must be between 0 and 1")
+            object.__setattr__(self, "progress", progress)
         object.__setattr__(self, "degraded", _mapping_or_none(self.degraded))
         object.__setattr__(self, "churn", _mapping_or_none(self.churn))
         object.__setattr__(self, "pressure", _mapping_or_none(self.pressure))
@@ -1525,6 +1536,7 @@ class HealthStatusReportedContext(BotLensDomainContextBase):
             "runtime_state",
             "last_useful_progress_at",
             "progress_state",
+            "progress",
             "degraded",
             "churn",
             "pressure",
@@ -1729,6 +1741,7 @@ def _durable_context_payload(
             "runtime_state": _optional_text(context.get("runtime_state")),
             "last_useful_progress_at": _optional_text(context.get("last_useful_progress_at")),
             "progress_state": _optional_text(context.get("progress_state")),
+            "progress": _coerce_float(context.get("progress")),
             "degraded": _compact_degraded_payload(context.get("degraded")),
             "churn": _compact_churn_payload(context.get("churn")),
             "pressure": _semantic_pressure_fingerprint(context.get("pressure")),
@@ -2475,6 +2488,7 @@ def deserialize_botlens_domain_context(
             runtime_state=context_payload.get("runtime_state"),
             last_useful_progress_at=context_payload.get("last_useful_progress_at"),
             progress_state=context_payload.get("progress_state"),
+            progress=context_payload.get("progress"),
             degraded=_mapping_or_none(context_payload.get("degraded")),
             churn=_mapping_or_none(context_payload.get("churn")),
             pressure=_mapping_or_none(context_payload.get("pressure")),
@@ -2658,6 +2672,7 @@ def build_botlens_domain_events_from_fact_batch(
                     runtime_state=_optional_text(runtime.get("runtime_state")),
                     last_useful_progress_at=_optional_text(runtime.get("last_useful_progress_at")),
                     progress_state=_optional_text(runtime.get("progress_state")),
+                    progress=_coerce_float(runtime.get("progress")),
                     degraded=_mapping_or_none(runtime.get("degraded")),
                     churn=_mapping_or_none(runtime.get("churn")),
                     pressure=_mapping_or_none(runtime.get("pressure")),
