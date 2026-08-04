@@ -14,6 +14,7 @@ export function BotLensRuntimeView({
   loadDecisionEvidencePage,
   loadTradeEvidencePage,
   loadDiagnosticEvidencePage,
+  focusDecision,
   focusTrade,
   onClose,
   open,
@@ -30,10 +31,11 @@ export function BotLensRuntimeView({
             changeSelectedSymbol={changeSelectedSymbol}
             loadOlderHistory={loadOlderHistory}
             loadMoreDecisionEvidence={loadMoreDecisionEvidence}
-        loadDecisionEvidencePage={loadDecisionEvidencePage}
-        loadTradeEvidencePage={loadTradeEvidencePage}
-        loadDiagnosticEvidencePage={loadDiagnosticEvidencePage}
-        focusTrade={focusTrade}
+            loadDecisionEvidencePage={loadDecisionEvidencePage}
+            loadTradeEvidencePage={loadTradeEvidencePage}
+            loadDiagnosticEvidencePage={loadDiagnosticEvidencePage}
+            focusDecision={focusDecision}
+            focusTrade={focusTrade}
             onClose={onClose}
             open={open}
             refreshSession={refreshSession}

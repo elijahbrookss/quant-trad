@@ -130,6 +130,7 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
       loadDecisionEvidencePage={controller.loadDecisionEvidencePage}
       loadTradeEvidencePage={controller.loadTradeEvidencePage}
       loadDiagnosticEvidencePage={controller.loadDiagnosticEvidencePage}
+      focusDecision={controller.focusDecision}
       focusTrade={controller.focusTrade}
       onClose={controller.closeModal}
       open={open}
