@@ -122,6 +122,16 @@ wallet gateway's committed settlement metadata. Runtime-event append order is
 transport, not the synchronization point for capital state. The persisted
 before/after state and wallet replay must agree.
 
+Full wallet replay and absolute-state validation share one canonical
+incremental transition reducer. Full projection folds the ordered ledger into a
+final snapshot. Validation walks that same order once, snapshots immediately
+before and after each material transition, and compares those states with the
+persisted absolute evidence. It must not replay every growing prefix or
+implement a report-specific accounting interpretation. Duplicate-event,
+initialization, fill, margin, fee, realized-PnL, and invariant behavior remain
+owned by the shared reducer; malformed-state diagnostics retain their first
+causal event and prior-event evidence.
+
 When multiple exit fills for the same trade are emitted before the next durable
 wallet fact batch, wallet fact construction must continue from the prior
 committed wallet fact for that trade. A stale per-exit source snapshot may not
@@ -167,6 +177,9 @@ snapshot has absorbed the fill.
   event ledger without relying on arrival order or projection state.
 - Wallet replay uses wallet commit ordering for ledger facts and must fail loud
   on missing clocks, malformed rows, or stale absolute state.
+- Wallet validation applies each canonical event at most once after ordering;
+  validation complexity is linear in ledger length apart from sorting and
+  bounded diagnostic context.
 - Terminal close behavior must release or account for reserved capital.
 
 ## Related Docs

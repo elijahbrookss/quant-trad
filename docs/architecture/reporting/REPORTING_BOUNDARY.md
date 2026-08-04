@@ -21,6 +21,7 @@ code_paths:
   - portal/backend/service/storage/repos/report_materializations.py
   - portal/backend/service/storage/repos/candles.py
   - portal/backend/service/storage/repos/runtime_events.py
+  - src/engines/bot_runtime/core/wallet.py
   - portal/backend/service/bots/botlens_intake_router.py
   - config/defaults.yaml
   - src/core/settings.py
@@ -84,6 +85,21 @@ threadpool or use the existing asynchronous materialization boundary. This
 isolation preserves portal, BotLens, health, and stream responsiveness; it does
 not make reconstruction itself faster or change its canonical output.
 
+Cold reconstruction reads each run-scoped source set once and reuses the loaded
+run, runtime events, projected decision ledger, and stored trades for readiness
+evaluation. Trade excursion evidence is grouped by instrument/timeframe and
+read through bounded multi-window candle queries. Each trade window retains its
+own exclusive end, latest-revision selection, row limit, fallback timeframe,
+and partial/unavailable result; batching changes round trips, not evidence.
+Wallet state validation advances the canonical wallet reducer once per ordered
+event and compares the same before/after snapshots that growing-prefix replay
+previously produced. Full replay and validation must share that reducer.
+
+These optimizations are admissible only when representative cold builds retain
+the exact semantic and operational fingerprints and the same diagnostics. They
+do not permit using mutable overlay state, skipping malformed wallet events, or
+turning truncated candle evidence into complete excursion evidence.
+
 Within one backend process, concurrent requests for the same reconstruction
 key share one single-flight owner. Followers wait for that owner's result and
 must log their wait duration rather than launching duplicate builds. The cache
@@ -142,6 +158,12 @@ The dataset is rebuildable from durable DB/read-model truth:
   mergeable p95/p99 histogram estimates when present,
 - observability events for normalized report diagnostics.
 - the reporting candle service for bounded candle windows when requested.
+
+Run-scoped chart history remains a separate bounded BotLens concern. Historical
+candles, trades, and overlay deltas are requested for the visible range and are
+not regenerated through the indicator engine during report reconstruction.
+Candidate-lifecycle report rows filter finalized indicator-output artifacts;
+they do not require loading or replaying every visual overlay.
 
 Run configuration metadata preserves strategy variant provenance when available
 without embedding the full raw run snapshot in report artifacts.
@@ -383,12 +405,10 @@ semantics.
 
 ## Known Gaps
 
-- Cold reconstruction currently performs excursion candle reads per trade and
-  validates wallet state by replaying growing event prefixes. Profiling has
-  demonstrated N+1 storage reads and quadratic wallet projection work on larger
-  completed runs. Later optimizations must batch the same candle evidence and
-  preserve the same wallet transition/error semantics, with canonical output
-  and fingerprint equality tests before adoption.
+- Large report payloads still require full typed-dataset assembly and JSON-safe
+  serialization on a true cold build. Terminal materialization and bounded
+  request caching remain the serving optimization; reporting must not omit
+  canonical sections merely to reduce serialization time.
 - Indicator/world-state context depends on structured runtime capture. When it
   is absent from decision artifact `observed_outputs`/`referenced_outputs`,
   reports expose explicit unavailable sections rather than replaying hidden
