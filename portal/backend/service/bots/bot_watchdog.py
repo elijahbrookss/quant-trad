@@ -38,7 +38,7 @@ import logging
 import socket
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional, Set
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 from core.settings import get_settings
 from ..storage.repos.bots import mark_bot_crashed
@@ -257,7 +257,7 @@ class BotWatchdog:
 
     def __init__(self) -> None:
         self._runner_id = _generate_runner_id()
-        self._registered_bots: Set[str] = set()
+        self._registered_runs: Set[Tuple[str, Optional[str]]] = set()
         self._local_tick_thread: Optional[threading.Thread] = None
         self._monitor_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -293,50 +293,66 @@ class BotWatchdog:
         """
         self._on_orphan_detected = callback
 
-    def register_bot(self, bot_id: str) -> None:
+    def register_bot(self, bot_id: str, *, run_id: str | None = None) -> None:
         """Register a bot as running on this server.
 
         Call this when a bot starts. Durable ownership is recorded on the run
         lease, not on the bot definition row.
         """
         with self._bot_lock:
-            self._registered_bots.add(bot_id)
-        logger.debug("bot_watchdog_registered | bot_id=%s | runner_id=%s", bot_id, self._runner_id)
+            self._registered_runs.add((bot_id, str(run_id or "").strip() or None))
+        logger.debug("bot_watchdog_registered | bot_id=%s | run_id=%s | runner_id=%s", bot_id, run_id, self._runner_id)
 
-    def unregister_bot(self, bot_id: str) -> None:
+    def unregister_bot(self, bot_id: str, *, run_id: str | None = None) -> None:
         """Unregister a bot that has stopped normally.
 
         Call this when a bot stops (completed, stopped, error).
         Run lease release is handled by the runtime control path.
         """
         with self._bot_lock:
-            self._registered_bots.discard(bot_id)
-        logger.debug("bot_watchdog_unregistered | bot_id=%s", bot_id)
+            normalized_run_id = str(run_id or "").strip() or None
+            if normalized_run_id is None:
+                self._registered_runs = {
+                    entry for entry in self._registered_runs if entry[0] != bot_id
+                }
+            else:
+                self._registered_runs.discard((bot_id, normalized_run_id))
+        logger.debug("bot_watchdog_unregistered | bot_id=%s | run_id=%s", bot_id, run_id)
 
     def tick(self, bot_id: str) -> None:
         """Record a local watchdog tick for a specific bot.
 
         Runtime liveness is persisted by the per-run lease renewer.
         """
-        logger.debug("bot_watchdog_tick | bot_id=%s | runner_id=%s", bot_id, self._runner_id)
+        _ = bot_id
+
+    def _prune_registered_runs(self) -> int:
+        active_leases = [
+            lease
+            for lease in list_active_bot_run_leases()
+            if run_lease_is_active(lease)
+        ]
+        active_runs = {
+            (str(lease.get("bot_id") or "").strip(), str(lease.get("run_id") or "").strip())
+            for lease in active_leases
+            if str(lease.get("bot_id") or "").strip() and str(lease.get("run_id") or "").strip()
+        }
+        active_bot_ids = {bot_id for bot_id, _run_id in active_runs}
+        with self._bot_lock:
+            before = len(self._registered_runs)
+            self._registered_runs = {
+                (bot_id, run_id)
+                for bot_id, run_id in self._registered_runs
+                if (
+                    (run_id is not None and (bot_id, run_id) in active_runs)
+                    or (run_id is None and bot_id in active_bot_ids)
+                )
+            }
+            return max(before - len(self._registered_runs), 0)
 
     def tick_all(self) -> None:
         """Record watchdog ticks for all registered bots on this server."""
-        with self._bot_lock:
-            bot_ids = list(self._registered_bots)
-
-        for bot_id in bot_ids:
-            try:
-                self.tick(bot_id)
-            except Exception as exc:
-                logger.warning("bot_watchdog_tick_failed | bot_id=%s | error=%s", bot_id, exc)
-
-        if bot_ids:
-            logger.debug(
-                "bot_watchdog_tick_all | count=%d | runner_id=%s",
-                len(bot_ids),
-                self._runner_id,
-            )
+        self._prune_registered_runs()
 
     def recover_local_orphans(self) -> List[str]:
         """Recover bots that were orphaned by this server (e.g., after restart).
@@ -361,6 +377,7 @@ class BotWatchdog:
                     bot_id,
                     reason=f"server_restart:{self._runner_id}",
                     diagnostics=diagnostics,
+                    run_id=str(lease.get("run_id") or "").strip() or None,
                 ):
                     crashed_ids.append(bot_id)
                     if self._on_orphan_detected:
@@ -412,6 +429,7 @@ class BotWatchdog:
                     bot_id,
                     reason=f"stale_run_lease:prev={previous_runner}",
                     diagnostics=diagnostics,
+                    run_id=str(lease.get("run_id") or "").strip() or None,
                 ):
                     crashed_ids.append(bot_id)
                     clock_gap = diagnostics.get("runner_clock_gap")
@@ -460,8 +478,11 @@ class BotWatchdog:
             bot_id = str(run_context.get("bot_id") or "").strip()
             if not bot_id:
                 continue
-            container = DockerBotRunner.inspect_bot_container(bot_id)
             current_run_id = _active_startup_run_id(run_context)
+            container = DockerBotRunner.inspect_bot_container(
+                bot_id,
+                run_id=current_run_id,
+            )
             container_run_id = str(container.get("runtime_run_id") or "").strip() or None
             ownership_mismatch = bool(current_run_id and container_run_id and container_run_id != current_run_id)
             if bool(container.get("running")):
@@ -524,6 +545,7 @@ class BotWatchdog:
                 bot_id,
                 reason=f"container_not_running:{container_name}",
                 diagnostics=diagnostics,
+                run_id=current_run_id,
             ):
                 failed.append(bot_id)
                 docker_lifecycle = diagnostics.get("docker_lifecycle")
@@ -621,13 +643,17 @@ class BotWatchdog:
     def status(self) -> Dict:
         """Return current watchdog status for observability."""
         with self._bot_lock:
-            registered_count = len(self._registered_bots)
-            registered_ids = list(self._registered_bots)
+            registered_count = len(self._registered_runs)
+            registered_runs = sorted(self._registered_runs, key=lambda entry: (entry[0], entry[1] or ""))
 
         return {
             "runner_id": self._runner_id,
             "registered_bots": registered_count,
-            "registered_bot_ids": registered_ids,
+            "registered_bot_ids": sorted({entry[0] for entry in registered_runs}),
+            "registered_runs": [
+                {"bot_id": bot_id, "run_id": run_id}
+                for bot_id, run_id in registered_runs
+            ],
             "local_tick_interval_seconds": LOCAL_TICK_INTERVAL_SECONDS,
             "stale_threshold_seconds": STALE_THRESHOLD_SECONDS,
             "monitor_interval_seconds": MONITOR_INTERVAL_SECONDS,

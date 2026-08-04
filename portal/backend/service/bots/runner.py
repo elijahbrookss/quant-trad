@@ -40,11 +40,18 @@ class DockerBotRunner:
         return cls(image=image, network=network)
 
     @staticmethod
-    def container_name_for(bot_id: str, project: str = "quant-trad-bots") -> str:
-        return f"{project}-{bot_id}"
+    def container_name_for(
+        bot_id: str,
+        project: str = "quant-trad-bots",
+        *,
+        run_id: str | None = None,
+    ) -> str:
+        normalized_run_id = str(run_id or "").strip()
+        suffix = f"-{normalized_run_id}" if normalized_run_id else ""
+        return f"{project}-{bot_id}{suffix}"
 
-    def _container_name(self, bot_id: str) -> str:
-        return self.container_name_for(bot_id, project=self.project)
+    def _container_name(self, bot_id: str, *, run_id: str | None = None) -> str:
+        return self.container_name_for(bot_id, project=self.project, run_id=run_id)
 
     @staticmethod
     def _run_docker(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -107,8 +114,13 @@ class DockerBotRunner:
         bot_id: str,
         *,
         project: str = "quant-trad-bots",
+        run_id: str | None = None,
     ) -> Dict[str, Any]:
-        container_name = cls.container_name_for(str(bot_id or "").strip(), project=project)
+        container_name = cls.container_name_for(
+            str(bot_id or "").strip(),
+            project=project,
+            run_id=run_id,
+        )
         if not container_name or container_name.endswith("-"):
             raise RuntimeError("bot id is required to inspect docker runtime")
 
@@ -186,8 +198,12 @@ class DockerBotRunner:
                 "QT_SECURITY_PROVIDER_CREDENTIAL_KEY is required for bot runtime containers. "
                 "Set it on the backend service environment before starting bots."
             )
-        name = self._container_name(bot_id)
-        existing = self.inspect_bot_container(bot_id, project=self.project)
+        name = self._container_name(bot_id, run_id=normalized_run_id)
+        existing = self.inspect_bot_container(
+            bot_id,
+            project=self.project,
+            run_id=normalized_run_id,
+        )
         existing_status = str(existing.get("status") or "").strip().lower()
         if bool(existing.get("running")):
             existing_run_id = str(existing.get("runtime_run_id") or "").strip() or "<unknown>"
@@ -196,7 +212,7 @@ class DockerBotRunner:
                 f"bot_id={bot_id} existing_run_id={existing_run_id} requested_run_id={normalized_run_id}"
             )
         if existing_status in {"created", "exited", "dead"}:
-            self.stop_bot(bot_id=bot_id, run_id=str(existing.get("runtime_run_id") or "") or None)
+            self.stop_bot(bot_id=bot_id, run_id=normalized_run_id)
         network = self._resolve_runtime_network()
         request_id = str(bot.get("_runtime_request_id") or bot.get("request_id") or "").strip() or None
         runtime_env = self._runtime_process_env(
@@ -252,14 +268,18 @@ class DockerBotRunner:
         return container_id
 
     def stop_bot(self, *, bot_id: str, preserve_container: bool = False, run_id: str | None = None) -> None:
-        name = self._container_name(bot_id)
         expected_run_id = str(run_id or "").strip()
+        name = self._container_name(bot_id, run_id=expected_run_id or None)
         if expected_run_id:
-            state = self.inspect_bot_container(bot_id, project=self.project)
+            state = self.inspect_bot_container(
+                bot_id,
+                project=self.project,
+                run_id=expected_run_id,
+            )
             container_run_id = str(state.get("runtime_run_id") or "").strip()
             if bool(state.get("running")) and container_run_id and container_run_id != expected_run_id:
                 raise RuntimeError(
-                    "refusing to stop same-bot container for a different active run "
+                    "refusing to stop run-scoped container with mismatched ownership "
                     f"bot_id={bot_id} expected_run_id={expected_run_id} container_run_id={container_run_id}"
                 )
             if str(state.get("status") or "").strip().lower() == "missing":

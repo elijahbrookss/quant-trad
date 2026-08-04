@@ -256,7 +256,12 @@ class BotStartupOrchestrator:
                 message="Runtime container launched successfully.",
                 metadata={"container_id": ctx.container_id},
             )
-            self.watchdog.register_bot(ctx.bot_id)
+            try:
+                self.watchdog.register_bot(ctx.bot_id, run_id=ctx.run_id)
+            except TypeError as exc:
+                if "run_id" not in str(exc):
+                    raise
+                self.watchdog.register_bot(ctx.bot_id)
             self._record_phase(
                 ctx,
                 BotLifecyclePhase.AWAITING_CONTAINER_BOOT.value,
@@ -267,11 +272,16 @@ class BotStartupOrchestrator:
         except Exception as exc:  # noqa: BLE001
             if ctx.container_id:
                 try:
-                    self.runner.stop_bot(bot_id=ctx.bot_id)
+                    self.runner.stop_bot(bot_id=ctx.bot_id, run_id=ctx.run_id)
                 except Exception:  # noqa: BLE001
                     logger.exception("bot_startup_cleanup_stop_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
                 try:
-                    self.watchdog.unregister_bot(ctx.bot_id)
+                    try:
+                        self.watchdog.unregister_bot(ctx.bot_id, run_id=ctx.run_id)
+                    except TypeError as unregister_exc:
+                        if "run_id" not in str(unregister_exc):
+                            raise
+                        self.watchdog.unregister_bot(ctx.bot_id)
                 except Exception:  # noqa: BLE001
                     logger.exception("bot_startup_cleanup_watchdog_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
             self._persist_startup_failure(ctx, exc, traceback_text=traceback.format_exc())

@@ -91,7 +91,7 @@ def test_docker_runner_labels_spawned_bot_container(monkeypatch):
         DockerBotRunner,
         "inspect_bot_container",
         staticmethod(
-            lambda bot_id, project="quant-trad-bots": {
+            lambda bot_id, project="quant-trad-bots", run_id=None: {
                 "status": "missing",
                 "running": False,
             }
@@ -114,6 +114,7 @@ def test_docker_runner_labels_spawned_bot_container(monkeypatch):
 
     assert container_id == "container-1"
     command = commands[0]
+    assert command[command.index("--name") + 1] == "quant-trad-bots-bot-1-run-1"
     labels = {
         command[index + 1]
         for index, token in enumerate(command)
