@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  BOTLENS_DURABLE_EVIDENCE_STAGES,
   resolveSelectedSymbolVisualRefreshIntervalMs,
   resolveBotLensInitialHistoryEnd,
   mergeBotLensForensicDocuments,
@@ -10,6 +11,7 @@ import {
   shouldLoadInitialBotLensHistory,
   shouldRetryBotLensRunBootstrap,
   shouldRetryBotLensSelectedSymbolBootstrap,
+  shouldStartDurableEvidenceStages,
   shouldLoadOlderBotLensHistory,
   shouldPollSelectedSymbolVisual,
 } from '../src/features/bots/botlens/hooks/useBotLensController.js'
@@ -240,4 +242,20 @@ test('selected-symbol bootstrap retries while projector snapshot is still unavai
     }),
     false,
   )
+})
+
+
+test('durable evidence waits for chart readiness and loads canonical sections in order', () => {
+  assert.deepEqual(BOTLENS_DURABLE_EVIDENCE_STAGES, ['decisions', 'trades', 'diagnostics'])
+  const base = {
+    open: true,
+    scopeKey: 'run-1:instrument-btc',
+    stageKey: 'run-1:instrument-btc:0',
+    activeStageKey: 'run-1:instrument-btc:0',
+    started: false,
+  }
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'loading' }), false)
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'ready' }), true)
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'ready', started: true }), false)
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'ready', activeStageKey: 'stale' }), false)
 })

@@ -104,6 +104,24 @@ const BOTLENS_DECISION_EVENT_NAMES = [
 ]
 
 const BOTLENS_EVIDENCE_PAGE_SIZE = 100
+export const BOTLENS_DURABLE_EVIDENCE_STAGES = Object.freeze(['decisions', 'trades', 'diagnostics'])
+
+export function shouldStartDurableEvidenceStages({
+  open,
+  scopeKey,
+  chartHistoryStatus,
+  stageKey,
+  activeStageKey,
+  started,
+}) {
+  return Boolean(
+    open
+    && scopeKey
+    && chartHistoryStatus === 'ready'
+    && stageKey === activeStageKey
+    && !started,
+  )
+}
 
 function emptyEvidencePage() {
   return { items: [], total: null, offset: 0, limit: BOTLENS_EVIDENCE_PAGE_SIZE, status: 'idle', error: null }
@@ -192,14 +210,22 @@ function historicalReplayTimeoutError() {
   return error
 }
 
-async function fetchExactRunBootstrapBeforeDeadline(runId, deadlineEpochMs) {
+function isAbortError(error) {
+  return ['AbortError', 'TimeoutError'].includes(String(error?.name || ''))
+}
+
+async function fetchExactRunBootstrapBeforeDeadline(runId, deadlineEpochMs, externalSignal = null) {
   const remainingMs = deadlineEpochMs - Date.now()
   if (remainingMs <= 0) throw historicalReplayTimeoutError()
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-    return fetchBotLensExactRunBootstrap(runId, { signal: AbortSignal.timeout(remainingMs) })
+    const timeoutSignal = AbortSignal.timeout(remainingMs)
+    const signal = externalSignal && typeof AbortSignal.any === 'function'
+      ? AbortSignal.any([externalSignal, timeoutSignal])
+      : timeoutSignal
+    return fetchBotLensExactRunBootstrap(runId, { signal })
   }
   return Promise.race([
-    fetchBotLensExactRunBootstrap(runId),
+    fetchBotLensExactRunBootstrap(runId, { signal: externalSignal || undefined }),
     delay(remainingMs).then(() => { throw historicalReplayTimeoutError() }),
   ])
 }
@@ -299,8 +325,67 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   forensicReplayRef.current = forensicReplay
   const forensicLoadRef = useRef(new Set())
   const durableEvidenceRequestRef = useRef({})
+  const durableEvidenceStageRef = useRef({ stageKey: null, token: null })
   const latestSelectionRef = useRef({ runId: null, symbolKey: null })
   const latestSelectionBootstrapRequestRef = useRef({ runId: null, symbolKey: null, requestId: 0 })
+  const chartRequestSequenceRef = useRef(0)
+  const chartRequestsRef = useRef(new Map())
+
+  const abortChartRequests = useCallback((keepSymbolKey = null) => {
+    const normalizedKeep = normalizeSeriesKey(keepSymbolKey || '')
+    chartRequestsRef.current.forEach((request, scopeKey) => {
+      if (normalizedKeep && request.symbolKey === normalizedKeep) return
+      request.controller.abort()
+      chartRequestsRef.current.delete(scopeKey)
+    })
+  }, [])
+
+  const beginChartRequest = useCallback(({ runId: requestedRunId, symbolKey, requestKey }) => {
+    const normalizedRunId = String(requestedRunId || '').trim()
+    const normalizedSymbolKey = normalizeSeriesKey(symbolKey || '')
+    if (!normalizedRunId || !normalizedSymbolKey || !requestKey) return null
+    const scopeKey = `${normalizedRunId}:${normalizedSymbolKey}`
+    const existing = chartRequestsRef.current.get(scopeKey)
+    if (existing?.requestKey === requestKey) return null
+    existing?.controller.abort()
+
+    const requestId = ++chartRequestSequenceRef.current
+    const request = {
+      controller: new AbortController(),
+      requestId,
+      requestKey,
+      runId: normalizedRunId,
+      scopeKey,
+      symbolKey: normalizedSymbolKey,
+    }
+    chartRequestsRef.current.set(scopeKey, request)
+    dispatch({
+      type: 'retrieval/chartRequest',
+      runId: normalizedRunId,
+      symbolKey: normalizedSymbolKey,
+      requestId,
+    })
+    return request
+  }, [])
+
+  const isCurrentChartRequest = useCallback((request) => {
+    if (!request) return false
+    const current = chartRequestsRef.current.get(request.scopeKey)
+    const selection = latestSelectionRef.current
+    return Boolean(
+      current?.requestId === request.requestId
+      && String(selection.runId || '').trim() === request.runId
+      && normalizeSeriesKey(selection.symbolKey || '') === request.symbolKey
+    )
+  }, [])
+
+  const finishChartRequest = useCallback((request) => {
+    if (!request) return
+    const current = chartRequestsRef.current.get(request.scopeKey)
+    if (current?.requestId === request.requestId) {
+      chartRequestsRef.current.delete(request.scopeKey)
+    }
+  }, [])
 
   const activeRunId = selectActiveRunId(state)
   const selectedSymbolKey = selectSelectedSymbolKey(state)
@@ -381,15 +466,17 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   }, [activeRunId, selectedSymbolKey])
 
   const refreshSession = useCallback(() => {
+    abortChartRequests()
     bootstrapLoadRef.current.clear()
     snapshotRefreshLoadRef.current.clear()
     initialChartLoadRef.current.clear()
     forensicLoadRef.current.clear()
     durableEvidenceRequestRef.current = {}
+    durableEvidenceStageRef.current = { stageKey: null, token: null }
     setForensicReplay(emptyForensicReplayState())
     setDurableEvidence(emptyDurableEvidenceState())
     setReloadTick((value) => value + 1)
-  }, [])
+  }, [abortChartRequests])
 
   const loadSelectedSymbolSnapshot = useCallback(
     async ({
@@ -517,6 +604,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   useEffect(() => {
     const bootstrapLoads = bootstrapLoadRef.current
     if (!open || !bot?.id) {
+      abortChartRequests()
       bootstrapLoads.clear()
       snapshotRefreshLoadRef.current.clear()
       initialChartLoadRef.current.clear()
@@ -527,6 +615,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     }
 
     let cancelled = false
+    const bootstrapController = new AbortController()
     const token = ++bootstrapTokenRef.current
 
     dispatch({
@@ -541,7 +630,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       try {
         while (!cancelled && token === bootstrapTokenRef.current) {
           const runBootstrap = runId
-            ? await fetchExactRunBootstrapBeforeDeadline(runId, exactBootstrapDeadline)
+            ? await fetchExactRunBootstrapBeforeDeadline(runId, exactBootstrapDeadline, bootstrapController.signal)
             : await fetchBotLensRunBootstrap(bot.id)
           if (cancelled || token !== bootstrapTokenRef.current) return
           const returnedRunId = String(
@@ -600,9 +689,10 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     load()
     return () => {
       cancelled = true
+      bootstrapController.abort()
       bootstrapLoads.clear()
     }
-  }, [bot?.id, loadSelectedSymbolSnapshot, logger, open, reloadTick, runId])
+  }, [abortChartRequests, bot?.id, loadSelectedSymbolSnapshot, logger, open, reloadTick, runId])
 
   useEffect(() => {
     if (!open || !activeRunId || !selectedSymbolKey) return
@@ -845,14 +935,48 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   useEffect(() => {
     if (!open || !durableEvidenceScopeKey) {
       durableEvidenceRequestRef.current = {}
+      durableEvidenceStageRef.current = { stageKey: null, token: null }
       setDurableEvidence((previous) => previous.scopeKey ? emptyDurableEvidenceState() : previous)
       return
     }
-    setDurableEvidence(emptyDurableEvidenceState(durableEvidenceScopeKey))
-    loadDurableEvidence('decisions', 0)
-    loadDurableEvidence('trades', 0)
-    loadDurableEvidence('diagnostics', 0)
-  }, [durableEvidenceScopeKey, loadDurableEvidence, open, reloadTick])
+
+    const stageKey = `${durableEvidenceScopeKey}:${reloadTick}`
+    if (durableEvidenceStageRef.current.stageKey !== stageKey) {
+      durableEvidenceStageRef.current = { stageKey, token: null }
+      setDurableEvidence(emptyDurableEvidenceState(durableEvidenceScopeKey))
+    }
+    if (!shouldStartDurableEvidenceStages({
+      open,
+      scopeKey: durableEvidenceScopeKey,
+      chartHistoryStatus,
+      stageKey,
+      activeStageKey: durableEvidenceStageRef.current.stageKey,
+      started: Boolean(durableEvidenceStageRef.current.token),
+    })) return
+
+    const token = {}
+    durableEvidenceStageRef.current = { stageKey, token }
+    const isCurrentStage = () => durableEvidenceStageRef.current.stageKey === stageKey
+      && durableEvidenceStageRef.current.token === token
+    const loadEvidenceStages = async () => {
+      logger.info('botlens_durable_evidence_stages_started', {
+        bot_id: bot?.id || null,
+        run_id: activeRunId,
+        instrument_id: durableEvidenceInstrumentId,
+        stages: BOTLENS_DURABLE_EVIDENCE_STAGES,
+      })
+      for (const section of BOTLENS_DURABLE_EVIDENCE_STAGES) {
+        await loadDurableEvidence(section, 0)
+        if (!isCurrentStage()) return
+      }
+      logger.info('botlens_durable_evidence_stages_ready', {
+        bot_id: bot?.id || null,
+        run_id: activeRunId,
+        instrument_id: durableEvidenceInstrumentId,
+      })
+    }
+    loadEvidenceStages()
+  }, [activeRunId, bot?.id, chartHistoryStatus, durableEvidenceInstrumentId, durableEvidenceScopeKey, loadDurableEvidence, logger, open, reloadTick])
 
   useEffect(() => {
     if (durableEvidenceScopeKey) {
@@ -892,21 +1016,19 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       chartCandles: currentChartCandles,
     })) return undefined
 
-    const requestKey = [activeRunId, selectedSymbolKey].join(':')
-    if (initialChartLoadRef.current.has(requestKey)) return undefined
-    initialChartLoadRef.current.add(requestKey)
-    let cancelled = false
-    dispatch({
-      type: 'retrieval/chartRequest',
+    const request = beginChartRequest({
       runId: activeRunId,
       symbolKey: selectedSymbolKey,
+      requestKey: `initial:${initialHistoryEnd || 'latest'}`,
     })
+    if (!request) return undefined
     fetchBotLensChartHistory(activeRunId, selectedSymbolKey, {
       endTime: initialHistoryEnd || undefined,
       limit: 240,
+      signal: request.controller.signal,
     })
       .then((page) => {
-        if (cancelled) return
+        if (!isCurrentChartRequest(request)) return
         if (String(page?.run_id || '') !== String(activeRunId)) {
           throw new Error('Chart history returned a mismatched run scope')
         }
@@ -925,14 +1047,16 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
           tradeEvidence: page?.trade_evidence,
           overlayEvidence: page?.overlay_evidence,
           mergeMode: 'replace',
+          requestId: request.requestId,
         })
       })
       .catch((err) => {
-        if (cancelled) return
+        if (isAbortError(err) || !isCurrentChartRequest(request)) return
         dispatch({
           type: 'retrieval/chartFailed',
           runId: activeRunId,
           symbolKey: selectedSymbolKey,
+          requestId: request.requestId,
           error: err?.message || 'Frozen chart retrieval failed',
         })
         logger.warn('botlens_initial_history_failed', {
@@ -942,18 +1066,20 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
           dataset_id: datasetId,
         }, err)
       })
-      .finally(() => {
-        initialChartLoadRef.current.delete(requestKey)
-      })
+      .finally(() => finishChartRequest(request))
 
     return () => {
-      cancelled = true
+      request.controller.abort()
+      finishChartRequest(request)
     }
   }, [
     activeRunId,
+    beginChartRequest,
     bot?.id,
     datasetId,
+    finishChartRequest,
     initialHistoryEnd,
+    isCurrentChartRequest,
     logger,
     open,
     selectedSymbolKey,
@@ -978,6 +1104,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     (symbolKey) => {
       const normalizedSymbolKey = normalizeSeriesKey(symbolKey || '')
       if (!normalizedSymbolKey) return
+      abortChartRequests(normalizedSymbolKey)
       dispatch({ type: 'selection/requested', symbolKey: normalizedSymbolKey })
       dispatch({
         type: 'ui/statusMessage',
@@ -996,7 +1123,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         state_cache_size: Object.keys(latestSymbolStates || {}).length,
       })
     },
-    [activeRunId, bot?.id, logger],
+    [abortChartRequests, activeRunId, bot?.id, logger],
   )
 
   const loadOlderHistory = useCallback(async () => {
@@ -1011,13 +1138,25 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     }
     const oldest = chartCandles[0]
     const endTime = oldest?.time ? new Date(Number(oldest.time) * 1000).toISOString() : undefined
-    dispatch({
-      type: 'retrieval/chartRequest',
+    const request = beginChartRequest({
       runId: activeRunId,
       symbolKey: selectedSymbolKey,
+      requestKey: `older:${endTime || 'start'}`,
     })
+    if (!request) return
     try {
-      const page = await fetchBotLensChartHistory(activeRunId, selectedSymbolKey, { endTime, limit: 240 })
+      const page = await fetchBotLensChartHistory(activeRunId, selectedSymbolKey, {
+        endTime,
+        limit: 240,
+        signal: request.controller.signal,
+      })
+      if (!isCurrentChartRequest(request)) return
+      if (String(page?.run_id || '') !== String(activeRunId)) {
+        throw new Error('Older chart history returned a mismatched run scope')
+      }
+      if (normalizeSeriesKey(page?.symbol_key || '') !== normalizeSeriesKey(selectedSymbolKey)) {
+        throw new Error('Older chart history returned a mismatched symbol scope')
+      }
       const candles = Array.isArray(page?.candles) ? page.candles : []
       dispatch({
         type: 'retrieval/chartSuccess',
@@ -1031,12 +1170,15 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         tradeEvidence: page?.trade_evidence,
         overlayEvidence: page?.overlay_evidence,
         mergeMode: 'prepend',
+        requestId: request.requestId,
       })
     } catch (err) {
+      if (isAbortError(err) || !isCurrentChartRequest(request)) return
       dispatch({
         type: 'retrieval/chartFailed',
         runId: activeRunId,
         symbolKey: selectedSymbolKey,
+        requestId: request.requestId,
         error: err?.message || 'Chart retrieval failed',
       })
       logger.warn(
@@ -1048,25 +1190,45 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         },
         err,
       )
+    } finally {
+      finishChartRequest(request)
     }
-  }, [activeRunId, bot?.id, chartCandles, chartHistory?.range?.has_more_before, chartHistoryStatus, dispatch, logger, selectedSymbolKey])
+  }, [activeRunId, beginChartRequest, bot?.id, chartCandles, chartHistory?.range?.has_more_before, chartHistoryStatus, finishChartRequest, isCurrentChartRequest, logger, selectedSymbolKey])
 
-  const focusTrade = useCallback(async (trade) => {
-    const focusValue = trade?.entry_time || trade?.opened_at || trade?.event_ts
+  const focusEvidence = useCallback(async (evidence, {
+    kind = 'evidence',
+    focusValue = evidence?.entry_time || evidence?.opened_at || evidence?.bar_time || evidence?.known_at || evidence?.event_ts,
+    endValue = evidence?.exit_time || evidence?.closed_at,
+    evidenceId = evidence?.trade_id || evidence?.decision_id || evidence?.event_id || focusValue,
+  } = {}) => {
     const focusEpochMs = Date.parse(focusValue || '')
     if (!activeRunId || !selectedSymbolKey || !Number.isFinite(focusEpochMs)) return
     const timeframeText = String(selectedSymbolMetadata?.timeframe || selectedSummary?.timeframe || '1h').trim().toLowerCase()
     const timeframeMatch = timeframeText.match(/(\d+)([mhd])/)
     const unitSeconds = timeframeMatch?.[2] === 'd' ? 86400 : timeframeMatch?.[2] === 'm' ? 60 : 3600
     const timeframeSeconds = Math.max(60, Number(timeframeMatch?.[1] || 1) * unitSeconds)
-    const exitEpochMs = Date.parse(trade?.exit_time || trade?.closed_at || '')
+    const exitEpochMs = Date.parse(endValue || '')
     const startTime = new Date(focusEpochMs - timeframeSeconds * 72 * 1000).toISOString()
     const endAnchorMs = Number.isFinite(exitEpochMs) ? exitEpochMs : focusEpochMs
     const endTime = new Date(endAnchorMs + timeframeSeconds * 72 * 1000).toISOString()
-    dispatch({ type: 'retrieval/chartRequest', runId: activeRunId, symbolKey: selectedSymbolKey })
+    const request = beginChartRequest({
+      runId: activeRunId,
+      symbolKey: selectedSymbolKey,
+      requestKey: `focus:${kind}:${evidenceId}:${startTime}:${endTime}`,
+    })
+    if (!request) return
     try {
-      const page = await fetchBotLensChartHistory(activeRunId, selectedSymbolKey, { startTime, endTime, limit: 320 })
-      if (String(page?.run_id || '') !== String(activeRunId)) throw new Error('Trade focus returned a mismatched run scope')
+      const page = await fetchBotLensChartHistory(activeRunId, selectedSymbolKey, {
+        startTime,
+        endTime,
+        limit: 320,
+        signal: request.controller.signal,
+      })
+      if (!isCurrentChartRequest(request)) return
+      if (String(page?.run_id || '') !== String(activeRunId)) throw new Error(`${kind} focus returned a mismatched run scope`)
+      if (normalizeSeriesKey(page?.symbol_key || '') !== normalizeSeriesKey(selectedSymbolKey)) {
+        throw new Error(`${kind} focus returned a mismatched symbol scope`)
+      }
       dispatch({
         type: 'retrieval/chartSuccess',
         runId: activeRunId,
@@ -1080,39 +1242,60 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         overlayEvidence: page?.overlay_evidence,
         mergeMode: 'replace',
         focusTime: focusValue,
-        focusToken: String(trade?.trade_id || focusValue) + ':' + Date.now(),
+        focusToken: `${kind}:${evidenceId}:${request.requestId}`,
+        requestId: request.requestId,
       })
     } catch (err) {
+      if (isAbortError(err) || !isCurrentChartRequest(request)) return
       dispatch({
         type: 'retrieval/chartFailed',
         runId: activeRunId,
         symbolKey: selectedSymbolKey,
-        error: err?.message || 'Trade chart focus failed',
+        requestId: request.requestId,
+        error: err?.message || `${kind} chart focus failed`,
       })
-      logger.warn('botlens_trade_focus_failed', {
+      logger.warn('botlens_evidence_focus_failed', {
         bot_id: bot?.id || null,
         run_id: activeRunId,
         symbol_key: selectedSymbolKey,
-        trade_id: trade?.trade_id || null,
+        evidence_kind: kind,
+        evidence_id: evidenceId || null,
       }, err)
+    } finally {
+      finishChartRequest(request)
     }
-  }, [activeRunId, bot?.id, logger, selectedSummary?.timeframe, selectedSymbolKey, selectedSymbolMetadata?.timeframe])
+  }, [activeRunId, beginChartRequest, bot?.id, finishChartRequest, isCurrentChartRequest, logger, selectedSummary?.timeframe, selectedSymbolKey, selectedSymbolMetadata?.timeframe])
+
+  const focusTrade = useCallback((trade) => focusEvidence(trade, {
+    kind: 'trade',
+    focusValue: trade?.entry_time || trade?.opened_at || trade?.event_ts,
+    endValue: trade?.exit_time || trade?.closed_at,
+    evidenceId: trade?.trade_id || trade?.event_id,
+  }), [focusEvidence])
+
+  const focusDecision = useCallback((decision) => focusEvidence(decision, {
+    kind: 'decision',
+    focusValue: decision?.bar_time || decision?.known_at || decision?.event_ts,
+    evidenceId: decision?.decision_id || decision?.event_id,
+  }), [focusEvidence])
 
   const clearError = useCallback(() => {
     dispatch({ type: 'ui/error', error: null })
   }, [])
 
   const closeModal = useCallback(() => {
+    abortChartRequests()
     dispatch({ type: 'session/reset', botId: bot?.id || null })
     bootstrapLoadRef.current.clear()
     snapshotRefreshLoadRef.current.clear()
     initialChartLoadRef.current.clear()
     forensicLoadRef.current.clear()
     durableEvidenceRequestRef.current = {}
+    durableEvidenceStageRef.current = { stageKey: null, token: null }
     setForensicReplay(emptyForensicReplayState())
     setDurableEvidence(emptyDurableEvidenceState())
     onClose?.()
-  }, [bot?.id, onClose])
+  }, [abortChartRequests, bot?.id, onClose])
 
   return {
     activeRunId,
@@ -1131,6 +1314,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     loadDecisionEvidencePage,
     loadTradeEvidencePage,
     loadDiagnosticEvidencePage,
+    focusDecision,
     focusTrade,
     forensicDocuments: forensicReplay.documents,
     forensicError: forensicReplay.error,

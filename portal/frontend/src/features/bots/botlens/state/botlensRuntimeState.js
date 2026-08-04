@@ -116,6 +116,28 @@ function commitProjectionStore(state, projectionStore) {
 const MAX_CHART_OVERLAY_PAGES = 16
 export const MAX_CHART_HISTORY_CANDLES = 3840
 
+function evidenceEpochSeconds(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1e12 ? Math.floor(value / 1000) : value
+  }
+  const parsed = Date.parse(value || '')
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
+}
+
+function tradeOverlapsCandleWindow(trade, candles) {
+  const first = Number(candles?.[0]?.time)
+  const last = Number(candles?.[candles.length - 1]?.time)
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return false
+  const entry = evidenceEpochSeconds(
+    trade?.entry_time || trade?.opened_at || trade?.event_ts,
+  )
+  const exit = evidenceEpochSeconds(trade?.exit_time || trade?.closed_at)
+  if (!Number.isFinite(entry) && !Number.isFinite(exit)) return false
+  const start = Number.isFinite(entry) ? entry : exit
+  const end = Number.isFinite(exit) ? exit : Number.POSITIVE_INFINITY
+  return start <= last && end >= first
+}
+
 function updateChartHistoryCache(cache, {
   symbolKey,
   candles,
@@ -128,6 +150,7 @@ function updateChartHistoryCache(cache, {
   mergeMode = 'append',
   focusTime = null,
   focusToken = null,
+  requestId = null,
 }) {
   const existing = cache?.[symbolKey] || null
   const mergedCandles = mergeMode === 'replace'
@@ -141,6 +164,9 @@ function updateChartHistoryCache(cache, {
   const mergedTrades = mergeMode === 'replace'
     ? mergeCanonicalTrades(trades || [])
     : mergeCanonicalTrades(existing?.trades || [], trades || [])
+  const boundedTrades = mergedTrades.filter((trade) => (
+    tradeOverlapsCandleWindow(trade, boundedCandles)
+  ))
   const pageTradeEvidence = tradeEvidence && typeof tradeEvidence === 'object'
     ? { ...tradeEvidence }
     : null
@@ -153,7 +179,7 @@ function updateChartHistoryCache(cache, {
   const mergedTradeEvidence = pageTradeEvidence
     ? {
         ...pageTradeEvidence,
-        loaded_trade_count: mergedTrades.length,
+        loaded_trade_count: boundedTrades.length,
         complete_for_loaded_candles: Boolean(
           pageTradeEvidence.complete_for_returned_candles
           && (existing?.tradeEvidence
@@ -202,7 +228,7 @@ function updateChartHistoryCache(cache, {
       status: 'ready',
       error: null,
       candles: boundedCandles,
-      trades: mergedTrades,
+      trades: boundedTrades,
       overlays: overlayPages.flatMap((page) => page.overlays),
       overlayPages,
       range: range && typeof range === 'object' ? { ...range } : existing?.range || null,
@@ -213,6 +239,9 @@ function updateChartHistoryCache(cache, {
       overlayEvidence: mergedOverlayEvidence,
       focusTime: focusTime || null,
       focusToken: focusToken || null,
+      requestId: requestId || existing?.requestId || null,
+      lastUpdateMode: mergeMode,
+      lastUpdateToken: requestId || focusToken || null,
     },
   }
 }
@@ -556,6 +585,7 @@ export function reduceBotLensState(state, action) {
             [normalizedSymbolKey]: {
               ...(state.retrieval.chartHistoryBySymbol?.[normalizedSymbolKey] || {}),
               symbolKey: normalizedSymbolKey,
+              requestId: action.requestId || null,
               status: 'loading',
               error: null,
             },
@@ -568,6 +598,10 @@ export function reduceBotLensState(state, action) {
       if (!matchesActiveRun(state, action.runId)) return state
       const normalizedSymbolKey = normalizeSeriesKey(action.symbolKey || '')
       if (!normalizedSymbolKey) return state
+      const currentRequestId = state.retrieval.chartHistoryBySymbol?.[normalizedSymbolKey]?.requestId
+      if (action.requestId && currentRequestId && action.requestId !== currentRequestId) {
+        return state
+      }
       return {
         ...state,
         retrieval: {
@@ -586,6 +620,7 @@ export function reduceBotLensState(state, action) {
               mergeMode: action.mergeMode,
               focusTime: action.focusTime,
               focusToken: action.focusToken,
+              requestId: action.requestId,
             },
           ),
         },
@@ -596,6 +631,10 @@ export function reduceBotLensState(state, action) {
       if (!matchesActiveRun(state, action.runId)) return state
       const normalizedSymbolKey = normalizeSeriesKey(action.symbolKey || '')
       if (!normalizedSymbolKey) return state
+      const currentRequestId = state.retrieval.chartHistoryBySymbol?.[normalizedSymbolKey]?.requestId
+      if (action.requestId && currentRequestId && action.requestId !== currentRequestId) {
+        return state
+      }
       return {
         ...state,
         retrieval: {

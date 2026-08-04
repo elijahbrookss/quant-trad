@@ -13,7 +13,10 @@ import { CameraIntents, DEFAULT_CAMERA_SPAN_BARS } from './hooks/useViewportCont
 import { MarkerTooltip } from './MarkerTooltip.jsx'
 import { createLogger } from '../../utils/logger.js'
 import { validateCanonicalCandles } from './botlensProjection.js'
-import { resolveCandleUpdateCameraIntent } from './chartCameraPolicy.js'
+import {
+  resolveCandleUpdateCameraIntent,
+  resolveCandleUpdateViewport,
+} from './chartCameraPolicy.js'
 
 const parseTimeframeToSeconds = (rawTimeframe) => {
   const text = (rawTimeframe || '').toString().trim().toLowerCase()
@@ -148,6 +151,8 @@ export function BotLensChart({
   className = '',
   heightClass = 'h-[360px]',
   timeframe = null,
+  dataUpdateMode = null,
+  dataUpdateToken = null,
   overlayVisibility = {},
   onNearHistoryStart = null,
   viewportResetKey = null,
@@ -169,6 +174,7 @@ export function BotLensChart({
   const diagLoggedRef = useRef(false)
   const frameSampleRef = useRef({ total: 0, count: 0, logged: false })
   const pendingCameraIntentRef = useRef(null)
+  const lastDataUpdateTokenRef = useRef(null)
   const { registerChart } = useChartState()
   const logger = useMemo(() => createLogger('BotLensChart', { chartId }), [chartId])
 
@@ -354,6 +360,10 @@ export function BotLensChart({
     }
     const previous = prevCandleDataRef.current || []
     const next = candleData
+    const hasNewDataUpdate = dataUpdateToken != null && dataUpdateToken !== lastDataUpdateTokenRef.current
+    const effectiveUpdateMode = hasNewDataUpdate ? dataUpdateMode : null
+    const timeScale = chartRef.current?.timeScale?.()
+    const preservedViewport = resolveCandleUpdateViewport({ updateMode: effectiveUpdateMode, visibleRange: timeScale?.getVisibleRange?.() || null })
     const prevLast = previous[previous.length - 1]
     const nextLast = next[next.length - 1]
     const prevLastTime = prevLast?.time
@@ -365,9 +375,9 @@ export function BotLensChart({
     const historyRewound =
       Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && (next.length < previous.length || nextLastTime < prevLastTime)
     const longJump = next.length > previous.length + 1
-    const requiresReset = !previous.length || !next.length || historyRewound || longJump
+    const requiresReset = !previous.length || !next.length || historyRewound || longJump || effectiveUpdateMode === 'prepend'
     const shouldAnimate = isSameCandle && playbackProfile.allowIntrabar
-    const cameraIntent = resolveCandleUpdateCameraIntent({ previous, next })
+    const cameraIntent = resolveCandleUpdateCameraIntent({ previous, next, updateMode: effectiveUpdateMode })
 
     const sample = frameSampleRef.current
     const start = performance.now()
@@ -390,6 +400,11 @@ export function BotLensChart({
       cancelAnimator('fallback')
       seriesRef.current.setData(next)
     }
+
+    if (preservedViewport) {
+      timeScale?.setVisibleRange?.(preservedViewport)
+    }
+    if (hasNewDataUpdate) lastDataUpdateTokenRef.current = dataUpdateToken
 
     const duration = performance.now() - start
     sample.total += duration
@@ -415,11 +430,12 @@ export function BotLensChart({
         isSameCandle,
         historyRewound,
         longJump,
+        updateMode: effectiveUpdateMode,
         range,
         logicalRange,
       })
     }
-  }, [cancelAnimator, candleData, debugRanges, logger, playbackProfile, seriesRef, startAnimator])
+  }, [cancelAnimator, candleData, dataUpdateMode, dataUpdateToken, debugRanges, logger, playbackProfile, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null

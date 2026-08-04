@@ -565,6 +565,99 @@ test('chart history is a bounded sliding window and focused replacements discard
   assert.equal(history.focusToken, 'trade-2:1')
 })
 
+test('chart history rejects stale success and failure actions by request identity', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartRequest',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 41,
+  })
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartRequest',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 42,
+  })
+  const afterStaleSuccess = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 41,
+    candles: [{ time: 60, open: 1, high: 1, low: 1, close: 1 }],
+    mergeMode: 'replace',
+  })
+  const afterStaleFailure = reduceBotLensState(afterStaleSuccess, {
+    type: 'retrieval/chartFailed',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 41,
+    error: 'stale failure',
+  })
+
+  assert.equal(afterStaleFailure.retrieval.chartHistoryBySymbol['instrument-btc|1m'].status, 'loading')
+  assert.equal(afterStaleFailure.retrieval.chartHistoryBySymbol['instrument-btc|1m'].candles, undefined)
+
+  const committed = reduceBotLensState(afterStaleFailure, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 42,
+    candles: [{ time: 120, open: 2, high: 2, low: 2, close: 2 }],
+    mergeMode: 'prepend',
+  })
+  const history = committed.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.equal(history.status, 'ready')
+  assert.equal(history.requestId, 42)
+  assert.equal(history.lastUpdateMode, 'prepend')
+  assert.equal(history.lastUpdateToken, 42)
+})
+
+test('chart history retains only trades overlapping the bounded candle window', () => {
+  const state = reduceBotLensState(bootstrapState(), {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [
+      { time: 100, open: 1, high: 1, low: 1, close: 1 },
+      { time: 200, open: 1, high: 1, low: 1, close: 1 },
+    ],
+    trades: [
+      {
+        trade_id: 'active-before-window',
+        status: 'open',
+        entry_time: '1970-01-01T00:00:50Z',
+      },
+      {
+        trade_id: 'closed-before-window',
+        status: 'closed',
+        entry_time: '1970-01-01T00:00:50Z',
+        exit_time: '1970-01-01T00:01:30Z',
+      },
+      {
+        trade_id: 'inside-window',
+        status: 'closed',
+        entry_time: '1970-01-01T00:02:00Z',
+        exit_time: '1970-01-01T00:03:00Z',
+      },
+      {
+        trade_id: 'future-trade',
+        status: 'open',
+        entry_time: '1970-01-01T00:05:00Z',
+      },
+    ],
+    tradeEvidence: { complete_for_returned_candles: true, trade_count: 4 },
+    mergeMode: 'replace',
+  })
+
+  const history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.trades.map((trade) => trade.trade_id), [
+    'active-before-window',
+    'inside-window',
+  ])
+  assert.equal(history.tradeEvidence.loaded_trade_count, 2)
+})
+
 test('batched live messages preserve reducer ordering in one render action', () => {
   let state = bootstrapState()
   state = reduceBotLensState(state, {

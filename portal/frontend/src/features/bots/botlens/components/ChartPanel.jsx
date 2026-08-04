@@ -227,6 +227,8 @@ function ChartViewport({
             mode={model.mode}
             playbackSpeed={model.playbackSpeed}
             timeframe={model.timeframe}
+            dataUpdateMode={model.dataUpdateMode}
+            dataUpdateToken={model.dataUpdateToken}
             overlayVisibility={overlayVisibility}
             onNearHistoryStart={onNearHistoryStart}
             viewportResetKey={viewportResetKey}

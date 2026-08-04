@@ -1,6 +1,20 @@
 import { CameraIntents } from './hooks/useViewportController.js'
 
-export const resolveCandleUpdateCameraIntent = ({ previous = [], next = [] } = {}) => {
+export const resolveCandleUpdateViewport = ({ updateMode = null, visibleRange = null } = {}) => {
+  const from = Number(visibleRange?.from)
+  const to = Number(visibleRange?.to)
+  if (
+    updateMode !== 'prepend'
+    || !Number.isFinite(from)
+    || !Number.isFinite(to)
+    || to <= from
+  ) return null
+  return { from, to }
+}
+
+export const resolveCandleUpdateCameraIntent = ({ previous = [], next = [], updateMode = null } = {}) => {
+  if (updateMode === 'prepend') return null
+
   const prevLast = previous[previous.length - 1]
   const nextLast = next[next.length - 1]
   const prevLastTime = prevLast?.time

@@ -6,7 +6,10 @@ import {
   computeFollowRange,
   isLogicalRangePinnedToLatest,
 } from '../src/components/bots/hooks/useViewportController.js'
-import { resolveCandleUpdateCameraIntent } from '../src/components/bots/chartCameraPolicy.js'
+import {
+  resolveCandleUpdateCameraIntent,
+  resolveCandleUpdateViewport,
+} from '../src/components/bots/chartCameraPolicy.js'
 
 function makeCandles(count = 200, start = 1_700_000_000, spacing = 60) {
   return Array.from({ length: count }, (_, index) => {
@@ -74,4 +77,21 @@ test('camera policy follows only initial load and symbol reset, not live appends
     intent: 'FOLLOW_LATEST',
     reason: 'series-reset',
   })
+})
+
+test('historical prepend preserves the visible time range and never follows latest', () => {
+  const previous = makeCandles(200)
+  const prepended = makeCandles(240, previous[0].time - 40 * 60)
+  const visibleRange = {
+    from: previous[8].time,
+    to: previous[88].time,
+  }
+
+  assert.equal(resolveCandleUpdateCameraIntent({
+    previous,
+    next: prepended,
+    updateMode: 'prepend',
+  }), null)
+  assert.deepEqual(resolveCandleUpdateViewport({ updateMode: 'prepend', visibleRange }), visibleRange)
+  assert.equal(resolveCandleUpdateViewport({ updateMode: 'replace', visibleRange }), null)
 })

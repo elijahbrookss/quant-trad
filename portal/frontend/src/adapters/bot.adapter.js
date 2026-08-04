@@ -155,12 +155,12 @@ export async function fetchBotLensSelectedSymbolSnapshot(runId, seriesKey, { lim
 export const fetchBotLensSelectedSymbolBootstrap = fetchBotLensSelectedSymbolSnapshot
 export const fetchBotLensSelectedSymbolVisual = fetchBotLensSelectedSymbolSnapshot
 
-export async function fetchBotLensChartHistory(runId, seriesKey, { startTime, endTime, limit = 320 } = {}) {
+export async function fetchBotLensChartHistory(runId, seriesKey, { startTime, endTime, limit = 320, signal } = {}) {
   const params = new URLSearchParams()
   if (startTime) params.set('start_time', String(startTime))
   if (endTime) params.set('end_time', String(endTime))
   params.set('limit', String(Math.max(1, Number(limit) || 320)))
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/chart?${params.toString()}`)
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}/series/${encodeURIComponent(seriesKey)}/chart?${params.toString()}`, { signal })
 }
 
 export async function fetchBotLensForensicEvents(
