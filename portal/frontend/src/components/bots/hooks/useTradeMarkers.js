@@ -39,7 +39,7 @@ const normalizeStatus = (value) => cleanText(value).toLowerCase()
 
 const tradeStatus = (trade) => normalizeStatus(trade?.status || trade?.trade_state)
 
-const isClosedTrade = (trade) => {
+export const isClosedTrade = (trade) => {
   const status = tradeStatus(trade)
   return Boolean(trade?.closed_at || trade?.exit_time || status === 'closed' || status === 'completed' || status === 'complete')
 }
@@ -288,12 +288,17 @@ const markerForTrade = (trade, projectEvent) => {
   return markers
 }
 
-const buildTradeRegions = (trades, candleLookup, candleData = []) => {
+const isSelectedTrade = (trade, selectedTradeId) => Boolean(
+  selectedTradeId && cleanText(trade?.trade_id) === cleanText(selectedTradeId),
+)
+
+const buildTradeRegions = (trades, candleLookup, candleData = [], selectedTradeId = null) => {
   if (!Array.isArray(trades)) return []
   const regions = []
   for (const trade of trades) {
     const entryTime = getEntryTime(trade)
     if (!Number.isFinite(entryTime)) continue
+    const selected = isSelectedTrade(trade, selectedTradeId)
     const exitTime = resolveCurrentTradeEnd(trade, candleData)
     if (!Number.isFinite(exitTime) || exitTime <= entryTime) continue
     const isLong = normalizeSide(trade) !== 'short'
@@ -319,15 +324,16 @@ const buildTradeRegions = (trades, candleLookup, candleData = []) => {
       x2: exitTime,
       y1: Math.min(...prices),
       y2: Math.max(...prices),
-      color: toRgba(baseColor, 0.065),
-      border: { color: toRgba(baseColor, 0.24), width: 1 },
+      color: toRgba(baseColor, selected ? 0.15 : 0.065),
+      border: { color: toRgba(baseColor, selected ? 0.72 : 0.24), width: selected ? 2 : 1 },
       precision: 4,
+      trade_id: trade?.trade_id,
     })
   }
   return regions
 }
 
-const buildTradeSegments = (trades, candleData = []) => {
+const buildTradeSegments = (trades, candleData = [], selectedTradeId = null) => {
   if (!Array.isArray(trades)) return []
   return trades
     .map((trade) => {
@@ -348,8 +354,10 @@ const buildTradeSegments = (trades, candleData = []) => {
         x2: endTime,
         y1: entryPrice,
         y2,
-        color,
-        lineWidth: isClosedTrade(trade) ? 2 : 2.5,
+        color: isSelectedTrade(trade, selectedTradeId)
+          ? color.replace(/0\.[0-9]+\)/, '1)')
+          : color,
+        lineWidth: isSelectedTrade(trade, selectedTradeId) ? 4 : isClosedTrade(trade) ? 2 : 2.5,
         lineStyle: isClosedTrade(trade) ? 0 : 2,
         trade_id: trade?.trade_id,
       }
@@ -407,7 +415,12 @@ const buildTradePriceLines = (trades, candleData) => {
   return priceLines
 }
 
-export const buildTradeMarkerArtifacts = (trades = [], candleLookup = new Map(), candleData = []) => {
+export const buildTradeMarkerArtifacts = (
+  trades = [],
+  candleLookup = new Map(),
+  candleData = [],
+  { selectedTradeId = null, showActiveTradeLevels = true } = {},
+) => {
   const resolvedTrades = Array.isArray(trades) ? trades : []
   const projectEvent = createCandleEventProjector(candleData)
   const markerById = new Map()
@@ -432,15 +445,20 @@ export const buildTradeMarkerArtifacts = (trades = [], candleLookup = new Map(),
   return {
     markers,
     tooltips,
-    regions: buildTradeRegions(resolvedTrades, candleLookup, candleData),
-    segments: buildTradeSegments(resolvedTrades, candleData),
-    priceLines: buildTradePriceLines(resolvedTrades, candleData),
+    regions: buildTradeRegions(resolvedTrades, candleLookup, candleData, selectedTradeId),
+    segments: buildTradeSegments(resolvedTrades, candleData, selectedTradeId),
+    priceLines: showActiveTradeLevels ? buildTradePriceLines(resolvedTrades, candleData) : [],
   }
 }
 
-export const useTradeMarkers = (trades = [], candleLookup = new Map(), candleData = []) => {
+export const useTradeMarkers = (
+  trades = [],
+  candleLookup = new Map(),
+  candleData = [],
+  { selectedTradeId = null, showActiveTradeLevels = true } = {},
+) => {
   return useMemo(
-    () => buildTradeMarkerArtifacts(trades, candleLookup, candleData),
-    [candleData, candleLookup, trades],
+    () => buildTradeMarkerArtifacts(trades, candleLookup, candleData, { selectedTradeId, showActiveTradeLevels }),
+    [candleData, candleLookup, selectedTradeId, showActiveTradeLevels, trades],
   )
 }

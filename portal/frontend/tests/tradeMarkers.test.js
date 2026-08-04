@@ -5,6 +5,7 @@ import {
   buildTradeMarkerArtifacts,
   projectTradeEventToCandle,
 } from '../src/components/bots/hooks/useTradeMarkers.js'
+import { buildTradeFocusPulseMarkers } from '../src/components/bots/hooks/usePulseMarkers.js'
 
 const candles = [
   { time: 1_700_000_000, open: 100, high: 101, low: 99, close: 100 },
@@ -174,6 +175,31 @@ test('open trade artifacts render active entry, stop, and target price lines', (
   assert.equal(artifacts.priceLines.some((line) => line.source === 'active_trade_entry' && line.price === 100), true)
   assert.equal(artifacts.priceLines.some((line) => line.source === 'active_trade_sl' && line.price === 98), true)
   assert.equal(artifacts.priceLines.some((line) => line.source === 'active_trade_tp' && line.price === 106), true)
+})
+
+test('terminal inspection suppresses active levels while retaining and emphasizing historical evidence', () => {
+  const artifacts = buildTradeMarkerArtifacts([openTrade()], candleLookup(), candles, {
+    selectedTradeId: 'trade-1',
+    showActiveTradeLevels: false,
+  })
+
+  assert.deepEqual(artifacts.priceLines, [])
+  assert.equal(artifacts.markers.some((marker) => marker.kind === 'entry'), true)
+  assert.equal(artifacts.regions.length, 1)
+  assert.equal(artifacts.regions[0].border.width, 2)
+  assert.equal(artifacts.segments.length, 1)
+  assert.equal(artifacts.segments[0].lineWidth, 4)
+})
+
+test('completed trade focus pulse marks entry and exit and alternates emphasis', () => {
+  const compact = buildTradeFocusPulseMarkers(closedTrade(), candles, 0)
+  const expanded = buildTradeFocusPulseMarkers(closedTrade(), candles, 1)
+
+  assert.deepEqual(compact.map((marker) => marker.text), ['SELECTED ENTRY', 'SELECTED EXIT'])
+  assert.deepEqual(compact.map((marker) => marker.time), [candles[0].time, candles[1].time])
+  assert.equal(compact.every((marker) => marker.trade_id === 'trade-1'), true)
+  assert.equal(expanded.every((marker, index) => marker.size > compact[index].size), true)
+  assert.deepEqual(buildTradeFocusPulseMarkers(openTrade(), candles, 0), [])
 })
 
 test('open trade artifacts ignore zero-valued missing exit and target prices', () => {

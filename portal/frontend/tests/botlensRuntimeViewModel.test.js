@@ -263,6 +263,7 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   assert.equal(model.retrievalPanels.chart.chartContext.symbol, 'BTC')
   assert.equal(model.retrievalPanels.chart.chartKey, 'instrument-btc|1m')
   assert.equal(model.retrievalPanels.chart.chartContext.openTradeCount, 1)
+  assert.equal(model.retrievalPanels.chart.showActiveTradeLevels, true)
   assert.equal(model.retrievalPanels.chart.liveTrades.length, 1)
   assert.deepEqual(
     model.tabs.map((tab) => tab.key),
@@ -613,4 +614,39 @@ test('terminal view model uses durable page totals instead of the bounded hot sn
   assert.equal(model.tabs.find((tab) => tab.key === 'trades').badge, '508')
   assert.equal(model.inspection.decisions.rows.length, 1)
   assert.equal(model.inspection.trades.recentTrades.length, 1)
+})
+
+test('terminal chart inspection disables active levels and resolves the focused completed trade', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 1767225600, open: 100, high: 105, low: 99, close: 104 }],
+    trades: [{
+      trade_id: 'trade-focus',
+      status: 'closed',
+      entry_time: '2026-01-01T00:00:00Z',
+      entry_price: 100,
+      exit_time: '2026-01-01T00:01:00Z',
+      exit_price: 104,
+    }],
+    mergeMode: 'replace',
+    focusTime: '2026-01-01T00:00:00Z',
+    focusToken: 'trade:trade-focus:request-1',
+    focusTradeId: 'trade-focus',
+  })
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(state, {
+    chartTrades: state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].trades,
+    runState: {
+      ...state.runState,
+      readiness: { ...state.runState.readiness, run_live: false },
+      lifecycle: { phase: 'completed', status: 'completed' },
+      transportEligible: false,
+    },
+  }))
+
+  assert.equal(model.retrievalPanels.chart.showActiveTradeLevels, false)
+  assert.equal(model.retrievalPanels.chart.focusTradeId, 'trade-focus')
+  assert.equal(model.retrievalPanels.chart.focusedTrade?.trade_id, 'trade-focus')
 })

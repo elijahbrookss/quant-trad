@@ -545,11 +545,13 @@ test('chart history is a bounded sliding window and focused replacements discard
     mergeMode: 'replace',
     focusTime: '1970-01-01T03:00:00Z',
     focusToken: 'trade-1:1',
+    focusTradeId: 'trade-1',
   })
   let history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
   assert.equal(history.candles.length, MAX_CHART_HISTORY_CANDLES)
   assert.equal(history.candles.at(-1).time, recent.at(-1).time)
   assert.equal(history.focusToken, 'trade-1:1')
+  assert.equal(history.focusTradeId, 'trade-1')
 
   state = reduceBotLensState(state, {
     type: 'retrieval/chartSuccess',
@@ -559,10 +561,12 @@ test('chart history is a bounded sliding window and focused replacements discard
     mergeMode: 'replace',
     focusTime: '1970-01-01T00:00:42Z',
     focusToken: 'trade-2:1',
+    focusTradeId: 'trade-2',
   })
   history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
   assert.deepEqual(history.candles.map((row) => row.time), [42])
   assert.equal(history.focusToken, 'trade-2:1')
+  assert.equal(history.focusTradeId, 'trade-2')
 })
 
 test('bidirectional chart pages preserve the combined loaded-window boundaries', () => {

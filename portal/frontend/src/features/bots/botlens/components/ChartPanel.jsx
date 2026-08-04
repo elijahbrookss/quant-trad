@@ -235,6 +235,8 @@ function ChartViewport({
             onNearHistoryEnd={onNearHistoryEnd}
             viewportResetKey={viewportResetKey}
             heightClass={chartHeightClass}
+            selectedTradeId={model.focusTradeId}
+            showActiveTradeLevels={model.showActiveTradeLevels}
           />
         </>
       ) : (
@@ -264,6 +266,7 @@ export const ChartPanel = memo(function ChartPanel({
   const chartHandles = getChart(RUNTIME_CHART_ID)?.handles
   const centerView = chartHandles?.centerView
   const focusAtTime = chartHandles?.focusAtTime
+  const pulseTrade = chartHandles?.pulseTrade
   const canRefocus = model.candles.length > 0 && typeof centerView === 'function'
   const barCount = Array.isArray(model.candles) ? model.candles.length : 0
   const overlayProjection = model.overlayProjection || {}
@@ -288,8 +291,14 @@ export const ChartPanel = memo(function ChartPanel({
 
   useEffect(() => {
     if (!model.focusToken || !model.focusTime || typeof focusAtTime !== 'function') return
-    focusAtTime(model.focusTime)
-  }, [focusAtTime, model.focusTime, model.focusToken])
+    const entryPrice = Number(model.focusedTrade?.entry_price)
+    focusAtTime(model.focusTime, Number.isFinite(entryPrice) ? entryPrice : undefined)
+    if (!model.focusedTrade || typeof pulseTrade !== 'function') return undefined
+    const timerId = window.setTimeout(() => {
+      pulseTrade(model.focusedTrade)
+    }, 100)
+    return () => window.clearTimeout(timerId)
+  }, [focusAtTime, model.focusTime, model.focusToken, model.focusedTrade, pulseTrade])
 
   useEffect(() => {
     if (!isFullscreen) return undefined

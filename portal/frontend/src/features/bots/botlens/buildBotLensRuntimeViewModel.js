@@ -975,6 +975,11 @@ export function buildBotLensRuntimeViewModel({
       cacheCount: Number(chartHistoryCacheCount || 0),
       focusTime: chartHistory?.focusTime || null,
       focusToken: chartHistory?.focusToken || null,
+      focusTradeId: chartHistory?.focusTradeId || null,
+      focusedTrade: (Array.isArray(chartTrades) ? chartTrades : []).find((trade) => (
+        String(trade?.trade_id || '') === String(chartHistory?.focusTradeId || '')
+      )) || null,
+      showActiveTradeLevels: Boolean(runReadiness.run_live),
       dataUpdateMode: chartHistory?.lastUpdateMode || null,
       dataUpdateToken: chartHistory?.lastUpdateToken || null,
       candles: Array.isArray(chartCandles) ? chartCandles : [],

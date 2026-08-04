@@ -150,6 +150,7 @@ function updateChartHistoryCache(cache, {
   mergeMode = 'append',
   focusTime = null,
   focusToken = null,
+  focusTradeId = null,
   requestId = null,
 }) {
   const existing = cache?.[symbolKey] || null
@@ -256,6 +257,7 @@ function updateChartHistoryCache(cache, {
       overlayEvidence: mergedOverlayEvidence,
       focusTime: focusTime || null,
       focusToken: focusToken || null,
+      focusTradeId: focusTradeId || null,
       requestId: requestId || existing?.requestId || null,
       lastUpdateMode: mergeMode,
       lastUpdateToken: requestId || focusToken || null,
@@ -637,6 +639,7 @@ export function reduceBotLensState(state, action) {
               mergeMode: action.mergeMode,
               focusTime: action.focusTime,
               focusToken: action.focusToken,
+              focusTradeId: action.focusTradeId,
               requestId: action.requestId,
             },
           ),

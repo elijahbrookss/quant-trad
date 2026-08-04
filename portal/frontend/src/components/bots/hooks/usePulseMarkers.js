@@ -1,11 +1,84 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { toFiniteNumber, toSec } from '../chartDataUtils.js'
+import { isClosedTrade, projectTradeEventToCandle } from './useTradeMarkers.js'
 
-export const usePulseMarkers = ({ seriesRef, markerManager }) => {
+const toOptionalNumber = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+const closedTradeExitPrice = (trade, entryPrice) => {
+  const explicit = toOptionalNumber(trade?.exit_price)
+  if (Number.isFinite(explicit) && !(explicit === 0 && Math.abs(entryPrice || 0) >= 1)) return explicit
+  const legs = Array.isArray(trade?.legs) ? trade.legs : []
+  const exitedLeg = legs.find((leg) => Number.isFinite(toOptionalNumber(leg?.exit_price)))
+  const legPrice = toOptionalNumber(exitedLeg?.exit_price)
+  return Number.isFinite(legPrice) ? legPrice : null
+}
+
+export const buildTradeFocusPulseMarkers = (trade, candleData = [], phase = 0) => {
+  if (!trade || !isClosedTrade(trade)) return []
+  const tradeId = String(trade?.trade_id || 'trade')
+  const isLong = String(trade?.side || trade?.direction || '').trim().toLowerCase() !== 'short'
+  const entryPrice = toOptionalNumber(trade?.entry_price)
+  const exitPrice = closedTradeExitPrice(trade, entryPrice)
+  const entryProjection = projectTradeEventToCandle(
+    trade?.entry_time || trade?.opened_at || trade?.bar_time,
+    candleData,
+  )
+  const exitProjection = projectTradeEventToCandle(
+    trade?.exit_time || trade?.closed_at,
+    candleData,
+  )
+  const expanded = Math.abs(Number(phase || 0)) % 2 === 1
+  const size = expanded ? 2.7 : 1.45
+  const alpha = expanded ? 0.98 : 0.58
+  const netPnl = toOptionalNumber(trade?.net_pnl ?? trade?.trade_net_pnl)
+  const exitColor = Number.isFinite(netPnl) && netPnl < 0
+    ? `rgba(248,113,113,${alpha})`
+    : `rgba(34,211,238,${alpha})`
+  const markers = []
+
+  if (Number.isFinite(entryProjection.time)) {
+    markers.push({
+      id: `focus:${tradeId}:entry`,
+      trade_id: trade?.trade_id,
+      time: entryProjection.time,
+      position: Number.isFinite(entryPrice) ? 'atPriceMiddle' : isLong ? 'belowBar' : 'aboveBar',
+      ...(Number.isFinite(entryPrice) ? { price: entryPrice } : {}),
+      shape: 'circle',
+      color: `rgba(251,191,36,${alpha})`,
+      text: 'SELECTED ENTRY',
+      size,
+    })
+  }
+  if (Number.isFinite(exitProjection.time)) {
+    markers.push({
+      id: `focus:${tradeId}:exit`,
+      trade_id: trade?.trade_id,
+      time: exitProjection.time,
+      position: Number.isFinite(exitPrice) ? 'atPriceMiddle' : isLong ? 'aboveBar' : 'belowBar',
+      ...(Number.isFinite(exitPrice) ? { price: exitPrice } : {}),
+      shape: 'circle',
+      color: exitColor,
+      text: 'SELECTED EXIT',
+      size,
+    })
+  }
+  return markers
+}
+
+export const usePulseMarkers = ({ seriesRef, markerManager, latestCandlesRef }) => {
   const pulseLineHandlesRef = useRef([])
   const pulseTimeoutRef = useRef(null)
+  const pulseIntervalRef = useRef(null)
 
   const clearPulseArtifacts = useCallback(() => {
+    if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current)
+    if (pulseIntervalRef.current) clearInterval(pulseIntervalRef.current)
+    pulseTimeoutRef.current = null
+    pulseIntervalRef.current = null
     pulseLineHandlesRef.current.forEach((handle) => {
       try {
         seriesRef.current?.removePriceLine(handle)
@@ -22,9 +95,20 @@ export const usePulseMarkers = ({ seriesRef, markerManager }) => {
     (trade) => {
       if (!trade || !seriesRef.current) return
       clearPulseArtifacts()
-      if (pulseTimeoutRef.current) {
-        clearTimeout(pulseTimeoutRef.current)
-        pulseTimeoutRef.current = null
+      if (isClosedTrade(trade)) {
+        let phase = 0
+        const renderPulse = () => {
+          markerManager?.setLayer(
+            'pulse',
+            buildTradeFocusPulseMarkers(trade, latestCandlesRef?.current || [], phase),
+          )
+          markerManager?.flush()
+          phase += 1
+        }
+        renderPulse()
+        pulseIntervalRef.current = setInterval(renderPulse, 180)
+        pulseTimeoutRef.current = setTimeout(clearPulseArtifacts, 2200)
+        return
       }
       const entryTime = toSec(trade?.entry_time)
       const stopPrice = toFiniteNumber(trade?.stop_price)
@@ -71,18 +155,13 @@ export const usePulseMarkers = ({ seriesRef, markerManager }) => {
       }
       pulseTimeoutRef.current = setTimeout(() => {
         clearPulseArtifacts()
-        pulseTimeoutRef.current = null
       }, 450)
     },
-    [clearPulseArtifacts, markerManager, seriesRef],
+    [clearPulseArtifacts, latestCandlesRef, markerManager, seriesRef],
   )
 
   useEffect(() => {
     return () => {
-      if (pulseTimeoutRef.current) {
-        clearTimeout(pulseTimeoutRef.current)
-        pulseTimeoutRef.current = null
-      }
       clearPulseArtifacts()
     }
   }, [clearPulseArtifacts])

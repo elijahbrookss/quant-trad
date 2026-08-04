@@ -1269,6 +1269,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         mergeMode: 'replace',
         focusTime: focusValue,
         focusToken: `${kind}:${evidenceId}:${request.requestId}`,
+        focusTradeId: kind === 'trade' ? evidenceId : null,
         requestId: request.requestId,
       })
     } catch (err) {

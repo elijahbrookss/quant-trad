@@ -157,6 +157,8 @@ export function BotLensChart({
   onNearHistoryStart = null,
   onNearHistoryEnd = null,
   viewportResetKey = null,
+  selectedTradeId = null,
+  showActiveTradeLevels = true,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -264,7 +266,10 @@ export function BotLensChart({
   }, [candleData, chartId, debugRanges, logger])
 
   const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, segments: tradeSegments, priceLines: tradePriceLines } =
-    useTradeMarkers(resolvedTrades, candleLookup, candleData)
+    useTradeMarkers(resolvedTrades, candleLookup, candleData, {
+      selectedTradeId,
+      showActiveTradeLevels,
+    })
 
   const showTradeMarkers = overlayVisibility.trade_markers !== false
   const showTradeRays = overlayVisibility.trade_rays !== false
@@ -287,6 +292,7 @@ export function BotLensChart({
   const { pulseTradeElements, clearPulseArtifacts } = usePulseMarkers({
     seriesRef,
     markerManager,
+    latestCandlesRef,
   })
 
   useEffect(() => {
@@ -462,7 +468,7 @@ export function BotLensChart({
       tradeTooltips: showTradeMarkers ? tradeMarkerTooltips : [],
       tradeRegions: showTradeRegions ? tradeRegions : [],
       tradeSegments: showTradeRegions ? tradeSegments : [],
-      tradePriceLines: showTradeRays ? tradePriceLines : [],
+      tradePriceLines: showTradeRays && showActiveTradeLevels ? tradePriceLines : [],
       candleData,
     })
     if (BOTLENS_DEBUG) {
@@ -500,7 +506,7 @@ export function BotLensChart({
       refreshMarkers({ force: true })
       pendingCameraIntentRef.current = null
     }
-  }, [applyArtifacts, candleData, computeArtifacts, refreshMarkers, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
+  }, [applyArtifacts, candleData, computeArtifacts, debugRanges, logger, refreshMarkers, requestIntent, resolvedOverlays, showActiveTradeLevels, showTradeMarkers, showTradeRays, showTradeRegions, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
 
   const containerClasses = [
     'relative w-full overflow-hidden rounded-[3px] border border-white/10 bg-[#0f1118]',
