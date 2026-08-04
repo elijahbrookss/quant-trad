@@ -134,6 +134,10 @@ Symbol projection owns symbol-level state:
 
 The frontend should treat these as projections keyed by runtime IDs, not as local execution state.
 
+Selected-symbol `symbol_live` is meaningful only while run-level `run_live` is true.
+A terminal snapshot may remain available for replay, but stale projector readiness
+cannot label that completed symbol live.
+
 Symbol fact intake drains in bounded batches. A symbol projector may apply many
 ready fact envelopes in one drain turn, preserving event order while emitting a
 single run-summary notification and a single fanout package for the drain. This

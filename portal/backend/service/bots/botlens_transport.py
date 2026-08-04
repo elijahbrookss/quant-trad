@@ -366,8 +366,15 @@ def _selected_symbol_readiness_payload(
     )
     snapshot_ready = bool(symbol_state is not None and symbol_state.readiness.snapshot_ready)
     symbol_live = bool(
-        (symbol_state is not None and symbol_state.readiness.symbol_live)
-        or (catalog_entry.get("readiness", {}) if isinstance(catalog_entry.get("readiness"), Mapping) else {}).get("symbol_live")
+        run_live
+        and (
+            (symbol_state is not None and symbol_state.readiness.symbol_live)
+            or (
+                catalog_entry.get("readiness", {})
+                if isinstance(catalog_entry.get("readiness"), Mapping)
+                else {}
+            ).get("symbol_live")
+        )
     )
     return {
         "catalog_discovered": catalog_discovered,

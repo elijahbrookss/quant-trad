@@ -150,6 +150,32 @@ def test_selected_symbol_snapshot_contract_is_symbol_scoped_and_not_detail_contr
     assert "detail" not in payload
 
 
+def test_terminal_selected_symbol_snapshot_cannot_claim_live_readiness() -> None:
+    payload = selected_symbol_snapshot_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        symbol_state=_symbol_state(),
+        symbol_catalog_entry={"symbol_key": "instrument-btc|1m"},
+        run_health={"status": "completed"},
+        run_bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id=None,
+        run_live=False,
+        transport_eligible=False,
+        message="BotLens selected-symbol snapshot ready.",
+    )
+
+    assert payload["readiness"] == {
+        "catalog_discovered": True,
+        "snapshot_ready": True,
+        "symbol_live": False,
+        "run_live": False,
+    }
+    assert payload["selected_symbol"]["metadata"]["readiness"]["symbol_live"] is False
+    assert payload["live_transport"]["eligible"] is False
+
+
 def test_selected_symbol_snapshot_bounds_heavy_evidence_and_reports_window() -> None:
     symbol_state = replace(
         _symbol_state(),
