@@ -236,12 +236,9 @@ def test_get_botlens_run_bootstrap_loads_exact_historical_run_without_live_trans
     monkeypatch.setattr(
         svc.bot_service,
         "get_bot",
-        lambda bot_id: {
-            "id": bot_id,
-            "status": "running",
-            "active_run_id": "newer-run",
-            "lifecycle": {"phase": "live", "status": "running"},
-        },
+        lambda _bot_id: pytest.fail(
+            "terminal exact-run bootstrap must not project the mutable bot definition"
+        ),
     )
     monkeypatch.setattr(
         svc,
@@ -279,7 +276,9 @@ def test_get_botlens_historical_run_bootstrap_survives_missing_definition(monkey
     monkeypatch.setattr(
         svc.bot_service,
         "get_bot",
-        lambda _bot_id: (_ for _ in ()).throw(KeyError("definition missing")),
+        lambda _bot_id: pytest.fail(
+            "terminal exact-run bootstrap must survive without reading the definition"
+        ),
     )
     monkeypatch.setattr(
         svc,
@@ -467,12 +466,9 @@ def test_terminal_run_without_symbol_catalog_is_explicitly_unavailable(monkeypat
     monkeypatch.setattr(
         svc.bot_service,
         "get_bot",
-        lambda bot_id: {
-            "id": bot_id,
-            "status": "idle",
-            "active_run_id": None,
-            "lifecycle": {"phase": "idle", "status": "idle"},
-        },
+        lambda _bot_id: pytest.fail(
+            "terminal exact-run bootstrap must not project the mutable bot definition"
+        ),
     )
     monkeypatch.setattr(
         svc,

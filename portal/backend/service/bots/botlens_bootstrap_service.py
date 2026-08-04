@@ -142,20 +142,36 @@ def _load_run_bootstrap_context(
     bot_id = str(run_row.get("bot_id") or "").strip()
     if not bot_id:
         raise ValueError(f"BotLens run is missing bot identity: run_id={run_id}")
-    try:
-        projected_bot = _mapping(bot_service.get_bot(bot_id))
-    except KeyError:
-        projected_bot = {
-            "id": bot_id,
-            "name": run_row.get("bot_name"),
-            "strategy_id": run_row.get("strategy_id"),
-            "strategy_variant_name": run_row.get("strategy_name"),
-            "run_type": run_row.get("run_type"),
-            "execution_mode": run_row.get("execution_mode"),
-            "status": run_row.get("status"),
-            "active_run_id": None,
-            "lifecycle": {},
-        }
+    persisted_status = str(run_row.get("status") or "").strip().lower()
+    config_snapshot = _mapping(run_row.get("config_snapshot"))
+    persisted_bot = _mapping(config_snapshot.get("bot"))
+    persisted_projection = {
+        **persisted_bot,
+        "id": bot_id,
+        "name": persisted_bot.get("name") or run_row.get("bot_name"),
+        "strategy_id": persisted_bot.get("strategy_id") or run_row.get("strategy_id"),
+        "strategy_variant_name": (
+            persisted_bot.get("strategy_variant_name") or run_row.get("strategy_name")
+        ),
+        "run_type": persisted_bot.get("run_type") or run_row.get("run_type"),
+        "execution_mode": (
+            persisted_bot.get("execution_mode") or run_row.get("execution_mode")
+        ),
+        "status": run_row.get("status"),
+        "active_run_id": None,
+        "lifecycle": {},
+    }
+
+    # A terminal exact-run read is owned by its immutable run/config snapshot.
+    # Projecting the mutable bot definition here can inspect an unrelated newer
+    # run (and Docker state) before the historical projector is even created.
+    if persisted_status and persisted_status not in _ACTIVE_STATUSES:
+        projected_bot = persisted_projection
+    else:
+        try:
+            projected_bot = _mapping(bot_service.get_bot(bot_id))
+        except KeyError:
+            projected_bot = persisted_projection
     if str(projected_bot.get("id") or "") != bot_id:
         raise ValueError(
             f"BotLens run ownership mismatch: bot_id={bot_id} run_id={run_id}"
