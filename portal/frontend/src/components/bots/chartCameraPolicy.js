@@ -12,7 +12,12 @@ export const resolveCandleUpdateViewport = ({ updateMode = null, visibleRange = 
   return { from, to }
 }
 
-export const resolveCandleUpdateCameraIntent = ({ previous = [], next = [], updateMode = null } = {}) => {
+export const resolveCandleUpdateCameraIntent = ({
+  previous = [],
+  next = [],
+  updateMode = null,
+  followLatest = false,
+} = {}) => {
   if (updateMode === 'prepend' || updateMode === 'append') return null
 
   const prevLast = previous[previous.length - 1]
@@ -25,5 +30,13 @@ export const resolveCandleUpdateCameraIntent = ({ previous = [], next = [], upda
   if (!next.length) return null
   if (!previous.length) return { intent: CameraIntents.FOLLOW_LATEST, reason: 'initial-load' }
   if (historyRewound || longJump) return { intent: CameraIntents.FOLLOW_LATEST, reason: 'series-reset' }
+  if (
+    followLatest
+    && Number.isFinite(prevLastTime)
+    && Number.isFinite(nextLastTime)
+    && nextLastTime > prevLastTime
+  ) {
+    return { intent: CameraIntents.FOLLOW_LATEST, reason: 'live-bar-advance' }
+  }
   return null
 }

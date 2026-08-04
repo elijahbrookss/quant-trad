@@ -980,6 +980,7 @@ export function buildBotLensRuntimeViewModel({
         String(trade?.trade_id || '') === String(chartHistory?.focusTradeId || '')
       )) || null,
       showActiveTradeLevels: Boolean(runReadiness.run_live),
+      followLatestCandles: Boolean(runReadiness.run_live),
       dataUpdateMode: chartHistory?.lastUpdateMode || null,
       dataUpdateToken: chartHistory?.lastUpdateToken || null,
       candles: Array.isArray(chartCandles) ? chartCandles : [],

@@ -237,6 +237,7 @@ function ChartViewport({
             heightClass={chartHeightClass}
             selectedTradeId={model.focusTradeId}
             showActiveTradeLevels={model.showActiveTradeLevels}
+            followLatestCandles={model.followLatestCandles}
           />
         </>
       ) : (

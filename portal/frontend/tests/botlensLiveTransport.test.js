@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   buildSelectedSymbolSubscriptionPayload,
   buildBotLensLiveTransportEpoch,
+  isBotLensLiveDocumentVisible,
   shouldOpenBotLensLiveTransport,
   shouldSendBotLensSelectedSymbolSubscription,
 } from '../src/features/bots/botlens/hooks/useBotLensLiveTransport.js'
@@ -51,6 +52,31 @@ test('live transport stays closed when run-scoped prerequisites are missing', ()
       selectedSymbolReady: true,
     }),
     false,
+  )
+})
+
+test('live transport suspends while its browser tab is hidden', () => {
+  assert.equal(isBotLensLiveDocumentVisible('visible'), true)
+  assert.equal(isBotLensLiveDocumentVisible('hidden'), false)
+  assert.equal(
+    shouldOpenBotLensLiveTransport({
+      open: true,
+      botId: 'bot-1',
+      runId: 'run-1',
+      transportEligible: true,
+      documentVisible: false,
+    }),
+    false,
+  )
+  assert.equal(
+    buildBotLensLiveTransportEpoch({
+      open: true,
+      botId: 'bot-1',
+      runId: 'run-1',
+      transportEligible: true,
+      documentVisible: false,
+    }),
+    'closed',
   )
 })
 

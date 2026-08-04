@@ -7,8 +7,18 @@ const WEBSOCKET_OPEN_STATE = typeof WebSocket === 'function' ? WebSocket.OPEN : 
 export const BOTLENS_LIVE_MESSAGE_LIMIT = 256
 export const BOTLENS_LIVE_BYTE_LIMIT = 2 * 1024 * 1024
 
-export function shouldOpenBotLensLiveTransport({ open, botId, runId, transportEligible }) {
-  return Boolean(open && botId && runId && transportEligible)
+export function isBotLensLiveDocumentVisible(visibilityState) {
+  return String(visibilityState || '').trim().toLowerCase() !== 'hidden'
+}
+
+export function shouldOpenBotLensLiveTransport({
+  open,
+  botId,
+  runId,
+  transportEligible,
+  documentVisible = true,
+}) {
+  return Boolean(open && botId && runId && transportEligible && documentVisible)
 }
 
 export function buildBotLensLiveTransportEpoch({
@@ -16,9 +26,16 @@ export function buildBotLensLiveTransportEpoch({
   botId,
   runId,
   transportEligible,
+  documentVisible = true,
   reconnectTick = 0,
 }) {
-  if (!shouldOpenBotLensLiveTransport({ open, botId, runId, transportEligible })) {
+  if (!shouldOpenBotLensLiveTransport({
+    open,
+    botId,
+    runId,
+    transportEligible,
+    documentVisible,
+  })) {
     return 'closed'
   }
   return [
@@ -84,13 +101,44 @@ export function useBotLensLiveTransport({
     streamSessionId: null,
   })
   const [reconnectTick, setReconnectTick] = useState(0)
+  const [documentVisible, setDocumentVisible] = useState(() => (
+    typeof document !== 'object'
+      ? true
+      : isBotLensLiveDocumentVisible(document.visibilityState)
+  ))
+  const previousDocumentVisibleRef = useRef(documentVisible)
   const transportEpoch = buildBotLensLiveTransportEpoch({
     open,
     botId,
     runId,
     transportEligible,
+    documentVisible,
     reconnectTick,
   })
+
+  useEffect(() => {
+    if (typeof document !== 'object' || typeof document.addEventListener !== 'function') {
+      return undefined
+    }
+    const handleVisibilityChange = () => {
+      setDocumentVisible(isBotLensLiveDocumentVisible(document.visibilityState))
+    }
+    handleVisibilityChange()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [])
+
+  useEffect(() => {
+    if (previousDocumentVisibleRef.current && !documentVisible) {
+      logger?.info?.('botlens_run_ws_suspended_hidden', {
+        bot_id: botId,
+        run_id: runId,
+        resume_from_seq: latestCursorRef.current.resumeFromSeq,
+        stream_session_id: latestCursorRef.current.streamSessionId || null,
+      })
+    }
+    previousDocumentVisibleRef.current = documentVisible
+  }, [botId, documentVisible, logger, runId])
 
   const clearPendingMessages = useCallback(() => {
     if (pendingFrameRef.current !== null) {
@@ -197,7 +245,13 @@ export function useBotLensLiveTransport({
   }, [botId, dispatch, logger, runId])
 
   useEffect(() => {
-    if (!shouldOpenBotLensLiveTransport({ open, botId, runId, transportEligible })) {
+    if (!shouldOpenBotLensLiveTransport({
+      open,
+      botId,
+      runId,
+      transportEligible,
+      documentVisible,
+    })) {
       closeSocket()
       reconnectRef.current = 0
       return undefined
@@ -319,6 +373,7 @@ export function useBotLensLiveTransport({
     botId,
     closeSocket,
     dispatch,
+    documentVisible,
     logger,
     open,
     refreshSession,

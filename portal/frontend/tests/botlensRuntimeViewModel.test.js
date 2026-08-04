@@ -264,6 +264,7 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   assert.equal(model.retrievalPanels.chart.chartKey, 'instrument-btc|1m')
   assert.equal(model.retrievalPanels.chart.chartContext.openTradeCount, 1)
   assert.equal(model.retrievalPanels.chart.showActiveTradeLevels, true)
+  assert.equal(model.retrievalPanels.chart.followLatestCandles, true)
   assert.equal(model.retrievalPanels.chart.liveTrades.length, 1)
   assert.deepEqual(
     model.tabs.map((tab) => tab.key),
@@ -647,6 +648,7 @@ test('terminal chart inspection disables active levels and resolves the focused 
   }))
 
   assert.equal(model.retrievalPanels.chart.showActiveTradeLevels, false)
+  assert.equal(model.retrievalPanels.chart.followLatestCandles, false)
   assert.equal(model.retrievalPanels.chart.focusTradeId, 'trade-focus')
   assert.equal(model.retrievalPanels.chart.focusedTrade?.trade_id, 'trade-focus')
 })

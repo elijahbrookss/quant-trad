@@ -159,6 +159,7 @@ export function BotLensChart({
   viewportResetKey = null,
   selectedTradeId = null,
   showActiveTradeLevels = true,
+  followLatestCandles = false,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -386,7 +387,13 @@ export function BotLensChart({
     const longJump = next.length > previous.length + 1
     const requiresReset = !previous.length || !next.length || historyRewound || longJump || effectiveUpdateMode === 'prepend'
     const shouldAnimate = isSameCandle && playbackProfile.allowIntrabar
-    const cameraIntent = resolveCandleUpdateCameraIntent({ previous, next, updateMode: effectiveUpdateMode })
+    const cameraIntent = resolveCandleUpdateCameraIntent({
+      previous,
+      next,
+      updateMode: effectiveUpdateMode,
+      followLatest: followLatestCandles,
+    })
+    if (cameraIntent) pendingCameraIntentRef.current = cameraIntent
 
     const sample = frameSampleRef.current
     const start = performance.now()
@@ -395,7 +402,6 @@ export function BotLensChart({
       cancelAnimator('reset')
       seriesRef.current.setData(next)
       frameSampleRef.current = { total: 0, count: 0, logged: false }
-      if (cameraIntent) pendingCameraIntentRef.current = cameraIntent
     } else if (shouldAnimate) {
       const prevMatch = previous.find((candle) => Number.isFinite(candle?.time) && candle.time === nextLastTime)
       startAnimator({ series: seriesRef.current, fromCandle: prevMatch, toCandle: nextLast, speed: playbackSpeed })
@@ -444,7 +450,7 @@ export function BotLensChart({
         logicalRange,
       })
     }
-  }, [cancelAnimator, candleData, dataUpdateMode, dataUpdateToken, debugRanges, logger, playbackProfile, seriesRef, startAnimator])
+  }, [cancelAnimator, candleData, dataUpdateMode, dataUpdateToken, debugRanges, followLatestCandles, logger, playbackProfile, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
