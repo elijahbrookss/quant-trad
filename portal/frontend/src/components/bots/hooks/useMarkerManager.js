@@ -46,8 +46,20 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
       counts[name] = (layer.markers || []).length
       merged.push(...(layer.markers || []))
     })
-    merged.sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
-    const signature = merged
+    const dedupedByIdentity = new Map()
+    merged.forEach((marker) => {
+      const identity = marker?.id || [
+        marker?.trade_id || '',
+        Number.isFinite(marker?.time) ? Number(marker.time) : '',
+        marker?.position || '',
+        marker?.shape || '',
+        marker?.text || '',
+      ].join('|')
+      if (!dedupedByIdentity.has(identity)) dedupedByIdentity.set(identity, marker)
+    })
+    const deduped = Array.from(dedupedByIdentity.values())
+      .sort((a, b) => (a.time ?? 0) - (b.time ?? 0))
+    const signature = deduped
       .map((marker) => {
         const time = Number.isFinite(marker?.time) ? Number(marker.time) : ''
         const position = marker?.position || ''
@@ -59,14 +71,18 @@ export const useMarkerManager = ({ seriesRef, markersApiRef, markerCacheRef }) =
       })
       .join('||')
     if (signature !== lastSignatureRef.current) {
-      api.setMarkers(merged)
+      api.setMarkers(deduped)
       lastSignatureRef.current = signature
     }
     if (markerCacheRef) {
-      markerCacheRef.current = merged
+      markerCacheRef.current = deduped
     }
     if (BOTLENS_DEBUG) {
-      console.debug('[BotLensChart] marker flush', { counts, total: merged.length })
+      console.debug('[BotLensChart] marker flush', {
+        counts,
+        total: deduped.length,
+        duplicates_removed: merged.length - deduped.length,
+      })
     }
   }, [ensureApi, markerCacheRef])
 
