@@ -17,14 +17,17 @@ code_paths:
   - portal/backend/controller/reports.py
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/reports/contract.py
+  - portal/backend/service/storage/repos/candles.py
   - portal/frontend/src/adapters/bot.adapter.js
   - portal/frontend/src/adapters/report.adapter.js
   - portal/frontend/src/components/bots/BotLensChart.jsx
   - portal/frontend/src/components/bots/chartCameraPolicy.js
   - portal/frontend/src/components/bots/hooks/useMarkerManager.js
   - portal/frontend/src/components/bots/hooks/useTradeMarkers.js
+  - portal/frontend/src/components/bots/hooks/useViewportController.js
   - portal/frontend/src/components/bots/botlensProjection.js
   - portal/frontend/src/features/bots/botlens
+  - portal/frontend/src/v2/rooms/BotLensRoom.jsx
   - src/core/settings.py
   - config/defaults.yaml
 ---
@@ -61,12 +64,15 @@ BotLens separates three read contracts:
    is capped at 256 messages and 2 MiB; overflow marks the view stale and
    requests a fresh bootstrap.
 2. **Bounded chart window.** Frozen chart history loads 240 bars at a time when
-   the viewport approaches the left edge. The browser retains at most 3,840
-   candles and 16 overlay pages, and retains only trade states overlapping that
-   candle window. Prepending restores the exact prior visible time range and
-   never follows latest. Ordinary append follows only while the user remains at
-   the live edge. Selecting a decision or trade replaces unrelated chart
-   history with a bounded window around its evidence time.
+   the viewport approaches either available edge. Dataset-relative paging flags
+   distinguish the requested interval from the frozen dataset boundary, so a
+   focused interior window can continue in both directions. The browser retains
+   at most 3,840 candles and 16 overlay pages, and retains only trade states
+   overlapping that candle window. Prepending and focused-window appends restore
+   the exact prior visible time range and never follow latest. Ordinary live
+   append follows only while the user remains at the live edge. Selecting a
+   decision or trade replaces unrelated chart history with a bounded window
+   around its evidence time.
 3. **Complete durable indexes.** Terminal decision, completed-trade, and
    diagnostic tabs read independent 100-record pages from typed report
    contracts. Total counts come from those durable contracts, never from hot
@@ -85,7 +91,10 @@ BotLens separates three read contracts:
    candle start or the containing normal candle interval. Missing-bar gaps and
    events outside the loaded window produce no marker. Original evidence time
    remains part of marker identity, and the composed marker layer deduplicates
-   before rendering. Completed trades never retain active stop/target rays.
+   before rendering. The marker API is refreshed after camera intent is applied
+   so the chart library indexes labels against an established visible range;
+   the layer remains above the candle series. Completed trades never retain
+   active stop/target rays.
 
 Run-stream fanout is concurrent across viewers. Each send has a configurable
 deadline, 1,500 ms by default. A slow or failed viewer is evicted without
@@ -108,12 +117,19 @@ not replay from another browser's memory.
   cannot change persisted evidence, report fingerprints, or backtest results.
 - Automatic left-edge loading stops at the frozen dataset boundary and never
   falls through to mutable provider data.
+- Automatic right-edge loading from a focused interior window stops at the
+  same frozen dataset boundary.
 - A decision or trade focus request is scoped to the exact run and series and
   cannot reuse a response from a prior selection.
 - Every chart response is admitted only for the latest request identity; newer
   work aborts superseded requests and identical work is deduplicated.
+- Long-lived viewport subscriptions call the latest paging callbacks rather
+  than retaining the chart's initial range contract.
 - Historical prepend preserves the exact visible time range without triggering
   follow-latest behavior.
+- Historical focused-window append also preserves the exact visible time range.
+- Initial run, research, bootstrap, and chart reads are abortable. Development
+  StrictMode probe mounts are canceled before they can duplicate durable work.
 - Marker projection never snaps across a missing bar or beyond the loaded
   candle range.
 - Completed trade evidence and active position state remain visually and
@@ -159,10 +175,12 @@ honest completeness semantics.
 - View-model tests prove durable totals replace bounded snapshot counts and
   diagnostic grouping ignores volatile timing fields.
 - Backend stream tests prove slow-viewer eviction and healthy-viewer progress.
-- Report route tests prove optional bounded diagnostic pages.
+- Report route tests prove optional bounded diagnostic pages, while frozen
+  candle paging tests prove dataset-relative before/after flags for latest,
+  focused, forward, and empty windows.
 - Full-year browser/API validation must confirm exact date range, complete
-  decision/trade totals, automatic chart history, trade focus, and stable memory
-  across multiple simultaneous lenses.
+  decision/trade totals, bidirectional automatic chart history, trade focus,
+  marker alignment, and stable memory across multiple simultaneous lenses.
 
 ## References
 

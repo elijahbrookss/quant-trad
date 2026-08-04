@@ -31,6 +31,7 @@ code_paths:
   - portal/backend/service/bots/bot_service.py
   - portal/backend/service/storage/repos/runs.py
   - portal/backend/service/storage/repos/market_structure.py
+  - portal/backend/service/storage/repos/candles.py
   - portal/backend/workers/market_data_collector.py
   - portal/backend/service/bots/botlens_bootstrap_service.py
   - portal/backend/service/bots/botlens_domain_events.py
@@ -207,8 +208,9 @@ Run inspection is a routed modal with a blurred background and a compact
 dashboard header. The header shows strategy, lifecycle/mode, exact backtest
 range, execution semantics, selected market, open trades, warning count, and
 last-event freshness. Generated IDs and raw contract detail stay behind the
-**Run details** lens with a copy action. Closing BotLens returns to its
-originating inventory.
+fixed, body-portal **Run details** lens with a copy action. That compact lens
+fits in the current viewport and scrolls only its bounded raw-detail region,
+not the underlying page. Closing BotLens returns to its originating inventory.
 
 Eligibility rules:
 
@@ -243,6 +245,11 @@ moves left. Completed runs request their initial durable 240-bar chart window
 and independent decision, trade, and diagnostic pages because terminal replay,
 not a live projection, owns their historical completeness evidence.
 
+Run identity, research evidence, selected-symbol bootstrap, and initial chart
+reads are abortable and scheduled after the mount commits. React development
+StrictMode probe mounts are therefore canceled before durable reads begin,
+while a real mount still fails visibly if any component read fails.
+
 Bot controller handlers that call synchronous SQL, Docker inspection, dataset
 preparation, or forensic services execute in FastAPI's worker threadpool. The
 SSE initial fleet snapshot and live-WebSocket run resolution explicitly offload
@@ -258,13 +265,21 @@ thread offload seam. See [ADR 0054](../decisions/0054-keep-blocking-api-work-off
 
 Dataset-bound backtest charts read only the run's frozen dataset series at its
 recorded commit boundary. They never fall through to later canonical revisions.
-The initial view requests the latest 240 bars and left-edge movement requests
-one guarded older page. Viewport pan is the only history-navigation control;
-there is no separate **Load earlier** action. The browser retains a sliding
-window of at most 3,840 candles. Selecting a trade replaces unrelated chart
-history with at most 320 bars spanning 72 bars before entry through 72 bars
-after exit, then centers the chart on entry. Every chart response names its
-evidence source.
+The initial view requests the latest 240 bars. Actual logical-range movement
+near the left edge requests one guarded older page; a focused interior window
+can likewise request newer pages at its right edge. Frozen responses compute
+before/after flags against dataset bounds rather than merely the requested
+interval, and long-lived chart subscriptions invoke the current range callback.
+Viewport pan is the only history-navigation control; there is no separate
+**Load earlier** action. The browser retains a sliding window of at most 3,840
+candles. Prepend and focused-window append preserve the prior visible time
+range. Selecting a trade replaces unrelated chart history with at most 320 bars
+spanning 72 bars before entry through 72 bars after exit, then centers the chart
+on entry. Every chart response names its evidence source.
+
+Trade-marker layers are deduplicated by evidence identity and refreshed after
+camera setup, so initial, focused, prepended, appended, and resized views index
+labels against the loaded candle range without changing causal bar projection.
 
 New runs may also return bounded historical overlay pages replayed from retained
 overlay deltas. The browser merges at most 16 page payloads and uses durable
