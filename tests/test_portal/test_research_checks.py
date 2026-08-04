@@ -2137,6 +2137,11 @@ def test_research_job_routes_delegate_to_async_dispatch(monkeypatch: pytest.Monk
 def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.MonkeyPatch) -> None:
     observed = {}
 
+    async def fake_run_in_threadpool(function, *args, **kwargs):
+        observed["threadpool_function"] = function
+        observed["threadpool_args"] = args
+        return function(*args, **kwargs)
+
     def fake_run_research_evidence(run_id: str):
         observed["run_id"] = run_id
         return {"schema_version": "run_research_evidence.v1", "run_id": run_id}
@@ -2155,6 +2160,7 @@ def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.Mo
         }
 
     monkeypatch.setattr(research_controller.research_service, "get_run_research_evidence", fake_run_research_evidence)
+    monkeypatch.setattr(research_controller, "run_in_threadpool", fake_run_in_threadpool)
     monkeypatch.setattr(research_controller.research_service, "get_research_trail", fake_research_trail)
     monkeypatch.setattr(research_controller.research_service, "compare_research_checks", fake_compare)
 
@@ -2175,6 +2181,8 @@ def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.Mo
     assert compare_response.json()["left"]["check_id"] == "check-a"
     assert observed == {
         "run_id": "run-1",
+        "threadpool_function": fake_run_research_evidence,
+        "threadpool_args": ("run-1",),
         "trail_item_id": "obs-1",
         "compare": ("check-a", "check-b"),
     }

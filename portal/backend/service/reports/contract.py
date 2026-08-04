@@ -224,19 +224,37 @@ def _dataset(run_id: str) -> Dict[str, Any]:
 
     if not should_build:
         logger.debug(with_log_context("report_dataset_inflight_wait", build_log_context(run_id=run_id)))
-        return future.result()
+        wait_started = time.perf_counter()
+        dataset = future.result()
+        logger.debug(
+            with_log_context(
+                "report_dataset_inflight_wait_done",
+                build_log_context(
+                    run_id=run_id,
+                    wait_ms=round((time.perf_counter() - wait_started) * 1000.0, 3),
+                ),
+            )
+        )
+        return dataset
 
+    build_started = time.perf_counter()
     try:
         logger.debug(with_log_context("report_dataset_build_start", build_log_context(run_id=run_id)))
+        fingerprint_before_started = time.perf_counter()
         input_fingerprint_before = _canonical_terminal_input_fingerprint(run_id)
+        fingerprint_before_seconds = time.perf_counter() - fingerprint_before_started
+        dataset_build_started = time.perf_counter()
         dataset = build_run_research_dataset(run_id)
+        dataset_build_seconds = time.perf_counter() - dataset_build_started
     except BaseException as exc:
         with _DATASET_CACHE_LOCK:
             _DATASET_INFLIGHT.pop(key, None)
             future.set_exception(exc)
         raise
 
+    fingerprint_after_started = time.perf_counter()
     input_fingerprint_after = _canonical_terminal_input_fingerprint(run_id)
+    fingerprint_after_seconds = time.perf_counter() - fingerprint_after_started
     validated_fingerprint = (
         input_fingerprint_after
         if input_fingerprint_before
@@ -251,7 +269,19 @@ def _dataset(run_id: str) -> Dict[str, Any]:
         )
         _DATASET_INFLIGHT.pop(key, None)
         future.set_result(dataset)
-    logger.debug(with_log_context("report_dataset_build_done", build_log_context(run_id=run_id)))
+    logger.debug(
+        with_log_context(
+            "report_dataset_build_done",
+            build_log_context(
+                run_id=run_id,
+                duration_ms=round((time.perf_counter() - build_started) * 1000.0, 3),
+                dataset_build_ms=round(dataset_build_seconds * 1000.0, 3),
+                fingerprint_before_ms=round(fingerprint_before_seconds * 1000.0, 3),
+                fingerprint_after_ms=round(fingerprint_after_seconds * 1000.0, 3),
+                fingerprint_validated=bool(validated_fingerprint),
+            ),
+        )
+    )
     return dataset
 
 

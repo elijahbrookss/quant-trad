@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any
 
 import pytest
@@ -576,8 +577,12 @@ def _build(
     return run_research_dataset.build_run_research_dataset("run-1")
 
 
-def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _build(monkeypatch)
+def test_dataset_builds_from_db_truth_without_artifact_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger=run_research_dataset.__name__):
+        dataset = _build(monkeypatch)
 
     assert dataset["readiness"]["dataset_ready"] is True
     assert dataset["readiness"]["results_ready"] is True
@@ -593,6 +598,23 @@ def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: py
     assert dataset["context"]["schema_version"] == "report_context.v1"
     assert dataset["candle_catalog"]["schema_version"] == "candle_catalog.v1"
     assert dataset["operational_health"]["schema_version"] == "operational_health.v1"
+    done_message = next(
+        message
+        for message in caplog.messages
+        if "run_research_dataset_build_done" in message
+    )
+    for field in (
+        "duration_ms=",
+        "source_load_ms=",
+        "trade_enrichment_ms=",
+        "readiness_ms=",
+        "wallet_accounting_ms=",
+        "observability_ms=",
+        "assembly_ms=",
+        "serialization_ms=",
+        "wallet_events=",
+    ):
+        assert field in done_message
 
 
 def test_runtime_step_timings_use_weighted_average_and_merged_histogram(

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ..service import research as research_service
 from ..service.research import async_dispatch as research_async_dispatch
@@ -199,7 +200,10 @@ async def compare_research_checks(left_check_id: str, right_check_id: str) -> Di
 @router.get("/runs/{run_id}/evidence")
 async def get_run_research_evidence(run_id: str) -> Dict[str, Any]:
     try:
-        return research_service.get_run_research_evidence(run_id)
+        return await run_in_threadpool(
+            research_service.get_run_research_evidence,
+            run_id,
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

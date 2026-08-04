@@ -16,6 +16,7 @@ import logging
 import math
 import re
 import statistics
+import time
 from typing import Any, Dict, List, Optional
 
 from utils.log_context import build_log_context, with_log_context
@@ -5905,6 +5906,8 @@ def _finalize_readiness(
 def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     """Build the canonical research dataset for a bot run from durable DB truth."""
 
+    build_started = time.perf_counter()
+    source_load_started = build_started
     run = get_bot_run(run_id)
     if not run:
         raise KeyError(f"Run {run_id} was not found")
@@ -5918,6 +5921,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     raw_trades = [dict(row) for row in list_bot_trades_for_run(run_id)]
     trades = _normalize_trades(raw_trades, trade_closed_context_by_id=trade_closed_by_id)
     decisions, signals, trades = _link_trace_rows(decisions=decisions, signals=signals, trades=trades)
+    source_load_seconds = time.perf_counter() - source_load_started
     metadata = _metadata(run)
     expected_candle_series = _expected_candle_series(run)
     execution = _execution_section(run=run, events=events)
@@ -5938,7 +5942,9 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
             fill_rows,
         ),
     )
+    trade_enrichment_started = time.perf_counter()
     trades = _enrich_trades_for_research(trades, execution=execution)
+    trade_enrichment_seconds = time.perf_counter() - trade_enrichment_started
     trace_rows = [*decisions, *signals, *trades]
     summary = _summary(decisions=decisions, trades=trades, starting_capital=metadata.starting_capital)
     decision_summary = {
@@ -5954,20 +5960,26 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         "profit_factor": summary.profit_factor,
         "win_rate": summary.win_rate,
     }
+    readiness_started = time.perf_counter()
     readiness = _readiness(
         run_id=run_id,
         run=run,
         decision_summary=decision_summary,
         financial_summary=financial_summary,
     )
+    readiness_seconds = time.perf_counter() - readiness_started
     execution = dict(execution)
     execution["slippage"] = _slippage_accounting(run=run, events=events, trades=trades)
     fee_accounting = _fee_accounting(trades, summary, events=events)
+    wallet_accounting_started = time.perf_counter()
     wallet_accounting = _wallet_accounting(run=run, decisions=decisions, events=events, summary=summary)
+    wallet_accounting_seconds = time.perf_counter() - wallet_accounting_started
     wallet_diagnostics = _mapping(wallet_accounting.get("wallet_diagnostics"))
+    observability_started = time.perf_counter()
     observability_events, observability_coverage = (
         _observability_events_for_run(run_id)
     )
+    observability_seconds = time.perf_counter() - observability_started
     candle_gaps = _candle_gaps(events, observability_events, metadata=metadata)
     portfolio_metrics = _portfolio_metrics(run=run, trades=trades, summary=summary)
     summary = _summary_with_portfolio_metrics(summary, portfolio_metrics)
@@ -6156,6 +6168,20 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         strategy_insights=insights,
         narrative_summary=narrative_summary,
     )
+    serialization_started = time.perf_counter()
+    dataset_payload = dataset.to_dict()
+    build_finished = time.perf_counter()
+    serialization_seconds = build_finished - serialization_started
+    measured_phase_seconds = (
+        source_load_seconds
+        + trade_enrichment_seconds
+        + readiness_seconds
+        + wallet_accounting_seconds
+        + observability_seconds
+        + serialization_seconds
+    )
+    total_seconds = build_finished - build_started
+    assembly_seconds = max(total_seconds - measured_phase_seconds, 0.0)
     logger.info(
         with_log_context(
             "run_research_dataset_build_done",
@@ -6166,10 +6192,19 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
                 "safe_to_compare": readiness.safe_to_compare,
                 "trades": summary.closed_trades,
                 "decisions": summary.total_decisions,
+                "duration_ms": round(total_seconds * 1000.0, 3),
+                "source_load_ms": round(source_load_seconds * 1000.0, 3),
+                "trade_enrichment_ms": round(trade_enrichment_seconds * 1000.0, 3),
+                "readiness_ms": round(readiness_seconds * 1000.0, 3),
+                "wallet_accounting_ms": round(wallet_accounting_seconds * 1000.0, 3),
+                "observability_ms": round(observability_seconds * 1000.0, 3),
+                "assembly_ms": round(assembly_seconds * 1000.0, 3),
+                "serialization_ms": round(serialization_seconds * 1000.0, 3),
+                "wallet_events": int(wallet_diagnostics.get("wallet_event_count") or 0),
             },
         )
     )
-    return dataset.to_dict()
+    return dataset_payload
 
 
 __all__ = [
