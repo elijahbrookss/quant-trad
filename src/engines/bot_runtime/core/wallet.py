@@ -689,50 +689,54 @@ def _validate_wallet_state_invariants(
             )
 
 
-def project_wallet(events: Iterable[Any]) -> WalletState:
-    balances: Dict[str, float] = {}
-    locked_margin: Dict[str, float] = {}
-    margin_positions: Dict[str, Dict[str, float]] = {}
-    seen_event_ids: set[str] = set()
-    initialized = False
-    mutated_after_initialization = False
-    for event in events:
+class _WalletProjector:
+    """Incremental form of the canonical wallet projection reducer."""
+
+    def __init__(self) -> None:
+        self.balances: Dict[str, float] = {}
+        self.locked_margin: Dict[str, float] = {}
+        self.margin_positions: Dict[str, Dict[str, float]] = {}
+        self.seen_event_ids: set[str] = set()
+        self.initialized = False
+        self.mutated_after_initialization = False
+
+    def apply(self, event: Any) -> None:
         event_id = _wallet_projection_event_id(event)
         if event_id:
-            if event_id in seen_event_ids:
-                continue
-            seen_event_ids.add(event_id)
+            if event_id in self.seen_event_ids:
+                return
+            self.seen_event_ids.add(event_id)
         event_type, payload = _normalize_wallet_projection_event(event)
         if not event_type:
-            continue
+            return
         if event_type == "INITIALIZE":
             initial_balances = _wallet_initial_balances(payload)
-            if initialized:
-                if initial_balances != balances:
+            if self.initialized:
+                if initial_balances != self.balances:
                     raise ValueError(
                         "wallet_projection_initialization_invalid: duplicate WALLET_INITIALIZED changed balances"
                     )
-                if mutated_after_initialization or locked_margin or margin_positions:
+                if self.mutated_after_initialization or self.locked_margin or self.margin_positions:
                     raise ValueError(
                         "wallet_projection_initialization_invalid: duplicate WALLET_INITIALIZED after wallet activity"
                     )
-                continue
-            balances = initial_balances
-            locked_margin = {}
-            margin_positions = {}
-            initialized = True
+                return
+            self.balances = initial_balances
+            self.locked_margin = {}
+            self.margin_positions = {}
+            self.initialized = True
         elif event_type == "DEPOSIT":
             for currency, amount in (payload.get("balances") or {}).items():
                 code = str(currency).upper()
-                balances[code] = balances.get(code, 0.0) + float(amount)
-            mutated_after_initialization = True
+                self.balances[code] = self.balances.get(code, 0.0) + float(amount)
+            self.mutated_after_initialization = True
         elif event_type == "DEPOSIT_DELTA":
             code = str(payload.get("asset") or "").upper()
             if not code:
-                continue
+                return
             amount = float(payload.get("amount") or 0.0)
-            balances[code] = balances.get(code, 0.0) + amount
-            mutated_after_initialization = True
+            self.balances[code] = self.balances.get(code, 0.0) + amount
+            self.mutated_after_initialization = True
         elif event_type == "MARGIN_RESERVED":
             currency = _wallet_ledger_currency(payload)
             margin_required = _wallet_ledger_number(
@@ -745,30 +749,30 @@ def project_wallet(events: Iterable[Any]) -> WalletState:
                 quote_currency=currency,
                 qty=_wallet_ledger_number(payload, "qty", 0.0),
                 margin_locked=margin_required,
-                locked_margin=locked_margin,
-                margin_positions=margin_positions,
+                locked_margin=self.locked_margin,
+                margin_positions=self.margin_positions,
             )
-            mutated_after_initialization = True
+            self.mutated_after_initialization = True
         elif event_type == "MARGIN_RELEASED":
             _apply_margin_exit_release(
                 trade_id=str(payload.get("trade_id")) if payload.get("trade_id") else None,
                 qty=_wallet_ledger_number(payload, "qty", 0.0),
                 explicit_release=_wallet_ledger_number(payload, "margin_required", 0.0),
-                locked_margin=locked_margin,
-                margin_positions=margin_positions,
+                locked_margin=self.locked_margin,
+                margin_positions=self.margin_positions,
             )
-            mutated_after_initialization = True
+            self.mutated_after_initialization = True
         elif event_type in {"FEE_APPLIED", "REALIZED_PNL_APPLIED"}:
             currency = _wallet_ledger_currency(payload)
-            balances[currency] = balances.get(currency, 0.0) + _wallet_ledger_balance_delta(payload)
-            mutated_after_initialization = True
+            self.balances[currency] = self.balances.get(currency, 0.0) + _wallet_ledger_balance_delta(payload)
+            self.mutated_after_initialization = True
         elif event_type in {
             "MARGIN_REJECTED",
             "POSITION_OPENED",
             "POSITION_CLOSED",
             "EQUITY_UPDATED",
         }:
-            continue
+            return
         elif event_type in {"TRADE_FILL", "ENTRY_FILL", "EXIT_FILL"}:
             side = str(payload.get("side") or "").lower()
             base = str(payload.get("base_currency") or "").upper()
@@ -788,7 +792,7 @@ def project_wallet(events: Iterable[Any]) -> WalletState:
                 else:
                     realized_pnl = float(payload.get("realized_pnl") or 0.0)
                     balance_delta = realized_pnl - fee
-                balances[quote] = balances.get(quote, 0.0) + balance_delta
+                self.balances[quote] = self.balances.get(quote, 0.0) + balance_delta
                 trade_id = payload.get("trade_id")
                 if event_type == "ENTRY_FILL":
                     margin_locked: Optional[float]
@@ -810,8 +814,8 @@ def project_wallet(events: Iterable[Any]) -> WalletState:
                         quote_currency=quote,
                         qty=qty,
                         margin_locked=float(margin_locked or 0.0),
-                        locked_margin=locked_margin,
-                        margin_positions=margin_positions,
+                        locked_margin=self.locked_margin,
+                        margin_positions=self.margin_positions,
                     )
                 elif event_type == "EXIT_FILL":
                     release_raw = wallet_delta.get("collateral_released") if isinstance(wallet_delta, Mapping) else None
@@ -823,35 +827,49 @@ def project_wallet(events: Iterable[Any]) -> WalletState:
                         trade_id=str(trade_id) if trade_id else None,
                         qty=qty,
                         explicit_release=release_value,
-                        locked_margin=locked_margin,
-                        margin_positions=margin_positions,
+                        locked_margin=self.locked_margin,
+                        margin_positions=self.margin_positions,
                     )
             elif side in {"buy", "long"}:
-                balances[base] = balances.get(base, 0.0) + qty
-                balances[quote] = balances.get(quote, 0.0) - notional - fee
+                self.balances[base] = self.balances.get(base, 0.0) + qty
+                self.balances[quote] = self.balances.get(quote, 0.0) - notional - fee
             elif side in {"sell", "short"}:
-                balances[base] = balances.get(base, 0.0) - qty
-                balances[quote] = balances.get(quote, 0.0) + notional - fee
-            mutated_after_initialization = True
+                self.balances[base] = self.balances.get(base, 0.0) - qty
+                self.balances[quote] = self.balances.get(quote, 0.0) + notional - fee
+            self.mutated_after_initialization = True
         elif event_type == "REJECTED":
-            continue
-    free_collateral: Dict[str, float] = {}
-    currencies = set(balances.keys()) | set(locked_margin.keys())
-    for currency in currencies:
-        free_value = balances.get(currency, 0.0) - locked_margin.get(currency, 0.0)
-        free_collateral[currency] = 0.0 if abs(free_value) <= WALLET_PROJECTION_EPSILON else free_value
-    _validate_wallet_state_invariants(
-        balances=balances,
-        locked_margin=locked_margin,
-        free_collateral=free_collateral,
-        margin_positions=margin_positions,
-    )
-    return WalletState(
-        balances=balances,
-        locked_margin=locked_margin,
-        free_collateral=free_collateral,
-        margin_positions=margin_positions,
-    )
+            return
+
+    def snapshot(self) -> WalletState:
+        free_collateral: Dict[str, float] = {}
+        currencies = set(self.balances.keys()) | set(self.locked_margin.keys())
+        for currency in currencies:
+            free_value = self.balances.get(currency, 0.0) - self.locked_margin.get(currency, 0.0)
+            free_collateral[currency] = (
+                0.0 if abs(free_value) <= WALLET_PROJECTION_EPSILON else free_value
+            )
+        _validate_wallet_state_invariants(
+            balances=self.balances,
+            locked_margin=self.locked_margin,
+            free_collateral=free_collateral,
+            margin_positions=self.margin_positions,
+        )
+        return WalletState(
+            balances=dict(self.balances),
+            locked_margin=dict(self.locked_margin),
+            free_collateral=free_collateral,
+            margin_positions={
+                trade_id: dict(position)
+                for trade_id, position in self.margin_positions.items()
+            },
+        )
+
+
+def project_wallet(events: Iterable[Any]) -> WalletState:
+    projector = _WalletProjector()
+    for event in events:
+        projector.apply(event)
+    return projector.snapshot()
 
 
 def project_wallet_from_events(events: Iterable[RuntimeEvent | Mapping[str, Any]]) -> WalletState:
@@ -1018,7 +1036,6 @@ def _wallet_issue_same_bar_group(
 
 
 def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
-    prefix: List[RuntimeEvent | Mapping[str, Any]] = []
     raw_events = list(events)
     for event in raw_events:
         event_type, payload = _wallet_event_context_for_validation(event)
@@ -1033,10 +1050,11 @@ def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]
                 "wallet_event_order": payload.get("wallet_event_order"),
             }
     ordered_events = canonical_wallet_ledger_events(raw_events)
+    projector = _WalletProjector()
     for event_index, event in enumerate(ordered_events):
         event_type, payload = _wallet_event_context_for_validation(event)
         if event_type not in WALLET_REPLAY_EVENT_NAMES:
-            prefix.append(event)
+            projector.apply(event)
             continue
         if event_type in {"ENTRY_FILL", "EXIT_FILL"}:
             missing = [
@@ -1065,7 +1083,7 @@ def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]
                         event_index,
                     ),
                 }
-            before_state = project_wallet_from_events(prefix)
+            before_state = projector.snapshot()
             wallet_before = _wallet_ledger_balances(payload.get("wallet_before"))
             replay_before = dict(getattr(before_state, "balances", {}) or {})
             for currency in sorted(set(wallet_before) | set(replay_before)):
@@ -1084,8 +1102,8 @@ def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]
                             event_index,
                         ),
                     }
-            prefix.append(event)
-            project_wallet_from_events(prefix)
+            projector.apply(event)
+            projector.snapshot()
             continue
         currency = _wallet_ledger_currency(payload)
         identity = _wallet_validation_event_identity(event, event_type, payload)
@@ -1119,9 +1137,9 @@ def _wallet_first_state_issue(events: Iterable[RuntimeEvent | Mapping[str, Any]]
                     "same_bar_operation_group": _wallet_issue_same_bar_group(ordered_events, event_index, payload),
                 }
 
-        before_state = project_wallet_from_events(prefix)
-        prefix.append(event)
-        after_state = project_wallet_from_events(prefix)
+        before_state = projector.snapshot()
+        projector.apply(event)
+        after_state = projector.snapshot()
         if wallet_before is not None and event_type != "WALLET_INITIALIZED":
             expected_before = _wallet_state_amount(before_state, "balances", currency)
             observed_before = _wallet_snapshot_amount(wallet_before, "balances", currency)
