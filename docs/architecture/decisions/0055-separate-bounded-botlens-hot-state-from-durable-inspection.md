@@ -17,9 +17,14 @@ code_paths:
   - portal/backend/controller/reports.py
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/reports/contract.py
+  - portal/frontend/src/adapters/bot.adapter.js
+  - portal/frontend/src/adapters/report.adapter.js
+  - portal/frontend/src/components/bots/BotLensChart.jsx
+  - portal/frontend/src/components/bots/chartCameraPolicy.js
+  - portal/frontend/src/components/bots/hooks/useMarkerManager.js
+  - portal/frontend/src/components/bots/hooks/useTradeMarkers.js
   - portal/frontend/src/components/bots/botlensProjection.js
   - portal/frontend/src/features/bots/botlens
-  - portal/frontend/src/adapters/report.adapter.js
   - src/core/settings.py
   - config/defaults.yaml
 ---
@@ -57,16 +62,30 @@ BotLens separates three read contracts:
    requests a fresh bootstrap.
 2. **Bounded chart window.** Frozen chart history loads 240 bars at a time when
    the viewport approaches the left edge. The browser retains at most 3,840
-   candles and 16 overlay pages. Prepending preserves the oldest inspection
-   edge; ordinary appends preserve the latest edge. Selecting a trade replaces
-   unrelated chart history with a bounded window around entry/exit, then
-   focuses the chart at the entry time.
-3. **Complete durable indexes.** Terminal decision, trade, and diagnostic tabs
-   read independent 100-record pages from typed report contracts. Total counts
-   come from those durable contracts, never from hot snapshot lengths. The UI
-   retains only the current page and exposes previous/next navigation. The
-   diagnostics contract remains backward compatible when `limit` is absent and
-   returns explicit `total`, `offset`, and `limit` when paging is requested.
+   candles and 16 overlay pages, and retains only trade states overlapping that
+   candle window. Prepending restores the exact prior visible time range and
+   never follows latest. Ordinary append follows only while the user remains at
+   the live edge. Selecting a decision or trade replaces unrelated chart
+   history with a bounded window around its evidence time.
+3. **Complete durable indexes.** Terminal decision, completed-trade, and
+   diagnostic tabs read independent 100-record pages from typed report
+   contracts. Total counts come from those durable contracts, never from hot
+   snapshot lengths. The UI retains only the current page, windows mounted
+   rows, filters the loaded page, and exposes previous/next navigation. Active
+   positions stay in a distinct snapshot section. The diagnostics contract
+   remains backward compatible when limit is absent and returns explicit total,
+   offset, and limit when paging is requested.
+4. **Staged inspection readiness.** Durable terminal inspection loads the chart
+   first, then decisions, completed trades, and diagnostics in that order. Each
+   section owns independent readiness/error state. Structured evidence lenses
+   expose persisted causal and provenance fields; absent inputs, fills,
+   slippage, position transitions, and partial exits are labeled unavailable
+   rather than inferred.
+5. **Causal marker projection.** Entry and exit timestamps map only to an exact
+   candle start or the containing normal candle interval. Missing-bar gaps and
+   events outside the loaded window produce no marker. Original evidence time
+   remains part of marker identity, and the composed marker layer deduplicates
+   before rendering. Completed trades never retain active stop/target rays.
 
 Run-stream fanout is concurrent across viewers. Each send has a configurable
 deadline, 1,500 ms by default. A slow or failed viewer is evicted without
@@ -89,8 +108,16 @@ not replay from another browser's memory.
   cannot change persisted evidence, report fingerprints, or backtest results.
 - Automatic left-edge loading stops at the frozen dataset boundary and never
   falls through to mutable provider data.
-- A trade focus request is scoped to the exact run and series and cannot reuse a
-  response from a prior selection.
+- A decision or trade focus request is scoped to the exact run and series and
+  cannot reuse a response from a prior selection.
+- Every chart response is admitted only for the latest request identity; newer
+  work aborts superseded requests and identical work is deduplicated.
+- Historical prepend preserves the exact visible time range without triggering
+  follow-latest behavior.
+- Marker projection never snaps across a missing bar or beyond the loaded
+  candle range.
+- Completed trade evidence and active position state remain visually and
+  semantically separate.
 
 ## Consequences
 
@@ -122,7 +149,13 @@ honest completeness semantics.
 ## Enforcement And Evidence
 
 - Frontend projection/state tests prove hot-candle, chart-candle, overlay-page,
-  and trade-marker bounds plus ordered batch reduction.
+  trade-window, stale-request, and trade-marker bounds plus ordered batch
+  reduction.
+- Viewport and marker tests prove exact prepend range preservation,
+  containing-candle projection, missing-gap rejection, stable event identity,
+  and marker deduplication.
+- Controller policy tests prove chart-first durable stage readiness and the
+  decisions-to-trades-to-diagnostics order.
 - View-model tests prove durable totals replace bounded snapshot counts and
   diagnostic grouping ignores volatile timing fields.
 - Backend stream tests prove slow-viewer eviction and healthy-viewer progress.

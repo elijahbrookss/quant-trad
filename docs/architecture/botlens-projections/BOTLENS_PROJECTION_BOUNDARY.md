@@ -49,7 +49,11 @@ code_paths:
   - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
   - src/engines/bot_runtime/strategy/series_builder_parts/models.py
   - portal/frontend/src/features/bots/botlens
+  - portal/frontend/src/adapters/bot.adapter.js
   - portal/frontend/src/components/bots/BotLensChart.jsx
+  - portal/frontend/src/components/bots/chartCameraPolicy.js
+  - portal/frontend/src/components/bots/hooks/useMarkerManager.js
+  - portal/frontend/src/components/bots/hooks/useTradeMarkers.js
   - portal/frontend/src/components/bots/botlensProjection.js
   - portal/frontend/src/features/bots/botlens/buildBotLensRuntimeViewModel.js
   - portal/frontend/src/features/bots/botlens/components/ChartPanel.jsx
@@ -286,7 +290,12 @@ and a later bootstrap rebuilds from it.
 BotLens async reads may inspect hot in-memory projector state inline. Run-row
 lookup, historical ledger reconstruction, blocking chart/forensic reads, and
 other synchronous persistence work must execute through an explicit thread
-offload seam. See [ADR 0054](../decisions/0054-keep-blocking-api-work-off-the-event-loop.md).
+offload seam. A terminal exact-run bootstrap is projected from the persisted run
+row and its captured configuration; it must not call the mutable bot control
+plane or replace historical identity with the bot's current definition. Active
+runs may still enrich bootstrap from the live bot service, with the persisted
+projection as their explicit fallback. See
+[ADR 0054](../decisions/0054-keep-blocking-api-work-off-the-event-loop.md).
 
 ## Bounded Hot Views
 
@@ -311,12 +320,21 @@ bootstrap rather than silently dropping facts while continuing to claim live
 state.
 
 Frozen chart history loads 240 candles per left-edge request and keeps a sliding
-window of at most 3,840 candles plus 16 overlay pages and 2,000 chart trade
-states. Prepending preserves the oldest inspection edge while live append keeps
-the latest edge. Trade focus replaces unrelated history with a bounded window
-and a focus token so the chart centers without retaining the prior year of
-geometry. These are presentation bounds, not evidence-retention limits. See
-[ADR 0055](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md).
+window of at most 3,840 candles plus 16 overlay pages. Chart trade state is
+deduplicated and clipped to trades that overlap the retained candle window, so
+evicted geometry cannot keep growing through marker references. A prepend
+captures and restores the exact visible time range; it emits no follow-latest
+camera intent. Live append follows only while the user remains at the live edge.
+Decision or trade focus replaces unrelated history with a bounded window and a
+typed focus token so the chart centers without retaining the prior year of
+geometry.
+
+Every chart request carries a monotonically increasing request identity scoped
+to the exact run and series. A newer request aborts a different in-flight
+request for that scope, identical work is deduplicated, and reducers reject late
+success or failure actions whose request identity is no longer current. These
+are presentation bounds and coordination rules, not evidence-retention limits.
+See [ADR 0055](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md).
 
 The fact stream is compacted before it reaches backend projectors.
 `runtime_state_observed` carries compact health/runtime fields, not the full
@@ -354,6 +372,43 @@ the risk engine for a configured trade window instead of serializing every
 trade and slicing afterward. Live trade deltas use `trade_revision`: if the
 cursor is too old for the retained change log, runtime warns and emits the
 available current trade batch as a projection resync boundary.
+
+## Inspection Interaction Contract
+
+Terminal inspection becomes usable in explicit stages: exact run bootstrap,
+bounded chart, decision page, completed-trade page, then diagnostics. The
+durable stages run sequentially after chart readiness and expose independent
+idle/loading/ready/error state, so one diagnostic read cannot block chart
+controls or erase already-ready decision evidence. The browser retains only the
+current 100-record page for each durable section. Tables window mounted rows,
+filter only the loaded authoritative page, and preserve previous/next navigation
+against durable totals.
+
+Active positions come only from the current projection snapshot and own
+active-looking stop/target rays. Completed trade history comes from the durable
+trade dataset and renders closed lifecycle, execution, cost, P&L, risk/excursion,
+and provenance fields. Missing fills, slippage, partial exits, causal values, or
+decision inputs remain explicitly unavailable; the UI must not infer them from
+later candles or alternate reconstruction paths.
+
+Decision selection focuses the bounded chart at bar_time/known_at and opens a
+structured evidence lens. The lens groups signal/verdict, observed context,
+causal engine evidence, risk/sizing/position, outcome/linkage, and provenance.
+Raw JSON is optional troubleshooting detail rather than the primary inspection
+surface.
+
+Trade events project to chart candles with a three-state rule:
+
+1. exact timestamp matches the candle start;
+2. an event inside a normal candle interval maps to that containing candle while
+   retaining the original evidence timestamp;
+3. an event outside the loaded range or inside a missing-bar gap is unavailable
+   and produces no marker.
+
+Entry and exit events project independently. Marker identity includes trade,
+event kind, and original evidence time, then the composed marker layer
+deduplicates that identity before rendering. Completed trades keep bounded
+entry/exit markers and spans but never retain active stop/target rays.
 
 ## Bounded Visual Overlay Projection
 
@@ -496,6 +551,9 @@ or bootstrap facts.
 - Projection and transport payloads stay bounded.
 - Heavy event history belongs on cold paths.
 - Complete trade markers require ledger-backed range evidence; selected-symbol tails are never presented as complete history.
+- Marker placement never uses nearest-candle snapping across missing bars or outside the loaded range.
+- Historical prepend preserves the user's exact visible time range and never re-enters follow-latest mode.
+- Missing persisted causal, fill, slippage, or position evidence is labeled unavailable rather than reconstructed.
 - Historical indicator overlays are page-complete only when the retained bounded
   timeline proves clocks, cadence, window coverage, terminal state, and no
   truncation; old or gapped runs remain explicitly unavailable/incomplete.
