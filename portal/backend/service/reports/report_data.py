@@ -264,18 +264,24 @@ def list_run_events(
     return rows
 
 
+def decision_ledger_from_events(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Project the decision ledger from an already-loaded runtime event set."""
+
+    ledger: List[Dict[str, Any]] = []
+    for row in rows:
+        projected = _botlens_decision_entry_from_event(dict(row))
+        if projected is not None:
+            ledger.append(projected)
+    return ledger
+
+
 def list_decision_ledger(run_id: str) -> List[Dict[str, Any]]:
     run = get_run(run_id)
     if not run:
         return []
 
     rows = list_run_events(run_id, event_types=[BOTLENS_DECISION_EVENT_TYPE])
-    ledger: List[Dict[str, Any]] = []
-    for row in rows:
-        projected = _botlens_decision_entry_from_event(row)
-        if projected is not None:
-            ledger.append(projected)
-    return ledger
+    return decision_ledger_from_events(rows)
 
 
 def list_observability_events(
@@ -340,8 +346,12 @@ def get_result_readiness(
     *,
     decision_summary: Mapping[str, Any] | None = None,
     financial_summary: Mapping[str, Any] | None = None,
+    run_row: Mapping[str, Any] | None = None,
+    runtime_events: Sequence[Mapping[str, Any]] | None = None,
+    decision_ledger: Sequence[Mapping[str, Any]] | None = None,
+    stored_trades: Sequence[Mapping[str, Any]] | None = None,
 ) -> Dict[str, Any]:
-    run = get_run(run_id)
+    run = dict(run_row) if isinstance(run_row, Mapping) else get_run(run_id)
     if not run:
         return {
             "run_id": run_id,
@@ -370,11 +380,24 @@ def get_result_readiness(
         }
 
     completed = str(run.get("status") or "").strip().lower() == "completed"
-    decision_rows = list_run_events(run_id, event_types=[BOTLENS_DECISION_EVENT_TYPE])
-    ledger = list_decision_ledger(run_id)
-    opened_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_OPENED_EVENT_TYPE])
-    closed_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_CLOSED_EVENT_TYPE])
-    stored_trades = list_bot_trades_for_run(run_id)
+    if runtime_events is None:
+        decision_rows = list_run_events(run_id, event_types=[BOTLENS_DECISION_EVENT_TYPE])
+        opened_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_OPENED_EVENT_TYPE])
+        closed_rows = list_run_events(run_id, event_types=[BOTLENS_TRADE_CLOSED_EVENT_TYPE])
+    else:
+        decision_rows = [row for row in runtime_events if _event_name(row) == "DECISION_EMITTED"]
+        opened_rows = [row for row in runtime_events if _event_name(row) == "TRADE_OPENED"]
+        closed_rows = [row for row in runtime_events if _event_name(row) == "TRADE_CLOSED"]
+    ledger = (
+        [dict(row) for row in decision_ledger]
+        if decision_ledger is not None
+        else decision_ledger_from_events(decision_rows)
+    )
+    resolved_stored_trades = (
+        [dict(row) for row in stored_trades]
+        if stored_trades is not None
+        else list_bot_trades_for_run(run_id)
+    )
 
     accepted_trade_ids = {
         str(entry.get("trade_id") or "").strip()
@@ -391,7 +414,7 @@ def get_result_readiness(
     missing_close = sorted(accepted_trade_ids - closed_trade_ids)
     terminal_open_trade_ids = sorted(
         str(row.get("trade_id") or row.get("id") or "").strip()
-        for row in stored_trades
+        for row in resolved_stored_trades
         if _stored_trade_is_open(row) and str(row.get("trade_id") or row.get("id") or "").strip()
     )
     decision_ledger_ready = not decision_rows or len(ledger) >= len(decision_rows)
@@ -501,6 +524,7 @@ def find_instrument(
 
 __all__ = [
     "REPORT_OBSERVABILITY_EVENT_LIMIT",
+    "decision_ledger_from_events",
     "find_instrument",
     "get_run",
     "get_result_readiness",

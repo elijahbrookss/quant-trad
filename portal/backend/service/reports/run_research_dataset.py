@@ -32,7 +32,7 @@ from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage.repos.candles import (
     get_candle_storage_summary,
     list_candle_provider_gap_evidence,
-    list_candles_for_series,
+    list_candles_for_series_windows,
 )
 from ..storage.repos.lifecycle import list_bot_run_lifecycle_events
 from ..storage.repos.observability import list_observability_events
@@ -1113,58 +1113,97 @@ def _candle_dt(row: Mapping[str, Any]) -> Optional[datetime]:
     return _parse_iso(value)
 
 
-def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    instrument_id = str(trade.get("instrument_id") or "").strip()
-    entry_dt = _parse_iso(trade.get("entry_time"))
-    exit_dt = _parse_iso(trade.get("exit_time"))
-    if not instrument_id or not entry_dt or not exit_dt:
-        return [], {"status": "unavailable", "caveats": ["trade_identity_or_lifecycle_incomplete"]}
-    candidate_timeframes = _unique_text(["1m", trade.get("timeframe")])
-    partial: tuple[List[Dict[str, Any]], Dict[str, Any]] | None = None
-    for timeframe in candidate_timeframes:
-        seconds = _timeframe_seconds(timeframe) or 60
-        duration_seconds = max((exit_dt - entry_dt).total_seconds(), 0.0)
-        expected_limit = int(duration_seconds / seconds) + 3
-        limit = max(1, min(expected_limit, 2000))
-        end = exit_dt + timedelta(seconds=seconds)
+def _prefetch_excursion_candles(
+    trades: Sequence[Mapping[str, Any]],
+) -> Dict[int, tuple[List[Dict[str, Any]], Dict[str, Any]]]:
+    requests_by_series: Dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    expected_limits: Dict[tuple[int, str], int] = {}
+    candidate_timeframes_by_trade: Dict[int, List[str]] = {}
+    results: Dict[int, tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
+
+    for trade_index, trade in enumerate(trades):
+        instrument_id = str(trade.get("instrument_id") or "").strip()
+        entry_dt = _parse_iso(trade.get("entry_time"))
+        exit_dt = _parse_iso(trade.get("exit_time"))
+        if not instrument_id or not entry_dt or not exit_dt:
+            results[trade_index] = (
+                [],
+                {"status": "unavailable", "caveats": ["trade_identity_or_lifecycle_incomplete"]},
+            )
+            continue
+        candidate_timeframes = _unique_text(["1m", trade.get("timeframe")])
+        candidate_timeframes_by_trade[trade_index] = candidate_timeframes
+        for timeframe in candidate_timeframes:
+            seconds = _timeframe_seconds(timeframe) or 60
+            duration_seconds = max((exit_dt - entry_dt).total_seconds(), 0.0)
+            expected_limit = int(duration_seconds / seconds) + 3
+            expected_limits[(trade_index, timeframe)] = expected_limit
+            requests_by_series[(instrument_id, timeframe)].append(
+                {
+                    "window_id": str(trade_index),
+                    "start": _iso(entry_dt),
+                    "end": _iso(exit_dt + timedelta(seconds=seconds)),
+                    "limit": max(1, min(expected_limit, 2000)),
+                }
+            )
+
+    rows_by_series: Dict[tuple[str, str], Dict[str, List[Dict[str, Any]]]] = {}
+    for (instrument_id, timeframe), windows in requests_by_series.items():
         try:
-            rows = list_candles_for_series(
+            rows_by_series[(instrument_id, timeframe)] = list_candles_for_series_windows(
                 instrument_id=instrument_id,
                 timeframe=timeframe,
-                start=_iso(entry_dt),
-                end=_iso(end),
-                limit=limit,
-                prefer_latest=False,
+                windows=windows,
             )
         except Exception as exc:  # pragma: no cover - defensive report caveat
+            first_trade_index = int(windows[0]["window_id"])
+            first_trade = trades[first_trade_index]
             logger.warning(
-                "report_excursion_candle_fetch_failed run_id=%s trade_id=%s instrument_id=%s timeframe=%s error=%s",
-                trade.get("run_id"),
-                trade.get("trade_id"),
+                "report_excursion_candle_batch_fetch_failed run_id=%s instrument_id=%s timeframe=%s trade_count=%s error=%s",
+                first_trade.get("run_id"),
                 instrument_id,
                 timeframe,
+                len(windows),
                 exc,
             )
+            rows_by_series[(instrument_id, timeframe)] = {}
+
+    for trade_index, trade in enumerate(trades):
+        if trade_index in results:
             continue
-        normalized = [dict(row) for row in rows if isinstance(row, Mapping)]
-        if not normalized:
-            continue
-        metadata = {
-            "status": "available",
-            "source": "market.candle_versions",
-            "source_timeframe": timeframe,
-            "candle_count": len(normalized),
-            "caveats": [],
-        }
-        if expected_limit > 2000 and len(normalized) >= 2000:
-            metadata["status"] = "partial"
-            metadata["caveats"] = ["excursion_candle_window_truncated_at_2000_rows"]
-            partial = (normalized, metadata)
-            continue
-        return normalized, metadata
-    if partial is not None:
-        return partial
-    return [], {"status": "unavailable", "caveats": ["excursion_candles_unavailable"]}
+        instrument_id = str(trade.get("instrument_id") or "").strip()
+        partial: tuple[List[Dict[str, Any]], Dict[str, Any]] | None = None
+        for timeframe in candidate_timeframes_by_trade.get(trade_index, []):
+            rows = rows_by_series.get((instrument_id, timeframe), {}).get(str(trade_index), [])
+            normalized = [dict(row) for row in rows if isinstance(row, Mapping)]
+            if not normalized:
+                continue
+            metadata = {
+                "status": "available",
+                "source": "market.candle_versions",
+                "source_timeframe": timeframe,
+                "candle_count": len(normalized),
+                "caveats": [],
+            }
+            if expected_limits[(trade_index, timeframe)] > 2000 and len(normalized) >= 2000:
+                metadata["status"] = "partial"
+                metadata["caveats"] = ["excursion_candle_window_truncated_at_2000_rows"]
+                partial = (normalized, metadata)
+                continue
+            results[trade_index] = (normalized, metadata)
+            break
+        else:
+            results[trade_index] = partial or (
+                [],
+                {"status": "unavailable", "caveats": ["excursion_candles_unavailable"]},
+            )
+    return results
+
+
+def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Compatibility helper for one trade using the canonical batched read path."""
+
+    return _prefetch_excursion_candles([trade])[0]
 
 
 def _compute_excursion(
@@ -1292,8 +1331,9 @@ def _enrich_trades_for_research(
     execution: Mapping[str, Any],
 ) -> List[Dict[str, Any]]:
     fallback_bars = [dict(row) for row in execution.get("fallback_bars") or [] if isinstance(row, Mapping)]
+    excursion_candles = _prefetch_excursion_candles(trades)
     enriched: List[Dict[str, Any]] = []
-    for trade in trades:
+    for trade_index, trade in enumerate(trades):
         row = dict(trade)
         risk = _entry_risk_fields(row)
         for key in ("stop_price", "stop_distance_price", "stop_distance_pct", "stop_distance_ticks", "r_ticks", "r_value", "tick_size"):
@@ -1302,7 +1342,7 @@ def _enrich_trades_for_research(
         row["entry_risk"] = risk["entry_risk"]
         row["runtime_excursion"] = _runtime_excursion_from_trade(row)
 
-        candles, candle_source = _fetch_excursion_candles(row)
+        candles, candle_source = excursion_candles[trade_index]
         trade_excursion = _compute_excursion(trade=row, candles=candles, source=candle_source, end_time=row.get("exit_time"))
         row["excursion"] = trade_excursion
         row["unrealized_excursion_before_exit"] = trade_excursion
@@ -5634,11 +5674,18 @@ def _readiness(
     run: Mapping[str, Any],
     decision_summary: Mapping[str, Any],
     financial_summary: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    decision_ledger: Sequence[Mapping[str, Any]],
+    stored_trades: Sequence[Mapping[str, Any]],
 ) -> RunResearchReadiness:
     readiness = report_data.get_result_readiness(
         run_id,
         decision_summary=decision_summary,
         financial_summary=financial_summary,
+        run_row=run,
+        runtime_events=events,
+        decision_ledger=decision_ledger,
+        stored_trades=stored_trades,
     )
     caveats = list(readiness.get("caveats") or [])
     caveats.append("botlens_snapshots_rebuildable_from_material_event_ledger_and_compact_context")
@@ -5915,7 +5962,8 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     log_context = build_log_context(run_id=run_id, bot_id=run.get("bot_id"))
     logger.info(with_log_context("run_research_dataset_build_start", log_context))
     events = report_data.list_run_events(run_id)
-    decisions = [_decision_row(entry) for entry in report_data.list_decision_ledger(run_id)]
+    decision_ledger = report_data.decision_ledger_from_events(events)
+    decisions = [_decision_row(entry) for entry in decision_ledger]
     signals = _signal_rows(events)
     trade_closed_by_id = _trade_closed_context_by_id(events)
     raw_trades = [dict(row) for row in list_bot_trades_for_run(run_id)]
@@ -5966,6 +6014,9 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         run=run,
         decision_summary=decision_summary,
         financial_summary=financial_summary,
+        events=events,
+        decision_ledger=decision_ledger,
+        stored_trades=raw_trades,
     )
     readiness_seconds = time.perf_counter() - readiness_started
     execution = dict(execution)

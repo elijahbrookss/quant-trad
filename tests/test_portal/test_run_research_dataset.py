@@ -36,6 +36,7 @@ class _ResearchDatasetStorage:
             tuple(key): [dict(row) for row in value]
             for key, value in (candles or {}).items()
         }
+        self.candle_window_calls: list[dict[str, Any]] = []
 
     def get_bot_run(self, run_id: str):
         return dict(self._run) if run_id == self._run.get("run_id") else None
@@ -77,6 +78,29 @@ class _ResearchDatasetStorage:
     ):
         _ = start, end, prefer_latest
         return [dict(row) for row in self._candles.get((instrument_id, timeframe), [])[: int(limit or 2000)]]
+
+    def list_candles_for_series_windows(
+        self,
+        *,
+        instrument_id: str,
+        timeframe: str,
+        windows,
+    ):
+        self.candle_window_calls.append(
+            {
+                "instrument_id": instrument_id,
+                "timeframe": timeframe,
+                "windows": [dict(window) for window in windows],
+            }
+        )
+        source = self._candles.get((instrument_id, timeframe), [])
+        return {
+            str(window["window_id"]): [
+                dict(row)
+                for row in source[: int(window.get("limit") or 2000)]
+            ]
+            for window in windows
+        }
 
     def list_bot_runtime_events(
         self,
@@ -530,7 +554,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, storage: _ResearchDatasetStorage) 
         "list_observability_events",
         "get_candle_storage_summary",
         "list_candle_provider_gap_evidence",
-        "list_candles_for_series",
+        "list_candles_for_series_windows",
     ):
         monkeypatch.setattr(run_research_dataset, name, getattr(storage, name))
     monkeypatch.setattr(report_data, "get_bot_run", storage.get_bot_run)
@@ -1122,6 +1146,47 @@ def test_dataset_enriches_trade_entry_risk_excursion_and_fallback_flags(monkeypa
     assert trade["intrabar_fallback_reasons"] == ["ambiguous_1m_candle"]
     assert trade["legs"][0]["excursion"]["mfe_ticks"] == pytest.approx(12.0)
     assert trade["legs"][0]["intrabar_fallback_within_leg"] is True
+
+
+def test_excursion_candle_reads_scale_with_unique_series_not_trade_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def list_windows(*, instrument_id: str, timeframe: str, windows):
+        calls.append(
+            {
+                "instrument_id": instrument_id,
+                "timeframe": timeframe,
+                "windows": [dict(window) for window in windows],
+            }
+        )
+        return {str(window["window_id"]): [] for window in windows}
+
+    monkeypatch.setattr(
+        run_research_dataset,
+        "list_candles_for_series_windows",
+        list_windows,
+    )
+    trade = _trades()[0]
+    trades = [
+        {
+            **trade,
+            "trade_id": f"trade-{index}",
+            "instrument_id": "instrument-btc",
+            "timeframe": "1h",
+        }
+        for index in range(25)
+    ]
+
+    results = run_research_dataset._prefetch_excursion_candles(trades)
+
+    assert len(results) == 25
+    assert {(call["instrument_id"], call["timeframe"]) for call in calls} == {
+        ("instrument-btc", "1m"),
+        ("instrument-btc", "1h"),
+    }
+    assert all(len(call["windows"]) == 25 for call in calls)
 
 
 def test_dataset_includes_signals_and_trace_identity(monkeypatch: pytest.MonkeyPatch) -> None:

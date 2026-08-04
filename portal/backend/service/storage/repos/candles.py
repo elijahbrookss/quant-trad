@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import json
+from collections.abc import Sequence
+from typing import Any, Dict, List, Mapping, Optional
 
 from data_providers.utils.ohlcv import interval_to_timedelta
 from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
@@ -283,6 +285,117 @@ def list_candles_for_series(
     return sorted(normalized, key=lambda row: int(row["time"]))
 
 
+def list_candles_for_series_windows(
+    *,
+    instrument_id: str,
+    timeframe: str,
+    windows: Sequence[Mapping[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Return latest accepted revisions for many independently bounded windows.
+
+    Each requested window retains the same exclusive-end and per-window row-limit
+    semantics as :func:`list_candles_for_series`. The database receives bounded
+    batches so callers do not need one round trip per trade.
+    """
+
+    instrument = str(instrument_id or "").strip()
+    interval = str(timeframe or "").strip()
+    if not instrument or not interval or not windows:
+        return {}
+    timeframe_seconds = _timeframe_seconds(interval)
+    normalized_windows: List[Dict[str, Any]] = []
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    for ordinal, window in enumerate(windows):
+        window_id = str(window.get("window_id") or ordinal).strip()
+        if not window_id:
+            raise ValueError("candle window_id must be non-empty")
+        if window_id in results:
+            raise ValueError(f"duplicate candle window_id: {window_id}")
+        results[window_id] = []
+        start_at = _parse_optional_timestamp(window.get("start"))
+        end_at = _parse_optional_timestamp(window.get("end"))
+        if start_at is None or end_at is None or end_at <= start_at:
+            continue
+        normalized_windows.append(
+            {
+                "window_id": window_id,
+                "ordinal": ordinal,
+                "start_at": start_at.isoformat(),
+                "end_at": end_at.isoformat(),
+                "row_limit": max(1, min(int(window.get("limit") or 320), 2000)),
+            }
+        )
+
+    batch_size = 500
+    for offset in range(0, len(normalized_windows), batch_size):
+        batch = normalized_windows[offset : offset + batch_size]
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    WITH requested AS (
+                        SELECT *
+                        FROM jsonb_to_recordset(CAST(:windows AS jsonb)) AS request(
+                            window_id text,
+                            ordinal integer,
+                            start_at timestamptz,
+                            end_at timestamptz,
+                            row_limit integer
+                        )
+                    ),
+                    series_match AS (
+                        SELECT series.id
+                        FROM market.series AS series
+                        WHERE series.instrument_id = :instrument_id
+                          AND series.fact_type = :fact_type
+                          AND series.contract_version = :contract_version
+                          AND series.timeframe_seconds = :timeframe_seconds
+                    )
+                    SELECT requested.window_id, requested.ordinal,
+                           visible.candle_open_time, visible.open, visible.high,
+                           visible.low, visible.close, visible.volume,
+                           visible.revision, visible.market_commit_seq
+                    FROM requested
+                    CROSS JOIN series_match
+                    JOIN LATERAL (
+                        SELECT DISTINCT ON (versions.candle_open_time)
+                            versions.candle_open_time, versions.open, versions.high,
+                            versions.low, versions.close, versions.volume,
+                            versions.revision, versions.market_commit_seq
+                        FROM market.candle_versions AS versions
+                        WHERE versions.series_id = series_match.id
+                          AND versions.candle_open_time >= requested.start_at
+                          AND versions.candle_open_time < requested.end_at
+                        ORDER BY versions.candle_open_time, versions.revision DESC
+                        LIMIT requested.row_limit
+                    ) AS visible ON TRUE
+                    ORDER BY requested.ordinal, visible.candle_open_time
+                    """
+                ),
+                {
+                    "windows": json.dumps(batch, sort_keys=True, separators=(",", ":")),
+                    "instrument_id": instrument,
+                    "fact_type": CANDLE_FACT_TYPE,
+                    "contract_version": CANDLE_FACT_VERSION,
+                    "timeframe_seconds": timeframe_seconds,
+                },
+            ).mappings().all()
+        for row in rows:
+            results[str(row["window_id"])].append(
+                {
+                    "time": int(row["candle_open_time"].timestamp()),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]) if row.get("volume") is not None else None,
+                    "revision": int(row["revision"]),
+                    "market_commit_seq": int(row["market_commit_seq"]),
+                }
+            )
+    return results
+
+
 def read_frozen_dataset_candles(
     *,
     dataset_id: str,
@@ -396,5 +509,6 @@ __all__ = [
     "get_candle_storage_summary",
     "list_candle_provider_gap_evidence",
     "list_candles_for_series",
+    "list_candles_for_series_windows",
     "read_frozen_dataset_candles",
 ]
