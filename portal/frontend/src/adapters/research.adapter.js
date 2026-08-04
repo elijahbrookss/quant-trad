@@ -12,11 +12,12 @@ function buildQuery(params = {}) {
   return text ? `?${text}` : ''
 }
 
-async function request(path) {
+async function request(path, options = {}) {
   const response = await fetch(`${BASE}${path}`, {
     method: 'GET',
     headers: { 'Content-Type': 'application/json' },
     mode: 'cors',
+    ...options,
   })
   if (!response.ok) {
     let detail = null
@@ -48,6 +49,6 @@ export async function fetchResearchTrail(itemId) {
   return request(`/api/research/items/${encodeURIComponent(itemId)}/trail`)
 }
 
-export async function fetchRunResearchEvidence(runId) {
-  return request(`/api/research/runs/${encodeURIComponent(runId)}/evidence`)
+export async function fetchRunResearchEvidence(runId, options = {}) {
+  return request(`/api/research/runs/${encodeURIComponent(runId)}/evidence`, options)
 }

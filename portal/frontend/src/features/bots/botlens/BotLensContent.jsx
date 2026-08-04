@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Check,
   ChevronLeft,
@@ -82,16 +83,17 @@ function DetailLens({ detail, onClose }) {
 
   if (!detail) return null
   const payload = detail.payload || {}
+  const compact = detail.layout === 'compact'
   const copy = async () => {
     if (typeof navigator?.clipboard?.writeText !== 'function') return
     await navigator.clipboard.writeText(JSON.stringify(payload, null, 2))
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1400)
   }
-  return (
+  const lens = (
     <div className="fixed inset-0 z-[130] flex items-center justify-center bg-[#02040a]/70 p-4 backdrop-blur-xl" role="dialog" aria-modal="true" aria-label={detail.title}>
       <button className="absolute inset-0 cursor-default" type="button" onClick={onClose} aria-label="Close details" />
-      <section className="qt-ops-console relative z-10 flex max-h-[84vh] w-full max-w-4xl flex-col overflow-hidden border-white/15 bg-[#0b0e16]/95 shadow-[0_36px_120px_rgba(0,0,0,0.75)]">
+      <section className={`qt-ops-console relative z-10 flex w-full flex-col overflow-hidden border-white/15 bg-[#0b0e16]/95 shadow-[0_36px_120px_rgba(0,0,0,0.75)] ${compact ? 'max-h-[min(42rem,calc(100vh-2rem))] max-w-2xl' : 'max-h-[84vh] max-w-4xl'}`}>
         <header className="flex items-start justify-between gap-4 border-b border-white/8 px-5 py-4">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">{detail.kicker || 'Evidence'}</p>
@@ -104,7 +106,7 @@ function DetailLens({ detail, onClose }) {
         </header>
         <div className="min-h-0 flex-1 overflow-auto p-5">
           {detail.summary?.length ? (
-            <div className="mb-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <div className={`mb-5 grid gap-2 ${compact ? 'sm:grid-cols-3' : 'sm:grid-cols-2 lg:grid-cols-4'}`}>
               {detail.summary.map((row) => (
                 <div key={row.label} className="rounded-lg border border-white/8 bg-black/20 px-3 py-2">
                   <p className="text-[10px] uppercase tracking-[0.14em] text-slate-600">{row.label}</p>
@@ -114,7 +116,7 @@ function DetailLens({ detail, onClose }) {
             </div>
           ) : null}
           {detail.sections?.length ? (
-            <div className="grid gap-4 lg:grid-cols-2">
+            <div className={`grid gap-4 ${compact ? 'grid-cols-1' : 'lg:grid-cols-2'}`}>
               {detail.sections.map((section) => (
                 <section key={section.title} className="overflow-hidden rounded-xl border border-white/8 bg-black/18">
                   <header className="border-b border-white/8 px-4 py-3">
@@ -153,6 +155,7 @@ function DetailLens({ detail, onClose }) {
       </section>
     </div>
   )
+  return typeof document === 'undefined' ? lens : createPortal(lens, document.body)
 }
 
 const TopBar = memo(function TopBar({ model, onClose, onRefresh, onDetails }) {
@@ -534,6 +537,7 @@ export function BotLensContent({
   model,
   changeSelectedSymbol,
   loadOlderHistory,
+  loadNewerHistory,
   loadDecisionEvidencePage,
   loadTradeEvidencePage,
   loadDiagnosticEvidencePage,
@@ -563,10 +567,17 @@ export function BotLensContent({
 
   const openRunDetails = useCallback(() => {
     setDetail({
+      layout: 'compact',
       kicker: 'Run contract',
       title: model.topBar.title,
       subtitle: model.topBar.subtitle,
       summary: model.topBar.stats.map((row) => ({ label: row.label, value: row.value })),
+      sections: [{
+        title: 'Identifiers',
+        rows: model.topBar.identifiers
+          .filter((row) => row.value)
+          .map((row) => ({ label: row.label.replaceAll('_', ' '), value: row.value })),
+      }],
       payload: Object.fromEntries(model.topBar.identifiers.filter((row) => row.value).map((row) => [row.key, row.value])),
     })
   }, [model.topBar])
@@ -794,6 +805,7 @@ export function BotLensContent({
               overlayOptions={overlayOptions}
               overlayVisibility={visibility}
               onLoadOlderHistory={loadOlderHistory}
+              onLoadNewerHistory={loadNewerHistory}
               onSelectSymbol={changeSelectedSymbol}
               onToggleOverlay={toggleOverlay}
               onToggleOverlayCollapse={() => setOverlayPanelCollapsed((value) => !value)}

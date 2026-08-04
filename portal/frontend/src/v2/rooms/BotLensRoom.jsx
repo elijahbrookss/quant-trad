@@ -39,29 +39,40 @@ export function BotLensRoom() {
 
   useEffect(() => {
     let mounted = true
+    const controller = new AbortController()
     setInspection(initialRunInspection(location.state, runId))
     setResearchEvidence(null)
     setRunError(null)
     setResearchError(null)
 
-    fetchRun(runId)
-      .then((payload) => {
-        if (!mounted) return
-        setInspection(assertRunInspectionScope(payload, runId))
-      })
-      .catch((error) => {
-        if (mounted) setRunError(error?.message || 'Unable to load authoritative run')
-      })
+    const loadTimer = window.setTimeout(() => {
+      fetchRun(runId, { signal: controller.signal })
+        .then((payload) => {
+          if (!mounted) return
+          setInspection(assertRunInspectionScope(payload, runId))
+        })
+        .catch((error) => {
+          if (mounted && error?.name !== 'AbortError') {
+            setRunError(error?.message || 'Unable to load authoritative run')
+          }
+        })
 
-    fetchRunResearchEvidence(runId)
-      .then((payload) => {
-        if (mounted) setResearchEvidence(payload)
-      })
-      .catch((error) => {
-        if (mounted) setResearchError(error?.message || 'Research evidence unavailable')
-      })
+      fetchRunResearchEvidence(runId, { signal: controller.signal })
+        .then((payload) => {
+          if (mounted) setResearchEvidence(payload)
+        })
+        .catch((error) => {
+          if (mounted && error?.name !== 'AbortError') {
+            setResearchError(error?.message || 'Research evidence unavailable')
+          }
+        })
+    }, 0)
 
-    return () => { mounted = false }
+    return () => {
+      mounted = false
+      window.clearTimeout(loadTimer)
+      controller.abort()
+    }
   }, [location.state, runId])
 
   const bot = useMemo(() => inspection ? projectRunAsBot(inspection) : null, [inspection])

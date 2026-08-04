@@ -40,8 +40,8 @@ export async function fetchBot(botId) {
   return request(`/api/bots/${encodeURIComponent(botId)}`)
 }
 
-export async function fetchRun(runId) {
-  return request(`/api/bots/runs/${encodeURIComponent(runId)}`)
+export async function fetchRun(runId, options = {}) {
+  return request(`/api/bots/runs/${encodeURIComponent(runId)}`, options)
 }
 
 export async function fetchActiveRuns() {
