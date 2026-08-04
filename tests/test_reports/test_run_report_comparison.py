@@ -304,3 +304,23 @@ def test_golden_evidence_first_divergence_populates_fields(monkeypatch: pytest.M
     assert result.first_divergence.present is True
     assert result.first_divergence.source == "golden"
     assert result.first_divergence.decision_id == "decision-1"
+
+
+def test_execution_semantics_mismatch_is_descriptive_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    left = _report("left")
+    right = _report("right", semantic="semantic-b")
+    left["identity"]["execution_semantics"] = ["spot"]
+    right["identity"]["execution_semantics"] = ["proxy_derivative"]
+    reports = {"left": left, "right": right}
+    monkeypatch.setattr(comparison, "report_materialization_status", lambda run_id, **_kwargs: _ready_status(run_id))
+    monkeypatch.setattr(comparison, "materialized_run_report", lambda run_id: reports[run_id])
+
+    result = comparison.compare_materialized_run_reports("left", "right")
+
+    assert result.can_compare is True
+    assert result.semantic_eligibility.status == "incompatible"
+    assert result.semantic_eligibility.equivalent is False
+    assert "execution_semantics_mismatch" in result.semantic_eligibility.blockers
+    assert result.first_divergence.divergence_type == "execution_semantics_mismatch"
+    assert result.first_divergence.left_value == ["spot"]
+    assert result.first_divergence.right_value == ["proxy_derivative"]

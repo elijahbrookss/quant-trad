@@ -2776,6 +2776,7 @@ def _report_diagnostics(
     portfolio_metrics: Mapping[str, Any],
     performance: Mapping[str, Any],
     summary: RunResearchSummary,
+    trades: Sequence[Mapping[str, Any]],
     position_ordering: Mapping[str, Any],
     context: Mapping[str, Any],
     observability_events: Sequence[Mapping[str, Any]] = (),
@@ -2939,6 +2940,9 @@ def _report_diagnostics(
 
     fallback_count = int(execution.get("intrabar_fallback_count") or 0)
     if fallback_count:
+        fallback_bars = [dict(row) for row in execution.get("fallback_bars") or [] if isinstance(row, Mapping)]
+        fallback_times = sorted(str(row.get("bar_time") or "").strip() for row in fallback_bars if str(row.get("bar_time") or "").strip())
+        affected_trade_count = sum(1 for trade in trades if int(trade.get("intrabar_fallback_count") or 0) > 0)
         items.append(
             _diagnostic(
                 severity="warning",
@@ -2947,6 +2951,10 @@ def _report_diagnostics(
                 message=f"{fallback_count} bars used pessimistic intrabar fallback.",
                 affected_identity={
                     "run_id": run_id,
+                    "fallback_bar_count": fallback_count,
+                    "affected_trade_count": affected_trade_count,
+                    "first_bar_time": fallback_times[0] if fallback_times else None,
+                    "last_bar_time": fallback_times[-1] if fallback_times else None,
                     "reason_distribution": execution.get("fallback_reason_distribution") or {},
                 },
                 readiness_impact="degrades_metrics",
@@ -6088,6 +6096,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         portfolio_metrics=portfolio_metrics,
         performance=performance,
         summary=summary,
+        trades=trades,
         position_ordering=position_ordering,
         context=context,
         observability_events=observability_events,

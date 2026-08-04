@@ -1587,6 +1587,25 @@ def _operational_diagnostics(dataset: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _run_report_identity(dataset: Mapping[str, Any]) -> Dict[str, Any]:
     metadata = _mapping(dataset.get("metadata"))
+    instrument_semantics = [
+        dict(row)
+        for row in metadata.get("instrument_semantics") or []
+        if isinstance(row, Mapping)
+    ]
+    source_instrument_types = sorted(
+        {
+            str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+            for row in instrument_semantics
+            if str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+        }
+    )
+    execution_semantics = sorted(
+        {
+            str(row.get("execution_semantics") or "").strip()
+            for row in instrument_semantics
+            if str(row.get("execution_semantics") or "").strip()
+        }
+    )
     return {
         "run_id": metadata.get("run_id"),
         "bot_id": metadata.get("bot_id"),
@@ -1602,6 +1621,9 @@ def _run_report_identity(dataset: Mapping[str, Any]) -> Dict[str, Any]:
         "timeframes": list(metadata.get("timeframes") or []),
         "provider": metadata.get("provider"),
         "exchange": metadata.get("exchange"),
+        "source_instrument_types": source_instrument_types,
+        "execution_semantics": execution_semantics,
+        "instrument_semantics": instrument_semantics,
         "simulated_window": _mapping(metadata.get("simulated_window")),
         "wall_clock_window": _mapping(metadata.get("wall_clock_window")),
         "starting_capital": metadata.get("starting_capital"),
@@ -1655,8 +1677,24 @@ def get_report_sections(run_id: str) -> Dict[str, Any]:
     return _mapping(_dataset(run_id).get("sections"))
 
 
-def get_report_diagnostics(run_id: str) -> Dict[str, Any]:
-    return _mapping(_dataset(run_id).get("diagnostics"))
+def get_report_diagnostics(
+    run_id: str,
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    payload = _mapping(_dataset(run_id).get("diagnostics"))
+    if limit is None:
+        return payload
+    rows = [dict(row) for row in payload.get("items") or []]
+    bounded_limit = max(1, min(int(limit or 100), 1000))
+    bounded_offset = max(0, int(offset or 0))
+    return payload | {
+        "items": rows[bounded_offset : bounded_offset + bounded_limit],
+        "total": len(rows),
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
 
 
 def get_report_metrics(run_id: str) -> Dict[str, Any]:

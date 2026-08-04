@@ -77,6 +77,13 @@ def _run_meta(
     evaluation_range = _mapping(dataset_binding.get("evaluation_range"))
     materialization_range = _mapping(dataset_binding.get("materialization_range"))
     risk_snapshot = _mapping(bot_snapshot.get("risk")) or _mapping(projected_bot.get("risk"))
+    execution_semantics = str(
+        row.get("execution_semantics")
+        or bot_snapshot.get("execution_semantics")
+        or risk_snapshot.get("execution_semantics")
+        or projected_bot.get("execution_semantics")
+        or ""
+    ).strip().lower() or None
     execution_mode = _normalize_execution_mode(
         row.get("execution_mode")
         or config_snapshot.get("execution_mode")
@@ -97,6 +104,7 @@ def _run_meta(
         "bot_id": str(row.get("bot_id") or projected_bot.get("id") or "").strip() or None,
         "status": status or str(projected_bot.get("status") or "").strip() or None,
         "execution_mode": execution_mode,
+        "execution_semantics": execution_semantics,
         "intrabar_execution": execution_mode == "full",
         "started_at": row.get("started_at"),
         "ended_at": row.get("ended_at"),

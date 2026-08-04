@@ -131,7 +131,12 @@ export async function getCandleCatalog(runId, options = {}) {
 }
 
 export async function getReportDiagnostics(runId, options = {}) {
-  return getReportJson(`/api/reports/${runId}/diagnostics`, options)
+  return getReportJson('/api/reports/' + runId + '/diagnostics', options)
+}
+
+export async function getReportDiagnosticsPage(runId, params = {}, options = {}) {
+  const query = buildQuery(params)
+  return getReportJson('/api/reports/' + runId + '/diagnostics' + query, options)
 }
 
 export async function getReportMetrics(runId, options = {}) {

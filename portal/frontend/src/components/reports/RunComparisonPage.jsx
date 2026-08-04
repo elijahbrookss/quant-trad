@@ -339,6 +339,15 @@ export function RunComparisonPage({ leftRunId, rightRunId, onBack }) {
               {normalizeComparisonLabel(view.blockedReason)}
             </div>
           ) : null}
+          {view.semanticEligibility.status === "incompatible" ? (
+            <div className="rounded-[8px] border border-amber-400/30 bg-amber-400/10 p-4">
+              <div className="text-sm font-semibold text-amber-100">Descriptive comparison only</div>
+              <p className="mt-1 text-sm leading-6 text-amber-100/80">{view.semanticEligibility.statement}</p>
+              <div className="mt-2 font-mono text-xs text-amber-200/70">
+                {(view.semanticEligibility.leftExecutionSemantics || []).join(", ") || "unknown"} → {(view.semanticEligibility.rightExecutionSemantics || []).join(", ") || "unknown"}
+              </div>
+            </div>
+          ) : null}
           <SectionShell title="Trust Comparison Matrix">
             <TrustMatrix rows={view.trustRows} />
           </SectionShell>

@@ -385,3 +385,39 @@ def test_report_export_contract_uses_manifest_and_zip(monkeypatch: pytest.Monkey
     bundle = client.post("/api/reports/run-1/export", json={})
     assert bundle.status_code == 200
     assert bundle.content == b"zip-bytes"
+
+
+def test_report_diagnostics_supports_explicit_bounded_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "severity": "warning",
+            "source": "runtime",
+            "code": f"diagnostic_{index}",
+            "message": "observed",
+            "affected_identity": {},
+            "readiness_impact": "none",
+        }
+        for index in range(5)
+    ]
+
+    def paged(_run_id: str, *, limit: int, offset: int) -> dict:
+        return {
+            "schema_version": "report_diagnostics.v1",
+            "run_id": "run-1",
+            "items": rows[offset : offset + limit],
+            "summary": {"total": len(rows)},
+            "total": len(rows),
+            "limit": limit,
+            "offset": offset,
+        }
+
+    monkeypatch.setattr(reports_controller, "_get_report_diagnostics", paged)
+    response = TestClient(app).get("/api/reports/run-1/diagnostics?limit=2&offset=2")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 5
+    assert payload["limit"] == 2
+    assert payload["offset"] == 2
+    assert [row["code"] for row in payload["items"]] == ["diagnostic_2", "diagnostic_3"]

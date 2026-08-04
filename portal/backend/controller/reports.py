@@ -804,13 +804,23 @@ async def get_signal_candle_window(
 
 
 @router.get("/{run_id}/diagnostics", response_model=ReportDiagnosticsResponse)
-async def get_report_diagnostics(run_id: str) -> ReportDiagnosticsResponse:
+async def get_report_diagnostics(
+    run_id: str,
+    limit: Optional[int] = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> ReportDiagnosticsResponse:
     """Return normalized report diagnostics for a run."""
 
-    context = build_log_context(run_id=run_id)
+    context = build_log_context(run_id=run_id, limit=limit, offset=offset)
     logger.info(with_log_context("report_diagnostics_request", context))
     try:
-        payload = await _run_report_task(_get_report_diagnostics, run_id)
+        payload = (
+            await _run_report_task(_get_report_diagnostics, run_id)
+            if limit is None
+            else await _run_report_task(
+                _get_report_diagnostics, run_id, limit=limit, offset=offset
+            )
+        )
         logger.info(with_log_context("report_diagnostics_success", context))
         return ReportDiagnosticsResponse.model_validate(payload)
     except KeyError as exc:

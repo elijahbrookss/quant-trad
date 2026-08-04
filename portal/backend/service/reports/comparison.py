@@ -21,6 +21,7 @@ from .schemas import (
     PerformanceDeltaDTO,
     RunComparisonDTO,
     RunReportDTO,
+    SemanticComparisonEligibilityDTO,
     SymbolDeltaDTO,
     TrustComparisonDTO,
     WalletComparisonDTO,
@@ -79,6 +80,7 @@ def summarize_run_report_comparison(comparison: RunComparisonDTO) -> Dict[str, A
         "comparison_verdict": comparison.comparison_verdict,
         "can_compare": comparison.can_compare,
         "blocked_reason": comparison.blocked_reason,
+        "semantic_eligibility": comparison.semantic_eligibility.model_dump(mode="json"),
         "trust": _model_subset(
             comparison.trust_comparison,
             (
@@ -260,6 +262,57 @@ def _blocked_comparison(
     )
 
 
+def _identity_values(report: RunReportDTO, field: str) -> list[str]:
+    values = report.identity.get(field) if isinstance(report.identity, Mapping) else []
+    if not isinstance(values, list):
+        values = [values]
+    return sorted({str(value).strip() for value in values if str(value or "").strip()})
+
+
+def _semantic_comparison_eligibility(
+    left: RunReportDTO,
+    right: RunReportDTO,
+) -> SemanticComparisonEligibilityDTO:
+    left_semantics = _identity_values(left, "execution_semantics")
+    right_semantics = _identity_values(right, "execution_semantics")
+    dataset_match = _same_if_present(left.trust.dataset_hash or left.trust.data_snapshot_hash, right.trust.dataset_hash or right.trust.data_snapshot_hash)
+    strategy_match = _same_if_present(left.trust.strategy_hash, right.trust.strategy_hash)
+    material_config_match = _same_if_present(left.trust.material_config_hash or left.trust.config_hash, right.trust.material_config_hash or right.trust.config_hash)
+    blockers: list[str] = []
+    if left_semantics and right_semantics and left_semantics != right_semantics:
+        blockers.append("execution_semantics_mismatch")
+    if dataset_match is False:
+        blockers.append("dataset_mismatch")
+    if strategy_match is False:
+        blockers.append("strategy_mismatch")
+    if material_config_match is False:
+        blockers.append("material_config_mismatch")
+    required_known = bool(left_semantics and right_semantics) and None not in (dataset_match, strategy_match, material_config_match)
+    if blockers:
+        status = "incompatible"
+        equivalent = False
+        statement = "Runs can be compared descriptively, but they are not eligible for repeatability equivalence: " + ", ".join(blockers) + "."
+    elif required_known:
+        status = "eligible"
+        equivalent = True
+        statement = "Execution semantics and material run identity match; repeatability equivalence may be evaluated."
+    else:
+        status = "unknown"
+        equivalent = None
+        statement = "Repeatability equivalence is unknown because execution or material identity evidence is incomplete."
+    return SemanticComparisonEligibilityDTO(
+        status=status,
+        equivalent=equivalent,
+        left_execution_semantics=left_semantics,
+        right_execution_semantics=right_semantics,
+        dataset_match=dataset_match,
+        strategy_match=strategy_match,
+        material_config_match=material_config_match,
+        blockers=blockers,
+        statement=statement,
+    )
+
+
 def _ready_comparison(
     left: RunReportDTO,
     right: RunReportDTO,
@@ -268,6 +321,7 @@ def _ready_comparison(
     golden_evidence: GoldenEvidenceDTO,
 ) -> RunComparisonDTO:
     trust = _trust_comparison(left, right)
+    semantic_eligibility = _semantic_comparison_eligibility(left, right)
     semantic_match = _golden_or_report_bool(golden_evidence.semantic_fingerprint_match, trust.semantic_fingerprint_match) is True
     operational_match = _golden_or_report_bool(golden_evidence.operational_fingerprint_match, trust.operational_fingerprint_match) is True
     data_match = _golden_or_report_bool(golden_evidence.data_snapshot_hash_match, trust.data_snapshot_hash_match) is not False
@@ -282,6 +336,20 @@ def _ready_comparison(
         verdict = "semantic_drift"
 
     status = "ready" if data_match else "ready_with_caveats"
+    if "execution_semantics_mismatch" in semantic_eligibility.blockers:
+        first_divergence = FirstDivergenceDTO(
+            present=True,
+            divergence_type="execution_semantics_mismatch",
+            field_path="identity.execution_semantics",
+            left_value=semantic_eligibility.left_execution_semantics,
+            right_value=semantic_eligibility.right_execution_semantics,
+            explanation="The runs use different execution models; equal decision or trade counts do not imply equal fills, sizing, fees, wallet accounting, or P&L.",
+            source="semantic_comparison_eligibility",
+        )
+    elif golden_evidence.status != "not_requested":
+        first_divergence = golden_evidence.first_divergence
+    else:
+        first_divergence = _first_divergence(left, right, semantic_match)
     return RunComparisonDTO(
         left_run_id=left.run_id,
         right_run_id=right.run_id,
@@ -289,6 +357,7 @@ def _ready_comparison(
         comparison_verdict=verdict,
         can_compare=True,
         blocked_reason=None,
+        semantic_eligibility=semantic_eligibility,
         trust_comparison=trust,
         performance_delta=_performance_delta(left.performance, right.performance),
         behavior_delta=_behavior_delta(left.behavior, right.behavior, golden_evidence),
@@ -296,7 +365,7 @@ def _ready_comparison(
         symbol_deltas=_symbol_deltas(left.symbol_breakdown, right.symbol_breakdown),
         coordinator_wait_delta=_coordinator_wait_delta(left.coordinator_waits, right.coordinator_waits),
         operational_drift=_operational_drift(left, right, semantic_match, operational_match),
-        first_divergence=golden_evidence.first_divergence if golden_evidence.status != "not_requested" else _first_divergence(left, right, semantic_match),
+        first_divergence=first_divergence,
         golden_evidence=golden_evidence,
         raw_refs={
             "source": "portal_report_materializations",
