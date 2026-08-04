@@ -172,16 +172,17 @@ durable-ledger summary per requested run and report replay eligibility from that
 evidence or from an existing hot projection. Selecting a terminal run rebuilds
 only run/catalog scope under the bounded bootstrap timeout; it does not embed a
 full selected-symbol history. The selected-symbol projector is a secondary read,
-while a dataset-bound chart and forensic cursor pages may begin as soon as run
-scope identifies the frozen dataset and canonical series.
+while a dataset-bound chart and typed terminal evidence pages may begin as soon
+as run scope identifies the frozen dataset and canonical series.
 
 Selected-symbol snapshot transport is an explicit latest-tail window: 16 signals,
 16 decisions, 32 trade states, 16 diagnostics, and 160 overlays. Runtime health
 includes no more than 16 latest warning details while retaining the untruncated
 warning count and typed summary. Every concern
 reports included and available counts, `ordering=latest_tail`, and whether it
-was truncated. The full projector remains authoritative for live state; the
-durable cursor path is authoritative for complete historical inspection.
+was truncated. The full projector remains authoritative for live state; typed
+durable report indexes are authoritative for complete terminal decision, trade,
+and diagnostic inspection.
 
 Cold selected-symbol rebuild does not scan every retained event or deserialize
 every overlay payload. It reads a bounded latest-tail seed for metadata, stats,
@@ -201,11 +202,18 @@ live projector, so loading an older entry page cannot reopen a closed trade. The
 frontend keeps this bounded chart-marker history separate from the compact
 recent-trades table.
 
-Cold decision inspection pages typed domain truth by run, selected series, and
-the stable after_seq/after_row_id cursor. Each page is bounded to 200 events in
-the operator UI (the backend contract caps requests at 1,000). Snapshot and cold
-rows are deduplicated by domain event identity; missing, failed, or exhausted
-pages remain explicit. Cold reads never become execution authority.
+The event-ledger forensic service continues to page typed domain truth by run,
+selected series, and stable `after_seq`/`after_row_id` cursor, with a backend
+request cap of 1,000. It is a forensic primitive, not the terminal workspace's
+complete-history index.
+
+Terminal operator inspection instead reads independent typed report datasets.
+Decisions and trades use 100-record `limit`/`offset` pages scoped to the selected
+canonical instrument (symbol is only a legacy fallback). Diagnostics expose the
+same optional page shape while preserving the original unpaged response when no
+limit is supplied. Durable `total` drives badges and page counts; the browser
+retains only the current page. Missing or failed pages remain explicit. None of
+these cold reads become execution authority.
 
 Event identity must distinguish distinct observations while remaining stable for
 retries of the same observation. SERIES_METADATA_REPORTED therefore includes
@@ -242,8 +250,11 @@ the durable event identity remain authoritative across retries or restarts.
 Producer-side fanout is a bounded projection handoff after sequence assignment.
 Execution enqueues the committed live payload and keeps walking forward; the
 dispatcher owns websocket/subscriber pressure and drains during terminal runtime
-flush. Subscriber failures, queue overflow, or drain timeout degrade BotLens
-projection and require resync. Canonical persistence remains fail-loud.
+flush. Run-stream fanout sends to viewers concurrently. Every send has the
+configured deadline (`viewer_send_timeout_ms`, 1,500 ms by default), and a slow
+or failed viewer is evicted without delaying healthy viewers serially.
+Subscriber failures, queue overflow, or drain timeout degrade BotLens projection
+and require resync. Canonical persistence remains fail-loud.
 
 Runtime lifecycle, bootstrap, and shutdown messages use the telemetry control
 lane. The control lane is still projection input and remains prioritized.
@@ -280,10 +291,25 @@ reads.
 
 An active operator lens renders this bounded bootstrap immediately and does not
 eagerly reconstruct the same latest window from the durable ledger when candles
-are already present. It also leaves the first durable forensic page behind the
-explicit **Load durable replay** action. The cold path is entered only as an
-explicit history read or as a fallback for a missing live base. Terminal lenses
-continue to use durable pages for completeness claims.
+are already present. The cold chart path is entered through viewport history
+movement or as a fallback for a missing live base. Terminal lenses use durable
+decision, trade, and diagnostic pages for completeness claims.
+
+The frontend keeps at most 320 live selected-symbol candles. Ordered append and
+same-timestamp replacement are constant-time; out-of-order evidence crosses the
+normal merge/deduplication path. WebSocket packets are queued in arrival order
+and reduced once per animation frame. The pending client buffer is capped at
+256 messages and 2 MiB. Overflow marks the projection stale and requests a new
+bootstrap rather than silently dropping facts while continuing to claim live
+state.
+
+Frozen chart history loads 240 candles per left-edge request and keeps a sliding
+window of at most 3,840 candles plus 16 overlay pages and 2,000 chart trade
+states. Prepending preserves the oldest inspection edge while live append keeps
+the latest edge. Trade focus replaces unrelated history with a bounded window
+and a focus token so the chart centers without retaining the prior year of
+geometry. These are presentation bounds, not evidence-retention limits. See
+[ADR 0055](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md).
 
 The fact stream is compacted before it reaches backend projectors.
 `runtime_state_observed` carries compact health/runtime fields, not the full

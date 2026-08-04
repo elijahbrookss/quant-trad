@@ -16,6 +16,8 @@ code_paths:
   - portal/backend/service/reports/candle_continuity.py
   - portal/backend/controller/reports.py
   - portal/backend/controller/research.py
+  - portal/frontend/src/adapters/report.adapter.js
+  - portal/frontend/src/components/reports/reportComparisonViewModel.js
   - portal/backend/service/reports/comparison.py
   - portal/backend/service/reports/golden_evidence.py
   - portal/backend/service/storage/repos/report_materializations.py
@@ -121,6 +123,16 @@ include it as read-only evidence for decision equality, verdict changes, trade
 lifecycle equality, wallet/order checks, runtime ordering, and first semantic
 divergence. The comparison API must not generate golden artifacts unless a
 future explicit build path is requested.
+
+Comparison first publishes `semantic_eligibility` from execution semantics,
+dataset identity, strategy identity, and material configuration identity.
+Mismatched execution semantics make repeatability equivalence incompatible even
+when decision and trade counts happen to match. Such runs remain available for
+descriptive performance/behavior inspection, but the UI must explain that equal
+counts do not prove equal fills, sizing, fees, wallet accounting, or P&L.
+Incomplete identity evidence produces `unknown`, not an optimistic eligibility
+claim. The first divergence points at `identity.execution_semantics` when that
+is the earliest proven incompatibility.
 
 CLI/agent consumers use compact projections for orchestration:
 `run_research_summary.v1` for single-run summary, an explicit
@@ -328,8 +340,11 @@ Reporting publishes report API payloads, compare payloads, compact research and
 comparison summaries for CLI/agent workflows, downloadable export bundles,
 normalized diagnostics, paged signal/decision/trade/context/candidate-lifecycle
 datasets, readiness/caveat explanations, and optional research exports with
-candle files. These are downstream products of the dataset, not new execution
-semantics.
+candle files. Diagnostics preserve the original full response when no page
+limit is requested and return explicit `total`, `limit`, and `offset` when a
+bounded operator page is requested. Paging changes delivery only; diagnostic
+identity, summary, and ordering remain canonical. These are downstream products
+of the dataset, not new execution semantics.
 
 ## Failure And Recovery
 
@@ -357,6 +372,10 @@ semantics.
   report-file existence. Materialized run-report compare additionally requires
   both RunReportDTO contract (`run_report.v2`) artifacts to be `ready` so the comparison UI can use
   the same artifact truth source as single-run reports.
+- Repeatability equivalence is eligible only when execution semantics and the
+  available dataset, strategy, and material configuration identities match.
+  Equal decision/trade counts alone are descriptive evidence, never equivalence
+  proof.
 - Standard computed metrics are exposed by the dataset; consumers should not need
   private formula implementations for normal report views.
 - Narrative summaries are bounded views over dataset facts.
@@ -402,6 +421,7 @@ semantics.
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
 - [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
 - [ADR 0046: Exact candle inputs and separate quality](../decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
+- [ADR 0055: Bounded BotLens hot state and durable inspection](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md)
 
 ## Known Gaps
 

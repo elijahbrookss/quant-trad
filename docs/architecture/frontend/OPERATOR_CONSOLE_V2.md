@@ -203,8 +203,12 @@ interpreted as zero.
 
 ## BotLens Modal And Replay
 
-Run inspection is a routed modal with a blurred background and a four-field
-evidence header. Closing the modal returns to its originating inventory.
+Run inspection is a routed modal with a blurred background and a compact
+dashboard header. The header shows strategy, lifecycle/mode, exact backtest
+range, execution semantics, selected market, open trades, warning count, and
+last-event freshness. Generated IDs and raw contract detail stay behind the
+**Run details** lens with a copy action. Closing BotLens returns to its
+originating inventory.
 
 Eligibility rules:
 
@@ -218,9 +222,9 @@ Historical bootstrap is bounded to 30 seconds. A timeout states that historical
 replay did not become ready and offers retry/report evidence; it never spins
 indefinitely. Terminal run bootstrap reconstructs run/catalog scope only and
 marks selected-symbol state as a required secondary read. That lets the frozen
-240-bar chart and the first durable forensic page load in parallel with cold
-symbol projection instead of blocking all useful content behind it. Run
-inventory determines replay eligibility from either a hot
+240-bar chart and first 100-record decision, trade, and diagnostic pages load in
+parallel with cold symbol projection instead of blocking all useful content
+behind it. Run inventory determines replay eligibility from either a hot
 projection or compact durable BotLens-ledger evidence; the inventory read never
 reconstructs the run.
 
@@ -231,12 +235,11 @@ owns health, live streams, and navigation reads.
 Active BotLens opens are bootstrap-first. When the hot selected-symbol
 bootstrap already contains a bounded candle window, the console renders that
 window and attaches the live stream without issuing the initial cold
-chart-history request or automatically scanning the first 200 forensic events.
-Cold reconstruction remains available when bootstrap has no candles, when the
-operator explicitly moves left, or through **Load durable replay**. Completed
-runs still request their initial durable 240-bar and forensic pages because
-terminal replay, not a live projection, owns their historical completeness
-evidence.
+chart-history request or scanning durable forensic history. Cold chart
+reconstruction remains available when bootstrap has no candles or the operator
+moves left. Completed runs request their initial durable 240-bar chart window
+and independent decision, trade, and diagnostic pages because terminal replay,
+not a live projection, owns their historical completeness evidence.
 
 Bot controller handlers that call synchronous SQL, Docker inspection, dataset
 preparation, or forensic services execute in FastAPI's worker threadpool. The
@@ -253,12 +256,16 @@ thread offload seam. See [ADR 0054](../decisions/0054-keep-blocking-api-work-off
 
 Dataset-bound backtest charts read only the run's frozen dataset series at its
 recorded commit boundary. They never fall through to later canonical revisions.
-The initial view requests the latest 240 bars, left-edge movement requests one
-guarded older page, and the manual **Load earlier** action remains as an
-accessible fallback. Every chart response names its evidence source.
+The initial view requests the latest 240 bars and left-edge movement requests
+one guarded older page. Viewport pan is the only history-navigation control;
+there is no separate **Load earlier** action. The browser retains a sliding
+window of at most 3,840 candles. Selecting a trade replaces unrelated chart
+history with at most 320 bars spanning 72 bars before entry through 72 bars
+after exit, then centers the chart on entry. Every chart response names its
+evidence source.
 
 New runs may also return bounded historical overlay pages replayed from retained
-overlay deltas. The browser merges at most 64 page payloads and uses durable
+overlay deltas. The browser merges at most 16 page payloads and uses durable
 history for terminal runs while active runs continue to prefer the live
 projection. Each page reports ordering, cadence, window, terminal-checkpoint,
 truncation, and fingerprint evidence. Old runs without retained deltas say
@@ -284,13 +291,28 @@ and durable forensic/report paths remain available. Each concern reports include
 available, ordering, and truncation metadata. These windows make initial state
 responsive; they are not completeness claims.
 
-Decision replay uses the typed durable event ledger in ascending 200-event
-pages keyed by after_seq and after_row_id and scoped to the selected instrument.
-The UI deduplicates those documents against the bounded projection snapshot,
-streams the next page near the scroll edge, and retains **Continue replay** as
-an accessible fallback. Signals, decisions, fills, and trade lifecycle events
-keep their domain identity and context. A component-local failure preserves
-already loaded evidence and exposes copyable details.
+Terminal decision, trade, and diagnostic inspection uses separate typed
+100-record pages. Decision and trade pages are scoped to the selected canonical
+instrument when that identity is available, with symbol fallback only for old
+evidence. Their tab badges and page counts use durable totals rather than the
+bounded projection tail. The browser retains only the current page and uses
+explicit previous/next navigation; it does not grow an infinite list.
+Diagnostics are grouped by severity, source, stable code, and stable affected
+identity so repeated fallback evidence becomes one inspectable condition. A
+detail lens preserves every raw occurrence and offers a copyable troubleshooting
+payload. Component-local failures preserve the chart and other healthy tabs.
+
+Active runs continue to consume the typed live decision/trade/diagnostic tail.
+The older ascending event-ledger cursor remains a forensic service boundary,
+but the terminal operator workspace does not use that growing cursor as its
+complete-history index.
+
+Live WebSocket packets are queued in arrival order and reduced once per browser
+animation frame. A pending client batch is capped at 256 messages and 2 MiB;
+overflow marks BotLens stale and forces a bootstrap rather than silently losing
+packets. Server fanout sends to viewers concurrently with a configurable
+1,500-ms default send deadline. A slow viewer is evicted and cannot serially
+delay healthy viewers. See [ADR 0055](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md).
 
 ## Liveness And Freshness Language
 
@@ -354,5 +376,6 @@ failed; invalid means evidence explicitly failed a validity contract.
 - [System architecture model](../system/SYSTEM_MODEL.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
+- [ADR 0055: Bounded BotLens hot state and durable inspection](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md)
 - [Research memory boundary](../research-memory/RESEARCH_MEMORY_BOUNDARY.md)
 - [Data boundary](../data/DATA_BOUNDARY.md)
