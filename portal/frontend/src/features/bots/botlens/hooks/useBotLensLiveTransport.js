@@ -4,6 +4,8 @@ import { openBotLensLiveStream } from '../../../../adapters/bot.adapter.js'
 import { normalizeSeriesKey } from '../../../../components/bots/botlensProjection.js'
 
 const WEBSOCKET_OPEN_STATE = typeof WebSocket === 'function' ? WebSocket.OPEN : 1
+export const BOTLENS_LIVE_MESSAGE_LIMIT = 256
+export const BOTLENS_LIVE_BYTE_LIMIT = 2 * 1024 * 1024
 
 export function shouldOpenBotLensLiveTransport({ open, botId, runId, transportEligible }) {
   return Boolean(open && botId && runId && transportEligible)
@@ -69,6 +71,10 @@ export function useBotLensLiveTransport({
   const sessionTokenRef = useRef(0)
   const reconnectTimerRef = useRef(null)
   const subscriptionRef = useRef({ socket: null, symbolKey: null })
+  const pendingMessagesRef = useRef([])
+  const pendingBytesRef = useRef(0)
+  const pendingFrameRef = useRef(null)
+  const bufferOverflowRef = useRef(false)
   const latestSelectionRef = useRef({
     selectedSymbolKey: null,
     selectedSymbolReady: false,
@@ -86,6 +92,39 @@ export function useBotLensLiveTransport({
     reconnectTick,
   })
 
+  const clearPendingMessages = useCallback(() => {
+    if (pendingFrameRef.current !== null) {
+      if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(pendingFrameRef.current)
+      else window.clearTimeout(pendingFrameRef.current)
+    }
+    pendingFrameRef.current = null
+    pendingMessagesRef.current = []
+    pendingBytesRef.current = 0
+    bufferOverflowRef.current = false
+  }, [])
+
+  const flushPendingMessages = useCallback(() => {
+    pendingFrameRef.current = null
+    const messages = pendingMessagesRef.current
+    pendingMessagesRef.current = []
+    pendingBytesRef.current = 0
+    if (messages.length) dispatch({ type: 'live/messagesReceived', messages })
+  }, [dispatch])
+
+  const queueLiveMessage = useCallback((message, rawBytes) => {
+    const nextCount = pendingMessagesRef.current.length + 1
+    const nextBytes = pendingBytesRef.current + Math.max(0, Number(rawBytes || 0) || 0)
+    if (nextCount > BOTLENS_LIVE_MESSAGE_LIMIT || nextBytes > BOTLENS_LIVE_BYTE_LIMIT) return false
+    pendingMessagesRef.current.push(message)
+    pendingBytesRef.current = nextBytes
+    if (pendingFrameRef.current === null) {
+      pendingFrameRef.current = typeof window.requestAnimationFrame === 'function'
+        ? window.requestAnimationFrame(flushPendingMessages)
+        : window.setTimeout(flushPendingMessages, 16)
+    }
+    return true
+  }, [flushPendingMessages])
+
   const closeSocket = useCallback(() => {
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current)
@@ -100,7 +139,8 @@ export function useBotLensLiveTransport({
     }
     socketRef.current = null
     subscriptionRef.current = { socket: null, symbolKey: null }
-  }, [])
+    clearPendingMessages()
+  }, [clearPendingMessages])
 
   useEffect(() => {
     latestSelectionRef.current = {
@@ -225,7 +265,19 @@ export function useBotLensLiveTransport({
           refreshSession()
           return
         }
-        dispatch({ type: 'live/messageReceived', message })
+        const rawBytes = typeof event.data === 'string' ? event.data.length * 2 : 0
+        if (!queueLiveMessage(message, rawBytes)) {
+          if (bufferOverflowRef.current) return
+          bufferOverflowRef.current = true
+          dispatch({ type: 'live/connectionStateChanged', connectionState: 'stale' })
+          logger?.warn?.('botlens_run_ws_client_buffer_overflow', {
+            bot_id: botId,
+            run_id: runId,
+            queued_messages: pendingMessagesRef.current.length,
+            queued_bytes: pendingBytesRef.current,
+          })
+          refreshSession()
+        }
       } catch (err) {
         logger?.warn?.('botlens_run_ws_parse_failed', { bot_id: botId }, err)
       }
@@ -264,11 +316,16 @@ export function useBotLensLiveTransport({
       closeSocket()
     }
   }, [
+    botId,
     closeSocket,
     dispatch,
     logger,
+    open,
     refreshSession,
+    runId,
+    queueLiveMessage,
     syncSelectedSymbolSubscription,
+    transportEligible,
     transportEpoch,
   ])
 

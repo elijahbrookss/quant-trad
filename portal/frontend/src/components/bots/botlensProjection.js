@@ -2,10 +2,11 @@ import { toFiniteNumber, toSec } from './chartDataUtils.js'
 import { createLogger } from '../../utils/logger.js'
 
 const DEFAULT_SYMBOL_STATE_LIMIT = 6
+const MAX_HOT_CANDLES = 320
 const MAX_LOGS = 300
 const MAX_DECISIONS = 600
 const MAX_TRADES = 240
-export const MAX_CHART_HISTORY_TRADES = 10000
+export const MAX_CHART_HISTORY_TRADES = 2000
 const SYMBOL_DELTA_DROP_WARN_INTERVAL_MS = 10000
 const logger = createLogger('botlensProjection')
 const symbolDeltaDropWarnings = new Map()
@@ -184,6 +185,23 @@ export function mergeCanonicalCandles(...streams) {
   return Array.from(byTime.entries())
     .sort((left, right) => left[0] - right[0])
     .map((entry) => entry[1])
+}
+
+export function appendBoundedCanonicalCandle(candles, candle, limit = MAX_HOT_CANDLES) {
+  const normalized = normalizeCandle(candle)
+  if (!normalized) return Array.isArray(candles) ? candles : []
+  const rows = Array.isArray(candles) ? candles : []
+  const last = rows.at(-1)
+  if (!last || normalized.time > Number(last.time)) {
+    const appended = [...rows, normalized]
+    return appended.length > limit ? appended.slice(-limit) : appended
+  }
+  if (normalized.time === Number(last.time)) {
+    const replaced = rows.slice()
+    replaced[replaced.length - 1] = normalized
+    return replaced
+  }
+  return mergeCanonicalCandles(rows, [normalized]).slice(-limit)
 }
 
 export function validateCanonicalCandles(candles) {
@@ -756,7 +774,7 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
       symbol_live: false,
       run_live: false,
     }),
-    candles: mergeCanonicalCandles(source.candles || []),
+    candles: mergeCanonicalCandles(source.candles || []).slice(-MAX_HOT_CANDLES),
     provisional_candle: normalizeCandle(source.provisional_candle),
     overlays: projectOverlayState(source.overlays || []),
     signals: Array.isArray(source.signals) ? source.signals.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry })) : [],
@@ -1277,7 +1295,7 @@ function withSymbolState(store, message, applyChange) {
 export function applyCandleDelta(store, message) {
   return withSymbolState(store, message, (next, payload) => {
     if (payload.candle && typeof payload.candle === 'object') {
-      next.candles = mergeCanonicalCandles(next.candles || [], [payload.candle])
+      next.candles = appendBoundedCanonicalCandle(next.candles, payload.candle)
     }
     return next
   })

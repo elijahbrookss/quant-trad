@@ -113,7 +113,8 @@ function commitProjectionStore(state, projectionStore) {
   }
 }
 
-const MAX_CHART_OVERLAY_PAGES = 64
+const MAX_CHART_OVERLAY_PAGES = 16
+export const MAX_CHART_HISTORY_CANDLES = 3840
 
 function updateChartHistoryCache(cache, {
   symbolKey,
@@ -124,9 +125,22 @@ function updateChartHistoryCache(cache, {
   evidenceSource,
   tradeEvidence,
   overlayEvidence,
+  mergeMode = 'append',
+  focusTime = null,
+  focusToken = null,
 }) {
   const existing = cache?.[symbolKey] || null
-  const mergedTrades = mergeCanonicalTrades(existing?.trades || [], trades || [])
+  const mergedCandles = mergeMode === 'replace'
+    ? mergeCanonicalCandles(candles || [])
+    : mergeCanonicalCandles(candles || [], existing?.candles || [])
+  const boundedCandles = mergedCandles.length <= MAX_CHART_HISTORY_CANDLES
+    ? mergedCandles
+    : mergeMode === 'prepend'
+      ? mergedCandles.slice(0, MAX_CHART_HISTORY_CANDLES)
+      : mergedCandles.slice(-MAX_CHART_HISTORY_CANDLES)
+  const mergedTrades = mergeMode === 'replace'
+    ? mergeCanonicalTrades(trades || [])
+    : mergeCanonicalTrades(existing?.trades || [], trades || [])
   const pageTradeEvidence = tradeEvidence && typeof tradeEvidence === 'object'
     ? { ...tradeEvidence }
     : null
@@ -155,7 +169,9 @@ function updateChartHistoryCache(cache, {
     : null
   const pageFingerprint = pageOverlayEvidence?.fingerprint
     || [range?.returned_start_time, range?.returned_end_time].filter(Boolean).join(':')
-  const priorOverlayPages = Array.isArray(existing?.overlayPages) ? existing.overlayPages : []
+  const priorOverlayPages = mergeMode === 'replace'
+    ? []
+    : Array.isArray(existing?.overlayPages) ? existing.overlayPages : []
   const overlayPages = pageFingerprint
     ? [
         ...priorOverlayPages.filter((page) => page.fingerprint !== pageFingerprint),
@@ -185,7 +201,7 @@ function updateChartHistoryCache(cache, {
       symbolKey,
       status: 'ready',
       error: null,
-      candles: mergeCanonicalCandles(candles || [], existing?.candles || []),
+      candles: boundedCandles,
       trades: mergedTrades,
       overlays: overlayPages.flatMap((page) => page.overlays),
       overlayPages,
@@ -195,6 +211,8 @@ function updateChartHistoryCache(cache, {
         : existing?.evidenceSource || null,
       tradeEvidence: mergedTradeEvidence,
       overlayEvidence: mergedOverlayEvidence,
+      focusTime: focusTime || null,
+      focusToken: focusToken || null,
     },
   }
 }
@@ -521,6 +539,10 @@ export function reduceBotLensState(state, action) {
     case 'live/messageReceived':
       return applyLiveProjectionMessage(state, action.message)
 
+    case 'live/messagesReceived':
+      return (Array.isArray(action.messages) ? action.messages : [])
+        .reduce((current, message) => applyLiveProjectionMessage(current, message), state)
+
     case 'retrieval/chartRequest': {
       if (!matchesActiveRun(state, action.runId)) return state
       const normalizedSymbolKey = normalizeSeriesKey(action.symbolKey || '')
@@ -561,6 +583,9 @@ export function reduceBotLensState(state, action) {
               evidenceSource: action.evidenceSource,
               tradeEvidence: action.tradeEvidence,
               overlayEvidence: action.overlayEvidence,
+              mergeMode: action.mergeMode,
+              focusTime: action.focusTime,
+              focusToken: action.focusToken,
             },
           ),
         },

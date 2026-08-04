@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   applyTypedSymbolDelta,
   applyCandleDelta,
+  appendBoundedCanonicalCandle,
   applyOpenTradesDelta,
   applyRunFaultDelta,
   applyRunHealthDelta,
@@ -12,7 +13,6 @@ import {
   applySelectedSymbolBootstrap,
   createRunStore,
   getSelectedSymbolState,
-  normalizeSeriesKey,
   selectSymbol,
 } from '../src/components/bots/botlensProjection.js'
 import { setLogSink } from '../src/utils/logger.js'
@@ -797,4 +797,31 @@ test('selectSymbol retains bounded client state and waits for explicit bootstrap
   assert.equal(getSelectedSymbolState(store), null)
   assert.equal(store.symbolStates['instrument-btc|1m'].symbol_key, 'instrument-btc|1m')
   assert.equal(store.symbolStates['instrument-eth|5m'].symbol_key, 'instrument-eth|5m')
+})
+
+
+test('ordered live candle appends stay bounded without reordering the hot tail', () => {
+  let candles = []
+  for (let time = 1; time <= 500; time += 1) {
+    candles = appendBoundedCanonicalCandle(candles, {
+      time,
+      open: time,
+      high: time,
+      low: time,
+      close: time,
+    })
+  }
+  assert.equal(candles.length, 320)
+  assert.equal(candles[0].time, 181)
+  assert.equal(candles.at(-1).time, 500)
+
+  candles = appendBoundedCanonicalCandle(candles, {
+    time: 500,
+    open: 500,
+    high: 501,
+    low: 499,
+    close: 500.5,
+  })
+  assert.equal(candles.length, 320)
+  assert.equal(candles.at(-1).close, 500.5)
 })

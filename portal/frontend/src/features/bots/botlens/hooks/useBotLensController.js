@@ -9,6 +9,7 @@ import {
 } from '../../../../adapters/bot.adapter.js'
 import { normalizeSeriesKey } from '../../../../components/bots/botlensProjection.js'
 import { createLogger } from '../../../../utils/logger.js'
+import { getDecisionDataset, getReportDiagnosticsPage, getTradeDataset } from '../../../../adapters/report.adapter.js'
 import { useBotLensLiveTransport } from './useBotLensLiveTransport.js'
 import {
   selectChartHistoryCacheCount,
@@ -101,6 +102,21 @@ const BOTLENS_DECISION_EVENT_NAMES = [
   'TRADE_UPDATED',
   'TRADE_CLOSED',
 ]
+
+const BOTLENS_EVIDENCE_PAGE_SIZE = 100
+
+function emptyEvidencePage() {
+  return { items: [], total: null, offset: 0, limit: BOTLENS_EVIDENCE_PAGE_SIZE, status: 'idle', error: null }
+}
+
+function emptyDurableEvidenceState(scopeKey = null) {
+  return {
+    scopeKey,
+    decisions: emptyEvidencePage(),
+    trades: emptyEvidencePage(),
+    diagnostics: { ...emptyEvidencePage(), summary: {} },
+  }
+}
 
 function emptyForensicReplayState(scopeKey = null) {
   return {
@@ -272,6 +288,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   )
   const [reloadTick, setReloadTick] = useState(0)
   const [forensicReplay, setForensicReplay] = useState(() => emptyForensicReplayState())
+  const [durableEvidence, setDurableEvidence] = useState(() => emptyDurableEvidenceState())
   const stateRef = useRef(state)
   stateRef.current = state
   const bootstrapTokenRef = useRef(0)
@@ -281,6 +298,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const forensicReplayRef = useRef(forensicReplay)
   forensicReplayRef.current = forensicReplay
   const forensicLoadRef = useRef(new Set())
+  const durableEvidenceRequestRef = useRef({})
   const latestSelectionRef = useRef({ runId: null, symbolKey: null })
   const latestSelectionBootstrapRequestRef = useRef({ runId: null, symbolKey: null, requestId: 0 })
 
@@ -348,6 +366,12 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const forensicScopeKey = activeRunId && selectedSymbolKey
     ? [activeRunId, selectedSymbolKey].join(':')
     : null
+  const durableEvidenceInstrumentId = String(selectedSymbolMetadata?.instrument_id || selectedSummary?.instrument_id || '').trim()
+  const durableEvidenceSymbol = String(selectedSymbolMetadata?.symbol || selectedSummary?.symbol || '').trim()
+  const durableEvidenceIdentity = durableEvidenceInstrumentId || durableEvidenceSymbol
+  const durableEvidenceScopeKey = activeRunId && durableEvidenceIdentity && !transportEligible
+    ? [activeRunId, durableEvidenceIdentity].join(':')
+    : null
 
   useEffect(() => {
     latestSelectionRef.current = {
@@ -361,7 +385,9 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     snapshotRefreshLoadRef.current.clear()
     initialChartLoadRef.current.clear()
     forensicLoadRef.current.clear()
+    durableEvidenceRequestRef.current = {}
     setForensicReplay(emptyForensicReplayState())
+    setDurableEvidence(emptyDurableEvidenceState())
     setReloadTick((value) => value + 1)
   }, [])
 
@@ -711,7 +737,128 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     }
   }, [activeRunId, bot?.id, forensicScopeKey, logger, selectedSymbolKey])
 
+  const loadDurableEvidence = useCallback(async (section, pageIndex = 0, { force = false } = {}) => {
+    const scopeKey = durableEvidenceScopeKey
+    if (!scopeKey || !activeRunId || !durableEvidenceIdentity) return
+    const normalizedPageIndex = Math.max(0, Number(pageIndex || 0) || 0)
+    const offset = normalizedPageIndex * BOTLENS_EVIDENCE_PAGE_SIZE
+    const token = {}
+    durableEvidenceRequestRef.current[section] = token
+    setDurableEvidence((previous) => {
+      const base = previous.scopeKey === scopeKey ? previous : emptyDurableEvidenceState(scopeKey)
+      return {
+        ...base,
+        scopeKey,
+        [section]: { ...base[section], status: 'loading', error: null },
+      }
+    })
+    try {
+      let payload
+      if (section === 'decisions') {
+        payload = await getDecisionDataset(activeRunId, {
+          limit: BOTLENS_EVIDENCE_PAGE_SIZE,
+          offset,
+          ...(durableEvidenceInstrumentId
+            ? { instrumentId: durableEvidenceInstrumentId }
+            : { symbol: durableEvidenceSymbol }),
+        }, { force })
+      } else if (section === 'trades') {
+        payload = await getTradeDataset(activeRunId, {
+          limit: BOTLENS_EVIDENCE_PAGE_SIZE,
+          offset,
+          ...(durableEvidenceInstrumentId
+            ? { instrumentId: durableEvidenceInstrumentId }
+            : { symbol: durableEvidenceSymbol }),
+        }, { force })
+      } else {
+        payload = await getReportDiagnosticsPage(activeRunId, {
+          limit: BOTLENS_EVIDENCE_PAGE_SIZE,
+          offset,
+        }, { force })
+      }
+      if (durableEvidenceRequestRef.current[section] !== token) return
+      if (String(payload?.run_id || '') !== String(activeRunId)) {
+        throw new Error(section + ' evidence returned a mismatched run scope')
+      }
+      setDurableEvidence((previous) => {
+        if (previous.scopeKey !== scopeKey) return previous
+        if (section === 'diagnostics') {
+          return {
+            ...previous,
+            diagnostics: {
+              items: Array.isArray(payload?.items) ? payload.items : [],
+              summary: payload?.summary && typeof payload.summary === 'object' ? payload.summary : {},
+              total: Math.max(0, Number(payload?.total || 0) || 0),
+              offset: Math.max(0, Number(payload?.offset || offset) || 0),
+              limit: Math.max(1, Number(payload?.limit || BOTLENS_EVIDENCE_PAGE_SIZE) || BOTLENS_EVIDENCE_PAGE_SIZE),
+              status: 'ready',
+              error: null,
+            },
+          }
+        }
+        return {
+          ...previous,
+          [section]: {
+            items: Array.isArray(payload?.items) ? payload.items : [],
+            total: Math.max(0, Number(payload?.total || 0) || 0),
+            offset: Math.max(0, Number(payload?.offset || offset) || 0),
+            limit: Math.max(1, Number(payload?.limit || BOTLENS_EVIDENCE_PAGE_SIZE) || BOTLENS_EVIDENCE_PAGE_SIZE),
+            status: 'ready',
+            error: null,
+          },
+        }
+      })
+    } catch (err) {
+      if (durableEvidenceRequestRef.current[section] !== token) return
+      setDurableEvidence((previous) => previous.scopeKey === scopeKey
+        ? {
+            ...previous,
+            [section]: {
+              ...previous[section],
+              status: "error",
+              error: err?.message || (section + ' evidence failed'),
+            },
+          }
+        : previous)
+      logger.warn('botlens_durable_evidence_failed', {
+        bot_id: bot?.id || null,
+        run_id: activeRunId,
+        instrument_id: durableEvidenceInstrumentId,
+        section,
+        offset,
+      }, err)
+    }
+  }, [activeRunId, bot?.id, durableEvidenceIdentity, durableEvidenceInstrumentId, durableEvidenceScopeKey, durableEvidenceSymbol, logger])
+
+  const loadDecisionEvidencePage = useCallback((pageIndex) => (
+    loadDurableEvidence('decisions', pageIndex)
+  ), [loadDurableEvidence])
+
+  const loadTradeEvidencePage = useCallback((pageIndex) => (
+    loadDurableEvidence('trades', pageIndex)
+  ), [loadDurableEvidence])
+
+  const loadDiagnosticEvidencePage = useCallback((pageIndex) => (
+    loadDurableEvidence('diagnostics', pageIndex)
+  ), [loadDurableEvidence])
+
   useEffect(() => {
+    if (!open || !durableEvidenceScopeKey) {
+      durableEvidenceRequestRef.current = {}
+      setDurableEvidence((previous) => previous.scopeKey ? emptyDurableEvidenceState() : previous)
+      return
+    }
+    setDurableEvidence(emptyDurableEvidenceState(durableEvidenceScopeKey))
+    loadDurableEvidence('decisions', 0)
+    loadDurableEvidence('trades', 0)
+    loadDurableEvidence('diagnostics', 0)
+  }, [durableEvidenceScopeKey, loadDurableEvidence, open, reloadTick])
+
+  useEffect(() => {
+    if (durableEvidenceScopeKey) {
+      if (forensicReplayRef.current.scopeKey) setForensicReplay(emptyForensicReplayState())
+      return
+    }
     if (!open || !forensicScopeKey) {
       if (forensicReplayRef.current.scopeKey) {
         setForensicReplay(emptyForensicReplayState())
@@ -729,7 +876,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
       return
     }
     loadMoreDecisionEvidence({ reset: true })
-  }, [forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick, transportEligible])
+  }, [durableEvidenceScopeKey, forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick, transportEligible])
 
   useEffect(() => {
     const currentState = stateRef.current
@@ -777,6 +924,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
           evidenceSource: page?.evidence_source,
           tradeEvidence: page?.trade_evidence,
           overlayEvidence: page?.overlay_evidence,
+          mergeMode: 'replace',
         })
       })
       .catch((err) => {
@@ -882,6 +1030,7 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
         evidenceSource: page?.evidence_source,
         tradeEvidence: page?.trade_evidence,
         overlayEvidence: page?.overlay_evidence,
+        mergeMode: 'prepend',
       })
     } catch (err) {
       dispatch({
@@ -902,6 +1051,53 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     }
   }, [activeRunId, bot?.id, chartCandles, chartHistory?.range?.has_more_before, chartHistoryStatus, dispatch, logger, selectedSymbolKey])
 
+  const focusTrade = useCallback(async (trade) => {
+    const focusValue = trade?.entry_time || trade?.opened_at || trade?.event_ts
+    const focusEpochMs = Date.parse(focusValue || '')
+    if (!activeRunId || !selectedSymbolKey || !Number.isFinite(focusEpochMs)) return
+    const timeframeText = String(selectedSymbolMetadata?.timeframe || selectedSummary?.timeframe || '1h').trim().toLowerCase()
+    const timeframeMatch = timeframeText.match(/(\d+)([mhd])/)
+    const unitSeconds = timeframeMatch?.[2] === 'd' ? 86400 : timeframeMatch?.[2] === 'm' ? 60 : 3600
+    const timeframeSeconds = Math.max(60, Number(timeframeMatch?.[1] || 1) * unitSeconds)
+    const exitEpochMs = Date.parse(trade?.exit_time || trade?.closed_at || '')
+    const startTime = new Date(focusEpochMs - timeframeSeconds * 72 * 1000).toISOString()
+    const endAnchorMs = Number.isFinite(exitEpochMs) ? exitEpochMs : focusEpochMs
+    const endTime = new Date(endAnchorMs + timeframeSeconds * 72 * 1000).toISOString()
+    dispatch({ type: 'retrieval/chartRequest', runId: activeRunId, symbolKey: selectedSymbolKey })
+    try {
+      const page = await fetchBotLensChartHistory(activeRunId, selectedSymbolKey, { startTime, endTime, limit: 320 })
+      if (String(page?.run_id || '') !== String(activeRunId)) throw new Error('Trade focus returned a mismatched run scope')
+      dispatch({
+        type: 'retrieval/chartSuccess',
+        runId: activeRunId,
+        symbolKey: selectedSymbolKey,
+        candles: Array.isArray(page?.candles) ? page.candles : [],
+        trades: Array.isArray(page?.trades) ? page.trades : [],
+        overlays: Array.isArray(page?.overlays) ? page.overlays : [],
+        range: page?.range,
+        evidenceSource: page?.evidence_source,
+        tradeEvidence: page?.trade_evidence,
+        overlayEvidence: page?.overlay_evidence,
+        mergeMode: 'replace',
+        focusTime: focusValue,
+        focusToken: String(trade?.trade_id || focusValue) + ':' + Date.now(),
+      })
+    } catch (err) {
+      dispatch({
+        type: 'retrieval/chartFailed',
+        runId: activeRunId,
+        symbolKey: selectedSymbolKey,
+        error: err?.message || 'Trade chart focus failed',
+      })
+      logger.warn('botlens_trade_focus_failed', {
+        bot_id: bot?.id || null,
+        run_id: activeRunId,
+        symbol_key: selectedSymbolKey,
+        trade_id: trade?.trade_id || null,
+      }, err)
+    }
+  }, [activeRunId, bot?.id, logger, selectedSummary?.timeframe, selectedSymbolKey, selectedSymbolMetadata?.timeframe])
+
   const clearError = useCallback(() => {
     dispatch({ type: 'ui/error', error: null })
   }, [])
@@ -912,7 +1108,9 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     snapshotRefreshLoadRef.current.clear()
     initialChartLoadRef.current.clear()
     forensicLoadRef.current.clear()
+    durableEvidenceRequestRef.current = {}
     setForensicReplay(emptyForensicReplayState())
+    setDurableEvidence(emptyDurableEvidenceState())
     onClose?.()
   }, [bot?.id, onClose])
 
@@ -929,6 +1127,11 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
     closeModal,
     changeSelectedSymbol,
     error: state.ui.error,
+    durableEvidence,
+    loadDecisionEvidencePage,
+    loadTradeEvidencePage,
+    loadDiagnosticEvidencePage,
+    focusTrade,
     forensicDocuments: forensicReplay.documents,
     forensicError: forensicReplay.error,
     forensicHasMore: forensicReplay.hasMore,

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildBotLensRuntimeViewModel } from '../src/features/bots/botlens/buildBotLensRuntimeViewModel.js'
+import { buildBotLensRuntimeViewModel, groupBotLensDiagnostics } from '../src/features/bots/botlens/buildBotLensRuntimeViewModel.js'
 import {
   selectActiveRunId,
   selectChartHistoryCacheCount,
@@ -250,7 +250,7 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   assert.equal(model.mode, 'ready')
   assert.equal(model.topBar.stats.find((row) => row.key === 'execution-mode'), undefined)
   assert.equal(model.topBar.stats.find((row) => row.key === 'phase'), undefined)
-  assert.equal(model.topBar.stats.find((row) => row.key === 'timeframe')?.value, '1M')
+  assert.equal(model.topBar.stats.find((row) => row.key === 'selected-symbol')?.value, 'BTC · 1m')
   assert.doesNotMatch(model.topBar.subtitle, /FULL/)
   assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
   assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'intrabar-path')?.value, 'Enabled')
@@ -551,4 +551,66 @@ test('runtime view model stops at unavailable evidence instead of rendering empt
   assert.equal(model.mode, 'unavailable')
   assert.equal(model.topBar.stats.find((row) => row.key === 'last-event')?.value, '—')
   assert.equal(model.notices[0]?.message, 'Persisted BotLens symbol evidence is unavailable for this terminal run.')
+})
+
+
+test('canonical diagnostic evidence is coalesced by severity source code and stable identity', () => {
+  const grouped = groupBotLensDiagnostics([
+    {
+      severity: 'warning',
+      source: 'storage_persistence',
+      code: 'db_write_slow',
+      message: 'slow write',
+      affected_identity: { series_key: 'btc|1h', details: { operation: 'persist', write_ms: 200 } },
+      timestamp: '2026-01-01T00:00:00Z',
+    },
+    {
+      severity: 'warning',
+      source: 'storage_persistence',
+      code: 'db_write_slow',
+      message: 'slow write',
+      affected_identity: { series_key: 'btc|1h', details: { operation: 'persist', write_ms: 900 } },
+      timestamp: '2026-01-01T00:01:00Z',
+    },
+  ])
+  assert.equal(grouped.length, 1)
+  assert.equal(grouped[0].count, 2)
+  assert.equal(grouped[0].technical.occurrences.length, 2)
+})
+
+test('terminal view model uses durable page totals instead of the bounded hot snapshot counts', () => {
+  const state = bootstrapState()
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(state, {
+    durableEvidence: {
+      decisions: {
+        items: [{ decision_id: 'decision-1', action: 'enter_long', accepted: true, bar_time: '2026-01-01T00:00:00Z' }],
+        total: 599,
+        offset: 0,
+        limit: 100,
+        status: 'ready',
+        error: null,
+      },
+      trades: {
+        items: [{ trade_id: 'trade-1', direction: 'long', entry_time: '2026-01-01T00:00:00Z', status: 'closed' }],
+        total: 508,
+        offset: 0,
+        limit: 100,
+        status: 'ready',
+        error: null,
+      },
+      diagnostics: {
+        items: [],
+        total: 63,
+        offset: 0,
+        limit: 100,
+        status: 'ready',
+        error: null,
+        summary: {},
+      },
+    },
+  }))
+  assert.equal(model.tabs.find((tab) => tab.key === 'decisions').badge, '599')
+  assert.equal(model.tabs.find((tab) => tab.key === 'trades').badge, '508')
+  assert.equal(model.inspection.decisions.rows.length, 1)
+  assert.equal(model.inspection.trades.recentTrades.length, 1)
 })

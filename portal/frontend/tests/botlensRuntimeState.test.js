@@ -8,6 +8,7 @@ import {
   selectSelectedSymbolState,
 } from '../src/features/bots/botlens/state/botlensRuntimeSelectors.js'
 import {
+  MAX_CHART_HISTORY_CANDLES,
   createInitialBotLensState,
   reduceBotLensState,
 } from '../src/features/bots/botlens/state/botlensRuntimeState.js'
@@ -524,4 +525,67 @@ test('terminal BotLens uses bounded durable overlay pages while active runs pref
     state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].overlayEvidence.complete_for_loaded_candles,
     true,
   )
+})
+
+
+test('chart history is a bounded sliding window and focused replacements discard unrelated history', () => {
+  let state = bootstrapState()
+  const recent = Array.from({ length: MAX_CHART_HISTORY_CANDLES + 200 }, (_, index) => ({
+    time: index + 10000,
+    open: 1,
+    high: 1,
+    low: 1,
+    close: 1,
+  }))
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: recent,
+    mergeMode: 'replace',
+    focusTime: '1970-01-01T03:00:00Z',
+    focusToken: 'trade-1:1',
+  })
+  let history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.equal(history.candles.length, MAX_CHART_HISTORY_CANDLES)
+  assert.equal(history.candles.at(-1).time, recent.at(-1).time)
+  assert.equal(history.focusToken, 'trade-1:1')
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 42, open: 2, high: 2, low: 2, close: 2 }],
+    mergeMode: 'replace',
+    focusTime: '1970-01-01T00:00:42Z',
+    focusToken: 'trade-2:1',
+  })
+  history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.candles.map((row) => row.time), [42])
+  assert.equal(history.focusToken, 'trade-2:1')
+})
+
+test('batched live messages preserve reducer ordering in one render action', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'live/messagesReceived',
+    messages: [
+      {
+        type: 'botlens_run_health_delta',
+        stream_session_id: 'stream-1',
+        scope_seq: 23,
+        stream_seq: 23,
+        payload: { health: { status: 'running', warning_count: 0, warnings: [] } },
+      },
+      {
+        type: 'botlens_run_health_delta',
+        stream_session_id: 'stream-1',
+        scope_seq: 24,
+        stream_seq: 24,
+        payload: { health: { status: 'degraded', warning_count: 1, warnings: [] } },
+      },
+    ],
+  })
+  assert.equal(state.runState.health.status, 'degraded')
+  assert.equal(state.live.lastStreamSeq, 24)
 })

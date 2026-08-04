@@ -60,6 +60,7 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
       chartTrades: controller.chartTrades,
       recentTrades: controller.recentTrades,
       error: controller.error,
+      durableEvidence: controller.durableEvidence,
       forensicDocuments: controller.forensicDocuments,
       forensicError: controller.forensicError,
       forensicHasMore: controller.forensicHasMore,
@@ -93,6 +94,7 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
       controller.chartTrades,
       controller.recentTrades,
       controller.error,
+      controller.durableEvidence,
       controller.forensicDocuments,
       controller.forensicError,
       controller.forensicHasMore,
@@ -125,6 +127,10 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
       changeSelectedSymbol={controller.changeSelectedSymbol}
       loadOlderHistory={controller.loadOlderHistory}
       loadMoreDecisionEvidence={controller.loadMoreDecisionEvidence}
+      loadDecisionEvidencePage={controller.loadDecisionEvidencePage}
+      loadTradeEvidencePage={controller.loadTradeEvidencePage}
+      loadDiagnosticEvidencePage={controller.loadDiagnosticEvidencePage}
+      focusTrade={controller.focusTrade}
       onClose={controller.closeModal}
       open={open}
       refreshSession={controller.refreshSession}

@@ -42,6 +42,13 @@ function formatMoment(value) {
   }
 }
 
+function formatDateOnly(value) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })
+}
+
 function formatRelativeTime(value) {
   if (!value) return '—'
   const timestamp = new Date(value).getTime()
@@ -196,6 +203,82 @@ function buildRecentTradeRows(trades = []) {
     exitPrice: formatNumber(Number(trade?.exit_price), 2),
     netPnl: formatSignedNumber(Number(trade?.net_pnl), 2),
     tradeId: String(trade?.trade_id || '').trim() || '—',
+    closedAt: formatMoment(trade?.exit_time || trade?.closed_at),
+    quantity: formatNumber(Number(trade?.quantity ?? trade?.qty ?? trade?.contracts), 2),
+    exitReason: humanizeToken(trade?.exit_reason || trade?.close_reason || '—'),
+    technical: trade,
+  }))
+}
+
+function stableDiagnosticIdentity(entry) {
+  const affected = entry?.affected_identity && typeof entry.affected_identity === 'object'
+    ? entry.affected_identity
+    : {}
+  const details = affected.details && typeof affected.details === 'object' ? affected.details : {}
+  return [
+    affected.instrument_id,
+    affected.series_key,
+    affected.symbol,
+    affected.timeframe,
+    details.component,
+    details.operation,
+    details.storage_target,
+  ].filter(Boolean).map(String).join('|') || 'run'
+}
+
+export function groupBotLensDiagnostics(entries = []) {
+  const groups = new Map()
+  ;(Array.isArray(entries) ? entries : []).forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object') return
+    const severity = String(entry.severity || entry.level || 'info').trim().toLowerCase()
+    const source = String(entry.source || entry.component || 'runtime').trim().toLowerCase()
+    const code = String(entry.code || entry.diagnostic_code || entry.operation || 'runtime_event').trim().toLowerCase()
+    const identity = stableDiagnosticIdentity(entry)
+    const key = [severity, source, code, identity].join(':')
+    const timestamp = entry.timestamp || entry.known_at || entry.event_ts || entry.observed_at || null
+    const current = groups.get(key) || {
+      key, severity, level: severity.toUpperCase(), source,
+      component: humanizeToken(source), code, title: humanizeToken(code),
+      message: String(entry.message || 'Runtime diagnostic recorded.'),
+      count: 0, firstTimestamp: timestamp, lastTimestamp: timestamp,
+      readinessImpact: entry.readiness_impact || 'none',
+      suggestedNextStep: entry.suggested_next_step || null,
+      affectedIdentity: entry.affected_identity || {}, occurrences: [],
+    }
+    current.count += 1
+    if (timestamp && (!current.firstTimestamp || Date.parse(timestamp) < Date.parse(current.firstTimestamp))) current.firstTimestamp = timestamp
+    if (timestamp && (!current.lastTimestamp || Date.parse(timestamp) > Date.parse(current.lastTimestamp))) current.lastTimestamp = timestamp
+    current.occurrences.push({ index, ...entry })
+    groups.set(key, current)
+  })
+  const rank = { critical: 0, warning: 1, info: 2 }
+  return Array.from(groups.values())
+    .sort((left, right) => (rank[left.severity] ?? 3) - (rank[right.severity] ?? 3)
+      || right.count - left.count || left.code.localeCompare(right.code))
+    .map((group) => ({
+      ...group,
+      occurredAt: group.count > 1
+        ? `${formatMoment(group.firstTimestamp)} – ${formatMoment(group.lastTimestamp)}`
+        : formatMoment(group.lastTimestamp),
+      technical: {
+        severity: group.severity, source: group.source, code: group.code, count: group.count,
+        affected_identity: group.affectedIdentity, readiness_impact: group.readinessImpact,
+        suggested_next_step: group.suggestedNextStep, occurrences: group.occurrences,
+      },
+    }))
+}
+
+function buildDecisionRows(entries = []) {
+  return (Array.isArray(entries) ? entries : []).map((entry, index) => ({
+    key: String(entry?.decision_id || entry?.event_id || `decision-${index}`),
+    occurredAt: formatMoment(entry?.bar_time || entry?.known_at || entry?.event_ts),
+    action: humanizeToken(entry?.action || entry?.decision_context?.intent || 'decision'),
+    verdict: humanizeToken(entry?.verdict || entry?.status || (entry?.accepted ? 'accepted' : entry?.rejected ? 'rejected' : 'observed')),
+    reason: humanizeToken(entry?.reason_code || entry?.rejection_reason || entry?.reason || '—'),
+    direction: String(entry?.decision_context?.direction || entry?.direction || entry?.artifact_summary?.side || '').trim().toUpperCase() || '—',
+    price: formatPrice(entry?.selected_price ?? entry?.price ?? entry?.decision_context?.signal_price),
+    tradeId: String(entry?.trade_id || ''),
+    technical: entry,
   }))
 }
 
@@ -554,6 +637,7 @@ export function buildBotLensRuntimeViewModel({
   chartTrades,
   recentTrades = chartTrades,
   error,
+  durableEvidence,
   forensicDocuments,
   forensicError,
   forensicHasMore,
@@ -591,10 +675,47 @@ export function buildBotLensRuntimeViewModel({
   const selectedNetPnlLabel = formatSignedNumber(selectedNetPnlValue)
   const priceContext = buildPriceContext(chartCandles)
   const openTradeCount = Object.keys(runState?.openTradesIndex || {}).length
-  const recentTradeRows = buildRecentTradeRows(recentTrades)
-  const diagnosticRows = buildDiagnosticRows(logs)
+  const durableDecisionPage = durableEvidence?.decisions || null
+  const durableTradePage = durableEvidence?.trades || null
+  const durableDiagnostics = durableEvidence?.diagnostics || null
+  const hasDurableDecisions = durableDecisionPage?.total !== null
+    && durableDecisionPage?.total !== undefined
+    && Number.isFinite(Number(durableDecisionPage.total))
+  const hasDurableTrades = durableTradePage?.total !== null
+    && durableTradePage?.total !== undefined
+    && Number.isFinite(Number(durableTradePage.total))
+  const hasDurableDiagnostics = durableDiagnostics?.total !== null
+    && durableDiagnostics?.total !== undefined
+    && Number.isFinite(Number(durableDiagnostics.total))
+  const decisionRecords = hasDurableDecisions
+    ? (Array.isArray(durableDecisionPage?.items) ? durableDecisionPage.items : [])
+    : (Array.isArray(selectedSymbolDecisions) ? selectedSymbolDecisions : [])
+  const tradeRecords = hasDurableTrades
+    ? (Array.isArray(durableTradePage?.items) ? durableTradePage.items : [])
+    : (Array.isArray(recentTrades) ? recentTrades : [])
+  const diagnosticRows = durableDiagnostics?.status === 'ready'
+    ? groupBotLensDiagnostics(durableDiagnostics.items)
+    : buildDiagnosticRows(logs)
+  const diagnosticEvidenceCount = durableDiagnostics?.status === 'ready'
+    ? durableDiagnostics.items.length
+    : diagnosticRows.length
+  const diagnosticCount = hasDurableDiagnostics
+    ? Math.max(0, Number(durableDiagnostics.total || 0))
+    : warningCount + diagnosticEvidenceCount
+  const recentTradeRows = buildRecentTradeRows(tradeRecords)
   const topTone = topBarTone(runState?.health?.status || botStatus)
   const strategyName = String(runState?.runMeta?.strategy_name || bot?.strategy_variant_name || bot?.strategy_id || 'Strategy').trim()
+  const runRangeLabel = runState?.runMeta?.backtest_start || runState?.runMeta?.backtest_end
+    ? `${formatDateOnly(runState?.runMeta?.backtest_start)} – ${formatDateOnly(runState?.runMeta?.backtest_end)}`
+    : formatMoment(runState?.runMeta?.started_at)
+  const executionSemantics = runState?.runMeta?.execution_semantics
+  const executionSemanticsLabel = humanizeToken(
+    executionSemantics?.instrument_type
+      || executionSemantics?.source_instrument_type
+      || executionSemantics?.execution_surface
+      || runState?.runMeta?.instrument_type
+      || 'unspecified',
+  )
   const selectedStats = selectedSymbolState?.stats && typeof selectedSymbolState.stats === 'object'
     ? selectedSymbolState.stats
     : selectedSummary?.stats && typeof selectedSummary.stats === 'object'
@@ -607,16 +728,24 @@ export function buildBotLensRuntimeViewModel({
       : {}
   const selectedOpenTradeCount = Number(selectedSummary?.open_trade_count || 0)
   const snapshotDecisionLedgerEntries = buildBotLensDecisionLedgerEntries({
-    signals: selectedSymbolSignals,
-    decisions: selectedSymbolDecisions,
-    trades: chartTrades,
+    signals: hasDurableDecisions ? [] : selectedSymbolSignals,
+    decisions: decisionRecords,
+    trades: hasDurableDecisions ? [] : chartTrades,
   })
-  const forensicDecisionLedgerEntries = buildBotLensForensicLedgerEntries(forensicDocuments)
+  const forensicDecisionLedgerEntries = hasDurableDecisions
+    ? []
+    : buildBotLensForensicLedgerEntries(forensicDocuments)
   const decisionLedgerEntries = mergeLedgerEntries(
     snapshotDecisionLedgerEntries,
     forensicDecisionLedgerEntries,
   )
-  const decisionCount = decisionLedgerEntries.length
+  const decisionRows = buildDecisionRows(decisionRecords)
+  const decisionCount = hasDurableDecisions
+    ? Math.max(0, Number(durableDecisionPage.total || 0))
+    : decisionLedgerEntries.length
+  const tradeCount = hasDurableTrades
+    ? Math.max(0, Number(durableTradePage.total || 0))
+    : recentTradeRows.length
   const decisionSummaryRows = buildDecisionSummaryRows({
     signals: selectedSymbolSignals,
     decisions: selectedSymbolDecisions,
@@ -843,6 +972,8 @@ export function buildBotLensRuntimeViewModel({
       hasMoreBefore: chartHistory?.range?.has_more_before !== false,
       historyCount: Number(chartHistory?.candles?.length || 0),
       cacheCount: Number(chartHistoryCacheCount || 0),
+      focusTime: chartHistory?.focusTime || null,
+      focusToken: chartHistory?.focusToken || null,
       candles: Array.isArray(chartCandles) ? chartCandles : [],
       trades: Array.isArray(chartTrades) ? chartTrades : [],
       overlays: Array.isArray(chartOverlays) ? chartOverlays : [],
@@ -879,7 +1010,7 @@ export function buildBotLensRuntimeViewModel({
     topBar: {
       kicker: 'BotLens',
       title: bot?.name || 'Runtime workspace',
-      subtitle: [strategyName, `run ${shortId(resolvedRunId)}`]
+      subtitle: [strategyName, selectedLabel, runRangeLabel]
         .filter(Boolean)
         .join(' · '),
       runMode: runModeBadge,
@@ -892,8 +1023,9 @@ export function buildBotLensRuntimeViewModel({
         { key: 'run_id', label: 'run_id', value: resolvedRunId !== '—' ? resolvedRunId : null, displayValue: shortId(resolvedRunId, 12) },
       ],
       stats: [
-        { key: 'selected-symbol', label: 'Selected Symbol', value: selectedLabel || '—' },
-        { key: 'timeframe', label: 'Timeframe', value: selectedTimeframe },
+        { key: 'range', label: 'Range', value: runRangeLabel },
+        { key: 'semantics', label: 'Execution', value: executionSemanticsLabel },
+        { key: 'selected-symbol', label: 'Market', value: selectedLabel || '—' },
         { key: 'open-trades', label: 'Open Trades', value: String(openTradeCount) },
         { key: 'warnings', label: 'Warnings', value: String(warningCount) },
         { key: 'last-event', label: 'Last Event', value: formatRelativeTime(runState?.health?.last_event_at) },
@@ -901,8 +1033,8 @@ export function buildBotLensRuntimeViewModel({
     },
     tabs: [
       { key: 'decisions', label: 'Decisions', badge: String(decisionCount) },
-      { key: 'trades', label: 'Trades', badge: String(recentTradeRows.length) },
-      { key: 'diagnostics', label: 'Diagnostics', badge: String(warningCount + diagnosticRows.length) },
+      { key: 'trades', label: 'Trades', badge: String(tradeCount) },
+      { key: 'diagnostics', label: 'Diagnostics', badge: String(diagnosticCount) },
     ],
     inspection: {
       state: {
@@ -912,14 +1044,33 @@ export function buildBotLensRuntimeViewModel({
       trades: {
         openTrades: currentStatePanels.tradeActivity.openTrades,
         recentTrades: recentTradeRows,
+        status: hasDurableTrades ? durableTradePage.status : 'ready',
+        error: hasDurableTrades ? durableTradePage.error : null,
+        total: tradeCount,
+        offset: hasDurableTrades ? durableTradePage.offset : 0,
+        limit: hasDurableTrades ? durableTradePage.limit : Math.max(recentTradeRows.length, 1),
+        pageIndex: hasDurableTrades ? Math.floor(durableTradePage.offset / durableTradePage.limit) : 0,
+        pageCount: hasDurableTrades ? Math.max(1, Math.ceil(tradeCount / durableTradePage.limit)) : 1,
+        durable: hasDurableTrades,
       },
       decisions: {
         entries: decisionLedgerEntries,
-        status: forensicStatus || (selectedSymbolBootstrapStatus === 'loading' ? 'loading' : 'ready'),
-        error: forensicError || null,
-        hasMore: forensicHasMore !== false,
-        autoLoad: !runState?.transportEligible,
+        rows: decisionRows,
+        status: hasDurableDecisions
+          ? durableDecisionPage.status
+          : forensicStatus || (selectedSymbolBootstrapStatus === 'loading' ? 'loading' : 'ready'),
+        error: hasDurableDecisions ? durableDecisionPage.error : forensicError || null,
+        hasMore: hasDurableDecisions
+          ? durableDecisionPage.offset + durableDecisionPage.limit < decisionCount
+          : forensicHasMore !== false,
+        autoLoad: false,
         nextCursor: forensicNextCursor || { afterSeq: 0, afterRowId: 0 },
+        total: decisionCount,
+        offset: hasDurableDecisions ? durableDecisionPage.offset : 0,
+        limit: hasDurableDecisions ? durableDecisionPage.limit : Math.max(decisionRows.length, 1),
+        pageIndex: hasDurableDecisions ? Math.floor(durableDecisionPage.offset / durableDecisionPage.limit) : 0,
+        pageCount: hasDurableDecisions ? Math.max(1, Math.ceil(decisionCount / durableDecisionPage.limit)) : 1,
+        durable: hasDurableDecisions,
         summaryRows: decisionSummaryRows,
         walletRows,
         latestRows: decisionLatestRows,
@@ -930,6 +1081,19 @@ export function buildBotLensRuntimeViewModel({
       diagnostics: {
         warnings: currentStatePanels.warnings,
         entries: diagnosticRows,
+        evidenceCount: diagnosticEvidenceCount,
+        status: durableDiagnostics?.status || 'ready',
+        error: durableDiagnostics?.error || null,
+        summary: durableDiagnostics?.summary || {},
+        total: hasDurableDiagnostics ? Number(durableDiagnostics.total) : diagnosticEvidenceCount,
+        offset: Math.max(0, Number(durableDiagnostics?.offset || 0) || 0),
+        limit: Math.max(1, Number(durableDiagnostics?.limit || diagnosticEvidenceCount || 1) || 1),
+        pageIndex: hasDurableDiagnostics
+          ? Math.floor(Number(durableDiagnostics.offset || 0) / Math.max(1, Number(durableDiagnostics.limit || 1)))
+          : 0,
+        pageCount: hasDurableDiagnostics
+          ? Math.max(1, Math.ceil(Number(durableDiagnostics.total) / Math.max(1, Number(durableDiagnostics.limit || 1))))
+          : 1,
         checks: [
           { key: 'runtime', label: 'Runtime', value: humanizeToken(runtimeStatus || 'idle') },
           { key: 'execution-mode', label: 'Execution Mode', value: executionModeLabel },

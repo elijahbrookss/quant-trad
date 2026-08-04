@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from 'react'
-import { LocateFixed, Maximize2, Minimize2, RefreshCcw } from 'lucide-react'
+import { LocateFixed, Maximize2, Minimize2 } from 'lucide-react'
 
 import { BotLensChart } from '../../../../components/bots/BotLensChart.jsx'
 import { OverlayToggleBar } from '../../../../components/bots/OverlayToggleBar.jsx'
@@ -178,7 +178,6 @@ function ChartViewport({
   centerView,
   isFullscreen,
   model,
-  onLoadOlderHistory,
   onNearHistoryStart,
   onToggleFullscreen,
   overlayVisibility,
@@ -204,16 +203,6 @@ function ChartViewport({
         >
           <LocateFixed className="size-3.5" />
           Reset
-        </button>
-        <button
-          type="button"
-          onClick={onLoadOlderHistory}
-          disabled={!model.candles.length || model.historyStatus === 'loading' || !model.hasMoreBefore}
-          className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/45 px-2.5 text-xs font-semibold text-slate-200 transition hover:border-white/20 hover:bg-black/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-          title="Load older chart history"
-        >
-          <RefreshCcw className="size-3.5" />
-          Load earlier
         </button>
         <button
           type="button"
@@ -267,7 +256,9 @@ export const ChartPanel = memo(function ChartPanel({
 }) {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const { getChart } = useChartState()
-  const centerView = getChart(RUNTIME_CHART_ID)?.handles?.centerView
+  const chartHandles = getChart(RUNTIME_CHART_ID)?.handles
+  const centerView = chartHandles?.centerView
+  const focusAtTime = chartHandles?.focusAtTime
   const canRefocus = model.candles.length > 0 && typeof centerView === 'function'
   const barCount = Array.isArray(model.candles) ? model.candles.length : 0
   const overlayProjection = model.overlayProjection || {}
@@ -289,6 +280,11 @@ export const ChartPanel = memo(function ChartPanel({
     : overlayEvidence.coverage === 'unavailable'
       ? 'not retained'
       : 'bounded replay'
+
+  useEffect(() => {
+    if (!model.focusToken || !model.focusTime || typeof focusAtTime !== 'function') return
+    focusAtTime(model.focusTime)
+  }, [focusAtTime, model.focusTime, model.focusToken])
 
   useEffect(() => {
     if (!isFullscreen) return undefined
