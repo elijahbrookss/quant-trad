@@ -435,6 +435,44 @@ const DiagnosticsTab = memo(function DiagnosticsTab({ model }) {
           )}
         </div>
       </section>
+
+      <section className="qt-ops-console overflow-hidden xl:col-span-2">
+        <header className="border-b border-white/8 px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm font-semibold text-slate-100">Retained diagnostics</p>
+            <span className="text-xs text-slate-500">{model.entries.length} recorded</span>
+          </div>
+        </header>
+        <div className="space-y-2 px-4 py-4">
+          {model.entries.length ? (
+            model.entries.map((entry) => (
+              <article key={entry.key} className="qt-ops-panel-muted px-3 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+                      <span className="qt-mono text-slate-300">{entry.level}</span>
+                      <span>{entry.code}</span>
+                      <span>{entry.component}</span>
+                      <span>{entry.status}</span>
+                      <span>{entry.occurredAt}</span>
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-slate-200">{entry.message}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-white/20 hover:bg-white/[0.08] hover:text-white"
+                    onClick={() => navigator.clipboard?.writeText(JSON.stringify(entry.technical, null, 2))}
+                  >
+                    Copy details
+                  </button>
+                </div>
+              </article>
+            ))
+          ) : (
+            <div className="px-1 py-8 text-center text-sm text-slate-400">No retained diagnostic events are available for this symbol.</div>
+          )}
+        </div>
+      </section>
     </div>
   )
 })

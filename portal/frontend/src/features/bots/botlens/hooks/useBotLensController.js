@@ -732,14 +732,17 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   }, [forensicScopeKey, loadMoreDecisionEvidence, open, reloadTick, transportEligible])
 
   useEffect(() => {
+    const currentState = stateRef.current
+    const currentChartHistoryStatus = selectSelectedSymbolChartHistoryStatus(currentState)
+    const currentChartCandles = selectSelectedSymbolChartCandles(currentState)
     if (!shouldLoadInitialBotLensHistory({
       open,
       activeRunId,
       selectedSymbolKey,
       datasetId,
-      chartHistoryStatus,
+      chartHistoryStatus: currentChartHistoryStatus,
       transportEligible,
-      chartCandles,
+      chartCandles: currentChartCandles,
     })) return undefined
 
     const requestKey = [activeRunId, selectedSymbolKey].join(':')
@@ -801,8 +804,6 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   }, [
     activeRunId,
     bot?.id,
-    chartCandles,
-    chartHistoryStatus,
     datasetId,
     initialHistoryEnd,
     logger,

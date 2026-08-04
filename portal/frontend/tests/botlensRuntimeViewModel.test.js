@@ -420,6 +420,31 @@ test('runtime view model merges signal decision and trade events into the decisi
   assert.equal(model.inspection.decisions.walletRows.find((row) => row.key === 'open-trades')?.value, '1')
   assert.equal(model.inspection.decisions.walletRows.find((row) => row.key === 'trade-events')?.value, '2')
   assert.equal(new Set(model.inspection.trades.recentTrades.map((row) => row.key)).size, 2)
+  assert.equal(model.tabs.find((tab) => tab.key === 'trades')?.badge, '2')
+})
+
+test('runtime view model exposes retained diagnostics separately from active warnings', () => {
+  const base = buildControllerLike(bootstrapState())
+  const diagnostic = {
+    event_id: 'diagnostic-1',
+    event_ts: '2026-01-01T00:04:00Z',
+    level: 'INFO',
+    diagnostic_code: 'candle_continuity_summary',
+    component: 'bot_runtime',
+    status: 'healthy',
+    message: 'Producer-owned terminal candle continuity (gaps=0, candles=8804).',
+    details: { gaps: 0, candle_count: 8804 },
+  }
+  const model = buildBotLensRuntimeViewModel({
+    ...base,
+    logs: [diagnostic],
+  })
+
+  assert.equal(model.inspection.diagnostics.entries.length, 1)
+  assert.equal(model.inspection.diagnostics.entries[0].code, 'Candle Continuity Summary')
+  assert.equal(model.inspection.diagnostics.entries[0].message, diagnostic.message)
+  assert.equal(model.inspection.diagnostics.entries[0].technical, diagnostic)
+  assert.equal(model.tabs.find((tab) => tab.key === 'diagnostics')?.badge, '2')
 })
 
 test('runtime view model merges and deduplicates cursor-replayed forensic evidence', () => {

@@ -351,6 +351,39 @@ test('chart retrieval stays out of base symbol state and composes at selector ti
   )
 })
 
+test('valid candle and trade history becomes ready even when overlay evidence is incomplete', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartRequest',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+  })
+  assert.equal(state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].status, 'loading')
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 1767225540, open: 99, high: 102, low: 98, close: 101 }],
+    trades: [{ event_id: 'trade-1', trade_id: 'trade-1', event_ts: '2025-12-31T23:59:00Z' }],
+    overlays: [],
+    range: { has_more_before: true, has_more_after: false },
+    tradeEvidence: { complete_for_returned_candles: true, trade_count: 1 },
+    overlayEvidence: {
+      coverage: 'bounded',
+      complete_for_returned_candles: false,
+      reason_codes: ['overlay_timeline_gap_or_order_violation'],
+    },
+  })
+
+  const history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.equal(history.status, 'ready')
+  assert.equal(history.candles.length, 1)
+  assert.equal(selectSelectedSymbolChartTrades(state).length, 1)
+  assert.equal(history.tradeEvidence.complete_for_loaded_candles, true)
+  assert.equal(history.overlayEvidence.complete_for_loaded_candles, false)
+})
+
 test('chart retrieval ignores stale responses from a previous run after the session changes', () => {
   let state = bootstrapState()
   state = reduceBotLensState(state, { type: 'session/reset', botId: 'bot-1' })

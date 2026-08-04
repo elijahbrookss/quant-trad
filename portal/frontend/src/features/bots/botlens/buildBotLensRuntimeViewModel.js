@@ -199,6 +199,19 @@ function buildRecentTradeRows(trades = []) {
   }))
 }
 
+function buildDiagnosticRows(entries = []) {
+  return (Array.isArray(entries) ? entries : []).map((entry, index) => ({
+    key: String(entry?.event_id || entry?.id || `diagnostic-${index}`),
+    level: String(entry?.level || 'INFO').trim().toUpperCase() || 'INFO',
+    code: humanizeToken(entry?.diagnostic_code || entry?.diagnostic_event || entry?.operation || 'runtime_event'),
+    message: String(entry?.message || 'Runtime diagnostic recorded.'),
+    component: humanizeToken(entry?.component || 'runtime'),
+    status: humanizeToken(entry?.status || 'observed'),
+    occurredAt: formatMoment(entry?.event_ts || entry?.observed_at || entry?.bar_time),
+    technical: entry,
+  }))
+}
+
 function buildPriceContext(candles = []) {
   const rows = Array.isArray(candles) ? candles : []
   const last = rows[rows.length - 1] || null
@@ -579,6 +592,7 @@ export function buildBotLensRuntimeViewModel({
   const priceContext = buildPriceContext(chartCandles)
   const openTradeCount = Object.keys(runState?.openTradesIndex || {}).length
   const recentTradeRows = buildRecentTradeRows(recentTrades)
+  const diagnosticRows = buildDiagnosticRows(logs)
   const topTone = topBarTone(runState?.health?.status || botStatus)
   const strategyName = String(runState?.runMeta?.strategy_name || bot?.strategy_variant_name || bot?.strategy_id || 'Strategy').trim()
   const selectedStats = selectedSymbolState?.stats && typeof selectedSymbolState.stats === 'object'
@@ -887,8 +901,8 @@ export function buildBotLensRuntimeViewModel({
     },
     tabs: [
       { key: 'decisions', label: 'Decisions', badge: String(decisionCount) },
-      { key: 'trades', label: 'Trades', badge: String(openTradeCount) },
-      { key: 'diagnostics', label: 'Diagnostics', badge: String(warningCount) },
+      { key: 'trades', label: 'Trades', badge: String(recentTradeRows.length) },
+      { key: 'diagnostics', label: 'Diagnostics', badge: String(warningCount + diagnosticRows.length) },
     ],
     inspection: {
       state: {
@@ -904,7 +918,7 @@ export function buildBotLensRuntimeViewModel({
         status: forensicStatus || (selectedSymbolBootstrapStatus === 'loading' ? 'loading' : 'ready'),
         error: forensicError || null,
         hasMore: forensicHasMore !== false,
-        autoLoad: !Boolean(runState?.transportEligible),
+        autoLoad: !runState?.transportEligible,
         nextCursor: forensicNextCursor || { afterSeq: 0, afterRowId: 0 },
         summaryRows: decisionSummaryRows,
         walletRows,
@@ -915,6 +929,7 @@ export function buildBotLensRuntimeViewModel({
       },
       diagnostics: {
         warnings: currentStatePanels.warnings,
+        entries: diagnosticRows,
         checks: [
           { key: 'runtime', label: 'Runtime', value: humanizeToken(runtimeStatus || 'idle') },
           { key: 'execution-mode', label: 'Execution Mode', value: executionModeLabel },

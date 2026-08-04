@@ -43,10 +43,16 @@ test('operator errors preserve technical details behind readable copy', () => {
 
 test('historical BotLens loading is bounded and left-pan history retrieval is guarded', () => {
   const controller = source(path.join('features', 'bots', 'botlens', 'hooks', 'useBotLensController.js'))
+  const content = source(path.join('features', 'bots', 'botlens', 'BotLensContent.jsx'))
   const viewport = source(path.join('components', 'bots', 'hooks', 'useViewportController.js'))
   assert.match(controller, /BOTLENS_EXACT_BOOTSTRAP_TIMEOUT_MS = 30_000/)
   assert.match(controller, /fetchExactRunBootstrapBeforeDeadline\(runId, exactBootstrapDeadline\)/)
   assert.match(controller, /Historical BotLens replay did not become ready within 30 seconds/)
+  assert.match(controller, /const currentState = stateRef\.current/)
+  assert.match(controller, /chartHistoryStatus: currentChartHistoryStatus/)
+  assert.doesNotMatch(controller, /\n\s+chartCandles,\n\s+chartHistoryStatus,\n\s+datasetId,/)
+  assert.match(content, /Retained diagnostics/)
+  assert.match(content, /JSON\.stringify\(entry\.technical, null, 2\)/)
   assert.match(viewport, /nearHistoryTriggeredRef/)
   assert.match(viewport, /onNearHistoryStart\?\.\(\)/)
 })
