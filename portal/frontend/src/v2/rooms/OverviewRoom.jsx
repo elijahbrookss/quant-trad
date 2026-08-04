@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { RefreshCcw } from 'lucide-react'
-import { useFleetBotsFeed } from '../../features/bots/page/useFleetBotsFeed.js'
 import { buildCollectorCardViewModel } from '../../features/collectors/buildCollectorCardViewModel.js'
 import { useCollectorsFeed } from '../../features/collectors/useCollectorsFeed.js'
 import { formatMarketStructureComponentError, useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
@@ -9,7 +8,7 @@ import {
   buildMarketPostureRows,
   buildStreamSessionRows,
 } from '../../features/market-structure/buildMarketPosture.js'
-import { buildProjectedRunsFromBots } from '../../features/operations/buildOperationsViewModel.js'
+import { useActiveRunsFeed } from '../../features/operations/useActiveRunsFeed.js'
 import {
   ACTIVITY_FILTERS,
   useOverviewBacktestActivity,
@@ -86,15 +85,13 @@ function marketIssueCount(rows) {
 }
 
 export function OverviewRoom() {
-  const { sortedBots, nowEpochMs, loading: botsLoading, error: botsError, refresh: refreshBots } = useFleetBotsFeed()
+  const activeRunsFeed = useActiveRunsFeed()
+  const nowEpochMs = Date.now()
   const collectorFeed = useCollectorsFeed()
   const marketFeed = useMarketStructureFeed()
   const [activityType, setActivityType] = useState('backtests_completed')
   const researchFeed = useOverviewBacktestActivity(activityType)
-  const projectedRuns = useMemo(
-    () => buildProjectedRunsFromBots(sortedBots, { nowEpochMs }),
-    [sortedBots, nowEpochMs],
-  )
+  const projectedRuns = activeRunsFeed.runs
 
   const postureRows = useMemo(() => buildMarketPostureRows({
     definitions: marketFeed.definitions,
@@ -135,7 +132,7 @@ export function OverviewRoom() {
   const marketIssues = marketIssueCount(postureRows)
   const filter = ACTIVITY_FILTERS.find((item) => item.value === activityType)
   const currentOperationIssues = [
-    { component: "Run definitions", error: botsError },
+    { component: "Active runs", error: activeRunsFeed.error },
     { component: "Collector schedules", error: collectorFeed.error },
     { component: "Collector live updates", error: collectorFeed.streamError },
     { component: "Market structure", error: marketFeed.error },
@@ -147,10 +144,10 @@ export function OverviewRoom() {
   ]
   const researchActivityIssues = researchFeed.errors.filter((issue) => issue.component === "Research activity")
   const topResultIssues = researchFeed.errors.filter((issue) => issue.component === "Top result")
-  const operationsLoading = botsLoading || collectorFeed.loading || marketFeed.loading
+  const operationsLoading = activeRunsFeed.loading || collectorFeed.loading || marketFeed.loading
 
   function refresh() {
-    refreshBots()
+    activeRunsFeed.refresh()
     collectorFeed.refresh()
     marketFeed.refresh()
     researchFeed.refresh()
@@ -168,7 +165,7 @@ export function OverviewRoom() {
 
       <div className="qt2-summary-grid">
         <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? "Within " + ATTENTION_CONTRACT.lookbackHours + " hours" : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} partial={attentionIssues.length > 0} />
-        <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run projection' : 'Run instances evidenced active'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={botsLoading && !projectedRuns.length} error={botsError && !projectedRuns.length ? botsError : null} partial={Boolean(botsError)} />
+        <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run instance' : 'Run instances currently owned'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={activeRunsFeed.loading && !projectedRuns.length} error={activeRunsFeed.error && !projectedRuns.length ? activeRunsFeed.error : null} partial={Boolean(activeRunsFeed.error)} />
         <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} schedule${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'On-schedule delivery evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.collectors.length} error={collectorFeed.error && !collectorFeed.collectors.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
         <SummaryCard label="Market pairs" value={postureRows.length || 'None'} detail={marketIssues ? `${marketIssues} pair${marketIssues === 1 ? '' : 's'} need review` : 'No known quality issues'} tone={marketIssues ? 'warning' : 'success'} to="/operations?tab=market" loading={marketFeed.loading && !postureRows.length} error={!postureRows.length ? marketFeed.error || formatMarketStructureComponentError(marketFeed.componentErrors.definitions) : null} partial={Boolean(marketFeed.error || marketFeed.streamError || Object.keys(marketFeed.componentErrors).length)} />
       </div>

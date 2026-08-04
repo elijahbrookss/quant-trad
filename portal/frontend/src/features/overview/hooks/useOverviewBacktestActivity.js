@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   fetchReportActivity,
-  getReport,
   listReports,
 } from '../../../adapters/report.adapter.js'
 import {
@@ -124,18 +123,9 @@ export function useOverviewBacktestActivity(
         : null
       if (requests[3].status === 'rejected') nextErrors.push({ component: 'Research activity', error: requests[3].reason?.message || 'Activity aggregation unavailable.' })
 
-      let dataset = null
-      if (top?.run_id) {
-        try {
-          const report = await getReport(top.run_id)
-          dataset = report?.identity || report?.context?.dataset_identity || null
-        } catch (error) {
-          nextErrors.push({ component: 'Top result', error: error?.message || 'Top-result dataset identity unavailable.' })
-        }
-      }
       if (!mounted) return
       setTopResult(top)
-      setTopResultDataset(dataset)
+      setTopResultDataset(top?.dataset_identity || null)
       setResearchItems(nextResearchItems)
       setOutcomes(outcomeRows(recentReports, nextResearchItems))
       setActivity(nextActivity)

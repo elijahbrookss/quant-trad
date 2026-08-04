@@ -15,7 +15,7 @@ import { sortBots } from '../fleet/buildBotFleetViewModel.js'
  * live clock tick for duration/age displays. Used by both the Fleet page
  * and the Overview page so the fetch/stream wiring exists exactly once.
  */
-export function useFleetBotsFeed() {
+export function useFleetBotsFeed({ enabled = true } = {}) {
   const [bots, setBots] = useState([])
   const [strategies, setStrategies] = useState([])
   const [loading, setLoading] = useState(true)
@@ -24,34 +24,78 @@ export function useFleetBotsFeed() {
   const [refreshRevision, setRefreshRevision] = useState(0)
   const refresh = useCallback(() => setRefreshRevision((value) => value + 1), [])
 
-  const { hasReceivedSnapshot } = useBotStream({
-    replaceBots: (incoming) => setBots(replaceFleetBotsSnapshot(incoming)),
+  const { state: botStreamState, hasReceivedSnapshot } = useBotStream({
+    replaceBots: (incoming) => {
+      setBots(replaceFleetBotsSnapshot(incoming))
+      setLoading(false)
+      setError(null)
+    },
     upsertBot: (bot) => setBots((prev) => upsertFleetBotRecord(prev, bot)),
     mergeBotRuntime: (id, runtime) => setBots((prev) => mergeFleetBotRuntime(prev, id, runtime)),
     removeBot: (id) => setBots((prev) => removeFleetBotRecord(prev, id)),
+    enabled,
   })
 
   useEffect(() => {
+    if (!enabled) return undefined
     let mounted = true
-    async function load() {
-      setLoading(true)
-      setError(null)
+    async function loadStrategies() {
       try {
-        const [botList, strategyList] = await Promise.all([listBots(), fetchStrategies()])
+        const strategyList = await fetchStrategies()
+        if (!mounted) return
+        setStrategies(Array.isArray(strategyList) ? strategyList : [])
+      } catch (err) {
+        if (mounted) setError(err?.message || 'Unable to load strategy labels')
+      }
+    }
+    loadStrategies()
+    return () => {
+      mounted = false
+    }
+  }, [enabled])
+
+  useEffect(() => {
+    if (!enabled) return undefined
+    if (hasReceivedSnapshot) return undefined
+    let mounted = true
+    const timer = setTimeout(async () => {
+      try {
+        const botList = await listBots()
         if (!mounted) return
         setBots(replaceFleetBotsSnapshot(botList))
-        setStrategies(Array.isArray(strategyList) ? strategyList : [])
+        setError(null)
       } catch (err) {
         if (mounted) setError(err?.message || 'Unable to load fleet')
       } finally {
         if (mounted) setLoading(false)
       }
+    }, botStreamState === 'error' ? 0 : 4000)
+    return () => {
+      mounted = false
+      clearTimeout(timer)
     }
-    load()
+  }, [botStreamState, enabled, hasReceivedSnapshot])
+
+  useEffect(() => {
+    if (!enabled) return undefined
+    if (refreshRevision === 0) return undefined
+    let mounted = true
+    setLoading(true)
+    setError(null)
+    listBots()
+      .then((botList) => {
+        if (mounted) setBots(replaceFleetBotsSnapshot(botList))
+      })
+      .catch((err) => {
+        if (mounted) setError(err?.message || 'Unable to refresh fleet')
+      })
+      .finally(() => {
+        if (mounted) setLoading(false)
+      })
     return () => {
       mounted = false
     }
-  }, [refreshRevision])
+  }, [enabled, refreshRevision])
 
   useEffect(() => {
     const id = setInterval(() => setNowEpochMs(Date.now()), 1000)

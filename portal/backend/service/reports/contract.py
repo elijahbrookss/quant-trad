@@ -311,7 +311,7 @@ def list_report_summaries(
         sort=sort,
     )
     logger.debug(with_log_context("report_catalog_list_start", context))
-    runs = report_data.list_runs(
+    runs = report_data.list_report_catalog_candidates(
         run_type=run_type,
         status=status,
         bot_id=bot_id,
@@ -354,16 +354,33 @@ def list_report_summaries(
         filtered.sort(key=lambda entry: entry.get("ended_at") or "", reverse=True)
     total = len(filtered)
     sliced = filtered[offset : offset + limit] if limit else filtered[offset:]
+    selected_run_ids = [str(run.get("run_id") or "") for run in sliced if str(run.get("run_id") or "")]
+    catalog_details = report_data.list_report_catalog_details(selected_run_ids)
+    materialization_statuses = report_data.list_report_materialization_statuses(selected_run_ids)
 
     items: List[Dict[str, Any]] = []
     for run in sliced:
         run_id = str(run.get("run_id") or "")
+        catalog_detail = _mapping(catalog_details.get(run_id))
+        symbols = [str(symbol) for symbol in (run.get("symbols") or [])]
         summary = _mapping(run.get("summary"))
-        readiness = report_data.get_result_readiness(
-            run_id,
-            financial_summary=summary or None,
+        dataset_id = str(catalog_detail.get("dataset_id") or "").strip() or None
+        dataset_hash = str(catalog_detail.get("dataset_hash") or run.get("data_snapshot_hash") or "").strip() or None
+        report_materialization = _mapping(materialization_statuses.get(run_id))
+        artifact_readiness = _mapping(report_materialization.get("artifact_readiness"))
+        materialized_ready = bool(
+            report_materialization.get("status") == "ready"
+            and report_materialization.get("can_view")
+            and report_materialization.get("freshness_verified")
         )
-        report_materialization = report_data.get_report_materialization_status(run_id)
+        dataset_ready = bool(
+            materialized_ready
+            and dataset_id
+            and dataset_hash
+            and artifact_readiness.get("dataset_ready")
+        )
+        results_ready = bool(materialized_ready and artifact_readiness.get("results_ready"))
+        safe_to_compare = bool(materialized_ready and artifact_readiness.get("safe_to_compare"))
         items.append(
             {
                 "schema_version": "run_report_summary_item.v1",
@@ -374,7 +391,11 @@ def list_report_summaries(
                 "strategy_name": run.get("strategy_name"),
                 "symbols": symbols,
                 "timeframe": run.get("timeframe"),
-                "execution_mode": _execution_mode_from_run(run),
+                "execution_mode": str(catalog_detail.get("execution_mode") or "fast").strip().lower(),
+                "dataset_identity": {
+                    "dataset_id": dataset_id,
+                    "dataset_hash": dataset_hash,
+                },
                 "simulated_window": {
                     "start": run.get("backtest_start"),
                     "end": run.get("backtest_end"),
@@ -393,11 +414,21 @@ def list_report_summaries(
                     "total_trades": summary.get("total_trades"),
                 },
                 "readiness": {
-                    "dataset_ready": bool(readiness.get("dataset_ready")),
-                    "results_ready": bool(readiness.get("results_ready")),
-                    "safe_to_compare": bool(readiness.get("safe_to_compare")),
-                    "reason": readiness.get("reason"),
-                    "dataset_status": readiness.get("dataset_status"),
+                    "dataset_ready": dataset_ready,
+                    "results_ready": results_ready,
+                    "safe_to_compare": safe_to_compare,
+                    "reason": (
+                        "report_freshness_unverified"
+                        if not report_materialization.get("freshness_verified")
+                        else artifact_readiness.get("reason")
+                        if safe_to_compare
+                        else report_materialization.get("stale_reason")
+                        or artifact_readiness.get("reason")
+                        or "report_not_materialized"
+                    ),
+                    "dataset_status": artifact_readiness.get("dataset_status") or (
+                        "ready" if dataset_ready else "blocked"
+                    ),
                 },
                 "report_materialization": report_materialization,
             }

@@ -156,7 +156,16 @@ class _FakeComposition:
 
 
 def test_list_bot_runs_inventory_is_bounded_and_does_not_replay(monkeypatch):
-    composition = _FakeComposition(config_service=_FakeConfigService(), storage=_FakeStorage())
+    storage = _FakeStorage()
+    storage.run["config_snapshot"] = {
+        "dataset_binding": {
+            "dataset_id": "dataset-1",
+            "dataset_hash": "hash-1",
+            "raw_rows": ["must-not-leak"] * 100,
+        },
+        "runtime_payload": {"large": ["must-not-leak"] * 100},
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
     monkeypatch.setattr(bot_service, "_composition", lambda: composition)
     monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
 
@@ -166,8 +175,57 @@ def test_list_bot_runs_inventory_is_bounded_and_does_not_replay(monkeypatch):
     assert result["runs"][0]["run_id"] == "run-1"
     assert result["runs"][0]["is_active"] is True
     assert result["runs"][0]["botlens_available"] is False
+    assert result["runs"][0]["config_snapshot"] == {
+        "dataset_binding": {
+            "dataset_id": "dataset-1",
+            "dataset_hash": "hash-1",
+        }
+    }
     assert result["next_cursor"] is None
     assert result["observed_at"]
+
+
+def test_active_run_inventory_keeps_sibling_runs_of_one_definition_distinct(monkeypatch):
+    storage = _FakeStorage()
+    runs = {
+        "run-1": {
+            **storage.run,
+            "run_id": "run-1",
+            "created_at": "2026-04-09T04:21:37Z",
+            "started_at": "2026-04-09T04:21:38Z",
+        },
+        "run-2": {
+            **storage.run,
+            "run_id": "run-2",
+            "created_at": "2026-04-09T04:22:37Z",
+            "started_at": "2026-04-09T04:22:38Z",
+        },
+    }
+    lifecycles = {
+        run_id: {**storage.lifecycle, "run_id": run_id}
+        for run_id in runs
+    }
+    leases = [
+        {**storage.lease, "run_id": run_id}
+        for run_id in runs
+    ]
+    storage.list_active_bot_run_leases = lambda: list(leases)
+    storage.list_bot_runs_by_ids = lambda run_ids: {
+        run_id: dict(runs[run_id]) for run_id in run_ids
+    }
+    storage.list_bot_run_lifecycles = lambda run_ids: {
+        run_id: dict(lifecycles[run_id]) for run_id in run_ids
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.list_active_run_instances()
+
+    assert [row["run_id"] for row in result] == ["run-2", "run-1"]
+    assert {row["bot_id"] for row in result} == {"bot-1"}
+    assert all(row["is_active"] is True for row in result)
+    assert all(row["liveness"]["state"] == "awaiting_telemetry" for row in result)
 
 
 def test_list_bot_runs_for_bot_reports_snapshot_unavailable_without_replay(monkeypatch):
@@ -418,3 +476,60 @@ def test_list_bots_uses_batched_projection_reads(monkeypatch):
     assert storage.batch_lifecycle_calls == 1
     assert storage.batch_status_calls == 1
     assert storage.single_latest_runtime_calls == 0
+
+
+def test_list_bots_hot_read_does_not_inspect_docker(monkeypatch):
+    bots = [
+        {"id": "bot-1", "name": "Bot 1"},
+        {"id": "bot-2", "name": "Bot 2"},
+    ]
+    inputs = {
+        bot["id"]: (
+            {"run_id": f"run-{bot['id'][-1]}", "status": "running"},
+            {
+                "run_id": f"run-{bot['id'][-1]}",
+                "phase": "live",
+                "status": "running",
+                "metadata": {},
+            },
+            None,
+            None,
+        )
+        for bot in bots
+    }
+    def _inspect(bot_id: str):
+        raise AssertionError(f"hot fleet read inspected Docker for {bot_id}")
+
+    monkeypatch.setattr(bot_service, "_load_projection_inputs_batch", lambda _bots: inputs)
+    monkeypatch.setattr(
+        "portal.backend.service.bots.bot_service.DockerBotRunner.inspect_bot_container",
+        _inspect,
+    )
+
+    result = bot_service._project_bots(bots, inspect_container=False)
+
+    assert [row["id"] for row in result] == ["bot-1", "bot-2"]
+    assert [row["lifecycle"]["container"]["id"] for row in result] == [
+        None,
+        None,
+    ]
+
+
+def test_bots_stream_uses_batched_facade_snapshot(monkeypatch):
+    observed = {}
+
+    class _StreamManager:
+        def subscribe_all(self, snapshot_fn):
+            observed["snapshot_fn"] = snapshot_fn
+            initial = {"type": "snapshot", "bots": snapshot_fn()}
+            return (lambda: None), SimpleNamespace(), initial
+
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=_FakeStorage())
+    composition.stream_manager = _StreamManager()
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "list_bots", lambda: [{"id": "batched-bot"}])
+
+    _release, _channel, initial = bot_service.bots_stream()
+
+    assert observed["snapshot_fn"] is bot_service.list_bots
+    assert initial["bots"] == [{"id": "batched-bot"}]

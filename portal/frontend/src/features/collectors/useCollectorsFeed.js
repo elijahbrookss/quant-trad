@@ -29,6 +29,8 @@ export function useCollectorsFeed({ enabled = true } = {}) {
     setLoading(true)
     let mounted = true
     let fallbackIntervalId = null
+    let fallbackTimerId = null
+    let receivedStreamSnapshot = false
     const source = openCollectorsStream({ attemptLimit: ATTEMPTS_LIMIT })
 
     function applySnapshot(snapshot) {
@@ -77,6 +79,7 @@ export function useCollectorsFeed({ enabled = true } = {}) {
 
     function onStreamSnapshot(event) {
       try {
+        receivedStreamSnapshot = true
         applySnapshot(JSON.parse(event.data))
         setStreamStatus("connected")
         setStreamError(null)
@@ -86,7 +89,6 @@ export function useCollectorsFeed({ enabled = true } = {}) {
       }
     }
 
-    loadSnapshot()
     if (source) {
       source.addEventListener("snapshot", onStreamSnapshot)
       source.addEventListener("delta", onStreamSnapshot)
@@ -100,15 +102,21 @@ export function useCollectorsFeed({ enabled = true } = {}) {
         setStreamStatus("reconnecting")
         setStreamError("Live market status is reconnecting; persisted snapshot remains visible.")
       }
+      fallbackTimerId = setTimeout(() => {
+        if (!receivedStreamSnapshot) loadSnapshot()
+      }, 4_000)
     } else {
       setStreamStatus("unavailable")
       setStreamError("Live market status is unavailable; using bounded snapshot refresh.")
+      loadSnapshot()
       fallbackIntervalId = setInterval(loadSnapshot, 30_000)
     }
+    if (refreshRevision > 0) loadSnapshot()
 
     return () => {
       mounted = false
       source?.close()
+      if (fallbackTimerId) clearTimeout(fallbackTimerId)
       if (fallbackIntervalId) clearInterval(fallbackIntervalId)
     }
   }, [enabled, refreshRevision])

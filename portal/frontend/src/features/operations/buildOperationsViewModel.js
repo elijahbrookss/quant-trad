@@ -2,6 +2,49 @@ import { getBotCardDisplayState } from '../bots/state/botRuntimeStatus.js'
 
 const ACTIVE_RUN_STATUSES = new Set(['starting', 'running', 'degraded', 'telemetry_degraded', 'paused'])
 
+const LIFECYCLE_PHASE_LABELS = Object.freeze({
+  start_requested: 'Accepting start request',
+  validating_configuration: 'Validating configuration',
+  resolving_strategy: 'Resolving strategy',
+  resolving_runtime_dependencies: 'Resolving runtime dependencies',
+  preparing_run: 'Preparing run record',
+  stamping_starting_state: 'Recording startup state',
+  launching_container: 'Launching runtime container',
+  container_launched: 'Runtime container launched',
+  awaiting_container_boot: 'Waiting for runtime process',
+  container_booting: 'Runtime process is booting',
+  loading_bot_config: 'Loading bot configuration',
+  claiming_run: 'Claiming run ownership',
+  loading_strategy_snapshot: 'Loading frozen strategy snapshot',
+  preparing_wallet: 'Preparing execution wallet',
+  planning_series_workers: 'Planning instrument workers',
+  spawning_series_workers: 'Starting instrument workers',
+  waiting_for_series_bootstrap: 'Loading frozen market series',
+  warming_up_runtime: 'Warming strategy state',
+  runtime_subscribing: 'Connecting runtime telemetry',
+  awaiting_first_snapshot: 'Waiting for first runtime snapshot',
+  live: 'Evaluating market data',
+  degraded: 'Running with degraded evidence',
+  telemetry_degraded: 'Runtime active; telemetry delayed',
+  stopping: 'Stopping runtime',
+  cancel_requested: 'Accepting cancel request',
+  canceling: 'Stopping runtime container',
+  startup_failed: 'Startup failed',
+  failed: 'Run failed',
+  crashed: 'Runtime crashed',
+  stopped: 'Runtime stopped',
+  canceled: 'Run canceled',
+  degraded_terminal: 'Run ended with degraded evidence',
+  completed: 'Run completed',
+})
+
+export function describeLifecyclePhase(value) {
+  const phase = String(value || '').trim().toLowerCase()
+  if (!phase) return 'Lifecycle phase unavailable'
+  return LIFECYCLE_PHASE_LABELS[phase]
+    || phase.split('_').filter(Boolean).map((word) => word[0]?.toUpperCase() + word.slice(1)).join(' ')
+}
+
 function toEpochMs(value) {
   const parsed = Date.parse(String(value || ''))
   return Number.isFinite(parsed) ? parsed : null
@@ -19,22 +62,39 @@ export function buildRunRows(runs = [], { nowEpochMs = Date.now() } = {}) {
     const status = String(run?.runtime_status || run?.lifecycle?.status || run?.status || 'unknown').toLowerCase()
     const definition = run?.definition || {}
     const totalTrades = run?.summary?.total_trades
+    const phase = run?.lifecycle?.phase || null
+    const rawProgress = run?.progress ?? run?.runtime?.progress
+    const progressValue = rawProgress == null ? Number.NaN : Number(rawProgress)
+    const progress = Number.isFinite(progressValue)
+      ? Math.min(Math.max(progressValue, 0), 1)
+      : null
     return {
       id: run.run_id,
       run,
       definition,
       definitionId: run.bot_id || definition.id || null,
       definitionName: definition.name || run.bot_name || 'Definition unavailable',
-      strategy: run.strategy_name || definition.strategy_name || run.strategy_id || definition.strategy_id || 'Unavailable',
+      strategy: run.strategy_name || definition.strategy_variant_name || definition.strategy_name || run.strategy_id || definition.strategy_id || 'Unavailable',
       runType: run.run_type || definition.run_type || 'unknown',
       executionMode: run.execution_mode || definition.execution_mode || 'unavailable',
       status,
-      phase: run?.lifecycle?.phase || null,
+      phase,
+      phaseLabel: describeLifecyclePhase(phase),
       instruments: Array.isArray(run.symbols) ? run.symbols : [],
       timeframe: run.timeframe || '—',
       startedAt: run.started_at || null,
       endedAt: run.ended_at || null,
       knownAt: run.known_at || run.last_snapshot_at || run.updated_at || null,
+      livenessState: String(run?.liveness?.state || 'unknown').toLowerCase(),
+      livenessLabel: run?.liveness?.state === 'alive'
+        ? 'Alive'
+        : run?.liveness?.state === 'awaiting_telemetry'
+          ? 'Awaiting telemetry'
+          : 'Liveness unavailable',
+      progress,
+      progressPercent: progress === null ? null : Math.round(progress * 100),
+      progressCurrent: Number.isFinite(Number(run?.runtime?.progress_current)) ? Number(run.runtime.progress_current) : null,
+      progressTotal: Number.isFinite(Number(run?.runtime?.progress_total)) ? Number(run.runtime.progress_total) : null,
       durationMs: durationMs(run.started_at, run.ended_at, nowEpochMs),
       simulatedStart: run.backtest_start || null,
       simulatedEnd: run.backtest_end || null,
@@ -79,6 +139,7 @@ export function buildProjectedRunsFromBots(bots = [], { nowEpochMs = Date.now() 
         ...(bot.lifecycle || {}),
         status: display.statusKey,
       },
+      progress: bot?.runtime?.progress ?? null,
       summary: { ...persistedSummary, ...runtimeStats },
       botlens_available: Boolean(display?.controls?.canOpenLens),
       botlens_reason: display?.controls?.canOpenLens

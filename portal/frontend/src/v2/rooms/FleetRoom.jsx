@@ -11,11 +11,11 @@ import {
 } from '../../features/market-structure/buildMarketPosture.js'
 import { formatMarketStructureComponentError, useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
 import {
-  buildCurrentRunRowsFromBots,
   buildRunRows,
   filterAndSortRunRows,
   filterResearchRows,
 } from '../../features/operations/buildOperationsViewModel.js'
+import { useActiveRunsFeed } from '../../features/operations/useActiveRunsFeed.js'
 import { useRunInventory } from '../../features/operations/useRunInventory.js'
 import { OperatorErrorNotice, OperatorSkeleton } from '../components/OperatorErrorNotice.jsx'
 import { Pagination, paginateRows } from '../components/Pagination.jsx'
@@ -118,7 +118,7 @@ function RunsTable({ pageModel, loading, hasMore, loadingMore, onLoadMore }) {
 
 function CurrentRunCards({ rows, loading }) {
   if (loading && !rows.length) return <OperatorSkeleton rows={4} label="Connecting to active operations" />
-  if (!rows.length) return <div className="qt2-empty">No running, starting, paused, or degraded run is currently evidenced.</div>
+  if (!rows.length) return <div className="qt2-empty">No active runs.</div>
   return (
     <div className="qt2-active-run-grid">
       {rows.map((row) => (
@@ -134,9 +134,16 @@ function CurrentRunCards({ rows, loading }) {
           <dl>
             <div><dt>Scope</dt><dd>{row.instruments.join(', ') || 'Instrument unavailable'} · {row.timeframe}</dd></div>
             <div><dt>Runtime</dt><dd>{formatDuration(row.durationMs)}</dd></div>
-            <div><dt>Phase</dt><dd>{row.phase || 'Lifecycle phase unavailable'}</dd></div>
-            <div><dt>Evidence</dt><dd>{formatTime(row.knownAt || row.startedAt)}</dd></div>
+            <div><dt>Current work</dt><dd>{row.phaseLabel}</dd></div>
+            <div><dt>Liveness</dt><dd>{row.livenessLabel}</dd></div>
+            <div><dt>Last update</dt><dd>{formatTime(row.knownAt || row.startedAt)}</dd></div>
           </dl>
+          {row.progress !== null ? (
+            <div className="qt2-run-progress" aria-label={`Run progress ${row.progressPercent}%`}>
+              <div><span>Replay progress</span><strong>{row.progressCurrent !== null && row.progressTotal !== null ? `${row.progressCurrent.toLocaleString()} / ${row.progressTotal.toLocaleString()}` : `${row.progressPercent}%`}</strong></div>
+              <progress max="1" value={row.progress} />
+            </div>
+          ) : null}
           <div className="qt2-active-run-actions">
             {row.botLensAvailable ? (
               <Link className="qt2-button qt2-button-primary" to={'/operations/runs/' + row.id} state={{ run: row.run, definition: row.definition, from: '/operations?tab=runs' }}>Open BotLens</Link>
@@ -311,7 +318,9 @@ export function FleetRoom() {
     : rawTab
   const tab = TABS.some((item) => item.id === requestedTab) ? requestedTab : 'runs'
   const runView = params.get('view') === 'history' ? 'history' : 'current'
-  const { sortedBots, error: botsError, nowEpochMs, hasReceivedSnapshot, refresh: refreshBots } = useFleetBotsFeed()
+  const definitionsEnabled = tab === 'runs' && runView === 'history'
+  const { sortedBots, error: botsError, nowEpochMs, hasReceivedSnapshot, refresh: refreshBots } = useFleetBotsFeed({ enabled: definitionsEnabled })
+  const activeRunsFeed = useActiveRunsFeed({ enabled: tab === 'runs' && runView === 'current' })
   const runInventory = useRunInventory(sortedBots, { enabled: tab === 'runs' && runView === 'history' })
   const collectorFeed = useCollectorsFeed({ enabled: tab === 'market' })
   const marketFeed = useMarketStructureFeed({ enabled: tab === 'market' })
@@ -353,9 +362,9 @@ export function FleetRoom() {
   const runRows = useMemo(() => filterAndSortRunRows(
     runView === 'history'
       ? buildRunRows(runInventory.runs, { nowEpochMs })
-      : buildCurrentRunRowsFromBots(sortedBots, { nowEpochMs }),
+      : buildRunRows(activeRunsFeed.runs, { nowEpochMs }),
     { query, status, runType, sort },
-  ), [runInventory.runs, runView, sortedBots, nowEpochMs, query, status, runType, sort])
+  ), [activeRunsFeed.runs, runInventory.runs, runView, nowEpochMs, query, status, runType, sort])
   const collectorGroups = useMemo(
     () => buildCollectorGroups(collectorFeed, nowEpochMs, query),
     [collectorFeed, nowEpochMs, query],
@@ -400,8 +409,11 @@ export function FleetRoom() {
 
   function refresh() {
     if (tab === 'runs') {
-      refreshBots()
-      if (runView === 'history') runInventory.refresh()
+      if (runView === 'current') activeRunsFeed.refresh()
+      else {
+        refreshBots()
+        runInventory.refresh()
+      }
     } else if (tab === 'market') {
       collectorFeed.refresh()
       marketFeed.refresh()
@@ -418,7 +430,7 @@ export function FleetRoom() {
           <p className="qt2-sub">Find the thing first. Open the evidence only when you need it.</p>
         </div>
         <div className="qt2-head-actions">
-          <span className="qt2-observation-note">{tab === 'runs' ? (hasReceivedSnapshot ? 'Run definitions live' : 'Run definitions connecting') : tab === 'market' ? 'Market snapshots + live deltas' : 'Bounded research inventory'}</span>
+          <span className="qt2-observation-note">{tab === 'runs' ? (runView === 'current' ? (activeRunsFeed.hasReceivedSnapshot ? 'Active run stream live' : 'Active run stream connecting') : (hasReceivedSnapshot ? 'Run history ready' : 'Run history connecting')) : tab === 'market' ? 'Market snapshots + live deltas' : 'Bounded research inventory'}</span>
           <button type="button" className="qt2-icon-button" onClick={refresh}><RefreshCcw size={14} />Refresh</button>
         </div>
       </div>
@@ -431,7 +443,7 @@ export function FleetRoom() {
         <div className="qt2-run-view-switch" role="tablist" aria-label="Run inventory scope">
           <button type="button" role="tab" aria-selected={runView === 'current'} className={runView === 'current' ? 'is-active' : ''} onClick={() => selectRunView('current')}>Current</button>
           <button type="button" role="tab" aria-selected={runView === 'history'} className={runView === 'history' ? 'is-active' : ''} onClick={() => selectRunView('history')}>History</button>
-          <span>{runView === 'current' ? 'Live fleet projections only' : 'Persisted terminal and prior runs · 20 at a time'}</span>
+          <span>{runView === 'current' ? 'Live run instances, one card per container' : 'Persisted terminal and prior runs · 20 at a time'}</span>
         </div>
       ) : null}
 
@@ -445,10 +457,11 @@ export function FleetRoom() {
       <section className="qt2-section qt2-operations-body">
         {tab === 'runs' ? (
           <>
-            {botsError ? <OperatorErrorNotice error={botsError} compact /> : null}
+            {runView === 'current' && activeRunsFeed.error ? <OperatorErrorNotice error={activeRunsFeed.error} compact /> : null}
+            {runView === 'history' && botsError ? <OperatorErrorNotice error={botsError} compact /> : null}
             {runView === 'history' && runInventory.error ? <OperatorErrorNotice error={runInventory.error} compact /> : null}
             {runView === 'current' ? (
-              <CurrentRunCards rows={runRows} loading={!hasReceivedSnapshot && !sortedBots.length} />
+              <CurrentRunCards rows={runRows} loading={activeRunsFeed.loading && !activeRunsFeed.runs.length} />
             ) : (
               <RunsTable pageModel={runPageModel} loading={runInventory.loading} hasMore={runInventory.hasMore} loadingMore={runInventory.loadingMore} onLoadMore={runInventory.loadMore} />
             )}

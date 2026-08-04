@@ -14,10 +14,17 @@ from ..storage.repos.report_materializations import (
     compute_report_input_fingerprint as compute_report_fingerprint,
     get_materialized_run_report as get_materialized_report,
     get_report_materialization_status as get_materialization_status,
+    list_report_materialization_statuses as list_materialization_statuses,
     mark_report_materialization_failed as mark_materialization_failed,
     store_materialized_run_report as store_materialized_report,
 )
-from ..storage.repos.runs import count_bot_runs_by_day, get_bot_run, list_bot_runs
+from ..storage.repos.runs import (
+    count_bot_runs_by_day,
+    get_bot_run,
+    list_bot_runs,
+    list_report_catalog_candidates as list_report_catalog_candidate_rows,
+    list_report_catalog_details as list_report_catalog_detail_rows,
+)
 from ..storage.repos.runtime_events import list_bot_runtime_events
 from ..storage.repos.trades import (
     list_bot_trade_events_for_trades,
@@ -51,6 +58,14 @@ def list_runs(
     )
 
 
+def list_report_catalog_candidates(**filters: Any) -> List[Dict[str, Any]]:
+    return list_report_catalog_candidate_rows(**filters)
+
+
+def list_report_catalog_details(run_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    return list_report_catalog_detail_rows([str(run_id) for run_id in run_ids])
+
+
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
     return get_bot_run(run_id)
 
@@ -66,6 +81,10 @@ def count_runs_by_day(
 
 def get_report_materialization_status(run_id: str) -> Dict[str, Any]:
     return get_materialization_status(run_id)
+
+
+def list_report_materialization_statuses(run_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    return list_materialization_statuses([str(run_id) for run_id in run_ids])
 
 
 def get_materialized_run_report(run_id: str) -> Optional[Dict[str, Any]]:

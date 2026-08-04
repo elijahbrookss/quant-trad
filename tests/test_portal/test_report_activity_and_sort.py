@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 from portal.backend.service.reports import contract, report_data
+from portal.backend.service.storage.repos import report_materializations as materializations_repo
 from portal.backend.service.storage.repos import runs as runs_repo
 
 
@@ -28,9 +29,17 @@ def _run(**overrides: Any) -> dict[str, Any]:
 
 
 def _install_list_runs(monkeypatch, runs: list[dict[str, Any]]) -> None:
-    monkeypatch.setattr(report_data, "list_runs", lambda **_kwargs: [dict(r) for r in runs])
-    monkeypatch.setattr(report_data, "get_result_readiness", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(report_data, "get_report_materialization_status", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(report_data, "list_report_catalog_candidates", lambda **_kwargs: [dict(r) for r in runs])
+    monkeypatch.setattr(
+        report_data,
+        "list_report_catalog_details",
+        lambda run_ids: {str(run_id): {} for run_id in run_ids},
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_report_materialization_statuses",
+        lambda run_ids: {str(run_id): {} for run_id in run_ids},
+    )
 
 
 def _run_ids(payload: dict[str, Any]) -> list[str]:
@@ -89,6 +98,97 @@ def test_list_report_summaries_sort_treats_invalid_or_non_finite_metrics_as_miss
 
     assert _run_ids(payload)[0] == "valid"
     assert set(_run_ids(payload)[1:]) == {"text", "infinite"}
+
+
+def test_report_catalog_readiness_requires_fresh_materialized_proof(monkeypatch) -> None:
+    _install_list_runs(
+        monkeypatch,
+        [_run(run_id="run-ready", summary={"net_pnl": 5.0, "total_trades": 2})],
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_report_catalog_details",
+        lambda _run_ids: {
+            "run-ready": {
+                "dataset_id": "dataset-1",
+                "dataset_hash": "dataset-hash-1",
+                "execution_mode": "fast",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        report_data,
+        "list_report_materialization_statuses",
+        lambda _run_ids: {
+            "run-ready": {
+                "status": "ready",
+                "can_view": True,
+                "freshness_verified": False,
+                "artifact_readiness": {
+                    "dataset_ready": True,
+                    "results_ready": True,
+                    "safe_to_compare": True,
+                    "reason": "ready",
+                },
+            }
+        },
+    )
+
+    payload = contract.list_report_summaries()
+
+    assert payload["items"][0]["readiness"] == {
+        "dataset_ready": False,
+        "results_ready": False,
+        "safe_to_compare": False,
+        "reason": "report_freshness_unverified",
+        "dataset_status": "blocked",
+    }
+
+
+def test_compact_report_status_projection_preserves_exact_artifact_readiness() -> None:
+    query = materializations_repo._status_projection_query(["run-ready"])
+    selected_keys = {str(column.key) for column in query.selected_columns}
+    assert "artifact" not in selected_keys
+    row = {
+        "run_id": "run-ready",
+        "status": "ready",
+        "contract_version": materializations_repo.REPORT_CONTRACT_VERSION,
+        "report_schema_version": materializations_repo.REPORT_SCHEMA_VERSION,
+        "dataset_schema_version": materializations_repo.REPORT_DATASET_SCHEMA_VERSION,
+        "builder_source_revision": materializations_repo.source_revision(),
+        "storage_schema_version": materializations_repo.REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION,
+        "artifact_valid": True,
+        "artifact_dataset_ready": True,
+        "artifact_results_ready": True,
+        "artifact_safe_to_compare": True,
+        "artifact_readiness_reason": "ready",
+        "artifact_dataset_status": "ready",
+        "artifact_results_status": "ready",
+        "artifact_comparison_status": "ready",
+        "input_fingerprint": "fingerprint-1",
+    }
+
+    status = materializations_repo._status_from_projection(
+        row,
+        contract_version=materializations_repo.REPORT_CONTRACT_VERSION,
+        input_fingerprint="fingerprint-1",
+        freshness_verified=True,
+    )
+
+    assert status["status"] == "ready"
+    assert status["can_view"] is True
+    assert status["freshness_verified"] is True
+    assert status["artifact_readiness"]["safe_to_compare"] is True
+
+    stale = materializations_repo._status_from_projection(
+        row,
+        contract_version=materializations_repo.REPORT_CONTRACT_VERSION,
+        input_fingerprint="fingerprint-2",
+        freshness_verified=True,
+    )
+    assert stale["status"] == "stale"
+    assert stale["can_view"] is False
+    assert stale["stale_reason"] == "input_fingerprint_changed"
 
 
 def test_list_report_summaries_sort_sharpe_desc(monkeypatch) -> None:

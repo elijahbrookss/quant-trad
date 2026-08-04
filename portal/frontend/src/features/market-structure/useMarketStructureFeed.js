@@ -29,6 +29,8 @@ export function useMarketStructureFeed({ enabled = true } = {}) {
     }
     let mounted = true
     let source = null
+    let fallbackTimerId = null
+    let receivedStreamSnapshot = false
 
     function applyPayload(payload) {
       if (!mounted || !payload) return
@@ -53,6 +55,7 @@ export function useMarketStructureFeed({ enabled = true } = {}) {
 
     function applyEvent(event) {
       try {
+        receivedStreamSnapshot = true
         applyPayload(JSON.parse(event.data))
         setStreamError(null)
       } catch {
@@ -72,7 +75,6 @@ export function useMarketStructureFeed({ enabled = true } = {}) {
       }
     }
 
-    load()
     source = openMarketStructureStream({ sessionLimit: 250 })
     if (source) {
       source.addEventListener('snapshot', applyEvent)
@@ -80,13 +82,19 @@ export function useMarketStructureFeed({ enabled = true } = {}) {
       source.onerror = () => {
         if (mounted) setStreamError('Live market updates disconnected; reconnecting.')
       }
+      fallbackTimerId = setTimeout(() => {
+        if (!receivedStreamSnapshot) load()
+      }, 4_000)
     } else {
       setStreamError('Live market updates are unavailable in this browser.')
+      load()
     }
+    if (refreshRevision > 0) load()
 
     return () => {
       mounted = false
       source?.close()
+      if (fallbackTimerId) clearTimeout(fallbackTimerId)
     }
   }, [enabled, refreshRevision])
 

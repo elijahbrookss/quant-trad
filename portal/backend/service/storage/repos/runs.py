@@ -23,6 +23,10 @@ _NON_MATERIAL_CONFIG_KEYS = {
 _LIFECYCLE_OWNED_RUN_FIELDS = frozenset({"status", "started_at", "ended_at"})
 
 
+def _timestamp_iso(value: Any) -> Optional[str]:
+    return value.isoformat() + "Z" if value is not None else None
+
+
 def _merge_symbols(existing: Any, incoming: Any) -> list[str]:
     merged: list[str] = []
     seen: set[str] = set()
@@ -159,27 +163,142 @@ def list_latest_bot_runs_by_bot_ids(bot_ids: List[str]) -> Dict[str, Dict[str, A
     if not wanted or not db.available:
         return {}
     with db.session() as session:
+        ranked = (
+            select(
+                BotRunRecord.run_id.label("run_id"),
+                func.row_number()
+                .over(
+                    partition_by=BotRunRecord.bot_id,
+                    order_by=(
+                        BotRunRecord.started_at.desc().nullslast(),
+                        BotRunRecord.updated_at.desc().nullslast(),
+                        BotRunRecord.created_at.desc().nullslast(),
+                        BotRunRecord.run_id.desc(),
+                    ),
+                )
+                .label("row_rank"),
+            )
+            .where(BotRunRecord.bot_id.in_(wanted))
+            .subquery()
+        )
         rows = (
             session.execute(
                 select(BotRunRecord)
-                .where(BotRunRecord.bot_id.in_(wanted))
-                .order_by(
-                    BotRunRecord.bot_id.asc(),
-                    BotRunRecord.started_at.desc().nullslast(),
-                    BotRunRecord.updated_at.desc().nullslast(),
-                    BotRunRecord.created_at.desc().nullslast(),
-                    BotRunRecord.run_id.desc(),
-                )
+                .join(ranked, ranked.c.run_id == BotRunRecord.run_id)
+                .where(ranked.c.row_rank == 1)
             )
             .scalars()
             .all()
         )
-    latest: Dict[str, Dict[str, Any]] = {}
-    for row in rows:
-        bot_id = str(row.bot_id or "")
-        if bot_id and bot_id not in latest:
-            latest[bot_id] = row.to_dict()
-    return latest
+    return {
+        str(row.bot_id): row.to_dict()
+        for row in rows
+        if str(row.bot_id or "").strip()
+    }
+
+
+def list_report_catalog_candidates(
+    *,
+    run_type: str,
+    status: str,
+    bot_id: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    started_after: Optional[str] = None,
+    started_before: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return compact fields used to rank report catalog rows.
+
+    The hot catalog must not deserialize every run configuration. Dataset
+    identity and execution settings are loaded only for the bounded page
+    selected by the caller.
+    """
+
+    if not db.available:
+        return []
+    columns = (
+        BotRunRecord.run_id,
+        BotRunRecord.bot_id,
+        BotRunRecord.bot_name,
+        BotRunRecord.strategy_id,
+        BotRunRecord.strategy_name,
+        BotRunRecord.run_type,
+        BotRunRecord.status,
+        BotRunRecord.timeframe,
+        BotRunRecord.symbols,
+        BotRunRecord.backtest_start,
+        BotRunRecord.backtest_end,
+        BotRunRecord.started_at,
+        BotRunRecord.ended_at,
+        BotRunRecord.summary,
+        BotRunRecord.data_snapshot_hash,
+        BotRunRecord.updated_at,
+    )
+    query = select(*columns)
+    if run_type:
+        query = query.where(BotRunRecord.run_type == str(run_type))
+    if status:
+        query = query.where(BotRunRecord.status == str(status))
+    if bot_id:
+        query = query.where(BotRunRecord.bot_id == str(bot_id))
+    if timeframe:
+        query = query.where(BotRunRecord.timeframe == str(timeframe))
+    start_dt = _parse_optional_timestamp(started_after)
+    if start_dt:
+        query = query.where(BotRunRecord.ended_at >= start_dt)
+    end_dt = _parse_optional_timestamp(started_before)
+    if end_dt:
+        query = query.where(BotRunRecord.ended_at <= end_dt)
+    with db.session() as session:
+        rows = session.execute(query).mappings().all()
+    return [
+        {
+            **dict(row),
+            "symbols": list(row.get("symbols") or []),
+            "summary": dict(row.get("summary") or {}),
+            "backtest_start": _timestamp_iso(row.get("backtest_start")),
+            "backtest_end": _timestamp_iso(row.get("backtest_end")),
+            "started_at": _timestamp_iso(row.get("started_at")),
+            "ended_at": _timestamp_iso(row.get("ended_at")),
+            "updated_at": _timestamp_iso(row.get("updated_at")),
+        }
+        for row in rows
+    ]
+
+
+def list_report_catalog_details(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return only the JSON scalar details needed by report catalog cards."""
+
+    wanted = [str(run_id or "").strip() for run_id in dict.fromkeys(run_ids) if str(run_id or "").strip()]
+    if not wanted or not db.available:
+        return {}
+    config = BotRunRecord.config_snapshot
+    query = select(
+        BotRunRecord.run_id,
+        func.coalesce(
+            config["execution_mode"].as_string(),
+            config["bot"]["execution_mode"].as_string(),
+            config["risk_settings"]["execution_mode"].as_string(),
+            config["bot"]["risk"]["execution_mode"].as_string(),
+        ).label("execution_mode"),
+        func.coalesce(
+            config["execution_behavior"].as_string(),
+            config["bot"]["execution_behavior"].as_string(),
+            config["bot"]["risk"]["execution_behavior"].as_string(),
+        ).label("execution_behavior"),
+        config["dataset_binding"]["dataset_id"].as_string().label("dataset_id"),
+        config["dataset_binding"]["dataset_hash"].as_string().label("dataset_hash"),
+    ).where(BotRunRecord.run_id.in_(wanted))
+    with db.session() as session:
+        rows = session.execute(query).mappings().all()
+    return {
+        str(row["run_id"]): {
+            "execution_mode": row.get("execution_mode"),
+            "execution_behavior": row.get("execution_behavior"),
+            "dataset_id": row.get("dataset_id"),
+            "dataset_hash": row.get("dataset_hash"),
+        }
+        for row in rows
+    }
 
 
 
@@ -244,7 +363,39 @@ def list_bot_runs_page(
         BotRunRecord.updated_at,
         BotRunRecord.created_at,
     )
-    query = select(BotRunRecord)
+    config = BotRunRecord.config_snapshot
+    columns = (
+        BotRunRecord.run_id,
+        BotRunRecord.bot_id,
+        BotRunRecord.bot_name,
+        BotRunRecord.strategy_id,
+        BotRunRecord.strategy_name,
+        BotRunRecord.run_type,
+        BotRunRecord.status,
+        BotRunRecord.timeframe,
+        BotRunRecord.datasource,
+        BotRunRecord.exchange,
+        BotRunRecord.symbols,
+        BotRunRecord.backtest_start,
+        BotRunRecord.backtest_end,
+        BotRunRecord.started_at,
+        BotRunRecord.ended_at,
+        BotRunRecord.summary,
+        BotRunRecord.config_hash,
+        BotRunRecord.material_config_hash,
+        BotRunRecord.strategy_hash,
+        BotRunRecord.data_snapshot_hash,
+        BotRunRecord.runtime_contract_version,
+        BotRunRecord.runtime_source_revision,
+        BotRunRecord.runtime_image,
+        BotRunRecord.storage_schema_version,
+        BotRunRecord.created_at,
+        BotRunRecord.updated_at,
+        config["execution_mode"].as_string().label("execution_mode"),
+        config["execution_behavior"].as_string().label("execution_behavior"),
+        config["dataset_binding"]["dataset_id"].as_string().label("dataset_id"),
+    )
+    query = select(*columns)
     cursor_at = _parse_optional_timestamp(before_sort_at)
     cursor_run_id = str(before_run_id or "").strip()
     if cursor_at is not None:
@@ -256,8 +407,39 @@ def list_bot_runs_page(
         )
     query = query.order_by(sort_at.desc(), BotRunRecord.run_id.desc()).limit(bounded_limit)
     with db.session() as session:
-        rows = session.execute(query).scalars().all()
-    return [row.to_dict() for row in rows]
+        rows = session.execute(query).mappings().all()
+    projected: List[Dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        execution_mode = str(row.get("execution_mode") or "fast").strip().lower()
+        if execution_mode not in {"fast", "full"}:
+            execution_mode = "fast"
+        execution_behavior = str(row.get("execution_behavior") or "simulated").strip().lower().replace("_", "-")
+        if execution_behavior not in {"simulated", "observe-only"}:
+            execution_behavior = "simulated"
+        dataset_id = str(row.pop("dataset_id", "") or "").strip() or None
+        row.update(
+            {
+                "symbols": list(row.get("symbols") or []),
+                "summary": dict(row.get("summary") or {}),
+                "backtest_start": _timestamp_iso(row.get("backtest_start")),
+                "backtest_end": _timestamp_iso(row.get("backtest_end")),
+                "started_at": _timestamp_iso(row.get("started_at")),
+                "ended_at": _timestamp_iso(row.get("ended_at")),
+                "created_at": _timestamp_iso(row.get("created_at")),
+                "updated_at": _timestamp_iso(row.get("updated_at")),
+                "execution_mode": execution_mode,
+                "execution_behavior": execution_behavior,
+                "dataset_id": dataset_id,
+                "config_snapshot": (
+                    {"dataset_binding": {"dataset_id": dataset_id}}
+                    if dataset_id
+                    else {}
+                ),
+            }
+        )
+        projected.append(row)
+    return projected
 
 
 def count_bot_runs_by_day(

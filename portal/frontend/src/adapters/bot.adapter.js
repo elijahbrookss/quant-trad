@@ -44,6 +44,14 @@ export async function fetchRun(runId) {
   return request(`/api/bots/runs/${encodeURIComponent(runId)}`)
 }
 
+export async function fetchActiveRuns() {
+  return request('/api/bots/runs/active')
+}
+
+export function openActiveRunsStream() {
+  return openSse('/api/bots/runs/stream', { withCredentials: false, base: BASE })
+}
+
 export async function fetchBotRuntimeCapacity() {
   return request('/api/bots/runtime-capacity')
 }

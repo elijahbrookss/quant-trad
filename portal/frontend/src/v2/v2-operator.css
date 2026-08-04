@@ -283,6 +283,44 @@
   gap: 0.55rem;
 }
 
+.qt2-run-progress {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.qt2-run-progress > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #81848a;
+  font-size: 0.56rem;
+}
+
+.qt2-run-progress strong {
+  color: #d8d1c2;
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+.qt2-run-progress progress {
+  width: 100%;
+  height: 0.28rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.qt2-run-progress progress::-webkit-progress-bar {
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.qt2-run-progress progress::-webkit-progress-value,
+.qt2-run-progress progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(194, 164, 109, 0.72), rgba(230, 211, 169, 0.92));
+}
+
 .qt2-active-run-head > span:last-child {
   color: #7c7f85;
   font-family: var(--font-mono);

@@ -239,6 +239,42 @@ async def stream_bots() -> StreamingResponse:
     return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)
 
 
+@router.get("/runs/active")
+def active_bot_runs() -> Dict[str, Any]:
+    rows = bot_service.list_active_run_instances()
+    return {
+        "schema_version": "active_run_list.v1",
+        "runs": rows,
+        "total": len(rows),
+        "observed_at": _utc_now_iso(),
+    }
+
+
+@router.get("/runs/stream")
+async def stream_active_bot_runs() -> StreamingResponse:
+    release, channel, initial = await asyncio.to_thread(bot_service.active_runs_stream)
+
+    async def event_iterator():
+        try:
+            yield _format_sse(initial.get("type", "snapshot"), initial)
+            while True:
+                try:
+                    payload = await asyncio.to_thread(channel.get)
+                except asyncio.CancelledError:
+                    break
+                if not payload:
+                    continue
+                yield _format_sse(payload.get("type", "update"), payload)
+        finally:
+            release()
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/runs")
 def bot_run_inventory(
     limit: int = 100,
