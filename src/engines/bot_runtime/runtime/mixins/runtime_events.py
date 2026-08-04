@@ -286,6 +286,18 @@ class RuntimeEventsMixin:
         warning_id = str(entry.get("warning_id") or "").strip() or self._warning_identity(entry, context)
         entry["warning_id"] = warning_id
         entry["id"] = warning_id
+        material_fields = (
+            "warning_id",
+            "warning_type",
+            "severity",
+            "source",
+            "indicator_id",
+            "symbol_key",
+            "symbol",
+            "timeframe",
+            "title",
+            "message",
+        )
         with self._lock:
             warnings = list(self._warnings)
             match_index = next(
@@ -293,6 +305,7 @@ class RuntimeEventsMixin:
                 None,
             )
             if match_index is None:
+                material_changed = True
                 entry.setdefault("count", 1)
                 entry.setdefault("first_seen_at", entry.get("timestamp") or now_iso)
                 entry["last_seen_at"] = entry.get("timestamp") or now_iso
@@ -302,15 +315,20 @@ class RuntimeEventsMixin:
                 warnings.append(entry)
             else:
                 existing = dict(warnings.pop(match_index))
+                previous_material = tuple(existing.get(field) for field in material_fields)
                 existing.update(entry)
                 existing["count"] = int(existing.get("count") or 1) + 1
                 existing["first_seen_at"] = existing.get("first_seen_at") or existing.get("timestamp") or now_iso
                 existing["last_seen_at"] = entry.get("timestamp") or now_iso
                 existing["updated_at"] = existing["last_seen_at"]
+                material_changed = previous_material != tuple(
+                    existing.get(field) for field in material_fields
+                )
                 warnings.append(existing)
             self._warnings = deque(warnings, maxlen=self._warning_limit)
             self.state["warnings"] = list(self._warnings)
-            self._warning_revision = int(getattr(self, "_warning_revision", 0) or 0) + 1
+            if material_changed:
+                self._warning_revision = int(getattr(self, "_warning_revision", 0) or 0) + 1
 
     def warnings(self) -> List[Dict[str, object]]:
         """Return the current runtime warnings."""

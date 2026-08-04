@@ -155,7 +155,6 @@ class LadderRiskEngine:
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
         self.trade_revision: int = 0
-        self._trade_material_signature: Tuple[Any, ...] = self._trade_material_state_signature()
         self._trade_material_signature_map: Dict[str, Tuple[Any, ...]] = self._trade_material_signature_by_id()
         self._trade_change_log: List[Tuple[int, Tuple[str, ...]]] = []
         self._trade_change_log_max: int = 8192
@@ -1690,12 +1689,14 @@ class LadderRiskEngine:
             )
             logger.warning(with_log_context("short_entry_rejected", context))
             return None
-        previous_signature = dict(self._trade_material_signature_map)
         self.active_trade = self.entry_execution.submit_entry(candle, direction)
         if self.active_trade is None:
             return None
         self.trades.append(self.active_trade)
-        self._bump_trade_revision_if_material_changed(previous_signature)
+        self._bump_trade_revision_if_material_changed(
+            {},
+            touched_trades=(self.active_trade,),
+        )
         return self.active_trade
 
     def step(
@@ -1704,18 +1705,25 @@ class LadderRiskEngine:
         *,
         same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.PESSIMISTIC_STOP,
     ) -> List[Dict[str, Any]]:
-        previous_signature = dict(self._trade_material_signature_map)
+        touched_trade = self.active_trade
+        previous_signature = self._cached_trade_material_signatures(
+            (touched_trade,) if touched_trade is not None else ()
+        )
         if self.active_trade is None:
             new_trade = self.entry_execution.process_pending(candle)
             if new_trade:
                 self.active_trade = new_trade
                 self.trades.append(self.active_trade)
+                touched_trade = new_trade
         if self.active_trade is None:
             return []
         events = self.active_trade.apply_bar(candle, same_bar_policy=same_bar_policy)
         if not self.active_trade.is_active():
             self.active_trade = None
-        self._bump_trade_revision_if_material_changed(previous_signature)
+        self._bump_trade_revision_if_material_changed(
+            previous_signature,
+            touched_trades=(touched_trade,) if touched_trade is not None else (),
+        )
         return events
 
     def step_intrabar_candle(
@@ -1770,16 +1778,20 @@ class LadderRiskEngine:
         *,
         reason_code: str = "BACKTEST_END",
     ) -> List[Dict[str, Any]]:
-        previous_signature = dict(self._trade_material_signature_map)
         if self.active_trade is None:
             return []
-        events = self.active_trade.force_close_at_backtest_end(
+        touched_trade = self.active_trade
+        previous_signature = self._cached_trade_material_signatures((touched_trade,))
+        events = touched_trade.force_close_at_backtest_end(
             candle,
             reason_code=reason_code,
         )
         if self.active_trade is not None and not self.active_trade.is_active():
             self.active_trade = None
-        self._bump_trade_revision_if_material_changed(previous_signature)
+        self._bump_trade_revision_if_material_changed(
+            previous_signature,
+            touched_trades=(touched_trade,),
+        )
         return events
 
     def _bump_trade_revision(self, *, changed_trade_ids: Sequence[str] = ()) -> None:
@@ -1814,6 +1826,22 @@ class LadderRiskEngine:
             if not trade_id:
                 continue
             signatures[trade_id] = self._trade_material_signature_for_trade(trade)
+        return signatures
+
+    def _cached_trade_material_signatures(
+        self,
+        trades: Sequence[LadderPosition],
+    ) -> Dict[str, Tuple[Any, ...]]:
+        signatures: Dict[str, Tuple[Any, ...]] = {}
+        for trade in trades:
+            trade_id = str(getattr(trade, "trade_id", "") or "").strip()
+            if not trade_id:
+                continue
+            signature = self._trade_material_signature_map.get(trade_id)
+            if signature is None:
+                signature = self._trade_material_signature_for_trade(trade)
+                self._trade_material_signature_map[trade_id] = signature
+            signatures[trade_id] = signature
         return signatures
 
     def _trade_material_signature_for_trade(self, trade: LadderPosition) -> Tuple[Any, ...]:
@@ -1854,17 +1882,28 @@ class LadderRiskEngine:
     def _bump_trade_revision_if_material_changed(
         self,
         previous_signature: Tuple[Any, ...] | Mapping[str, Tuple[Any, ...]],
+        *,
+        touched_trades: Optional[Sequence[LadderPosition]] = None,
     ) -> bool:
-        current_signature = self._trade_material_state_signature()
-        current_signature_map = self._trade_material_signature_by_id()
-        self._trade_material_signature = current_signature
-        self._trade_material_signature_map = current_signature_map
+        touched_by_id: Dict[str, LadderPosition] = {}
+        if touched_trades is None:
+            current_signature_map = self._trade_material_signature_by_id()
+            self._trade_material_signature_map = current_signature_map
+        else:
+            current_signature_map = self._trade_material_signature_map
+            for trade in touched_trades:
+                trade_id = str(getattr(trade, "trade_id", "") or "").strip()
+                if not trade_id:
+                    continue
+                touched_by_id[trade_id] = trade
+                current_signature_map[trade_id] = self._trade_material_signature_for_trade(trade)
 
         def _advance_position_commit_seq(changed_trade_ids: Sequence[str]) -> None:
             changed = {str(trade_id) for trade_id in changed_trade_ids if str(trade_id).strip()}
             if not changed:
                 return
-            for trade in self.trades:
+            candidates = touched_by_id.values() if touched_by_id else self.trades
+            for trade in candidates:
                 trade_id = str(getattr(trade, "trade_id", "") or "").strip()
                 if trade_id not in changed:
                     continue
@@ -1873,9 +1912,14 @@ class LadderRiskEngine:
 
         if isinstance(previous_signature, Mapping):
             previous_signature_map = dict(previous_signature)
+            candidate_ids = (
+                set(previous_signature_map) | set(touched_by_id)
+                if touched_trades is not None
+                else set(previous_signature_map) | set(current_signature_map)
+            )
             changed_trade_ids = sorted(
                 trade_id
-                for trade_id in set(previous_signature_map) | set(current_signature_map)
+                for trade_id in candidate_ids
                 if previous_signature_map.get(trade_id) != current_signature_map.get(trade_id)
             )
             if not changed_trade_ids:
@@ -1884,6 +1928,11 @@ class LadderRiskEngine:
             self._bump_trade_revision(changed_trade_ids=changed_trade_ids)
             return True
 
+        current_signature = tuple(
+            current_signature_map.get(str(getattr(trade, "trade_id", "") or "").strip())
+            for trade in self.trades
+            if str(getattr(trade, "trade_id", "") or "").strip()
+        )
         if current_signature == previous_signature:
             return False
         changed_trade_ids = sorted(current_signature_map)

@@ -109,7 +109,9 @@ class RuntimeExecutionLoopMixin:
             self._log_revision = 0
             self._decision_revision = 0
             self._push_log_marker = None
+            self._push_log_revision_seen = -1
             self._push_decision_marker = None
+            self._push_wallet_stream_length = 0
             self._push_payload_size_probe_count = 0
             self._warning_revision = 0
             self._push_runtime_health_fingerprint = None
@@ -700,12 +702,6 @@ class RuntimeExecutionLoopMixin:
                 step_context["epoch"] = epoch
                 step_context["bar_time"] = bar_time
 
-                context = self._series_log_context(
-                    series,
-                    bar_index=state.bar_index,
-                    epoch=epoch,
-                )
-                logger.debug(with_log_context("apply_bar", context))
                 if state.bar_index % WALK_FORWARD_SAMPLE_INTERVAL == 0:
                     info_context = self._series_log_context(
                         series,

@@ -1179,7 +1179,15 @@ class RuntimePushStreamMixin:
         return durable
 
     def _log_facts(self) -> Tuple[List[Dict[str, Any]], int]:
-        entries = self.logs()
+        revision_tracked = hasattr(self, "_log_revision")
+        with self._lock:
+            revision = int(getattr(self, "_log_revision", 0) or 0)
+            seen_revision = int(getattr(self, "_push_log_revision_seen", -1))
+            if revision_tracked and seen_revision == revision:
+                return [], 0
+            entries = list(self._logs) if revision_tracked else []
+        if not revision_tracked:
+            entries = self.logs()
         new_entries, marker, dropped = self._bounded_entries_after_marker(
             entries,
             marker_field="id",
@@ -1191,6 +1199,7 @@ class RuntimePushStreamMixin:
             fact_type=BOTLENS_FACT_LOG_EMITTED,
         )
         self._push_log_marker = marker
+        self._push_log_revision_seen = revision
         return [{"fact_type": BOTLENS_FACT_LOG_EMITTED, "log": entry} for entry in new_entries], dropped
 
     def _decision_facts(self) -> Tuple[List[Dict[str, Any]], int]:
@@ -1991,13 +2000,26 @@ class RuntimePushStreamMixin:
         stream = getattr(run_context, "runtime_event_stream", None)
         if stream is None:
             return []
-        entries = list(stream)
-        new_entries, marker = self._entries_after_marker(
-            entries,
-            marker_field="event_id",
-            previous_marker=getattr(self, "_push_wallet_marker", None),
-        )
+        stream_length = len(stream)
+        previous_length = max(int(getattr(self, "_push_wallet_stream_length", 0) or 0), 0)
+        if stream_length == previous_length:
+            return []
+        if 0 <= previous_length < stream_length:
+            new_entries = list(stream[previous_length:])
+            marker = (
+                str(new_entries[-1].get("event_id") or "").strip()
+                if new_entries and isinstance(new_entries[-1], AbcMapping)
+                else getattr(self, "_push_wallet_marker", None)
+            )
+        else:
+            entries = list(stream)
+            new_entries, marker = self._entries_after_marker(
+                entries,
+                marker_field="event_id",
+                previous_marker=getattr(self, "_push_wallet_marker", None),
+            )
         self._push_wallet_marker = marker
+        self._push_wallet_stream_length = stream_length
         facts: List[Dict[str, Any]] = []
         projected_wallet = getattr(self, "_push_wallet_projection", None)
         if isinstance(projected_wallet, AbcMapping):

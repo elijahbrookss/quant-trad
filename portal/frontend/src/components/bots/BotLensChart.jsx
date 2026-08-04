@@ -17,6 +17,9 @@ import {
   resolveCandleUpdateCameraIntent,
   resolveCandleUpdateViewport,
 } from './chartCameraPolicy.js'
+import { resolveChartArtifactRefreshKey } from './chartArtifactRefreshPolicy.js'
+
+const EMPTY_LIST = Object.freeze([])
 
 const parseTimeframeToSeconds = (rawTimeframe) => {
   const text = (rawTimeframe || '').toString().trim().toLowerCase()
@@ -177,14 +180,14 @@ export function BotLensChart({
   const prevCandleDataRef = useRef([])
   const diagLoggedRef = useRef(false)
   const frameSampleRef = useRef({ total: 0, count: 0, logged: false })
-  const pendingCameraIntentRef = useRef(null)
+  const latestTradeSegmentsRef = useRef([])
   const lastDataUpdateTokenRef = useRef(null)
   const { registerChart } = useChartState()
   const logger = useMemo(() => createLogger('BotLensChart', { chartId }), [chartId])
 
-  const resolvedCandles = Array.isArray(candles) ? candles : []
-  const resolvedTrades = Array.isArray(trades) ? trades : []
-  const resolvedOverlays = Array.isArray(overlays) ? overlays : []
+  const resolvedCandles = Array.isArray(candles) ? candles : EMPTY_LIST
+  const resolvedTrades = Array.isArray(trades) ? trades : EMPTY_LIST
+  const resolvedOverlays = Array.isArray(overlays) ? overlays : EMPTY_LIST
   const instantPlayback = Number(playbackSpeed) <= 0 || String(mode || '').toLowerCase() === 'instant'
   const playbackProfile = useMemo(() => {
     const speed = Number(playbackSpeed)
@@ -223,6 +226,16 @@ export function BotLensChart({
   const candleData = resolvedCandles
   const candleLookup = useMemo(() => buildCandleLookup(candleData), [candleData])
   const candleLookupRef = useRef(candleLookup)
+  const artifactRefreshKey = resolveChartArtifactRefreshKey({
+    candles: candleData,
+    timeframe,
+    dataUpdateToken,
+  })
+  // Live candles are the hot path. Chart artifacts are immutable between their
+  // own updates, so refresh their candle window at a bounded bar cadence.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const artifactCandles = useMemo(() => candleData, [artifactRefreshKey, resolvedOverlays, resolvedTrades])
+  const artifactCandleLookup = useMemo(() => buildCandleLookup(artifactCandles), [artifactCandles])
 
   useEffect(() => {
     latestCandlesRef.current = candleData
@@ -267,7 +280,7 @@ export function BotLensChart({
   }, [candleData, chartId, debugRanges, logger])
 
   const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, segments: tradeSegments, priceLines: tradePriceLines } =
-    useTradeMarkers(resolvedTrades, candleLookup, candleData, {
+    useTradeMarkers(resolvedTrades, artifactCandleLookup, artifactCandles, {
       selectedTradeId,
       showActiveTradeLevels,
     })
@@ -277,7 +290,6 @@ export function BotLensChart({
   const showTradeRegions = overlayVisibility.trade_regions !== false
 
   const markerManager = useMarkerManager({ seriesRef, markersApiRef, markerCacheRef })
-  const refreshMarkers = markerManager.flush
 
   const { recenter, requestIntent, attachRangeGuards, setAnimationActive, focusAtTime, resetViewport } = useCameraLock({
     chartRef,
@@ -393,7 +405,6 @@ export function BotLensChart({
       updateMode: effectiveUpdateMode,
       followLatest: followLatestCandles,
     })
-    if (cameraIntent) pendingCameraIntentRef.current = cameraIntent
 
     const sample = frameSampleRef.current
     const start = performance.now()
@@ -434,6 +445,14 @@ export function BotLensChart({
 
     prevCandleDataRef.current = next
 
+    if (cameraIntent) {
+      requestIntent({
+        ...cameraIntent,
+        payload: { ...(cameraIntent.payload || {}), segments: latestTradeSegmentsRef.current },
+        reason: cameraIntent.reason,
+      })
+    }
+
     if (debugRanges) {
       const timeScale = chartRef.current?.timeScale?.()
       const range = timeScale?.getVisibleRange?.() || null
@@ -450,7 +469,7 @@ export function BotLensChart({
         logicalRange,
       })
     }
-  }, [cancelAnimator, candleData, dataUpdateMode, dataUpdateToken, debugRanges, followLatestCandles, logger, playbackProfile, seriesRef, startAnimator])
+  }, [cancelAnimator, candleData, chartId, dataUpdateMode, dataUpdateToken, debugRanges, followLatestCandles, logger, playbackProfile, playbackSpeed, requestIntent, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
@@ -475,7 +494,7 @@ export function BotLensChart({
       tradeRegions: showTradeRegions ? tradeRegions : [],
       tradeSegments: showTradeRegions ? tradeSegments : [],
       tradePriceLines: showTradeRays && showActiveTradeLevels ? tradePriceLines : [],
-      candleData,
+      candleData: artifactCandles,
     })
     if (BOTLENS_DEBUG) {
       logger.debug('overlay_render_artifacts', {
@@ -490,6 +509,7 @@ export function BotLensChart({
       })
     }
     applyArtifacts(artifacts)
+    latestTradeSegmentsRef.current = artifacts.tradeSegments || []
     if (debugRanges) {
       const markerTimes = (artifacts?.markers || [])
         .map((marker) => marker?.time)
@@ -502,17 +522,7 @@ export function BotLensChart({
         last: markerTimes[markerTimes.length - 1] ?? null,
       })
     }
-    if (pendingCameraIntentRef.current) {
-      const pending = pendingCameraIntentRef.current
-      requestIntent({
-        ...pending,
-        payload: { ...(pending.payload || {}), segments: artifacts.tradeSegments },
-        reason: pending.reason,
-      })
-      refreshMarkers({ force: true })
-      pendingCameraIntentRef.current = null
-    }
-  }, [applyArtifacts, candleData, computeArtifacts, debugRanges, logger, refreshMarkers, requestIntent, resolvedOverlays, showActiveTradeLevels, showTradeMarkers, showTradeRays, showTradeRegions, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
+  }, [applyArtifacts, artifactCandles, computeArtifacts, debugRanges, logger, resolvedOverlays, showActiveTradeLevels, showTradeMarkers, showTradeRays, showTradeRegions, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
 
   const containerClasses = [
     'relative w-full overflow-hidden rounded-[3px] border border-white/10 bg-[#0f1118]',

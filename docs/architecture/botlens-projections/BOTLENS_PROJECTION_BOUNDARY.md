@@ -45,17 +45,21 @@ code_paths:
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/engines/bot_runtime/runtime/mixins/setup_prepare.py
   - src/engines/bot_runtime/runtime/mixins/execution_loop.py
+  - src/engines/bot_runtime/runtime/mixins/runtime_events.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - src/engines/bot_runtime/runtime/mixins/runtime_projection.py
+  - src/engines/bot_runtime/core/domain/engine.py
   - src/engines/bot_runtime/strategy/series_builder_parts/models.py
   - portal/frontend/src/features/bots/botlens
   - portal/frontend/src/adapters/bot.adapter.js
   - portal/frontend/src/components/bots/BotLensChart.jsx
+  - portal/frontend/src/components/bots/chartArtifactRefreshPolicy.js
   - portal/frontend/src/components/bots/chartCameraPolicy.js
   - portal/frontend/src/components/bots/hooks/useMarkerManager.js
   - portal/frontend/src/components/bots/hooks/useTradeMarkers.js
   - portal/frontend/src/components/bots/botlensProjection.js
   - portal/frontend/src/features/bots/botlens/buildBotLensRuntimeViewModel.js
+  - portal/frontend/src/features/bots/botlens/hooks/useBotLensController.js
   - portal/frontend/src/features/bots/botlens/components/ChartPanel.jsx
   - portal/frontend/src/features/bots/botlens/state/botlensRuntimeSelectors.js
   - portal/frontend/src/features/bots/botlens/state/botlensRuntimeState.js
@@ -319,6 +323,14 @@ and reduced once per animation frame. The pending client buffer is capped at
 bootstrap rather than silently dropping facts while continuing to claim live
 state.
 
+The chart's candle series and follow-latest camera advance on every accepted
+live candle. Trade segments, markers, price-scale ghosts, and overlay geometry
+use a separate artifact snapshot. That snapshot refreshes immediately when
+trade, overlay, or loaded-history identity changes and otherwise at a bounded
+ten-bar cadence. This presentation cadence does not delay candles, change
+projected facts, or weaken trade/overlay clocks; it prevents the renderer from
+rebuilding every historical visual artifact for each candle-only message.
+
 Frozen chart history loads 240 candles per left-edge request and keeps a sliding
 window of at most 3,840 candles plus 16 overlay pages. Chart trade state is
 deduplicated and clipped to trades that overlap the retained candle window, so
@@ -353,6 +365,19 @@ Wallet ledger and diagnostic facts keep full
 canonical payloads on the producer-side canonical append path while live
 transport drops repeated wallet snapshots and raw diagnostic context that the
 hot view does not need.
+
+Runtime live-fact cursors are mutation driven. Trade material signatures are
+recomputed only for the trade touched by an entry, step, or forced close; a
+full scan remains only as a compatibility path for callers that cannot identify
+their touched trades. Log delivery uses the log revision before reading the
+retained deque, and wallet delivery consumes the append-only runtime-event tail.
+Repeated occurrences of an otherwise unchanged runtime warning still update its
+aggregate occurrence metadata, but do not advance the compact warning revision
+because that compact live payload intentionally omits occurrence timestamps and
+counts. High-frequency intrabar fallbacks therefore use a condition identity
+scoped by series and reason rather than a bar timestamp. Their per-bar durable
+runtime events remain distinct evidence. A material warning field change does
+advance the revision.
 
 Paper market streams may emit `provisional_candle_updated` facts. They update
 the selected-symbol chart by replacing the latest visual candle for the

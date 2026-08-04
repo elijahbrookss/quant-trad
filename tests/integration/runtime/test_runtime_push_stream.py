@@ -2230,3 +2230,40 @@ def test_push_update_coalesces_repeated_runtime_warning_counts_until_health_hear
     assert "runtime_state_observed" not in second_fact_types
     assert "runtime_state_observed" in third_fact_types
     assert snapshot_calls == 2
+
+
+def test_log_facts_skip_retained_log_scan_when_revision_is_unchanged() -> None:
+    runtime = _PushRuntime()
+    runtime._logs = [{"id": "log-1", "message": "first"}]
+    runtime._log_revision = 1
+    runtime._push_log_revision_seen = -1
+
+    first, first_dropped = runtime._log_facts()
+    runtime._entries_after_marker = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("unchanged logs must not be rescanned")
+    )
+    second, second_dropped = runtime._log_facts()
+
+    assert [fact["log"]["id"] for fact in first] == ["log-1"]
+    assert first_dropped == 0
+    assert second == []
+    assert second_dropped == 0
+
+
+def test_wallet_facts_read_only_new_runtime_events_after_first_cursor() -> None:
+    runtime = _PushRuntime()
+    runtime._run_context.runtime_event_stream = [
+        {"event_id": "event-1", "event_name": "IGNORED", "context": {}},
+    ]
+    runtime._push_wallet_stream_length = 0
+
+    assert runtime._wallet_facts() == []
+    runtime._entries_after_marker = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("append-only wallet stream must not be rescanned")
+    )
+    runtime._run_context.runtime_event_stream.append(
+        {"event_id": "event-2", "event_name": "IGNORED", "context": {}}
+    )
+
+    assert runtime._wallet_facts() == []
+    assert runtime._push_wallet_stream_length == 2

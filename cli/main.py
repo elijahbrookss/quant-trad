@@ -2953,7 +2953,11 @@ def build_parser() -> argparse.ArgumentParser:
     bots_start.add_argument("--run-type", choices=["backtest", "sim_trade", "paper", "live"])
     bots_start.add_argument("--execution-behavior", "--execution", choices=["simulated", "observe-only"], dest="execution_behavior")
     bots_start.add_argument("--dataset-id", help="Required immutable dataset identity for backtest runs.")
-    bots_start.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
+    bots_start.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable opt-in cProfile and process peak-RSS evidence for this backtest run.",
+    )
     bots_start.add_argument("--duration-seconds", type=float, help="Optional bounded duration for observe-only paper runs.")
     bots_start.add_argument(
         "--market-data-stream-policy-json",
@@ -4010,7 +4014,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_bot = experiments_sub.add_parser("start-bot", help="Start a bot run and write a resumable experiment record.")
     start_bot.add_argument("bot_id")
     start_bot.add_argument("--dataset-id", required=True, help="Prepared immutable dataset identity.")
-    start_bot.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
+    start_bot.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable opt-in cProfile and process peak-RSS evidence for this backtest run.",
+    )
     start_bot.add_argument("--request-id")
     start_bot.add_argument("--baseline-run-id")
     start_bot.add_argument("--export", action="store_true", help="Record export as a default for collect.")

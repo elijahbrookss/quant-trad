@@ -22,6 +22,7 @@ code_paths:
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
+  - src/engines/bot_runtime/runtime/profiling.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - portal/backend/service/storage/repos/observability.py
   - portal/backend/service/storage/repos/market_collection.py
@@ -202,6 +203,17 @@ complete database pressure signal.
   before persistence. The hot path records timing samples, but the writer ships
   mergeable bucket rows instead of one payload per bar. Shutdown drains pending
   rollups; persist failures remain visible diagnostics.
+- Opt-in runtime profiles use `cProfile` for CPU call accounting and the process
+  peak resident set size for bounded memory context. The reported RSS is a
+  process-lifetime high-water mark, not allocation ownership for the profile
+  session. Continuous allocation tracing is excluded because its per-allocation
+  interception materially distorts backtest throughput and concurrent-capacity
+  measurements.
+- Successful canonical fact persistence and projection dispatch diagnostics are
+  sampled every 250 operations after the first sample. Exact counters and latest
+  latency remain available through metrics. Third-party WebSocket protocol
+  frame logging is held at WARN even when the application runs at DEBUG. Failure,
+  overflow, timeout, and lifecycle diagnostics are not sampled.
 - BotLens ingest routes projection batches before waiting on diagnostic durable
   writes. Persistence runs in bounded background batches and emits explicit
   errors on failure so API websocket receive loops are not held hostage by

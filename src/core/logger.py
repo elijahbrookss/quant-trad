@@ -29,5 +29,6 @@ if LOKI_URL:
 logging.getLogger("matplotlib.font_manager").setLevel(logging.WARNING)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 logging.getLogger("ccxt.base.exchange").setLevel(logging.WARNING)
+logging.getLogger("websockets").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)

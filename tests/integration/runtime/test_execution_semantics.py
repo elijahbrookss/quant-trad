@@ -222,6 +222,28 @@ def test_full_missing_intrabar_falls_back_to_pessimistic_strategy_bar() -> None:
     assert fallback_events[0]["context"]["reason"] == "missing_1m_data"
 
 
+def test_repeated_intrabar_fallbacks_share_one_compact_runtime_warning() -> None:
+    runtime = _runtime_for_intrabar(lambda *args, **kwargs: None)
+    runtime._run_context = RunContext(bot_id="bot-1", run_id="run-1")
+    series, _state, first_parent = _series_state(_engine_with_position("long"))
+    second_parent = _candle(5, high=111.0, low=95.0, close=100.0, duration_minutes=5)
+
+    runtime._log_intrabar_fallback(series, first_parent, reason="intrabar_missing")
+    runtime._log_intrabar_fallback(series, second_parent, reason="intrabar_missing")
+
+    warnings = runtime.state["warnings"]
+    assert len(warnings) == 1
+    assert warnings[0]["count"] == 2
+    assert warnings[0]["context"]["bar_time"] == second_parent.time.isoformat().replace("+00:00", "Z")
+    assert runtime._warning_revision == 1
+    fallback_events = [
+        event
+        for event in runtime._run_context.runtime_event_stream
+        if event["event_name"] == RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC.value
+    ]
+    assert len(fallback_events) == 2
+
+
 def test_frozen_dataset_missing_intrabar_series_is_looked_up_once() -> None:
     fetch_calls = 0
 

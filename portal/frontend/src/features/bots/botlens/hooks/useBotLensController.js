@@ -419,6 +419,10 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   const openTradesIndex = state.runState?.openTradesIndex
   const chartHistoryForSymbol = state.retrieval?.chartHistoryBySymbol?.[selectedSymbolKey] || null
   const chartHistoryBySymbol = state.retrieval?.chartHistoryBySymbol
+  const projectionCandles = selectedSymbolProjection?.candles
+  const projectionProvisionalCandle = selectedSymbolProjection?.provisional_candle
+  const projectionOverlays = selectedSymbolProjection?.overlays
+  const projectionRecentTrades = selectedSymbolProjection?.recent_trades
 
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const selectedSymbolSlices = useMemo(() => selectSelectedSymbolBaseSlices(state), [selectedSymbolProjection, selectedSymbolKey])
@@ -439,17 +443,17 @@ export function useBotLensController({ open, bot, onClose, runId = null }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const openTrades = useMemo(() => selectOpenTrades(state), [openTradesIndex])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
-  const chartCandles = useMemo(() => selectSelectedSymbolChartCandles(state), [selectedSymbolProjection, chartHistoryForSymbol, selectedSymbolKey])
+  const chartCandles = useMemo(() => selectSelectedSymbolChartCandles(state), [chartHistoryForSymbol?.candles, projectionCandles, projectionProvisionalCandle, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const chartHistory = useMemo(() => selectSelectedSymbolChartHistory(state), [chartHistoryForSymbol, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const chartHistoryStatus = useMemo(() => selectSelectedSymbolChartHistoryStatus(state), [chartHistoryForSymbol, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- live projection and durable history are independently scoped
-  const selectedSymbolOverlays = useMemo(() => selectSelectedSymbolOverlays(state), [selectedSymbolProjection, chartHistoryForSymbol, selectedSymbolKey])
+  const selectedSymbolOverlays = useMemo(() => selectSelectedSymbolOverlays(state), [chartHistoryForSymbol?.overlays, projectionOverlays, selectedSymbolKey, state.runState?.lifecycle])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
-  const selectedSymbolRecentTrades = useMemo(() => selectSelectedSymbolRecentTrades(state), [selectedSymbolProjection, selectedSymbolKey])
+  const selectedSymbolRecentTrades = useMemo(() => selectSelectedSymbolRecentTrades(state), [projectionRecentTrades, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- history and live tails are independently scoped
-  const chartTrades = useMemo(() => selectSelectedSymbolChartTrades(state), [selectedSymbolProjection, chartHistoryForSymbol, selectedSymbolKey])
+  const chartTrades = useMemo(() => selectSelectedSymbolChartTrades(state), [chartHistoryForSymbol?.trades, projectionRecentTrades, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above
   const selectedSymbolLogs = useMemo(() => selectSelectedSymbolLogs(state), [selectedSymbolProjection, selectedSymbolKey])
   // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally scoped, see comment above

@@ -1362,10 +1362,20 @@ class TestHubIntegration:
                     ))
                 )
 
-            await asyncio.sleep(0.15)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2.0
+            symbol_snapshot = None
+            while loop.time() < deadline:
+                symbol_snapshot = hub.get_symbol_snapshot(
+                    run_id="run-1",
+                    symbol_key="instrument-btc|1m",
+                )
+                if symbol_snapshot is not None and symbol_snapshot.candles.candles:
+                    break
+                await asyncio.sleep(0.01)
 
-            symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             assert symbol_snapshot is not None
+            assert symbol_snapshot.candles.candles
             assert symbol_snapshot.candles.candles[-1]["time"] == _epoch_candle_time(99)
 
         asyncio.run(scenario())

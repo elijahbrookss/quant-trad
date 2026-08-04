@@ -37,6 +37,11 @@ def test_python_profile_session_records_bounded_standard_library_evidence() -> N
     assert summary["wall_seconds"] > 0.0
     assert summary["cpu_seconds"] >= 0.0
     assert summary["peak_memory_bytes"] is not None
+    assert summary["memory_scope"] == "process_peak_rss"
+    assert summary["current_memory_bytes"] is None
+    assert "peak_memory_is_process_lifetime_rss_not_profile_session_allocations" in summary[
+        "caveats"
+    ]
     assert summary["work_units"] == 2_000
     assert summary["work_units_per_second"] > 0.0
     assert 1 <= len(summary["top_by_cumulative_time"]) <= 5
