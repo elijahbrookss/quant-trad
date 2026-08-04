@@ -15,6 +15,7 @@ code_paths:
   - portal/backend/service/reports
   - portal/backend/service/reports/candle_continuity.py
   - portal/backend/controller/reports.py
+  - portal/backend/controller/research.py
   - portal/backend/service/reports/comparison.py
   - portal/backend/service/reports/golden_evidence.py
   - portal/backend/service/storage/repos/report_materializations.py
@@ -75,6 +76,23 @@ after reconstruction. After the burst window, every reuse rechecks that durable
 fingerprint. A mismatch or unavailable proof evicts the entry and rebuilds from
 durable truth; this cache is never persisted, never crosses backend processes,
 and never becomes report or comparison truth.
+
+Cold reconstruction is synchronous internally because it reads one coherent
+durable input boundary, but HTTP controllers must not execute it on the ASGI
+event-loop thread. Controllers either dispatch reconstruction to the bounded
+threadpool or use the existing asynchronous materialization boundary. This
+isolation preserves portal, BotLens, health, and stream responsiveness; it does
+not make reconstruction itself faster or change its canonical output.
+
+Within one backend process, concurrent requests for the same reconstruction
+key share one single-flight owner. Followers wait for that owner's result and
+must log their wait duration rather than launching duplicate builds. The cache
+owner's completion log records total duration, durable-fingerprint checks, and
+the canonical dataset-build duration. The dataset builder's completion log
+records total duration and phase durations for source loading, trade
+enrichment, readiness, wallet accounting, observability, remaining assembly,
+and serialization on the same structured log event. These timings are
+operational evidence only and cannot enter dataset identity.
 
 Paired run-report comparison reads ready `RunReportDTO` artifacts from
 `portal_report_materializations`. It returns structured blockers for
@@ -365,6 +383,12 @@ semantics.
 
 ## Known Gaps
 
+- Cold reconstruction currently performs excursion candle reads per trade and
+  validates wallet state by replaying growing event prefixes. Profiling has
+  demonstrated N+1 storage reads and quadratic wallet projection work on larger
+  completed runs. Later optimizations must batch the same candle evidence and
+  preserve the same wallet transition/error semantics, with canonical output
+  and fingerprint equality tests before adoption.
 - Indicator/world-state context depends on structured runtime capture. When it
   is absent from decision artifact `observed_outputs`/`referenced_outputs`,
   reports expose explicit unavailable sections rather than replaying hidden
