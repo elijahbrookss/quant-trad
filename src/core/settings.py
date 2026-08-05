@@ -57,6 +57,9 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_OBSERVABILITY_PERSIST_PENDING_EVENTS_MAX", ("observability", "persist_pending_events_max")),
     ("QT_OBSERVABILITY_HIGH_VOLUME_METRIC_SAMPLE_EVERY", ("observability", "high_volume_metric_sample_every")),
     ("QT_OBSERVABILITY_HIGH_VOLUME_METRIC_MAX_LAG_MS", ("observability", "high_volume_metric_max_lag_ms")),
+    ("QT_OBSERVABILITY_CAPACITY_SAMPLE_ENABLED", ("observability", "capacity_sample_enabled")),
+    ("QT_OBSERVABILITY_CAPACITY_SAMPLE_INTERVAL_SECONDS", ("observability", "capacity_sample_interval_seconds")),
+    ("QT_OBSERVABILITY_CAPACITY_SAMPLE_RETENTION_DAYS", ("observability", "capacity_sample_retention_days")),
     ("QT_ASYNC_JOBS_RUNNING_TIMEOUT_SECONDS", ("async_jobs", "running_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
@@ -425,6 +428,9 @@ class ObservabilitySettings:
     persist_pending_events_max: int
     high_volume_metric_sample_every: int
     high_volume_metric_max_lag_ms: int
+    capacity_sample_enabled: bool
+    capacity_sample_interval_seconds: int
+    capacity_sample_retention_days: int
 
 
 
@@ -776,6 +782,15 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
             high_volume_metric_max_lag_ms=_coerce_int(
                 observability_payload.get("high_volume_metric_max_lag_ms"), 5000, minimum=10
+            ),
+            capacity_sample_enabled=_coerce_bool(
+                observability_payload.get("capacity_sample_enabled"), True
+            ),
+            capacity_sample_interval_seconds=_coerce_int(
+                observability_payload.get("capacity_sample_interval_seconds"), 300, minimum=30
+            ),
+            capacity_sample_retention_days=_coerce_int(
+                observability_payload.get("capacity_sample_retention_days"), 30, minimum=1
             ),
         ),
         async_jobs=AsyncJobSettings(

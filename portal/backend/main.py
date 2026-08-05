@@ -14,6 +14,7 @@ from .service.bots import bot_service
 from .service.bots.bot_watchdog import get_watchdog
 from .service.bots.telemetry_stream import telemetry_hub
 from .service.bots.runner_observability import start_runner_observability, stop_runner_observability
+from .service.capacity_observability import start_database_capacity_sampler, stop_database_capacity_sampler
 from .service.db.postgres_extensions import ensure_postgres_extensions
 from .service.observability_exporter import start_observability_exporter, stop_observability_exporter
 
@@ -57,6 +58,7 @@ def _startup_watchdog() -> None:
     ensure_builtin_overlays_registered()
     ensure_postgres_extensions()
     start_observability_exporter()
+    start_database_capacity_sampler()
     bot_service.ensure_watchdog_stream_bridge()
     watchdog = get_watchdog()
     start_runner_observability(runner_id=watchdog.runner_id)
@@ -69,6 +71,7 @@ def _shutdown_watchdog() -> None:
     watchdog = get_watchdog()
     watchdog.stop_background_monitor()
     stop_runner_observability()
+    stop_database_capacity_sampler()
     stop_observability_exporter()
     logger.info("bot_watchdog_stopped | runner_id=%s", watchdog.runner_id)
 

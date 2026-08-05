@@ -18,6 +18,7 @@ code_paths:
   - portal/backend/service/provenance.py
   - portal/backend/service/storage
   - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/storage/repos/capacity.py
   - portal/backend/service/bots/storage_gateway.py
   - portal/backend/service/storage/repos/lifecycle.py
   - portal/backend/service/storage/repos/run_leases.py
@@ -149,6 +150,16 @@ Active schema surfaces are justified by role:
   columns.
 - Keep as bounded observability: `observability_events.botlens_backend_events`
   and `observability_metrics.botlens_backend_metric_rollups`.
+- Keep as bounded capacity observability:
+  `observability_metrics.database_capacity_samples` stores one database-level
+  sample per configured time bucket, and
+  `observability_metrics.database_relation_capacity_samples` stores one
+  logical user-relation sample per bucket. They use the single `PG_DSN`, are
+  leader-fenced with a PostgreSQL advisory transaction lock, and delete rows
+  older than the configured retention window. TimescaleDB internal chunks are
+  excluded; hypertable size and activity are aggregated into the logical
+  schema/table identity. These rows support capacity planning and alerts but
+  cannot certify market facts, runtime semantics, or research validity.
 - Keep as bounded profiler data: `portal_bot_run_step_rollups` stores typed
   bucketed phase-duration metrics with mergeable histogram counts for p95/p99
   estimates. Raw `portal_bot_run_steps` rows are not part of the schema

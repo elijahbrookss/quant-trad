@@ -65,6 +65,30 @@ starts to pressure Loki, prefer these levers in order:
 5. Add labels only for stable routing dimensions; avoid `run_id` and `bot_id`
    labels unless measured query needs justify the cardinality cost.
 
+## Capacity And Growth Dashboard
+
+The observability profile provisions **QuantTrad Capacity & Database Growth**
+at Grafana UID `quanttrad-capacity-growth`. It includes:
+
+- PostgreSQL database size, growth rate, WAL rate, connections, cache hit, and
+  sampler cost;
+- logical schema and table/hypertable size, row estimates, insert rate, and
+  growth leaderboards with schema/relation filters;
+- per-container CPU and memory plus Docker filesystem used/free capacity from
+  the `docker-stats` sidecar.
+
+Database and logical-relation samples run every five minutes and retain 30 days
+by default. Docker samples run every 15 seconds and follow Loki's local
+seven-day retention. The two cadences intentionally answer different questions:
+short spikes stay visible in Loki, while table growth remains cheap enough to
+retain for planning.
+
+Before creating alerts, measure at least one representative bounded campaign.
+Useful starting candidates are filesystem free below 20%, database connections
+above 70% of `max_connections`, cache hit below 95%, and sustained database or
+relation growth above the measured storage budget. These are starting points,
+not universal thresholds; tune them from the observed workload.
+
 ## Error Posture
 
 Quant-Trad should fail loudly for invalid states. A fallback is allowed only when it is modeled, visible, and logged with enough context to investigate.

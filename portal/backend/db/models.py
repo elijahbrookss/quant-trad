@@ -8,6 +8,7 @@ from typing import Any, Dict
 from sqlalchemy import (
     JSON,
     Boolean,
+    BigInteger,
     CheckConstraint,
     Column,
     DateTime,
@@ -1335,6 +1336,74 @@ class BotlensBackendMetricRollupRecord(Base):
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
         }
+
+
+class DatabaseCapacitySampleRecord(Base):
+    """Bounded database-level capacity and workload snapshot."""
+
+    __tablename__ = "database_capacity_samples"
+    __table_args__ = (
+        Index("ix_database_capacity_samples_sampled_at", "sampled_at"),
+        {"schema": "observability_metrics"},
+    )
+
+    sampled_at = Column(DateTime, primary_key=True)
+    database_size_bytes = Column(BigInteger, nullable=False)
+    relation_count = Column(Integer, nullable=False)
+    max_connections = Column(Integer, nullable=False)
+    connections_total = Column(Integer, nullable=False)
+    connections_active = Column(Integer, nullable=False)
+    connections_idle = Column(Integer, nullable=False)
+    xact_commit = Column(BigInteger, nullable=False)
+    xact_rollback = Column(BigInteger, nullable=False)
+    blocks_read = Column(BigInteger, nullable=False)
+    blocks_hit = Column(BigInteger, nullable=False)
+    tuples_returned = Column(BigInteger, nullable=False)
+    tuples_fetched = Column(BigInteger, nullable=False)
+    tuples_inserted = Column(BigInteger, nullable=False)
+    tuples_updated = Column(BigInteger, nullable=False)
+    tuples_deleted = Column(BigInteger, nullable=False)
+    temp_files = Column(BigInteger, nullable=False)
+    temp_bytes = Column(BigInteger, nullable=False)
+    deadlocks = Column(BigInteger, nullable=False)
+    block_read_time_ms = Column(Float, nullable=False)
+    block_write_time_ms = Column(Float, nullable=False)
+    wal_bytes = Column(BigInteger, nullable=False)
+    sample_query_ms = Column(Float, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class DatabaseRelationCapacitySampleRecord(Base):
+    """Bounded schema/table-level size and activity snapshot."""
+
+    __tablename__ = "database_relation_capacity_samples"
+    __table_args__ = (
+        Index(
+            "ix_database_relation_capacity_samples_relation_time",
+            "schema_name",
+            "relation_name",
+            "sampled_at",
+        ),
+        Index("ix_database_relation_capacity_samples_sampled_at", "sampled_at"),
+        {"schema": "observability_metrics"},
+    )
+
+    sampled_at = Column(DateTime, primary_key=True)
+    schema_name = Column(String(128), primary_key=True)
+    relation_name = Column(String(128), primary_key=True)
+    relation_kind = Column(String(32), nullable=False)
+    table_bytes = Column(BigInteger, nullable=False)
+    index_bytes = Column(BigInteger, nullable=False)
+    toast_bytes = Column(BigInteger, nullable=False)
+    total_bytes = Column(BigInteger, nullable=False)
+    estimated_live_rows = Column(BigInteger, nullable=False)
+    estimated_dead_rows = Column(BigInteger, nullable=False)
+    inserts_total = Column(BigInteger, nullable=False)
+    updates_total = Column(BigInteger, nullable=False)
+    deletes_total = Column(BigInteger, nullable=False)
+    sequential_scans_total = Column(BigInteger, nullable=False)
+    index_scans_total = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class AsyncJobRecord(Base):

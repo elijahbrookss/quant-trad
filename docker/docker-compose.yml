@@ -236,6 +236,24 @@ services:
     networks:
       - quanttrad
 
+  docker-stats:
+    profiles: [observability]
+    image: docker:27-cli
+    labels:
+      loki.job: quanttrad
+      loki.service: docker-stats
+    environment:
+      QT_DOCKER_CAPACITY_INTERVAL_SECONDS: "${QT_DOCKER_CAPACITY_INTERVAL_SECONDS:-15}"
+    command:
+      - /bin/sh
+      - /opt/quanttrad/docker_capacity_sampler.sh
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker:/host-docker:ro
+      - ../scripts/reporting/docker_capacity_sampler.sh:/opt/quanttrad/docker_capacity_sampler.sh:ro
+    networks:
+      - quanttrad
+
   grafana:
     profiles: [observability]
     image: grafana/grafana:latest

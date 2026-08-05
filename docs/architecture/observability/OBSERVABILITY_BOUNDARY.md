@@ -19,6 +19,8 @@ code_paths:
   - portal/backend/service/bots/botlens_intake_router.py
   - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_run_stream.py
+  - portal/backend/service/capacity_observability.py
+  - portal/backend/service/storage/repos/capacity.py
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
@@ -37,6 +39,7 @@ code_paths:
   - docker/promtail/config.yml
   - docker/loki/config.yml
   - docker/grafana
+  - scripts/reporting/docker_capacity_sampler.sh
   - docs/architecture/observability/diagrams/observability-flow.mmd
 ---
 # Observability Boundary
@@ -139,6 +142,35 @@ Exporter write latency is itself observable through
 `observability_export_db_ms`, and `observability_export_errors`. Dashboards must
 use these alongside storage `db_write_*` metrics; `db_write_ms` alone is not a
 complete database pressure signal.
+
+## Capacity Telemetry
+
+Capacity telemetry is a bounded diagnostic surface for storage-budget and
+resource planning. The backend records one database snapshot and one row per
+logical user relation every five minutes. Database snapshots include database
+size, connections, transaction and tuple counters, block cache counters,
+temporary-file pressure, deadlocks, WAL bytes, and sample-query cost. Relation
+snapshots include logical table/index/TOAST bytes, estimated live/dead rows, and
+PostgreSQL activity counters by schema and relation.
+
+TimescaleDB hypertables are measured as logical relations with
+`hypertable_detailed_size` and aggregate chunk activity. Internal chunks are
+excluded so Grafana does not double-count one hypertable as both a logical table
+and many implementation tables. Capacity rows are diagnostic rather than
+market or runtime truth, use the existing `PG_DSN`, and are deleted after the
+configured 30-day retention window.
+
+The observability-profile `docker-stats` sidecar emits numeric container CPU,
+memory, PID, and Docker filesystem samples every 15 seconds through normal
+Docker stdout. Promtail and Loki retain that short-horizon operational stream;
+the sidecar does not post directly to Loki and does not add a second database.
+
+Grafana provisions `QuantTrad Capacity & Database Growth`
+(`quanttrad-capacity-growth`). Its schema and relation variables support
+logical-table drilldown, while Loki panels show pressure that can grow before a
+bounded market-structure session closes and publishes its archive and canonical
+facts. Alert rules may consume these panels later, but alert thresholds are
+operator policy rather than trading truth.
 
 ## What Belongs Here
 

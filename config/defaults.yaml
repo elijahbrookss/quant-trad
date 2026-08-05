@@ -47,6 +47,9 @@ observability:
   persist_pending_events_max: 10000
   high_volume_metric_sample_every: 100
   high_volume_metric_max_lag_ms: 5000
+  capacity_sample_enabled: true
+  capacity_sample_interval_seconds: 300
+  capacity_sample_retention_days: 30
 
 async_jobs:
   running_timeout_seconds: 1800
