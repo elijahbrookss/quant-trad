@@ -204,7 +204,7 @@
       },
       "targets": [
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | unwrap available_bytes [$__range])",
+          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, used_bytes, total_bytes, used_percent, path, sample_kind | unwrap available_bytes [$__range])",
           "queryType": "range",
           "refId": "A"
         }
@@ -745,19 +745,19 @@
       },
       "targets": [
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | unwrap used_bytes [$__interval])",
+          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, available_bytes, total_bytes, used_percent, path, sample_kind | unwrap used_bytes [$__interval])",
           "legendFormat": "used",
           "queryType": "range",
           "refId": "A"
         },
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | unwrap available_bytes [$__interval])",
+          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, used_bytes, total_bytes, used_percent, path, sample_kind | unwrap available_bytes [$__interval])",
           "legendFormat": "available",
           "queryType": "range",
           "refId": "B"
         },
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | unwrap total_bytes [$__interval])",
+          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, available_bytes, used_bytes, used_percent, path, sample_kind | unwrap total_bytes [$__interval])",
           "legendFormat": "total",
           "queryType": "range",
           "refId": "C"
