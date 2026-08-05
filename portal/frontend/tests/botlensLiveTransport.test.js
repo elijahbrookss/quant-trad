@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  botLensReconnectDelayMs,
   buildSelectedSymbolSubscriptionPayload,
   buildBotLensLiveTransportEpoch,
   isBotLensLiveDocumentVisible,
@@ -191,4 +192,12 @@ test('selected-symbol subscription carries snapshot resume cursor for server rep
       stream_session_id: 'stream-1',
     },
   )
+})
+
+test('reconnect delay backs off, caps, and applies bounded jitter', () => {
+  assert.equal(botLensReconnectDelayMs(1, 0), 300)
+  assert.equal(botLensReconnectDelayMs(2, 0), 600)
+  assert.equal(botLensReconnectDelayMs(3, 0), 1200)
+  assert.equal(botLensReconnectDelayMs(20, 0), 10000)
+  assert.equal(botLensReconnectDelayMs(20, 1), 12000)
 })

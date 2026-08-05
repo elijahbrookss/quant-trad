@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
 
 import { openBotLensLiveStream } from '../../../../adapters/bot.adapter.js'
 import { normalizeSeriesKey } from '../../../../components/bots/botlensProjection.js'
@@ -6,6 +6,16 @@ import { normalizeSeriesKey } from '../../../../components/bots/botlensProjectio
 const WEBSOCKET_OPEN_STATE = typeof WebSocket === 'function' ? WebSocket.OPEN : 1
 export const BOTLENS_LIVE_MESSAGE_LIMIT = 256
 export const BOTLENS_LIVE_BYTE_LIMIT = 2 * 1024 * 1024
+export const BOTLENS_LIVE_FRAME_MESSAGE_LIMIT = 24
+export const BOTLENS_LIVE_FRAME_BYTE_LIMIT = 256 * 1024
+export const BOTLENS_LIVE_STABLE_CONNECTION_MS = 30_000
+
+export function botLensReconnectDelayMs(attempt, randomValue = 0) {
+  const normalizedAttempt = Math.max(1, Number(attempt || 1) || 1)
+  const baseDelay = Math.min(300 * (2 ** Math.min(normalizedAttempt - 1, 6)), 10_000)
+  const jitterRatio = Math.min(Math.max(Number(randomValue || 0) || 0, 0), 1)
+  return Math.round(baseDelay + (baseDelay * 0.2 * jitterRatio))
+}
 
 export function isBotLensLiveDocumentVisible(visibilityState) {
   return String(visibilityState || '').trim().toLowerCase() !== 'hidden'
@@ -87,6 +97,7 @@ export function useBotLensLiveTransport({
   const reconnectRef = useRef(0)
   const sessionTokenRef = useRef(0)
   const reconnectTimerRef = useRef(null)
+  const stableConnectionTimerRef = useRef(null)
   const subscriptionRef = useRef({ socket: null, symbolKey: null })
   const pendingMessagesRef = useRef([])
   const pendingBytesRef = useRef(0)
@@ -153,30 +164,61 @@ export function useBotLensLiveTransport({
 
   const flushPendingMessages = useCallback(() => {
     pendingFrameRef.current = null
-    const messages = pendingMessagesRef.current
-    pendingMessagesRef.current = []
-    pendingBytesRef.current = 0
-    if (messages.length) dispatch({ type: 'live/messagesReceived', messages })
+    const pending = pendingMessagesRef.current
+    if (!pending.length) return
+
+    let count = 0
+    let bytes = 0
+    while (count < pending.length && count < BOTLENS_LIVE_FRAME_MESSAGE_LIMIT) {
+      const nextBytes = Math.max(0, Number(pending[count]?.rawBytes || 0) || 0)
+      if (count > 0 && bytes + nextBytes > BOTLENS_LIVE_FRAME_BYTE_LIMIT) break
+      bytes += nextBytes
+      count += 1
+    }
+    const entries = pending.splice(0, Math.max(count, 1))
+    pendingBytesRef.current = Math.max(
+      0,
+      pendingBytesRef.current - entries.reduce(
+        (total, entry) => total + Math.max(0, Number(entry?.rawBytes || 0) || 0),
+        0,
+      ),
+    )
+    const messages = entries.map((entry) => entry.message)
+    startTransition(() => {
+      dispatch({ type: 'live/messagesReceived', messages })
+    })
+
+    if (pending.length) {
+      pendingFrameRef.current = typeof window.requestAnimationFrame === 'function'
+        ? window.requestAnimationFrame(flushPendingMessages)
+        : window.setTimeout(flushPendingMessages, 16)
+    }
   }, [dispatch])
 
   const queueLiveMessage = useCallback((message, rawBytes) => {
     const nextCount = pendingMessagesRef.current.length + 1
     const nextBytes = pendingBytesRef.current + Math.max(0, Number(rawBytes || 0) || 0)
-    if (nextCount > BOTLENS_LIVE_MESSAGE_LIMIT || nextBytes > BOTLENS_LIVE_BYTE_LIMIT) return false
-    pendingMessagesRef.current.push(message)
+    const withinLimit = nextCount <= BOTLENS_LIVE_MESSAGE_LIMIT && nextBytes <= BOTLENS_LIVE_BYTE_LIMIT
+    // Keep the boundary message before closing the socket so the ordered
+    // reducer can advance its cursor and the reconnect can safely resume.
+    pendingMessagesRef.current.push({ message, rawBytes })
     pendingBytesRef.current = nextBytes
     if (pendingFrameRef.current === null) {
       pendingFrameRef.current = typeof window.requestAnimationFrame === 'function'
         ? window.requestAnimationFrame(flushPendingMessages)
         : window.setTimeout(flushPendingMessages, 16)
     }
-    return true
+    return withinLimit
   }, [flushPendingMessages])
 
   const closeSocket = useCallback(() => {
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current)
       reconnectTimerRef.current = null
+    }
+    if (stableConnectionTimerRef.current) {
+      window.clearTimeout(stableConnectionTimerRef.current)
+      stableConnectionTimerRef.current = null
     }
     if (socketRef.current) {
       try {
@@ -280,7 +322,15 @@ export function useBotLensLiveTransport({
 
     socket.onopen = () => {
       if (cancelled || token !== sessionTokenRef.current) return
-      reconnectRef.current = 0
+      bufferOverflowRef.current = false
+      if (stableConnectionTimerRef.current) {
+        window.clearTimeout(stableConnectionTimerRef.current)
+      }
+      stableConnectionTimerRef.current = window.setTimeout(() => {
+        stableConnectionTimerRef.current = null
+        reconnectRef.current = 0
+        dispatch({ type: 'live/reconnectAttempt', attempt: 0 })
+      }, BOTLENS_LIVE_STABLE_CONNECTION_MS)
       dispatch({ type: 'live/connectionStateChanged', connectionState: 'open' })
       const currentSelection = latestSelectionRef.current
       const currentCursor = latestCursorRef.current
@@ -320,17 +370,25 @@ export function useBotLensLiveTransport({
           return
         }
         const rawBytes = typeof event.data === 'string' ? event.data.length * 2 : 0
+        if (bufferOverflowRef.current) return
         if (!queueLiveMessage(message, rawBytes)) {
-          if (bufferOverflowRef.current) return
           bufferOverflowRef.current = true
-          dispatch({ type: 'live/connectionStateChanged', connectionState: 'stale' })
+          dispatch({ type: 'live/connectionStateChanged', connectionState: 'reconnecting' })
           logger?.warn?.('botlens_run_ws_client_buffer_overflow', {
             bot_id: botId,
             run_id: runId,
             queued_messages: pendingMessagesRef.current.length,
             queued_bytes: pendingBytesRef.current,
+            recovery: 'ordered_resume',
           })
-          refreshSession()
+          try {
+            socket.close(4001, 'client_backpressure_resume')
+          } catch (closeError) {
+            logger?.warn?.('botlens_run_ws_backpressure_close_failed', {
+              bot_id: botId,
+              run_id: runId,
+            }, closeError)
+          }
         }
       } catch (err) {
         logger?.warn?.('botlens_run_ws_parse_failed', { bot_id: botId }, err)
@@ -347,7 +405,11 @@ export function useBotLensLiveTransport({
       if (cancelled || token !== sessionTokenRef.current) return
       socketRef.current = null
       subscriptionRef.current = { socket: null, symbolKey: null }
-      const shouldRetry = Boolean(runId) && reconnectRef.current < 2
+      if (stableConnectionTimerRef.current) {
+        window.clearTimeout(stableConnectionTimerRef.current)
+        stableConnectionTimerRef.current = null
+      }
+      const shouldRetry = Boolean(runId && open && transportEligible && documentVisible)
       const nextAttempt = shouldRetry ? reconnectRef.current + 1 : reconnectRef.current
       if (shouldRetry) {
         reconnectRef.current = nextAttempt
@@ -358,11 +420,19 @@ export function useBotLensLiveTransport({
         connectionState: shouldRetry ? 'reconnecting' : 'closed',
       })
       if (!shouldRetry) return
+      const reconnectDelayMs = botLensReconnectDelayMs(nextAttempt, Math.random())
+      logger?.info?.('botlens_run_ws_reconnect_scheduled', {
+        bot_id: botId,
+        run_id: runId,
+        attempt: nextAttempt,
+        delay_ms: reconnectDelayMs,
+        resume_from_seq: latestCursorRef.current.resumeFromSeq,
+      })
       reconnectTimerRef.current = window.setTimeout(() => {
         reconnectTimerRef.current = null
         if (cancelled || token !== sessionTokenRef.current) return
         setReconnectTick((value) => value + 1)
-      }, 300)
+      }, reconnectDelayMs)
     }
 
     return () => {

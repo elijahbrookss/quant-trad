@@ -468,10 +468,32 @@ def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
         raise KeyError(f"run {normalized_run_id!r} does not belong to bot {bot_id!r}")
     if not run and not lifecycle:
         raise KeyError(normalized_run_id)
-    status = _clean_text(lifecycle.get("status")) or "unknown"
+    run_snapshot = _telemetry_hub().get_run_snapshot(run_id=normalized_run_id)
+    runtime_health = (
+        _as_mapping(run_snapshot.health.to_dict())
+        if run_snapshot is not None
+        else {}
+    )
+    persisted_status = _clean_text(run.get("status"))
+    lifecycle_status = _clean_text(lifecycle.get("status"))
     phase = _clean_text(lifecycle.get("phase"))
+    status = (
+        persisted_status
+        if persisted_status and is_terminal_run_state(status=persisted_status)
+        else (
+            _clean_text(runtime_health.get("status"))
+            or lifecycle_status
+            or persisted_status
+            or "unknown"
+        )
+    )
     report_status = _report_status(normalized_run_id)
     terminal = is_terminal_run_state(status=status, phase=phase)
+    checkpoint_at = (
+        runtime_health.get("last_event_at")
+        or runtime_health.get("last_useful_progress_at")
+        or lifecycle.get("checkpoint_at")
+    )
     return {
         "schema_version": "bot_run_status.v1",
         "bot_id": bot_id,
@@ -480,9 +502,11 @@ def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
         "phase": phase,
         "terminal": terminal,
         "completed": status == "completed" or phase == "completed",
-        "active": is_active_run_state(status=status, phase=phase),
-        "checkpoint_at": lifecycle.get("checkpoint_at"),
-        "updated_at": lifecycle.get("updated_at") or run.get("updated_at"),
+        "active": not terminal and is_active_run_state(status=status, phase=phase),
+        "checkpoint_at": checkpoint_at,
+        "updated_at": checkpoint_at or lifecycle.get("updated_at") or run.get("updated_at"),
+        "progress": runtime_health.get("progress"),
+        "progress_unit": "fraction" if runtime_health.get("progress") is not None else None,
         "started_at": run.get("started_at"),
         "ended_at": run.get("ended_at"),
         "summary": _metric_subset(_as_mapping(run.get("summary"))),

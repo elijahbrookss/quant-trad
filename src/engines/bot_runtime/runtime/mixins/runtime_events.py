@@ -133,18 +133,32 @@ class RuntimeEventsMixin:
                 proxy_lock.acquire()
                 try:
                     if wallet_state is not None:
+                        try:
+                            wallet_snapshot = wallet_state.copy()
+                        except AttributeError:
+                            wallet_snapshot = dict(wallet_state)
                         return BaseWalletGateway._wallet_state_snapshot(
-                            BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_state))
+                            BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_snapshot))
                         )
-                    runtime_events = list(runtime_events_proxy)
+                    try:
+                        runtime_events = list(runtime_events_proxy[:])
+                    except TypeError:
+                        runtime_events = list(runtime_events_proxy)
                 finally:
                     proxy_lock.release()
             else:
                 if wallet_state is not None:
+                    try:
+                        wallet_snapshot = wallet_state.copy()
+                    except AttributeError:
+                        wallet_snapshot = dict(wallet_state)
                     return BaseWalletGateway._wallet_state_snapshot(
-                        BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_state))
+                        BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_snapshot))
                     )
-                runtime_events = list(runtime_events_proxy)
+                try:
+                    runtime_events = list(runtime_events_proxy[:])
+                except TypeError:
+                    runtime_events = list(runtime_events_proxy)
             return BaseWalletGateway._wallet_state_snapshot(project_wallet_from_events(runtime_events))
         if self._run_context is None:
             return {}

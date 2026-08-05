@@ -11,6 +11,10 @@ function shortIdentity(value) {
   return text.length > 20 ? text.slice(0, 10) + '…' + text.slice(-6) : text || 'Unavailable'
 }
 
+export function shouldLoadRunResearchEvidence(inspection) {
+  return inspection?.run?.is_active === false
+}
+
 function RunEvidenceStrip({ inspection, researchEvidence, researchError, runError }) {
   const run = inspection?.run || {}
   const projection = run.projection || {}
@@ -20,7 +24,7 @@ function RunEvidenceStrip({ inspection, researchEvidence, researchError, runErro
       <span><small>Run state</small><strong>{run.runtime_status || run.status || 'Unavailable'}</strong></span>
       <span title={run.config_snapshot?.dataset_binding?.dataset_id || run.data_snapshot_hash || ''}><small>Dataset</small><strong className="qt-mono">{shortIdentity(run.config_snapshot?.dataset_binding?.dataset_id || run.data_snapshot_hash)}</strong></span>
       <span><small>BotLens evidence</small><strong>{projection.available ? (run.is_active ? 'Live projection' : 'Rebuildable') : projection.reason || 'Unavailable'}</strong></span>
-      <span><small>Research result</small><strong>{researchError ? 'Unavailable' : researchEvidence ? (researchEvidence?.readiness?.comparison_status || researchEvidence?.readiness?.dataset_status || 'Evidence loaded') : 'Loading independently'}</strong></span>
+      <span><small>Research result</small><strong>{run.is_active ? 'Deferred while active' : researchError ? 'Unavailable' : researchEvidence ? (researchEvidence?.readiness?.comparison_status || researchEvidence?.readiness?.dataset_status || 'Evidence loaded') : 'Loading independently'}</strong></span>
       </div>
       {runError ? <OperatorErrorNotice error={runError} compact /> : null}
       {researchError ? <OperatorErrorNotice error={researchError} compact /> : null}
@@ -49,21 +53,22 @@ export function BotLensRoom() {
       fetchRun(runId, { signal: controller.signal })
         .then((payload) => {
           if (!mounted) return
-          setInspection(assertRunInspectionScope(payload, runId))
+          const scopedInspection = assertRunInspectionScope(payload, runId)
+          setInspection(scopedInspection)
+          if (!shouldLoadRunResearchEvidence(scopedInspection)) return
+          fetchRunResearchEvidence(runId, { signal: controller.signal })
+            .then((researchPayload) => {
+              if (mounted) setResearchEvidence(researchPayload)
+            })
+            .catch((error) => {
+              if (mounted && error?.name !== 'AbortError') {
+                setResearchError(error?.message || 'Research evidence unavailable')
+              }
+            })
         })
         .catch((error) => {
           if (mounted && error?.name !== 'AbortError') {
             setRunError(error?.message || 'Unable to load authoritative run')
-          }
-        })
-
-      fetchRunResearchEvidence(runId, { signal: controller.signal })
-        .then((payload) => {
-          if (mounted) setResearchEvidence(payload)
-        })
-        .catch((error) => {
-          if (mounted && error?.name !== 'AbortError') {
-            setResearchError(error?.message || 'Research evidence unavailable')
           }
         })
     }, 0)

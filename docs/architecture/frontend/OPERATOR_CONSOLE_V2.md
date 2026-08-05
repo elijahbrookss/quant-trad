@@ -245,10 +245,13 @@ moves left. Completed runs request their initial durable 240-bar chart window
 and independent decision, trade, and diagnostic pages because terminal replay,
 not a live projection, owns their historical completeness evidence.
 
-Run identity, research evidence, selected-symbol bootstrap, and initial chart
-reads are abortable and scheduled after the mount commits. React development
-StrictMode probe mounts are therefore canceled before durable reads begin,
-while a real mount still fails visibly if any component read fails.
+Run identity, selected-symbol bootstrap, and initial chart reads are abortable
+and scheduled after the mount commits. Research evidence is not requested for
+an active run; the compact header uses exact-run inspection and labels research
+as deferred. A terminal run loads research evidence only after its authoritative
+run read confirms terminal state. React development StrictMode probe mounts are
+therefore canceled before durable reads begin, while a real mount still fails
+visibly if any component read fails.
 
 Bot controller handlers that call synchronous SQL, Docker inspection, dataset
 preparation, or forensic services execute in FastAPI's worker threadpool. The
@@ -325,9 +328,13 @@ but the terminal operator workspace does not use that growing cursor as its
 complete-history index.
 
 Live WebSocket packets are queued in arrival order and reduced once per browser
-animation frame. A pending client batch is capped at 256 messages and 2 MiB;
-overflow marks BotLens stale and forces a bootstrap rather than silently losing
-packets. Server fanout sends to viewers concurrently with a configurable
+animation frame in chunks of at most 24 messages and 256 KiB. Each ordered
+chunk commits projection state once. A pending client queue is capped at 256
+messages and 2 MiB; renderer backlog closes and resumes the socket from its
+last committed cursor. It does not force a bootstrap unless the server reports
+a mismatched session, ahead-of-stream cursor, or expired replay window.
+Reconnect attempts use capped exponential backoff and reset only after a stable
+connection. Server fanout sends to viewers concurrently with a configurable
 1,500-ms default send deadline. A slow viewer is evicted and cannot serially
 delay healthy viewers. See [ADR 0055](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md).
 

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections import Counter
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
 from typing import Any, Mapping
-import uuid
+
 from sqlalchemy.orm import Session
+
+from portal.backend.service.bots.startup_lifecycle import (
+    is_active_run_state,
+    is_terminal_run_state,
+)
 
 from portal.backend.service.indicators.indicator_service.runtime_validation import (
     collect_runtime_output_evidence_for_instance,
@@ -17,6 +23,8 @@ from portal.backend.service.indicators.indicator_service.runtime_validation impo
 from portal.backend.service.market import candle_service, instrument_service
 from portal.backend.service.provenance import source_revision
 from portal.backend.service.reports import contract as reports_contract
+from portal.backend.service.storage.repos import lifecycle as lifecycle_repo
+from portal.backend.service.storage.repos import runs as runs_repo
 
 from . import repository
 from .checks import (
@@ -326,8 +334,74 @@ def get_research_trail(item_id: str) -> dict[str, Any]:
     }
 
 
+def _active_run_research_evidence(run_id: str) -> dict[str, Any] | None:
+    run = runs_repo.get_bot_run(run_id) or {}
+    if not isinstance(run, Mapping) or not run:
+        return None
+    lifecycle = lifecycle_repo.get_bot_run_lifecycle(run_id) or {}
+    persisted_status = str(run.get("status") or "").strip().lower()
+    phase = str(lifecycle.get("phase") or "").strip().lower()
+    lifecycle_status = str(lifecycle.get("status") or "").strip().lower()
+    if is_terminal_run_state(status=persisted_status, phase=phase):
+        return None
+    if not is_active_run_state(
+        status=lifecycle_status or persisted_status,
+        phase=phase,
+    ):
+        return None
+    summary = run.get("summary") if isinstance(run.get("summary"), Mapping) else {}
+    config = run.get("config_snapshot") if isinstance(run.get("config_snapshot"), Mapping) else {}
+    symbols = config.get("symbols") if isinstance(config.get("symbols"), list) else []
+    return {
+        "schema_version": "run_research_evidence.v1",
+        "run_id": run_id,
+        "metadata": {
+            "bot_id": run.get("bot_id"),
+            "strategy_id": config.get("strategy_id"),
+            "symbols": list(symbols),
+            "instrument_ids": [],
+            "timeframe": config.get("timeframe"),
+            "simulated_window": {},
+            "datasource": config.get("datasource") or config.get("provider"),
+            "exchange": config.get("exchange"),
+        },
+        "readiness": {
+            "dataset_status": "deferred_while_run_active",
+            "safe_to_compare": False,
+            "caveats": ["Research evidence is materialized after the run reaches a terminal state."],
+        },
+        "counts": {
+            "signals": None,
+            "decisions": None,
+            "trades": (
+                summary.get("total_trades")
+                if summary.get("total_trades") is not None
+                else summary.get("trades")
+            ),
+            "accepted_decisions": None,
+            "rejected_decisions": None,
+            "closed_trades": (
+                summary.get("closed_trades")
+                if summary.get("closed_trades") is not None
+                else summary.get("trades")
+            ),
+            "open_trades": summary.get("open_trades"),
+        },
+        "signals": {"output_names": {}, "event_keys": {}},
+        "decisions": {"states": {}, "reason_codes": {}},
+        "supported_checks": [],
+        "data_quality": {"status": "deferred_while_run_active"},
+    }
+
+
 def get_run_research_evidence(run_id: str) -> dict[str, Any]:
-    return _run_evidence_summary(run_id, include_dataset_context=True)
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required")
+    active_summary = _active_run_research_evidence(normalized_run_id)
+    if active_summary is not None:
+        return active_summary
+    return _run_evidence_summary(normalized_run_id, include_dataset_context=True)
 
 
 def compare_research_checks(left_check_id: str, right_check_id: str) -> dict[str, Any]:

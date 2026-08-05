@@ -1814,6 +1814,46 @@ def test_candidate_lifecycle_research_check_uses_persisted_indicator_evidence(mo
     assert created[1]["payload"]["result"]["recommendation"] == "contract_holds"
 
 
+def test_active_run_research_evidence_does_not_materialize_growing_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_calls = 0
+
+    def _dataset(_run_id):
+        nonlocal dataset_calls
+        dataset_calls += 1
+        raise AssertionError("active evidence must not build the research dataset")
+
+    monkeypatch.setattr(
+        service.runs_repo,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "bot_id": "bot-1",
+            "status": "running",
+            "config_snapshot": {
+                "strategy_id": "strategy-1",
+                "symbols": ["BTCUSDT"],
+                "timeframe": "5m",
+            },
+            "summary": {"total_trades": 7, "open_trades": 1},
+        },
+    )
+    monkeypatch.setattr(
+        service.lifecycle_repo,
+        "get_bot_run_lifecycle",
+        lambda _run_id: {"status": "running", "phase": "live"},
+    )
+    monkeypatch.setattr(service.reports_contract, "get_run_research_dataset", _dataset)
+
+    payload = service.get_run_research_evidence("run-1")
+
+    assert payload["readiness"]["dataset_status"] == "deferred_while_run_active"
+    assert payload["readiness"]["safe_to_compare"] is False
+    assert payload["counts"]["trades"] == 7
+    assert dataset_calls == 0
+
+
 def test_run_research_evidence_summarizes_checkable_report_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         service.reports_contract,

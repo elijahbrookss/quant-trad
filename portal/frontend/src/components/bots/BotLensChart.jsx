@@ -178,6 +178,7 @@ export function BotLensChart({
   const prevPriceLinesRef = useRef([])
   const markerDetailsRef = useRef([])
   const prevCandleDataRef = useRef([])
+  const incrementalCandleUpdatesSinceResetRef = useRef(0)
   const diagLoggedRef = useRef(false)
   const frameSampleRef = useRef({ total: 0, count: 0, logged: false })
   const latestTradeSegmentsRef = useRef([])
@@ -290,6 +291,7 @@ export function BotLensChart({
   const showTradeRegions = overlayVisibility.trade_regions !== false
 
   const markerManager = useMarkerManager({ seriesRef, markersApiRef, markerCacheRef })
+  const refreshMarkers = markerManager.flush
 
   const { recenter, requestIntent, attachRangeGuards, setAnimationActive, focusAtTime, resetViewport } = useCameraLock({
     chartRef,
@@ -377,6 +379,7 @@ export function BotLensChart({
     if (seriesRef.current !== seriesInstanceRef.current) {
       seriesInstanceRef.current = seriesRef.current
       prevCandleDataRef.current = []
+      incrementalCandleUpdatesSinceResetRef.current = 0
       frameSampleRef.current = { total: 0, count: 0, logged: false }
       diagLoggedRef.current = false
     }
@@ -393,11 +396,28 @@ export function BotLensChart({
 
     const timeAdvanced = Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && nextLastTime > prevLastTime
     const isAppend = timeAdvanced && next.length === previous.length + 1
+    const nextPreviousLast = timeAdvanced
+      ? next.find((candle) => Number.isFinite(candle?.time) && candle.time === prevLastTime)
+      : null
+    const forwardCandles = timeAdvanced
+      ? next.filter((candle) => Number.isFinite(candle?.time) && candle.time > prevLastTime)
+      : []
+    const canIncrementalCatchUp = Boolean(
+      timeAdvanced
+      && nextPreviousLast
+      && forwardCandles.length
+      && effectiveUpdateMode !== 'prepend',
+    )
     const isSameCandle = next.length === previous.length && Number.isFinite(nextLastTime) && nextLastTime === prevLastTime
     const historyRewound =
-      Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && (next.length < previous.length || nextLastTime < prevLastTime)
-    const longJump = next.length > previous.length + 1
-    const requiresReset = !previous.length || !next.length || historyRewound || longJump || effectiveUpdateMode === 'prepend'
+      Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime)
+      && (nextLastTime < prevLastTime || (next.length < previous.length && !canIncrementalCatchUp))
+    const longJump = forwardCandles.length > 1
+    const requiresReset = !previous.length || !next.length || historyRewound
+      || (timeAdvanced && !canIncrementalCatchUp) || effectiveUpdateMode === 'prepend'
+    const shouldRebaseIncrementalSeries = canIncrementalCatchUp
+      && previous.length === next.length
+      && incrementalCandleUpdatesSinceResetRef.current + forwardCandles.length >= 64
     const shouldAnimate = isSameCandle && playbackProfile.allowIntrabar
     const cameraIntent = resolveCandleUpdateCameraIntent({
       previous,
@@ -412,13 +432,23 @@ export function BotLensChart({
     if (requiresReset) {
       cancelAnimator('reset')
       seriesRef.current.setData(next)
+      refreshMarkers({ force: true })
+      incrementalCandleUpdatesSinceResetRef.current = 0
       frameSampleRef.current = { total: 0, count: 0, logged: false }
+    } else if (shouldRebaseIncrementalSeries) {
+      cancelAnimator('bounded-rebase')
+      seriesRef.current.setData(next)
+      refreshMarkers({ force: true })
+      incrementalCandleUpdatesSinceResetRef.current = 0
+      frameSampleRef.current = { total: 0, count: 0, logged: false }
+    } else if (canIncrementalCatchUp) {
+      cancelAnimator(longJump ? 'catch-up' : 'append')
+      seriesRef.current.update(nextPreviousLast)
+      forwardCandles.forEach((candle) => seriesRef.current.update(candle))
+      incrementalCandleUpdatesSinceResetRef.current += forwardCandles.length
     } else if (shouldAnimate) {
       const prevMatch = previous.find((candle) => Number.isFinite(candle?.time) && candle.time === nextLastTime)
       startAnimator({ series: seriesRef.current, fromCandle: prevMatch, toCandle: nextLast, speed: playbackSpeed })
-    } else if (isAppend) {
-      cancelAnimator('append')
-      seriesRef.current.update(nextLast)
     } else if (isSameCandle) {
       cancelAnimator('same-candle')
       seriesRef.current.update(nextLast)
@@ -464,12 +494,14 @@ export function BotLensChart({
         isSameCandle,
         historyRewound,
         longJump,
+        canIncrementalCatchUp,
+        shouldRebaseIncrementalSeries,
         updateMode: effectiveUpdateMode,
         range,
         logicalRange,
       })
     }
-  }, [cancelAnimator, candleData, chartId, dataUpdateMode, dataUpdateToken, debugRanges, followLatestCandles, logger, playbackProfile, playbackSpeed, requestIntent, seriesRef, startAnimator])
+  }, [cancelAnimator, candleData, chartId, dataUpdateMode, dataUpdateToken, debugRanges, followLatestCandles, logger, playbackProfile, playbackSpeed, refreshMarkers, requestIntent, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null

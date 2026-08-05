@@ -37,6 +37,7 @@ code_paths:
   - portal/backend/service/bots/botlens_symbol_service.py
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/bots/container_runtime_telemetry.py
+  - portal/backend/service/research/service.py
   - portal/backend/service/bots/paper_market_stream.py
   - src/core/settings.py
   - src/engines/bot_runtime/live_market.py
@@ -262,6 +263,12 @@ latency. Independent runs retain independent writer locks and may persist in
 parallel. The locks are process-local coordination only—database idempotency and
 the durable event identity remain authoritative across retries or restarts.
 
+Transport-owned projection rows wait in an asynchronous batch for at most 100
+ms or 512 rows. This removes one-row transaction pressure without delaying hot
+projection or changing row order. A terminal lifecycle message forces any
+pending rows for that run through the same ordered writer before terminal
+report materialization is enqueued.
+
 Producer-side fanout is a bounded projection handoff after sequence assignment.
 Execution enqueues the committed live payload and keeps walking forward; the
 dispatcher owns websocket/subscriber pressure and drains during terminal runtime
@@ -315,13 +322,31 @@ are already present. The cold chart path is entered through viewport history
 movement or as a fallback for a missing live base. Terminal lenses use durable
 decision, trade, and diagnostic pages for completeness claims.
 
+Research evidence follows the same terminal boundary. The active lens derives
+its compact status strip from exact-run inspection and does not request the
+growing research dataset. If an older client requests research evidence for an
+active run, the backend returns a typed deferred summary without constructing
+signals, decisions, and trades. Full research evidence remains a terminal,
+materialized read.
+
 The frontend keeps at most 320 live selected-symbol candles. Ordered append and
 same-timestamp replacement are constant-time; out-of-order evidence crosses the
-normal merge/deduplication path. WebSocket packets are queued in arrival order
-and reduced once per animation frame. The pending client buffer is capped at
-256 messages and 2 MiB. Overflow marks the projection stale and requests a new
-bootstrap rather than silently dropping facts while continuing to claim live
-state.
+normal merge/deduplication path. WebSocket packets are queued in arrival order.
+At most 24 messages and 256 KiB enter one animation-frame reducer chunk; that
+chunk preserves every message transition while committing the projection store
+once. The pending client queue is capped at 256 messages and 2 MiB.
+
+Crossing the client queue limit is renderer backpressure, not evidence that the
+server cursor is invalid. The client accepts the boundary message, closes the
+viewer, drains ordered chunks, and reconnects with capped exponential backoff
+from its last committed cursor. The server's bounded run ring replays the gap.
+Only a typed reset-required response for session mismatch, an ahead-of-stream
+cursor, or an expired replay window triggers a fresh bootstrap.
+
+Forward multi-candle catch-up updates the chart series in candle order. Once
+the 320-candle hot window slides, the chart periodically rebases after 64
+forward updates so chart-library state remains bounded without setData on every
+new candle.
 
 The chart's candle series and follow-latest camera advance on every accepted
 live candle. Trade segments, markers, price-scale ghosts, and overlay geometry

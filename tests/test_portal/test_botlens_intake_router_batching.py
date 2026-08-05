@@ -374,6 +374,40 @@ def test_intake_router_lifecycle_ingest_skips_persistence_and_only_enqueues_proj
     asyncio.run(scenario())
 
 
+def test_intake_router_combines_rows_arriving_within_persistence_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        persisted_batches: list[list[str]] = []
+
+        def _record(rows, *, context=None):
+            _ = context
+            persisted_batches.append([str(row.get("event_id") or "") for row in rows])
+            return len(rows)
+
+        monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", _record)
+        router = IntakeRouter(
+            registry=_FakeRegistry(),
+            persist_batch_max_delay_ms=50,
+        )
+        context = {
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "series_key": "instrument-btc|1m",
+            "message_kind": BRIDGE_FACTS_KIND,
+            "pipeline_stage": "botlens_ingest_facts",
+        }
+
+        await asyncio.gather(
+            router._persist_rows(rows=[{"event_id": "event-1"}], context=context),
+            router._persist_rows(rows=[{"event_id": "event-2"}], context=context),
+        )
+
+        assert persisted_batches == [["event-1", "event-2"]]
+
+    asyncio.run(scenario())
+
+
 def test_intake_router_serializes_event_ledger_writes_within_one_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

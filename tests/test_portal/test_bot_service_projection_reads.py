@@ -340,6 +340,63 @@ def test_list_bot_runs_for_bot_keeps_persisted_terminal_status_when_snapshot_is_
     assert result["runs"][0]["runtime_status"] == "completed"
 
 
+def test_get_bot_run_status_uses_fresh_hot_checkpoint_and_progress(monkeypatch):
+    storage = _FakeStorage()
+    snapshot = SimpleNamespace(
+        health=SimpleNamespace(
+            to_dict=lambda: {
+                "status": "running",
+                "progress": 0.72,
+                "last_event_at": "2026-04-09T05:30:00Z",
+            }
+        ),
+    )
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(
+        bot_service,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub({"run-1": snapshot}),
+    )
+
+    result = bot_service.get_bot_run_status("bot-1", "run-1")
+
+    assert result["status"] == "running"
+    assert result["checkpoint_at"] == "2026-04-09T05:30:00Z"
+    assert result["updated_at"] == "2026-04-09T05:30:00Z"
+    assert result["progress"] == pytest.approx(0.72)
+    assert result["progress_unit"] == "fraction"
+
+
+def test_get_bot_run_status_prefers_persisted_terminal_truth_over_stale_lifecycle(monkeypatch):
+    storage = _FakeStorage()
+    storage.run["status"] = "completed"
+    storage.run["ended_at"] = "2026-04-09T06:00:00Z"
+    snapshot = SimpleNamespace(
+        health=SimpleNamespace(
+            to_dict=lambda: {
+                "status": "running",
+                "progress": 0.99,
+                "last_event_at": "2026-04-09T05:59:59Z",
+            }
+        ),
+    )
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(
+        bot_service,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub({"run-1": snapshot}),
+    )
+
+    result = bot_service.get_bot_run_status("bot-1", "run-1")
+
+    assert result["status"] == "completed"
+    assert result["terminal"] is True
+    assert result["completed"] is True
+    assert result["active"] is False
+
+
 def test_runtime_capacity_marks_estimate_incomplete_when_snapshot_missing(monkeypatch):
     composition = _FakeComposition(config_service=_FakeConfigService(), storage=_FakeStorage())
     monkeypatch.setattr(bot_service, "_composition", lambda: composition)

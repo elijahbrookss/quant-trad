@@ -26,6 +26,8 @@ code_paths:
   - portal/frontend/src/components/bots/hooks/useTradeMarkers.js
   - portal/frontend/src/components/bots/hooks/useViewportController.js
   - portal/frontend/src/components/bots/botlensProjection.js
+  - portal/frontend/src/features/bots/botlens/hooks/useBotLensLiveTransport.js
+  - portal/frontend/src/features/bots/botlens/state/botlensRuntimeState.js
   - portal/frontend/src/features/bots/botlens
   - portal/frontend/src/v2/rooms/BotLensRoom.jsx
   - src/core/settings.py
@@ -59,10 +61,13 @@ BotLens separates three read contracts:
 
 1. **Hot projection.** The selected-symbol bootstrap and live deltas own only
    current operator state. The browser retains at most 320 hot candles and
-   applies ordered append/replacement in constant time. Incoming messages are
-   reduced once per animation frame in original order. A pending client batch
-   is capped at 256 messages and 2 MiB; overflow marks the view stale and
-   requests a fresh bootstrap.
+   applies ordered append/replacement in constant time. Incoming messages keep
+   their exact stream order but are admitted to React in visual chunks of at
+   most 24 messages and 256 KiB per animation frame. One chunk builds one
+   projection store and commits root state once. The total pending queue is
+   capped at 256 messages and 2 MiB. Crossing that boundary closes the viewer
+   and resumes from the last committed cursor; only a server-proven session
+   mismatch or expired replay window requests a fresh bootstrap.
 2. **Bounded chart window.** Frozen chart history loads 240 bars at a time when
    the viewport approaches either available edge. Dataset-relative paging flags
    distinguish the requested interval from the frozen dataset boundary, so a
@@ -98,8 +103,21 @@ BotLens separates three read contracts:
 
 Run-stream fanout is concurrent across viewers. Each send has a configurable
 deadline, 1,500 ms by default. A slow or failed viewer is evicted without
-serially delaying healthy viewers. Its recovery boundary is a new bootstrap,
-not replay from another browser's memory.
+serially delaying healthy viewers. The server retains an 8,192-message run
+ring by default. A reconnect first replays from the viewer's ordered cursor;
+session mismatch, a cursor ahead of the stream, or an expired ring window is
+the explicit bootstrap boundary.
+
+The chart applies an ordinary multi-candle catch-up through ordered series
+updates rather than a full setData rebuild. Once the 320-candle hot window
+starts sliding, the chart may retain a small internal prefix for incremental
+rendering and rebases to the bounded source window every 64 forward updates.
+This bounds chart-library memory without rebuilding on every new candle.
+
+Exact-run research evidence is terminal work. An active BotLens mount uses the
+cheap run inspection summary and does not materialize the growing research
+dataset. The backend returns an explicit deferred summary if an older client
+still calls the research endpoint while the run is active.
 
 ## Invariants
 
@@ -109,9 +127,12 @@ not replay from another browser's memory.
   navigate to it again.
 - WebSocket batching preserves message order and therefore all run, concern,
   position, and overlay clocks.
-- Buffer overflow, stale cursors, and send timeouts fail visible and trigger
-  resynchronization; packets are not silently discarded while the view remains
-  labeled live.
+- Client render backlog fails visible, closes the socket, and resumes from the
+  last committed cursor. It does not rebuild the session merely because React
+  fell behind.
+- Session mismatch, an ahead-of-stream cursor, an expired replay window, and
+  send timeouts fail visible and trigger bootstrap resynchronization; packets
+  are not silently discarded while the view remains labeled live.
 - A slow viewer cannot delay a healthy viewer by the slow viewer's timeout.
 - Chart-window replacement or eviction changes only presentation memory. It
   cannot change persisted evidence, report fingerprints, or backtest results.
@@ -134,15 +155,20 @@ not replay from another browser's memory.
   candle range.
 - Completed trade evidence and active position state remain visually and
   semantically separate.
+- An active run never constructs a complete research dataset for a compact
+  BotLens header.
+- Incremental chart catch-up preserves candle order and periodically rebases to
+  the bounded hot window.
 
 ## Consequences
 
 Year-long and multi-tab inspection has a fixed browser-memory envelope while
 the operator still sees complete counts and can navigate every durable record.
-Live rendering performs at most one reducer dispatch per animation frame, and
-server fanout isolates slow viewers. Chart navigation feels continuous because
-history arrives from viewport movement; there is no second manual loading
-control competing with pan/zoom.
+Live rendering performs at most one small reducer dispatch per animation frame,
+commits projection state once per chunk, and treats those updates as
+interruptible visual work. Server fanout isolates slow viewers. Chart
+navigation feels continuous because history arrives from viewport movement;
+there is no second manual loading control competing with pan/zoom.
 
 The bounded chart is not a miniature full-run database. Crossing an evicted
 range causes another deterministic read, and a trade jump discards unrelated
@@ -167,6 +193,9 @@ honest completeness semantics.
 - Frontend projection/state tests prove hot-candle, chart-candle, overlay-page,
   trade-window, stale-request, and trade-marker bounds plus ordered batch
   reduction.
+- Transport tests prove capped reconnect backoff; production validation records
+  replay hits/misses, reconnect count, and client backlog recovery.
+- Research tests prove active evidence requests never build the report dataset.
 - Viewport and marker tests prove exact prepend range preservation,
   containing-candle projection, missing-gap rejection, stable event identity,
   and marker deduplication.

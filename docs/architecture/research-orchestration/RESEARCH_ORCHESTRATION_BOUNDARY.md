@@ -55,6 +55,17 @@ It is an interface boundary, not a new strategy engine.
 The backend API owns the semantic contract for orchestration. The CLI is a thin
 adapter over that API.
 
+Compact run-status polling joins persisted terminal truth with the latest hot
+runtime health. A terminal persisted run status dominates a stale non-terminal
+lifecycle phase; while active, the newest projected event time and progress
+drive checkpoint output. Therefore qt runs wait observes forward progress and
+termination without reading frontend state or a stale initial lifecycle row.
+
+Complete research evidence is terminal work. An active-run research request
+returns a typed deferred summary from cheap run/lifecycle fields and never
+constructs the growing signals/decisions/trades dataset. Terminal requests
+continue through the canonical report research dataset.
+
 The boundary may:
 
 - call bot control API routes,
@@ -222,7 +233,8 @@ for:
   plus `qt research jobs status/result <job_id>`,
 - research evidence read models through `qt research run`, `qt research trail`,
   and `qt research compare`,
-- run lifecycle waiting through compact run status API state,
+- run lifecycle waiting through compact run status API state that combines
+  fresh hot progress with persisted terminal precedence,
 - report listing, readiness, compact research summary, diagnostics,
   materialization status/build, export, and materialized report comparison
   summary,

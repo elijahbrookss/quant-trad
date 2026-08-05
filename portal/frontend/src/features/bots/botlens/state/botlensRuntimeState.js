@@ -273,10 +273,7 @@ function matchesActiveRun(state, runId) {
   return activeRunId === requestedRunId
 }
 
-function applyLiveProjectionMessage(state, message) {
-  const projectionStore = getBotLensProjectionStore(state)
-  if (!projectionStore) return state
-
+function applyLiveProjectionMessageToStore(projectionStore, message) {
   let nextProjectionStore = projectionStore
   switch (String(message?.type || '')) {
     case RUN_LIFECYCLE_DELTA_TYPE:
@@ -301,7 +298,29 @@ function applyLiveProjectionMessage(state, message) {
       break
   }
 
-  return commitProjectionStore(state, nextProjectionStore)
+  return nextProjectionStore
+}
+
+function applyLiveProjectionMessage(state, message) {
+  const projectionStore = getBotLensProjectionStore(state)
+  if (!projectionStore) return state
+  return commitProjectionStore(
+    state,
+    applyLiveProjectionMessageToStore(projectionStore, message),
+  )
+}
+
+export function applyLiveProjectionMessages(state, messages) {
+  const projectionStore = getBotLensProjectionStore(state)
+  if (!projectionStore) return state
+  const nextProjectionStore = (Array.isArray(messages) ? messages : [])
+    .reduce(
+      (current, message) => applyLiveProjectionMessageToStore(current, message),
+      projectionStore,
+    )
+  return nextProjectionStore === projectionStore
+    ? state
+    : commitProjectionStore(state, nextProjectionStore)
 }
 
 export function reduceBotLensState(state, action) {
@@ -588,8 +607,7 @@ export function reduceBotLensState(state, action) {
       return applyLiveProjectionMessage(state, action.message)
 
     case 'live/messagesReceived':
-      return (Array.isArray(action.messages) ? action.messages : [])
-        .reduce((current, message) => applyLiveProjectionMessage(current, message), state)
+      return applyLiveProjectionMessages(state, action.messages)
 
     case 'retrieval/chartRequest': {
       if (!matchesActiveRun(state, action.runId)) return state

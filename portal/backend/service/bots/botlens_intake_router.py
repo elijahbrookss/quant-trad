@@ -64,7 +64,7 @@ from .botlens_state import ProjectionBatch
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_intake_router", event_logger=logger)
 _PERSIST_BATCH_MAX_ROWS = 512
-_PERSIST_BATCH_MAX_DELAY_MS = 25
+_PERSIST_BATCH_MAX_DELAY_MS = 100
 _PERSIST_IDEMPOTENCE_MAX_EVENT_IDS = 50_000
 _TERMINAL_LIFECYCLE_STATES = frozenset({"completed", "stopped", "cancelled", "canceled", "error", "failed", "crashed", "startup_failed"})
 
@@ -368,6 +368,24 @@ class IntakeRouter:
         for waiter in pending.waiters:
             if not waiter.done():
                 waiter.set_result(inserted)
+
+    async def _flush_pending_run_rows(self, *, bot_id: str, run_id: str) -> None:
+        flush_keys: list[tuple[Any, ...]] = []
+        async with self._persist_lock:
+            for key, pending in tuple(self._pending_persist_batches.items()):
+                if (
+                    str(pending.context.get("bot_id") or "").strip() != str(bot_id).strip()
+                    or str(pending.context.get("run_id") or "").strip() != str(run_id).strip()
+                    or pending.flushing
+                ):
+                    continue
+                pending.flushing = True
+                if pending.flush_task is not None:
+                    pending.flush_task.cancel()
+                    pending.flush_task = None
+                flush_keys.append(key)
+        if flush_keys:
+            await asyncio.gather(*(self._flush_rows(key) for key in flush_keys))
 
     def _schedule_persist_rows(
         self,
@@ -902,6 +920,7 @@ class IntakeRouter:
                 bot_id=bot_id,
                 reason=str(payload.get("status") or payload.get("phase") or "terminal").strip().lower(),
             )
+            await self._flush_pending_run_rows(bot_id=bot_id, run_id=run_id)
             _enqueue_terminal_report_materialization(
                 run_id=run_id,
                 bot_id=bot_id,
