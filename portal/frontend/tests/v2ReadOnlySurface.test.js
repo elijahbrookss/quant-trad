@@ -80,6 +80,8 @@ test('run-scoped BotLens always performs authoritative exact-run and research-ev
   assert.match(room, /const loadTimer = window\.setTimeout/)
   assert.match(room, /window\.clearTimeout\(loadTimer\)/)
   assert.match(room, /controller\.abort\(\)/)
+  assert.match(room, /onTerminal=\{handleRuntimeTerminal\}/)
+  assert.match(room, /terminalRefreshRequestedRef/)
   assert.match(controller, /const loadTimer = window\.setTimeout\(load, 0\)/)
   assert.match(controller, /fetchBotLensExactRunBootstrap\(runId(?:,|\))/)
   assert.equal(room.includes('fetchBot(botId)'), false)

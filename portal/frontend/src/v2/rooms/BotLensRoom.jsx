@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { fetchRun } from '../../adapters/bot.adapter.js'
 import { fetchRunResearchEvidence } from '../../adapters/research.adapter.js'
@@ -40,12 +40,21 @@ export function BotLensRoom() {
   const [researchEvidence, setResearchEvidence] = useState(null)
   const [runError, setRunError] = useState(null)
   const [researchError, setResearchError] = useState(null)
+  const [terminalRefreshRunId, setTerminalRefreshRunId] = useState(null)
+  const terminalRefreshRequestedRef = useRef(null)
+
+  useEffect(() => {
+    terminalRefreshRequestedRef.current = null
+  }, [runId])
 
   useEffect(() => {
     let mounted = true
     const controller = new AbortController()
-    setInspection(initialRunInspection(location.state, runId))
-    setResearchEvidence(null)
+    const terminalRefresh = terminalRefreshRunId === runId
+    if (!terminalRefresh) {
+      setInspection(initialRunInspection(location.state, runId))
+      setResearchEvidence(null)
+    }
     setRunError(null)
     setResearchError(null)
 
@@ -78,7 +87,15 @@ export function BotLensRoom() {
       window.clearTimeout(loadTimer)
       controller.abort()
     }
-  }, [location.state, runId])
+  }, [location.state, runId, terminalRefreshRunId])
+
+  const handleRuntimeTerminal = useCallback(({ runId: terminalRunId } = {}) => {
+    const resolvedRunId = String(terminalRunId || '').trim()
+    if (!resolvedRunId || resolvedRunId !== String(runId || '').trim()) return
+    if (terminalRefreshRequestedRef.current === resolvedRunId) return
+    terminalRefreshRequestedRef.current = resolvedRunId
+    setTerminalRefreshRunId(resolvedRunId)
+  }, [runId])
 
   const bot = useMemo(() => inspection ? projectRunAsBot(inspection) : null, [inspection])
   const from = safeRunLensOrigin(location.state?.from)
@@ -111,6 +128,7 @@ export function BotLensRoom() {
       runId={runId}
       open
       onClose={handleClose}
+      onTerminal={handleRuntimeTerminal}
       variant="dialog"
       contextHeader={contextHeader}
     />

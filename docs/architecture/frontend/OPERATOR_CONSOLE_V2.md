@@ -342,6 +342,11 @@ connection. Server fanout sends to viewers concurrently with a configurable
 1,500-ms default send deadline. A slow viewer is evicted and cannot serially
 delay healthy viewers. See [ADR 0055](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md).
 
+The terminal lifecycle message closes live eligibility in the projection
+store. The existing routed room then performs one exact-run refresh and starts
+research plus durable evidence only after that read proves the run inactive.
+The chart/controller remains mounted across this handoff.
+
 ## Liveness And Freshness Language
 
 The console may say:

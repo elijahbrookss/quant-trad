@@ -8,6 +8,7 @@ const MAX_DECISIONS = 600
 const MAX_TRADES = 240
 export const MAX_CHART_HISTORY_TRADES = 2000
 const SYMBOL_DELTA_DROP_WARN_INTERVAL_MS = 10000
+const TERMINAL_RUN_LIFECYCLE_STATES = new Set(['completed', 'canceled', 'cancelled', 'stopped', 'failed', 'crashed', 'startup_failed', 'error'])
 const logger = createLogger('botlensProjection')
 const symbolDeltaDropWarnings = new Map()
 
@@ -1129,14 +1130,41 @@ export function applyRunLifecycleDelta(store, message) {
     ? message.payload.lifecycle
     : null
   if (!lifecycle) return store
+  const nextLifecycle = { ...(store?.lifecycle || {}), ...lifecycle }
+  const lifecycleState = String(nextLifecycle.status || nextLifecycle.phase || '').trim().toLowerCase()
+  const terminal = TERMINAL_RUN_LIFECYCLE_STATES.has(lifecycleState)
+  const runLive = terminal
+    ? false
+    : Boolean(nextLifecycle.live ?? store?.readiness?.run_live)
+  const symbolStates = terminal
+    ? Object.fromEntries(Object.entries(store?.symbolStates || {}).map(([symbolKey, symbolState]) => [
+        symbolKey,
+        {
+          ...symbolState,
+          status: lifecycleState,
+          readiness: normalizeSelectedSymbolReadiness({
+            ...(symbolState?.readiness || {}),
+            symbol_live: false,
+            run_live: false,
+          }, {
+            catalog_discovered: true,
+            snapshot_ready: Boolean(symbolState?.readiness?.snapshot_ready),
+            symbol_live: false,
+            run_live: false,
+          }),
+        },
+      ]))
+    : store?.symbolStates
   return {
     ...store,
     seq: Math.max(Number(store?.seq || 0), Number(message?.scope_seq || 0)),
-    lifecycle: { ...(store?.lifecycle || {}), ...lifecycle },
-    readiness: normalizeRunReadiness(store?.readiness, {
+    lifecycle: nextLifecycle,
+    transportEligible: terminal || lifecycle.live === false ? false : Boolean(store?.transportEligible),
+    readiness: normalizeRunReadiness({ ...(store?.readiness || {}), run_live: runLive }, {
       catalog_discovered: store?.readiness?.catalog_discovered || Object.keys(store?.symbolIndex || {}).length > 0,
-      run_live: Boolean(lifecycle.live ?? store?.readiness?.run_live),
+      run_live: runLive,
     }),
+    symbolStates,
   }
 }
 

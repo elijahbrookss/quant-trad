@@ -153,6 +153,10 @@ are compact digests rather than full serialized copies of their payloads.
   send timeouts fail visible and trigger bootstrap resynchronization; packets
   are not silently discarded while the view remains labeled live.
 - A slow viewer cannot delay a healthy viewer by the slow viewer's timeout.
+- Terminal lifecycle demotes live transport and bounded symbol readiness in the
+  same ordered reducer commit. One exact-run refresh then promotes the mounted
+  room into durable evidence and terminal research; terminal promotion never
+  requires a remount.
 - Chart-window replacement or eviction changes only presentation memory. It
   cannot change persisted evidence, report fingerprints, or backtest results.
 - Automatic left-edge loading stops at the frozen dataset boundary and never

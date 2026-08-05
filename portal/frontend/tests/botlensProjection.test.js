@@ -216,6 +216,27 @@ test('run bootstrap can seed selected symbol state and replay cursor in one resp
   assert.equal(selected.overlays[0].overlay_id, 'overlay-1')
 })
 
+test('terminal lifecycle delta closes live transport and releases historical evidence loading', () => {
+  let store = createRunStore(runBootstrapPayload())
+  store = applySelectedSymbolBootstrap(store, selectedSymbolBootstrapPayload())
+  assert.equal(store.transportEligible, true)
+  assert.equal(store.readiness.run_live, true)
+
+  store = applyRunLifecycleDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 23,
+    scope_seq: 21,
+    payload: { lifecycle: { phase: 'completed', status: 'completed', live: false } },
+  })
+
+  assert.equal(store.lifecycle.status, 'completed')
+  assert.equal(store.transportEligible, false)
+  assert.equal(store.readiness.run_live, false)
+  assert.equal(getSelectedSymbolState(store).status, 'completed')
+  assert.equal(getSelectedSymbolState(store).readiness.run_live, false)
+  assert.equal(getSelectedSymbolState(store).readiness.symbol_live, false)
+})
+
 test('run deltas and selected-symbol bootstrap stay on separate client boundaries', () => {
   let store = createRunStore(runBootstrapPayload())
   store = applySelectedSymbolBootstrap(store, selectedSymbolBootstrapPayload())

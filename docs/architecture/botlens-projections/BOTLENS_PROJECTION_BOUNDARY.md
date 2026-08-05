@@ -348,6 +348,14 @@ after that backlog is empty. The server's bounded run ring replays the gap.
 Only a typed reset-required response for session mismatch, an ahead-of-stream
 cursor, or an expired replay window triggers a fresh bootstrap.
 
+An accepted terminal lifecycle delta explicitly makes live transport
+ineligible, clears live readiness on the bounded run and symbol projections,
+and closes the viewer without a session bootstrap. The routed room observes
+that live-to-terminal edge once, refreshes the authoritative run record, and
+only then requests terminal research and durable evidence. This promotes a
+single mounted BotLens session from live projection to historical inspection;
+it does not remount or rebuild the active session.
+
 Forward multi-candle catch-up updates the chart series in candle order. Once
 the 320-candle hot window slides, the chart periodically rebases after 64
 forward updates so chart-library state remains bounded without setData on every

@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { buildBotLensRuntimeViewModel } from './buildBotLensRuntimeViewModel.js'
 import { useBotLensController } from './hooks/useBotLensController.js'
 import { BotLensRuntimeView } from './BotLensRuntimeView.jsx'
@@ -9,9 +9,48 @@ import { BotLensRuntimePageView } from './BotLensRuntimePageView.jsx'
  * routed lens). Both variants render the same BotLensContent; only the
  * outer chrome differs. See BotLensRuntimeView.jsx / BotLensRuntimePageView.jsx.
  */
-export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot), onClose, variant = 'dialog', contextHeader = null }) {
+export function BotLensRuntimeContainer({
+  bot,
+  runId = null,
+  open = Boolean(bot),
+  onClose,
+  onTerminal,
+  variant = 'dialog',
+  contextHeader = null,
+}) {
   const controller = useBotLensController({ open, bot, onClose, runId })
   const runState = controller.runState
+  const observedLiveRef = useRef(false)
+  const terminalNotificationRef = useRef(null)
+
+  useEffect(() => {
+    observedLiveRef.current = false
+    terminalNotificationRef.current = null
+  }, [runId])
+
+  useEffect(() => {
+    const lifecycle = runState?.lifecycle && typeof runState.lifecycle === 'object'
+      ? runState.lifecycle
+      : {}
+    const lifecycleState = String(lifecycle.status || lifecycle.phase || '').trim().toLowerCase()
+    const live = Boolean(
+      runState?.transportEligible
+      || lifecycle.live
+      || runState?.readiness?.run_live,
+    )
+    if (live) {
+      observedLiveRef.current = true
+      return
+    }
+    const terminal = ['completed', 'canceled', 'cancelled', 'stopped', 'failed', 'crashed', 'startup_failed', 'error']
+      .includes(lifecycleState)
+    const resolvedRunId = String(controller.activeRunId || runId || '').trim()
+    if (!terminal || !resolvedRunId || !observedLiveRef.current || terminalNotificationRef.current === resolvedRunId) {
+      return
+    }
+    terminalNotificationRef.current = resolvedRunId
+    onTerminal?.({ runId: resolvedRunId, lifecycle })
+  }, [controller.activeRunId, onTerminal, runId, runState?.lifecycle, runState?.readiness?.run_live, runState?.transportEligible])
 
   // buildBotLensRuntimeViewModel only ever reads these 7 sub-fields off
   // `runState` (verified by grep — nothing else, notably never `symbolStates`,
