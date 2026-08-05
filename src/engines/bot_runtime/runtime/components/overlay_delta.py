@@ -162,6 +162,9 @@ def overlay_payload_summary(payload: Any) -> Dict[str, Any]:
         summary["payload_counts"] = counts
     if point_count > 0:
         summary["point_count"] = int(point_count)
+    polylines = payload.get("polylines")
+    if isinstance(polylines, list) and polylines:
+        summary["polyline_fingerprint"] = _json_fingerprint(polylines)
     return summary
 
 

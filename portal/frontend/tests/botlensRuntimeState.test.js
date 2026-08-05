@@ -768,3 +768,59 @@ test('batched live messages coalesce growing symbol concerns without losing fact
   assert.equal(selected.live_cursors.scope_seq_by_concern.candles, 25)
   assert.equal(selected.live_cursors.scope_seq_by_concern.decisions, 24)
 })
+
+test('batched live messages coalesce contiguous overlay commits without delaying geometry', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'live/messagesReceived',
+    messages: [
+      {
+        type: 'botlens_symbol_overlay_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 23,
+        stream_seq: 23,
+        payload: {
+          overlay_commit_seq: 1,
+          base_overlay_commit_seq: 0,
+          overlay_commit_seq_status: 'overlay_scoped',
+          checkpoint_kind: 'full_state',
+          ops: [{
+            op: 'upsert',
+            key: 'overlay-live',
+            overlay: {
+              overlay_id: 'overlay-live',
+              payload: { markers: [{ time: 1, price: 10 }] },
+            },
+          }],
+        },
+      },
+      {
+        type: 'botlens_symbol_overlay_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 24,
+        stream_seq: 24,
+        payload: {
+          overlay_commit_seq: 2,
+          base_overlay_commit_seq: 1,
+          overlay_commit_seq_status: 'overlay_scoped',
+          ops: [{
+            op: 'patch',
+            key: 'overlay-live',
+            payload_patch: {
+              replace: { markers: [{ time: 2, price: 11 }] },
+            },
+          }],
+        },
+      },
+    ],
+  })
+
+  const selected = selectSelectedSymbolState(state)
+  const overlay = selected.overlays.find((entry) => entry.overlay_id === 'overlay-live')
+  assert.equal(overlay.payload.markers[0].time, 2)
+  assert.equal(selected.live_cursors.overlay_commit_seq, 2)
+  assert.equal(selected.live_cursors.scope_seq_by_concern.overlays, 24)
+  assert.equal(state.live.lastStreamSeq, 24)
+})

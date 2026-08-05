@@ -256,7 +256,7 @@ buffer drains. Seeing a live message first does not make projection state
 canonical.
 
 Transport-owned durable rows share a bounded process queue by write contract,
-up to 512 rows or 250 ms. Rows from concurrent runs may therefore enter one
+up to 512 rows or 2,000 ms. Rows from concurrent runs may therefore enter one
 database transaction. The repository groups them back into `(bot_id, run_id)`
 scopes, allocates a dense sequence range for each run, and retains a sorted
 process-local lock for every run represented by the write. A later write that
@@ -328,18 +328,23 @@ materialized read.
 The frontend keeps at most 320 live selected-symbol candles. Ordered append and
 same-timestamp replacement are constant-time; out-of-order evidence crosses the
 normal merge/deduplication path. WebSocket packets are queued in arrival order.
-At most 24 messages and 256 KiB enter one animation-frame reducer chunk.
+At most 24 messages and 256 KiB enter one reducer chunk, and visual commits are
+paced no faster than once per 100 ms while backlog exists.
 Repeated deltas for the same selected-symbol concern are reduced to one
 equivalent concern update: candle and evidence arrays retain ordered entries,
 while provisional-candle and stats concerns retain their newest value. Groups
 are applied in terminal stream-cursor order and the projection store commits
-once. Overlay-clock deltas and run-scoped messages remain uncoalesced. The
-pending client queue is capped at 256 messages and 2 MiB.
+once. Contiguous overlay-clock deltas for one symbol may combine their ordered
+ops into the same reducer commit; a base-clock gap ends the group, and a full
+checkpoint replaces earlier ops in that group. Run-scoped messages remain
+individually ordered. The pending client queue is capped at 256 messages and
+2 MiB.
 
 Crossing the client queue limit is renderer backpressure, not evidence that the
 server cursor is invalid. The client accepts the boundary message, closes the
-viewer, drains ordered chunks, and reconnects with capped exponential backoff
-from its last committed cursor. The server's bounded run ring replays the gap.
+viewer, stops parsing packets already queued behind that boundary, drains the
+accepted ordered chunks, and reconnects with capped exponential backoff only
+after that backlog is empty. The server's bounded run ring replays the gap.
 Only a typed reset-required response for session mismatch, an ahead-of-stream
 cursor, or an expired replay window triggers a fresh bootstrap.
 
@@ -381,8 +386,11 @@ runtime snapshot. `series_state_observed` carries routing identity only.
 unbounded indicator history. Rolling polyline changes use a typed tail patch:
 the patch names the line index, expected point count, dropped prefix, and
 appended points, and carries SHA-256 fingerprints for both the previous and
-resulting polyline collection. A mismatch fails replay rather than silently
-accepting divergent geometry. The first overlay state is a bounded full
+resulting polyline collection. Browser projection applies that tail operation
+immediately, carries the result fingerprint into the next base check, and fails
+loud on a mismatch rather than advancing an apparently healthy but stale layer.
+Overlay revisions are compact digests; they never retain a second serialized
+copy of rolling geometry. The first overlay state is a bounded full
 checkpoint; runtime also emits a `checkpoint_kind=full_state` recovery snapshot
 every 20 overlay commits and at terminal projection. Changes between checkpoints
 avoid retransmitting the entire rolling window.

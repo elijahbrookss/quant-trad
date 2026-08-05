@@ -442,7 +442,10 @@ def test_botlens_fact_stream_overlay_delta_uses_bounded_render_payload() -> None
         {"time": 8, "price": 8.0},
         {"time": 9, "price": 9.0},
     ]
-    assert overlay["payload_summary"] == {
+    payload_summary = dict(overlay["payload_summary"])
+    polyline_fingerprint = payload_summary.pop("polyline_fingerprint")
+    assert len(polyline_fingerprint) == 64
+    assert payload_summary == {
         "geometry_keys": ["markers", "polylines"],
         "payload_counts": {"markers": 2, "polylines": 1},
         "point_count": 2,

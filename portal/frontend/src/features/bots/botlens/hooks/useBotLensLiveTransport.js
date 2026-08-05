@@ -8,6 +8,7 @@ export const BOTLENS_LIVE_MESSAGE_LIMIT = 256
 export const BOTLENS_LIVE_BYTE_LIMIT = 2 * 1024 * 1024
 export const BOTLENS_LIVE_FRAME_MESSAGE_LIMIT = 24
 export const BOTLENS_LIVE_FRAME_BYTE_LIMIT = 256 * 1024
+export const BOTLENS_LIVE_RENDER_INTERVAL_MS = 100
 export const BOTLENS_LIVE_STABLE_CONNECTION_MS = 30_000
 
 export function botLensReconnectDelayMs(attempt, randomValue = 0) {
@@ -153,8 +154,7 @@ export function useBotLensLiveTransport({
 
   const clearPendingMessages = useCallback(() => {
     if (pendingFrameRef.current !== null) {
-      if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(pendingFrameRef.current)
-      else window.clearTimeout(pendingFrameRef.current)
+      window.clearTimeout(pendingFrameRef.current)
     }
     pendingFrameRef.current = null
     pendingMessagesRef.current = []
@@ -189,9 +189,7 @@ export function useBotLensLiveTransport({
     })
 
     if (pending.length) {
-      pendingFrameRef.current = typeof window.requestAnimationFrame === 'function'
-        ? window.requestAnimationFrame(flushPendingMessages)
-        : window.setTimeout(flushPendingMessages, 16)
+      pendingFrameRef.current = window.setTimeout(flushPendingMessages, BOTLENS_LIVE_RENDER_INTERVAL_MS)
     }
   }, [dispatch])
 
@@ -204,9 +202,7 @@ export function useBotLensLiveTransport({
     pendingMessagesRef.current.push({ message, rawBytes })
     pendingBytesRef.current = nextBytes
     if (pendingFrameRef.current === null) {
-      pendingFrameRef.current = typeof window.requestAnimationFrame === 'function'
-        ? window.requestAnimationFrame(flushPendingMessages)
-        : window.setTimeout(flushPendingMessages, 16)
+      pendingFrameRef.current = window.setTimeout(flushPendingMessages, 0)
     }
     return withinLimit
   }, [flushPendingMessages])
@@ -351,6 +347,7 @@ export function useBotLensLiveTransport({
     }
 
     socket.onmessage = (event) => {
+      if (bufferOverflowRef.current) return
       if (cancelled || token !== sessionTokenRef.current) return
       try {
         const message = JSON.parse(event.data)
@@ -370,7 +367,6 @@ export function useBotLensLiveTransport({
           return
         }
         const rawBytes = typeof event.data === 'string' ? event.data.length * 2 : 0
-        if (bufferOverflowRef.current) return
         if (!queueLiveMessage(message, rawBytes)) {
           bufferOverflowRef.current = true
           dispatch({ type: 'live/connectionStateChanged', connectionState: 'reconnecting' })
@@ -428,11 +424,16 @@ export function useBotLensLiveTransport({
         delay_ms: reconnectDelayMs,
         resume_from_seq: latestCursorRef.current.resumeFromSeq,
       })
-      reconnectTimerRef.current = window.setTimeout(() => {
+      const reconnectWhenDrained = () => {
         reconnectTimerRef.current = null
         if (cancelled || token !== sessionTokenRef.current) return
+        if (pendingMessagesRef.current.length) {
+          reconnectTimerRef.current = window.setTimeout(reconnectWhenDrained, 50)
+          return
+        }
         setReconnectTick((value) => value + 1)
-      }, reconnectDelayMs)
+      }
+      reconnectTimerRef.current = window.setTimeout(reconnectWhenDrained, reconnectDelayMs)
     }
 
     return () => {

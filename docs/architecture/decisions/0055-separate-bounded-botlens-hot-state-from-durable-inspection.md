@@ -14,6 +14,8 @@ tags:
   - replay
   - accepted
 code_paths:
+  - portal/backend/service/bots/botlens_intake_router.py
+  - portal/backend/service/bots/botlens_state.py
   - portal/backend/controller/reports.py
   - portal/backend/service/bots/botlens_run_stream.py
   - portal/backend/service/reports/contract.py
@@ -26,10 +28,12 @@ code_paths:
   - portal/frontend/src/components/bots/hooks/useTradeMarkers.js
   - portal/frontend/src/components/bots/hooks/useViewportController.js
   - portal/frontend/src/components/bots/botlensProjection.js
+  - portal/frontend/src/features/bots/botlens/BotLensRuntimeContainer.jsx
   - portal/frontend/src/features/bots/botlens/hooks/useBotLensLiveTransport.js
   - portal/frontend/src/features/bots/botlens/state/botlensRuntimeState.js
   - portal/frontend/src/features/bots/botlens
   - portal/frontend/src/v2/rooms/BotLensRoom.jsx
+  - src/engines/bot_runtime/runtime/components/overlay_delta.py
   - src/core/settings.py
   - config/defaults.yaml
 ---
@@ -63,10 +67,13 @@ BotLens separates three read contracts:
    current operator state. The browser retains at most 320 hot candles and
    applies ordered append/replacement in constant time. Incoming messages keep
    their exact stream order but are admitted to React in visual chunks of at
-   most 24 messages and 256 KiB per animation frame. One chunk builds one
-   projection store and commits root state once. The total pending queue is
-   capped at 256 messages and 2 MiB. Crossing that boundary closes the viewer
-   and resumes from the last committed cursor; only a server-proven session
+   most 24 messages and 256 KiB, paced no faster than once per 100 ms while
+   backlog exists. One chunk builds one projection store and commits root state
+   once. Contiguous same-symbol overlay commits may combine ordered ops; base
+   mismatch splits the group and full-state checkpoints reset it. The total
+   pending queue is capped at 256 messages and 2 MiB. Crossing that boundary closes the viewer
+   before parsing further queued packets, drains accepted work, then resumes
+   from the last committed cursor; only a server-proven session
    mismatch or expired replay window requests a fresh bootstrap.
 2. **Bounded chart window.** Frozen chart history loads 240 bars at a time when
    the viewport approaches either available edge. Dataset-relative paging flags
@@ -121,16 +128,24 @@ still calls the research endpoint while the run is active.
 
 ## Invariants
 
+Rolling overlays use exact polyline-tail patches between bounded full
+checkpoints. The browser applies drop/append operations immediately, checks the
+known base fingerprint, and carries the result fingerprint forward; it does not
+advance the overlay cursor while leaving geometry stale. Overlay revision fields
+are compact digests rather than full serialized copies of their payloads.
+
 - Bounded hot or chart state is never labeled complete run history.
 - Terminal decision/trade/diagnostic totals come from durable typed datasets.
 - The browser does not accumulate every page merely because the operator can
   navigate to it again.
 - WebSocket batching preserves message order and therefore all run, concern,
   position, and overlay clocks.
-- Within one animation-frame chunk, repeated independent symbol concerns may
+- Within one reducer chunk, repeated independent symbol concerns may
   commute into one equivalent update. Ordered evidence entries are concatenated,
-  last-value concerns keep the newest payload, and overlay/run deltas remain
-  uncoalesced; the terminal stream and concern cursors still advance exactly.
+  last-value concerns keep the newest payload, contiguous overlay ops combine
+  only when their base clocks prove continuity, and run deltas remain
+  individually ordered; the terminal stream and concern cursors still advance
+  exactly.
 - Client render backlog fails visible, closes the socket, and resumes from the
   last committed cursor. It does not rebuild the session merely because React
   fell behind.
@@ -168,7 +183,8 @@ still calls the research endpoint while the run is active.
 
 Year-long and multi-tab inspection has a fixed browser-memory envelope while
 the operator still sees complete counts and can navigate every durable record.
-Live rendering performs at most one small reducer dispatch per animation frame,
+Live rendering performs at most one small reducer dispatch per 100 ms while
+catch-up backlog exists,
 coalesces repeated independent concern work, commits projection state once per
 chunk, and treats those updates as interruptible visual work. Server fanout
 isolates slow viewers. Chart

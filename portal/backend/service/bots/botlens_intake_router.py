@@ -65,7 +65,7 @@ from .botlens_state import ProjectionBatch
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_intake_router", event_logger=logger)
 _PERSIST_BATCH_MAX_ROWS = 512
-_PERSIST_BATCH_MAX_DELAY_MS = 250
+_PERSIST_BATCH_MAX_DELAY_MS = 2_000
 _PERSIST_IDEMPOTENCE_MAX_EVENT_IDS = 50_000
 _TERMINAL_LIFECYCLE_STATES = frozenset({"completed", "stopped", "cancelled", "canceled", "error", "failed", "crashed", "startup_failed"})
 

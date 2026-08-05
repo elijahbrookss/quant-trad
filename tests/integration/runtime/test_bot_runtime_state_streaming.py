@@ -157,7 +157,11 @@ def test_overlay_delta_patches_stable_overlay_payload_changes() -> None:
 
 
 def test_overlay_delta_encodes_large_rolling_polylines_as_small_exact_tail_patch() -> None:
-    from portal.backend.service.bots.botlens_state import apply_overlay_delta, project_overlay_state
+    from portal.backend.service.bots.botlens_state import (
+        apply_overlay_delta,
+        overlay_revision,
+        project_overlay_state,
+    )
 
     runtime = _DummyRuntime()
     cache: dict[str, object] = {}
@@ -191,6 +195,13 @@ def test_overlay_delta_encodes_large_rolling_polylines_as_small_exact_tail_patch
     assert [entry["drop_prefix"] for entry in patch["polyline_tail"]["entries"]] == [25, 25, 25]
     assert [len(entry["append"]) for entry in patch["polyline_tail"]["entries"]] == [25, 25, 25]
     assert len(json.dumps(second, separators=(",", ":")).encode("utf-8")) < 10_000
+    assert (
+        first["ops"][0]["overlay"]["payload_summary"]["polyline_fingerprint"]
+        == patch["polyline_tail"]["expected_fingerprint"]
+    )
+    assert patch["payload_summary"]["polyline_fingerprint"] == patch["polyline_tail"]["result_fingerprint"]
+    assert len(overlay_revision(overlay(0))) == 64
+
 
     projected = apply_overlay_delta([first["ops"][0]["overlay"]], second)
     assert projected[0]["payload"]["polylines"] == overlay(25)["payload"]["polylines"]

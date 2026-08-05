@@ -887,7 +887,8 @@ def overlay_identity(overlay: Any, index: int) -> str:
 
 
 def overlay_revision(overlay: Any) -> str:
-    return json.dumps(_normalize_scalar_value(overlay), sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(_normalize_scalar_value(overlay), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def project_overlay_state(overlays: Any) -> Tuple[Dict[str, Any], ...]:

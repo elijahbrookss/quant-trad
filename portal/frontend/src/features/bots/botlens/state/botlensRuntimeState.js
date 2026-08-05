@@ -343,6 +343,34 @@ function mergeCoalescedTypedMessage(previous, message) {
     }
   }
   const entryFields = COALESCED_ENTRY_FIELDS_BY_TYPE[type]
+  if (type === 'botlens_symbol_overlay_delta') {
+    const previousCommitSeq = Number(previousPayload.overlay_commit_seq || 0)
+    const baseCommitSeq = Number(payload.base_overlay_commit_seq || -1)
+    if (
+      !Number.isFinite(previousCommitSeq)
+      || previousCommitSeq <= 0
+      || baseCommitSeq !== previousCommitSeq
+    ) {
+      return null
+    }
+    const messageIsFull = String(payload.checkpoint_kind || '').trim().toLowerCase() === 'full_state'
+    const previousIsFull = String(previousPayload.checkpoint_kind || '').trim().toLowerCase() === 'full_state'
+    const ops = messageIsFull
+      ? (Array.isArray(payload.ops) ? payload.ops : [])
+      : [
+          ...(Array.isArray(previousPayload.ops) ? previousPayload.ops : []),
+          ...(Array.isArray(payload.ops) ? payload.ops : []),
+        ]
+    return {
+      ...message,
+      payload: {
+        ...payload,
+        base_overlay_commit_seq: messageIsFull ? baseCommitSeq : Number(previousPayload.base_overlay_commit_seq || 0),
+        ops,
+        ...((messageIsFull || previousIsFull) ? { checkpoint_kind: 'full_state' } : {}),
+      },
+    }
+  }
   if (entryFields) {
     const mergedPayload = { ...payload }
     entryFields.forEach((field) => {
@@ -368,9 +396,9 @@ export function coalesceLiveProjectionMessages(messages) {
     }
     const type = String(message?.type || '')
     if (
-      type === 'botlens_symbol_overlay_delta'
-      || !(
+      !(
         type === 'botlens_symbol_candle_delta'
+        || type === 'botlens_symbol_overlay_delta'
         || COALESCED_ENTRY_FIELDS_BY_TYPE[type]
         || COALESCED_LAST_VALUE_TYPES.has(type)
       )
@@ -390,7 +418,12 @@ export function coalesceLiveProjectionMessages(messages) {
       return
     }
     const merged = mergeCoalescedTypedMessage(previous, message)
-    if (merged) grouped.set(key, merged)
+    if (merged) {
+      grouped.set(key, merged)
+    } else {
+      output.push(previous)
+      grouped.set(key, message)
+    }
   })
   output.push(...grouped.values())
   return output.sort(

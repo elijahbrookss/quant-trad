@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  applyOverlayDelta,
+  projectOverlayState,
   applyTypedSymbolDelta,
   applyCandleDelta,
   appendBoundedCanonicalCandle,
@@ -824,4 +826,81 @@ test('ordered live candle appends stay bounded without reordering the hot tail',
   })
   assert.equal(candles.length, 320)
   assert.equal(candles.at(-1).close, 500.5)
+})
+
+test('compact polyline tail patches update overlay geometry immediately and retain a bounded revision', () => {
+  const baseFingerprint = 'a'.repeat(64)
+  const resultFingerprint = 'b'.repeat(64)
+  const overlays = projectOverlayState([{
+    overlay_id: 'overlay-lines',
+    type: 'strategy_signal',
+    payload: {
+      polylines: [{
+        role: 'signal',
+        points: [
+          { time: 1, price: 10 },
+          { time: 2, price: 11 },
+          { time: 3, price: 12 },
+        ],
+      }],
+    },
+    payload_summary: {
+      polyline_fingerprint: baseFingerprint,
+      point_count: 3,
+    },
+  }])
+
+  assert.match(overlays[0].overlay_revision, /^fnv1a32:[0-9a-f]{8}$/)
+  assert.ok(overlays[0].overlay_revision.length < 32)
+
+  const updated = applyOverlayDelta(overlays, {
+    ops: [{
+      op: 'patch',
+      key: 'overlay-lines',
+      payload_patch: {
+        polyline_tail: {
+          expected_fingerprint: baseFingerprint,
+          result_fingerprint: resultFingerprint,
+          entries: [{
+            index: 0,
+            expected_count: 3,
+            drop_prefix: 1,
+            append: [{ time: 4, price: 13 }],
+          }],
+        },
+        payload_summary: { point_count: 3 },
+      },
+    }],
+  })
+
+  assert.deepEqual(
+    updated[0].payload.polylines[0].points.map((point) => point.time),
+    [2, 3, 4],
+  )
+  assert.equal(updated[0].payload_summary.polyline_fingerprint, resultFingerprint)
+  assert.match(updated[0].overlay_revision, /^fnv1a32:[0-9a-f]{8}$/)
+})
+
+test('polyline tail patches fail loud when their base fingerprint diverges', () => {
+  const overlays = projectOverlayState([{
+    overlay_id: 'overlay-lines',
+    payload: { polylines: [{ points: [{ time: 1, price: 10 }] }] },
+    payload_summary: { polyline_fingerprint: 'expected' },
+  }])
+  assert.throws(
+    () => applyOverlayDelta(overlays, {
+      ops: [{
+        op: 'patch',
+        key: 'overlay-lines',
+        payload_patch: {
+          polyline_tail: {
+            expected_fingerprint: 'different',
+            result_fingerprint: 'result',
+            entries: [{ index: 0, expected_count: 1, drop_prefix: 0, append: [] }],
+          },
+        },
+      }],
+    }),
+    /base fingerprint mismatch/,
+  )
 })

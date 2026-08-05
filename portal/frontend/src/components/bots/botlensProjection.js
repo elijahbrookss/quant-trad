@@ -221,7 +221,13 @@ export function validateCanonicalCandles(candles) {
 }
 
 function stableOverlayRevision(value) {
-  return JSON.stringify(sortValue(value))
+  const serialized = JSON.stringify(sortValue(value))
+  let hash = 0x811c9dc5
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash ^= serialized.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`
 }
 
 function sortValue(value) {
@@ -243,17 +249,76 @@ function overlayIdentity(overlay, index) {
   return explicitOverlayId
 }
 
+function withCompactOverlayRevision(overlay, overlayId) {
+  const normalized = {
+    ...(overlay && typeof overlay === 'object' ? overlay : {}),
+    overlay_id: overlayId,
+  }
+  delete normalized.overlay_revision
+  return {
+    ...normalized,
+    overlay_revision: stableOverlayRevision(normalized),
+  }
+}
+
+function applyPolylineTailPatch(payload, rawPatch, payloadSummary = {}) {
+  const patch = rawPatch && typeof rawPatch === 'object' ? rawPatch : {}
+  const expectedFingerprint = String(patch.expected_fingerprint || '').trim()
+  const resultFingerprint = String(patch.result_fingerprint || '').trim()
+  const entries = Array.isArray(patch.entries) ? patch.entries : []
+  const polylines = Array.isArray(payload?.polylines) ? payload.polylines : null
+  if (!expectedFingerprint || !resultFingerprint || !entries.length) {
+    throw new Error('overlay_delta.polyline_tail contract is incomplete')
+  }
+  if (!polylines) {
+    throw new Error('overlay_delta.polyline_tail requires existing polylines')
+  }
+  const knownFingerprint = String(payloadSummary?.polyline_fingerprint || '').trim()
+  if (knownFingerprint && knownFingerprint !== expectedFingerprint) {
+    throw new Error('overlay_delta.polyline_tail base fingerprint mismatch')
+  }
+  const nextPolylines = polylines.map((line) => (
+    line && typeof line === 'object' ? { ...line } : line
+  ))
+  entries.forEach((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      throw new Error('overlay_delta.polyline_tail entry must be an object')
+    }
+    const index = Number(entry.index)
+    const expectedCount = Number(entry.expected_count)
+    const dropPrefix = Number(entry.drop_prefix)
+    const append = Array.isArray(entry.append) ? entry.append : []
+    if (!Number.isInteger(index) || index < 0 || index >= nextPolylines.length) {
+      throw new Error('overlay_delta.polyline_tail index is out of range')
+    }
+    const line = nextPolylines[index]
+    if (!line || typeof line !== 'object' || !Array.isArray(line.points)) {
+      throw new Error('overlay_delta.polyline_tail requires existing point lists')
+    }
+    if (line.points.length !== expectedCount) {
+      throw new Error('overlay_delta.polyline_tail point count mismatch')
+    }
+    if (!Number.isInteger(dropPrefix) || dropPrefix < 0 || dropPrefix > line.points.length) {
+      throw new Error('overlay_delta.polyline_tail drop_prefix is out of range')
+    }
+    nextPolylines[index] = {
+      ...line,
+      points: [...line.points.slice(dropPrefix), ...append],
+    }
+  })
+  return {
+    polylines: nextPolylines,
+    fingerprint: resultFingerprint,
+  }
+}
+
 export function projectOverlayState(overlays = []) {
   const projected = new Map()
   ;(Array.isArray(overlays) ? overlays : []).forEach((overlay, index) => {
     if (!overlay || typeof overlay !== 'object') return
     const overlayId = overlayIdentity(overlay, index)
     if (!overlayId) return
-    projected.set(overlayId, {
-      ...overlay,
-      overlay_id: overlayId,
-      overlay_revision: stableOverlayRevision({ ...overlay, overlay_id: overlayId }),
-    })
+    projected.set(overlayId, withCompactOverlayRevision(overlay, overlayId))
   })
   return Array.from(projected.values())
 }
@@ -288,6 +353,12 @@ export function applyOverlayDelta(overlays = [], overlayDelta = {}) {
           payload[String(replaceKey)] = replaceValue
         })
       }
+      const tailResult = patch.polyline_tail
+        ? applyPolylineTailPatch(payload, patch.polyline_tail, existing.payload_summary)
+        : null
+      if (tailResult) {
+        payload.polylines = tailResult.polylines
+      }
       const nextOverlay = {
         ...existing,
         payload,
@@ -296,18 +367,22 @@ export function applyOverlayDelta(overlays = [], overlayDelta = {}) {
           : {}),
         overlay_id: key,
       }
-      overlayMap.set(key, {
-        ...nextOverlay,
-        overlay_revision: stableOverlayRevision({ ...nextOverlay, overlay_id: key }),
-      })
+      if (tailResult) {
+        nextOverlay.payload_summary = {
+          ...(existing.payload_summary && typeof existing.payload_summary === 'object'
+            ? existing.payload_summary
+            : {}),
+          ...(nextOverlay.payload_summary && typeof nextOverlay.payload_summary === 'object'
+            ? nextOverlay.payload_summary
+            : {}),
+          polyline_fingerprint: tailResult.fingerprint,
+        }
+      }
+      overlayMap.set(key, withCompactOverlayRevision(nextOverlay, key))
       return
     }
     if (opName !== 'upsert' || !op.overlay || typeof op.overlay !== 'object') return
-    overlayMap.set(key, {
-      ...op.overlay,
-      overlay_id: key,
-      overlay_revision: stableOverlayRevision({ ...op.overlay, overlay_id: key }),
-    })
+    overlayMap.set(key, withCompactOverlayRevision(op.overlay, key))
   })
   return Array.from(overlayMap.values())
 }

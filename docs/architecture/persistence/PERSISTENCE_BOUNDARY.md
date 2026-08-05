@@ -26,6 +26,7 @@ code_paths:
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_event_retention.py
+  - portal/backend/service/bots/botlens_intake_router.py
   - src/engines/bot_runtime/runtime/components/canonical_facts.py
   - src/engines/bot_runtime/runtime/components/persistence_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
@@ -299,6 +300,9 @@ Transport-owned retained rows from concurrent runs share a bounded
 write-contract queue in the portal process. One flush may contain multiple
 `(bot_id, run_id)` groups; the repository locks and reserves each run's
 allocator independently inside the same transaction before one bulk insert.
+The queue flushes at 512 rows or 2,000 ms, whichever comes first, so concurrent
+backtests aggregate sparse transport-owned facts without delaying canonical
+runtime ownership.
 Process-local run locks are acquired in sorted order so overlapping flushes
 cannot reorder a run or deadlock, while disjoint flushes remain eligible for
 parallel execution. A terminal run forces the whole pending mixed batch that

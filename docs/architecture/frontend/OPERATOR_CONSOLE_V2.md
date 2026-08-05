@@ -327,11 +327,15 @@ The older ascending event-ledger cursor remains a forensic service boundary,
 but the terminal operator workspace does not use that growing cursor as its
 complete-history index.
 
-Live WebSocket packets are queued in arrival order and reduced once per browser
-animation frame in chunks of at most 24 messages and 256 KiB. Each ordered
-chunk commits projection state once. A pending client queue is capped at 256
-messages and 2 MiB; renderer backlog closes and resumes the socket from its
-last committed cursor. It does not force a bootstrap unless the server reports
+Live WebSocket packets are queued in arrival order and reduced on a bounded
+100-ms visual cadence in chunks of at most 24 messages and 256 KiB. Each ordered
+chunk commits projection state once. Contiguous overlay commits combine their
+ordered ops only when base clocks match; polyline tail patches update geometry
+immediately and carry their result fingerprint forward. A pending client queue
+is capped at 256 messages and 2 MiB; renderer backlog closes and resumes the
+socket from its last committed cursor after accepted backlog drains. Packets
+already queued behind an overflow boundary are not parsed. It does not force a
+bootstrap unless the server reports
 a mismatched session, ahead-of-stream cursor, or expired replay window.
 Reconnect attempts use capped exponential backoff and reset only after a stable
 connection. Server fanout sends to viewers concurrently with a configurable

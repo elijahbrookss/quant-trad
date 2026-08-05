@@ -42,6 +42,36 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
     ],
   )
 
+  const selectedSymbolState = controller.selectedSymbolState
+  const selectedSymbolStateForModel = useMemo(
+    () => ({
+      stats: selectedSymbolState?.stats,
+      runtime: selectedSymbolState?.runtime,
+      readiness: selectedSymbolState?.readiness,
+      overlay_projection: selectedSymbolState?.overlay_projection,
+      live_cursors: {
+        overlay_projection: selectedSymbolState?.live_cursors?.overlay_projection,
+      },
+      overlay_validity: selectedSymbolState?.overlay_validity,
+      status: selectedSymbolState?.status,
+      last_event_at: selectedSymbolState?.last_event_at,
+      candles: { length: Number(selectedSymbolState?.candles?.length || 0) },
+      timeframe: selectedSymbolState?.timeframe,
+    }),
+    [
+      selectedSymbolState?.stats,
+      selectedSymbolState?.runtime,
+      selectedSymbolState?.readiness,
+      selectedSymbolState?.overlay_projection,
+      selectedSymbolState?.live_cursors?.overlay_projection,
+      selectedSymbolState?.overlay_validity,
+      selectedSymbolState?.status,
+      selectedSymbolState?.last_event_at,
+      selectedSymbolState?.candles?.length,
+      selectedSymbolState?.timeframe,
+    ],
+  )
+
   // Single memo boundary around the whole view-model build. Every dep here
   // is now a properly-scoped, stable-across-irrelevant-ticks value (thanks
   // to useBotLensController's per-slice selectors and runStateForModel
@@ -76,7 +106,7 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
       selectedSymbolKey: controller.selectedSymbolKey,
       selectedSymbolMetadata: controller.selectedSymbolMetadata,
       selectedSymbolSignals: controller.selectedSymbolSignals,
-      selectedSymbolState: controller.selectedSymbolState,
+      selectedSymbolState: selectedSymbolStateForModel,
       selectedSummary: controller.selectedSummary,
       statusMessage: controller.statusMessage,
       streamState: controller.streamState,
@@ -110,7 +140,7 @@ export function BotLensRuntimeContainer({ bot, runId = null, open = Boolean(bot)
       controller.selectedSymbolKey,
       controller.selectedSymbolMetadata,
       controller.selectedSymbolSignals,
-      controller.selectedSymbolState,
+      selectedSymbolStateForModel,
       controller.selectedSummary,
       controller.statusMessage,
       controller.streamState,
