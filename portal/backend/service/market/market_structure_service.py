@@ -358,7 +358,7 @@ class MarketStructureService:
                 market_data_repo.register_series(
                     instrument_id=instrument_id,
                     fact_type=DERIVATIVE_STATE_FACT_TYPE,
-                    timeframe_seconds=60,
+                    timeframe_seconds=None,
                     contract_version=DERIVATIVE_STATE_FACT_VERSION,
                 )
                 if product_type == "future"

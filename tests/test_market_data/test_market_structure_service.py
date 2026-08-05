@@ -5,9 +5,12 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import portal.backend.service.market.market_structure_service as market_structure_module
 from data_providers.streams.contracts import ProviderRawMessage
+from market_data.fact_registry import get_fact_contract
 from market_data.order_book import BookLifecycle
 from market_data.structure import MarketTradeRecord
+from market_data.market_state import DERIVATIVE_STATE_FACT_TYPE
 from portal.backend.service.market.market_structure_service import MarketStructureService
 from portal.backend.service.storage.repos.market_structure import (
     AggregateIngestionOutcome,
@@ -454,3 +457,87 @@ def test_bounded_collector_spools_archives_persists_and_aggregates(
     assert repository.coverage is not None
     assert repository.aggregate_count > 0
     assert repository.released is True
+
+
+class _FakeConfigurationRepository:
+    def register_product_definition(self, **_kwargs) -> None:
+        return None
+
+    def upsert_stream_definition(self, **kwargs) -> dict:
+        return {
+            "definition_id": kwargs["definition_id"],
+            "provider_product_id": kwargs["provider_product_id"],
+        }
+
+    def register_instrument_mapping(self, **_kwargs) -> str:
+        return "mapping-1"
+
+
+class _ContractValidatingMarketDataRepository:
+    def __init__(self) -> None:
+        self.next_source_id = 1
+        self.next_series_id = 1
+        self.series_calls: list[dict] = []
+
+    def register_source(self, *_args, **_kwargs) -> int:
+        source_id = self.next_source_id
+        self.next_source_id += 1
+        return source_id
+
+    def register_series(self, **kwargs) -> int:
+        get_fact_contract(kwargs["fact_type"]).validate(
+            contract_version=kwargs["contract_version"],
+            timeframe_seconds=kwargs["timeframe_seconds"],
+        )
+        self.series_calls.append(dict(kwargs))
+        series_id = self.next_series_id
+        self.next_series_id += 1
+        return series_id
+
+
+def test_configure_pair_registers_derivative_state_without_timeframe(
+    monkeypatch,
+) -> None:
+    pair = market_structure_module.PHASE1_PAIRS["bip_btc"]
+    futures = {
+        "id": "future-instrument",
+        "symbol": pair.futures_product_id,
+        "tick_size": "0.01",
+        "qty_step": "1",
+    }
+    spot = {
+        "id": "spot-instrument",
+        "symbol": pair.spot_product_id,
+        "tick_size": "0.01",
+        "qty_step": "0.00000001",
+    }
+    fake_market_data_repository = _ContractValidatingMarketDataRepository()
+
+    monkeypatch.setattr(
+        market_structure_module,
+        "get_instrument_record",
+        lambda _instrument_id: futures,
+    )
+    monkeypatch.setattr(
+        market_structure_module,
+        "resolve_or_create_instrument",
+        lambda *_args, **_kwargs: (spot, None),
+    )
+    monkeypatch.setattr(
+        market_structure_module,
+        "market_data_repo",
+        fake_market_data_repository,
+    )
+
+    result = MarketStructureService(
+        repository=_FakeConfigurationRepository(),
+    ).configure_pair(pair_id="bip_btc")
+
+    derivative_calls = [
+        call
+        for call in fake_market_data_repository.series_calls
+        if call["fact_type"] == DERIVATIVE_STATE_FACT_TYPE
+    ]
+    assert result["pair_id"] == "bip_btc"
+    assert len(derivative_calls) == 1
+    assert derivative_calls[0]["timeframe_seconds"] is None

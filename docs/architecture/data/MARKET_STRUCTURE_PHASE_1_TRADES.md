@@ -145,6 +145,8 @@ The supported API-backed CLI operations are:
 
 ```bash
 qt data market-structure configure-pair --pair bip_btc --auth-mode authenticated
+qt data market-structure configure-pair --pair etp_eth --auth-mode authenticated
+qt data market-structure configure-pair --pair slp_sol --auth-mode authenticated
 qt data market-structure definitions
 qt data market-structure sessions --definition-id ms_coinbase_btc_usd
 qt data market-structure status ms_coinbase_btc_usd
@@ -159,6 +161,30 @@ frozen dataset ranges, configured spool/segment limits, and production
 blockers. `replay` verifies object SHA-256, exact frame order, replay
 fingerprint, raw mapping completeness, and canonical provider-trade identity
 coverage.
+
+### Capacity campaigns
+
+Capacity measurement uses concurrent bounded sessions, not production
+enrollment. A representative three-product trade campaign targets the futures
+definitions `ms_coinbase_bip_20dec30_cde`,
+`ms_coinbase_etp_20dec30_cde`, and
+`ms_coinbase_slp_20dec30_cde`. Each invocation remains capped at the CLI's
+one-hour maximum and carries a unique owner id.
+
+The campaign watches two different publication phases:
+
+1. During capture, the definition-scoped fsynced spool and process resources
+   can grow while canonical PostgreSQL trade and archive rows remain flat.
+2. At bounded session close, the archive is verified, acknowledged, and
+   published with canonical trade, coverage, and aggregate facts; PostgreSQL
+   growth can therefore arrive as a closing burst.
+
+The provisioned Grafana dashboard `QuantTrad Capacity & Database Growth`
+combines 15-second container/filesystem telemetry with five-minute logical
+schema/table snapshots so both phases are visible. Multiple consecutive
+one-hour windows may be measured, but an indefinite loop is not admission.
+The 24-hour implemented-path proof, storage-growth budget, recovery evidence,
+and explicit production gate remain mandatory before continuous collection.
 
 Recent REST reconciliation is deliberately only a bounded overlap diagnostic.
 REST-only IDs can occur after a capture and are not treated as gaps or evidence
