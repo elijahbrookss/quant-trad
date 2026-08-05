@@ -728,3 +728,43 @@ test('batched live messages preserve reducer ordering in one render action', () 
   assert.equal(state.runState.health.status, 'degraded')
   assert.equal(state.live.lastStreamSeq, 24)
 })
+
+test('batched live messages coalesce growing symbol concerns without losing facts or cursor order', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'live/messagesReceived',
+    messages: [
+      {
+        type: 'botlens_symbol_candle_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 23,
+        stream_seq: 23,
+        payload: { candle: { time: 1767225660, open: 2, high: 3, low: 1, close: 2 } },
+      },
+      {
+        type: 'botlens_symbol_decision_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 24,
+        stream_seq: 24,
+        payload: { entries: [{ event_id: 'decision-24' }] },
+      },
+      {
+        type: 'botlens_symbol_candle_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 25,
+        stream_seq: 25,
+        payload: { candle: { time: 1767225720, open: 2, high: 4, low: 2, close: 3 } },
+      },
+    ],
+  })
+
+  const selected = selectSelectedSymbolState(state)
+  assert.deepEqual(selected.candles.slice(-2).map((candle) => candle.time), [1767225660, 1767225720])
+  assert.equal(selected.decisions.at(-1).event_id, 'decision-24')
+  assert.equal(state.live.lastStreamSeq, 25)
+  assert.equal(selected.live_cursors.scope_seq_by_concern.candles, 25)
+  assert.equal(selected.live_cursors.scope_seq_by_concern.decisions, 24)
+})

@@ -1294,9 +1294,13 @@ function withSymbolState(store, message, applyChange) {
 
 export function applyCandleDelta(store, message) {
   return withSymbolState(store, message, (next, payload) => {
-    if (payload.candle && typeof payload.candle === 'object') {
-      next.candles = appendBoundedCanonicalCandle(next.candles, payload.candle)
-    }
+    const candles = [
+      ...(Array.isArray(payload.candles) ? payload.candles : []),
+      ...(payload.candle && typeof payload.candle === 'object' ? [payload.candle] : []),
+    ]
+    candles.forEach((candle) => {
+      next.candles = appendBoundedCanonicalCandle(next.candles, candle)
+    })
     return next
   })
 }

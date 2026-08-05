@@ -255,19 +255,15 @@ DB batch has completed, but the run is not finalized until that source-side
 buffer drains. Seeing a live message first does not make projection state
 canonical.
 
-Transport-owned durable rows use one ordered persistence writer per
-`(bot_id, run_id)`. All series and message kinds for the same run share that
-writer because the durable event-sequence allocator is run-owned; concurrent
-writes for one run would only contend on the same allocator row and amplify
-latency. Independent runs retain independent writer locks and may persist in
-parallel. The locks are process-local coordination only—database idempotency and
-the durable event identity remain authoritative across retries or restarts.
-
-Transport-owned projection rows wait in an asynchronous batch for at most 100
-ms or 512 rows. This removes one-row transaction pressure without delaying hot
-projection or changing row order. A terminal lifecycle message forces any
-pending rows for that run through the same ordered writer before terminal
-report materialization is enqueued.
+Transport-owned durable rows share a bounded process queue by write contract,
+up to 512 rows or 250 ms. Rows from concurrent runs may therefore enter one
+database transaction. The repository groups them back into `(bot_id, run_id)`
+scopes, allocates a dense sequence range for each run, and retains a sorted
+process-local lock for every run represented by the write. A later write that
+overlaps any of those runs cannot overtake it; disjoint writes may still proceed
+in parallel. Terminal lifecycle admission drains any queued mixed batch
+containing that run. Database idempotency and durable event identity remain
+authoritative across retries or restarts.
 
 Producer-side fanout is a bounded projection handoff after sequence assignment.
 Execution enqueues the committed live payload and keeps walking forward; the
@@ -332,9 +328,13 @@ materialized read.
 The frontend keeps at most 320 live selected-symbol candles. Ordered append and
 same-timestamp replacement are constant-time; out-of-order evidence crosses the
 normal merge/deduplication path. WebSocket packets are queued in arrival order.
-At most 24 messages and 256 KiB enter one animation-frame reducer chunk; that
-chunk preserves every message transition while committing the projection store
-once. The pending client queue is capped at 256 messages and 2 MiB.
+At most 24 messages and 256 KiB enter one animation-frame reducer chunk.
+Repeated deltas for the same selected-symbol concern are reduced to one
+equivalent concern update: candle and evidence arrays retain ordered entries,
+while provisional-candle and stats concerns retain their newest value. Groups
+are applied in terminal stream-cursor order and the projection store commits
+once. Overlay-clock deltas and run-scoped messages remain uncoalesced. The
+pending client queue is capped at 256 messages and 2 MiB.
 
 Crossing the client queue limit is renderer backpressure, not evidence that the
 server cursor is invalid. The client accepts the boundary message, closes the

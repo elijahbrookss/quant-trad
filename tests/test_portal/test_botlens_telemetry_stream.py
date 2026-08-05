@@ -1275,10 +1275,10 @@ class TestHubIntegration:
             await hub.ingest(_intake_payload(_bootstrap_payload(candle_time=1, run_seq=1)))
             await hub.ingest(_intake_payload(_facts_payload(candle_time=2, run_seq=2)))
 
-            # Give background tasks and thread pool operations time to complete.
-            # asyncio.sleep(0) yields to other tasks but doesn't wait for threads;
-            # a real sleep ensures asyncio.to_thread persistence calls finish.
-            await asyncio.sleep(0.15)
+            # Validate the explicit durability boundary rather than coupling the
+            # integration test to the router's batching interval.
+            await hub._router._flush_pending_run_rows(bot_id="bot-1", run_id="run-1")
+            await asyncio.sleep(0)
 
             symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             run_snapshot = hub.get_run_snapshot(run_id="run-1")

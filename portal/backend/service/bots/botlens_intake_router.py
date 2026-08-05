@@ -19,6 +19,7 @@ and happens inside the projector tasks.
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack
 import logging
 import threading
 import time
@@ -64,7 +65,7 @@ from .botlens_state import ProjectionBatch
 logger = logging.getLogger(__name__)
 _OBSERVER = BackendObserver(component="botlens_intake_router", event_logger=logger)
 _PERSIST_BATCH_MAX_ROWS = 512
-_PERSIST_BATCH_MAX_DELAY_MS = 100
+_PERSIST_BATCH_MAX_DELAY_MS = 250
 _PERSIST_IDEMPOTENCE_MAX_EVENT_IDS = 50_000
 _TERMINAL_LIFECYCLE_STATES = frozenset({"completed", "stopped", "cancelled", "canceled", "error", "failed", "crashed", "startup_failed"})
 
@@ -169,6 +170,7 @@ class IntakeRouter:
             tuple[str, str], asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self._persist_tasks: set[asyncio.Task[None]] = set()
+        self._persist_tasks_by_run: dict[tuple[str, str], set[asyncio.Task[None]]] = {}
         self._persisted_event_ids: dict[tuple[str, str, str, str, str], OrderedDict[str, None]] = {}
         self._scheduled_event_ids: dict[tuple[str, str, str, str, str], OrderedDict[str, None]] = {}
         self._continuity_accumulators: dict[tuple[str, str], CandleContinuityAccumulator] = {}
@@ -176,11 +178,11 @@ class IntakeRouter:
 
     @staticmethod
     def _persist_context_key(context: Mapping[str, Any]) -> tuple[Any, ...]:
+        # The repository already groups rows by bot/run and allocates each
+        # run's sequence range independently inside one transaction. Keep the
+        # process-side queue keyed by write contract, not run identity, so
+        # concurrent bots can share one database round trip.
         return (
-            str(context.get("bot_id") or "").strip(),
-            str(context.get("run_id") or "").strip(),
-            str(context.get("series_key") or "").strip(),
-            str(context.get("worker_id") or "").strip(),
             str(context.get("message_kind") or "").strip(),
             str(context.get("pipeline_stage") or "").strip(),
             str(context.get("source_emitter") or "").strip(),
@@ -334,25 +336,50 @@ class IntakeRouter:
             pending = self._pending_persist_batches.pop(key, None)
             if pending is None:
                 return
-            run_key = (
+        rows = [dict(row) for row in pending.rows]
+        run_keys = sorted({
+            (
+                str(row.get("bot_id") or "").strip(),
+                str(row.get("run_id") or "").strip(),
+            )
+            for row in rows
+            if str(row.get("bot_id") or "").strip() and str(row.get("run_id") or "").strip()
+        })
+        if not run_keys:
+            fallback_run_key = (
                 str(pending.context.get("bot_id") or "").strip(),
                 str(pending.context.get("run_id") or "").strip(),
             )
-            run_lock = self._persist_run_locks.get(run_key)
-            if run_lock is None:
-                run_lock = asyncio.Lock()
-                self._persist_run_locks[run_key] = run_lock
-        rows = [dict(row) for row in pending.rows]
+            if all(fallback_run_key):
+                run_keys = [fallback_run_key]
+        run_locks: list[asyncio.Lock] = []
+        async with self._persist_lock:
+            for run_key in run_keys:
+                run_lock = self._persist_run_locks.get(run_key)
+                if run_lock is None:
+                    run_lock = asyncio.Lock()
+                    self._persist_run_locks[run_key] = run_lock
+                run_locks.append(run_lock)
+        bot_ids = {bot_id for bot_id, _run_id in run_keys}
+        run_ids = {run_id for _bot_id, run_id in run_keys}
         context = {
             **dict(pending.context),
+            "bot_id": next(iter(bot_ids)) if len(bot_ids) == 1 else None,
+            "run_id": next(iter(run_ids)) if len(run_ids) == 1 else None,
+            "series_key": pending.context.get("series_key") if len(run_ids) == 1 else None,
+            "worker_id": pending.context.get("worker_id") if len(run_ids) == 1 else None,
             "batch_size": len(rows),
+            "batch_bot_count": len(bot_ids),
+            "batch_run_count": len(run_ids),
         }
         try:
             # The event-sequence allocator is owned per run. Concurrent writes
             # for the same run only contend on that row and amplify latency;
             # serialize them here while allowing independent runs to persist in
             # parallel.
-            async with run_lock:
+            async with AsyncExitStack() as stack:
+                for run_lock in run_locks:
+                    await stack.enter_async_context(run_lock)
                 inserted = int(
                     await asyncio.to_thread(
                         record_bot_runtime_events_batch,
@@ -373,11 +400,12 @@ class IntakeRouter:
         flush_keys: list[tuple[Any, ...]] = []
         async with self._persist_lock:
             for key, pending in tuple(self._pending_persist_batches.items()):
-                if (
-                    str(pending.context.get("bot_id") or "").strip() != str(bot_id).strip()
-                    or str(pending.context.get("run_id") or "").strip() != str(run_id).strip()
-                    or pending.flushing
-                ):
+                contains_run = any(
+                    str(row.get("bot_id") or "").strip() == str(bot_id).strip()
+                    and str(row.get("run_id") or "").strip() == str(run_id).strip()
+                    for row in pending.rows
+                )
+                if not contains_run or pending.flushing:
                     continue
                 pending.flushing = True
                 if pending.flush_task is not None:
@@ -386,6 +414,12 @@ class IntakeRouter:
                 flush_keys.append(key)
         if flush_keys:
             await asyncio.gather(*(self._flush_rows(key) for key in flush_keys))
+        run_key = (str(bot_id).strip(), str(run_id).strip())
+        while True:
+            in_flight = tuple(self._persist_tasks_by_run.get(run_key, ()))
+            if not in_flight:
+                break
+            await asyncio.gather(*in_flight)
 
     def _schedule_persist_rows(
         self,
@@ -424,7 +458,23 @@ class IntakeRouter:
 
         task = asyncio.create_task(_run())
         self._persist_tasks.add(task)
-        task.add_done_callback(self._persist_tasks.discard)
+        run_key = (
+            str(context.get("bot_id") or "").strip(),
+            str(context.get("run_id") or "").strip(),
+        )
+        run_tasks = self._persist_tasks_by_run.setdefault(run_key, set())
+        run_tasks.add(task)
+
+        def _discard(done: asyncio.Task[None]) -> None:
+            self._persist_tasks.discard(done)
+            scoped_tasks = self._persist_tasks_by_run.get(run_key)
+            if scoped_tasks is None:
+                return
+            scoped_tasks.discard(done)
+            if not scoped_tasks:
+                self._persist_tasks_by_run.pop(run_key, None)
+
+        task.add_done_callback(_discard)
 
     def _accumulate_continuity(
         self,

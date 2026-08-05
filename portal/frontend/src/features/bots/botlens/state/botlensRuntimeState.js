@@ -310,10 +310,98 @@ function applyLiveProjectionMessage(state, message) {
   )
 }
 
+const COALESCED_ENTRY_FIELDS_BY_TYPE = {
+  botlens_symbol_signal_delta: ['entries'],
+  botlens_symbol_trade_delta: ['upserts', 'removals'],
+  botlens_symbol_diagnostic_delta: ['entries'],
+  botlens_symbol_decision_delta: ['entries'],
+}
+
+const COALESCED_LAST_VALUE_TYPES = new Set([
+  'botlens_symbol_provisional_candle_delta',
+  'botlens_symbol_stats_delta',
+])
+
+function mergeCoalescedTypedMessage(previous, message) {
+  const type = String(message?.type || '')
+  const previousPayload = previous?.payload && typeof previous.payload === 'object'
+    ? previous.payload
+    : {}
+  const payload = message?.payload && typeof message.payload === 'object'
+    ? message.payload
+    : {}
+  if (type === 'botlens_symbol_candle_delta') {
+    const candles = [
+      ...(Array.isArray(previousPayload.candles) ? previousPayload.candles : []),
+      ...(previousPayload.candle && typeof previousPayload.candle === 'object' ? [previousPayload.candle] : []),
+      ...(Array.isArray(payload.candles) ? payload.candles : []),
+      ...(payload.candle && typeof payload.candle === 'object' ? [payload.candle] : []),
+    ]
+    return {
+      ...message,
+      payload: { ...payload, candle: null, candles },
+    }
+  }
+  const entryFields = COALESCED_ENTRY_FIELDS_BY_TYPE[type]
+  if (entryFields) {
+    const mergedPayload = { ...payload }
+    entryFields.forEach((field) => {
+      mergedPayload[field] = [
+        ...(Array.isArray(previousPayload[field]) ? previousPayload[field] : []),
+        ...(Array.isArray(payload[field]) ? payload[field] : []),
+      ]
+    })
+    return { ...message, payload: mergedPayload }
+  }
+  if (COALESCED_LAST_VALUE_TYPES.has(type)) return message
+  return null
+}
+
+export function coalesceLiveProjectionMessages(messages) {
+  const source = Array.isArray(messages) ? messages : []
+  const grouped = new Map()
+  const output = []
+  source.forEach((message) => {
+    if (!isTypedSymbolDeltaMessage(message)) {
+      output.push(message)
+      return
+    }
+    const type = String(message?.type || '')
+    if (
+      type === 'botlens_symbol_overlay_delta'
+      || !(
+        type === 'botlens_symbol_candle_delta'
+        || COALESCED_ENTRY_FIELDS_BY_TYPE[type]
+        || COALESCED_LAST_VALUE_TYPES.has(type)
+      )
+    ) {
+      output.push(message)
+      return
+    }
+    const symbolKey = normalizeSeriesKey(message?.symbol_key || '')
+    if (!symbolKey) {
+      output.push(message)
+      return
+    }
+    const key = `${type}:${symbolKey}`
+    const previous = grouped.get(key)
+    if (!previous) {
+      grouped.set(key, message)
+      return
+    }
+    const merged = mergeCoalescedTypedMessage(previous, message)
+    if (merged) grouped.set(key, merged)
+  })
+  output.push(...grouped.values())
+  return output.sort(
+    (left, right) => Number(left?.stream_seq || 0) - Number(right?.stream_seq || 0),
+  )
+}
+
 export function applyLiveProjectionMessages(state, messages) {
   const projectionStore = getBotLensProjectionStore(state)
   if (!projectionStore) return state
-  const nextProjectionStore = (Array.isArray(messages) ? messages : [])
+  const nextProjectionStore = coalesceLiveProjectionMessages(messages)
     .reduce(
       (current, message) => applyLiveProjectionMessageToStore(current, message),
       projectionStore,

@@ -1327,6 +1327,8 @@ def record_bot_runtime_events_batch(
     grouped: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
     for row in normalized:
         grouped.setdefault((row["bot_id"], row["run_id"]), []).append(row)
+    grouped_bot_ids = {bot_id for bot_id, _run_id in grouped}
+    grouped_run_ids = {run_id for _bot_id, run_id in grouped}
 
     raw_context = dict(context or {})
     payload_context = _runtime_event_context(normalized[0].get("payload"))
@@ -1338,8 +1340,8 @@ def record_bot_runtime_events_batch(
         pipeline_stage=pipeline_stage,
     )
     write_context = {
-        "run_id": str(normalized[0].get("run_id") or ""),
-        "bot_id": str(normalized[0].get("bot_id") or ""),
+        "run_id": next(iter(grouped_run_ids)) if len(grouped_run_ids) == 1 else None,
+        "bot_id": next(iter(grouped_bot_ids)) if len(grouped_bot_ids) == 1 else None,
         "event_id": str(normalized[0].get("event_id") or ""),
         "series_key": _normalize_botlens_series_key(raw_context.get("series_key") or payload_context.get("series_key")) or None,
         "worker_id": str(raw_context.get("worker_id") or payload_context.get("worker_id") or "").strip() or None,
@@ -1354,6 +1356,9 @@ def record_bot_runtime_events_batch(
         "write_contract": "event_id_dedupe_before_run_seq_allocation",
         "precheck_mode": "event_id_then_seq_guard",
     }
+    if len(grouped_run_ids) > 1:
+        write_context["batch_bot_count"] = len(grouped_bot_ids)
+        write_context["batch_run_count"] = len(grouped_run_ids)
     continuity_summary = continuity_summary_from_runtime_event_rows(
         normalized,
         series_key=write_context.get("series_key"),

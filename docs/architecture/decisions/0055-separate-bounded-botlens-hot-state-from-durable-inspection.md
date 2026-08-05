@@ -127,6 +127,10 @@ still calls the research endpoint while the run is active.
   navigate to it again.
 - WebSocket batching preserves message order and therefore all run, concern,
   position, and overlay clocks.
+- Within one animation-frame chunk, repeated independent symbol concerns may
+  commute into one equivalent update. Ordered evidence entries are concatenated,
+  last-value concerns keep the newest payload, and overlay/run deltas remain
+  uncoalesced; the terminal stream and concern cursors still advance exactly.
 - Client render backlog fails visible, closes the socket, and resumes from the
   last committed cursor. It does not rebuild the session merely because React
   fell behind.
@@ -165,8 +169,9 @@ still calls the research endpoint while the run is active.
 Year-long and multi-tab inspection has a fixed browser-memory envelope while
 the operator still sees complete counts and can navigate every durable record.
 Live rendering performs at most one small reducer dispatch per animation frame,
-commits projection state once per chunk, and treats those updates as
-interruptible visual work. Server fanout isolates slow viewers. Chart
+coalesces repeated independent concern work, commits projection state once per
+chunk, and treats those updates as interruptible visual work. Server fanout
+isolates slow viewers. Chart
 navigation feels continuous because history arrives from viewport movement;
 there is no second manual loading control competing with pan/zoom.
 

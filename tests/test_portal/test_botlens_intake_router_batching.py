@@ -408,6 +408,84 @@ def test_intake_router_combines_rows_arriving_within_persistence_window(
     asyncio.run(scenario())
 
 
+def test_intake_router_combines_concurrent_runs_in_one_database_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        persisted_batches: list[tuple[list[str], dict[str, object]]] = []
+
+        def _record(rows, *, context=None):
+            persisted_batches.append((
+                [str(row.get("event_id") or "") for row in rows],
+                dict(context or {}),
+            ))
+            return len(rows)
+
+        monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", _record)
+        router = IntakeRouter(registry=_FakeRegistry(), persist_batch_max_delay_ms=50)
+
+        await asyncio.gather(*(
+            router._persist_rows(
+                rows=[{
+                    "event_id": f"event-{index}",
+                    "bot_id": f"bot-{index}",
+                    "run_id": f"run-{index}",
+                }],
+                context={
+                    "bot_id": f"bot-{index}",
+                    "run_id": f"run-{index}",
+                    "series_key": "instrument-btc|1m",
+                    "message_kind": BRIDGE_FACTS_KIND,
+                    "pipeline_stage": "botlens_ingest_facts",
+                },
+            )
+            for index in range(3)
+        ))
+
+        assert len(persisted_batches) == 1
+        rows, context = persisted_batches[0]
+        assert rows == ["event-0", "event-1", "event-2"]
+        assert context["batch_run_count"] == 3
+        assert context["batch_size"] == 3
+        assert context["run_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_intake_router_terminal_drain_waits_for_scheduled_run_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        persisted: list[str] = []
+
+        def _record(rows, *, context=None):
+            _ = context
+            time.sleep(0.02)
+            persisted.extend(str(row.get("event_id") or "") for row in rows)
+            return len(rows)
+
+        monkeypatch.setattr(intake_mod, "record_bot_runtime_events_batch", _record)
+        router = IntakeRouter(registry=_FakeRegistry(), persist_batch_max_delay_ms=50)
+        context = {
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "series_key": "instrument-btc|1m",
+            "message_kind": BRIDGE_FACTS_KIND,
+            "pipeline_stage": "botlens_ingest_facts",
+        }
+        router._schedule_persist_rows(
+            rows=[{"event_id": "event-1", "bot_id": "bot-1", "run_id": "run-1"}],
+            context=context,
+        )
+
+        await router._flush_pending_run_rows(bot_id="bot-1", run_id="run-1")
+
+        assert persisted == ["event-1"]
+        assert ("bot-1", "run-1") not in router._persist_tasks_by_run
+
+    asyncio.run(scenario())
+
+
 def test_intake_router_serializes_event_ledger_writes_within_one_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

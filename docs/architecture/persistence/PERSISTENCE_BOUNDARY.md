@@ -295,6 +295,16 @@ prechecks for stable health, overlay, diagnostic, or stats facts. The database
 uniqueness constraint remains the final correctness guard after restarts or
 retries.
 
+Transport-owned retained rows from concurrent runs share a bounded
+write-contract queue in the portal process. One flush may contain multiple
+`(bot_id, run_id)` groups; the repository locks and reserves each run's
+allocator independently inside the same transaction before one bulk insert.
+Process-local run locks are acquired in sorted order so overlapping flushes
+cannot reorder a run or deadlock, while disjoint flushes remain eligible for
+parallel execution. A terminal run forces the whole pending mixed batch that
+contains it to drain. Mixed-batch logs report run and bot counts rather than
+mislabeling the transaction as one run.
+
 The runtime trade-snapshot and trade-event read models use the same strict
 failure policy through a dedicated ordered writer. The bar path copies each
 typed payload into a bounded queue; one background worker writes accepted
