@@ -6,7 +6,10 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
-from engines.bot_runtime.core.execution_assumptions import resolve_execution_assumptions
+from engines.bot_runtime.core.execution_assumptions import (
+    execution_quality_meets,
+    resolve_execution_assumptions,
+)
 
 
 PLAN_SCHEMA = "experiment_plan.v1"
@@ -300,8 +303,13 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{intent} experiments require non-empty pass_gates")
         if not bool(comparison_policy.get("require_golden")):
             raise ValueError(f"{intent} experiments require comparison_policy.require_golden=true")
-        if str(comparison_policy.get("minimum_execution_quality_class") or "").upper() != "X2":
-            raise ValueError(f"{intent} experiments require minimum_execution_quality_class=X2 in Phase 1")
+        minimum_execution_quality = str(
+            comparison_policy.get("minimum_execution_quality_class") or ""
+        ).upper()
+        if not execution_quality_meets(minimum_execution_quality, "X2"):
+            raise ValueError(
+                f"{intent} experiments require minimum_execution_quality_class=X2 or higher"
+            )
     normalized = {
         "schema_version": PLAN_SCHEMA,
         "name": _clean_id(payload.get("name"), "name"),

@@ -258,6 +258,7 @@ class MarketStructureAdmissionRequest(BaseModel):
 
 class MarketStructureReplayRequest(BaseModel):
     storage_root: Optional[str] = None
+    execution_instrument_id: Optional[str] = None
 
 
 class MarketStructureCompactionRequest(BaseModel):
@@ -773,6 +774,8 @@ def replay_market_structure_book_session(
         }
         if req.storage_root:
             kwargs["storage_root"] = Path(req.storage_root)
+        if req.execution_instrument_id is not None:
+            kwargs["execution_instrument_id"] = req.execution_instrument_id
         return market_structure_service.replay_book_session(**kwargs)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

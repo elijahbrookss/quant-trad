@@ -95,6 +95,13 @@ from market_data.structure import (
     bucket_start_for,
     translate_coinbase_market_trade,
 )
+from engines.bot_runtime.core.book_execution import (
+    EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+    ExecutionBookSourceReference,
+    ExecutionBookTape,
+    ExecutionBookTapeBundle,
+    ExecutionBookValidityClosure,
+)
 
 from ..storage.repos.market_data import market_data_repo
 from ..storage.repos.market_structure import (
@@ -184,6 +191,56 @@ def _stable_hash(payload: Mapping[str, Any]) -> str:
             default=str,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _build_execution_book_tape_from_replay(
+    *,
+    states: Sequence[Any],
+    closing_validity: Sequence[Any],
+    instrument_id: str,
+    replay_fingerprint: str,
+) -> ExecutionBookTape:
+    """Project certified provider-neutral replay facts into an execution tape."""
+
+    normalized_instrument_id = str(instrument_id or "").strip()
+    if not normalized_instrument_id:
+        raise ValueError("market_book_replay_invalid: execution instrument id is empty")
+    if not states:
+        raise RuntimeError(
+            "market_book_replay_invalid: no causal book states are available for execution"
+        )
+    closures = tuple(
+        ExecutionBookValidityClosure(
+            validity_interval_id=row.interval_id,
+            status=str(getattr(row.status, "value", row.status)),
+            known_at=row.known_at,
+            reason=str(row.reason or getattr(row.status, "value", row.status)),
+            source_reference=ExecutionBookSourceReference(
+                definition_id=row.closing_position.definition_id,
+                session_id=row.closing_position.session_id,
+                connection_epoch=row.closing_position.connection_epoch,
+                source_product_id=row.closing_position.provider_product_id,
+                source_sequence=row.closing_position.provider_sequence_num,
+                receive_ordinal=row.closing_position.receive_ordinal,
+                event_ordinal=row.closing_position.event_ordinal,
+            ),
+            evidence_hash=str(row.closing_quality_hash or row.version_id),
+        )
+        for row in closing_validity
+    )
+    return ExecutionBookTape.from_book_states(
+        states,
+        instrument_id=normalized_instrument_id,
+        replay_fingerprint=replay_fingerprint,
+        source_capability="l2",
+        replay_certified=True,
+        limitations=(
+            "aggregated_depth_only",
+            "exact_queue_position_unavailable",
+            "resting_order_execution_not_modeled",
+        ),
+        validity_closures=closures,
+    )
 
 
 def _observed_channel(raw_frame: bytes) -> str:
@@ -2063,6 +2120,7 @@ class MarketStructureService:
         *,
         definition_id: str,
         session_id: str,
+        execution_instrument_id: Optional[str] = None,
         storage_root: Path = DEFAULT_STORAGE_ROOT,
     ) -> dict[str, Any]:
         """Replay acknowledged raw objects without provider access."""
@@ -2190,12 +2248,20 @@ class MarketStructureService:
         def reduce_operations(
             reducer: Level2BookReconstructor,
             selected: Sequence[tuple[str, BookSourcePosition, Any]],
-        ) -> tuple[list[str], list[str], dict[str, Any], dict[str, Any], list[Any]]:
+        ) -> tuple[
+            list[str],
+            list[str],
+            dict[str, Any],
+            dict[str, Any],
+            list[Any],
+            list[Any],
+        ]:
             snapshot_ids: list[str] = []
             batch_ids: list[str] = []
             checkpoints: dict[str, Any] = {}
             opening_validity: dict[str, Any] = {}
             states: list[Any] = []
+            closing_validity: list[Any] = []
             for kind, position, payload in selected:
                 if kind == "invalidate":
                     result = reducer.invalidate_transport(
@@ -2215,16 +2281,30 @@ class MarketStructureService:
                 for validity in result.validity_versions:
                     if validity.revision == 1:
                         opening_validity[validity.interval_id] = validity
-            return snapshot_ids, batch_ids, checkpoints, opening_validity, states
+                    elif validity.closing_position is not None:
+                        closing_validity.append(validity)
+            return (
+                snapshot_ids,
+                batch_ids,
+                checkpoints,
+                opening_validity,
+                states,
+                closing_validity,
+            )
 
         full = Level2BookReconstructor(
             series_id=int(definition["series_id"]),
             contract=contract,
             ordering_assurance=OrderingAssurance.PROVIDER_DELIVERY_GUARANTEED,
         )
-        snapshot_ids, batch_ids, replay_checkpoints, opening_validity, replay_states = (
-            reduce_operations(full, operations)
-        )
+        (
+            snapshot_ids,
+            batch_ids,
+            replay_checkpoints,
+            opening_validity,
+            replay_states,
+            closing_validity,
+        ) = reduce_operations(full, operations)
         final_state_hash = full.current_state_hash
         reconciliation = self.repository.reconcile_book_replay(
             definition_id=definition_id,
@@ -2373,7 +2453,15 @@ class MarketStructureService:
                 ),
             }
         )
-        return {
+        execution_book_tape = None
+        if execution_instrument_id is not None:
+            execution_book_tape = _build_execution_book_tape_from_replay(
+                states=replay_states,
+                closing_validity=closing_validity,
+                instrument_id=execution_instrument_id,
+                replay_fingerprint=fingerprint,
+            ).to_dict()
+        result = {
             "schema_version": "market.book_session_replay.v1",
             "definition_id": definition_id,
             "session_id": session_id,
@@ -2397,6 +2485,13 @@ class MarketStructureService:
                 "persisted_equal": feature_equal,
             },
         }
+        if execution_book_tape is not None:
+            result["execution_book_tape"] = execution_book_tape
+            result["execution_book_tape_bundle"] = ExecutionBookTapeBundle(
+                schema_version=EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+                tapes=(ExecutionBookTape.from_dict(execution_book_tape),),
+            ).to_dict()
+        return result
 
     def reconcile_recent_trades(
         self, *, definition_id: str, limit: int = 100

@@ -41,6 +41,7 @@ _BACKTEST_EXECUTION_BOT_FIELDS = (
     "run_type",
     "bot_env",
     "execution_semantics",
+    "execution_book_tape_bundle",
 )
 
 

@@ -11,6 +11,7 @@ from typing import Any, Dict, Mapping, Protocol
 from core.settings import get_settings
 from engines.bot_runtime.strategy.models import Strategy
 from engines.bot_runtime.core.execution_context import ResolvedExecutionContextBundle
+from engines.bot_runtime.core.book_execution import ExecutionBookTapeBundle
 
 from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
 from ..market.backtest_dataset_service import validate_backtest_dataset
@@ -73,6 +74,7 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "economic_claim_intent",
         "execution_assumptions",
         "resolved_execution_context_bundle",
+        "execution_book_tape_bundle",
         "run_type",
         "playback_speed",
         "backtest_start",
@@ -192,6 +194,14 @@ class BotStartupOrchestrator:
                 ctx.bot_record["resolved_execution_context_bundle"] = context_bundle.to_dict()
             else:
                 context_bundle = None
+            raw_book_bundle = artifacts.get("execution_book_tape_bundle")
+            if raw_book_bundle is not None:
+                if not isinstance(raw_book_bundle, Mapping):
+                    raise TypeError("startup artifacts execution_book_tape_bundle must be a mapping")
+                book_bundle = ExecutionBookTapeBundle.from_dict(raw_book_bundle)
+                ctx.bot_record["execution_book_tape_bundle"] = book_bundle.to_dict()
+            else:
+                book_bundle = None
             symbols = list(ctx.runtime_readiness.get("symbols") or [])
             ctx.runtime_dependency_metadata = {
                 "symbols": symbols,
@@ -203,6 +213,12 @@ class BotStartupOrchestrator:
                 ),
                 "resolved_execution_context_count": (
                     len(context_bundle.contexts) if context_bundle is not None else 0
+                ),
+                "execution_book_tape_bundle_hash": (
+                    book_bundle.bundle_hash if book_bundle is not None else None
+                ),
+                "execution_book_tape_count": (
+                    len(book_bundle.tapes) if book_bundle is not None else 0
                 ),
             }
             ctx.bot_record["wallet_config"] = dict(ctx.wallet_config)
@@ -438,6 +454,9 @@ class BotStartupOrchestrator:
                     "execution_assumptions": dict(ctx.bot_record.get("execution_assumptions") or {}),
                     "resolved_execution_context_bundle": dict(
                         ctx.bot_record.get("resolved_execution_context_bundle") or {}
+                    ),
+                    "execution_book_tape_bundle": dict(
+                        ctx.bot_record.get("execution_book_tape_bundle") or {}
                     ),
                     "dataset_binding": dict(ctx.dataset_binding),
                     "request_id": ctx.request_id or None,

@@ -1948,6 +1948,225 @@ def _instrument_economics_class(metadata: RunResearchMetadata) -> str:
     return "unknown"
 
 
+def _book_execution_quality_assessment(
+    *,
+    execution: Mapping[str, Any],
+    require_l2: bool,
+) -> Dict[str, Any]:
+    """Verify replay and visible-depth evidence projected from lifecycle truth."""
+
+    lifecycle = _mapping(execution.get("order_lifecycle"))
+    rows = [
+        dict(row)
+        for row in lifecycle.get("events") or []
+        if isinstance(row, Mapping)
+    ]
+    level_rows = [row for row in rows if str(row.get("fill_id") or "").strip()]
+    canonical_fill_rows = [
+        row
+        for row in execution.get("fills") or []
+        if isinstance(row, Mapping)
+    ]
+    evidence_rows = [
+        (row, dict(row.get("book_execution_evidence") or {}))
+        for row in rows
+        if isinstance(row.get("book_execution_evidence"), Mapping)
+        and row.get("book_execution_evidence")
+    ]
+    evidence_by_event = {
+        str(row.get("event_id") or ""): evidence
+        for row, evidence in evidence_rows
+    }
+    blockers: List[str] = []
+    required_fields = (
+        "schema_version",
+        "execution_model_version",
+        "execution_model_artifact_hash",
+        "execution_book_tape_id",
+        "execution_book_tape_hash",
+        "execution_book_replay_fingerprint",
+        "execution_book_replay_certified",
+        "execution_book_source_capability",
+        "execution_book_snapshot_hash",
+        "execution_book_state_hash",
+        "execution_book_validity_interval_id",
+        "execution_book_source_reference",
+        "execution_book_known_at",
+        "order_arrival_at",
+        "best_bid",
+        "best_ask",
+        "spread",
+        "limitations",
+    )
+    if canonical_fill_rows and not level_rows:
+        blockers.append("per_level_order_lifecycle_evidence_missing")
+    if level_rows and not evidence_rows:
+        blockers.append("execution_book_evidence_missing")
+    for row, evidence in evidence_rows:
+        if any(evidence.get(field) is None for field in required_fields):
+            blockers.append("execution_book_evidence_incomplete")
+            continue
+        if str(evidence.get("schema_version") or "") != "book_execution_evidence.v1":
+            blockers.append("execution_book_evidence_schema_invalid")
+        if evidence.get("execution_book_replay_certified") is not True:
+            blockers.append("execution_book_replay_uncertified")
+        capability = str(evidence.get("execution_book_source_capability") or "").lower()
+        if capability not in {"l1", "l2", "l3"}:
+            blockers.append("execution_book_capability_invalid")
+        elif require_l2 and capability not in {"l2", "l3"}:
+            blockers.append("execution_book_capability_below_l2")
+        source_reference = evidence.get("execution_book_source_reference")
+        if not isinstance(source_reference, Mapping) or any(
+            source_reference.get(field) is None
+            for field in (
+                "definition_id",
+                "session_id",
+                "connection_epoch",
+                "source_product_id",
+                "receive_ordinal",
+                "event_ordinal",
+            )
+        ):
+            blockers.append("execution_book_source_reference_incomplete")
+        known_at = _parse_iso(evidence.get("execution_book_known_at"))
+        arrival_at = _parse_iso(evidence.get("order_arrival_at"))
+        if known_at is None or arrival_at is None or known_at > arrival_at:
+            blockers.append("execution_book_arrival_not_causal")
+        best_bid = _safe_float(evidence.get("best_bid"))
+        best_ask = _safe_float(evidence.get("best_ask"))
+        spread = _safe_float(evidence.get("spread"))
+        if (
+            best_bid is None
+            or best_ask is None
+            or spread is None
+            or best_bid >= best_ask
+            or spread < 0.0
+            or abs((best_ask - best_bid) - spread) > 1e-9
+        ):
+            blockers.append("execution_book_spread_evidence_invalid")
+        if not isinstance(evidence.get("limitations"), list):
+            blockers.append("execution_book_limitations_missing")
+
+    for row in level_rows:
+        evidence = evidence_by_event.get(str(row.get("event_id") or ""))
+        if evidence is None:
+            blockers.append("per_level_execution_book_evidence_missing")
+            continue
+        if require_l2:
+            required_level_fields = (
+                "book_level_index",
+                "book_side",
+                "visible_level_qty",
+                "consumed_level_qty",
+                "eligible_visible_depth",
+            )
+            if any(evidence.get(field) is None for field in required_level_fields):
+                blockers.append("per_level_l2_evidence_incomplete")
+                continue
+            visible = _safe_float(evidence.get("visible_level_qty"))
+            consumed = _safe_float(evidence.get("consumed_level_qty"))
+            fill_qty = _safe_float(row.get("fill_qty"))
+            if (
+                visible is None
+                or consumed is None
+                or fill_qty is None
+                or consumed <= 0.0
+                or consumed > visible + 1e-12
+                or abs(consumed - fill_qty) > 1e-12
+            ):
+                blockers.append("per_level_visible_depth_bound_invalid")
+
+    if require_l2:
+        grouped: Dict[tuple[str, str, str], Dict[str, float]] = {}
+        for row in level_rows:
+            evidence = evidence_by_event.get(str(row.get("event_id") or ""), {})
+            key = (
+                str(row.get("order_request_id") or ""),
+                str(evidence.get("execution_book_snapshot_hash") or ""),
+                str(evidence.get("order_arrival_at") or ""),
+            )
+            bucket = grouped.setdefault(key, {"consumed": 0.0, "eligible": 0.0})
+            bucket["consumed"] += float(_safe_float(row.get("fill_qty")) or 0.0)
+            bucket["eligible"] = max(
+                bucket["eligible"],
+                float(_safe_float(evidence.get("eligible_visible_depth")) or 0.0),
+            )
+        if any(
+            values["eligible"] <= 0.0
+            or values["consumed"] > values["eligible"] + 1e-12
+            for values in grouped.values()
+        ):
+            blockers.append("execution_book_visible_depth_exceeded")
+
+    latest_by_order: Dict[str, Dict[str, Any]] = {}
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("order_request_id") or ""),
+            int(item.get("order_event_seq") or 0),
+        ),
+    ):
+        request_id = str(row.get("order_request_id") or "")
+        if request_id:
+            latest_by_order[request_id] = row
+    for row in latest_by_order.values():
+        remaining = float(_safe_float(row.get("order_remaining_qty")) or 0.0)
+        state = str(row.get("state") or "")
+        evidence = dict(row.get("book_execution_evidence") or {})
+        if remaining > 1e-12 and state in {"canceled", "expired"}:
+            if str(evidence.get("residual_disposition") or "") != state:
+                blockers.append("execution_book_residual_disposition_missing")
+        elif remaining > 1e-12 and state not in {"open", "partially_filled"}:
+            blockers.append("execution_book_residual_state_invalid")
+
+    payload = {
+        "schema_version": "execution_book_quality_evidence.v1",
+        "status": "available" if evidence_rows and not blockers else "invalid" if blockers else "not_exercised",
+        "required_capability": "l2" if require_l2 else "l1",
+        "lifecycle_event_count": len(rows),
+        "level_fill_event_count": len(level_rows),
+        "evidence_event_count": len(evidence_rows),
+        "tape_ids": sorted(
+            {
+                str(evidence.get("execution_book_tape_id"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_tape_id")
+            }
+        ),
+        "tape_hashes": sorted(
+            {
+                str(evidence.get("execution_book_tape_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_tape_hash")
+            }
+        ),
+        "snapshot_hashes": sorted(
+            {
+                str(evidence.get("execution_book_snapshot_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_snapshot_hash")
+            }
+        ),
+        "replay_fingerprints": sorted(
+            {
+                str(evidence.get("execution_book_replay_fingerprint"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_replay_fingerprint")
+            }
+        ),
+        "limitations": sorted(
+            {
+                str(item)
+                for _row, evidence in evidence_rows
+                for item in evidence.get("limitations") or []
+            }
+        ),
+        "blocking_reasons": sorted(dict.fromkeys(blockers)),
+    }
+    payload["evidence_hash"] = _stable_hash(payload)
+    return payload
+
+
 def _execution_quality_evidence(
     *,
     run: Mapping[str, Any],
@@ -1999,6 +2218,20 @@ def _execution_quality_evidence(
         for row in context_rows
         if str(row.get("context_hash") or "")
     }
+    if context_evidence.get("status") == "available" and context_rows:
+        quality_rank = {
+            item.value: index
+            for index, item in enumerate(ExecutionQualityClass)
+        }
+        model_ceilings = [
+            str(_mapping(row.get("model")).get("execution_quality_ceiling") or "").upper()
+            for row in context_rows
+        ]
+        if any(value not in quality_rank for value in model_ceilings):
+            blockers.append("execution_context_quality_ceiling_invalid")
+        else:
+            # A multi-series report may claim only the weakest pinned model.
+            ceiling = min(model_ceilings, key=quality_rank.__getitem__)
     if context_evidence.get("status") == "invalid":
         blockers.extend(context_evidence.get("blocking_reasons") or [])
     if context_evidence.get("status") == "available":
@@ -2046,6 +2279,14 @@ def _execution_quality_evidence(
             if any(str(fill.get(field) or "") != str(expected or "") for field, expected in expected_fields.items()):
                 blockers.append("per_fill_execution_context_component_mismatch")
                 break
+            expected_model_version = str(
+                _mapping(context_row.get("model")).get("version") or ""
+            )
+            if expected_model_version and str(
+                fill.get("execution_model_version") or ""
+            ) != expected_model_version:
+                blockers.append("per_fill_execution_context_model_version_mismatch")
+                break
     if execution_quality_meets(ceiling, "X1"):
         if trades and not fill_rows:
             blockers.append("canonical_fill_evidence_unavailable")
@@ -2067,7 +2308,11 @@ def _execution_quality_evidence(
                 blockers.append("per_fill_execution_evidence_incomplete")
                 break
         expected_manifest_hash = str(validated_manifest.get("manifest_hash") or "")
-        expected_model_version = str(validated_manifest.get("model_version") or "")
+        expected_model_version = (
+            str(validated_manifest.get("model_version") or "")
+            if context_evidence.get("status") != "available"
+            else ""
+        )
         expected_intent = str(validated_manifest.get("economic_claim_intent") or intent)
         if expected_manifest_hash and any(
             str(row.get("execution_assumption_manifest_hash") or "") != expected_manifest_hash
@@ -2083,14 +2328,41 @@ def _execution_quality_evidence(
             blockers.append("per_fill_economic_claim_intent_mismatch")
     if execution_quality_meets(ceiling, "X1") and str(cost_stress.get("status")) != "available":
         blockers.append("cost_stress_evidence_unavailable")
-    actual = ceiling if not blockers else "X0"
+    base_blockers = sorted(dict.fromkeys(blockers))
+    x3_evidence = _book_execution_quality_assessment(
+        execution=execution,
+        require_l2=False,
+    )
+    x4_evidence = _book_execution_quality_assessment(
+        execution=execution,
+        require_l2=True,
+    )
+    x3_blockers = (
+        list(x3_evidence.get("blocking_reasons") or [])
+        if execution_quality_meets(ceiling, "X3")
+        else []
+    )
+    x4_blockers = (
+        list(x4_evidence.get("blocking_reasons") or [])
+        if execution_quality_meets(ceiling, "X4")
+        else []
+    )
+    if base_blockers:
+        actual = "X0"
+    elif execution_quality_meets(ceiling, "X4"):
+        actual = "X2" if x3_blockers else "X3" if x4_blockers else "X4"
+    elif execution_quality_meets(ceiling, "X3"):
+        actual = "X2" if x3_blockers else "X3"
+    else:
+        actual = ceiling
+    all_blockers = sorted(dict.fromkeys([*base_blockers, *x3_blockers, *x4_blockers]))
     return {
         "schema_version": "execution_quality_evidence.v1",
         "economic_claim_intent": intent,
         "execution_quality_class": actual,
         "execution_quality_ceiling": ceiling,
         "qualified": actual != "X0" or intent in {"exploration", "legacy_unclassified"},
-        "blocking_reasons": sorted(dict.fromkeys(blockers)),
+        "blocking_reasons": all_blockers,
         "assumption_manifest": validated_manifest or manifest,
         "assumption_manifest_hash": manifest.get("manifest_hash"),
         "fee_evidence_status": "available" if not fee_caveats else "degraded",
@@ -2099,6 +2371,8 @@ def _execution_quality_evidence(
         "resolved_execution_context_status": context_evidence.get("status"),
         "resolved_execution_context_bundle_hash": context_evidence.get("bundle_hash"),
         "resolved_execution_context_evidence": context_evidence,
+        "spread_execution_evidence": x3_evidence,
+        "l2_execution_evidence": x4_evidence,
     }
 
 
@@ -2391,6 +2665,9 @@ def _execution_section(
                     "reason": context.get("reason"),
                     "replacement_attempt_id": context.get("replacement_attempt_id"),
                     "venue_event_name": context.get("venue_event_name"),
+                    "book_execution_evidence": dict(
+                        context.get("book_execution_evidence") or {}
+                    ),
                     "correlation_id": _payload(row).get("correlation_id"),
                     "root_id": _payload(row).get("root_id"),
                     "parent_id": _payload(row).get("parent_id"),
@@ -2448,6 +2725,9 @@ def _execution_section(
                     "book_data_capability": context.get("book_data_capability"),
                     "time_in_force": context.get("time_in_force"),
                     "post_only": context.get("post_only"),
+                    "book_execution_evidence": dict(
+                        context.get("book_execution_evidence") or {}
+                    ),
                     "accounting_mode": context.get("accounting_mode"),
                     "wallet_commit_seq": context.get("wallet_commit_seq"),
                     "position_commit_seq": context.get("position_commit_seq"),

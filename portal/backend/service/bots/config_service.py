@@ -13,8 +13,10 @@ from engines.bot_runtime.core.execution_assumptions import (
 )
 from engines.bot_runtime.core.execution_context import (
     build_execution_context_bundle,
+    execution_model_artifact_from_book_tape,
     resolve_execution_context,
 )
+from engines.bot_runtime.core.book_execution import ExecutionBookTapeBundle
 from engines.bot_runtime.core.execution_plan import compile_runtime_execution_plan
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, normalize_execution_semantics
 from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
@@ -676,6 +678,18 @@ class BotConfigService:
         else:
             execution_assumptions = legacy_execution_assumptions()
 
+        raw_book_bundle = bot.get("execution_book_tape_bundle")
+        if raw_book_bundle is not None:
+            if run_type != "backtest":
+                raise ValueError(
+                    "execution_book_tape_bundle is admitted only for backtest runs in Phase 3A"
+                )
+            if not isinstance(raw_book_bundle, Mapping):
+                raise ValueError("execution_book_tape_bundle must be an object")
+            execution_book_bundle = ExecutionBookTapeBundle.from_dict(raw_book_bundle)
+        else:
+            execution_book_bundle = None
+
         execution_plan = compile_runtime_execution_plan(
             normalise_template(getattr(strategy, "atm_template", None))
         )
@@ -718,10 +732,23 @@ class BotConfigService:
                     require_margin_accounting=execution_semantics in {"derivative", "proxy_derivative"},
                     execution_semantics=execution_semantics,
                 )
+                book_tape = (
+                    execution_book_bundle.tape_for(str(instrument.get("id") or ""))
+                    if execution_book_bundle is not None
+                    else None
+                )
                 execution_context = resolve_execution_context(
                     profile,
                     execution_assumptions,
                     instrument_payload=instrument,
+                    execution_model_artifact=(
+                        execution_model_artifact_from_book_tape(
+                            execution_assumptions,
+                            source_capability=book_tape.source_capability,
+                        )
+                        if book_tape is not None
+                        else None
+                    ),
                     source="backend_startup_resolution",
                 )
                 policy_conformance = execution_context.validate_policy_capabilities(
@@ -751,6 +778,11 @@ class BotConfigService:
                         "fee_schedule_version": execution_context.fee_schedule.version,
                         "fee_schedule_hash": execution_context.fee_schedule.schedule_hash,
                         "execution_model_artifact_hash": execution_context.model.artifact_hash,
+                        "execution_book_tape_id": book_tape.tape_id if book_tape is not None else None,
+                        "execution_book_tape_hash": book_tape.tape_hash if book_tape is not None else None,
+                        "execution_book_replay_fingerprint": (
+                            book_tape.replay_fingerprint if book_tape is not None else None
+                        ),
                         "order_policy_conformance": policy_conformance,
                     }
                 )
@@ -765,6 +797,8 @@ class BotConfigService:
         if errors:
             raise ValueError("Bot startup preflight failed: " + " | ".join(errors))
         context_bundle = build_execution_context_bundle(resolved_contexts)
+        if execution_book_bundle is not None and len(execution_book_bundle.tapes) != len(resolved_contexts):
+            raise ValueError("execution_book_tape_bundle contains unbound tapes")
 
         return {
             "strategy_id": strategy_id,
@@ -774,6 +808,9 @@ class BotConfigService:
             "run_strategy_snapshot": dict(getattr(strategy, "run_strategy_snapshot", {}) or {}),
             "effective_strategy_config": dict(getattr(strategy, "effective_strategy_config", {}) or {}),
             "resolved_execution_context_bundle": context_bundle.to_dict(),
+            "execution_book_tape_bundle": (
+                execution_book_bundle.to_dict() if execution_book_bundle is not None else None
+            ),
             "runtime_readiness": {
                 "datasource": strategy.datasource,
                 "exchange": strategy.exchange,
@@ -781,6 +818,11 @@ class BotConfigService:
                 "symbols": symbols,
                 "profiles": readiness_entries,
                 "resolved_execution_context_bundle": context_bundle.to_dict(),
+                "execution_book_tape_bundle_hash": (
+                    execution_book_bundle.bundle_hash
+                    if execution_book_bundle is not None
+                    else None
+                ),
             },
         }
 

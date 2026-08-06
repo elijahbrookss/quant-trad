@@ -36,8 +36,13 @@ from engines.bot_runtime.core.execution_assumptions import (
 from engines.bot_runtime.core.execution_context import (
     ResolvedExecutionContext,
     ResolvedExecutionContextBundle,
+    execution_model_artifact_from_book_tape,
     resolve_execution_context,
     validate_context_against_runtime,
+)
+from engines.bot_runtime.core.book_execution import (
+    BookExecutionModel,
+    ExecutionBookTapeBundle,
 )
 from market_data.backtest import resolve_backtest_warmup_bars
 from atm import normalise_template
@@ -420,6 +425,21 @@ class SeriesBuilderConstructionMixin:
         raw_context_bundle = self.config.get("resolved_execution_context_bundle")
         if raw_context_bundle is not None and not isinstance(raw_context_bundle, Mapping):
             raise RuntimeError("resolved_execution_context_bundle must be an object")
+        raw_book_bundle = self.config.get("execution_book_tape_bundle")
+        if raw_book_bundle is not None and not isinstance(raw_book_bundle, Mapping):
+            raise RuntimeError("execution_book_tape_bundle must be an object")
+        book_bundle = (
+            ExecutionBookTapeBundle.from_dict(raw_book_bundle)
+            if isinstance(raw_book_bundle, Mapping) and raw_book_bundle
+            else None
+        )
+        book_tape = (
+            book_bundle.tape_for(execution_profile.instrument.instrument_id or instrument_id)
+            if book_bundle is not None
+            else None
+        )
+        if book_tape is not None and self.run_type != "backtest":
+            raise RuntimeError("execution book replay is admitted only for backtest runs in Phase 3A")
         if isinstance(raw_context_bundle, Mapping) and raw_context_bundle:
             context_bundle = ResolvedExecutionContextBundle.from_dict(raw_context_bundle)
             execution_context = context_bundle.context_for(
@@ -438,9 +458,21 @@ class SeriesBuilderConstructionMixin:
                 execution_profile,
                 execution_assumptions,
                 instrument_payload=instrument or {},
+                execution_model_artifact=(
+                    execution_model_artifact_from_book_tape(
+                        execution_assumptions,
+                        source_capability=book_tape.source_capability,
+                    )
+                    if book_tape is not None
+                    else None
+                ),
                 source="legacy_runtime_compatibility_resolution",
             )
         execution_profile = execution_profile.bind_execution_context(execution_context)
+        if execution_context.model.input_capability != "bars" and book_tape is None:
+            raise RuntimeError("book execution context is missing its immutable execution book tape")
+        if execution_context.model.input_capability == "bars" and book_tape is not None:
+            raise RuntimeError("execution book tape was supplied to a bar execution context")
         profile_context = self._strategy_log_context(
             strategy,
             symbol=symbol,
@@ -486,6 +518,13 @@ class SeriesBuilderConstructionMixin:
             execution_assumptions,
             execution_context,
         )
+        if book_tape is not None:
+            book_model = BookExecutionModel(
+                execution_context=execution_context,
+                tape=book_tape,
+            )
+            risk_engine.attach_execution_model(book_model)
+            risk_engine.attach_execution_adapter(book_model)
         strategy_rules, strategy_params = strategy.compilation_inputs()
         compiled_strategy = compile_strategy(
             strategy_id=strategy.id,
@@ -506,6 +545,17 @@ class SeriesBuilderConstructionMixin:
         series_meta["atm_template"] = atm_template
         series_meta["risk_config"] = deepcopy(risk_config)
         series_meta["resolved_execution_context"] = execution_context.to_dict()
+        if book_tape is not None:
+            series_meta["execution_book_tape"] = {
+                "schema_version": book_tape.schema_version,
+                "tape_id": book_tape.tape_id,
+                "tape_hash": book_tape.tape_hash,
+                "source_capability": book_tape.source_capability,
+                "replay_fingerprint": book_tape.replay_fingerprint,
+                "replay_certified": book_tape.replay_certified,
+                "snapshot_count": len(book_tape.snapshots),
+                "limitations": list(book_tape.limitations),
+            }
         if backtest_warmup_evidence is not None:
             series_meta["backtest_warmup"] = backtest_warmup_evidence
         if candle_gap_classification:

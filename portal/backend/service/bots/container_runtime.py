@@ -588,6 +588,7 @@ def _load_runtime_bot_snapshot(bot_id: str, run_id: str) -> tuple[Dict[str, Any]
             "economic_claim_intent",
             "execution_assumptions",
             "resolved_execution_context_bundle",
+            "execution_book_tape_bundle",
         ):
             if field in config_snapshot:
                 value = config_snapshot.get(field)
