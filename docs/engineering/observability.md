@@ -74,8 +74,12 @@ at Grafana UID `quanttrad-capacity-growth`. It includes:
   sampler cost;
 - logical schema and table/hypertable size, row estimates, insert rate, and
   growth leaderboards with schema/relation filters;
-- per-container CPU and memory plus Docker filesystem used/free capacity from
-  the `docker-stats` sidecar.
+- per-container CPU and memory plus authority-labeled Docker engine filesystem
+  used/free capacity from the `docker-stats` sidecar;
+- optional physical Docker Desktop backing-volume capacity, VHDX allocation
+  growth, reserve, and projected days-to-reserve from
+  `scripts/reporting/host_capacity_sampler.ps1` (Docker settings determine the
+  volume; no drive letter is hardcoded).
 
 Database and logical-relation samples run every five minutes and retain 30 days
 by default. Docker samples run every 15 seconds and follow Loki's local
@@ -83,11 +87,24 @@ seven-day retention. The two cadences intentionally answer different questions:
 short spikes stay visible in Loki, while table growth remains cheap enough to
 retain for planning.
 
-Before creating alerts, measure at least one representative bounded campaign.
+Before creating alerts, measure at least one representative campaign. Never use
+Docker Desktop/WSL guest free space as physical-host headroom; check the
+dashboard authority panel and require `physical_host_visible=true`.
 Useful starting candidates are filesystem free below 20%, database connections
 above 70% of `max_connections`, cache hit below 95%, and sustained database or
 relation growth above the measured storage budget. These are starting points,
 not universal thresholds; tune them from the observed workload.
+
+On Windows Docker Desktop, install the authority sampler for continuous use
+from PowerShell with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/reporting/host_capacity_sampler.ps1 -InstallScheduledTask
+```
+
+The user-level task starts immediately, starts again at logon, restarts after
+failure, writes one bounded daily NDJSON file under `logs/host-capacity`, and is
+removed with the same command plus `-RemoveScheduledTask`.
 
 ## Error Posture
 

@@ -42,7 +42,10 @@ def test_docker_capacity_sampler_is_bounded_and_observable():
     service = compose["services"]["docker-stats"]
     assert service["profiles"] == ["observability"]
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in service["volumes"]
-    assert "/var/lib/docker:/host-docker:ro" in service["volumes"]
+    assert (
+        "${QT_DOCKER_STORAGE_ROOT:-/var/lib/docker}:/host-docker:ro"
+        in service["volumes"]
+    )
     assert service["environment"]["QT_DOCKER_CAPACITY_INTERVAL_SECONDS"].endswith(
         ":-15}"
     )

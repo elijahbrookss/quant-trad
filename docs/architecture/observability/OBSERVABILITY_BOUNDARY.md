@@ -30,6 +30,7 @@ code_paths:
   - portal/backend/service/storage/repos/market_collection.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/workers/market_data_collector.py
+  - portal/backend/service/market/collector_supervisor.py
   - cli/logs.py
   - src/core/logger.py
   - src/utils/logging_utils.py
@@ -40,6 +41,7 @@ code_paths:
   - docker/loki/config.yml
   - docker/grafana
   - scripts/reporting/docker_capacity_sampler.sh
+  - scripts/reporting/host_capacity_sampler.ps1
   - docs/architecture/observability/diagrams/observability-flow.mmd
 ---
 # Observability Boundary
@@ -161,16 +163,30 @@ market or runtime truth, use the existing `PG_DSN`, and are deleted after the
 configured 30-day retention window.
 
 The observability-profile `docker-stats` sidecar emits numeric container CPU,
-memory, PID, and Docker filesystem samples every 15 seconds through normal
-Docker stdout. Promtail and Loki retain that short-horizon operational stream;
-the sidecar does not post directly to Loki and does not add a second database.
+memory, PID, and Docker engine-filesystem samples every 15 seconds through
+normal Docker stdout. Every filesystem sample declares its scope, authority,
+runtime kind, and whether physical host capacity is visible. Docker Desktop/WSL
+engine capacity is explicitly a virtual-guest sample, not host free space.
+Promtail and Loki retain that short-horizon operational stream; the sidecar does
+not post directly to Loki and does not add a second database.
+
+On Windows Docker Desktop, `host_capacity_sampler.ps1` optionally supplies the
+missing physical authority. It discovers Docker's configured WSL VHDX and its
+backing volume from Docker metadata rather than a drive literal, writes bounded
+daily NDJSON, and projects days to a configurable reserve from observed VHDX
+allocation growth. Promtail reads those files through the same Loki pipeline.
+On native Linux or cloud volumes, the engine/data-volume exporter can be
+authoritative directly. If the actual backing resource is not observable,
+capacity remains explicitly unavailable.
 
 Grafana provisions `QuantTrad Capacity & Database Growth`
 (`quanttrad-capacity-growth`). Its schema and relation variables support
 logical-table drilldown, while Loki panels show pressure that can grow before a
-bounded market-structure session closes and publishes its archive and canonical
-facts. Alert rules may consume these panels later, but alert thresholds are
-operator policy rather than trading truth.
+market-structure segment publishes its archive and canonical facts. Separate
+panels show engine/guest storage, physical Docker backing-volume headroom, VHDX
+allocation growth, projected days to reserve, and discovery/authority state.
+Alert rules may consume these panels later, but alert thresholds are operator
+policy rather than trading truth.
 
 ## What Belongs Here
 

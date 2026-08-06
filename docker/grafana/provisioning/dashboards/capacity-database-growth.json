@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Database, schema/table, PostgreSQL load, container resource, and Docker filesystem capacity telemetry.",
+  "description": "Database, schema/table, PostgreSQL load, container resources, Docker engine storage, and authoritative host-volume capacity telemetry.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -35,7 +35,7 @@
       },
       "id": 1,
       "options": {
-        "content": "## Capacity campaign control\nPostgreSQL logical schema/table snapshots run every **5 minutes** with **30-day** retention. Container CPU, memory, PIDs, and Docker filesystem capacity run every **15 seconds** into Loki with **7-day** local retention.\n\nSuggested first alerts: Docker free space below 20%; sustained DB growth above the measured budget; connections above 70%; cache hit below 95%; or a collector above its measured CPU envelope.",
+        "content": "## Capacity campaign control\nPostgreSQL logical schema/table snapshots run every **5 minutes** with **30-day** retention. Container CPU, memory, PIDs, and Docker engine-storage capacity run every **15 seconds** into Loki with **7-day** local retention.\n\n**Authority matters:** on native Linux the engine filesystem is the storage authority. On Docker Desktop/WSL it is only the virtual guest; run `scripts/reporting/host_capacity_sampler.ps1` on Windows for the physical backing-volume panels and projections. The agent discovers Docker's configured VHDX path—no drive is hardcoded.\n\nSuggested first alerts: authoritative free space below the reserve; projected days to reserve below the response horizon; sustained DB/table growth above budget; connections above 70%; cache hit below 95%; or a collector above its measured CPU envelope.",
         "mode": "markdown"
       },
       "title": "How to use this dashboard",
@@ -209,7 +209,7 @@
           "refId": "A"
         }
       ],
-      "title": "Docker filesystem free",
+      "title": "Docker engine filesystem free (authority-aware)",
       "type": "stat"
     },
     {
@@ -763,7 +763,7 @@
           "refId": "C"
         }
       ],
-      "title": "Docker filesystem capacity",
+      "title": "Docker engine storage (guest on Desktop/WSL)",
       "type": "timeseries"
     },
     {
@@ -853,6 +853,187 @@
       ],
       "title": "Tracked logical relations",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "min"],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "last_over_time({compose_service=\"host-capacity\"} | json | sample_kind=\"host_filesystem\" | unwrap available_bytes [$__interval])",
+          "legendFormat": "host available",
+          "queryType": "range",
+          "refId": "A"
+        },
+        {
+          "expr": "last_over_time({compose_service=\"host-capacity\"} | json | sample_kind=\"host_filesystem\" | unwrap reserve_bytes [$__interval])",
+          "legendFormat": "host reserve",
+          "queryType": "range",
+          "refId": "B"
+        },
+        {
+          "expr": "last_over_time({compose_service=\"host-capacity\"} | json | sample_kind=\"host_filesystem\" | unwrap total_bytes [$__interval])",
+          "legendFormat": "host total",
+          "queryType": "range",
+          "refId": "C"
+        }
+      ],
+      "title": "Physical Docker backing-volume capacity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 7},
+              {"color": "green", "value": 30}
+            ]
+          },
+          "unit": "d"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 60
+      },
+      "id": 22,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "last_over_time({compose_service=\"host-capacity\"} | json | sample_kind=\"host_filesystem\" | unwrap projected_days_to_reserve [$__range])",
+          "legendFormat": "days to reserve",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Projected days to host reserve",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 60
+      },
+      "id": 23,
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max"],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "last_over_time({compose_service=\"host-capacity\"} | json | sample_kind=\"host_filesystem\" | unwrap backing_artifact_bytes [$__interval])",
+          "legendFormat": "Docker VHDX allocated",
+          "queryType": "range",
+          "refId": "A"
+        },
+        {
+          "expr": "last_over_time({compose_service=\"host-capacity\"} | json | sample_kind=\"host_filesystem\" | unwrap growth_bytes_per_day [$__interval])",
+          "legendFormat": "24h allocation growth/day",
+          "queryType": "range",
+          "refId": "B"
+        }
+      ],
+      "title": "Docker backing artifact growth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "quanttrad-loki"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "id": 24,
+      "options": {
+        "dedupStrategy": "exact",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{compose_service=~\"docker-stats|host-capacity\"} | json | sample_kind=~\"filesystem|host_filesystem|capacity_unavailable|host_capacity_unavailable\" | line_format \"{{.sample_kind}} scope={{.capacity_scope}} authority={{.capacity_authority}} physical_host_visible={{.physical_host_visible}} runtime={{.runtime_kind}} resource={{.resource_id}} reason={{.reason}}\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Capacity authority and discovery status",
+      "type": "logs"
     }
   ],
   "refresh": "15s",

@@ -216,6 +216,7 @@ services:
       - ./promtail/config.yml:/etc/promtail/config.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ../logs/host-capacity:/var/log/quanttrad-host-capacity:ro
     depends_on:
       - loki
     networks:
@@ -244,12 +245,13 @@ services:
       loki.service: docker-stats
     environment:
       QT_DOCKER_CAPACITY_INTERVAL_SECONDS: "${QT_DOCKER_CAPACITY_INTERVAL_SECONDS:-15}"
+      QT_DOCKER_STORAGE_MOUNT: /host-docker
     command:
       - /bin/sh
       - /opt/quanttrad/docker_capacity_sampler.sh
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /var/lib/docker:/host-docker:ro
+      - ${QT_DOCKER_STORAGE_ROOT:-/var/lib/docker}:/host-docker:ro
       - ../scripts/reporting/docker_capacity_sampler.sh:/opt/quanttrad/docker_capacity_sampler.sh:ro
     networks:
       - quanttrad
