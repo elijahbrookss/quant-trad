@@ -78,6 +78,42 @@ REQUIRED_RESEARCH_LINK_INDEXES = frozenset(
     }
 )
 
+REQUIRED_RESEARCH_AUTHORITY_INDEXES = {
+    "portal_research_protocols": frozenset(
+        {"ix_research_protocols_status_created", "ix_research_protocols_hash"}
+    ),
+    "portal_research_families": frozenset(
+        {"ix_research_families_protocol_status", "ix_research_families_hash"}
+    ),
+    "portal_research_attempts": frozenset(
+        {"ix_research_attempts_family_status", "ix_research_attempts_protocol_role"}
+    ),
+    "portal_research_strategy_graphs": frozenset(
+        {"ix_research_strategy_graphs_family_version", "ix_research_strategy_graphs_hash"}
+    ),
+    "portal_research_candidates": frozenset(
+        {"ix_research_candidates_family_created", "ix_research_candidates_hash"}
+    ),
+    "portal_research_holdout_uses": frozenset(
+        {"ix_research_holdout_uses_protocol_status"}
+    ),
+    "portal_research_certificates": frozenset(
+        {"ix_research_certificates_family_quality", "ix_research_certificates_hash"}
+    ),
+    "portal_research_authority_events": frozenset(
+        {"ix_research_authority_events_aggregate", "ix_research_authority_events_request"}
+    ),
+    "portal_research_governance_cases": frozenset(
+        {"ix_research_governance_cases_state_updated", "ix_research_governance_cases_family"}
+    ),
+    "portal_research_governance_proposals": frozenset(
+        {"ix_research_governance_proposals_case_version", "ix_research_governance_proposals_request"}
+    ),
+    "portal_research_governance_decisions": frozenset(
+        {"ix_research_governance_decisions_case_created", "ix_research_governance_decisions_request"}
+    ),
+}
+
 REQUIRED_PROVIDER_CREDENTIAL_INDEXES = frozenset(
     {
         "ix_provider_credential_refs_provider_venue",
@@ -488,6 +524,462 @@ class ResearchLinkRecord(Base):
             "metadata": dict(self.link_metadata or {}),
             "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
             "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchProtocolRecord(Base):
+    """Immutable private/public scientific protocol manifests."""
+
+    __tablename__ = "portal_research_protocols"
+    __table_args__ = (
+        UniqueConstraint("protocol_hash", name="uq_research_protocol_hash"),
+        Index("ix_research_protocols_status_created", "status", "created_at"),
+        Index("ix_research_protocols_hash", "protocol_hash"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    schema_version = Column(String(64), nullable=False)
+    protocol_hash = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="active")
+    blindness_class = Column(String(64), nullable=False)
+    private_manifest = Column(JSONB, nullable=False)
+    public_manifest = Column(JSONB, nullable=False)
+    created_by = Column(String(128), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
+
+    def to_dict(self, *, private: bool = False) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "schema_version": self.schema_version,
+            "protocol_hash": self.protocol_hash,
+            "status": self.status,
+            "blindness_class": self.blindness_class,
+            "manifest": dict(self.private_manifest if private else self.public_manifest or {}),
+            "created_by": self.created_by,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
+        }
+
+
+class ResearchFamilyRecord(Base):
+    """Mutable projection for one protocol-bound search family."""
+
+    __tablename__ = "portal_research_families"
+    __table_args__ = (
+        UniqueConstraint("family_hash", name="uq_research_family_hash"),
+        Index("ix_research_families_protocol_status", "protocol_id", "status"),
+        Index("ix_research_families_hash", "family_hash"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    protocol_id = Column(String(64), ForeignKey("portal_research_protocols.id", ondelete="RESTRICT"), nullable=False)
+    family_hash = Column(String(64), nullable=False)
+    name = Column(String(255), nullable=False)
+    status = Column(String(32), nullable=False, default="open")
+    current_candidate_id = Column(String(64), nullable=True)
+    feedback_released = Column(Boolean, nullable=False, default=False)
+    created_by = Column(String(128), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    closed_at = Column(DateTime, nullable=True)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "protocol_id": self.protocol_id,
+            "family_hash": self.family_hash,
+            "name": self.name,
+            "status": self.status,
+            "current_candidate_id": self.current_candidate_id,
+            "feedback_released": bool(self.feedback_released),
+            "created_by": self.created_by,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
+        }
+
+
+class ResearchAttemptRecord(Base):
+    """Every admitted trial, including failed and abandoned outcomes."""
+
+    __tablename__ = "portal_research_attempts"
+    __table_args__ = (
+        UniqueConstraint("family_id", "attempt_ordinal", name="uq_research_attempt_family_ordinal"),
+        UniqueConstraint("family_id", "request_id", name="uq_research_attempt_family_request"),
+        Index("ix_research_attempts_family_status", "family_id", "status", "attempt_ordinal"),
+        Index("ix_research_attempts_protocol_role", "protocol_id", "dataset_role"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    protocol_id = Column(String(64), ForeignKey("portal_research_protocols.id", ondelete="RESTRICT"), nullable=False)
+    family_id = Column(String(64), ForeignKey("portal_research_families.id", ondelete="RESTRICT"), nullable=False)
+    attempt_ordinal = Column(Integer, nullable=False)
+    request_id = Column(String(128), nullable=False)
+    dataset_role = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, default="registered")
+    trial_manifest_hash = Column(String(64), nullable=False)
+    trial_manifest = Column(JSONB, nullable=False)
+    result_evidence = Column(JSONB, nullable=True)
+    error = Column(String(2048), nullable=True)
+    estimated_runtime_seconds = Column(Float, nullable=False, default=0.0)
+    estimated_compute_units = Column(Float, nullable=False, default=0.0)
+    actual_runtime_seconds = Column(Float, nullable=True)
+    actual_compute_units = Column(Float, nullable=True)
+    created_by = Column(String(128), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "protocol_id": self.protocol_id,
+            "family_id": self.family_id,
+            "attempt_ordinal": int(self.attempt_ordinal),
+            "request_id": self.request_id,
+            "dataset_role": self.dataset_role,
+            "status": self.status,
+            "trial_manifest_hash": self.trial_manifest_hash,
+            "trial_manifest": dict(self.trial_manifest or {}),
+            "result_evidence": dict(self.result_evidence or {}) if self.result_evidence is not None else None,
+            "error": self.error,
+            "estimated_runtime_seconds": float(self.estimated_runtime_seconds or 0.0),
+            "estimated_compute_units": float(self.estimated_compute_units or 0.0),
+            "actual_runtime_seconds": float(self.actual_runtime_seconds) if self.actual_runtime_seconds is not None else None,
+            "actual_compute_units": float(self.actual_compute_units) if self.actual_compute_units is not None else None,
+            "created_by": self.created_by,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "finished_at": (self.finished_at.isoformat() + "Z") if self.finished_at else None,
+        }
+
+
+class ResearchCandidateRecord(Base):
+    """Immutable candidate frozen before any final holdout access."""
+
+    __tablename__ = "portal_research_candidates"
+    __table_args__ = (
+        UniqueConstraint("candidate_hash", name="uq_research_candidate_hash"),
+        UniqueConstraint("family_id", "candidate_version", name="uq_research_candidate_family_version"),
+        Index("ix_research_candidates_family_created", "family_id", "created_at"),
+        Index("ix_research_candidates_hash", "candidate_hash"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    protocol_id = Column(String(64), ForeignKey("portal_research_protocols.id", ondelete="RESTRICT"), nullable=False)
+    family_id = Column(String(64), ForeignKey("portal_research_families.id", ondelete="RESTRICT"), nullable=False)
+    source_attempt_id = Column(String(64), ForeignKey("portal_research_attempts.id", ondelete="RESTRICT"), nullable=False)
+    candidate_version = Column(Integer, nullable=False)
+    candidate_hash = Column(String(64), nullable=False)
+    manifest = Column(JSONB, nullable=False)
+    frozen_by = Column(String(128), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "protocol_id": self.protocol_id,
+            "family_id": self.family_id,
+            "source_attempt_id": self.source_attempt_id,
+            "candidate_version": int(self.candidate_version),
+            "candidate_hash": self.candidate_hash,
+            "manifest": dict(self.manifest or {}),
+            "frozen_by": self.frozen_by,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchStrategyGraphRecord(Base):
+    """Immutable typed strategy graph admitted through one budgeted attempt."""
+
+    __tablename__ = "portal_research_strategy_graphs"
+    __table_args__ = (
+        UniqueConstraint("graph_hash", name="uq_research_strategy_graph_hash"),
+        UniqueConstraint("search_attempt_id", name="uq_research_strategy_graph_attempt"),
+        UniqueConstraint("family_id", "graph_version", name="uq_research_strategy_graph_family_version"),
+        Index("ix_research_strategy_graphs_family_version", "family_id", "graph_version"),
+        Index("ix_research_strategy_graphs_hash", "graph_hash"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    protocol_id = Column(String(64), ForeignKey("portal_research_protocols.id", ondelete="RESTRICT"), nullable=False)
+    family_id = Column(String(64), ForeignKey("portal_research_families.id", ondelete="RESTRICT"), nullable=False)
+    search_attempt_id = Column(String(64), ForeignKey("portal_research_attempts.id", ondelete="RESTRICT"), nullable=False)
+    parent_graph_ids = Column(JSONB, nullable=False)
+    graph_version = Column(Integer, nullable=False)
+    graph_hash = Column(String(64), nullable=False)
+    compiled_hash = Column(String(64), nullable=False)
+    manifest = Column(JSONB, nullable=False)
+    created_by = Column(String(128), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "protocol_id": self.protocol_id,
+            "family_id": self.family_id,
+            "search_attempt_id": self.search_attempt_id,
+            "parent_graph_ids": list(self.parent_graph_ids or []),
+            "graph_version": int(self.graph_version),
+            "graph_hash": self.graph_hash,
+            "compiled_hash": self.compiled_hash,
+            "manifest": dict(self.manifest or {}),
+            "created_by": self.created_by,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchHoldoutUseRecord(Base):
+    """Database-unique one-use reservation for a family final holdout."""
+
+    __tablename__ = "portal_research_holdout_uses"
+    __table_args__ = (
+        UniqueConstraint("family_id", name="uq_research_holdout_family_once"),
+        UniqueConstraint("request_id", name="uq_research_holdout_request"),
+        Index("ix_research_holdout_uses_protocol_status", "protocol_id", "status"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    protocol_id = Column(String(64), ForeignKey("portal_research_protocols.id", ondelete="RESTRICT"), nullable=False)
+    family_id = Column(String(64), ForeignKey("portal_research_families.id", ondelete="RESTRICT"), nullable=False)
+    candidate_id = Column(String(64), ForeignKey("portal_research_candidates.id", ondelete="RESTRICT"), nullable=False)
+    request_id = Column(String(128), nullable=False)
+    status = Column(String(32), nullable=False, default="reserved")
+    blindness_class = Column(String(64), nullable=False)
+    reservation_token_hash = Column(String(64), nullable=False)
+    reserved_by = Column(String(128), nullable=False)
+    executor_actor = Column(String(128), nullable=True)
+    result_evidence = Column(JSONB, nullable=True)
+    feedback_released = Column(Boolean, nullable=False, default=False)
+    reserved_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    def to_dict(self, *, include_result: bool = False) -> Dict[str, Any]:
+        payload = {
+            "id": self.id,
+            "protocol_id": self.protocol_id,
+            "family_id": self.family_id,
+            "candidate_id": self.candidate_id,
+            "request_id": self.request_id,
+            "status": self.status,
+            "blindness_class": self.blindness_class,
+            "reserved_by": self.reserved_by,
+            "executor_actor": self.executor_actor,
+            "feedback_released": bool(self.feedback_released),
+            "reserved_at": (self.reserved_at or datetime.utcnow()).isoformat() + "Z",
+            "completed_at": (self.completed_at.isoformat() + "Z") if self.completed_at else None,
+        }
+        # ``include_result`` is an internal capability decision made by the
+        # repository.  Public projections pass it only after feedback release;
+        # the sealed certifier needs the evidence before that release.
+        payload["result_evidence"] = (
+            dict(self.result_evidence or {}) if include_result else None
+        )
+        return payload
+
+
+class ResearchCertificateRecord(Base):
+    """Append-only scientific quality certificate."""
+
+    __tablename__ = "portal_research_certificates"
+    __table_args__ = (
+        UniqueConstraint("certificate_hash", name="uq_research_certificate_hash"),
+        Index("ix_research_certificates_family_quality", "family_id", "scientific_quality_class", "created_at"),
+        Index("ix_research_certificates_hash", "certificate_hash"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    protocol_id = Column(String(64), ForeignKey("portal_research_protocols.id", ondelete="RESTRICT"), nullable=False)
+    family_id = Column(String(64), ForeignKey("portal_research_families.id", ondelete="RESTRICT"), nullable=False)
+    candidate_id = Column(String(64), ForeignKey("portal_research_candidates.id", ondelete="RESTRICT"), nullable=False)
+    scientific_quality_class = Column(String(8), nullable=False)
+    status = Column(String(32), nullable=False)
+    evidence = Column(JSONB, nullable=False)
+    certificate_hash = Column(String(64), nullable=False)
+    created_by = Column(String(128), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "protocol_id": self.protocol_id,
+            "family_id": self.family_id,
+            "candidate_id": self.candidate_id,
+            "scientific_quality_class": self.scientific_quality_class,
+            "status": self.status,
+            "evidence": dict(self.evidence or {}),
+            "certificate_hash": self.certificate_hash,
+            "created_by": self.created_by,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchAuthorityEventRecord(Base):
+    """Append-only audit event for every scientific authority mutation."""
+
+    __tablename__ = "portal_research_authority_events"
+    __table_args__ = (
+        UniqueConstraint("aggregate_type", "aggregate_id", "event_seq", name="uq_research_authority_aggregate_seq"),
+        UniqueConstraint("aggregate_type", "aggregate_id", "idempotency_key", name="uq_research_authority_idempotency"),
+        Index("ix_research_authority_events_aggregate", "aggregate_type", "aggregate_id", "event_seq"),
+        Index("ix_research_authority_events_request", "request_id", "created_at"),
+    )
+
+    id = Column(String(96), primary_key=True)
+    aggregate_type = Column(String(32), nullable=False)
+    aggregate_id = Column(String(64), nullable=False)
+    event_seq = Column(Integer, nullable=False)
+    event_type = Column(String(64), nullable=False)
+    actor_id = Column(String(128), nullable=False)
+    actor_role = Column(String(64), nullable=False)
+    request_id = Column(String(128), nullable=False)
+    idempotency_key = Column(String(128), nullable=False)
+    payload = Column(JSONB, nullable=False)
+    evidence_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "aggregate_type": self.aggregate_type,
+            "aggregate_id": self.aggregate_id,
+            "event_seq": int(self.event_seq),
+            "event_type": self.event_type,
+            "actor_id": self.actor_id,
+            "actor_role": self.actor_role,
+            "request_id": self.request_id,
+            "idempotency_key": self.idempotency_key,
+            "payload": dict(self.payload or {}),
+            "evidence_hash": self.evidence_hash,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchGovernanceCaseRecord(Base):
+    """Current projection for one append-only offline governance trail."""
+
+    __tablename__ = "portal_research_governance_cases"
+    __table_args__ = (
+        UniqueConstraint("family_id", name="uq_research_governance_case_family"),
+        UniqueConstraint(
+            "creation_request_id",
+            name="uq_research_governance_case_creation_request",
+        ),
+        Index("ix_research_governance_cases_state_updated", "current_state", "updated_at"),
+        Index("ix_research_governance_cases_family", "family_id"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    current_state = Column(String(64), nullable=False)
+    state_version = Column(Integer, nullable=False, default=0)
+    observation_id = Column(String(64), ForeignKey("portal_research_items.id", ondelete="RESTRICT"), nullable=False)
+    hypothesis_id = Column(String(64), ForeignKey("portal_research_items.id", ondelete="RESTRICT"), nullable=True)
+    protocol_id = Column(String(64), ForeignKey("portal_research_protocols.id", ondelete="RESTRICT"), nullable=True)
+    family_id = Column(String(64), ForeignKey("portal_research_families.id", ondelete="RESTRICT"), nullable=True)
+    candidate_id = Column(String(64), ForeignKey("portal_research_candidates.id", ondelete="RESTRICT"), nullable=True)
+    certificate_id = Column(String(64), ForeignKey("portal_research_certificates.id", ondelete="RESTRICT"), nullable=True)
+    created_by = Column(String(128), nullable=False)
+    creation_request_id = Column(String(128), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "current_state": self.current_state,
+            "state_version": int(self.state_version),
+            "observation_id": self.observation_id,
+            "hypothesis_id": self.hypothesis_id,
+            "protocol_id": self.protocol_id,
+            "family_id": self.family_id,
+            "candidate_id": self.candidate_id,
+            "certificate_id": self.certificate_id,
+            "created_by": self.created_by,
+            "creation_request_id": self.creation_request_id,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+            "updated_at": (self.updated_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchGovernanceProposalRecord(Base):
+    """Immutable request for exactly one expected state transition."""
+
+    __tablename__ = "portal_research_governance_proposals"
+    __table_args__ = (
+        UniqueConstraint("case_id", "request_id", name="uq_research_governance_proposal_request"),
+        UniqueConstraint("proposal_hash", name="uq_research_governance_proposal_hash"),
+        Index("ix_research_governance_proposals_case_version", "case_id", "expected_state_version"),
+        Index("ix_research_governance_proposals_request", "request_id", "created_at"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    case_id = Column(String(64), ForeignKey("portal_research_governance_cases.id", ondelete="RESTRICT"), nullable=False)
+    expected_state_version = Column(Integer, nullable=False)
+    source_state = Column(String(64), nullable=False)
+    target_state = Column(String(64), nullable=False)
+    binding_updates = Column(JSONB, nullable=False)
+    evidence_hashes = Column(JSONB, nullable=False)
+    rationale = Column(String(2048), nullable=False)
+    proposed_by = Column(String(128), nullable=False)
+    proposed_role = Column(String(64), nullable=False)
+    request_id = Column(String(128), nullable=False)
+    proposal_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "case_id": self.case_id,
+            "expected_state_version": int(self.expected_state_version),
+            "source_state": self.source_state,
+            "target_state": self.target_state,
+            "binding_updates": dict(self.binding_updates or {}),
+            "evidence_hashes": list(self.evidence_hashes or []),
+            "rationale": self.rationale,
+            "proposed_by": self.proposed_by,
+            "proposed_role": self.proposed_role,
+            "request_id": self.request_id,
+            "proposal_hash": self.proposal_hash,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
+        }
+
+
+class ResearchGovernanceDecisionRecord(Base):
+    """Immutable authorization or rejection of a transition proposal."""
+
+    __tablename__ = "portal_research_governance_decisions"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_research_governance_decision_proposal"),
+        UniqueConstraint("request_id", name="uq_research_governance_decision_request"),
+        UniqueConstraint("decision_hash", name="uq_research_governance_decision_hash"),
+        Index("ix_research_governance_decisions_case_created", "case_id", "created_at"),
+        Index("ix_research_governance_decisions_request", "request_id", "created_at"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    proposal_id = Column(String(64), ForeignKey("portal_research_governance_proposals.id", ondelete="RESTRICT"), nullable=False)
+    case_id = Column(String(64), ForeignKey("portal_research_governance_cases.id", ondelete="RESTRICT"), nullable=False)
+    disposition = Column(String(32), nullable=False)
+    resulting_state = Column(String(64), nullable=False)
+    resulting_state_version = Column(Integer, nullable=False)
+    policy_evidence = Column(JSONB, nullable=False)
+    authorized_by = Column(String(128), nullable=False)
+    authorized_role = Column(String(64), nullable=False)
+    request_id = Column(String(128), nullable=False)
+    decision_hash = Column(String(64), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "proposal_id": self.proposal_id,
+            "case_id": self.case_id,
+            "disposition": self.disposition,
+            "resulting_state": self.resulting_state,
+            "resulting_state_version": int(self.resulting_state_version),
+            "policy_evidence": dict(self.policy_evidence or {}),
+            "authorized_by": self.authorized_by,
+            "authorized_role": self.authorized_role,
+            "request_id": self.request_id,
+            "decision_hash": self.decision_hash,
+            "created_at": (self.created_at or datetime.utcnow()).isoformat() + "Z",
         }
 
 

@@ -2340,6 +2340,42 @@ def _cmd_research_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_research_authority_post(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(args.payload_json, label="--payload-json")
+    if not payload:
+        raise ValueError("--payload-json is required")
+    path = str(args.authority_path).format(**vars(args))
+    _print_json(_client(args).request_json("POST", path, payload=payload))
+    return 0
+
+
+def _cmd_research_authority_protocol_get(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", f"/api/research/authority/protocols/{args.protocol_id}"
+        )
+    )
+    return 0
+
+
+def _cmd_research_authority_family_evidence(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", f"/api/research/authority/families/{args.family_id}/evidence"
+        )
+    )
+    return 0
+
+
+def _cmd_research_governance_case_get(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", f"/api/research/governance/cases/{args.case_id}"
+        )
+    )
+    return 0
+
+
 def _cmd_instruments_list(args: argparse.Namespace) -> int:
     payload = _client(args).request_json("GET", "/api/instruments/")
     items = list(payload or [])
@@ -4106,6 +4142,98 @@ def build_parser() -> argparse.ArgumentParser:
     research_compare.add_argument("left_check_id")
     research_compare.add_argument("right_check_id")
     research_compare.set_defaults(func=_cmd_research_compare)
+
+    research_authority = research_sub.add_parser(
+        "authority",
+        help="Protocol-bound offline scientific search and holdout operations.",
+    )
+    research_authority_sub = research_authority.add_subparsers(
+        dest="research_authority_command", required=True
+    )
+
+    def add_authority_post(
+        name: str, help_text: str, path: str
+    ) -> argparse.ArgumentParser:
+        command = research_authority_sub.add_parser(name, help=help_text)
+        command.add_argument(
+            "--payload-json",
+            required=True,
+            help="Exact request JSON object as a path, inline object, or '-'.",
+        )
+        command.set_defaults(
+            func=_cmd_research_authority_post, authority_path=path
+        )
+        return command
+
+    add_authority_post(
+        "protocol-create", "Create one immutable scientific protocol.",
+        "/api/research/authority/protocols",
+    )
+    protocol_get = research_authority_sub.add_parser(
+        "protocol-get", help="Read a protocol with its holdout binding redacted."
+    )
+    protocol_get.add_argument("protocol_id")
+    protocol_get.set_defaults(func=_cmd_research_authority_protocol_get)
+    add_authority_post(
+        "family-create", "Open a protocol-bound experiment family.",
+        "/api/research/authority/families",
+    )
+    add_authority_post(
+        "attempt-register", "Register a budgeted train or validation attempt.",
+        "/api/research/authority/attempts",
+    )
+    attempt_complete = add_authority_post(
+        "attempt-complete", "Persist a terminal attempt outcome.",
+        "/api/research/authority/attempts/{attempt_id}/complete",
+    )
+    attempt_complete.add_argument("attempt_id")
+    add_authority_post(
+        "candidate-freeze", "Freeze an immutable validation candidate.",
+        "/api/research/authority/candidates",
+    )
+    add_authority_post(
+        "strategy-graph-create",
+        "Create a typed graph and consume family search budget.",
+        "/api/research/authority/strategy-graphs",
+    )
+    add_authority_post(
+        "family-close", "Close search before final holdout access.",
+        "/api/research/authority/families/{family_id}/close",
+    ).add_argument("family_id")
+    add_authority_post(
+        "holdout-reserve", "Reserve the family holdout exactly once.",
+        "/api/research/authority/holdouts/reserve",
+    )
+    add_authority_post(
+        "family-certify", "Issue scientific evidence after sealed evaluation.",
+        "/api/research/authority/families/{family_id}/certify",
+    ).add_argument("family_id")
+    family_evidence = research_authority_sub.add_parser(
+        "family-evidence", help="Read public family lineage and released evidence."
+    )
+    family_evidence.add_argument("family_id")
+    family_evidence.set_defaults(func=_cmd_research_authority_family_evidence)
+    add_authority_post(
+        "governance-case-create",
+        "Open an offline governance case from a persisted observation.",
+        "/api/research/governance/cases",
+    )
+    add_authority_post(
+        "transition-propose",
+        "Propose one evidence-linked offline state transition.",
+        "/api/research/governance/proposals",
+    )
+    transition_decide = add_authority_post(
+        "transition-decide",
+        "Authorize or reject a transition as a distinct actor.",
+        "/api/research/governance/proposals/{proposal_id}/decide",
+    )
+    transition_decide.add_argument("proposal_id")
+    governance_case_get = research_authority_sub.add_parser(
+        "governance-case-get", help="Read the append-only offline governance trail."
+    )
+    governance_case_get.add_argument("case_id")
+    governance_case_get.set_defaults(func=_cmd_research_governance_case_get)
 
     instruments = subparsers.add_parser("instruments", help="Instrument metadata and runtime profiles.")
     instruments_sub = instruments.add_subparsers(dest="instruments_command", required=True)

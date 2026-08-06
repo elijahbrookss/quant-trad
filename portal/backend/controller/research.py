@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -10,6 +10,8 @@ from starlette.concurrency import run_in_threadpool
 
 from ..service import research as research_service
 from ..service.research import async_dispatch as research_async_dispatch
+from ..service.research import authority as research_authority
+from ..service.research import governance as research_governance
 
 
 router = APIRouter()
@@ -62,10 +64,202 @@ class ResearchCheckSweepRequest(BaseModel):
     ranking: Dict[str, Any]
 
 
+class ResearchAuthorityRequest(BaseModel):
+    actor_id: str
+    actor_role: str
+    request_id: str
+
+
+class ScientificProtocolRequest(ResearchAuthorityRequest):
+    protocol: Dict[str, Any]
+
+
+class ResearchFamilyRequest(ResearchAuthorityRequest):
+    protocol_id: str
+    family_id: Optional[str] = None
+    name: str
+
+
+class ResearchAttemptRequest(ResearchAuthorityRequest):
+    family_id: str
+    dataset_role: str = Field(pattern="^(train|validation|holdout)$")
+    trial_inputs: Dict[str, Any]
+    estimated_runtime_seconds: float = Field(ge=0)
+    estimated_compute_units: float = Field(ge=0)
+
+
+class ResearchAttemptCompletionRequest(ResearchAuthorityRequest):
+    status: str = Field(pattern="^(completed|failed|abandoned|invalid)$")
+    result_evidence: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+    actual_runtime_seconds: float = Field(default=0, ge=0)
+    actual_compute_units: float = Field(default=0, ge=0)
+
+
+class ResearchCandidateRequest(ResearchAuthorityRequest):
+    candidate: Dict[str, Any]
+
+
+class TypedStrategyGraphRequest(ResearchAuthorityRequest):
+    family_id: str
+    graph: Dict[str, Any]
+    mutation_dimensions: List[str]
+    influenced_by_attempt_ids: List[str] = Field(default_factory=list)
+    estimated_runtime_seconds: float = Field(default=0, ge=0)
+    estimated_compute_units: float = Field(default=0, ge=0)
+
+
+class HoldoutReservationRequest(ResearchAuthorityRequest):
+    family_id: str
+    candidate_id: str
+
+
+class FamilyAuthorityRequest(ResearchAuthorityRequest):
+    robustness: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GovernanceCaseRequest(ResearchAuthorityRequest):
+    case_id: Optional[str] = None
+    observation_id: str
+
+
+class GovernanceTransitionProposalRequest(ResearchAuthorityRequest):
+    proposal_id: Optional[str] = None
+    case_id: str
+    expected_state_version: int = Field(ge=0)
+    target_state: str
+    binding_updates: Dict[str, Any] = Field(default_factory=dict)
+    evidence_hashes: List[str]
+    rationale: str
+
+
+class GovernanceTransitionDecisionRequest(ResearchAuthorityRequest):
+    disposition: str = Field(pattern="^(approve|reject)$")
+
+
 def _model_payload(model: BaseModel) -> Dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
+
+
+def _authority_call(handler, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        return handler(payload)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/authority/protocols", status_code=201)
+def create_scientific_protocol(body: ScientificProtocolRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.create_protocol, _model_payload(body))
+
+
+@router.get("/authority/protocols/{protocol_id}")
+def get_scientific_protocol(protocol_id: str) -> Dict[str, Any]:
+    try:
+        return research_authority.get_protocol(protocol_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/authority/families", status_code=201)
+def create_research_family(body: ResearchFamilyRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.create_family, _model_payload(body))
+
+
+@router.post("/authority/attempts", status_code=201)
+def register_research_attempt(body: ResearchAttemptRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.register_attempt, _model_payload(body))
+
+
+@router.post("/authority/attempts/{attempt_id}/complete")
+def complete_research_attempt(
+    attempt_id: str,
+    body: ResearchAttemptCompletionRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["attempt_id"] = attempt_id
+    return _authority_call(research_authority.complete_attempt, payload)
+
+
+@router.post("/authority/candidates", status_code=201)
+def freeze_research_candidate(body: ResearchCandidateRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.freeze_candidate, _model_payload(body))
+
+
+@router.post("/authority/strategy-graphs", status_code=201)
+def create_typed_strategy_graph(body: TypedStrategyGraphRequest) -> Dict[str, Any]:
+    return _authority_call(
+        research_authority.create_typed_strategy_graph, _model_payload(body)
+    )
+
+
+@router.post("/authority/holdouts/reserve", status_code=201)
+def reserve_research_holdout(body: HoldoutReservationRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.reserve_holdout, _model_payload(body))
+
+
+@router.post("/authority/families/{family_id}/close")
+def close_research_family(
+    family_id: str,
+    body: FamilyAuthorityRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["family_id"] = family_id
+    return _authority_call(research_authority.close_family, payload)
+
+
+@router.post("/authority/families/{family_id}/certify", status_code=201)
+def certify_research_family(
+    family_id: str,
+    body: FamilyAuthorityRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["family_id"] = family_id
+    return _authority_call(research_authority.certify_family, payload)
+
+
+@router.get("/authority/families/{family_id}/evidence")
+def get_research_family_evidence(family_id: str) -> Dict[str, Any]:
+    try:
+        return research_authority.family_evidence(family_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/governance/cases", status_code=201)
+def create_governance_case(body: GovernanceCaseRequest) -> Dict[str, Any]:
+    return _authority_call(research_governance.create_case, _model_payload(body))
+
+
+@router.post("/governance/proposals", status_code=201)
+def propose_governance_transition(
+    body: GovernanceTransitionProposalRequest,
+) -> Dict[str, Any]:
+    return _authority_call(
+        research_governance.propose_transition, _model_payload(body)
+    )
+
+
+@router.post("/governance/proposals/{proposal_id}/decide", status_code=201)
+def decide_governance_transition(
+    proposal_id: str,
+    body: GovernanceTransitionDecisionRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["proposal_id"] = proposal_id
+    return _authority_call(research_governance.decide_transition, payload)
+
+
+@router.get("/governance/cases/{case_id}")
+def get_governance_case(case_id: str) -> Dict[str, Any]:
+    try:
+        return research_governance.case_trail(case_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/items", status_code=201)

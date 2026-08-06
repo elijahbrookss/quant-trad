@@ -24,6 +24,7 @@ from .models import (
     REQUIRED_PROVIDER_CREDENTIAL_INDEXES,
     REQUIRED_REPORT_MATERIALIZATION_INDEXES,
     REQUIRED_RESEARCH_ITEM_INDEXES,
+    REQUIRED_RESEARCH_AUTHORITY_INDEXES,
     REQUIRED_RESEARCH_LINK_INDEXES,
 )
 
@@ -707,6 +708,10 @@ class Database:
         assert_required_indexes("portal_bot_run_leases", REQUIRED_BOT_RUN_LEASE_INDEXES)
         assert_required_indexes("portal_research_items", REQUIRED_RESEARCH_ITEM_INDEXES)
         assert_required_indexes("portal_research_links", REQUIRED_RESEARCH_LINK_INDEXES)
+        for table_name, required_indexes in sorted(
+            REQUIRED_RESEARCH_AUTHORITY_INDEXES.items()
+        ):
+            assert_required_indexes(table_name, required_indexes)
         assert_required_indexes("portal_provider_credential_refs", REQUIRED_PROVIDER_CREDENTIAL_INDEXES)
         assert_required_indexes("portal_async_jobs", REQUIRED_ASYNC_JOB_INDEXES)
         self._assert_async_job_index_definitions(inspector)

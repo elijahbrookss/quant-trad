@@ -24,6 +24,77 @@ class _Response:
         return self._body
 
 
+def _capture_request(monkeypatch, response: bytes = b'{"ok":true}'):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = (
+            json.loads(request.data.decode("utf-8")) if request.data else None
+        )
+        return _Response(response)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return observed
+
+
+def test_research_authority_strategy_graph_create_posts_exact_payload(monkeypatch):
+    observed = _capture_request(monkeypatch)
+    payload = {
+        "actor_id": "agent:researcher",
+        "actor_role": "research_agent",
+        "request_id": "request-graph-1",
+        "family_id": "family-1",
+        "graph": {"schema_version": "typed_strategy_graph.v1"},
+        "mutation_dimensions": ["initial_graph"],
+    }
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "authority",
+            "strategy-graph-create",
+            "--payload-json",
+            json.dumps(payload),
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/research/authority/strategy-graphs",
+        "body": payload,
+    }
+
+
+def test_research_governance_transition_decision_uses_path_identity(monkeypatch):
+    observed = _capture_request(monkeypatch)
+    payload = {
+        "actor_id": "human:authority",
+        "actor_role": "research_authority",
+        "request_id": "decision-1",
+        "disposition": "approve",
+    }
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "authority",
+            "transition-decide",
+            "proposal-1",
+            "--payload-json",
+            json.dumps(payload),
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/research/governance/proposals/proposal-1/decide",
+        "body": payload,
+    }
+
+
 def test_research_observe_create_uses_memory_item_route(monkeypatch):
     observed = {}
 
