@@ -27,6 +27,7 @@ from data_providers.streams.contracts import (
     MarketSubscription,
     ProviderRawMessage,
 )
+from data_providers.streams.runtime import ContinuousStreamPolicy
 from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
@@ -114,6 +115,7 @@ PHASE1_AUTHENTICATED_PROOF_SHA256 = (
 DEFAULT_SPOOL_BYTES = 8 * 1024**3
 DEFAULT_SEGMENT_BYTES = 128 * 1024**2
 DEFAULT_STORAGE_ROOT = Path("logs/market-structure")
+MAX_ANALYZER_SEQUENCE_HASHES = 8192
 
 
 @dataclass(frozen=True)
@@ -400,8 +402,8 @@ class MarketStructureService:
                 contract_version=MARKET_TRADE_FACT_VERSION,
                 max_spool_bytes=max_spool_bytes,
                 max_segment_bytes=max_segment_bytes,
-                enabled=False,
-                production_admitted=False,
+                enabled=None,
+                production_admitted=None,
                 config={
                     "schema_version": "market_structure_stream_config.v1",
                     "pair_id": normalized_pair,
@@ -432,8 +434,8 @@ class MarketStructureService:
                 contract_version=L2_BOOK_FACT_VERSION,
                 max_spool_bytes=max_spool_bytes,
                 max_segment_bytes=max_segment_bytes,
-                enabled=False,
-                production_admitted=False,
+                enabled=None,
+                production_admitted=None,
                 config={
                     "schema_version": "market_structure_l2_stream_config.v1",
                     "pair_id": normalized_pair,
@@ -677,6 +679,170 @@ class MarketStructureService:
             "noop": outcome.noop_count,
             "max_commit_seq": outcome.max_commit_seq,
             "materialization_fingerprint": fingerprint,
+        }
+
+    def start_continuous_validation(
+        self,
+        *,
+        definition_id: str,
+        duration_seconds: float,
+        requested_by: str,
+        policy: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        duration = float(duration_seconds)
+        if not 60 <= duration <= 7 * 24 * 3600:
+            raise ValueError(
+                "market_stream_validation_invalid: duration must be 60..604800 seconds"
+            )
+        runtime_policy = ContinuousStreamPolicy.from_mapping(policy)
+        stop_at = datetime.now(UTC) + timedelta(seconds=duration)
+        row = self.repository.configure_continuous_runtime(
+            definition_id=definition_id,
+            enabled=True,
+            mode="validation",
+            requested_by=requested_by,
+            policy=runtime_policy.to_dict(),
+            stop_at=stop_at,
+        )
+        return {
+            "schema_version": "market.continuous_collector_control.v1",
+            "definition_id": str(row["id"]),
+            "enabled": bool(row["enabled"]),
+            "production_admitted": bool(row["production_admitted"]),
+            "mode": "validation",
+            "stop_at": stop_at.isoformat(),
+            "policy": runtime_policy.to_dict(),
+        }
+
+    def start_continuous_production(
+        self,
+        *,
+        definition_id: str,
+        requested_by: str,
+        policy: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        runtime_policy = ContinuousStreamPolicy.from_mapping(policy)
+        row = self.repository.configure_continuous_runtime(
+            definition_id=definition_id,
+            enabled=True,
+            mode="production",
+            requested_by=requested_by,
+            policy=runtime_policy.to_dict(),
+        )
+        return {
+            "schema_version": "market.continuous_collector_control.v1",
+            "definition_id": str(row["id"]),
+            "enabled": bool(row["enabled"]),
+            "production_admitted": bool(row["production_admitted"]),
+            "mode": "production",
+            "stop_at": None,
+            "policy": runtime_policy.to_dict(),
+        }
+
+    def stop_continuous(
+        self,
+        *,
+        definition_id: str,
+        requested_by: str,
+    ) -> dict[str, Any]:
+        row = self.repository.configure_continuous_runtime(
+            definition_id=definition_id,
+            enabled=False,
+            mode="stopped",
+            requested_by=requested_by,
+            policy={},
+        )
+        return {
+            "schema_version": "market.continuous_collector_control.v1",
+            "definition_id": str(row["id"]),
+            "enabled": bool(row["enabled"]),
+            "production_admitted": bool(row["production_admitted"]),
+            "mode": "stopped",
+        }
+
+    def set_production_admission(
+        self,
+        *,
+        definition_id: str,
+        admitted: bool,
+        approved_by: str,
+        evidence: Mapping[str, Any],
+        storage_budget: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        evidence_payload = dict(evidence or {})
+        budget_payload = dict(storage_budget or {})
+        if admitted:
+            validation_session_id = str(
+                evidence_payload.get("validation_session_id") or ""
+            ).strip()
+            if not validation_session_id:
+                raise ValueError(
+                    "market_stream_admission_invalid: validation_session_id is required"
+                )
+            evidence_payload = self.repository.continuous_validation_evidence(
+                definition_id=definition_id,
+                session_id=validation_session_id,
+            )
+            if not evidence_payload["continuous_capture_completed"]:
+                raise ValueError(
+                    "market_stream_admission_invalid: canonical validation blockers="
+                    + ",".join(evidence_payload["blockers"])
+                )
+            required_budget_fields = {
+                "capacity_resource_id",
+                "capacity_scope",
+                "capacity_authority",
+                "physical_host_visible",
+                "capacity_observed_at",
+                "observed_available_bytes",
+                "observed_growth_bytes_per_day",
+                "growth_budget_bytes_per_day",
+                "minimum_headroom_bytes",
+            }
+            missing = sorted(required_budget_fields - set(budget_payload))
+            if missing:
+                raise ValueError(
+                    "market_stream_admission_invalid: storage budget fields missing="
+                    + ",".join(missing)
+                )
+            authority = str(budget_payload["capacity_authority"] or "").strip()
+            if authority not in {
+                "physical_host_filesystem",
+                "engine_storage_filesystem",
+                "cloud_volume",
+            } or not bool(budget_payload["physical_host_visible"]):
+                raise ValueError(
+                    "market_stream_admission_invalid: authoritative physical/cloud storage capacity is required; virtual guest capacity is insufficient"
+                )
+            observed_available = int(budget_payload["observed_available_bytes"])
+            observed_growth = float(
+                budget_payload["observed_growth_bytes_per_day"]
+            )
+            growth_budget = float(budget_payload["growth_budget_bytes_per_day"])
+            minimum_headroom = int(budget_payload["minimum_headroom_bytes"])
+            if (
+                observed_available < minimum_headroom
+                or observed_growth < 0
+                or growth_budget <= 0
+                or observed_growth > growth_budget
+                or minimum_headroom <= 0
+            ):
+                raise ValueError(
+                    "market_stream_admission_invalid: observed capacity/growth exceeds the explicit storage budget"
+                )
+        row = self.repository.set_production_admission(
+            definition_id=definition_id,
+            admitted=admitted,
+            approved_by=approved_by,
+            evidence=evidence_payload,
+            storage_budget=budget_payload,
+        )
+        return {
+            "schema_version": "market.stream_production_admission.v1",
+            "definition_id": str(row["id"]),
+            "enabled": bool(row["enabled"]),
+            "production_admitted": bool(row["production_admitted"]),
+            "admission": dict(row["config"] or {}).get("production_admission"),
         }
 
     async def capture_bounded(
@@ -1702,6 +1868,15 @@ class MarketStructureService:
     def replay_manifest(
         self, *, manifest_id: str, storage_root: Path = DEFAULT_STORAGE_ROOT
     ) -> dict[str, Any]:
+        retention = self.repository.archive_retention_status(
+            target_kind="raw_manifest",
+            target_id=manifest_id,
+        )
+        if retention["object_retention_state"] == "expired":
+            raise RuntimeError(
+                "market_archive_object_expired: "
+                f"manifest_id={manifest_id} expiration={retention['expiration']}"
+            )
         manifest = self.repository.get_manifest(manifest_id)
         store = FilesystemRawArchiveObjectStore(
             Path(storage_root).expanduser().resolve() / "objects"
@@ -2325,6 +2500,8 @@ class _CaptureAnalyzer:
             prior_hash = self.sequence_hashes.get(message_sequence)
             if prior_hash is None:
                 self.sequence_hashes[message_sequence] = record.raw_frame_sha256
+                if len(self.sequence_hashes) > MAX_ANALYZER_SEQUENCE_HASHES:
+                    self.sequence_hashes.pop(next(iter(self.sequence_hashes)))
             elif prior_hash != record.raw_frame_sha256:
                 self._quality(
                     record,

@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from core.settings import get_settings
 from market_data.contracts import (
     FUNDING_RATE_FACT_TYPE,
     OPEN_INTEREST_FACT_TYPE,
@@ -24,7 +25,12 @@ from ..service.market.normalization_service import market_normalization_service
 from market_data.requirements import UnavailableMarketData
 
 from ..service.market.collector_service import market_data_collector
+from ..service.market.market_storage_lifecycle import market_storage_lifecycle_service
 from ..service.market.market_structure_service import market_structure_service
+from ..service.storage.repos.market_lifecycle import (
+    MarketStorageLifecycleBusyError,
+    market_storage_lifecycle_repository,
+)
 from ..service.storage.repos.market_structure import market_structure_repository
 
 
@@ -228,12 +234,40 @@ class MarketStructureCaptureRequest(BaseModel):
     owner_id: Optional[str] = None
 
 
+class MarketStructureContinuousValidationRequest(BaseModel):
+    duration_seconds: float = 24 * 3600
+    requested_by: str
+    policy: Optional[dict[str, Any]] = None
+
+
+class MarketStructureContinuousStartRequest(BaseModel):
+    requested_by: str
+    policy: Optional[dict[str, Any]] = None
+
+
+class MarketStructureContinuousStopRequest(BaseModel):
+    requested_by: str
+
+
+class MarketStructureAdmissionRequest(BaseModel):
+    admitted: bool
+    approved_by: str
+    evidence: dict[str, Any]
+    storage_budget: dict[str, Any]
+
+
 class MarketStructureReplayRequest(BaseModel):
     storage_root: Optional[str] = None
 
 
 class MarketStructureCompactionRequest(BaseModel):
     source_manifest_ids: list[str]
+    storage_root: Optional[str] = None
+    owner_id: Optional[str] = None
+
+
+class MarketStorageLifecycleRunRequest(BaseModel):
+    execute: bool = False
     storage_root: Optional[str] = None
     owner_id: Optional[str] = None
 
@@ -624,6 +658,92 @@ def capture_market_structure(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post(
+    "/market-structure/definitions/{definition_id}/continuous/validate"
+)
+def validate_continuous_market_structure(
+    definition_id: str,
+    req: MarketStructureContinuousValidationRequest,
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.start_continuous_validation(
+            definition_id=definition_id,
+            duration_seconds=req.duration_seconds,
+            requested_by=req.requested_by,
+            policy=req.policy,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market-structure/definitions/{definition_id}/continuous/start"
+)
+def start_continuous_market_structure(
+    definition_id: str,
+    req: MarketStructureContinuousStartRequest,
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.start_continuous_production(
+            definition_id=definition_id,
+            requested_by=req.requested_by,
+            policy=req.policy,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market-structure/definitions/{definition_id}/continuous/stop"
+)
+def stop_continuous_market_structure(
+    definition_id: str,
+    req: MarketStructureContinuousStopRequest,
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.stop_continuous(
+            definition_id=definition_id,
+            requested_by=req.requested_by,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market-structure/definitions/{definition_id}/continuous/admission"
+)
+def set_continuous_market_structure_admission(
+    definition_id: str,
+    req: MarketStructureAdmissionRequest,
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.set_production_admission(
+            definition_id=definition_id,
+            admitted=req.admitted,
+            approved_by=req.approved_by,
+            evidence=req.evidence,
+            storage_budget=req.storage_budget,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get(
+    "/market-structure/definitions/{definition_id}/continuous/validation/{session_id}"
+)
+def get_continuous_market_structure_validation_evidence(
+    definition_id: str,
+    session_id: str,
+) -> dict[str, Any]:
+    try:
+        return market_structure_repository.continuous_validation_evidence(
+            definition_id=definition_id,
+            session_id=session_id,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/market-structure/manifests/{manifest_id}/replay")
 def replay_market_structure_manifest(
     manifest_id: str,
@@ -717,6 +837,50 @@ def get_market_structure_retention_status(
             target_kind=target_kind,
             target_id=target_id,
         )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/market-structure/storage-lifecycle/plan")
+def plan_market_storage_lifecycle() -> dict[str, Any]:
+    try:
+        policy = get_settings().market_data_lifecycle
+        return market_storage_lifecycle_service.plan(policy=policy)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/storage-lifecycle/run")
+def run_market_storage_lifecycle(
+    req: MarketStorageLifecycleRunRequest,
+) -> dict[str, Any]:
+    try:
+        kwargs: dict[str, Any] = {
+            "policy": get_settings().market_data_lifecycle,
+            "execute": req.execute,
+            "owner_id": req.owner_id,
+        }
+        if req.storage_root:
+            kwargs["storage_root"] = Path(req.storage_root)
+        return market_storage_lifecycle_service.run(**kwargs)
+    except MarketStorageLifecycleBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/market-structure/storage-lifecycle/events")
+def list_market_storage_lifecycle_events(
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    try:
+        rows = market_storage_lifecycle_repository.list_recent_events(limit=limit)
+        return {
+            "schema_version": "market.storage_lifecycle_event_list.v1",
+            "events": rows,
+            "count": len(rows),
+            "observed_at": datetime.now(UTC).isoformat(),
+        }
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

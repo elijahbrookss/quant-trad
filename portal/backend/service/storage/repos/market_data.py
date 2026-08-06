@@ -52,6 +52,8 @@ from sqlalchemy import text
 
 from ....db import db
 
+from .market_lifecycle import market_storage_lifecycle_repository
+
 
 _SERIES_IDENTITY_VERSION = "market_series.v1"
 
@@ -2292,6 +2294,7 @@ class PostgresMarketDataRepository:
 
         with db.session() as session:
             session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
             watermark = self._current_commit_seq_with_session(session)
             manifest_series: list[dict[str, Any]] = []
             archive_refs: dict[str, dict[str, str]] = {}

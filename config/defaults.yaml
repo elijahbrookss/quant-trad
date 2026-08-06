@@ -81,6 +81,28 @@ workers:
     idle_sleep_max_seconds: 5.0
     db_wait_timeout_seconds: 120
 
+market_data_lifecycle:
+  enabled: true
+  execution_enabled: false
+  interval_seconds: 3600
+  archive_compaction_enabled: true
+  archive_expiration_enabled: true
+  hot_compression_enabled: true
+  hot_expiration_enabled: true
+  raw_trade_archive_days: 400
+  raw_l2_archive_days: 90
+  book_checkpoint_archive_days: 90
+  raw_trade_hot_days: 180
+  raw_l2_hot_days: 7
+  derived_hot_days: 400
+  compacted_source_grace_hours: 24
+  compaction_min_age_minutes: 15
+  compaction_min_objects: 2
+  compaction_target_bytes: 536870912
+  max_compaction_groups_per_run: 8
+  max_archive_expirations_per_run: 100
+  max_chunk_operations_per_run: 16
+
 bot_runtime:
   mode: backtest
   target: docker

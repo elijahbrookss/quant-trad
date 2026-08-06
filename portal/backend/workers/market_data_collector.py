@@ -13,7 +13,13 @@ from typing import Any
 from core.settings import get_settings
 
 from portal.backend.service.async_jobs import wait_for_database_ready
+from portal.backend.service.market.collector_supervisor import (
+    ContinuousCollectorSupervisor,
+)
 from portal.backend.service.market.collector_service import market_data_collector
+from portal.backend.service.market.market_storage_lifecycle import (
+    MarketStorageLifecycleSupervisor,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +29,7 @@ _WORKER_SETTINGS = _SETTINGS.workers.collectors
 _LEASE_SECONDS = 90.0
 _WORKER_STATE_TTL_SECONDS = 30.0
 _WORKER_HEARTBEAT_SECONDS = 10.0
-_WORKER_VERSION = "market_data_collector.v2"
+_WORKER_VERSION = "market_data_collector.v3"
 
 
 def _on_signal(signum: int, _frame: Any) -> None:
@@ -39,8 +45,14 @@ def _worker_id() -> str:
 class _WorkerHeartbeat:
     """Keep idle and in-flight collector process liveness observable."""
 
-    def __init__(self, worker_id: str) -> None:
+    def __init__(
+        self,
+        worker_id: str,
+        *,
+        context_provider=None,
+    ) -> None:
         self.worker_id = worker_id
+        self.context_provider = context_provider
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._state = "starting"
@@ -65,6 +77,7 @@ class _WorkerHeartbeat:
                     "derivatives.open_interest",
                     "derivatives.funding_rate",
                 ],
+                "collector_modes": ["scheduled", "continuous_stream"],
                 "concurrency": 1,
             },
             context={"hostname": socket.gethostname(), "pid": os.getpid()},
@@ -100,6 +113,11 @@ class _WorkerHeartbeat:
 
     def _publish(self) -> None:
         state, definition_id, attempt_id, last_error = self._snapshot()
+        context = (
+            dict(self.context_provider())
+            if self.context_provider is not None
+            else None
+        )
         market_data_collector.heartbeat_worker(
             worker_id=self.worker_id,
             ttl_seconds=_WORKER_STATE_TTL_SECONDS,
@@ -107,6 +125,7 @@ class _WorkerHeartbeat:
             active_definition_id=definition_id,
             active_attempt_id=attempt_id,
             last_error=last_error,
+            context=context,
         )
 
     def _run(self) -> None:
@@ -146,7 +165,18 @@ def main() -> int:
         )
         return 2
 
-    heartbeat = _WorkerHeartbeat(worker_id)
+    supervisor = ContinuousCollectorSupervisor(owner_id=worker_id)
+    lifecycle_supervisor = MarketStorageLifecycleSupervisor(
+        policy=_SETTINGS.market_data_lifecycle,
+        owner_id=f"{worker_id}:storage-lifecycle",
+    )
+    heartbeat = _WorkerHeartbeat(
+        worker_id,
+        context_provider=lambda: {
+            "continuous_collectors": supervisor.snapshot(),
+            "storage_lifecycle": lifecycle_supervisor.snapshot(),
+        },
+    )
     try:
         heartbeat.start()
     except Exception as exc:
@@ -156,6 +186,24 @@ def main() -> int:
             exc,
         )
         return 3
+    try:
+        supervisor.start()
+        lifecycle_supervisor.start()
+    except Exception as exc:
+        logger.error(
+            "market_data_supervisor_start_failed | worker_id=%s error=%s",
+            worker_id,
+            exc,
+        )
+        try:
+            supervisor.stop()
+        except Exception:
+            logger.exception(
+                "continuous_collector_supervisor_start_cleanup_failed | worker_id=%s",
+                worker_id,
+            )
+        heartbeat.stop()
+        return 4
 
     idle = float(_WORKER_SETTINGS.idle_sleep_seconds)
     idle_max = max(idle, float(_WORKER_SETTINGS.idle_sleep_max_seconds))
@@ -222,6 +270,23 @@ def main() -> int:
                 exc,
             )
 
+    try:
+        lifecycle_supervisor.stop()
+    except Exception as exc:
+        logger.warning(
+            "market_storage_lifecycle_supervisor_stop_failed | "
+            "worker_id=%s error=%s",
+            worker_id,
+            exc,
+        )
+    try:
+        supervisor.stop()
+    except Exception as exc:
+        logger.warning(
+            "continuous_collector_supervisor_stop_failed | worker_id=%s error=%s",
+            worker_id,
+            exc,
+        )
     try:
         heartbeat.stop()
     except Exception as exc:

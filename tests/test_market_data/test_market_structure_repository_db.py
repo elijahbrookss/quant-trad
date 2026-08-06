@@ -114,6 +114,82 @@ def _btc_l2_frames() -> list[str]:
     raise AssertionError("BTC Level 2 snapshot/update fixtures missing")
 
 
+def test_continuous_validation_evidence_reports_active_elapsed_time() -> None:
+    token = uuid.uuid4().hex
+    instrument_id = f"ms-evidence-{token[:20]}"
+    with db.session() as session:
+        session.add(
+            InstrumentRecord(
+                id=instrument_id,
+                datasource="COINBASE",
+                exchange="COINBASE_DIRECT",
+                symbol=f"EVIDENCE-{token[:8].upper()}",
+                instrument_type="spot",
+                can_short=False,
+                short_requires_borrow=False,
+                has_funding=False,
+                extra_metadata={},
+            )
+        )
+    source_id = market_data_repo.register_source(
+        SourceIdentity(
+            provider="COINBASE",
+            venue="COINBASE_DIRECT",
+            source_kind="stream",
+            adapter_version=f"continuous-evidence-db-test.{token}",
+        )
+    )
+    series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type="market.trade",
+        timeframe_seconds=None,
+        contract_version="market.trade.v1",
+    )
+    definition_id = f"msevidence_{token}"
+    market_structure_repository.upsert_stream_definition(
+        definition_id=definition_id,
+        source_id=source_id,
+        series_id=series_id,
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        provider_product_id="BTC-USD",
+        channels=("market_trades", "heartbeats"),
+        auth_mode="public",
+        contract_version="market.trade.v1",
+        max_spool_bytes=1024**3,
+        max_segment_bytes=128 * 1024**2,
+        config={},
+    )
+    claim = market_structure_repository.claim_stream(
+        definition_id=definition_id,
+        owner_id="continuous-evidence-db-test",
+        lease_seconds=120,
+        bounded=True,
+    )
+    try:
+        market_structure_repository.append_session_event(
+            claim,
+            event_ordinal=0,
+            connection_epoch=0,
+            event_type="connected",
+            occurred_at=datetime.now(UTC) - timedelta(seconds=65),
+        )
+        evidence = market_structure_repository.continuous_validation_evidence(
+            definition_id=definition_id,
+            session_id=claim.session_id,
+        )
+        assert evidence["session_active"] is True
+        assert 60 <= evidence["duration_seconds"] < 120
+        assert "validation_session_still_active" in evidence["blockers"]
+        assert (
+            "graceful_terminal_event_missing_or_duplicated"
+            not in evidence["blockers"]
+        )
+        assert "coverage_interval_still_open" not in evidence["blockers"]
+    finally:
+        market_structure_repository.release(claim)
+
+
 def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

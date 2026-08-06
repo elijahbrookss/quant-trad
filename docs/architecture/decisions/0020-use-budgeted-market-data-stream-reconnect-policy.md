@@ -12,6 +12,7 @@ tags:
   - market-data
   - runtime
 code_paths:
+  - src/data_providers/streams/runtime.py
   - portal/backend/service/bots/market_data_stream_policy.py
   - portal/backend/service/bots/paper_market_stream.py
   - portal/backend/service/bots/startup_service.py
@@ -45,12 +46,18 @@ Quant-Trad needs paper/live uptime without weakening runtime semantics:
 
 ## Decision
 
-Make market-data reconnect behavior a bot-owned runtime policy named
-`market_data_stream_policy`.
+Define provider-neutral reconnect semantics in
+`src/data_providers/streams/runtime.py`. Paper/live bots expose one bot-owned
+instance named `market_data_stream_policy`; supervised archival collectors use
+the same reconnect contract inside their broader segment/lease/queue policy.
 
 The policy is not strategy, variant, ATM, or risk sizing configuration. It is
 resolved as normal bot config, may be overridden at run start, and is frozen in
 `config_snapshot.bot.market_data_stream_policy`.
+
+The bot service remains the settings adapter. It does not own a second
+normalizer, which prevents paper/live and collector reconnect semantics from
+drifting.
 
 Default policy:
 
@@ -92,6 +99,8 @@ path once the stream policy declares the outage terminal.
 - Existing databases need the clean schema update for
   `portal_bots.market_data_stream_policy`; runtime schema checking still fails
   loud if the column is missing.
+- Continuous collectors share the backoff/disconnect contract while adding
+  their own bounded segment queue, fencing lease, and durable restart recovery.
 
 ## References
 

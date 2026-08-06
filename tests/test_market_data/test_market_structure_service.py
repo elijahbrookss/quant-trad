@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import portal.backend.service.market.market_structure_service as market_structure_module
+import pytest
 from data_providers.streams.contracts import ProviderRawMessage
 from market_data.fact_registry import get_fact_contract
 from market_data.order_book import BookLifecycle
@@ -20,6 +21,34 @@ from portal.backend.service.storage.repos.market_structure import (
     StreamClaim,
     TradeIngestionOutcome,
 )
+
+
+class _AdmissionRepository:
+    def __init__(self) -> None:
+        self.persisted = None
+
+    def continuous_validation_evidence(self, **kwargs):
+        return {
+            "schema_version": "market.continuous_validation_evidence.v1",
+            "definition_id": kwargs["definition_id"],
+            "validation_session_id": kwargs["session_id"],
+            "continuous_capture_completed": True,
+            "blockers": [],
+        }
+
+    def set_production_admission(self, **kwargs):
+        self.persisted = kwargs
+        return {
+            "id": kwargs["definition_id"],
+            "enabled": False,
+            "production_admitted": kwargs["admitted"],
+            "config": {
+                "production_admission": {
+                    "evidence": kwargs["evidence"],
+                    "storage_budget": kwargs["storage_budget"],
+                }
+            },
+        }
 
 
 class _FakeStream:
@@ -541,3 +570,60 @@ def test_configure_pair_registers_derivative_state_without_timeframe(
     assert result["pair_id"] == "bip_btc"
     assert len(derivative_calls) == 1
     assert derivative_calls[0]["timeframe_seconds"] is None
+
+
+def test_production_admission_uses_canonical_proof_and_authoritative_capacity() -> None:
+    repository = _AdmissionRepository()
+    service = MarketStructureService(repository=repository)
+    storage_budget = {
+        "capacity_resource_id": "docker-backing-volume",
+        "capacity_scope": "physical_host_volume",
+        "capacity_authority": "physical_host_filesystem",
+        "physical_host_visible": True,
+        "capacity_observed_at": "2026-08-05T12:00:00Z",
+        "observed_available_bytes": 500 * 1024**3,
+        "observed_growth_bytes_per_day": 2 * 1024**3,
+        "growth_budget_bytes_per_day": 5 * 1024**3,
+        "minimum_headroom_bytes": 100 * 1024**3,
+    }
+
+    result = service.set_production_admission(
+        definition_id="definition-a",
+        admitted=True,
+        approved_by="operator-a",
+        evidence={
+            "validation_session_id": "session-a",
+            "continuous_capture_completed": True,
+        },
+        storage_budget=storage_budget,
+    )
+
+    assert result["production_admitted"] is True
+    assert repository.persisted["evidence"]["validation_session_id"] == "session-a"
+    assert repository.persisted["evidence"] != {
+        "validation_session_id": "session-a",
+        "continuous_capture_completed": True,
+    }
+
+
+def test_production_admission_rejects_virtual_guest_capacity() -> None:
+    service = MarketStructureService(repository=_AdmissionRepository())
+
+    with pytest.raises(ValueError, match="virtual guest capacity is insufficient"):
+        service.set_production_admission(
+            definition_id="definition-a",
+            admitted=True,
+            approved_by="operator-a",
+            evidence={"validation_session_id": "session-a"},
+            storage_budget={
+                "capacity_resource_id": "docker-engine-storage",
+                "capacity_scope": "docker_engine_storage",
+                "capacity_authority": "virtual_guest_storage",
+                "physical_host_visible": False,
+                "capacity_observed_at": "2026-08-05T12:00:00Z",
+                "observed_available_bytes": 900 * 1024**3,
+                "observed_growth_bytes_per_day": 1,
+                "growth_budget_bytes_per_day": 2,
+                "minimum_headroom_bytes": 1,
+            },
+        )

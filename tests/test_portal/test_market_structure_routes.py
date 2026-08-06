@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 import pytest
 
 pytest.importorskip("fastapi")
@@ -381,3 +382,145 @@ def test_market_normalization_routes_preserve_causal_request(monkeypatch) -> Non
     assert observed["materialize"]["source_series_id"] == 41
     assert observed["materialize"]["as_of_commit_seq"] == 77
     assert observed["compare"]["known_at"].isoformat() == "2026-08-02T12:03:00+00:00"
+
+
+def test_continuous_collector_control_routes_are_non_blocking_and_typed(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def record(name, result):
+        def inner(**kwargs):
+            observed[name] = kwargs
+            return result
+
+        return inner
+
+    monkeypatch.setattr(
+        controller.market_structure_service,
+        "start_continuous_validation",
+        record("validate", {"mode": "validation"}),
+    )
+    monkeypatch.setattr(
+        controller.market_structure_service,
+        "start_continuous_production",
+        record("start", {"mode": "production"}),
+    )
+    monkeypatch.setattr(
+        controller.market_structure_service,
+        "stop_continuous",
+        record("stop", {"mode": "stopped"}),
+    )
+    monkeypatch.setattr(
+        controller.market_structure_service,
+        "set_production_admission",
+        record("admit", {"production_admitted": True}),
+    )
+    monkeypatch.setattr(
+        controller.market_structure_repository,
+        "continuous_validation_evidence",
+        record("evidence", {"continuous_capture_completed": True}),
+    )
+    client = _client()
+    validate = client.post(
+        "/api/market-data/market-structure/definitions/definition-a/continuous/validate",
+        json={
+            "duration_seconds": 86400,
+            "requested_by": "operator-a",
+            "policy": {"max_inflight_segments": 3},
+        },
+    )
+    start = client.post(
+        "/api/market-data/market-structure/definitions/definition-a/continuous/start",
+        json={"requested_by": "operator-a", "policy": None},
+    )
+    stop = client.post(
+        "/api/market-data/market-structure/definitions/definition-a/continuous/stop",
+        json={"requested_by": "operator-a"},
+    )
+    admit = client.post(
+        "/api/market-data/market-structure/definitions/definition-a/continuous/admission",
+        json={
+            "admitted": True,
+            "approved_by": "operator-a",
+            "evidence": {"validation_session_id": "session-a"},
+            "storage_budget": {"capacity_resource_id": "volume-a"},
+        },
+    )
+    evidence = client.get(
+        "/api/market-data/market-structure/definitions/definition-a/continuous/validation/session-a"
+    )
+
+    assert all(
+        response.status_code == 200
+        for response in (validate, start, stop, admit, evidence)
+    )
+    assert observed["validate"]["duration_seconds"] == 86400.0
+    assert observed["validate"]["policy"] == {"max_inflight_segments": 3}
+    assert observed["start"]["requested_by"] == "operator-a"
+    assert observed["stop"]["definition_id"] == "definition-a"
+    assert observed["admit"]["evidence"] == {
+        "validation_session_id": "session-a"
+    }
+    assert observed["evidence"] == {
+        "definition_id": "definition-a",
+        "session_id": "session-a",
+    }
+
+
+def test_market_storage_lifecycle_routes_are_dry_run_first(monkeypatch) -> None:
+    policy = object()
+    observed = {}
+    monkeypatch.setattr(
+        controller,
+        "get_settings",
+        lambda: SimpleNamespace(market_data_lifecycle=policy),
+    )
+
+    def fake_plan(*, policy):
+        observed["plan_policy"] = policy
+        return {
+            "schema_version": "market.storage_lifecycle_plan.v1",
+            "summary": {"eligible_count": 2},
+        }
+
+    def fake_run(**kwargs):
+        observed["run"] = kwargs
+        return {
+            "schema_version": "market.storage_lifecycle_run.v1",
+            "status": "dry_run",
+        }
+
+    monkeypatch.setattr(
+        controller.market_storage_lifecycle_service,
+        "plan",
+        fake_plan,
+    )
+    monkeypatch.setattr(
+        controller.market_storage_lifecycle_service,
+        "run",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        controller.market_storage_lifecycle_repository,
+        "list_recent_events",
+        lambda **kwargs: [{"id": "event-a", "limit": kwargs["limit"]}],
+    )
+
+    client = _client()
+    plan = client.get("/api/market-data/market-structure/storage-lifecycle/plan")
+    run = client.post(
+        "/api/market-data/market-structure/storage-lifecycle/run",
+        json={"storage_root": "/portable/market-data"},
+    )
+    events = client.get(
+        "/api/market-data/market-structure/storage-lifecycle/events",
+        params={"limit": 17},
+    )
+
+    assert plan.status_code == run.status_code == events.status_code == 200
+    assert observed["plan_policy"] is policy
+    assert observed["run"]["policy"] is policy
+    assert observed["run"]["execute"] is False
+    assert str(observed["run"]["storage_root"]) == "/portable/market-data"
+    assert events.json()["events"] == [{"id": "event-a", "limit": 17}]

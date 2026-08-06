@@ -652,3 +652,151 @@ def test_market_structure_recent_reconciliation_is_bounded(monkeypatch) -> None:
         "path": "/api/market-data/market-structure/definitions/definition-a/reconcile-recent",
         "query": {"limit": ["25"]},
     }
+
+
+def test_market_structure_continuous_controls_use_worker_owned_routes(monkeypatch) -> None:
+    observed = []
+
+    def fake_urlopen(request, timeout):
+        observed.append(
+            {
+                "method": request.get_method(),
+                "path": urllib.parse.urlparse(request.full_url).path,
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        return _Response({"schema_version": "test.v1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "continuous-validate",
+            "definition-a",
+            "--duration",
+            "86400",
+            "--requested-by",
+            "operator-a",
+            "--policy-json",
+            '{"max_inflight_segments":3}',
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "continuous-evidence",
+            "definition-a",
+            "session-a",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "continuous-stop",
+            "definition-a",
+            "--requested-by",
+            "operator-a",
+        ]
+    ) == 0
+    assert observed == [
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/validate",
+            "body": {
+                "duration_seconds": 86400.0,
+                "requested_by": "operator-a",
+                "policy": {"max_inflight_segments": 3},
+            },
+        },
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/validation/session-a",
+            "body": None,
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/stop",
+            "body": {"requested_by": "operator-a"},
+        },
+    ]
+
+
+def test_market_storage_lifecycle_cli_is_dry_run_first(monkeypatch) -> None:
+    observed = []
+
+    def fake_urlopen(request, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        observed.append(
+            {
+                "method": request.get_method(),
+                "path": parsed.path,
+                "query": urllib.parse.parse_qs(parsed.query),
+                "body": (
+                    json.loads(request.data.decode("utf-8"))
+                    if request.data
+                    else None
+                ),
+            }
+        )
+        return _Response({"schema_version": "market.storage_lifecycle_run.v1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "lifecycle-plan",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "lifecycle-run",
+            "--storage-root",
+            "/portable/market-data",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "lifecycle-events",
+            "--limit",
+            "11",
+        ]
+    ) == 0
+
+    assert observed == [
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/storage-lifecycle/plan",
+            "query": {},
+            "body": None,
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/storage-lifecycle/run",
+            "query": {},
+            "body": {
+                "execute": False,
+                "storage_root": "/portable/market-data",
+                "owner_id": None,
+            },
+        },
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/storage-lifecycle/events",
+            "query": {"limit": ["11"]},
+            "body": None,
+        },
+    ]

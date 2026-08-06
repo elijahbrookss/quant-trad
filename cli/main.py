@@ -1565,6 +1565,88 @@ def _cmd_data_market_structure_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_market_structure_continuous_validate(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/validate",
+            payload={
+                "duration_seconds": args.duration,
+                "requested_by": args.requested_by,
+                "policy": _read_json_object_arg(
+                    args.policy_json, label="--policy-json"
+                )
+                or None,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_continuous_start(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/start",
+            payload={
+                "requested_by": args.requested_by,
+                "policy": _read_json_object_arg(
+                    args.policy_json, label="--policy-json"
+                )
+                or None,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_continuous_stop(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/stop",
+            payload={"requested_by": args.requested_by},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_continuous_admit(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/admission",
+            payload={
+                "admitted": not args.revoke,
+                "approved_by": args.approved_by,
+                "evidence": _read_json_object_arg(
+                    args.evidence_json, label="--evidence-json"
+                ),
+                "storage_budget": _read_json_object_arg(
+                    args.storage_budget_json, label="--storage-budget-json"
+                ),
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_continuous_evidence(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/validation/{quote(args.session_id, safe='')}",
+        )
+    )
+    return 0
+
+
 def _cmd_data_market_structure_replay(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -1623,6 +1705,42 @@ def _cmd_data_market_structure_retention_status(args: argparse.Namespace) -> int
         _client(args).request_json(
             "GET",
             f"/api/market-data/market-structure/archive-retention/{quote(args.target_kind, safe='')}/{quote(args.target_id, safe='')}",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_lifecycle_plan(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/storage-lifecycle/plan",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_lifecycle_run(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/storage-lifecycle/run",
+            payload={
+                "execute": bool(args.execute),
+                "storage_root": args.storage_root,
+                "owner_id": args.owner_id,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_lifecycle_events(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/storage-lifecycle/events",
+            params={"limit": args.limit},
         )
     )
     return 0
@@ -3606,6 +3724,67 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_capture.add_argument("--storage-root")
     data_market_structure_capture.add_argument("--owner-id")
     data_market_structure_capture.set_defaults(func=_cmd_data_market_structure_capture)
+    data_market_structure_continuous_validate = data_market_structure_sub.add_parser(
+        "continuous-validate",
+        help="Start a worker-owned bounded validation run (up to seven days).",
+    )
+    data_market_structure_continuous_validate.add_argument("definition_id")
+    data_market_structure_continuous_validate.add_argument(
+        "--duration", type=float, default=24 * 3600
+    )
+    data_market_structure_continuous_validate.add_argument(
+        "--requested-by", required=True
+    )
+    data_market_structure_continuous_validate.add_argument("--policy-json")
+    data_market_structure_continuous_validate.set_defaults(
+        func=_cmd_data_market_structure_continuous_validate
+    )
+    data_market_structure_continuous_start = data_market_structure_sub.add_parser(
+        "continuous-start",
+        help="Start an explicitly admitted worker-owned production stream.",
+    )
+    data_market_structure_continuous_start.add_argument("definition_id")
+    data_market_structure_continuous_start.add_argument(
+        "--requested-by", required=True
+    )
+    data_market_structure_continuous_start.add_argument("--policy-json")
+    data_market_structure_continuous_start.set_defaults(
+        func=_cmd_data_market_structure_continuous_start
+    )
+    data_market_structure_continuous_stop = data_market_structure_sub.add_parser(
+        "continuous-stop",
+        help="Request a graceful stop after draining durable projection work.",
+    )
+    data_market_structure_continuous_stop.add_argument("definition_id")
+    data_market_structure_continuous_stop.add_argument(
+        "--requested-by", required=True
+    )
+    data_market_structure_continuous_stop.set_defaults(
+        func=_cmd_data_market_structure_continuous_stop
+    )
+    data_market_structure_continuous_admit = data_market_structure_sub.add_parser(
+        "continuous-admit",
+        help="Record or revoke explicit production admission and storage budgets.",
+    )
+    data_market_structure_continuous_admit.add_argument("definition_id")
+    data_market_structure_continuous_admit.add_argument(
+        "--approved-by", required=True
+    )
+    data_market_structure_continuous_admit.add_argument("--evidence-json")
+    data_market_structure_continuous_admit.add_argument("--storage-budget-json")
+    data_market_structure_continuous_admit.add_argument("--revoke", action="store_true")
+    data_market_structure_continuous_admit.set_defaults(
+        func=_cmd_data_market_structure_continuous_admit
+    )
+    data_market_structure_continuous_evidence = data_market_structure_sub.add_parser(
+        "continuous-evidence",
+        help="Inspect system-derived validation, archive, mapping, and coverage blockers.",
+    )
+    data_market_structure_continuous_evidence.add_argument("definition_id")
+    data_market_structure_continuous_evidence.add_argument("session_id")
+    data_market_structure_continuous_evidence.set_defaults(
+        func=_cmd_data_market_structure_continuous_evidence
+    )
     data_market_structure_replay = data_market_structure_sub.add_parser(
         "replay",
         help="Verify one acknowledged raw manifest and deterministic trade replay.",
@@ -3662,6 +3841,35 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_retention_status.add_argument("target_id")
     data_market_structure_retention_status.set_defaults(
         func=_cmd_data_market_structure_retention_status
+    )
+    data_market_structure_lifecycle_plan = data_market_structure_sub.add_parser(
+        "lifecycle-plan",
+        help="Plan pin-safe archive and Timescale lifecycle work without mutation.",
+    )
+    data_market_structure_lifecycle_plan.set_defaults(
+        func=_cmd_data_market_structure_lifecycle_plan
+    )
+    data_market_structure_lifecycle_run = data_market_structure_sub.add_parser(
+        "lifecycle-run",
+        help="Run lifecycle work; remains a dry-run unless --execute is supplied and enabled.",
+    )
+    data_market_structure_lifecycle_run.add_argument(
+        "--execute", action="store_true"
+    )
+    data_market_structure_lifecycle_run.add_argument("--storage-root")
+    data_market_structure_lifecycle_run.add_argument("--owner-id")
+    data_market_structure_lifecycle_run.set_defaults(
+        func=_cmd_data_market_structure_lifecycle_run
+    )
+    data_market_structure_lifecycle_events = data_market_structure_sub.add_parser(
+        "lifecycle-events",
+        help="Inspect immutable lifecycle completion, skip, and failure evidence.",
+    )
+    data_market_structure_lifecycle_events.add_argument(
+        "--limit", type=int, default=200
+    )
+    data_market_structure_lifecycle_events.set_defaults(
+        func=_cmd_data_market_structure_lifecycle_events
     )
     data_market_structure_reconcile = data_market_structure_sub.add_parser(
         "reconcile-recent",

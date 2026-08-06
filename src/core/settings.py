@@ -17,6 +17,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 import yaml
 from dotenv import load_dotenv
 
+from core.market_storage_lifecycle import MarketStorageLifecyclePolicy
+
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,83 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_SECONDS", ("workers", "collectors", "idle_sleep_seconds")),
     ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_MAX_SECONDS", ("workers", "collectors", "idle_sleep_max_seconds")),
     ("QT_WORKERS_COLLECTORS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "collectors", "db_wait_timeout_seconds")),
+    ("QT_MARKET_DATA_LIFECYCLE_ENABLED", ("market_data_lifecycle", "enabled")),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED",
+        ("market_data_lifecycle", "execution_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS",
+        ("market_data_lifecycle", "interval_seconds"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_ARCHIVE_COMPACTION_ENABLED",
+        ("market_data_lifecycle", "archive_compaction_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_ARCHIVE_EXPIRATION_ENABLED",
+        ("market_data_lifecycle", "archive_expiration_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_HOT_COMPRESSION_ENABLED",
+        ("market_data_lifecycle", "hot_compression_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_HOT_EXPIRATION_ENABLED",
+        ("market_data_lifecycle", "hot_expiration_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_RAW_TRADE_ARCHIVE_DAYS",
+        ("market_data_lifecycle", "raw_trade_archive_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_RAW_L2_ARCHIVE_DAYS",
+        ("market_data_lifecycle", "raw_l2_archive_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_BOOK_CHECKPOINT_ARCHIVE_DAYS",
+        ("market_data_lifecycle", "book_checkpoint_archive_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_RAW_TRADE_HOT_DAYS",
+        ("market_data_lifecycle", "raw_trade_hot_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_RAW_L2_HOT_DAYS",
+        ("market_data_lifecycle", "raw_l2_hot_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_DERIVED_HOT_DAYS",
+        ("market_data_lifecycle", "derived_hot_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTED_SOURCE_GRACE_HOURS",
+        ("market_data_lifecycle", "compacted_source_grace_hours"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_AGE_MINUTES",
+        ("market_data_lifecycle", "compaction_min_age_minutes"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_OBJECTS",
+        ("market_data_lifecycle", "compaction_min_objects"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTION_TARGET_BYTES",
+        ("market_data_lifecycle", "compaction_target_bytes"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_MAX_COMPACTION_GROUPS_PER_RUN",
+        ("market_data_lifecycle", "max_compaction_groups_per_run"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_MAX_ARCHIVE_EXPIRATIONS_PER_RUN",
+        ("market_data_lifecycle", "max_archive_expirations_per_run"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_MAX_CHUNK_OPERATIONS_PER_RUN",
+        ("market_data_lifecycle", "max_chunk_operations_per_run"),
+    ),
     ("QT_BOT_RUNTIME_MODE", ("bot_runtime", "mode")),
     ("QT_BOT_RUNTIME_TARGET", ("bot_runtime", "target")),
     ("QT_BOT_RUNTIME_IMAGE", ("bot_runtime", "image")),
@@ -671,6 +750,7 @@ class AppSettings:
     observability: ObservabilitySettings
     async_jobs: AsyncJobSettings
     workers: WorkersSettings
+    market_data_lifecycle: MarketStorageLifecyclePolicy
     bot_runtime: BotRuntimeSettings
     providers: ProviderSettings
     security: SecuritySettings
@@ -688,6 +768,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     indicator_workers_payload = _coerce_mapping(workers_payload.get("indicators"))
     research_workers_payload = _coerce_mapping(workers_payload.get("research"))
     collector_workers_payload = _coerce_mapping(workers_payload.get("collectors"))
+    market_data_lifecycle_payload = _coerce_mapping(payload.get("market_data_lifecycle"))
     bot_runtime_payload = _coerce_mapping(payload.get("bot_runtime"))
     snapshot_payload = _coerce_mapping(bot_runtime_payload.get("snapshot"))
     push_payload = _coerce_mapping(bot_runtime_payload.get("push"))
@@ -851,6 +932,9 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                     collector_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
                 ),
             ),
+        ),
+        market_data_lifecycle=MarketStorageLifecyclePolicy.from_mapping(
+            market_data_lifecycle_payload
         ),
         bot_runtime=BotRuntimeSettings(
             mode=_coerce_str(bot_runtime_payload.get("mode"), "backtest"),
@@ -1128,6 +1212,7 @@ __all__ = [
     "IbkrSettings",
     "LoggingSettings",
     "MarketDataStreamPolicySettings",
+    "MarketStorageLifecyclePolicy",
     "ObservabilitySettings",
     "ProviderRuntimeSettings",
     "ReportArtifactSettings",

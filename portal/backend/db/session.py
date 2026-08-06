@@ -483,6 +483,7 @@ class Database:
             "raw_archive_record_mappings",
             "raw_archive_compaction_sources",
             "archive_retention_pin_versions",
+            "storage_lifecycle_events",
             "stream_coverage_interval_versions",
             "stream_quality_events",
             "market_trade_identities",

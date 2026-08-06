@@ -15,16 +15,20 @@ tags:
   - accepted
 code_paths:
   - src/data_providers/streams
+  - src/core/market_storage_lifecycle.py
   - src/market_data
   - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
   - portal/backend/service/market
+  - portal/backend/service/market/market_storage_lifecycle.py
   - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/workers
   - cli/main.py
   - docker/docker-compose.yml
   - config/defaults.yaml
   - scripts/db
+  - scripts/db/manual_enable_market_storage_lifecycle_v1.sql
   - docs/architecture/data/MARKET_STRUCTURE_DATA_PLANE.md
 ---
 # ADR 0053: Use A Tiered Market-Structure Archive And Replay Boundary
@@ -187,9 +191,38 @@ and collector services. A new BIP archive replayed with an identical fingerprint
 after backend replacement. This is durable local object storage for the current
 deployment boundary, not a claim of cloud object-store durability.
 
-No definition is enabled or production-admitted. Phase 4 is complete; the
-24-hour implemented-path measurement and explicit budget approval now remain
-as post-campaign production-readiness gates.
+The generic supervisor and continuous Coinbase trade adapter now rotate and
+finalize archive segments without closing acquisition, reconnect by explicit
+epoch, and recover orphaned WAL segments under fresh fencing before a new
+session. Recovery closes prior coverage at the last proven event and never
+bridges downtime. The Level 2 continuous adapter is not yet registered.
+
+On 2026-08-05 the generic storage-lifecycle implementation added scheduled,
+lease-independent raw archive compaction; checksum-verified, pin-safe object
+expiration; Timescale chunk compression and controlled expiration; immutable
+lifecycle evidence; and dry-run-first API/`qt` controls. Frozen dataset creation
+and explicit archive pinning share the lifecycle fence, and replay reports an
+expired object explicitly instead of treating a retained manifest as retained
+bytes. Terminal reconnect epochs now retire their projection state after final
+canonicalization, bounding in-process state by active/finalizing epochs.
+
+Destructive lifecycle execution remains configuration-gated and defaults off.
+Timescale compression activation is an explicit maintenance operation through
+`scripts/db/manual_enable_market_storage_lifecycle_v1.sql`; the script refuses
+to run while a stream lease is active. Quant-Trad intentionally installs no
+native Timescale retention policy because that path cannot enforce frozen
+dataset pins.
+
+The current cold tier covers exact raw provider frames and book checkpoints.
+It does not yet archive typed derived rows to Parquet. Derived-table hot expiry
+therefore must remain disabled or use a retention window that matches the
+deployment's rehydration requirements until a typed cold archive contract is
+implemented.
+
+No definition is production-admitted by this implementation status. Phase 4 is
+complete; the 24-hour canonical implemented-path evidence and authoritative
+physical/cloud resource budget remain production-readiness gates. That proof is
+not a 24-hour process lifetime: admitted production has no duration cap.
 
 ## Consequences
 
@@ -200,11 +233,13 @@ unbounded blob store. Dataset consumers remain independent from providers and
 operational retention.
 
 The design adds operational complexity: local spool capacity, upload
-acknowledgement, object manifests, compaction, pins, replay versions, and two
-independent retention policies. The Phase 0 one-hour measurements provide a
+acknowledgement, object manifests, compaction, pins, replay versions, worker
+supervision, restart recovery, and two independent retention policies. The
+Phase 0 one-hour measurements provide a
 provisional implementation envelope because L2 cost and throughput cannot be
 safely inferred from candle/OI rates. A 24-hour measurement on the implemented
-path remains mandatory before production enrollment.
+path remains mandatory before production enrollment, and Docker Desktop/WSL
+guest capacity cannot substitute for physical backing-volume evidence.
 
 Raw replay after default retention is possible only for ranges pinned/copied by
 a dataset or explicit retention hold. Manifests remain, but they must report an

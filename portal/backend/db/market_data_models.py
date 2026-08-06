@@ -1012,6 +1012,62 @@ class MarketArchiveRetentionPinVersionRecord(Base):
     known_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class MarketStorageLifecycleEventRecord(Base):
+    """Append-only evidence for compaction, compression, and retention work."""
+
+    __tablename__ = "storage_lifecycle_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "event_ordinal",
+            name="uq_market_storage_lifecycle_event",
+        ),
+        CheckConstraint(
+            "event_ordinal >= 0",
+            name="ck_market_storage_lifecycle_event_ordinal",
+        ),
+        CheckConstraint(
+            "action IN ('archive_compact', 'archive_expire', 'chunk_compress', 'chunk_expire')",
+            name="ck_market_storage_lifecycle_action",
+        ),
+        CheckConstraint(
+            "event_type IN ('planned', 'completed', 'skipped', 'failed')",
+            name="ck_market_storage_lifecycle_event_type",
+        ),
+        CheckConstraint(
+            "target_kind IN ('raw_manifest_set', 'raw_manifest', 'book_checkpoint', 'hypertable_chunk')",
+            name="ck_market_storage_lifecycle_target_kind",
+        ),
+        Index(
+            "ix_market_storage_lifecycle_target",
+            "target_kind",
+            "target_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_market_storage_lifecycle_action_time",
+            "action",
+            "occurred_at",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), primary_key=True)
+    operation_id = Column(String(128), nullable=False)
+    event_ordinal = Column(Integer, nullable=False)
+    policy_version = Column(String(64), nullable=False)
+    action = Column(String(32), nullable=False)
+    event_type = Column(String(16), nullable=False)
+    target_kind = Column(String(32), nullable=False)
+    target_id = Column(Text, nullable=False)
+    cutoff_at = Column(DateTime(timezone=True), nullable=True)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    reason = Column(Text, nullable=True)
+    evidence_hash = Column(String(64), nullable=False)
+    evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
 class MarketStreamCoverageIntervalVersionRecord(Base):
     """Typed product/channel delivery coverage, separate from book validity."""
 
@@ -2123,6 +2179,7 @@ __all__ = [
     "MarketProviderRateBudgetRecord",
     "MarketDatasetArchiveRefRecord",
     "MarketArchiveRetentionPinVersionRecord",
+    "MarketStorageLifecycleEventRecord",
     "MarketInstrumentRoleMappingVersionRecord",
     "MarketBookCheckpointManifestRecord",
     "MarketBookQualityEventLinkRecord",
