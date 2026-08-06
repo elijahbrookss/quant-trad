@@ -19,13 +19,15 @@ from itertools import pairwise
 from statistics import fmean, median
 from typing import Any
 
+from .replay_availability import ResearchReplayAvailabilityPolicy
 from strategies.typed_graph import (
     CompiledTypedStrategy,
     TypedStrategyGraph,
     compile_typed_strategy_graph,
 )
 
-CAMPAIGN_CHARTER_SCHEMA_VERSION = "autonomous_research_campaign.v1"
+LEGACY_CAMPAIGN_CHARTER_SCHEMA_VERSION = "autonomous_research_campaign.v1"
+CAMPAIGN_CHARTER_SCHEMA_VERSION = "autonomous_research_campaign.v2"
 CAMPAIGN_EVALUATOR_VERSION = "btc_perp_market_structure_evaluator.v1"
 CAMPAIGN_FEATURE_VERSION = "btc_perp_market_structure_features.v1"
 CAMPAIGN_METRIC_VERSION = "btc_perp_market_structure_metrics.v1"
@@ -171,11 +173,26 @@ class CampaignCharter:
     provider_fetch_allowed: bool
     external_trading_allowed: bool
     promotion_eligible: bool
+    replay_availability_policy: ResearchReplayAvailabilityPolicy | None = None
     charter_hash: str = ""
 
     def __post_init__(self) -> None:
-        if self.schema_version != CAMPAIGN_CHARTER_SCHEMA_VERSION:
+        if self.schema_version not in {
+            LEGACY_CAMPAIGN_CHARTER_SCHEMA_VERSION,
+            CAMPAIGN_CHARTER_SCHEMA_VERSION,
+        }:
             raise ValueError("unsupported campaign charter schema")
+        replay_policy = self.replay_availability_policy
+        if replay_policy is not None and not isinstance(
+            replay_policy, ResearchReplayAvailabilityPolicy
+        ):
+            replay_policy = ResearchReplayAvailabilityPolicy.from_dict(replay_policy)
+        if self.schema_version == LEGACY_CAMPAIGN_CHARTER_SCHEMA_VERSION:
+            if replay_policy is not None:
+                raise ValueError("legacy campaign charter cannot add replay policy")
+        elif replay_policy is None:
+            raise ValueError("campaign replay availability policy is required")
+        object.__setattr__(self, "replay_availability_policy", replay_policy)
         for name in (
             "campaign_id",
             "objective",
@@ -243,7 +260,13 @@ class CampaignCharter:
         if len({row.dataset_id for row in datasets}) != 3:
             raise ValueError("campaign dataset identities must be unique")
         facts = tuple(sorted({_required(value, "eligible_fact_type") for value in self.eligible_fact_types}))
-        required_facts = {"market.trade_flow", "derivatives.open_interest", "derivatives.funding_rate"}
+        required_facts = {
+            "market.trade_flow",
+            "derivatives.open_interest",
+            "derivatives.funding_rate",
+        }
+        if self.schema_version == CAMPAIGN_CHARTER_SCHEMA_VERSION:
+            required_facts.add("market.trade")
         if not required_facts <= set(facts):
             raise ValueError("campaign eligible facts are incomplete")
         object.__setattr__(self, "eligible_fact_types", facts)
@@ -303,11 +326,17 @@ class CampaignCharter:
         object.__setattr__(self, "charter_hash", expected)
 
     def _material(self) -> dict[str, Any]:
-        return {
+        material = {
             key: value
             for key, value in asdict(self).items()
             if key != "charter_hash"
         }
+        # Historical v1 manifests retain their exact hash material. They remain
+        # readable as terminal evidence but are rejected by the executable
+        # campaign preflight because they lack a replay availability contract.
+        if self.schema_version == LEGACY_CAMPAIGN_CHARTER_SCHEMA_VERSION:
+            material.pop("replay_availability_policy", None)
+        return material
 
     def to_dict(self) -> dict[str, Any]:
         return {**self._material(), "charter_hash": self.charter_hash}
@@ -332,6 +361,12 @@ class CampaignCharter:
         ):
             values[name] = tuple(raw.get(name) or ())
         values["cost_stress_scenarios"] = tuple(raw.get("cost_stress_scenarios") or ())
+        replay_policy = raw.get("replay_availability_policy")
+        values["replay_availability_policy"] = (
+            ResearchReplayAvailabilityPolicy.from_dict(replay_policy)
+            if replay_policy is not None
+            else None
+        )
         return cls(**values)
 
 
@@ -394,10 +429,17 @@ class FrozenCampaignBar:
     open_interest: float | None
     funding_rate: float | None
     source_hashes: tuple[str, ...]
+    canonical_known_at: datetime | None = None
+    replay_policy_hash: str | None = None
+    replay_bucket_hash: str | None = None
 
     def __post_init__(self) -> None:
         if self.known_at < self.bucket_end:
             raise ValueError("campaign bar known_at precedes bucket end")
+        canonical_known_at = self.canonical_known_at or self.known_at
+        if canonical_known_at < self.bucket_end:
+            raise ValueError("campaign bar canonical known_at precedes bucket end")
+        object.__setattr__(self, "canonical_known_at", canonical_known_at)
         if self.trade_count < 0:
             raise ValueError("campaign bar trade_count is negative")
         populated = self.trade_count > 0
@@ -814,7 +856,7 @@ def _causal_entry_index(
     return None
 
 
-def _causal_opportunity_indexes(
+def causal_opportunity_indexes(
     rows: Sequence[CampaignFeatureRow],
     indexes: Sequence[int],
     *,
@@ -832,6 +874,10 @@ def _causal_opportunity_indexes(
             continue
         eligible.append(index)
     return tuple(eligible)
+
+
+# Kept private as an implementation alias for pinned evaluator v1 call sites.
+_causal_opportunity_indexes = causal_opportunity_indexes
 
 
 def _net_return_bps(
@@ -1148,6 +1194,7 @@ __all__ = [
     "CAMPAIGN_EVALUATOR_VERSION",
     "CAMPAIGN_FEATURE_VERSION",
     "CAMPAIGN_METRIC_VERSION",
+    "LEGACY_CAMPAIGN_CHARTER_SCHEMA_VERSION",
     "CampaignCharter",
     "CampaignDatasetBinding",
     "CampaignEvaluation",
@@ -1157,6 +1204,7 @@ __all__ = [
     "build_campaign_features",
     "build_campaign_graph_manifest",
     "campaign_graph_specs",
+    "causal_opportunity_indexes",
     "evaluate_campaign_graph",
     "full_scoring_indexes",
     "rank_evaluations",

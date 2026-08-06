@@ -399,6 +399,17 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         opening_session_event_id=opening_event_id,
         closing_session_event_id=closing_event_id,
     )
+    frozen_coverage = market_structure_repository.get_coverage_version(
+        interval_id=coverage.interval_id,
+        revision=coverage.revision,
+    )
+    assert frozen_coverage == coverage
+    assert frozen_coverage.material_hash == coverage.material_hash
+    with pytest.raises(ValueError, match="market_stream_coverage_unknown"):
+        market_structure_repository.get_coverage_version(
+            interval_id=coverage.interval_id,
+            revision=coverage.revision + 1,
+        )
     aggregate = aggregate_trade_bucket(
         [fact],
         interval_seconds=1,

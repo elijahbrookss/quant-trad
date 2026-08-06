@@ -13,6 +13,7 @@ import time
 from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,11 @@ from engines.bot_runtime.core.execution_profile import compile_series_execution_
 from portal.backend.db.session import db
 from portal.backend.service.storage.repos.instruments import get_instrument
 from portal.backend.service.storage.repos.market_data import market_data_repo
+from portal.backend.service.storage.repos.market_structure import (
+    market_structure_repository,
+)
 from research_science import (
+    CAMPAIGN_CHARTER_SCHEMA_VERSION,
     CAMPAIGN_EVALUATOR_VERSION,
     CAMPAIGN_FEATURE_VERSION,
     CAMPAIGN_METRIC_VERSION,
@@ -36,9 +41,12 @@ from research_science import (
     CampaignEvaluation,
     CampaignExecutionCosts,
     FrozenCampaignBar,
+    ResearchReplayAvailabilityArtifact,
     build_campaign_features,
     build_campaign_graph_manifest,
     campaign_graph_specs,
+    causal_opportunity_indexes,
+    derive_research_replay_availability,
     evaluate_campaign_graph,
     full_scoring_indexes,
     rank_evaluations,
@@ -59,6 +67,15 @@ HOLDOUT_AUTHORITY_ID = "campaign_holdout_authority"
 HOLDOUT_EXECUTOR_ID = "campaign_holdout_executor"
 SCIENCE_AUTHORITY_ID = "campaign_science_authority"
 HUMAN_OWNER_ID = "campaign_human_research_owner"
+
+
+@dataclass(frozen=True)
+class CampaignReplayRoleInputs:
+    role: str
+    bars: tuple[FrozenCampaignBar, ...]
+    replay_artifact: ResearchReplayAvailabilityArtifact
+    replay_binding_hash: str
+    dataset_manifest_hash: str
 
 
 def _campaign_family_name(charter: CampaignCharter) -> str:
@@ -162,10 +179,30 @@ def _latest_asof(records: Sequence[Any], known_at: datetime) -> Any | None:
         return None
     keys = [row.fact.known_at for row in records]
     index = bisect_right(keys, known_at) - 1
-    return records[index] if index >= 0 else None
+    record = records[index] if index >= 0 else None
+    if record is None:
+        return None
+    fact = record.fact
+    if fact.known_at > known_at:
+        raise RuntimeError("campaign causal join selected a future-known fact")
+    sample_time = getattr(fact, "sample_time", None)
+    if sample_time is not None and sample_time > known_at:
+        raise RuntimeError("campaign causal join selected a future sample")
+    return record
 
 
-def _load_bars(charter: CampaignCharter, role: str) -> tuple[FrozenCampaignBar, ...]:
+def _load_replay_role_inputs(
+    charter: CampaignCharter,
+    role: str,
+) -> CampaignReplayRoleInputs:
+    if (
+        charter.schema_version != CAMPAIGN_CHARTER_SCHEMA_VERSION
+        or charter.replay_availability_policy is None
+    ):
+        raise ValueError(
+            "campaign_replay_contract_required: historical v1 charters are read-only; "
+            "create a new campaign identity with a v2 replay policy"
+        )
     manifest = _dataset_manifest(charter, role)
     by_fact: dict[str, list[Any]] = {}
     for entry in manifest["series"]:
@@ -173,27 +210,70 @@ def _load_bars(charter: CampaignCharter, role: str) -> tuple[FrozenCampaignBar, 
             dataset_id=manifest["dataset_id"],
             series_id=int(entry["series_id"]),
         )
-    trade_records = sorted(
+    aggregate_records = sorted(
         by_fact["market.trade_flow"],
         key=lambda row: (row.fact.bucket_start, row.fact.known_at),
     )
+    source_trade_records = sorted(
+        by_fact["market.trade"],
+        key=lambda row: (
+            row.fact.connection_epoch,
+            row.fact.receive_ordinal,
+            row.fact.event_ordinal,
+            row.fact.trade_ordinal,
+            row.fact.raw_record_id,
+        ),
+    )
     oi_records = sorted(
-        by_fact["derivatives.open_interest"], key=lambda row: row.fact.known_at
+        by_fact["derivatives.open_interest"],
+        key=lambda row: (
+            row.fact.known_at,
+            row.fact.sample_time,
+            row.fact.row_hash,
+        ),
     )
     funding_records = sorted(
-        by_fact["derivatives.funding_rate"], key=lambda row: row.fact.known_at
+        by_fact["derivatives.funding_rate"],
+        key=lambda row: (
+            row.fact.known_at,
+            row.fact.sample_time,
+            row.fact.row_hash,
+        ),
+    )
+    coverage_keys = sorted(
+        {
+            (str(row.fact.coverage_interval_id), int(row.fact.coverage_revision))
+            for row in aggregate_records
+            if row.fact.coverage_interval_id is not None
+            and row.fact.coverage_revision is not None
+        }
+    )
+    coverage_versions = {
+        key: market_structure_repository.get_coverage_version(
+            interval_id=key[0], revision=key[1]
+        )
+        for key in coverage_keys
+    }
+    replay_buckets, replay_artifact = derive_research_replay_availability(
+        policy=charter.replay_availability_policy,
+        aggregates=aggregate_records,
+        source_trades=source_trade_records,
+        coverage_versions=coverage_versions,
     )
     bars: list[FrozenCampaignBar] = []
-    for record in trade_records:
+    for replay in replay_buckets:
+        record = replay.aggregate
         fact = record.fact
-        if not fact.aggregate_complete or not fact.archive_complete or not fact.canonicalization_complete:
-            raise ValueError("campaign trade-flow row is not dataset-eligible complete evidence")
-        oi = _latest_asof(oi_records, fact.known_at)
-        funding = _latest_asof(funding_records, fact.known_at)
+        decision_time = replay.replay_available_at
+        oi = _latest_asof(oi_records, decision_time)
+        funding = _latest_asof(funding_records, decision_time)
         source_hashes = [
             str(record.provenance_hash),
             str(fact.material_hash),
             str(fact.input_fingerprint),
+            replay.coverage_material_hash,
+            replay.replay_bucket_hash,
+            *replay.source_receipt_hashes,
         ]
         if oi is not None:
             source_hashes.append(str(oi.fact.row_hash))
@@ -203,7 +283,7 @@ def _load_bars(charter: CampaignCharter, role: str) -> tuple[FrozenCampaignBar, 
             FrozenCampaignBar(
                 bucket_start=fact.bucket_start,
                 bucket_end=fact.bucket_end,
-                known_at=fact.known_at,
+                known_at=decision_time,
                 open_price=float(fact.open_price) if fact.open_price is not None else None,
                 high_price=float(fact.high_price) if fact.high_price is not None else None,
                 low_price=float(fact.low_price) if fact.low_price is not None else None,
@@ -215,9 +295,45 @@ def _load_bars(charter: CampaignCharter, role: str) -> tuple[FrozenCampaignBar, 
                 open_interest=float(oi.fact.value) if oi is not None else None,
                 funding_rate=float(funding.fact.rate) if funding is not None else None,
                 source_hashes=tuple(sorted(set(source_hashes))),
+                canonical_known_at=fact.known_at,
+                replay_policy_hash=charter.replay_availability_policy.policy_hash,
+                replay_bucket_hash=replay.replay_bucket_hash,
             )
         )
-    return tuple(bars)
+    replay_binding_hash = stable_hash(
+        {
+            "schema_version": "campaign_replay_binding.v1",
+            "role": role,
+            "dataset_id": manifest["dataset_id"],
+            "dataset_hash": manifest["dataset_hash"],
+            "dataset_manifest_hash": manifest["dataset_manifest_hash"],
+            "policy_hash": charter.replay_availability_policy.policy_hash,
+            "replay_semantic_hash": replay_artifact.replay_semantic_hash,
+            "coverage_material_hashes": list(
+                replay_artifact.coverage_material_hashes
+            ),
+            "aggregate_series": [
+                {
+                    "series_id": row["series_id"],
+                    "material_hash": row["material_hash"],
+                    "provenance_hash": row["provenance_hash"],
+                }
+                for row in manifest["series"]
+                if row["fact_type"] in {"market.trade", "market.trade_flow"}
+            ],
+        }
+    )
+    return CampaignReplayRoleInputs(
+        role=role,
+        bars=tuple(bars),
+        replay_artifact=replay_artifact,
+        replay_binding_hash=replay_binding_hash,
+        dataset_manifest_hash=manifest["dataset_manifest_hash"],
+    )
+
+
+def _load_bars(charter: CampaignCharter, role: str) -> tuple[FrozenCampaignBar, ...]:
+    return _load_replay_role_inputs(charter, role).bars
 
 
 def _execution_bundle(charter: CampaignCharter) -> tuple[CampaignExecutionCosts, dict[str, Any]]:
@@ -286,7 +402,14 @@ def _protocol_manifest(
     charter: CampaignCharter,
     *,
     code_revision: str,
+    replay_binding_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    replay_bindings = dict(replay_binding_hashes or {})
+    if charter.schema_version == CAMPAIGN_CHARTER_SCHEMA_VERSION:
+        if set(replay_bindings) != {"train", "validation", "holdout"}:
+            raise ValueError("campaign protocol requires every replay binding hash")
+        if charter.replay_availability_policy is None:
+            raise ValueError("campaign protocol replay policy is missing")
     contamination = max(charter.feature_lookback_bars, charter.label_horizon_bars, 1)
     return {
         "schema_version": "scientific_protocol.v1",
@@ -350,6 +473,20 @@ def _protocol_manifest(
             "code_revision": code_revision,
             "execution_progression": "fixed_x2_search_x3_x5_feasibility.v1",
             "instrument_economics": "incomplete_no_promotion.v1",
+            **(
+                {
+                    "research_replay_availability": (
+                        charter.replay_availability_policy.policy_hash
+                    ),
+                    "research_replay_train_binding": replay_bindings["train"],
+                    "research_replay_validation_binding": replay_bindings[
+                        "validation"
+                    ],
+                    "research_replay_holdout_binding": replay_bindings["holdout"],
+                }
+                if charter.replay_availability_policy is not None
+                else {}
+            ),
         },
     }
 
@@ -500,21 +637,126 @@ def _execution_progression_evidence(charter: CampaignCharter) -> dict[str, Any]:
     return {**material, "evidence_hash": stable_hash(material)}
 
 
+def _causal_admission_evidence(
+    charter: CampaignCharter,
+    *,
+    role: str,
+    features: Sequence[Any],
+    requested_indexes: Sequence[int],
+) -> dict[str, Any]:
+    causal_indexes = causal_opportunity_indexes(
+        features,
+        requested_indexes,
+        horizon=charter.label_horizon_bars,
+    )
+    signal_capable = tuple(
+        index
+        for index in causal_indexes
+        if bool(features[index].facts.get("market.has_trade"))
+    )
+    calendar_days = len(
+        {features[index].bar.bucket_start.date() for index in causal_indexes}
+    )
+    maximum_exposure = min(
+        1.0,
+        len(signal_capable)
+        * charter.label_horizon_bars
+        / max(len(causal_indexes), 1),
+    )
+    failures: list[str] = []
+    if len(causal_indexes) < charter.minimum_sample_count:
+        failures.append("causal_sample_floor_unmet")
+    if len(signal_capable) < charter.minimum_trade_count:
+        failures.append("signal_capable_trade_floor_unmet")
+    if calendar_days < charter.minimum_calendar_days:
+        failures.append("calendar_floor_unmet")
+    if maximum_exposure < charter.minimum_exposure:
+        failures.append("maximum_exposure_floor_unmet")
+    fold_counts: tuple[int, ...] = ()
+    if role == "validation":
+        width = charter.walk_forward_validation_bars
+        folds = tuple(
+            tuple(requested_indexes[offset : offset + width])
+            for offset in range(0, len(requested_indexes), width)
+        )
+        fold_counts = tuple(
+            len(set(fold) & set(causal_indexes)) for fold in folds
+        )
+        if len(fold_counts) != charter.walk_forward_fold_count or any(
+            count <= 0 for count in fold_counts
+        ):
+            failures.append("walk_forward_fold_has_no_causal_opportunity")
+    material = {
+        "schema_version": "campaign_causal_admission.v1",
+        "role": role,
+        "requested_scoring_count": len(tuple(requested_indexes)),
+        "causal_opportunity_count": len(causal_indexes),
+        "signal_capable_opportunity_count": len(signal_capable),
+        "calendar_days": calendar_days,
+        "maximum_exposure": maximum_exposure,
+        "label_horizon_bars": charter.label_horizon_bars,
+        "fold_opportunity_counts": list(fold_counts),
+        "failures": sorted(set(failures)),
+    }
+    if failures:
+        # Holdout counts and window details remain private even on failure.
+        reason = "sealed role failed causal admission" if role == "holdout" else ",".join(failures)
+        raise ValueError(f"campaign {role} causal admission failed: {reason}")
+    return {**material, "admission_hash": stable_hash(material)}
+
+
 def preflight_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
     if len(str(code_revision).strip()) < 7:
         raise ValueError("campaign code revision is required")
     charter = load_private_charter(path)
+    if (
+        charter.schema_version != CAMPAIGN_CHARTER_SCHEMA_VERSION
+        or charter.replay_availability_policy is None
+    ):
+        raise ValueError(
+            "campaign_replay_contract_required: terminal v1 campaigns cannot be "
+            "re-executed; create a new campaign identity and v2 charter"
+        )
     manifests = {role: _dataset_manifest(charter, role) for role in ("train", "validation", "holdout")}
-    train_bars = _load_bars(charter, "train")
-    validation_bars = _load_bars(charter, "validation")
+    role_inputs = {
+        role: _load_replay_role_inputs(charter, role)
+        for role in ("train", "validation", "holdout")
+    }
+    train_bars = role_inputs["train"].bars
+    validation_bars = role_inputs["validation"].bars
+    holdout_bars = role_inputs["holdout"].bars
     train_features = build_campaign_features(
         train_bars, lookback_bars=charter.feature_lookback_bars
     )
     validation_features = build_campaign_features(
         validation_bars, lookback_bars=charter.feature_lookback_bars
     )
+    holdout_features = build_campaign_features(
+        holdout_bars, lookback_bars=charter.feature_lookback_bars
+    )
     train_indexes = full_scoring_indexes(charter, len(train_features))
     validation_indexes = validation_scoring_indexes(charter, len(validation_features))
+    holdout_indexes = full_scoring_indexes(charter, len(holdout_features))
+    admissions = {
+        "train": _causal_admission_evidence(
+            charter,
+            role="train",
+            features=train_features,
+            requested_indexes=train_indexes,
+        ),
+        "validation": _causal_admission_evidence(
+            charter,
+            role="validation",
+            features=validation_features,
+            requested_indexes=validation_indexes,
+        ),
+        "holdout": _causal_admission_evidence(
+            charter,
+            role="holdout",
+            features=holdout_features,
+            requested_indexes=holdout_indexes,
+        ),
+    }
     costs, context = _execution_bundle(charter)
     specs = campaign_graph_specs()
     if len(specs) != charter.graph_budget:
@@ -536,17 +778,26 @@ def preflight_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any
                 "dataset_hash": manifests["train"]["dataset_hash"],
                 "rows": len(train_bars),
                 "scoring_indexes": len(train_indexes),
+                "causal_opportunities": admissions["train"]["causal_opportunity_count"],
+                "signal_capable_opportunities": admissions["train"]["signal_capable_opportunity_count"],
+                "replay_binding_hash": role_inputs["train"].replay_binding_hash,
             },
             "validation": {
                 "dataset_id": manifests["validation"]["dataset_id"],
                 "dataset_hash": manifests["validation"]["dataset_hash"],
                 "rows": len(validation_bars),
                 "scoring_indexes": len(validation_indexes),
+                "causal_opportunities": admissions["validation"]["causal_opportunity_count"],
+                "signal_capable_opportunities": admissions["validation"]["signal_capable_opportunity_count"],
+                "fold_opportunity_counts": admissions["validation"]["fold_opportunity_counts"],
+                "replay_binding_hash": role_inputs["validation"].replay_binding_hash,
             },
             "holdout": {
                 "sealed": True,
                 "blind_alias": charter.dataset("holdout").blind_alias,
                 "manifest_valid": True,
+                "causal_admission_passed": True,
+                "replay_binding_valid": True,
             },
         },
         "provider_fetch_allowed": False,
@@ -555,6 +806,7 @@ def preflight_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any
         "graph_budget": len(specs),
         "execution_context_hash": context["context_hash"],
         "fee_schedule_hash": costs.fee_schedule_hash,
+        "replay_availability_policy_hash": charter.replay_availability_policy.policy_hash,
         "execution_progression": _execution_progression_evidence(charter),
         "preflight_hash": stable_hash(
             {
@@ -563,6 +815,14 @@ def preflight_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any
                 "dataset_hashes": [manifests[role]["dataset_hash"] for role in ("train", "validation", "holdout")],
                 "execution_context_hash": context["context_hash"],
                 "graph_specs": list(specs),
+                "replay_binding_hashes": {
+                    role: role_inputs[role].replay_binding_hash
+                    for role in ("train", "validation", "holdout")
+                },
+                "causal_admission_hashes": {
+                    role: admissions[role]["admission_hash"]
+                    for role in ("train", "validation", "holdout")
+                },
             }
         ),
     }
@@ -573,11 +833,30 @@ def execute_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
     preflight = preflight_campaign(path, code_revision=code_revision)
     charter = load_private_charter(path)
     costs, execution_context = _execution_bundle(charter)
+    replay_binding_hashes: dict[str, str] | None = None
+    if charter.schema_version == CAMPAIGN_CHARTER_SCHEMA_VERSION:
+        replay_inputs = {
+            role: _load_replay_role_inputs(charter, role)
+            for role in ("train", "validation", "holdout")
+        }
+        train_bars = replay_inputs["train"].bars
+        validation_bars = replay_inputs["validation"].bars
+        holdout_bars = replay_inputs["holdout"].bars
+        replay_binding_hashes = {
+            role: replay_inputs[role].replay_binding_hash
+            for role in ("train", "validation", "holdout")
+        }
+    else:
+        # Test-only compatibility for the historical evaluator harness. Normal
+        # preflight rejects v1 before this point.
+        train_bars = _load_bars(charter, "train")
+        validation_bars = _load_bars(charter, "validation")
+        holdout_bars = _load_bars(charter, "holdout")
     train_features = build_campaign_features(
-        _load_bars(charter, "train"), lookback_bars=charter.feature_lookback_bars
+        train_bars, lookback_bars=charter.feature_lookback_bars
     )
     validation_features = build_campaign_features(
-        _load_bars(charter, "validation"), lookback_bars=charter.feature_lookback_bars
+        validation_bars, lookback_bars=charter.feature_lookback_bars
     )
     train_indexes = full_scoring_indexes(charter, len(train_features))
     validation_indexes = validation_scoring_indexes(charter, len(validation_features))
@@ -602,7 +881,11 @@ def execute_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
             "actor_id": PROTOCOL_AUTHORITY_ID,
             "actor_role": "research_authority",
             "request_id": f"{charter.campaign_id}:protocol-authorize",
-            "protocol": _protocol_manifest(charter, code_revision=code_revision),
+            "protocol": _protocol_manifest(
+                charter,
+                code_revision=code_revision,
+                replay_binding_hashes=replay_binding_hashes,
+            ),
         }
     )
     family = authority.create_family(
@@ -856,7 +1139,7 @@ def execute_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
         request_id=f"{charter.campaign_id}:holdout-reserve",
     )
     holdout_features = build_campaign_features(
-        _load_bars(charter, "holdout"), lookback_bars=charter.feature_lookback_bars
+        holdout_bars, lookback_bars=charter.feature_lookback_bars
     )
     holdout_graph = TypedStrategyGraph.from_dict(winner_graph["manifest"])
     holdout_evaluation = evaluate_campaign_graph(
@@ -998,6 +1281,11 @@ def execute_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
         "holdout_metrics_released": True,
         "execution_progression": progression,
         "execution_context_hash": execution_context["context_hash"],
+        "replay_availability_policy_hash": (
+            charter.replay_availability_policy.policy_hash
+            if charter.replay_availability_policy is not None
+            else None
+        ),
         "instrument_economics_class": "incomplete",
         "promotion_eligible": False,
         "external_trading_authority": False,

@@ -9,14 +9,21 @@ from pathlib import Path
 import pytest
 
 from portal.backend.service.research.campaign_runner import (
+    CampaignReplayRoleInputs,
     _campaign_family_name,
     _gate_failures,
+    _latest_asof,
     _protocol_manifest,
+    preflight_campaign,
 )
+from portal.backend.service.research import campaign_runner
 from research_science import (
+    CAMPAIGN_CHARTER_SCHEMA_VERSION,
     CampaignCharter,
     CampaignExecutionCosts,
     FrozenCampaignBar,
+    ResearchReplayAvailabilityArtifact,
+    ResearchReplayAvailabilityPolicy,
     ScientificProtocol,
     build_campaign_features,
     build_campaign_graph_manifest,
@@ -48,6 +55,23 @@ def _charter() -> CampaignCharter:
         sealed_holdout_binding={
             "dataset_id": "sealed-holdout-id",
             "dataset_hash": "sealed-holdout-hash",
+            "window_start": "2026-08-05T15:30:00Z",
+            "window_end": "2026-08-05T16:33:00Z",
+        },
+    )
+
+
+def _v2_charter() -> CampaignCharter:
+    raw = _charter_raw()
+    raw["schema_version"] = CAMPAIGN_CHARTER_SCHEMA_VERSION
+    raw["campaign_id"] = "btc_perp_market_structure_replay_contract_test"
+    raw["eligible_fact_types"] = [*raw["eligible_fact_types"], "market.trade"]
+    raw["replay_availability_policy"] = ResearchReplayAvailabilityPolicy().to_dict()
+    return resolve_campaign_charter(
+        raw,
+        sealed_holdout_binding={
+            "dataset_id": "sealed-holdout-v2-id",
+            "dataset_hash": "sealed-holdout-v2-hash",
             "window_start": "2026-08-05T15:30:00Z",
             "window_end": "2026-08-05T16:33:00Z",
         },
@@ -306,6 +330,136 @@ def test_campaign_protocol_manifest_pins_every_scientific_boundary() -> None:
         }
     )
     assert protocol.family_name == _campaign_family_name(charter)
+
+
+def test_v2_protocol_requires_and_pins_every_replay_binding() -> None:
+    charter = _v2_charter()
+    with pytest.raises(ValueError, match="every replay binding"):
+        _protocol_manifest(charter, code_revision="abcdef123456")
+    bindings = {
+        "train": "a" * 64,
+        "validation": "b" * 64,
+        "holdout": "c" * 64,
+    }
+    manifest = _protocol_manifest(
+        charter,
+        code_revision="abcdef123456",
+        replay_binding_hashes=bindings,
+    )
+    policies = manifest["policy_versions"]
+    assert policies["research_replay_availability"] == (
+        charter.replay_availability_policy.policy_hash
+    )
+    assert policies["research_replay_holdout_binding"] == "c" * 64
+
+
+def test_campaign_causal_join_never_selects_future_sample() -> None:
+    class Fact:
+        def __init__(self, minute: int) -> None:
+            self.sample_time = datetime(2026, 8, 5, 0, minute, tzinfo=UTC)
+            self.known_at = self.sample_time + timedelta(seconds=5)
+
+    class Record:
+        def __init__(self, minute: int) -> None:
+            self.fact = Fact(minute)
+
+    records = [Record(1), Record(2), Record(3)]
+    selected = _latest_asof(
+        records,
+        datetime(2026, 8, 5, 0, 2, 4, tzinfo=UTC),
+    )
+    assert selected is records[0]
+    assert selected.fact.sample_time <= datetime(2026, 8, 5, 0, 2, 4, tzinfo=UTC)
+
+
+def test_preflight_enforces_causal_floors_and_redacts_holdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    charter = _v2_charter()
+    bars = {
+        "train": _bars(120),
+        "validation": tuple(
+            replace(
+                row,
+                bucket_start=row.bucket_start + timedelta(days=1),
+                bucket_end=row.bucket_end + timedelta(days=1),
+                known_at=row.known_at + timedelta(days=1),
+                canonical_known_at=row.canonical_known_at + timedelta(days=1),
+            )
+            for row in _bars(120)
+        ),
+        "holdout": tuple(
+            replace(
+                row,
+                bucket_start=row.bucket_start + timedelta(days=2),
+                bucket_end=row.bucket_end + timedelta(days=2),
+                known_at=row.known_at + timedelta(days=2),
+                canonical_known_at=row.canonical_known_at + timedelta(days=2),
+            )
+            for row in _bars(120)
+        ),
+    }
+    artifact = ResearchReplayAvailabilityArtifact(
+        schema_version="research_replay_availability.v1",
+        policy_hash=charter.replay_availability_policy.policy_hash,
+        bucket_count=120,
+        eligible_bucket_count=120,
+        excluded_bucket_count=0,
+        exclusion_counts={},
+        coverage_material_hashes=("d" * 64,),
+        replay_bucket_hashes=tuple(f"bucket-{index}" for index in range(120)),
+        replay_semantic_hash="e" * 64,
+    )
+    monkeypatch.setattr(campaign_runner, "load_private_charter", lambda _path: charter)
+    monkeypatch.setattr(
+        campaign_runner,
+        "_dataset_manifest",
+        lambda _charter, role: {
+            "dataset_id": f"dataset-{role}",
+            "dataset_hash": f"hash-{role}",
+            "dataset_manifest_hash": f"manifest-{role}",
+            "series": [],
+        },
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_load_replay_role_inputs",
+        lambda _charter, role: CampaignReplayRoleInputs(
+            role=role,
+            bars=bars[role],
+            replay_artifact=artifact,
+            replay_binding_hash=f"binding-{role}",
+            dataset_manifest_hash=f"manifest-{role}",
+        ),
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_execution_bundle",
+        lambda _charter: (
+            _execution(charter),
+            {"context_hash": "context-hash"},
+        ),
+    )
+    result = preflight_campaign("unused.json", code_revision="abcdef123456")
+    assert result["datasets"]["train"]["causal_opportunities"] >= 18
+    assert result["datasets"]["validation"]["fold_opportunity_counts"] == [12, 12, 12]
+    assert result["datasets"]["holdout"] == {
+        "sealed": True,
+        "blind_alias": "btc-perp-final-session-v1",
+        "manifest_valid": True,
+        "causal_admission_passed": True,
+        "replay_binding_valid": True,
+    }
+    assert "replay_binding_hash" not in result["datasets"]["holdout"]
+    assert "causal_opportunities" not in result["datasets"]["holdout"]
+
+
+def test_terminal_v1_campaign_cannot_be_reexecuted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(campaign_runner, "load_private_charter", lambda _path: _charter())
+    with pytest.raises(ValueError, match="terminal v1 campaigns cannot be re-executed"):
+        preflight_campaign("unused.json", code_revision="abcdef123456")
 
 
 def test_replacement_campaign_has_a_new_identity_and_sealed_assignment() -> None:

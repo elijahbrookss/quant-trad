@@ -1628,6 +1628,40 @@ class PostgresMarketStructureRepository:
                 raise RuntimeError("market_stream_coverage_conflict")
         return str(stored["id"])
 
+    def get_coverage_version(
+        self,
+        *,
+        interval_id: str,
+        revision: int,
+    ) -> TradeCoverageIntervalVersion:
+        """Read one exact immutable coverage revision for frozen replay binding."""
+
+        normalized_id = str(interval_id or "").strip()
+        normalized_revision = int(revision)
+        if not normalized_id or normalized_revision <= 0:
+            raise ValueError("market_stream_coverage_invalid: exact identity is required")
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM market.stream_coverage_interval_versions
+                    WHERE interval_id = :interval_id
+                      AND revision = :revision
+                    """
+                ),
+                {
+                    "interval_id": normalized_id,
+                    "revision": normalized_revision,
+                },
+            ).mappings().first()
+        if row is None:
+            raise ValueError(
+                "market_stream_coverage_unknown: "
+                f"interval_id={normalized_id} revision={normalized_revision}"
+            )
+        return _coverage_version(row)
+
     def close_open_session_coverages(
         self,
         claim: StreamClaim,
@@ -4755,6 +4789,51 @@ class PostgresMarketStructureRepository:
                 )
             )
         return tuple(records)
+
+
+def _coverage_version(row: Mapping[str, Any]) -> TradeCoverageIntervalVersion:
+    coverage = TradeCoverageIntervalVersion(
+        interval_id=str(row["interval_id"]),
+        revision=int(row["revision"]),
+        definition_id=str(row["definition_id"]),
+        session_id=str(row["session_id"]),
+        connection_epoch=int(row["connection_epoch"]),
+        provider_product_id=str(row["provider_product_id"]),
+        channel=str(row["channel"]),
+        status=str(row["status"]),
+        ordering_assurance=str(row["ordering_assurance"]),
+        archive_status=str(row["archive_status"]),
+        opening_raw_record_id=str(row["opening_raw_record_id"]),
+        opening_receive_ordinal=int(row["opening_receive_ordinal"]),
+        opening_effective_at=row["opening_effective_at"],
+        last_raw_record_id=str(row["last_raw_record_id"]),
+        last_receive_ordinal=int(row["last_receive_ordinal"]),
+        last_effective_at=row["last_effective_at"],
+        canonicalization_watermark_ordinal=int(
+            row["canonicalization_watermark_ordinal"]
+        ),
+        archive_complete_through_ordinal=int(
+            row["archive_complete_through_ordinal"]
+        ),
+        known_at=row["known_at"],
+        closing_raw_record_id=row["closing_raw_record_id"],
+        closing_receive_ordinal=(
+            int(row["closing_receive_ordinal"])
+            if row["closing_receive_ordinal"] is not None
+            else None
+        ),
+        closing_effective_at=row["closing_effective_at"],
+        first_provider_sequence_num=row["first_provider_sequence_num"],
+        last_provider_sequence_num=row["last_provider_sequence_num"],
+        gap_quality_event_ids=tuple(row["gap_quality_event_ids"] or ()),
+        opening_evidence=dict(row["opening_evidence"] or {}),
+        closing_evidence=dict(row["closing_evidence"] or {}),
+    )
+    if coverage.material_hash != str(row["material_hash"]):
+        raise RuntimeError("market_stream_coverage_storage_corrupt: hash mismatch")
+    return coverage
+
+
 def _trade_record(row: Mapping[str, Any]) -> MarketTradeRecord:
     fact = MarketTradeFact(
         provider_product_id=row["provider_product_id"],

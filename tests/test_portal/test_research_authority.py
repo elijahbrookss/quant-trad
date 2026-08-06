@@ -21,12 +21,15 @@ from portal.backend.service.research import (
 from portal.backend.service.research import authority_repository as repository
 from portal.backend.service.research import repository as research_repository
 from research_science import (
+    CAMPAIGN_CHARTER_SCHEMA_VERSION,
     CANDIDATE_SCHEMA_VERSION,
     PROTOCOL_SCHEMA_VERSION,
     CampaignCharter,
     CampaignExecutionCosts,
     CandidateSnapshot,
     FrozenCampaignBar,
+    ResearchReplayAvailabilityArtifact,
+    ResearchReplayAvailabilityPolicy,
     ScientificProtocol,
     resolve_campaign_charter,
 )
@@ -1166,6 +1169,9 @@ def _campaign_runner_charter(suffix: str) -> CampaignCharter:
         / "btc_perp_market_structure_v3.json"
     )
     raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = CAMPAIGN_CHARTER_SCHEMA_VERSION
+    raw["eligible_fact_types"] = [*raw["eligible_fact_types"], "market.trade"]
+    raw["replay_availability_policy"] = ResearchReplayAvailabilityPolicy().to_dict()
     campaign_id = f"btc_perp_runner_e2e_{suffix[:8]}"
     raw["campaign_id"] = campaign_id
     raw["instrument_id"] = "BTC-USD"
@@ -1266,8 +1272,35 @@ def test_campaign_runner_completes_persisted_sealed_lifecycle(
     )
     monkeypatch.setattr(
         campaign_runner,
-        "_load_bars",
-        lambda _charter, role: bars[role],
+        "_load_replay_role_inputs",
+        lambda _charter, role: campaign_runner.CampaignReplayRoleInputs(
+            role=role,
+            bars=bars[role],
+            replay_artifact=ResearchReplayAvailabilityArtifact(
+                schema_version="research_replay_availability.v1",
+                policy_hash=charter.replay_availability_policy.policy_hash,
+                bucket_count=len(bars[role]),
+                eligible_bucket_count=len(bars[role]),
+                excluded_bucket_count=0,
+                exclusion_counts={},
+                coverage_material_hashes=("a" * 64,),
+                replay_bucket_hashes=tuple(
+                    f"{role}-bucket-{index}" for index in range(len(bars[role]))
+                ),
+                replay_semantic_hash=(
+                    {"train": "a", "validation": "b", "holdout": "c"}[role]
+                    * 64
+                ),
+            ),
+            replay_binding_hash=(
+                {"train": "d", "validation": "e", "holdout": "f"}[role]
+                * 64
+            ),
+            dataset_manifest_hash=(
+                {"train": "1", "validation": "2", "holdout": "3"}[role]
+                * 64
+            ),
+        ),
     )
     monkeypatch.setattr(
         campaign_runner,
@@ -1300,6 +1333,15 @@ def test_campaign_runner_completes_persisted_sealed_lifecycle(
         "private-charter-not-read.json",
         code_revision="runner-e2e-test-revision",
     )
+
+    persisted_protocol = repository.protocol_private(result["protocol_id"])
+    replay_policy_versions = dict(persisted_protocol.policy_versions)
+    assert replay_policy_versions["research_replay_availability"] == (
+        charter.replay_availability_policy.policy_hash
+    )
+    assert replay_policy_versions["research_replay_train_binding"] == "d" * 64
+    assert replay_policy_versions["research_replay_validation_binding"] == "e" * 64
+    assert replay_policy_versions["research_replay_holdout_binding"] == "f" * 64
 
     diagnostic = repository.family_evidence(result["family_id"], private=True)
     if force_validation_rejection:

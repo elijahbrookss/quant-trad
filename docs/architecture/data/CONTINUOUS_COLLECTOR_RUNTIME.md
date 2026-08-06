@@ -48,6 +48,12 @@ adapter implements Coinbase `market_trades` plus `heartbeats`. Future trade,
 book, news, or alternate-provider adapters must register explicitly rather than
 adding provider switches to the supervisor.
 
+Coinbase L2 currently has bounded capture, archive, reconstruction, checkpoint,
+and replay support, but no registered long-lived supervisor adapter. An L2
+definition or historical checkpoint must therefore never be reported as a live
+indefinite collector. It remains bounded until a provider-neutral continuous
+book adapter, sustained validation evidence, and storage admission exist.
+
 ## Runtime Contract
 
 One enabled definition maps to one supervisor task and one fenced stream claim.

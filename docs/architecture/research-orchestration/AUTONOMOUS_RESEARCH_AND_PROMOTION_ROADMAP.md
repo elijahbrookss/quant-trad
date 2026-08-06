@@ -74,6 +74,15 @@ than the original gap list. Phase 7 and later remain proposed. Phase 6 promotion
 means registry state `RESEARCH_CERTIFIED`; no shadow, paper, live-order,
 deployment, credential, or capital authority is opened by these implementations.
 
+The first operated campaign exposed a missing distinction between canonical
+batch publication time and causally derivable research replay time. The
+[research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md) now
+requires frozen raw receipts, exact aggregate/coverage reconciliation, a pinned
+watermark and latency policy, decision-time cross-fact joins, and causal
+opportunity admission before a campaign can allocate attempts. Historical
+campaign v1 charters remain immutable and non-executable; future searches need
+a new v2 identity and sealed assignment.
+
 Market-data acquisition and coverage are deliberately outside the critical
 path of this roadmap. The starting assumption is that every required market
 fact is causal, complete, frozen, losslessly replayable, and identified by

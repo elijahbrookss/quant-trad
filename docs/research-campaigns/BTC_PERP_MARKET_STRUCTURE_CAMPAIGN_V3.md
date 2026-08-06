@@ -3,7 +3,7 @@ component: btc-perp-market-structure-campaign-v3
 subsystem: research-orchestration
 layer: operation
 doc_type: campaign-charter
-status: terminal-rejected
+status: terminal-invalid-input-contract
 tags:
   - research
   - autonomous-campaign
@@ -17,10 +17,12 @@ code_paths:
 ---
 # BTC PERP Market-Structure Campaign V3
 
-> **Terminal status:** V3 completed its bounded workflow and rejected the
-> family before validation or holdout access. All 24 train attempts had zero
-> causal scoring opportunities because every persisted train fact became known
-> after the final train-bar arrival. No candidate or certificate was created;
+> **Terminal status:** V3's immutable workflow records show rejection before
+> validation or holdout access. All 24 train attempts had zero scoring
+> opportunities under the late aggregate publication clock. Later raw-receipt
+> reconciliation proved the campaign lacked the replay-availability contract
+> needed to make that an economic conclusion, so V3 is classified as an invalid
+> research-input-contract outcome. No candidate or certificate was created;
 > the sealed holdout remains unopened. See the
 > [terminal dossier](./BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V3_DOSSIER.md).
 
@@ -80,6 +82,11 @@ never know public historical data.
   are not search dimensions.
 - Any post-activation code, protocol, dataset, threshold, or assumption change
   invalidates V3 and requires a new identity.
+
+The V3 charter uses historical schema `autonomous_research_campaign.v1` and is
+now read-only. Executable campaigns require v2, including raw trade evidence
+and an immutable research replay availability policy. This preserves V3's hash
+and terminal records instead of retroactively repairing them.
 
 ## Autonomy ceiling
 

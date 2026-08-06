@@ -3,12 +3,12 @@ component: btc-perp-market-structure-campaign-v3-dossier
 subsystem: research-orchestration
 layer: operation
 doc_type: campaign-result
-status: terminal-rejected
+status: terminal-invalid-input-contract
 tags:
   - research
   - autonomous-campaign
   - perpetual
-  - negative-result
+  - invalid-input-contract
   - sealed-holdout
 code_paths:
   - config/research_campaigns/btc_perp_market_structure_v3.json
@@ -19,17 +19,22 @@ code_paths:
 
 ## Decision
 
-QT completed its first end-to-end bounded autonomous research operation and
-rejected the family before validation. This is an operational success and an
-economic non-result: the workflow accounted for every attempt, enforced causal
-availability, stopped without selecting a candidate, archived its state, and
-did not expose the sealed holdout.
+QT completed its first end-to-end bounded autonomous research operation and its
+immutable records correctly show that the family was rejected before
+validation. Repository forensics subsequently established that this must be
+classified as an **invalid research-input-contract outcome**, not an economic
+or strategy result. The workflow accounted for every attempt, archived its
+state, and did not expose the sealed holdout, but its preflight did not prove
+that the frozen input could supply causal replay opportunities before opening
+the search budget.
 
-The campaign does **not** show that market-structure signals lack value. It
-shows that this frozen train artifact cannot support the declared
-five-event-minute causal claim: every persisted trade-flow row became known
-after the last possible train-bar arrival, so no signal could be followed by a
-causally valid execution event within the train window.
+The campaign does **not** show that market-structure signals lack value, and it
+does not establish an economic non-result. Canonical aggregate `known_at`
+correctly reflected delayed post-session finalization, while the frozen raw
+receipts show that a pinned continuous transform could have derived most
+non-empty minute aggregates in time. V3 had no explicit replay-availability
+contract to distinguish those two clocks, and therefore evaluated the wrong
+research input semantics.
 
 ## Pinned operation
 
@@ -67,27 +72,42 @@ trial manifest, deterministic result artifact, explicit failure reasons, actor,
 request, and append-only events. The remaining budget was not spent after the
 entire declared graph family failed the train eligibility floor.
 
-## Causal failure evidence
+## Retrospective input-contract diagnosis
 
-The train artifact contained 59 complete rows. Across those rows:
+The original terminal evidence remains true for the clock it consumed: the
+train artifact contained 59 complete aggregate rows and every aggregate
+`known_at` followed the last possible train-bar arrival. That explains the 24
+zero-opportunity attempts, but it does not prove that the underlying market
+events were unavailable.
 
-- zero rows had a later bar whose arrival was at or after the row's `known_at`;
-- every row's `known_at` was later than the final train-bar arrival;
-- `known_at - bucket_end` ranged from about 67.6 to 3,547.5 seconds;
-- all 24 graph evaluations therefore had `sample_count = 0` and
-  `trade_count = 0`.
+The later raw-to-aggregate reconciliation found:
 
-The evaluator did not substitute event time for known-at time, move execution
-backward, fetch alternative data, or relax the protocol. This is the causal
-fence working as designed.
+- 46 of 59 train minutes contained trades and all 46 reconciled exactly to the
+  persisted aggregate material;
+- raw messages for those buckets had arrived by bucket close;
+- 45 of the 46 non-empty buckets had a later market event available for the
+  declared execution horizon when availability was derived from receipt
+  evidence; and
+- aggregate publication lag came from bounded-session canonicalization and
+  finalization, not late market delivery.
+
+The evaluator was right not to rewrite canonical `known_at` or substitute
+provider event time. The missing boundary was a separate, versioned replay
+availability certificate derived from frozen raw receipts, exact coverage,
+watermarks, a pinned transform, and deterministic latency. Preflight also
+counted nominal indexes rather than the evaluator's actual causal
+opportunities. In addition, using the late aggregate clock for cross-fact joins
+could select OI/funding samples from after the bucket, a latent look-ahead path
+even though V3's zero scoring count prevented a performance result.
 
 ## Quality and claim boundaries
 
 - The configured execution ceiling was conservative-bar X2, with explicit
   fees, adverse slippage, and cost stresses. Because no causal trade was
   evaluable, no strategy earned an X2 performance claim.
-- No scientific certificate was issued, so the result must not be represented
-  as S1-S4 evidence for or against the economic hypothesis.
+- No scientific certificate was issued, and the invalid input contract means
+  the result must not be represented as S1-S4 evidence for or against the
+  economic hypothesis.
 - X3 spread, X4 L2 replay, and X5 queue-bounded execution were unavailable and
   were not optimization surfaces.
 - Derivative economics remain incomplete. No funding-inclusive, margin,
@@ -134,11 +154,15 @@ python -m portal.backend.service.research.campaign_runner evidence \
 Do not rerun `execute` for V3. Its identity is terminal, and any new economic
 attempt requires a new charter, protocol, and holdout assignment.
 
-## Required follow-up before another economic campaign
+## Implemented repair and next identity
 
-Do not rerun this strategy family against the same causal artifact. First
-certify a research input whose known-at distribution leaves enough future bars
-for the declared horizon. The next charter should include a deterministic
-pre-activation causal-opportunity floor by role, while preserving the existing
-known-at semantics rather than weakening them. Only then should QT allocate a
-new campaign identity, train budget, or sealed holdout.
+The runner now requires `autonomous_research_campaign.v2`, a frozen raw trade
+series in every role dataset, an immutable replay-availability policy, exact
+raw/aggregate/coverage reconciliation, receipt-watermark availability,
+decision-time OI/funding joins, and deterministic pre-activation opportunity
+floors for train, validation, and the private holdout. V1 charters remain
+readable but cannot execute.
+
+Do not rerun V3 or mutate its terminal records. Any future search requires a
+new campaign identity, newly frozen role datasets that bind every replay
+source, a new protocol, and a separately sealed holdout assignment.

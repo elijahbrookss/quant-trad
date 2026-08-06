@@ -57,11 +57,26 @@ declared hash matches, whose series are non-empty, and whose frozen ranges cover
 the assigned window. Resolution reads frozen storage and performs no provider
 fetch.
 
+Selection campaigns using derived trade flow additionally require the
+[research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md). Each
+role dataset freezes raw `market.trade` receipt evidence with the aggregate and
+cross-facts. The immutable protocol pins the replay policy and the exact train,
+validation, and private holdout replay binding hashes. Canonical `known_at`
+remains unchanged; the separate replay clock is admitted only after exact
+raw/aggregate/coverage reconciliation.
+
 The research agent receives the public protocol. For a sealed historical
 holdout, its dataset ID, hash, and window are redacted. Trial registration
 derives the dataset binding from the private protocol; the caller may choose
 only `train` or `validation`, never a dataset. A material protocol change
 requires a new protocol ID/hash and family.
+
+Before activation, the trusted runner constructs causal entry/exit
+opportunities under the replay clock for train, every validation fold, and the
+privately resolved holdout. Declared sample, signal-capable trade, calendar,
+exposure, and horizon floors must pass before an attempt budget can be opened.
+Public evidence exposes train/validation counts but only a sealed pass/fail for
+the holdout.
 
 ## Immutable protocol manifest
 
