@@ -40,6 +40,21 @@ code_paths:
 ---
 # Data Boundary
 
+## Scientific protocol allocation
+
+Scientific protocols reference only existing frozen `market_dataset.v1`
+artifacts. Protocol admission verifies dataset ID/hash identity, non-empty
+series, and assigned-window coverage through the canonical market-data
+repository. Train, validation, and holdout windows are exact, chronological,
+and non-overlapping.
+
+Trial registration never accepts a dataset ID, hash, binding, or provider fetch
+request. The scientific authority derives the private train/validation binding
+from the immutable protocol. The public protocol redacts a controlled holdout,
+and only the in-process one-use holdout executor may resolve its binding. No
+provider adapter is reachable from typed strategy evaluation, experiment
+registration, governance, or holdout policy.
+
 ## Purpose
 
 The data boundary turns external observations into immutable, causally readable

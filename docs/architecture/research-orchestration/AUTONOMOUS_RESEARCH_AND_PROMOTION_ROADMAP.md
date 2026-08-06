@@ -16,6 +16,8 @@ tags:
   - audit
 code_paths:
   - src/strategies
+  - src/research_science
+  - src/research_governance
   - src/engines/bot_runtime
   - src/engines/bot_runtime/core/execution_context.py
   - src/data_providers/registry.py
@@ -29,13 +31,14 @@ code_paths:
   - docs/architecture/decisions/0049-keep-live-order-submission-closed.md
   - docs/architecture/decisions/0056-pin-venue-neutral-execution-contexts-per-run.md
   - docs/architecture/decisions/0057-use-append-only-canonical-order-lifecycle.md
+  - docs/architecture/decisions/0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md
 ---
 # Autonomous Research and Promotion Roadmap
 
 ## Status and assessment boundary
 
-This is the ratified governing cross-boundary roadmap. Later phases remain
-direction rather than implementation truth, and this document is never an
+This is the ratified governing cross-boundary roadmap. Unimplemented phases
+remain direction rather than implementation truth, and this document is never an
 authorization to submit external orders. It records the repository state
 inspected on 2026-08-05 and defines the evidence and enforcement that must exist
 before permissions expand.
@@ -56,15 +59,20 @@ expansion, and keeps L2 work independent until the venue-neutral lifecycle
 boundary exists. It also requires `economic_claim_intent` to be immutable per
 run so exploratory evidence cannot be relabeled after completion.
 
-Phase 1, Phase 2A, Phase 2B, Phase 3A, and Phase 3B are implemented by the
+Phase 1, Phase 2A, Phase 2B, Phase 3A, Phase 3B, Phase 4, Phase 5, and the
+offline Phase 6 ceiling are implemented by the
 [Phase 1 economic execution contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md),
 [Phase 2A venue-neutral execution context](../execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md),
 the [Phase 2B durable canonical order lifecycle](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md),
 the [Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md),
-and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md).
+and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md),
+[scientific research authority](SCIENTIFIC_RESEARCH_AUTHORITY.md), the
+[typed strategy/action graph](TYPED_STRATEGY_GRAPH.md), and
+[offline research governance](OFFLINE_RESEARCH_GOVERNANCE.md).
 The verified inventory below is maintained as current production wiring rather
-than the original gap list. Phase 4 and later remain proposed, and no live-order,
-promotion, or capital authority is opened by these implementations.
+than the original gap list. Phase 7 and later remain proposed. Phase 6 promotion
+means registry state `RESEARCH_CERTIFIED`; no shadow, paper, live-order,
+deployment, credential, or capital authority is opened by these implementations.
 
 Market-data acquisition and coverage are deliberately outside the critical
 path of this roadmap. The starting assumption is that every required market
@@ -82,21 +90,25 @@ canonical wallet and fill accounting, materialized research reports, bounded
 experiment orchestration, and production-wired streaming paper runs. It is
 suitable for reproducible signal research and predefined experiments.
 
-It is now suitable for explicitly bounded X0-X5 execution research, but not for
-venue-realized execution claims or autonomous strategy selection and promotion.
+It is now suitable for explicitly bounded X0-X5 execution research, controlled
+S0-S4 scientific search, budgeted typed strategy invention, and autonomous
+offline research promotion through `RESEARCH_CERTIFIED`. It is not suitable for
+venue-realized execution claims or any operational strategy deployment.
 The most important remaining blockers are not market data:
 
-- X3/X4 use deterministic zero latency and visible top/L2 liquidity only;
-  passive queue progress, hidden liquidity, calibrated latency, and realized
-  venue reconciliation remain absent;
-- the strategy language is typed and deterministic but only expresses entry
-  directions over one signal trigger plus indicator-output guards;
-- experiment plans have no enforced train/validation/holdout protocol or search
-  ledger; selection gates are non-empty, but scientific authority remains S0;
+- X5 supplies named deterministic passive queue bounds and latency stresses, but
+  hidden liquidity, calibrated venue latency, and realized reconciliation remain
+  absent;
+- typed strategy graphs now express bounded facts, expressions, actions, sizing,
+  risk, and execution policy, but operational adapters for every new action are
+  intentionally not deployment-wired;
+- protocol-bound train/validation/holdout, search ledgers, one-use holdouts, and
+  S0-S4 certificates are enforced, but identity remains application-asserted and
+  stronger external/forward holdout custody is deferred;
 - `golden` currently certifies reproducibility and reconciliation, not economic
   realism or statistical validity;
-- ADR 0048 correctly describes mutation and promotion controls as proposed,
-  while ADR 0049 keeps external order submission closed;
+- ADRs 0048 and 0059 govern offline mutation/promotion through
+  `RESEARCH_CERTIFIED`, while ADR 0049 keeps external order submission closed;
 - derivative contracts and entry margin exist, but funding charges, maintenance
   liquidation, mark behavior, settlement/roll, borrow/carry, and other complete
   derivative economics are not applied by the performance runtime.
@@ -106,8 +118,8 @@ This validates the supplied operating conclusion with three corrections:
 1. Current execution is more than naive candle touch. It has explicit X0-X2 bar
    economics plus replay-certified X3 spread and X4 aggressive L2 models,
    canonical lifecycle/residual custody, per-fill accounting, and reconciled
-   evidence. The missing layer is resting/queue/latency realism and calibration,
-   not all execution semantics.
+   evidence plus X5 bounded passive queue/latency scenarios. The missing layer is
+   venue calibration and realized reconciliation, not basic execution semantics.
 2. Paper mode is production-wired against live closed candles, but it delegates
    fills to the backtest adapter. X3/X4 remain backtest-only; paper is still
    bar-based simulated execution, not production-book shadow execution.
@@ -600,6 +612,11 @@ later work.
 
 ## Phase 4 — Scientific protocol and search-budget authority
 
+**Implementation status (2026-08-06): implemented.** See
+[Scientific Research Authority](SCIENTIFIC_RESEARCH_AUTHORITY.md). The deployed
+shape is one application and database with logical roles; external attestation,
+forward allocation, and institution-grade identity isolation remain deferred.
+
 - **Objective:** Make selection evidence resistant to leakage, repeated search,
   weak samples, and post-hoc threshold changes before agents gain a larger search
   surface.
@@ -647,6 +664,11 @@ later work.
 
 ## Phase 5 — Typed fact, expression, signal, action, and order-policy graph
 
+**Implementation status (2026-08-06): implemented for bounded offline graph
+generation and canonical action-intent compilation.** See
+[Typed Strategy and Action Graph](TYPED_STRATEGY_GRAPH.md). A graph is not order
+submission or deployment authority.
+
 - **Objective:** Give agents a broad but constrained deterministic strategy
   landscape after search accounting exists.
 - **Capabilities added:** Typed fact catalog; nested `all`/`any`/`not`, numeric,
@@ -691,6 +713,11 @@ later work.
   space; Phase 4 budget and multiplicity controls remain mandatory.
 
 ## Phase 6 — Audited mutation and promotion state machine
+
+**Implementation status (2026-08-06): implemented through the offline
+`RESEARCH_CERTIFIED` ceiling.** See
+[Offline Research Governance](OFFLINE_RESEARCH_GOVERNANCE.md). Operational
+promotion states are structurally absent.
 
 - **Objective:** Turn ADR 0048 into an enforced boundary before promotion rights
   expand.
@@ -994,14 +1021,13 @@ dataset, provenance, provider-isolation, and live-closed boundaries.
 
 ## Recommended next implementation campaign
 
-Execute Phase 4 as the next bounded campaign: add in-application immutable
-scientific protocols, complete attempt/search-budget accounting, walk-forward
-fold authority, derived purge/embargo, frozen candidate identity, one-use
-concurrent-safe holdout access, explicit blindness classes, and S0-S4 evidence
-classification. Keep provider access, typed strategy generation, promotion,
-shadow/paper/live execution, and capital authority structurally outside that
-campaign. Phase 4 must make exhaustive attempt retention and holdout non-reuse
-enforceable before Phase 5 expands the search landscape.
+Stabilize and exercise the completed offline Phases 4-6 before expanding the
+ceiling: run real frozen research families, measure operator ergonomics, harden
+authenticated actor identity, add externally attested or forward-unseen holdout
+allocation only when a real custodian exists, and expand canonical runtime action
+adapters only from observed typed-graph demand. Phase 7 shadow execution remains
+deliberately unstarted until the owner separately authorizes that operational
+boundary.
 
 ## Explicit deprecations
 

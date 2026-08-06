@@ -42,6 +42,25 @@ code_paths:
 ---
 # Persistence Boundary
 
+## Offline scientific authority and governance
+
+Phase 4-6 records remain inside the primary PostgreSQL boundary. The schema
+contract creates and validates immutable protocol manifests, experiment family
+projections, complete attempt records, typed strategy graph artifacts, frozen
+candidates, database-unique holdout uses, scientific certificates, append-only
+authority events, governance cases, immutable transition proposals, and
+immutable authorization decisions.
+
+Mutable family/case rows are current projections; attempts, graphs, candidates,
+holdout use, certificates, events, proposals, and decisions are durable evidence
+and are never overwritten as a substitute for a new version. Unique family
+holdout and proposal-decision constraints provide the concurrency boundary.
+
+Clean databases receive these tables through the existing schema contract. The
+idempotent additive migration
+`scripts/db/manual_migration_offline_research_governance_v1.sql` upgrades the
+early governance-case shape by making creation request identity mandatory.
+
 ## Purpose
 
 The persistence boundary stores durable runtime truth and read-model support data. It protects replay, BotLens rebuilds, reporting, comparison, and operator recovery.

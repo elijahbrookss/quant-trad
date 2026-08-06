@@ -33,6 +33,31 @@ code_paths:
 ---
 # Research Orchestration Boundary
 
+## Offline autonomy through Phase 6
+
+The production research surface now includes three additional, provider-free
+boundaries:
+
+- [Scientific Research Authority](SCIENTIFIC_RESEARCH_AUTHORITY.md) owns
+  immutable protocols, role-derived frozen datasets, attempt/search accounting,
+  candidate freezing, one-use holdouts, and S0-S4 evidence.
+- [Typed Strategy and Action Graph](TYPED_STRATEGY_GRAPH.md) owns bounded
+  data-only strategy invention and canonical action-intent compilation; graph
+  creation consumes family search budget.
+- [Offline Research Governance](OFFLINE_RESEARCH_GOVERNANCE.md) owns separate
+  proposal/decision records and registry promotion through
+  `RESEARCH_CERTIFIED` only.
+
+These are logical components inside the current application and PostgreSQL
+deployment. They do not require allocator, researcher, certifier, governance,
+or auditor microservices. Stronger identity/custody services are future seams,
+not a prerequisite for honest controlled-workflow claims.
+
+The autonomous research workflow cannot choose provider data, resolve a sealed
+holdout through public operations, disable durable audit, mutate a frozen
+candidate, self-authorize a transition, or progress to shadow, paper, live,
+deployment, external submission, or capital states.
+
 ## Purpose
 
 The research orchestration boundary gives agent/tool workflows a small,
