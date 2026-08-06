@@ -110,7 +110,7 @@ def _validate_protocol_datasets(protocol: ScientificProtocol) -> None:
         BlindnessClass.FORWARD_UNSEEN,
     }:
         raise ValueError(
-            "requested holdout blindness requires an attestation/allocation authority not implemented in this campaign"
+            "requested holdout blindness requires an attestation/allocation authority not implemented by this service"
         )
     ordered = [protocol.assignment(role) for role in ("train", "validation", "holdout")]
     if not (

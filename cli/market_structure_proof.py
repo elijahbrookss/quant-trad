@@ -556,7 +556,7 @@ async def run_coinbase_market_structure_proof(
             f"Refusing to overwrite existing proof report: {output_dir / 'proof-report.json'}"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
-    campaign_started = time.monotonic()
+    proof_started = time.monotonic()
     started_at = _utc_iso()
     proof_implementation = _proof_implementation()
     aggregate_rates: dict[int, Counter[str]] = defaultdict(Counter)
@@ -583,7 +583,7 @@ async def run_coinbase_market_structure_proof(
                 duration_seconds=duration,
                 reconnect_interval_seconds=reconnect_interval,
                 sample_limit=sample_limit,
-                campaign_started=campaign_started,
+                proof_started=proof_started,
                 aggregate_rates=aggregate_rates,
                 start_delay_seconds=index * 0.5,
             )
@@ -591,7 +591,7 @@ async def run_coinbase_market_structure_proof(
         ]
     )
     stream_results = [row for product_rows in captured_products for row in product_rows]
-    elapsed = max(time.monotonic() - campaign_started, 0.000001)
+    elapsed = max(time.monotonic() - proof_started, 0.000001)
     capacity = _capacity_summary(
         stream_results,
         aggregate_rates,
@@ -677,7 +677,7 @@ async def _capture_product_stream(
     duration_seconds: float,
     reconnect_interval_seconds: float | None,
     sample_limit: int,
-    campaign_started: float,
+    proof_started: float,
     aggregate_rates: dict[int, Counter[str]],
     start_delay_seconds: float,
 ) -> list[dict[str, Any]]:
@@ -760,7 +760,7 @@ async def _capture_product_stream(
                 provider_error = _provider_error_payload(message)
                 if provider_error is not None:
                     provider_errors.append(provider_error)
-                second = max(0, int(time.monotonic() - campaign_started))
+                second = max(0, int(time.monotonic() - proof_started))
                 bucket = aggregate_rates[second]
                 bucket["frames"] += 1
                 bucket["raw_bytes"] += len(message.raw_frame)
@@ -969,7 +969,7 @@ def _bounded_public_probe(url: str, *, accept: str) -> dict[str, Any]:
         url,
         headers={
             "Accept": accept,
-            "User-Agent": "quant-trad-market-structure-phase0/1.0",
+            "User-Agent": "quant-trad-market-structure-proof/1.0",
         },
         method="GET",
     )

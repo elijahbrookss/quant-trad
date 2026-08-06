@@ -25,9 +25,9 @@ from market_data.structure import (
     aggregate_trade_bucket,
 )
 
-RESEARCH_REPLAY_AVAILABILITY_SCHEMA_VERSION = "research_replay_availability.v1"
-RESEARCH_REPLAY_TRANSFORM_VERSION = "market.trade_flow.receipt_replay.v1"
-RESEARCH_REPLAY_WATERMARK_POLICY = "first_subsequent_covered_trade.v1"
+TRADE_FLOW_REPLAY_SCHEMA_VERSION = "research.trade_flow_replay.v1"
+TRADE_FLOW_REPLAY_TRANSFORM_VERSION = "market.trade_flow.receipt_replay.v1"
+TRADE_FLOW_REPLAY_WATERMARK_POLICY = "first_subsequent_covered_trade.v1"
 
 
 def _stable_hash(value: Any) -> str:
@@ -43,16 +43,16 @@ def _stable_hash(value: Any) -> str:
 
 
 @dataclass(frozen=True)
-class ResearchReplayAvailabilityPolicy:
+class TradeFlowReplayPolicy:
     """Immutable rules for deriving one research replay timeline."""
 
-    schema_version: str = RESEARCH_REPLAY_AVAILABILITY_SCHEMA_VERSION
+    schema_version: str = TRADE_FLOW_REPLAY_SCHEMA_VERSION
     source_fact_type: str = "market.trade"
     aggregate_fact_type: str = "market.trade_flow"
     interval_seconds: int = 60
     availability_basis: str = "frozen_source_received_at"
-    transform_version: str = RESEARCH_REPLAY_TRANSFORM_VERSION
-    watermark_policy: str = RESEARCH_REPLAY_WATERMARK_POLICY
+    transform_version: str = TRADE_FLOW_REPLAY_TRANSFORM_VERSION
+    watermark_policy: str = TRADE_FLOW_REPLAY_WATERMARK_POLICY
     processing_latency_ms: int = 50
     require_complete_coverage: bool = True
     require_archive_complete: bool = True
@@ -60,14 +60,14 @@ class ResearchReplayAvailabilityPolicy:
     policy_hash: str = ""
 
     def __post_init__(self) -> None:
-        if self.schema_version != RESEARCH_REPLAY_AVAILABILITY_SCHEMA_VERSION:
+        if self.schema_version != TRADE_FLOW_REPLAY_SCHEMA_VERSION:
             raise ValueError("unsupported research replay availability schema")
         expected_strings = {
             "source_fact_type": "market.trade",
             "aggregate_fact_type": "market.trade_flow",
             "availability_basis": "frozen_source_received_at",
-            "transform_version": RESEARCH_REPLAY_TRANSFORM_VERSION,
-            "watermark_policy": RESEARCH_REPLAY_WATERMARK_POLICY,
+            "transform_version": TRADE_FLOW_REPLAY_TRANSFORM_VERSION,
+            "watermark_policy": TRADE_FLOW_REPLAY_WATERMARK_POLICY,
         }
         for name, expected in expected_strings.items():
             if str(getattr(self, name) or "").strip() != expected:
@@ -105,12 +105,12 @@ class ResearchReplayAvailabilityPolicy:
     @classmethod
     def from_dict(
         cls, raw: Mapping[str, Any]
-    ) -> ResearchReplayAvailabilityPolicy:
+    ) -> TradeFlowReplayPolicy:
         return cls(**dict(raw))
 
 
 @dataclass(frozen=True)
-class ReplayAvailableTradeFlowBucket:
+class AvailableTradeFlowBucket:
     """One aggregate with canonical and research-availability clocks separated."""
 
     aggregate: TradeFlowAggregateRecord
@@ -127,7 +127,7 @@ class ReplayAvailableTradeFlowBucket:
 
 
 @dataclass(frozen=True)
-class ResearchReplayAvailabilityArtifact:
+class TradeFlowReplayArtifact:
     """Pure derivation evidence before dataset identity is bound by the caller."""
 
     schema_version: str
@@ -168,15 +168,15 @@ def _receipt_normalized(trade: MarketTradeFact) -> MarketTradeFact:
     return replace(trade, accepted_at=trade.received_at, known_at=trade.received_at)
 
 
-def derive_research_replay_availability(
+def derive_trade_flow_replay(
     *,
-    policy: ResearchReplayAvailabilityPolicy,
+    policy: TradeFlowReplayPolicy,
     aggregates: Sequence[TradeFlowAggregateRecord],
     source_trades: Sequence[MarketTradeRecord],
     coverage_versions: Mapping[tuple[str, int], TradeCoverageIntervalVersion],
 ) -> tuple[
-    tuple[ReplayAvailableTradeFlowBucket, ...],
-    ResearchReplayAvailabilityArtifact,
+    tuple[AvailableTradeFlowBucket, ...],
+    TradeFlowReplayArtifact,
 ]:
     """Derive replay availability and fail closed on any material mismatch.
 
@@ -215,7 +215,7 @@ def derive_research_replay_availability(
             ),
         )
     )
-    eligible: list[ReplayAvailableTradeFlowBucket] = []
+    eligible: list[AvailableTradeFlowBucket] = []
     exclusions: Counter[str] = Counter()
     coverage_hashes: set[str] = set()
 
@@ -321,7 +321,7 @@ def derive_research_replay_availability(
         )
         replay_bucket_hash = _stable_hash(
             {
-                "schema_version": RESEARCH_REPLAY_AVAILABILITY_SCHEMA_VERSION,
+                "schema_version": TRADE_FLOW_REPLAY_SCHEMA_VERSION,
                 "policy_hash": policy.policy_hash,
                 "aggregate_material_hash": aggregate.material_hash,
                 "aggregate_input_fingerprint": aggregate.input_fingerprint,
@@ -332,7 +332,7 @@ def derive_research_replay_availability(
             }
         )
         eligible.append(
-            ReplayAvailableTradeFlowBucket(
+            AvailableTradeFlowBucket(
                 aggregate=aggregate_record,
                 replay_available_at=replay_available_at,
                 source_receipt_watermark_at=watermark.received_at,
@@ -344,8 +344,8 @@ def derive_research_replay_availability(
         )
 
     replay_hashes = tuple(row.replay_bucket_hash for row in eligible)
-    artifact = ResearchReplayAvailabilityArtifact(
-        schema_version=RESEARCH_REPLAY_AVAILABILITY_SCHEMA_VERSION,
+    artifact = TradeFlowReplayArtifact(
+        schema_version=TRADE_FLOW_REPLAY_SCHEMA_VERSION,
         policy_hash=policy.policy_hash,
         bucket_count=len(ordered_aggregates),
         eligible_bucket_count=len(eligible),
@@ -355,7 +355,7 @@ def derive_research_replay_availability(
         replay_bucket_hashes=replay_hashes,
         replay_semantic_hash=_stable_hash(
             {
-                "schema_version": RESEARCH_REPLAY_AVAILABILITY_SCHEMA_VERSION,
+                "schema_version": TRADE_FLOW_REPLAY_SCHEMA_VERSION,
                 "policy_hash": policy.policy_hash,
                 "replay_bucket_hashes": list(replay_hashes),
                 "exclusion_counts": dict(sorted(exclusions.items())),
@@ -366,11 +366,11 @@ def derive_research_replay_availability(
 
 
 __all__ = [
-    "RESEARCH_REPLAY_AVAILABILITY_SCHEMA_VERSION",
-    "RESEARCH_REPLAY_TRANSFORM_VERSION",
-    "RESEARCH_REPLAY_WATERMARK_POLICY",
-    "ReplayAvailableTradeFlowBucket",
-    "ResearchReplayAvailabilityArtifact",
-    "ResearchReplayAvailabilityPolicy",
-    "derive_research_replay_availability",
+    "TRADE_FLOW_REPLAY_SCHEMA_VERSION",
+    "TRADE_FLOW_REPLAY_TRANSFORM_VERSION",
+    "TRADE_FLOW_REPLAY_WATERMARK_POLICY",
+    "AvailableTradeFlowBucket",
+    "TradeFlowReplayArtifact",
+    "TradeFlowReplayPolicy",
+    "derive_trade_flow_replay",
 ]

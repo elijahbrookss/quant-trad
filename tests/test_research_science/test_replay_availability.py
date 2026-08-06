@@ -19,8 +19,8 @@ from market_data.structure import (
     aggregate_trade_bucket,
 )
 from research_science import (
-    ResearchReplayAvailabilityPolicy,
-    derive_research_replay_availability,
+    TradeFlowReplayPolicy,
+    derive_trade_flow_replay,
 )
 
 
@@ -149,9 +149,9 @@ def _fixture():
 
 def test_replay_availability_uses_receipt_watermark_and_preserves_canonical_clock() -> None:
     _, coverage, trades, aggregates = _fixture()
-    policy = ResearchReplayAvailabilityPolicy(processing_latency_ms=50)
+    policy = TradeFlowReplayPolicy(processing_latency_ms=50)
 
-    buckets, artifact = derive_research_replay_availability(
+    buckets, artifact = derive_trade_flow_replay(
         policy=policy,
         aggregates=aggregates,
         source_trades=trades,
@@ -169,8 +169,8 @@ def test_replay_availability_uses_receipt_watermark_and_preserves_canonical_cloc
 
 def test_replay_semantics_ignore_later_batch_canonicalization_timestamps() -> None:
     _, coverage, trades, aggregates = _fixture()
-    policy = ResearchReplayAvailabilityPolicy()
-    left, left_artifact = derive_research_replay_availability(
+    policy = TradeFlowReplayPolicy()
+    left, left_artifact = derive_trade_flow_replay(
         policy=policy,
         aggregates=aggregates,
         source_trades=trades,
@@ -194,7 +194,7 @@ def test_replay_semantics_ignore_later_batch_canonicalization_timestamps() -> No
         )
         for row in aggregates
     )
-    right, right_artifact = derive_research_replay_availability(
+    right, right_artifact = derive_trade_flow_replay(
         policy=policy,
         aggregates=delayed_aggregates,
         source_trades=delayed_trades,
@@ -209,14 +209,14 @@ def test_replay_semantics_ignore_later_batch_canonicalization_timestamps() -> No
 
 def test_replay_prefix_is_invariant_when_later_buckets_are_added() -> None:
     _, coverage, trades, aggregates = _fixture()
-    policy = ResearchReplayAvailabilityPolicy()
-    prefix, _ = derive_research_replay_availability(
+    policy = TradeFlowReplayPolicy()
+    prefix, _ = derive_trade_flow_replay(
         policy=policy,
         aggregates=aggregates[:1],
         source_trades=trades[:2],
         coverage_versions={(coverage.interval_id, coverage.revision): coverage},
     )
-    full, _ = derive_research_replay_availability(
+    full, _ = derive_trade_flow_replay(
         policy=policy,
         aggregates=aggregates,
         source_trades=trades,
@@ -240,8 +240,8 @@ def test_replay_fails_on_raw_aggregate_tamper() -> None:
         *trades[1:],
     )
     with pytest.raises(ValueError, match="do not reconcile"):
-        derive_research_replay_availability(
-            policy=ResearchReplayAvailabilityPolicy(),
+        derive_trade_flow_replay(
+            policy=TradeFlowReplayPolicy(),
             aggregates=aggregates,
             source_trades=tampered,
             coverage_versions={(coverage.interval_id, coverage.revision): coverage},
@@ -251,8 +251,8 @@ def test_replay_fails_on_raw_aggregate_tamper() -> None:
 def test_replay_fails_on_an_internal_aggregate_gap() -> None:
     _, coverage, trades, aggregates = _fixture()
     with pytest.raises(ValueError, match="aggregate bucket gap"):
-        derive_research_replay_availability(
-            policy=ResearchReplayAvailabilityPolicy(),
+        derive_trade_flow_replay(
+            policy=TradeFlowReplayPolicy(),
             aggregates=(aggregates[0], aggregates[2]),
             source_trades=trades,
             coverage_versions={(coverage.interval_id, coverage.revision): coverage},
@@ -268,8 +268,8 @@ def test_zero_trade_bucket_requires_a_later_source_watermark() -> None:
         coverage=coverage,
         version=7,
     )
-    eligible, _ = derive_research_replay_availability(
-        policy=ResearchReplayAvailabilityPolicy(),
+    eligible, _ = derive_trade_flow_replay(
+        policy=TradeFlowReplayPolicy(),
         aggregates=(zero,),
         source_trades=(trades[0], trades[2]),
         coverage_versions={(coverage.interval_id, coverage.revision): coverage},
@@ -277,8 +277,8 @@ def test_zero_trade_bucket_requires_a_later_source_watermark() -> None:
     assert len(eligible) == 1
     assert eligible[0].source_trade_count == 0
 
-    unavailable, artifact = derive_research_replay_availability(
-        policy=ResearchReplayAvailabilityPolicy(),
+    unavailable, artifact = derive_trade_flow_replay(
+        policy=TradeFlowReplayPolicy(),
         aggregates=(zero,),
         source_trades=(trades[0],),
         coverage_versions={(coverage.interval_id, coverage.revision): coverage},
