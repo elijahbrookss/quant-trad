@@ -3,27 +3,27 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any, Mapping
+from typing import Any
 
+from portal.backend.service.storage.repos.market_data import market_data_repo
 from research_science import (
     CANDIDATE_SCHEMA_VERSION,
     SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
-    CandidateSnapshot,
     BlindnessClass,
+    CandidateSnapshot,
     ScientificEvidence,
     ScientificProtocol,
     adjusted_p_values,
     classify_scientific_quality,
 )
-from portal.backend.service.storage.repos.market_data import market_data_repo
 from strategies.typed_graph import (
     TYPED_STRATEGY_GRAPH_VERSION,
     TypedStrategyGraph,
 )
 
 from . import authority_repository as repository
-
 
 RESEARCHER_ROLES = {"researcher", "research_agent"}
 AUTHORITY_ROLES = {"research_authority", "human_research_owner"}
@@ -407,10 +407,42 @@ def execute_holdout_internal(
     )
 
 
+def reject_holdout_internal(
+    *,
+    holdout_use_id: str,
+    reservation_token: str,
+    result_evidence: Mapping[str, Any],
+    reason_codes: Sequence[str],
+    executor_actor: str,
+    request_id: str,
+) -> dict[str, Any]:
+    """Internal negative-result seam; deliberately absent from the controller."""
+
+    return repository.reject_holdout_internal(
+        holdout_use_id=holdout_use_id,
+        reservation_token=reservation_token,
+        result_evidence=result_evidence,
+        reason_codes=reason_codes,
+        executor_actor=executor_actor,
+        request_id=request_id,
+    )
+
+
 def close_family(payload: Mapping[str, Any]) -> dict[str, Any]:
     actor_id, actor_role, request_id = _identity(payload, admitted_roles=AUTHORITY_ROLES)
     return repository.close_family(
         family_id=_required(payload.get("family_id"), field="family_id"),
+        actor_id=actor_id,
+        actor_role=actor_role,
+        request_id=request_id,
+    )
+
+
+def archive_rejected_family(payload: Mapping[str, Any]) -> dict[str, Any]:
+    actor_id, actor_role, request_id = _identity(payload, admitted_roles=AUTHORITY_ROLES)
+    return repository.archive_rejected_family(
+        family_id=_required(payload.get("family_id"), field="family_id"),
+        reason=_required(payload.get("reason"), field="reason"),
         actor_id=actor_id,
         actor_role=actor_role,
         request_id=request_id,

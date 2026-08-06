@@ -7,8 +7,9 @@ import json
 import math
 import secrets
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -27,7 +28,6 @@ from portal.backend.db.models import (
 from portal.backend.db.session import db
 from research_science import CandidateSnapshot, DatasetRole, ScientificProtocol
 from strategies.typed_graph import TypedStrategyGraph, compile_typed_strategy_graph
-
 
 RUNNER_TERMINAL_ATTEMPT_STATUSES = {
     "completed",
@@ -987,6 +987,82 @@ def execute_holdout_internal(
         return holdout.to_dict(include_result=False)
 
 
+def reject_holdout_internal(
+    *,
+    holdout_use_id: str,
+    reservation_token: str,
+    result_evidence: Mapping[str, Any],
+    reason_codes: Sequence[str],
+    executor_actor: str,
+    request_id: str,
+) -> dict[str, Any]:
+    """Consume a sealed holdout whose evaluated candidate failed its gates.
+
+    Negative holdout evidence is retained privately and the one-use capability
+    is terminally consumed.  Public family evidence continues to redact the
+    result because failed holdouts never enter the certificate feedback-release
+    path.
+    """
+
+    supplied_hash = hashlib.sha256(
+        _required(reservation_token, field="reservation_token").encode("utf-8")
+    ).hexdigest()
+    normalized_reasons = tuple(
+        sorted(
+            {
+                _required(value, field="holdout_rejection_reason")
+                for value in reason_codes
+            }
+        )
+    )
+    if not normalized_reasons:
+        raise ValueError("holdout rejection requires at least one reason code")
+    result_payload = {
+        **dict(result_evidence),
+        "holdout_gate_passed": False,
+        "holdout_rejection_reason_codes": list(normalized_reasons),
+    }
+    with db.session() as session:
+        holdout = session.scalar(
+            select(ResearchHoldoutUseRecord)
+            .where(ResearchHoldoutUseRecord.id == holdout_use_id)
+            .with_for_update()
+        )
+        if holdout is None:
+            raise KeyError(f"holdout use not found: {holdout_use_id}")
+        if not secrets.compare_digest(holdout.reservation_token_hash, supplied_hash):
+            raise ValueError("holdout_reservation_token_invalid")
+        if holdout.status == "rejected":
+            return holdout.to_dict(include_result=False)
+        if holdout.status != "reserved":
+            raise ValueError("holdout_use_not_reserved")
+        family = session.get(ResearchFamilyRecord, holdout.family_id)
+        if family is None:
+            raise RuntimeError("holdout_family_missing")
+        holdout.status = "rejected"
+        holdout.executor_actor = _required(executor_actor, field="executor_actor")
+        holdout.result_evidence = result_payload
+        holdout.completed_at = _now()
+        family.status = "holdout_rejected"
+        session.flush()
+        _event(
+            session,
+            aggregate_type="family",
+            aggregate_id=family.id,
+            event_type="HOLDOUT_REJECTED_SEALED",
+            actor_id=executor_actor,
+            actor_role="holdout_executor",
+            request_id=request_id,
+            idempotency_key=f"holdout-reject:{request_id}",
+            payload={
+                "holdout_use_id": holdout.id,
+                "reason_codes": list(normalized_reasons),
+                "result_evidence_hash": _stable_hash(result_payload),
+            },
+        )
+        return holdout.to_dict(include_result=False)
+
+
 def close_family(
     *,
     family_id: str,
@@ -1031,6 +1107,61 @@ def close_family(
             request_id=request_id,
             idempotency_key=f"family-close:{request_id}",
             payload={"candidate_id": family.current_candidate_id},
+        )
+        return family.to_dict()
+
+
+def archive_rejected_family(
+    *,
+    family_id: str,
+    reason: str,
+    actor_id: str,
+    actor_role: str,
+    request_id: str,
+) -> dict[str, Any]:
+    """Terminally archive a family that cannot produce a certifiable candidate."""
+
+    with db.session() as session:
+        family = session.scalar(
+            select(ResearchFamilyRecord)
+            .where(ResearchFamilyRecord.id == family_id)
+            .with_for_update()
+        )
+        if family is None:
+            raise KeyError(f"research family not found: {family_id}")
+        if family.status == "archived":
+            return family.to_dict()
+        if family.status not in {"open", "holdout_rejected"}:
+            raise ValueError("family_not_eligible_for_rejection_archive")
+        if family.status == "open" and family.current_candidate_id:
+            raise ValueError("open family with a frozen candidate must use normal closure")
+        nonterminal = int(
+            session.scalar(
+                select(func.count()).select_from(ResearchAttemptRecord).where(
+                    ResearchAttemptRecord.family_id == family.id,
+                    ResearchAttemptRecord.status.not_in(TERMINAL_ATTEMPT_STATUSES),
+                )
+            )
+            or 0
+        )
+        if nonterminal:
+            raise ValueError("family_has_unaccounted_attempts")
+        normalized_reason = _required(reason, field="archive_reason")
+        prior_status = family.status
+        family.status = "archived"
+        family.closed_at = family.closed_at or _now()
+        family.feedback_released = False
+        session.flush()
+        _event(
+            session,
+            aggregate_type="family",
+            aggregate_id=family.id,
+            event_type="REJECTED_FAMILY_ARCHIVED",
+            actor_id=actor_id,
+            actor_role=actor_role,
+            request_id=request_id,
+            idempotency_key=f"family-rejection-archive:{request_id}",
+            payload={"prior_status": prior_status, "reason": normalized_reason},
         )
         return family.to_dict()
 
@@ -1294,21 +1425,23 @@ def internal_holdout_binding(holdout_use_id: str, *, reservation_token: str) -> 
 
 __all__ = [
     "TERMINAL_ATTEMPT_STATUSES",
+    "archive_rejected_family",
     "close_family",
     "complete_attempt",
     "create_certificate",
     "create_family",
-    "create_strategy_graph",
     "create_protocol",
+    "create_strategy_graph",
     "execute_holdout_internal",
-    "family_evidence",
     "family_context",
+    "family_evidence",
     "freeze_candidate",
     "get_protocol",
     "internal_holdout_binding",
     "protocol_private",
-    "register_attempt",
     "record_rejected_proposal",
+    "reject_holdout_internal",
+    "register_attempt",
     "release_holdout_feedback",
     "reserve_holdout",
 ]

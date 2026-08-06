@@ -7,13 +7,11 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.orm import Session
 
-from portal.backend.db.session import db
-from portal.backend.service.research import authority
-from portal.backend.service.research import authority_repository as repository
-from portal.backend.service.research import governance
-from portal.backend.service.research import governance_repository
-from portal.backend.service.research import repository as research_repository
 from market_data.store import FrozenDataset
+from portal.backend.db.session import db
+from portal.backend.service.research import authority, governance, governance_repository
+from portal.backend.service.research import authority_repository as repository
+from portal.backend.service.research import repository as research_repository
 from research_science import (
     CANDIDATE_SCHEMA_VERSION,
     PROTOCOL_SCHEMA_VERSION,
@@ -21,7 +19,6 @@ from research_science import (
     ScientificProtocol,
 )
 from strategies.typed_graph import TYPED_STRATEGY_GRAPH_VERSION
-
 
 pytestmark = pytest.mark.integration
 
@@ -291,6 +288,169 @@ def test_protocol_admission_requires_frozen_instrument_universe_coverage(
                 "actor_role": "research_authority",
                 "request_id": f"request-protocol-{suffix}",
                 "protocol": payload,
+            }
+        )
+
+
+def _reserved_fixture_holdout(suffix: str) -> tuple[dict, dict, str]:
+    protocol = ScientificProtocol.from_dict(_protocol_payload(f"protocol-{suffix}"))
+    repository.create_protocol(
+        protocol,
+        actor_id="human:owner",
+        actor_role="research_authority",
+        request_id=f"request-protocol-{suffix}",
+    )
+    family = repository.create_family(
+        protocol_id=protocol.protocol_id,
+        family_id=f"family-{suffix}",
+        name="fixture-family",
+        actor_id="agent:researcher",
+        actor_role="research_agent",
+        request_id=f"request-family-{suffix}",
+    )
+    attempt = repository.register_attempt(
+        family_id=family["id"],
+        request_id=f"request-validation-{suffix}",
+        dataset_role="validation",
+        trial_inputs={"strategy_graph_hash": "1" * 64},
+        estimated_runtime_seconds=1,
+        estimated_compute_units=1,
+        actor_id="agent:researcher",
+        actor_role="research_agent",
+    )
+    evidence = {
+        "artifact_hash": "2" * 64,
+        "strategy_artifact_hash": "3" * 64,
+        "parameter_artifact_hash": "4" * 64,
+        "execution_model_hash": "5" * 64,
+        "metric_contract_hash": "6" * 64,
+        "reproducible": True,
+        "sample_count": 80,
+        "trade_count": 60,
+        "calendar_days": 365,
+        "exposure": 4000,
+        "execution_quality_class": "X5",
+        "execution_stress_ids_passed": [
+            "cost-plus-25bps",
+            "latency-plus-one-bar",
+        ],
+        "metric_results": {
+            "net_sharpe": 1.1,
+            "net_return": 0.12,
+            "max_drawdown": -0.08,
+        },
+        "benchmark_metric_results": {
+            "buy-and-hold": {"net_sharpe": 0.5},
+        },
+        "walk_forward_fold_count": 3,
+        "purge_bars": 20,
+        "embargo_bars": 20,
+        "context_only_warmup": True,
+        "flat_at_scoring_start": True,
+        "no_pending_orders_at_scoring_start": True,
+        "signals_not_before_scoring_start": True,
+    }
+    repository.complete_attempt(
+        attempt_id=attempt["id"],
+        status="completed",
+        result_evidence=evidence,
+        error=None,
+        actual_runtime_seconds=1,
+        actual_compute_units=1,
+        actor_id="runner:offline",
+        actor_role="experiment_runner",
+        request_id=f"request-validation-complete-{suffix}",
+    )
+    candidate = repository.freeze_candidate(
+        CandidateSnapshot(
+            schema_version=CANDIDATE_SCHEMA_VERSION,
+            candidate_id=f"candidate-{suffix}",
+            family_id=family["id"],
+            protocol_hash=protocol.protocol_hash,
+            source_attempt_id=attempt["id"],
+            strategy_artifact_hash="3" * 64,
+            parameter_artifact_hash="4" * 64,
+            execution_model_hash="5" * 64,
+            metric_contract_hash="6" * 64,
+            research_dataset_hashes=("a" * 64, "b" * 64),
+            evidence_hashes=("2" * 64,),
+            frozen_by="agent:researcher",
+        ),
+        actor_id="agent:researcher",
+        actor_role="research_agent",
+        request_id=f"request-candidate-{suffix}",
+    )
+    repository.close_family(
+        family_id=family["id"],
+        actor_id="human:holdout-authority",
+        actor_role="research_authority",
+        request_id=f"request-close-{suffix}",
+    )
+    holdout, token = repository.reserve_holdout(
+        family_id=family["id"],
+        candidate_id=candidate["id"],
+        actor_id="human:holdout-authority",
+        actor_role="research_authority",
+        request_id=f"request-holdout-{suffix}",
+    )
+    return family, holdout, token
+
+
+def test_rejected_holdout_is_consumed_and_remains_sealed(
+    authority_transaction,
+) -> None:
+    suffix = uuid4().hex
+    family, holdout, token = _reserved_fixture_holdout(suffix)
+    rejected = authority.reject_holdout_internal(
+        holdout_use_id=holdout["id"],
+        reservation_token=token,
+        result_evidence={
+            "artifact_hash": "7" * 64,
+            "sample_count": 5,
+            "trade_count": 1,
+        },
+        reason_codes=("sample_count_below_minimum", "trade_count_below_minimum"),
+        executor_actor="runner:sealed-holdout",
+        request_id=f"request-holdout-reject-{suffix}",
+    )
+    assert rejected["status"] == "rejected"
+    public = repository.family_evidence(family["id"])
+    assert public["family"]["status"] == "holdout_rejected"
+    assert public["holdout"]["status"] == "rejected"
+    assert public["holdout"]["result_evidence"] is None
+    private = repository.family_evidence(family["id"], private=True)
+    assert private["holdout"]["result_evidence"][
+        "holdout_rejection_reason_codes"
+    ] == ["sample_count_below_minimum", "trade_count_below_minimum"]
+    archived = authority.archive_rejected_family(
+        {
+            "actor_id": "human:holdout-authority",
+            "actor_role": "research_authority",
+            "request_id": f"request-family-archive-{suffix}",
+            "family_id": family["id"],
+            "reason": "sealed_holdout_gate_rejection",
+        }
+    )
+    assert archived["status"] == "archived"
+    assert repository.family_evidence(family["id"])["events"][-1][
+        "event_type"
+    ] == "REJECTED_FAMILY_ARCHIVED"
+    with pytest.raises(ValueError, match="holdout_use_not_reserved"):
+        repository.execute_holdout_internal(
+            holdout_use_id=holdout["id"],
+            reservation_token=token,
+            result_evidence={},
+            executor_actor="runner:sealed-holdout",
+            request_id=f"request-holdout-retry-{suffix}",
+        )
+    with pytest.raises(ValueError, match="scientific certification requires"):
+        authority.certify_family(
+            {
+                "actor_id": "human:independent-certifier",
+                "actor_role": "research_authority",
+                "request_id": f"request-certificate-{suffix}",
+                "family_id": family["id"],
+                "robustness": {},
             }
         )
 

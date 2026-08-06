@@ -15,6 +15,7 @@ code_paths:
   - src/research_science
   - portal/backend/service/research/authority.py
   - portal/backend/service/research/authority_repository.py
+  - portal/backend/service/research/campaign_runner.py
   - portal/backend/controller/research.py
   - portal/backend/db/models.py
   - cli/main.py
@@ -153,6 +154,14 @@ sufficiency contract before consuming the one-use holdout capability. A failed
 admission leaves the holdout reserved and unconsumed so an operator can correct
 the runner evidence without allocating a new dataset.
 
+A complete evaluation that genuinely fails a pinned holdout gate is different
+from malformed runner evidence. The internal negative-result seam stores that
+evidence sealed, marks the holdout `rejected`, terminally consumes the one-use
+capability, and permits the rejected family to be archived. Public evidence
+does not release failed holdout metrics. Families that produce no
+validation-qualified candidate may also be terminally archived once every
+attempt is accounted; they do not open the holdout.
+
 This class does not claim continuous-forward state across folds. That remains a
 higher future protocol version.
 
@@ -210,3 +219,14 @@ CLI log does not disable this durable authority trail.
 
 Phase 4 grants controlled search and evidence authority only. It grants no
 shadow, paper, live, external-order, credential, capital, or deployment access.
+
+## Bounded campaign runner
+
+`campaign_runner.py` is a trusted operator-only composition over the same
+authority and governance services. It may resolve a protocol's private sealed
+holdout binding and reservation capability, but it has no HTTP route and no
+provider, credential, deployment, or order-submission dependency. Campaign
+code must pass a provider-free preflight before protocol activation and pin its
+source revision in the immutable protocol. Once activated, a campaign may emit
+evidence and documentation but cannot change its charter, evaluator, policy,
+thresholds, or code identity.
