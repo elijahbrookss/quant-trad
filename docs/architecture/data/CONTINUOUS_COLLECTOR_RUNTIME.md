@@ -18,6 +18,7 @@ code_paths:
   - src/core/market_storage_lifecycle.py
   - src/market_data/archive.py
   - portal/backend/service/market/collector_supervisor.py
+  - portal/backend/service/market/collector_safety.py
   - portal/backend/service/market/continuous_stream_collector.py
   - portal/backend/service/market/market_storage_lifecycle.py
   - portal/backend/service/market/market_structure_service.py
@@ -30,8 +31,9 @@ code_paths:
   - scripts/reporting/host_capacity_sampler.ps1
   - scripts/db/manual_enable_market_storage_lifecycle_v1.sql
   - docker/grafana/provisioning/dashboards/capacity-database-growth.json
----
+  - docker/grafana/provisioning/alerting/collector-safety.yml
   - docker/docker-compose.yml
+---
 # Continuous Collector Runtime
 
 ## Purpose
@@ -52,7 +54,7 @@ Coinbase L2 currently has bounded capture, archive, reconstruction, checkpoint,
 and replay support, but no registered long-lived supervisor adapter. An L2
 definition or historical checkpoint must therefore never be reported as a live
 indefinite collector. It remains bounded until a provider-neutral continuous
-book adapter, sustained validation evidence, and storage admission exist.
+book adapter and appropriate safety policy exist.
 
 ## Runtime Contract
 
@@ -158,19 +160,20 @@ Operator surfaces are:
 
 `qt data market-structure` exposes worker-owned controls:
 
-- `continuous-validate` starts the production implementation path for a bounded
+- `continuous-validate` starts the implementation path for a bounded
   60-second to seven-day proof;
 - `continuous-evidence` derives proof status from canonical session, archive,
   mapping, quality, and coverage rows;
-- `continuous-admit` records explicit operator and resource-budget approval;
-- `continuous-start` starts admitted production with no duration cap;
+- `enroll` applies a validated product/stream fleet manifest;
+- `continuous-start` performs system-derived qualification and starts with no
+  duration cap;
 - `continuous-stop` requests graceful drain and stop.
+- `safety-halt`, `safety-acknowledge`, and `safety-status` operate persistent
+  global, fleet, and stream latches.
 
-The 24-hour requirement is an admission proof, not a collector lifetime cap.
-Callers cannot assert that proof with a Boolean: admission replaces submitted
-claims with repository-derived evidence and rejects failures, archive mapping
-lag, open/invalid terminal coverage, missing archive evidence, or less than 24
-hours of implemented-path runtime.
+The BIP, ETP, and SLP trade enrollments are continuous: their runtime has no
+`stop_at`. A restart reconstructs desired tasks from the database and cannot
+bypass an active safety latch.
 
 ## Resource Authority
 
@@ -200,13 +203,20 @@ Cloud deployments should provide the equivalent `physical_host_filesystem` or
 detection is valid only when the runtime can observe the real backing resource;
 otherwise the state is `unavailable`, never an optimistic estimate.
 
-## Production Admission
+## Collector Safety Authority
 
-Admission requires both canonical validation evidence and an explicit resource
-budget containing an authoritative resource identity, observation time,
-physical visibility, observed free bytes, observed growth, allowed daily
-growth, and minimum headroom. Virtual-guest storage is rejected. Observed
-growth above budget or free space below headroom is rejected.
+Each enrollment pins a `CollectorSafetyPolicy`. Qualification derives adapter
+support, exact product registration, writable storage, actual filesystem free
+bytes, current spool utilization, and applicable persistent latches. Operators
+do not supply an optimistic storage budget to make a stream eligible.
 
-Admission never starts collection by itself. Starting and stopping remain
-separate explicit controls, and revoking admission disables the definition.
+Warning thresholds append immutable safety evidence and trigger Grafana without
+stopping collection. Critical thresholds append evidence, latch the stream,
+disable desired work, and let the normal collector shutdown drain archives and
+canonicalization before the lease is released. Local spool exhaustion remains
+an immediate fail-closed condition.
+
+Safety state is a database projection derived from append-only warning, halt,
+and acknowledgement events. The applicable `global:*`, fleet, and stream scopes
+are checked on every supervisor pass, so process/container restart cannot clear
+a halt. A distinct operator acknowledgement is required to release a scope.

@@ -3,7 +3,7 @@ component: market-structure-phase-0-provider-proof
 subsystem: data
 layer: operations
 doc_type: validation
-status: implemented
+status: historical
 tags:
   - market-data
   - market-structure

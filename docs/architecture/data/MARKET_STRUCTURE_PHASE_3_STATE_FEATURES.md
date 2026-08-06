@@ -3,7 +3,7 @@ component: market-structure-phase3-state-features
 subsystem: data
 layer: operations
 doc_type: architecture
-status: active
+status: historical
 tags:
   - market-data
   - market-structure

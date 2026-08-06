@@ -15,7 +15,6 @@ code_paths:
   - src/research_science
   - portal/backend/service/research/authority.py
   - portal/backend/service/research/authority_repository.py
-  - portal/backend/service/research/campaign_runner.py
   - portal/backend/controller/research.py
   - portal/backend/db/models.py
   - cli/main.py
@@ -26,8 +25,8 @@ code_paths:
 
 ## Implemented boundary
 
-Phase 4 is implemented inside the existing application and primary PostgreSQL
-boundary. It is a scientific protocol, controlled operation set, and durable
+Scientific authority is implemented inside the existing application and
+primary PostgreSQL boundary. It is a protocol, controlled operation set, and durable
 state projection—not a collection of pretend institutional microservices.
 
 ```text
@@ -57,13 +56,14 @@ declared hash matches, whose series are non-empty, and whose frozen ranges cover
 the assigned window. Resolution reads frozen storage and performs no provider
 fetch.
 
-Selection campaigns using derived trade flow additionally require the
+Studies using derived trade flow additionally require the
 [research replay availability boundary](RESEARCH_REPLAY_AVAILABILITY.md). Each
-role dataset freezes raw `market.trade` receipt evidence with the aggregate and
-cross-facts. The immutable protocol pins the replay policy and the exact train,
-validation, and private holdout replay binding hashes. Canonical `known_at`
-remains unchanged; the separate replay clock is admitted only after exact
-raw/aggregate/coverage reconciliation.
+The `StudyDefinition` declares raw trades, aggregate trade flow, and every
+contextual fact through `FactRequirement`; no orchestrator inserts OI or
+funding implicitly. The immutable protocol pins train, validation, and private
+holdout datasets. `ResearchRun` separately pins availability evidence and
+exact implementation bundles. Canonical `known_at` remains unchanged; the
+replay clock is admitted only after exact raw/aggregate/coverage reconciliation.
 
 The research agent receives the public protocol. For a sealed historical
 holdout, its dataset ID, hash, and window are redacted. Trial registration
@@ -106,7 +106,7 @@ safety, or benchmark metrics.
 
 This is a workflow fence, not a claim about global knowledge. A person or
 process with database, shell, repository, or independent provider access may
-already know historical public data. Phase 4 does not attempt institution-grade
+already know historical public data. The current authority does not attempt institution-grade
 capability isolation.
 
 ## Assurance classes
@@ -232,16 +232,14 @@ CLI log does not disable this durable authority trail.
 
 ## Operational boundary
 
-Phase 4 grants controlled search and evidence authority only. It grants no
+Scientific authority grants controlled search and evidence authority only. It grants no
 shadow, paper, live, external-order, credential, capital, or deployment access.
 
-## Bounded campaign runner
+## Study composition
 
-`campaign_runner.py` is a trusted operator-only composition over the same
-authority and governance services. It may resolve a protocol's private sealed
-holdout binding and reservation capability, but it has no HTTP route and no
-provider, credential, deployment, or order-submission dependency. Campaign
-code must pass a provider-free preflight before protocol activation and pin its
-source revision in the immutable protocol. Once activated, a campaign may emit
-evidence and documentation but cannot change its charter, evaluator, policy,
-thresholds, or code identity.
+`StudyDefinition` is provider-free and resolves only exact registered feature,
+search-space, evaluator, and availability bundles. `ResearchRun` pins its code,
+protocol, frozen dataset bindings, bundle versions, and availability evidence.
+The study boundary has no provider, credential, deployment, promotion, or
+order-submission dependency. A material change requires a new immutable study
+and run identity.

@@ -22,7 +22,8 @@ code_paths:
 
 ## Status
 
-Accepted on 2026-08-06 for roadmap Phases 4 through 6.
+Accepted on 2026-08-06 for scientific authority, bounded strategy generation,
+and offline research governance.
 
 ## Context
 

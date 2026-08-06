@@ -1,21 +1,24 @@
 ---
-component: btc-perp-market-structure-campaign-v3-dossier
+component: btc-perp-market-structure-v3-postmortem
 subsystem: research-orchestration
 layer: operation
-doc_type: campaign-result
-status: terminal-invalid-input-contract
+doc_type: postmortem
+status: historical
 tags:
   - research
-  - autonomous-campaign
+  - historical-research
   - perpetual
   - invalid-input-contract
   - sealed-holdout
 code_paths:
-  - config/research_campaigns/btc_perp_market_structure_v3.json
-  - src/research_science/autonomous_campaign.py
-  - portal/backend/service/research/campaign_runner.py
+  - src/research_science/replay_availability.py
+  - portal/backend/service/research/authority_repository.py
 ---
-# BTC PERP Market-Structure Campaign V3 Terminal Dossier
+# BTC PERP Market-Structure V3 Historical Postmortem
+
+This document preserves the vocabulary and identities emitted by the retired
+operation as historical evidence. The executable schema, JSON definition, and
+runner facade were deleted without a compatibility parser or migration.
 
 ## Decision
 
