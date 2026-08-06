@@ -498,6 +498,7 @@ class EntryFilledContext(RuntimeEventContextBase):
     book_data_capability: Optional[str] = None
     time_in_force: Optional[str] = None
     post_only: Optional[bool] = None
+    book_execution_evidence: Mapping[str, Any] | None = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
     accounting_mode: Optional[str] = None
@@ -570,6 +571,11 @@ class EntryFilledContext(RuntimeEventContextBase):
             raise ValueError("context.full_fill_assumption must be a boolean when provided")
         if self.post_only is not None and not isinstance(self.post_only, bool):
             raise ValueError("context.post_only must be a boolean when provided")
+        object.__setattr__(
+            self,
+            "book_execution_evidence",
+            _copy_mapping(self.book_execution_evidence),
+        )
         if self.fee_precision is not None:
             if isinstance(self.fee_precision, bool):
                 raise ValueError("context.fee_precision must be an integer when provided")
@@ -636,6 +642,7 @@ class OrderLifecycleChangedContext(RuntimeEventContextBase):
     reason: Optional[str] = None
     replacement_attempt_id: Optional[str] = None
     venue_event_name: Optional[str] = None
+    book_execution_evidence: Mapping[str, Any] | None = None
     event_subtype: str = "order_lifecycle"
     category: RuntimeEventCategory = RuntimeEventCategory.EXECUTION
     reason_code: Optional[ReasonCode] = None
@@ -701,6 +708,11 @@ class OrderLifecycleChangedContext(RuntimeEventContextBase):
                 if numeric < 0.0:
                     raise ValueError(f"context.{field_name} must be >= 0")
                 object.__setattr__(self, field_name, numeric)
+        object.__setattr__(
+            self,
+            "book_execution_evidence",
+            _copy_mapping(self.book_execution_evidence),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -749,6 +761,7 @@ class ExitFilledContext(RuntimeEventContextBase):
     book_data_capability: Optional[str] = None
     time_in_force: Optional[str] = None
     post_only: Optional[bool] = None
+    book_execution_evidence: Mapping[str, Any] | None = None
     realized_pnl: Optional[float] = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
@@ -826,6 +839,11 @@ class ExitFilledContext(RuntimeEventContextBase):
             raise ValueError("context.full_fill_assumption must be a boolean when provided")
         if self.post_only is not None and not isinstance(self.post_only, bool):
             raise ValueError("context.post_only must be a boolean when provided")
+        object.__setattr__(
+            self,
+            "book_execution_evidence",
+            _copy_mapping(self.book_execution_evidence),
+        )
         if self.fee_precision is not None:
             if isinstance(self.fee_precision, bool):
                 raise ValueError("context.fee_precision must be an integer when provided")
@@ -1071,6 +1089,9 @@ def _execution_evidence_from_dict(data: Mapping[str, Any]) -> Dict[str, Any]:
     result["fee_precision"] = (
         int(data["fee_precision"]) if data.get("fee_precision") is not None else None
     )
+    result["book_execution_evidence"] = _copy_mapping(
+        data.get("book_execution_evidence")
+    )
     return result
 
 
@@ -1256,6 +1277,9 @@ def _runtime_context_from_dict(
             reason=_optional_text(data.get("reason")),
             replacement_attempt_id=_optional_text(data.get("replacement_attempt_id")),
             venue_event_name=_optional_text(data.get("venue_event_name")),
+            book_execution_evidence=_copy_mapping(
+                data.get("book_execution_evidence")
+            ),
             event_subtype=_optional_text(data.get("event_subtype")) or "order_lifecycle",
             category=category,
             reason_code=reason_code,

@@ -158,11 +158,21 @@ _EXECUTION_EVIDENCE_FIELDS = (
 
 def _execution_evidence_fields(source: Mapping[str, Any]) -> Dict[str, Any]:
     metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
-    return {
+    result = {
         key: metadata.get(key) if key in metadata else source.get(key)
         for key in _EXECUTION_EVIDENCE_FIELDS
         if key in metadata or key in source
     }
+    candidate = metadata if (
+        str(metadata.get("schema_version") or "") == "book_execution_evidence.v1"
+        or metadata.get("execution_book_snapshot_hash") is not None
+    ) else source
+    if (
+        str(candidate.get("schema_version") or "") == "book_execution_evidence.v1"
+        or candidate.get("execution_book_snapshot_hash") is not None
+    ):
+        result["book_execution_evidence"] = dict(candidate)
+    return result
 
 
 class RuntimeEventsMixin:
@@ -923,6 +933,13 @@ class RuntimeEventsMixin:
                 reason=event.reason,
                 replacement_attempt_id=event.replacement_attempt_id,
                 venue_event_name=event.venue_event_name,
+                book_execution_evidence=(
+                    dict(event.metadata)
+                    if str(event.metadata.get("schema_version") or "")
+                    == "book_execution_evidence.v1"
+                    or event.metadata.get("execution_book_snapshot_hash") is not None
+                    else {}
+                ),
             ),
             root_id=parent_event.root_id if parent_event is not None else None,
             parent_id=parent_event.event_id if parent_event is not None else None,

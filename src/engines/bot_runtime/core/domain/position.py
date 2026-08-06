@@ -139,6 +139,76 @@ class LadderPosition:
             self.fees_paid += fee
             self._update_net()
 
+    def apply_incremental_entry_fill(
+        self,
+        *,
+        fill_id: str,
+        filled_qty: float,
+        fill_price: float,
+        fee_paid: float,
+        stop_price: float,
+        fill_legs: List[Leg],
+        fill_evidence: Mapping[str, Any],
+        wallet_metadata: Mapping[str, Any],
+    ) -> bool:
+        """Idempotently augment this canonical position for one entry fill."""
+
+        normalized_fill_id = str(fill_id or "").strip()
+        if not normalized_fill_id:
+            raise ValueError("incremental entry fill_id is required")
+        outcome = dict(self.entry_outcome or {})
+        applied_ids = [str(value) for value in outcome.get("entry_fill_ids") or ()]
+        if normalized_fill_id in applied_ids:
+            return False
+        if not self.is_active():
+            raise RuntimeError("incremental entry fill cannot augment a closed position")
+        quantity = float(filled_qty)
+        price = float(fill_price)
+        if not math.isfinite(quantity) or not math.isfinite(price) or quantity <= 0 or price <= 0:
+            raise ValueError("incremental entry fill quantity and price must be positive")
+        current_qty = sum(max(float(leg.contracts), 0.0) for leg in self.legs)
+        if current_qty <= 0:
+            raise RuntimeError("canonical position has no entry quantity to augment")
+        new_qty = current_qty + quantity
+        new_price = ((self.entry_price * current_qty) + (price * quantity)) / new_qty
+        self.entry_price = float(new_price)
+        self.stop_price = float(stop_price)
+        by_id = {str(leg.leg_id or leg.name): leg for leg in self.legs}
+        for added in fill_legs:
+            key = str(added.leg_id or added.name)
+            existing = by_id.get(key)
+            if existing is None:
+                self.legs.append(added)
+                by_id[key] = added
+                continue
+            existing.contracts = float(existing.contracts) + float(added.contracts)
+            if existing.status == "open":
+                existing.target_price = float(added.target_price)
+                existing.ticks = int(added.ticks)
+        applied_ids.append(normalized_fill_id)
+        fill_rows = [dict(row) for row in outcome.get("entry_fills") or () if isinstance(row, Mapping)]
+        fill_rows.append(dict(fill_evidence))
+        outcome.update(
+            {
+                "entry_fill_ids": applied_ids,
+                "entry_fills": fill_rows,
+                "filled_qty": new_qty,
+                "avg_fill_price": self.entry_price,
+                "fee_paid": float(outcome.get("fee_paid") or 0.0) + float(fee_paid or 0.0),
+                "remaining_qty": max(float(outcome.get("requested_qty") or new_qty) - new_qty, 0.0),
+            }
+        )
+        self.entry_outcome = outcome
+        self.apply_entry_fee(float(fee_paid or 0.0))
+        if wallet_metadata:
+            existing_wallet = dict(self.wallet_fill_metadata or {})
+            rows = [dict(row) for row in existing_wallet.get("entry_fills") or () if isinstance(row, Mapping)]
+            if not rows and existing_wallet:
+                rows.append(existing_wallet)
+            rows.append(dict(wallet_metadata))
+            self.wallet_fill_metadata = {"entry_fills": rows, "fill_count": len(rows)}
+        return True
+
     def _apply_fee_amount(self, fee: float) -> None:
         if fee:
             self.fees_paid += fee

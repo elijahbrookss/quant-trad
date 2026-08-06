@@ -27,7 +27,11 @@ from ..execution_runtime import DeterministicExecutionModel
 from ..exit_settlement import ExitSettlement, ExitSettlementService
 from ..fees import FeeResolver, executed_fee, executed_notional
 from ..margin import calculate_max_qty_by_margin
-from ..order_lifecycle import CanonicalOrderLifecycle, CanonicalOrderLifecycleEvent
+from ..order_lifecycle import (
+    CanonicalOrderLifecycle,
+    CanonicalOrderLifecycleEvent,
+    stable_order_identity,
+)
 from ..wallet import WalletLedger, trace_wallet_balance
 from ..wallet_gateway import WalletGateway
 from .models import (
@@ -811,6 +815,22 @@ class LadderRiskEngine:
         candle: Candle,
     ) -> EntryFill:
         fill_price = float(outcome.avg_fill_price or candle.close)
+        outcome_metadata = dict(outcome.metadata or {})
+        fill_id = str(
+            outcome_metadata.get("fill_id")
+            or outcome_metadata.get("order_fill_id")
+            or stable_order_identity(
+                "entry_fill",
+                {
+                    "order_intent_id": pending.order_intent_id,
+                    "trade_id": pending.trade_id,
+                    "fill_time": outcome.filled_at or outcome.updated_at,
+                    "filled_qty": outcome.filled_qty,
+                    "fill_price": fill_price,
+                    "fee_paid": outcome.fee_paid,
+                },
+            )
+        )
         return EntryFill(
             order_intent_id=str(pending.order_intent_id),
             trade_id=str(pending.trade_id),
@@ -832,6 +852,244 @@ class LadderRiskEngine:
             fee_source=str(outcome.fee_source or "template_or_instrument"),
             fee_version=outcome.fee_version,
             raw={"outcome": asdict(outcome)},
+            fill_id=fill_id,
+        )
+
+    @staticmethod
+    def _is_book_execution_fill(fill: EntryFill) -> bool:
+        raw = dict(fill.raw or {})
+        outcome = dict(raw.get("outcome") or {})
+        metadata = dict(outcome.get("metadata") or {})
+        return (
+            str(metadata.get("schema_version") or "") == "book_execution_evidence.v1"
+            or bool(metadata.get("execution_book_snapshot_hash"))
+        )
+
+    def _apply_incremental_entry_fill(
+        self,
+        *,
+        request: EntryRequest,
+        pending: PendingEntry,
+        fill: EntryFill,
+    ) -> EntryFillResult:
+        """Settle and apply one L2 price-level entry fill atomically."""
+
+        events: List[Dict[str, Any]] = []
+        settlement_payloads: List[Dict[str, Any]] = []
+        fill_id = str(fill.fill_id or "").strip()
+        if not fill_id:
+            raise ValueError("incremental entry fill_id is required")
+        existing = self.active_trade
+        if existing is None or str(existing.trade_id) != str(pending.trade_id):
+            existing = next(
+                (
+                    trade
+                    for trade in reversed(self.trades)
+                    if str(trade.trade_id) == str(pending.trade_id)
+                ),
+                None,
+            )
+        applied_ids = set(str(value) for value in getattr(pending, "applied_fill_ids", ()) or ())
+        if existing is not None:
+            applied_ids.update(
+                str(value)
+                for value in dict(existing.entry_outcome or {}).get("entry_fill_ids") or ()
+            )
+        if fill_id in applied_ids:
+            return EntryFillResult(
+                status="duplicate",
+                pending=pending if float(pending.remaining_qty or 0.0) > 1e-12 else None,
+                position=existing,
+                events=events,
+                settlement_payloads=settlement_payloads,
+            )
+        if fill.filled_qty <= 0 or fill.fill_price <= 0:
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=existing,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="ENTRY_FILL_EMPTY",
+                rejection_detail={"fill_id": fill_id, "filled_qty": fill.filled_qty},
+            )
+        if fill.candle is None or not fill.candle.is_complete():
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=existing,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="ENTRY_CANDLE_MISSING",
+                rejection_detail={"fill_id": fill_id, "order_intent_id": pending.order_intent_id},
+            )
+        candle = Candle(
+            time=fill.candle.time,
+            open=float(fill.candle.open),
+            high=float(fill.candle.high),
+            low=float(fill.candle.low),
+            close=float(fill.candle.close),
+            atr=fill.candle.atr,
+            lookback_15=fill.candle.lookback_15,
+        )
+        prior_qty = float(pending.filled_qty or 0.0)
+        prior_notional = float(pending.filled_notional or 0.0)
+        filled_qty_total = prior_qty + float(fill.filled_qty)
+        if filled_qty_total > float(request.requested_qty) + 1e-12:
+            raise RuntimeError("incremental entry fill would overfill canonical request")
+        filled_notional_total = prior_notional + float(fill.filled_qty) * float(fill.fill_price)
+        fees_paid_total = float(pending.fees_paid or 0.0) + float(fill.fee_paid or 0.0)
+        remaining_qty = max(float(request.requested_qty) - filled_qty_total, 0.0)
+        avg_fill_price = filled_notional_total / filled_qty_total
+        stop_price = self._calculate_stop_price(avg_fill_price, pending.direction, pending.r_ticks)
+        fill_legs = self._build_legs(
+            candle,
+            pending.direction,
+            pending.r_ticks,
+            float(fill.filled_qty),
+            entry_price=avg_fill_price,
+            qty_raw=float(fill.filled_qty),
+            qty_final=float(fill.filled_qty),
+            order_intent_id=pending.order_intent_id,
+            side=pending.intent.side,
+            allow_subminimum=True,
+        )
+        if not fill_legs:
+            raise RuntimeError("incremental entry fill produced no canonical position legs")
+        base_currency, quote_currency = self._resolve_base_quote()
+        notional = executed_notional(
+            price=float(fill.fill_price),
+            quantity=float(fill.filled_qty),
+            contract_size=self.contract_size,
+        )
+        use_wallet_execution = bool(self.execution_adapter and self._wallet_gateway)
+        if use_wallet_execution:
+            settled = self.entry_settlement.apply_entry_fill(
+                EntrySettlementContext(
+                    side=pending.intent.side,
+                    filled_qty=float(fill.filled_qty),
+                    entry_price=float(fill.fill_price),
+                    notional=notional,
+                    fee_paid=float(fill.fee_paid or 0.0),
+                    trade_id=pending.trade_id,
+                    fill_id=fill_id,
+                    direction=pending.direction,
+                    qty_raw=float(fill.filled_qty),
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                )
+            )
+            if not settled:
+                return EntryFillResult(
+                    status="rejected",
+                    pending=None,
+                    position=existing,
+                    events=events,
+                    settlement_payloads=settlement_payloads,
+                    rejection_reason=self.last_rejection_reason or "ENTRY_SETTLEMENT_FAILED",
+                    rejection_detail=dict(self.last_rejection_detail or {}),
+                )
+        wallet_metadata = self.pop_wallet_fill_metadata(str(pending.trade_id))
+        raw_outcome = dict((fill.raw or {}).get("outcome") or {})
+        fill_evidence = {
+            "fill_id": fill_id,
+            "filled_qty": float(fill.filled_qty),
+            "fill_price": float(fill.fill_price),
+            "fee_paid": float(fill.fee_paid or 0.0),
+            "fee_role": fill.liquidity_role,
+            "fee_rate": fill.fee_rate,
+            "fee_source": fill.fee_source,
+            "fee_version": fill.fee_version,
+            "filled_at": fill.fill_time,
+            "metadata": dict(raw_outcome.get("metadata") or {}),
+        }
+        if existing is None:
+            runtime_stop_adjustments = self._build_stop_adjustments(fill_legs, pending.r_ticks)
+            breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(fill_legs, pending.r_ticks)
+            position = self._build_position(
+                candle=candle,
+                entry_price=avg_fill_price,
+                stop_price=stop_price,
+                direction=pending.direction,
+                entry_order=asdict(pending.intent),
+                entry_outcome={
+                    **raw_outcome,
+                    "requested_qty": float(request.requested_qty),
+                    "filled_qty": filled_qty_total,
+                    "avg_fill_price": avg_fill_price,
+                    "fee_paid": fees_paid_total,
+                    "remaining_qty": remaining_qty,
+                    "entry_fill_ids": [fill_id],
+                    "entry_fills": [fill_evidence],
+                },
+                legs=fill_legs,
+                breakeven_ticks=breakeven_ticks,
+                trailing_activation_ticks=self._trailing_activation_ticks(fill_legs, pending.r_ticks),
+                trailing_distance_ticks=self._trailing_distance_ticks(pending.atr_at_entry),
+                fixed_horizon_bars=self._fixed_horizon_bars(),
+                runtime_stop_adjustments=runtime_stop_adjustments,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                atr_at_entry=pending.atr_at_entry,
+                r_multiple_at_entry=pending.r_multiple_at_entry,
+                r_value=pending.r_value,
+                r_ticks=pending.r_ticks,
+                trade_id=pending.trade_id,
+                pre_entry_context=getattr(candle, "lookback_15", None),
+                use_wallet_execution=use_wallet_execution,
+                execution_profile=self.execution_profile,
+            )
+            position.apply_entry_fee(float(fill.fee_paid or 0.0))
+            position.wallet_fill_metadata = dict(wallet_metadata)
+            event_type = "entry_opened"
+        else:
+            position = existing
+            applied = position.apply_incremental_entry_fill(
+                fill_id=fill_id,
+                filled_qty=float(fill.filled_qty),
+                fill_price=float(fill.fill_price),
+                fee_paid=float(fill.fee_paid or 0.0),
+                stop_price=stop_price,
+                fill_legs=fill_legs,
+                fill_evidence=fill_evidence,
+                wallet_metadata=wallet_metadata,
+            )
+            if not applied:
+                return EntryFillResult(
+                    status="duplicate",
+                    pending=pending if remaining_qty > 1e-12 else None,
+                    position=position,
+                    events=events,
+                    settlement_payloads=settlement_payloads,
+                )
+            event_type = "entry_increased"
+        pending.filled_qty = filled_qty_total
+        pending.filled_notional = filled_notional_total
+        pending.fees_paid = fees_paid_total
+        pending.remaining_qty = remaining_qty
+        pending.applied_fill_ids = tuple([*getattr(pending, "applied_fill_ids", ()), fill_id])
+        events.append(
+            {
+                "type": event_type,
+                "trade_id": pending.trade_id,
+                "order_intent_id": pending.order_intent_id,
+                "fill_id": fill_id,
+                "fill_price": float(fill.fill_price),
+                "filled_qty": float(fill.filled_qty),
+                "cumulative_filled_qty": filled_qty_total,
+                "remaining_qty": remaining_qty,
+                "avg_fill_price": avg_fill_price,
+                "fee_paid": float(fill.fee_paid or 0.0),
+                "cumulative_fees_paid": fees_paid_total,
+                "direction": pending.direction,
+            }
+        )
+        return EntryFillResult(
+            status=("opened" if existing is None else "augmented") if remaining_qty <= 1e-12 else ("opened_partial" if existing is None else "augmented_partial"),
+            pending=pending if remaining_qty > 1e-12 else None,
+            position=position,
+            events=events,
+            settlement_payloads=settlement_payloads,
         )
 
     def apply_entry_fill(
@@ -843,6 +1101,13 @@ class LadderRiskEngine:
     ) -> EntryFillResult:
         events: List[Dict[str, Any]] = []
         settlement_payloads: List[Dict[str, Any]] = []
+
+        if pending is not None and self._is_book_execution_fill(fill):
+            return self._apply_incremental_entry_fill(
+                request=request,
+                pending=pending,
+                fill=fill,
+            )
 
         if fill.filled_qty <= 0:
             return EntryFillResult(
@@ -973,6 +1238,16 @@ class LadderRiskEngine:
                     notional=notional,
                     fee_paid=fees_paid_total,
                     trade_id=pending.trade_id,
+                    fill_id=str(fill.fill_id or stable_order_identity(
+                        "entry_fill",
+                        {
+                            "order_intent_id": pending.order_intent_id,
+                            "trade_id": pending.trade_id,
+                            "filled_qty": filled_qty_total,
+                            "avg_fill_price": avg_fill_price,
+                            "fee_paid": fees_paid_total,
+                        },
+                    )),
                     direction=pending.direction,
                     qty_raw=pending.qty_raw,
                     base_currency=base_currency,
@@ -1618,6 +1893,7 @@ class LadderRiskEngine:
         qty_final: Optional[float] = None,
         order_intent_id: Optional[str] = None,
         side: Optional[str] = None,
+        allow_subminimum: bool = False,
     ) -> List[Leg]:
         """Build take-profit legs from template configuration.
 
@@ -1758,7 +2034,7 @@ class LadderRiskEngine:
             return []
 
         min_qty = self.min_qty
-        if min_qty not in (None, 0):
+        if min_qty not in (None, 0) and not allow_subminimum:
             for leg in legs:
                 if leg.contracts < float(min_qty):
                     return []
@@ -1801,11 +2077,14 @@ class LadderRiskEngine:
         previous_signature = self._cached_trade_material_signatures(
             (touched_trade,) if touched_trade is not None else ()
         )
-        if self.active_trade is None:
+        if self.entry_execution.has_pending:
             new_trade = self.entry_execution.process_pending(candle)
             if new_trade:
-                self.active_trade = new_trade
-                self.trades.append(self.active_trade)
+                if self.active_trade is None:
+                    self.active_trade = new_trade
+                    self.trades.append(self.active_trade)
+                elif str(self.active_trade.trade_id) != str(new_trade.trade_id):
+                    raise RuntimeError("pending entry fill targeted a different active trade")
                 self._pending_entry_fills.append(new_trade)
                 touched_trade = new_trade
         if self.active_trade is None:

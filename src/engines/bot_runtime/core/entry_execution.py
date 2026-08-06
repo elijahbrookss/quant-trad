@@ -45,6 +45,7 @@ class PendingEntry:
     fees_paid: float = 0.0
     remaining_qty: float = 0.0
     order_lifecycle: Optional[CanonicalOrderLifecycle] = None
+    applied_fill_ids: tuple[str, ...] = ()
 
 
 class EntryExecutionCoordinator:
@@ -140,6 +141,7 @@ class EntryExecutionCoordinator:
             "order_cumulative_filled_qty": snapshot.cumulative_filled_qty,
             "order_remaining_qty": snapshot.remaining_qty,
             "order_fill_id": latest_fill.fill_id if latest_fill is not None else None,
+            "order_fill_ids": [event.fill_id for event in lifecycle.events if event.fill_id is not None],
             "order_lifecycle_replay_hash": snapshot.replay_hash,
             "order_lifecycle_event_ids": [event.event_id for event in lifecycle.events],
             "order_execution_context_hash": lifecycle.request.execution_context_hash,
@@ -153,29 +155,21 @@ class EntryExecutionCoordinator:
         recorder(lifecycle, after_seq=after_seq)
 
     @staticmethod
-    def _require_safe_partial_disposition(
+    def _require_accounted_partial_disposition(
         pending: PendingEntry,
         *,
         disposition: str,
     ) -> None:
-        """Fail closed before a production-wired partial entry can disappear.
-
-        Phase 2B makes lifecycle state authoritative but intentionally does not
-        enable book-driven partial entry execution.  Existing bar adapters are
-        full-fill adapters.  If a future/custom adapter nevertheless produces a
-        partial entry, its residual may complete (including through the explicit
-        convert-to-market replacement), but the filled quantity may not be
-        abandoned by rejection, cancellation, or expiry.  Phase 3 must replace
-        this guard with per-fill incremental position and wallet settlement
-        before admitting those residual dispositions.
-        """
+        """Permit residual termination only after every partial fill was settled."""
 
         if float(pending.filled_qty or 0.0) <= 1e-12:
             return
+        if pending.applied_fill_ids:
+            return
         raise RuntimeError(
-            "partial entry disposition is not admitted by canonical accounting "
-            f"during Phase 2B: disposition={disposition!r} "
-            f"filled_qty={float(pending.filled_qty)!r} "
+            "partial entry disposition is not admitted because the partial fill "
+            "was not atomically applied to canonical accounting "
+            f"disposition={disposition!r} filled_qty={float(pending.filled_qty)!r} "
             f"remaining_qty={float(pending.remaining_qty)!r} "
             f"order_request_id={pending.order_intent_id!r}"
         )
@@ -242,32 +236,86 @@ class EntryExecutionCoordinator:
                     venue_event_name=venue_lifecycle_event_name(context, CanonicalOrderState.OPEN),
                 )
         elif normalized_status in {"filled", "partially_filled"}:
-            fill_id = stable_order_identity(
-                "order_fill",
-                {
-                    "request_id": lifecycle.request.request_id,
-                    "attempt_id": attempt_id,
-                    "next_event_seq": len(lifecycle.events) + 1,
-                    "known_at": str(known_at),
-                    "filled_qty": outcome.filled_qty,
-                    "fill_price": outcome.avg_fill_price,
-                    "fee_paid": outcome.fee_paid,
-                },
-            )
-            lifecycle.record_fill(
-                attempt_id=attempt_id,
-                fill_id=fill_id,
-                fill_qty=float(outcome.filled_qty),
-                fill_price=float(outcome.avg_fill_price or 0.0),
-                fill_fee=float(outcome.fee_paid or 0.0),
-                known_at=known_at,
-                venue_event_name=venue_lifecycle_event_name(
-                    context,
-                    CanonicalOrderState.FILLED
-                    if float(outcome.remaining_qty or 0.0) <= 1e-12
-                    else CanonicalOrderState.PARTIALLY_FILLED,
-                ),
-            )
+            level_rows = outcome.metadata.get("price_level_fills")
+            if isinstance(level_rows, list) and level_rows:
+                for row in level_rows:
+                    row_payload = dict(row or {})
+                    row_metadata = dict(row_payload.get("metadata") or {})
+                    fill_id = str(
+                        row_metadata.get("fill_id")
+                        or stable_order_identity(
+                            "order_fill",
+                            {
+                                "request_id": lifecycle.request.request_id,
+                                "attempt_id": attempt_id,
+                                "next_event_seq": len(lifecycle.events) + 1,
+                                "known_at": str(known_at),
+                                "filled_qty": row_payload.get("filled_qty"),
+                                "fill_price": row_payload.get("fill_price"),
+                                "fee_paid": row_payload.get("fee"),
+                            },
+                        )
+                    )
+                    lifecycle.record_fill(
+                        attempt_id=attempt_id,
+                        fill_id=fill_id,
+                        fill_qty=float(row_payload.get("filled_qty") or 0.0),
+                        fill_price=float(row_payload.get("fill_price") or 0.0),
+                        fill_fee=float(row_payload.get("fee") or 0.0),
+                        known_at=known_at,
+                        source_sequence=row_metadata.get("book_level_index"),
+                        venue_event_name=venue_lifecycle_event_name(
+                            context,
+                            CanonicalOrderState.PARTIALLY_FILLED,
+                        ),
+                        metadata=row_metadata,
+                    )
+            else:
+                fill_id = stable_order_identity(
+                    "order_fill",
+                    {
+                        "request_id": lifecycle.request.request_id,
+                        "attempt_id": attempt_id,
+                        "next_event_seq": len(lifecycle.events) + 1,
+                        "known_at": str(known_at),
+                        "filled_qty": outcome.filled_qty,
+                        "fill_price": outcome.avg_fill_price,
+                        "fee_paid": outcome.fee_paid,
+                    },
+                )
+                lifecycle.record_fill(
+                    attempt_id=attempt_id,
+                    fill_id=fill_id,
+                    fill_qty=float(outcome.filled_qty),
+                    fill_price=float(outcome.avg_fill_price or 0.0),
+                    fill_fee=float(outcome.fee_paid or 0.0),
+                    known_at=known_at,
+                    venue_event_name=venue_lifecycle_event_name(
+                        context,
+                        CanonicalOrderState.FILLED
+                        if float(outcome.remaining_qty or 0.0) <= 1e-12
+                        else CanonicalOrderState.PARTIALLY_FILLED,
+                    ),
+                )
+            residual_disposition = str(
+                outcome.metadata.get("residual_disposition") or ""
+            ).strip().lower()
+            if residual_disposition in {"canceled", "expired"}:
+                terminal = (
+                    CanonicalOrderState.CANCELED
+                    if residual_disposition == "canceled"
+                    else CanonicalOrderState.EXPIRED
+                )
+                current = lifecycle.attempt_snapshot(attempt_id)
+                if current is not None and current.state is not CanonicalOrderState.FILLED:
+                    lifecycle.transition(
+                        attempt_id=attempt_id,
+                        state=terminal,
+                        known_at=known_at,
+                        reason=f"residual_{residual_disposition}",
+                        venue_event_name=venue_lifecycle_event_name(context, terminal),
+                        metadata=dict(outcome.metadata),
+                    )
         elif normalized_status in {"expired", "canceled", "rejected"}:
             target = CanonicalOrderState(normalized_status)
             lifecycle.transition(
@@ -304,6 +352,15 @@ class EntryExecutionCoordinator:
             )
             logger.warning(with_log_context("entry_rejected", context))
             return None
+        intent = replace(
+            intent,
+            metadata={
+                **dict(intent.metadata),
+                "known_at": candle.time,
+                "arrival_at": candle.time,
+            },
+        )
+        request = replace(request, intent=intent)
 
         lifecycle = self._create_order_lifecycle(
             request=request,
@@ -431,7 +488,12 @@ class EntryExecutionCoordinator:
                     outcome=outcome,
                     candle=candle,
                 )
-                result = engine.apply_entry_fill(request=request, pending=pending, fill=fill)
+                result = self._apply_outcome_fills(
+                    request=request,
+                    pending=pending,
+                    outcome=outcome,
+                    candle=candle,
+                )
                 position = self._apply_fill_result(result)
                 if position is not None:
                     return position
@@ -467,7 +529,12 @@ class EntryExecutionCoordinator:
             outcome=outcome,
             candle=candle,
         )
-        result = engine.apply_entry_fill(request=request, pending=pending, fill=fill)
+        result = self._apply_outcome_fills(
+            request=request,
+            pending=pending,
+            outcome=outcome,
+            candle=candle,
+        )
         return self._apply_fill_result(result)
 
     def process_pending(self, candle: Candle) -> Optional[LadderPosition]:
@@ -484,7 +551,12 @@ class EntryExecutionCoordinator:
         pending_intent = replace(
             pending.intent,
             qty=float(pending.remaining_qty or pending.intent.qty),
-            metadata={**dict(pending.intent.metadata), "pending_evaluation": True},
+            metadata={
+                **dict(pending.intent.metadata),
+                "pending_evaluation": True,
+                "known_at": candle.time,
+                "arrival_at": candle.time,
+            },
         )
         outcome, rejection = execution_model.evaluate(
             pending_intent,
@@ -495,7 +567,7 @@ class EntryExecutionCoordinator:
         )
         normalized_status = str(outcome.status or "").strip().lower()
         if rejection is not None or normalized_status in {"expired", "canceled", "rejected"}:
-            self._require_safe_partial_disposition(
+            self._require_accounted_partial_disposition(
                 pending,
                 disposition=(
                     str(getattr(rejection, "reason", None) or "rejected")
@@ -526,9 +598,19 @@ class EntryExecutionCoordinator:
             self.pending_entry = None
             return None
         if outcome.status in {"filled", "partially_filled"}:
-            fill = self._build_entry_fill(pending=pending, outcome=outcome, candle=candle)
-            result = engine.apply_entry_fill(request=request, pending=pending, fill=fill)
+            result = self._apply_outcome_fills(
+                request=request,
+                pending=pending,
+                outcome=outcome,
+                candle=candle,
+            )
             position = self._apply_fill_result(result)
+            residual_disposition = str(
+                outcome.metadata.get("residual_disposition") or ""
+            ).strip().lower()
+            if residual_disposition in {"canceled", "expired"}:
+                self.pending_entry = None
+                return position
             if position is not None:
                 return position
             if result.status == "pending" and result.pending is not None:
@@ -577,17 +659,80 @@ class EntryExecutionCoordinator:
             candle=candle,
         )
 
+    def _apply_outcome_fills(
+        self,
+        *,
+        request: "EntryRequest",
+        pending: PendingEntry,
+        outcome: ExecutionOutcome,
+        candle: "Candle",
+    ) -> "EntryFillResult":
+        """Apply exact book levels individually; preserve one-fill bar behavior."""
+
+        engine = self._engine
+        level_rows = outcome.metadata.get("price_level_fills")
+        if not isinstance(level_rows, list) or not level_rows:
+            fill = self._build_entry_fill(pending=pending, outcome=outcome, candle=candle)
+            return engine.apply_entry_fill(request=request, pending=pending, fill=fill)
+        result = None
+        for index, raw in enumerate(level_rows):
+            row = dict(raw or {})
+            row_metadata = dict(row.get("metadata") or {})
+            level_outcome = ExecutionOutcome(
+                order_id=outcome.order_id,
+                status=("filled" if index == len(level_rows) - 1 and float(outcome.remaining_qty or 0.0) <= 1e-12 else "partially_filled"),
+                filled_qty=float(row.get("filled_qty") or 0.0),
+                avg_fill_price=float(row.get("fill_price") or 0.0),
+                fee_paid=float(row.get("fee") or 0.0),
+                fee_role=str(row.get("fee_role") or outcome.fee_role),
+                fee_rate=float(row.get("fee_rate") or 0.0),
+                fee_source=str(row.get("fee_source") or outcome.fee_source),
+                fee_version=row.get("fee_version") or outcome.fee_version,
+                created_at=outcome.created_at,
+                updated_at=outcome.updated_at,
+                filled_at=outcome.filled_at,
+                remaining_qty=max(float(pending.remaining_qty or pending.requested_qty) - float(row.get("filled_qty") or 0.0), 0.0),
+                fallback_applied=outcome.fallback_applied,
+                fallback_reason=outcome.fallback_reason,
+                limit_price=outcome.limit_price,
+                validity_window=outcome.validity_window,
+                metadata={
+                    **row_metadata,
+                    "schema_version": outcome.metadata.get("schema_version"),
+                    "residual_disposition": outcome.metadata.get("residual_disposition"),
+                    **(
+                        self._lifecycle_evidence(pending.order_lifecycle)
+                        if pending.order_lifecycle is not None
+                        else {}
+                    ),
+                },
+            )
+            fill = self._build_entry_fill(
+                pending=pending,
+                outcome=level_outcome,
+                candle=candle,
+            )
+            result = engine.apply_entry_fill(request=request, pending=pending, fill=fill)
+            if result.rejection_reason:
+                return result
+        if result is None:
+            raise RuntimeError("book execution outcome declared no applicable level fills")
+        return result
+
     def _apply_fill_result(self, result: "EntryFillResult") -> Optional[LadderPosition]:
         engine = self._engine
         if result.rejection_reason:
             engine.last_rejection_reason = result.rejection_reason
             engine.last_rejection_detail = result.rejection_detail
-        if result.status == "pending":
+        if result.status in {"pending", "opened_partial", "augmented_partial"}:
             self.pending_entry = result.pending
-            return None
-        if result.status == "opened":
+            return result.position
+        if result.status in {"opened", "augmented"}:
             self.pending_entry = None
             return result.position
+        if result.status == "duplicate":
+            self.pending_entry = result.pending
+            return None
         self.pending_entry = None
         return None
 
@@ -651,7 +796,11 @@ class EntryExecutionCoordinator:
                 time_in_force="gtc",
                 post_only=False,
                 limit_params=None,
-                metadata=dict(pending.intent.metadata),
+                metadata={
+                    **dict(pending.intent.metadata),
+                    "known_at": candle.time,
+                    "arrival_at": candle.time,
+                },
             )
             lifecycle.replace(
                 attempt_id=predecessor_attempt_id,
@@ -682,10 +831,12 @@ class EntryExecutionCoordinator:
             )
             normalized_status = str(market_outcome.status or "").strip().lower()
             if rejection is not None or normalized_status not in {"filled", "partially_filled"}:
-                self._require_safe_partial_disposition(
+                self._require_accounted_partial_disposition(
                     pending,
-                    disposition=(
-                        str(getattr(rejection, "reason", None) or normalized_status or "unfilled")
+                    disposition=str(
+                        getattr(rejection, "reason", None)
+                        or normalized_status
+                        or "unfilled"
                     ),
                 )
             market_outcome = self._apply_evaluated_outcome(
@@ -717,15 +868,18 @@ class EntryExecutionCoordinator:
                     "fallback_reason": "convert_to_market",
                 }
             )
-            fill = engine.build_entry_fill(
+            result = self._apply_outcome_fills(
+                request=pending.request,
                 pending=pending,
                 outcome=market_outcome,
                 candle=candle,
             )
-            result = engine.apply_entry_fill(request=pending.request, pending=pending, fill=fill)
             return self._apply_fill_result(result)
 
-        self._require_safe_partial_disposition(pending, disposition=fallback or "expired")
+        self._require_accounted_partial_disposition(
+            pending,
+            disposition=fallback or "expired",
+        )
         outcome_payload = ExecutionOutcome(
             **{
                 **asdict(outcome),

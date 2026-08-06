@@ -347,6 +347,7 @@ class EntryFill:
     fee_source: Optional[str] = None
     fee_version: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
+    fill_id: Optional[str] = None
 
 
 @dataclass
