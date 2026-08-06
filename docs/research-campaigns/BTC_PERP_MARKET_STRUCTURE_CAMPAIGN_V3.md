@@ -3,7 +3,7 @@ component: btc-perp-market-structure-campaign-v3
 subsystem: research-orchestration
 layer: operation
 doc_type: campaign-charter
-status: pre-activation
+status: terminal-rejected
 tags:
   - research
   - autonomous-campaign
@@ -16,6 +16,13 @@ code_paths:
   - portal/backend/service/research/campaign_runner.py
 ---
 # BTC PERP Market-Structure Campaign V3
+
+> **Terminal status:** V3 completed its bounded workflow and rejected the
+> family before validation or holdout access. All 24 train attempts had zero
+> causal scoring opportunities because every persisted train fact became known
+> after the final train-bar arrival. No candidate or certificate was created;
+> the sealed holdout remains unopened. See the
+> [terminal dossier](./BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V3_DOSSIER.md).
 
 ## Campaign decision
 
