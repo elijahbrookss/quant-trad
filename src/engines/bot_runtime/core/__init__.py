@@ -21,6 +21,22 @@ from .execution import (
     DerivativesExecutionConstraints,
     DerivativesExecutionModel,
 )
+from .book_execution import (
+    AGGREGATED_L2_MODEL_VERSION,
+    BOOK_EXECUTION_EVIDENCE_SCHEMA_VERSION,
+    EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION,
+    EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+    EXECUTION_BOOK_TAPE_SCHEMA_VERSION,
+    SPREAD_AWARE_MODEL_VERSION,
+    BookExecutionModel,
+    BookOrderExecutionBatch,
+    ExecutionBookLevel,
+    ExecutionBookSnapshot,
+    ExecutionBookSourceReference,
+    ExecutionBookTape,
+    ExecutionBookTapeBundle,
+    ExecutionBookValidityClosure,
+)
 from .execution_adapter import ExecutionAdapter, SpotExecutionAdapter, DerivativesExecutionAdapter
 from .execution_assumptions import (
     CONSERVATIVE_BAR_MODEL_VERSION,
@@ -45,6 +61,7 @@ from .execution_context import (
     ResolvedExecutionContextBundle,
     VenueExecutionProfile,
     build_execution_context_bundle,
+    execution_model_artifact_from_book_tape,
     resolve_execution_context,
     validate_context_against_runtime,
 )
@@ -155,6 +172,20 @@ from .runtime_events import (
 )
 
 __all__ = [
+    "AGGREGATED_L2_MODEL_VERSION",
+    "BOOK_EXECUTION_EVIDENCE_SCHEMA_VERSION",
+    "EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION",
+    "EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION",
+    "EXECUTION_BOOK_TAPE_SCHEMA_VERSION",
+    "SPREAD_AWARE_MODEL_VERSION",
+    "BookExecutionModel",
+    "BookOrderExecutionBatch",
+    "ExecutionBookLevel",
+    "ExecutionBookSnapshot",
+    "ExecutionBookSourceReference",
+    "ExecutionBookTape",
+    "ExecutionBookTapeBundle",
+    "ExecutionBookValidityClosure",
     "CONSERVATIVE_BAR_MODEL_VERSION",
     "COSTED_BAR_MODEL_VERSION",
     "EXECUTION_ASSUMPTIONS_SCHEMA_VERSION",
@@ -171,6 +202,7 @@ __all__ = [
     "ResolvedExecutionContextBundle",
     "VenueExecutionProfile",
     "build_execution_context_bundle",
+    "execution_model_artifact_from_book_tape",
     "resolve_execution_context",
     "validate_context_against_runtime",
     "EconomicClaimIntent",

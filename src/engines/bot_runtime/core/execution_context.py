@@ -24,7 +24,13 @@ EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION = "execution_model_artifact.v1"
 RESOLVED_EXECUTION_CONTEXT_SCHEMA_VERSION = "resolved_execution_context.v1"
 RESOLVED_EXECUTION_CONTEXT_BUNDLE_SCHEMA_VERSION = "resolved_execution_context_bundle.v1"
 
-_ORDER_TYPES = {"market", "limit_maker", "limit_resting", "stop_market"}
+_ORDER_TYPES = {
+    "market",
+    "limit_aggressive",
+    "limit_maker",
+    "limit_resting",
+    "stop_market",
+}
 _TIME_IN_FORCE = {"gtc", "ioc", "fok", "day"}
 _BOOK_CAPABILITIES = {"bars", "l1", "l2", "l3"}
 _INCREMENT_POLICIES = {"reject", "round_down"}
@@ -376,8 +382,8 @@ class ExecutionModelArtifact:
         _required_text(self.version, field="execution_model_artifact.version")
         _required_text(self.assumption_manifest_hash, field="execution_model_artifact.assumption_manifest_hash")
         _required_text(self.source, field="execution_model_artifact.source")
-        if self.execution_quality_ceiling not in {"X0", "X1", "X2"}:
-            raise ValueError("Phase 2A execution model quality ceiling must be X0, X1, or X2")
+        if self.execution_quality_ceiling not in {"X0", "X1", "X2", "X3", "X4"}:
+            raise ValueError("execution model quality ceiling must be X0 through X4")
         if self.input_capability not in _BOOK_CAPABILITIES:
             raise ValueError("execution model input_capability must be bars, l1, l2, or l3")
         for name in ("supports_partial_fills", "supports_resting_orders", "supports_latency"):
@@ -449,8 +455,16 @@ class ResolvedExecutionContext:
             raise ValueError("phase_2a_fee_calculation_basis_unsupported")
         if self.fee_schedule.maker_rate < 0 or self.fee_schedule.taker_rate < 0:
             raise ValueError("phase_2a_fee_rebate_unsupported")
-        if self.model.input_capability != "bars":
-            raise ValueError("Phase 2A execution models must consume bars")
+        capability_rank = {"bars": 0, "l1": 1, "l2": 2, "l3": 3}
+        if capability_rank[self.model.input_capability] > capability_rank[self.venue.book_data_capability]:
+            raise ValueError("execution_model_input_exceeds_venue_book_capability")
+        if self.model.execution_quality_ceiling == "X3" and self.model.input_capability not in {"l1", "l2", "l3"}:
+            raise ValueError("x3_execution_model_requires_spread_capability")
+        if self.model.execution_quality_ceiling == "X4":
+            if self.model.input_capability not in {"l2", "l3"}:
+                raise ValueError("x4_execution_model_requires_l2_or_l3")
+            if not self.model.supports_partial_fills:
+                raise ValueError("x4_execution_model_requires_partial_fills")
         _required_text(self.source, field="resolved_execution_context.source")
         if not str(self.fee_schedule.version or "").strip():
             raise ValueError("resolved execution context requires a versioned fee schedule")
@@ -658,7 +672,7 @@ class ResolvedExecutionContext:
                 {**metadata, **normalization.to_log_dict()},
             )
         normalized_price = order_price
-        if normalized_type in {"limit_maker", "limit_resting", "stop_market"}:
+        if normalized_type in {"limit_aggressive", "limit_maker", "limit_resting", "stop_market"}:
             ticks = order_price / self.instrument.tick_size
             if self.venue.price_increment_policy == "reject" and not math.isclose(
                 ticks, round(ticks), rel_tol=0.0, abs_tol=1e-9
@@ -943,6 +957,7 @@ def resolve_venue_execution_profile(
             sorted(
                 {
                     "market": "taker",
+                    "limit_aggressive": "taker",
                     "limit_maker": "maker",
                     "limit_resting": "maker",
                     "stop_market": "taker",
@@ -1028,11 +1043,43 @@ def execution_model_artifact_from_assumptions(
     )
 
 
+def execution_model_artifact_from_book_tape(
+    assumptions: ResolvedExecutionAssumptions,
+    *,
+    source_capability: str,
+) -> ExecutionModelArtifact:
+    """Build the pinned deterministic X3/X4 model contract for a book tape."""
+
+    capability = str(source_capability or "").strip().lower()
+    if capability not in {"l1", "l2", "l3"}:
+        raise ValueError("book execution model requires l1, l2, or l3 capability")
+    from .book_execution import AGGREGATED_L2_MODEL_VERSION, SPREAD_AWARE_MODEL_VERSION
+
+    l2_capable = capability in {"l2", "l3"}
+    return ExecutionModelArtifact(
+        schema_version=EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION,
+        artifact_id=("deterministic_aggregated_l2_execution" if l2_capable else "deterministic_spread_execution"),
+        version=(AGGREGATED_L2_MODEL_VERSION if l2_capable else SPREAD_AWARE_MODEL_VERSION),
+        assumption_manifest_hash=assumptions.manifest_hash,
+        input_capability=("l2" if l2_capable else "l1"),
+        execution_quality_ceiling=("X4" if l2_capable else "X3"),
+        # L1 is still visibility-bounded: the top level may satisfy only part
+        # of an order, so residual disposition remains explicit at X3 too.
+        supports_partial_fills=True,
+        supports_resting_orders=False,
+        supports_latency=False,
+        calibration_artifact_hash=None,
+        source="replay_certified_execution_book_tape",
+        artifact_hash="",
+    )
+
+
 def resolve_execution_context(
     profile: Any,
     assumptions: ResolvedExecutionAssumptions,
     *,
     instrument_payload: Mapping[str, Any] | None = None,
+    execution_model_artifact: ExecutionModelArtifact | None = None,
     source: str = "runtime_profile_resolution",
 ) -> ResolvedExecutionContext:
     """Resolve the complete venue-neutral execution bundle for one series."""
@@ -1049,7 +1096,9 @@ def resolve_execution_context(
         execution_fee_contract=profile.fees,
         raw=_raw_contract(raw_instrument, "fee_schedule"),
     )
-    model = execution_model_artifact_from_assumptions(assumptions)
+    model = execution_model_artifact or execution_model_artifact_from_assumptions(assumptions)
+    if model.assumption_manifest_hash != assumptions.manifest_hash:
+        raise ValueError("execution_model_assumption_manifest_mismatch")
     return ResolvedExecutionContext(
         schema_version=RESOLVED_EXECUTION_CONTEXT_SCHEMA_VERSION,
         instrument=instrument,
@@ -1084,6 +1133,7 @@ def validate_context_against_runtime(
         profile,
         assumptions,
         instrument_payload=instrument_payload,
+        execution_model_artifact=context.model,
         source=context.source,
     )
     if recomputed.context_hash != context.context_hash:
@@ -1108,6 +1158,7 @@ __all__ = [
     "VenueExecutionProfile",
     "build_execution_context_bundle",
     "execution_model_artifact_from_assumptions",
+    "execution_model_artifact_from_book_tape",
     "instrument_execution_contract_from_profile",
     "resolve_execution_context",
     "resolve_fee_schedule",

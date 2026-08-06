@@ -31,11 +31,13 @@ class EconomicClaimIntent(str, Enum):
 
 
 class ExecutionQualityClass(str, Enum):
-    """Implemented portion of the execution-quality ladder."""
+    """Implemented execution-quality ladder through visible L2 replay."""
 
     X0 = "X0"
     X1 = "X1"
     X2 = "X2"
+    X3 = "X3"
+    X4 = "X4"
 
 
 _QUALITY_RANK = {item.value: index for index, item in enumerate(ExecutionQualityClass)}
