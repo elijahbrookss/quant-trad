@@ -182,10 +182,15 @@ lifecycle events. Entry and exit callers reach the adapter through that
 lifecycle; fills then continue through existing accounting owners. `FillOrder`
 must remain a compatibility seam and must not own durable state.
 
-Phase 2B lifecycle evidence does not imply book execution. Current production
-bar models remain full-fill. Canonical partial exits settle per fill; a partial
-entry cannot be abandoned until Phase 3 adds incremental entry accounting.
-See [the Phase 2B contract](PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md).
+Phase 3A optionally binds a replay-certified execution-book tape for backtests.
+X3 consumes only the causal top of book; X4 walks visible aggregated L2 and
+records exact level fills through this same lifecycle. Book-driven partial
+entries settle incrementally into the existing wallet and position owners, so
+filled exposure survives residual open/cancel/expiry outcomes. Omitting the tape
+preserves immutable full-fill X0-X2 bar behavior. Passive queue progress,
+nonzero latency, paper/shadow use, and calibration remain out of scope. See the
+[Phase 2B contract](PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) and
+[Phase 3A contract](PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md).
 
 The runtime reads entry order semantics only from the immutable compiled plan.
 Unknown liquidity roles, exit-event types, and same-bar conflict policies are

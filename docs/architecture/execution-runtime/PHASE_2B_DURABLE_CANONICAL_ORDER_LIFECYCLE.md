@@ -43,6 +43,12 @@ higher execution-quality class. Current production bar models remain full-fill.
 Phase 3 is the first campaign allowed to admit book-driven partial entry fills
 and resting residual behavior after adding per-fill incremental entry settlement.
 
+Phase 3A has since implemented that incremental entry boundary and aggressive
+X3/X4 book execution for backtests. The Phase 2B restrictions below remain
+controlling for X0-X2 and for custom/legacy adapters that do not carry exact
+book-fill identity. See
+[Phase 3A replay-certified book execution](PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md).
+
 The composition is illustrated in
 [canonical-order-lifecycle.mmd](diagrams/canonical-order-lifecycle.mmd).
 
