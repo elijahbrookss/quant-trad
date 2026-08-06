@@ -1,9 +1,9 @@
 ---
-component: btc-perp-market-structure-campaign-v2
+component: btc-perp-market-structure-campaign-v3
 subsystem: research-orchestration
 layer: operation
 doc_type: campaign-charter
-status: invalidated-archived
+status: pre-activation
 tags:
   - research
   - autonomous-campaign
@@ -11,24 +11,19 @@ tags:
   - market-structure
   - sealed-holdout
 code_paths:
-  - config/research_campaigns/btc_perp_market_structure_v2.json
+  - config/research_campaigns/btc_perp_market_structure_v3.json
   - src/research_science/autonomous_campaign.py
   - portal/backend/service/research/campaign_runner.py
 ---
-# BTC PERP Market-Structure Campaign V2
-
-> **Terminal status:** V2 stopped on its first train attempt because the runner
-> presented a research role at the experiment-runner completion boundary. The
-> attempt is accounted as abandoned, the family and governance case are
-> archived, and the sealed V2 holdout was never reserved or evaluated. V2 is
-> immutable and will not be retried.
+# BTC PERP Market-Structure Campaign V3
 
 ## Campaign decision
 
-V2 is the replacement identity for QT's first bounded autonomous research
-operation. V1 activated but failed before family creation or any trial because
-of an exact protocol/family-name mismatch. V1 was governed to rejection and
-archive; it is not retried or rewritten.
+V3 is the final replacement identity for QT's first bounded autonomous
+research operation. V1 and V2 remain immutable evidence of bounded activation
+defects. Before V3 activation, the runner's entire success path was executed in
+a database-backed transaction through all experiment-runner, candidate,
+holdout, certificate, and governance boundaries.
 
 The selected instrument remains Coinbase `BIP-20DEC30-CDE`, displayed by its
 source definition as **BTC PERP** / Bitcoin Perpetual. It is a perpetual-style
@@ -47,16 +42,17 @@ collateral adequacy, deployment readiness, or capital eligibility.
 
 ## Immutable data fence
 
-Train and validation remain the provider-free, previously disclosed research
-assignments. The data steward created a new materially distinct sealed holdout
-artifact for V2 by narrowing the still-unopened final session and freezing it
-at a new market commit watermark. Its identity and exact window remain private.
+Train and validation retain the provider-free assignments disclosed below. The
+data steward created a materially distinct V3 holdout by narrowing the still
+unopened final session again and freezing it at a new market commit watermark.
+The runner and public charter receive only the blind alias until the governed
+one-use holdout boundary is reached.
 
 | Role | Dataset | Window (UTC) |
 |---|---|---|
 | Train | `mds_b61dc21c05e991ffe34b08e4061f449f` | 2026-08-05 05:50–06:49 |
 | Validation | `mds_6946bb064ffe0802da788075438c1a9d` | 2026-08-05 14:03–15:30 |
-| Holdout | sealed as `btc-perp-final-session-v2` | binding withheld |
+| Holdout | sealed as `btc-perp-final-session-v3` | binding withheld |
 
 The assurance remains `PLATFORM_CONTROLLED_HISTORICAL`: QT proves normal
 workflow non-exposure, candidate-before-evaluation ordering, and one-use
@@ -76,17 +72,17 @@ never know public historical data.
 - X3–X5 are reported unavailable unless their exact frozen inputs exist; they
   are not search dimensions.
 - Any post-activation code, protocol, dataset, threshold, or assumption change
-  invalidates V2 and requires a new identity.
+  invalidates V3 and requires a new identity.
 
 ## Autonomy ceiling
 
-Agents may generate/evaluate bounded graphs, reject weak work, and nominate one
-candidate. Separate identities authorize protocol, holdout, certification, and
-governance transitions. Even a qualified result remains:
+Agents may generate and evaluate bounded graphs, reject weak work, and nominate
+one candidate. Separate identities authorize protocol, holdout, certification,
+and governance transitions. Even a qualified result remains:
 
 - `instrument_economics_class = incomplete`
 - `promotion_eligible = false`
 - `external_trading_authority = false`
 
 No shadow, paper, live, deployment, credential, capital, or external-order
-state exists in V2.
+state exists in V3.

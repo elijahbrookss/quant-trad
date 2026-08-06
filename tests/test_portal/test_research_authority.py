@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -9,14 +12,23 @@ from sqlalchemy.orm import Session
 
 from market_data.store import FrozenDataset
 from portal.backend.db.session import db
-from portal.backend.service.research import authority, governance, governance_repository
+from portal.backend.service.research import (
+    authority,
+    campaign_runner,
+    governance,
+    governance_repository,
+)
 from portal.backend.service.research import authority_repository as repository
 from portal.backend.service.research import repository as research_repository
 from research_science import (
     CANDIDATE_SCHEMA_VERSION,
     PROTOCOL_SCHEMA_VERSION,
+    CampaignCharter,
+    CampaignExecutionCosts,
     CandidateSnapshot,
+    FrozenCampaignBar,
     ScientificProtocol,
+    resolve_campaign_charter,
 )
 from strategies.typed_graph import TYPED_STRATEGY_GRAPH_VERSION
 
@@ -165,9 +177,9 @@ def _graph_payload(graph_id: str, *, parents: list[str] | None = None) -> dict:
 
 @pytest.fixture
 def authority_transaction(monkeypatch: pytest.MonkeyPatch):
-    if not db.ensure_schema() or db._engine is None:  # noqa: SLF001 - bounded integration fixture
+    if not db.ensure_schema() or db._engine is None:
         pytest.skip("PostgreSQL is unavailable")
-    connection = db._engine.connect()  # noqa: SLF001 - bounded integration fixture
+    connection = db._engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection, expire_on_commit=False, autoflush=False, future=True)
 
@@ -185,6 +197,9 @@ def authority_transaction(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(repository, "db", SimpleNamespace(session=session_scope))
     monkeypatch.setattr(
         governance_repository, "db", SimpleNamespace(session=session_scope)
+    )
+    monkeypatch.setattr(
+        research_repository, "db", SimpleNamespace(session=session_scope)
     )
     hashes = {
         f"mds_{value * 32}": value * 64 for value in ("a", "b", "c")
@@ -1141,3 +1156,190 @@ def test_offline_governance_reaches_research_certified_and_no_further(
     assert trail["maximum_state"] == "RESEARCH_CERTIFIED"
     assert trail["operational_trading_authority"] is False
     assert len(trail["decisions"]) == 10
+
+
+def _campaign_runner_charter(suffix: str) -> CampaignCharter:
+    path = (
+        Path(__file__).parents[2]
+        / "config"
+        / "research_campaigns"
+        / "btc_perp_market_structure_v3.json"
+    )
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    campaign_id = f"btc_perp_runner_e2e_{suffix[:8]}"
+    raw["campaign_id"] = campaign_id
+    raw["instrument_id"] = "BTC-USD"
+    raw["instrument_symbol"] = "BTC-PERP"
+    raw["datasets"] = [
+        {
+            "role": "train",
+            "dataset_id": f"mds_{'a' * 32}",
+            "dataset_hash": "a" * 64,
+            "window_start": "2020-01-01T00:00:00Z",
+            "window_end": "2020-01-01T01:59:00Z",
+        },
+        {
+            "role": "validation",
+            "dataset_id": f"mds_{'b' * 32}",
+            "dataset_hash": "b" * 64,
+            "window_start": "2021-01-01T00:00:00Z",
+            "window_end": "2021-01-01T01:59:00Z",
+        },
+        {
+            "role": "holdout",
+            "blind_alias": f"sealed-{suffix}",
+            "sealed": True,
+        },
+    ]
+    return resolve_campaign_charter(
+        raw,
+        sealed_holdout_binding={
+            "dataset_id": f"mds_{'c' * 32}",
+            "dataset_hash": "c" * 64,
+            "window_start": "2022-01-01T00:00:00Z",
+            "window_end": "2022-01-01T01:59:00Z",
+        },
+    )
+
+
+def _campaign_runner_bars(
+    start: datetime,
+    count: int = 120,
+) -> tuple[FrozenCampaignBar, ...]:
+    rows = []
+    price = 60_000.0
+    for index in range(count):
+        prior = price
+        direction = 1.0 if (index // 20) % 2 == 0 else -1.0
+        price = prior * (1.0 + direction * 0.002)
+        bucket_start = start + timedelta(minutes=index)
+        rows.append(
+            FrozenCampaignBar(
+                bucket_start=bucket_start,
+                bucket_end=bucket_start + timedelta(minutes=1),
+                known_at=bucket_start + timedelta(minutes=1, milliseconds=50),
+                open_price=prior,
+                high_price=max(prior, price) * 1.0001,
+                low_price=min(prior, price) * 0.9999,
+                close_price=price,
+                trade_count=20 + index % 5,
+                base_volume=100.0,
+                quote_notional=6_000_000.0 + index * 1000.0,
+                cvd_delta=50.0 * direction,
+                open_interest=100_000.0 + index,
+                funding_rate=0.00001,
+                source_hashes=(f"source-{index}",),
+            )
+        )
+    return tuple(rows)
+
+
+@pytest.mark.parametrize("force_validation_rejection", [False, True])
+def test_campaign_runner_completes_persisted_sealed_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    authority_transaction,
+    force_validation_rejection: bool,
+) -> None:
+    suffix = uuid4().hex
+    charter = _campaign_runner_charter(suffix)
+    bars = {
+        "train": _campaign_runner_bars(datetime(2020, 1, 1, tzinfo=UTC)),
+        "validation": _campaign_runner_bars(datetime(2021, 1, 1, tzinfo=UTC)),
+        "holdout": _campaign_runner_bars(datetime(2022, 1, 1, tzinfo=UTC)),
+    }
+    costs = CampaignExecutionCosts(
+        market_slippage_bps=charter.market_slippage_bps,
+        taker_fee_rate=charter.taker_fee_rate,
+        execution_quality_class="X2",
+        execution_model_hash="e" * 64,
+        fee_schedule_hash="f" * 64,
+        stress_scenarios=charter.cost_stress_scenarios,
+    )
+    monkeypatch.setattr(campaign_runner, "load_private_charter", lambda _path: charter)
+    monkeypatch.setattr(
+        campaign_runner,
+        "preflight_campaign",
+        lambda _path, *, code_revision: {
+            "preflight_hash": "d" * 64,
+            "code_revision": code_revision,
+        },
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_load_bars",
+        lambda _charter, role: bars[role],
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "_execution_bundle",
+        lambda _charter: (costs, {"context_hash": "e" * 64}),
+    )
+    monkeypatch.setattr(
+        campaign_runner,
+        "campaign_graph_specs",
+        # Strategy-space construction has separate exhaustive tests; use a
+        # reliably passing family here to isolate persisted lifecycle wiring.
+        lambda: tuple(
+            {
+                "family": "flow_continuation",
+                "flow": 0.1,
+                "price": 0.0,
+                "ordinal": ordinal,
+            }
+            for ordinal in range(1, 25)
+        ),
+    )
+    if force_validation_rejection:
+        monkeypatch.setattr(
+            campaign_runner,
+            "_gate_failures",
+            lambda _charter, _evaluation: ("forced_validation_rejection",),
+        )
+
+    result = campaign_runner.execute_campaign(
+        "private-charter-not-read.json",
+        code_revision="runner-e2e-test-revision",
+    )
+
+    diagnostic = repository.family_evidence(result["family_id"], private=True)
+    if force_validation_rejection:
+        assert result["outcome"] == "rejected_before_holdout"
+        assert result["holdout_opened"] is False
+        assert diagnostic["family"]["status"] == "archived"
+        assert diagnostic["holdout"] is None
+        assert all(
+            attempt["status"] in {"completed", "invalid", "failed", "abandoned"}
+            for attempt in diagnostic["attempts"]
+        )
+        trail = governance.case_trail(result["governance_case_id"])
+        assert trail["case"]["current_state"] == "ARCHIVED"
+        assert trail["operational_trading_authority"] is False
+        return
+    assert result["outcome"] == "research_certified", [
+        (
+            attempt["dataset_role"],
+            attempt["status"],
+            attempt["error"],
+            (attempt["result_evidence"] or {}).get("gate_failures"),
+        )
+        for attempt in diagnostic["attempts"]
+        if attempt["dataset_role"] == "validation"
+    ]
+    assert result["holdout_opened"] is True
+    assert result["holdout_consumed"] is True
+    assert result["promotion_eligible"] is False
+    assert result["external_trading_authority"] is False
+    evidence = diagnostic
+    assert evidence["family"]["feedback_released"] is True
+    assert evidence["holdout"]["status"] == "completed"
+    assert len(evidence["certificates"]) == 1
+    assert evidence["certificates"][0]["status"] == "qualified"
+    assert evidence["attempts"]
+    assert all(
+        attempt["status"] in {"completed", "invalid", "failed", "abandoned"}
+        for attempt in evidence["attempts"]
+    )
+    trail = governance.case_trail(result["governance_case_id"])
+    assert trail["case"]["current_state"] == "RESEARCH_CERTIFIED"
+    assert trail["maximum_state"] == "RESEARCH_CERTIFIED"
+    assert trail["operational_trading_authority"] is False

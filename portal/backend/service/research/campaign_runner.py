@@ -678,7 +678,7 @@ def execute_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
         terminal = authority.complete_attempt(
             {
                 "actor_id": RESEARCH_RUNNER_ID,
-                "actor_role": "research_runner",
+                "actor_role": "experiment_runner",
                 "request_id": f"{charter.campaign_id}:train-complete:{int(spec['ordinal']):02d}",
                 "attempt_id": attempt["id"],
                 "status": "invalid" if train_failures else "completed",
@@ -732,7 +732,7 @@ def execute_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
         terminal = authority.complete_attempt(
             {
                 "actor_id": RESEARCH_RUNNER_ID,
-                "actor_role": "research_runner",
+                "actor_role": "experiment_runner",
                 "request_id": f"{charter.campaign_id}:validation-complete:{rank:02d}",
                 "attempt_id": attempt["id"],
                 "status": "invalid" if failures else "completed",

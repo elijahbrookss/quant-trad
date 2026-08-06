@@ -35,6 +35,7 @@ CHARTER_PATH = (
     / "btc_perp_market_structure_v1.json"
 )
 CHARTER_V2_PATH = CHARTER_PATH.with_name("btc_perp_market_structure_v2.json")
+CHARTER_V3_PATH = CHARTER_PATH.with_name("btc_perp_market_structure_v3.json")
 
 
 def _charter_raw() -> dict:
@@ -325,6 +326,23 @@ def test_replacement_campaign_has_a_new_identity_and_sealed_assignment() -> None
     ).dataset_id
     assert _campaign_family_name(charter) == _protocol_manifest(
         charter, code_revision="replacement-code-revision"
+    )["family_name"]
+
+    v3_raw = json.loads(CHARTER_V3_PATH.read_text(encoding="utf-8"))
+    v3 = resolve_campaign_charter(
+        v3_raw,
+        sealed_holdout_binding={
+            "dataset_id": "final-sealed-holdout-id",
+            "dataset_hash": "final-sealed-holdout-hash",
+            "window_start": "2026-08-05T15:32:00Z",
+            "window_end": "2026-08-05T16:33:00Z",
+        },
+    )
+    assert v3.campaign_id == "btc_perp_market_structure_v3"
+    assert v3.dataset("holdout").blind_alias == "btc-perp-final-session-v3"
+    assert v3.charter_hash not in {charter.charter_hash, _charter().charter_hash}
+    assert _campaign_family_name(v3) == _protocol_manifest(
+        v3, code_revision="final-replacement-code-revision"
     )["family_name"]
 
 
