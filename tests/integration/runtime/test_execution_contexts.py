@@ -18,7 +18,12 @@ from engines.bot_runtime.core.execution_context import (
 )
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, LimitParams
-from engines.bot_runtime.core.execution_order import build_fill_order, execute_fill_order
+from engines.bot_runtime.core.execution_order import (
+    build_fill_order,
+    execute_fill_order,
+    execute_fill_order_with_lifecycle,
+)
+from engines.bot_runtime.core.order_lifecycle import CanonicalOrderState
 from engines.bot_runtime.core.execution_runtime import DeterministicExecutionModel
 from engines.bot_runtime.core.fees import FeeResolver, FeeSchedule
 
@@ -346,6 +351,46 @@ def test_round_down_increment_policy_normalizes_before_fill() -> None:
     assert fill.fill_price == pytest.approx(100.00)
     assert fill.metadata["requested_price"] == pytest.approx(100.005)
     assert fill.metadata["normalized_price"] == pytest.approx(100.00)
+
+
+def test_fill_order_compatibility_facade_preserves_economics_and_adds_lifecycle() -> None:
+    context = _context(_instrument())
+    model = SpotExecutionModel(
+        SpotExecutionConstraints(
+            tick_size=0.01,
+            qty_step=0.001,
+            min_qty=0.001,
+            min_notional=1.0,
+        ),
+        assumptions=_assumptions(),
+        execution_context=context,
+    )
+    order = build_fill_order(
+        side="buy",
+        requested_qty=0.01,
+        price=100.0,
+        order_type="market",
+        liquidity_role="taker",
+        price_source="test",
+        time_in_force="gtc",
+        post_only=False,
+        execution_context=context,
+    )
+
+    legacy_fill, legacy_rejection = execute_fill_order(model, order)
+    lifecycle_result = execute_fill_order_with_lifecycle(model, order)
+
+    assert legacy_rejection is None
+    assert lifecycle_result.rejection is None
+    assert legacy_fill is not None
+    assert lifecycle_result.fill is not None
+    assert lifecycle_result.fill.filled_qty == legacy_fill.filled_qty
+    assert lifecycle_result.fill.fill_price == legacy_fill.fill_price
+    assert lifecycle_result.fill.notional == legacy_fill.notional
+    assert lifecycle_result.fill.fee == legacy_fill.fee
+    assert lifecycle_result.lifecycle.snapshot().state == CanonicalOrderState.FILLED
+    assert lifecycle_result.fill.metadata["order_request_id"]
+    assert lifecycle_result.fill.metadata["order_lifecycle_replay_hash"]
 
 
 def test_market_price_collar_rejects_adverse_entry_and_fill_order() -> None:

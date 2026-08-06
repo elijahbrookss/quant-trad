@@ -8,6 +8,15 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Protocol, Tuple
 
 from .execution import FillRejection, FillResult
 from .execution_policy import fee_rate_for_role, normalize_liquidity_role
+from .order_lifecycle import (
+    CanonicalOrderLifecycle,
+    CanonicalOrderRequest,
+    CanonicalOrderState,
+    build_initial_order_attempt,
+    execution_policy_hash,
+    stable_order_identity,
+    venue_lifecycle_event_name,
+)
 
 if TYPE_CHECKING:
     from .execution_context import ResolvedExecutionContext
@@ -56,6 +65,16 @@ class OrderFillExecutor(Protocol):
         order: FillOrder,
     ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
         ...
+
+
+@dataclass(frozen=True)
+class LifecycleFillExecution:
+    """Compatibility fill result plus its authoritative order trace."""
+
+    fill: Optional[FillResult]
+    rejection: Optional[FillRejection]
+    lifecycle: CanonicalOrderLifecycle
+    emitted_event_ids: Tuple[str, ...]
 
 
 def build_fill_order(
@@ -135,9 +154,170 @@ def execute_fill_order(
     executor: OrderFillExecutor,
     order: FillOrder,
 ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-    """Execute an order through the canonical typed order surface."""
+    """Execute through the durable lifecycle while preserving the legacy tuple."""
+
+    result = execute_fill_order_with_lifecycle(executor, order)
+    return result.fill, result.rejection
+
+
+def _compatibility_known_at(order: FillOrder) -> str:
+    metadata = dict(order.metadata or {})
+    for key in ("known_at", "bar_time", "event_time", "fill_time", "created_at"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            return value
+    # Old direct callers did not carry a causal timestamp.  Keep their adapter
+    # deterministic and explicitly disclose the compatibility sentinel.
+    return "1970-01-01T00:00:00Z"
+
+
+def canonical_order_request_for_fill_order(order: FillOrder) -> CanonicalOrderRequest:
+    """Adapt an immediate FillOrder into the immutable Phase 2B request."""
+
+    metadata = dict(order.metadata or {})
+    context = order.execution_context
+    context_hash = (
+        str(context.context_hash)
+        if context is not None
+        else stable_order_identity(
+            "legacy_execution_context",
+            {
+                "fee_source": order.fee_source,
+                "fee_version": order.fee_version,
+                "fee_schedule_hash": order.fee_schedule_hash,
+            },
+        )
+    )
+    instrument_id = str(metadata.get("instrument_id") or "").strip()
+    symbol = str(metadata.get("symbol") or "").strip()
+    if context is not None:
+        instrument_id = instrument_id or str(context.instrument.instrument_id or "").strip()
+        symbol = symbol or str(context.instrument.symbol or "").strip()
+    instrument_id = instrument_id or "compatibility:unbound_instrument"
+    symbol = symbol or "compatibility:unbound_symbol"
+    policy_hash = execution_policy_hash(
+        order_type=order.order_type,
+        time_in_force=order.time_in_force,
+        post_only=order.post_only,
+        liquidity_role=order.liquidity_role,
+        price_source=order.price_source,
+    )
+    identity_material = {
+        "run_id": metadata.get("run_id"),
+        "bot_id": metadata.get("bot_id"),
+        "strategy_id": metadata.get("strategy_id"),
+        "instrument_id": instrument_id,
+        "symbol": symbol,
+        "trade_id": metadata.get("trade_id"),
+        "leg_id": metadata.get("leg_id"),
+        "side": order.side,
+        "requested_qty": order.requested_qty,
+        "requested_price": order.price,
+        "execution_context_hash": context_hash,
+        "execution_policy_hash": policy_hash,
+        "known_at": _compatibility_known_at(order),
+    }
+    request_id = str(
+        metadata.get("order_request_id")
+        or metadata.get("order_id")
+        or stable_order_identity("order_request", identity_material)
+    )
+    return CanonicalOrderRequest(
+        request_id=request_id,
+        run_id=str(metadata.get("run_id") or "compatibility:unbound_run"),
+        bot_id=str(metadata.get("bot_id") or "compatibility:unbound_bot"),
+        strategy_id=str(metadata.get("strategy_id") or "compatibility:unbound_strategy"),
+        instrument_id=instrument_id,
+        symbol=symbol,
+        side=order.side,
+        requested_qty=order.requested_qty,
+        requested_price=order.price,
+        order_type=order.order_type,
+        time_in_force=order.time_in_force,
+        post_only=order.post_only,
+        liquidity_role=order.liquidity_role,
+        price_source=order.price_source,
+        execution_context_hash=context_hash,
+        execution_policy_hash=policy_hash,
+        known_at=_compatibility_known_at(order),
+        signal_id=metadata.get("signal_id"),
+        decision_id=metadata.get("decision_id"),
+        trade_id=metadata.get("trade_id"),
+        metadata={
+            **metadata,
+            "binding_source": (
+                "resolved_execution_context"
+                if context is not None
+                else "legacy_fill_order_compatibility"
+            ),
+            "known_at_source": (
+                "fill_order_metadata"
+                if any(metadata.get(key) for key in ("known_at", "bar_time", "event_time", "fill_time", "created_at"))
+                else "compatibility_sentinel"
+            ),
+        },
+    )
+
+
+def _lifecycle_evidence(lifecycle: CanonicalOrderLifecycle, *, fill_id: Optional[str] = None) -> Dict[str, Any]:
+    snapshot = lifecycle.snapshot()
+    active_attempt_id = snapshot.active_attempt_id or lifecycle.attempts[-1].attempt_id
+    attempt = next(item for item in lifecycle.attempts if item.attempt_id == active_attempt_id)
+    return {
+        "order_lifecycle_schema_version": lifecycle.request.schema_version,
+        "order_request_id": lifecycle.request.request_id,
+        "order_request_manifest_hash": lifecycle.request.manifest_hash,
+        "order_attempt_id": attempt.attempt_id,
+        "order_attempt_manifest_hash": attempt.manifest_hash,
+        "order_lifecycle_state": snapshot.state.value,
+        "order_cumulative_filled_qty": snapshot.cumulative_filled_qty,
+        "order_remaining_qty": snapshot.remaining_qty,
+        "order_fill_id": fill_id,
+        "order_lifecycle_replay_hash": snapshot.replay_hash,
+        "order_lifecycle_event_ids": [event.event_id for event in lifecycle.events],
+        "order_execution_context_hash": lifecycle.request.execution_context_hash,
+        "order_execution_policy_hash": attempt.execution_policy_hash,
+    }
+
+
+def _validate_existing_lifecycle(order: FillOrder, lifecycle: CanonicalOrderLifecycle) -> None:
+    context_hash = (
+        str(order.execution_context.context_hash)
+        if order.execution_context is not None
+        else lifecycle.request.execution_context_hash
+    )
+    if context_hash != lifecycle.request.execution_context_hash:
+        raise ValueError("fill_order_execution_context_changed_during_order_lifetime")
+    snapshot = lifecycle.snapshot()
+    active_attempt_id = snapshot.active_attempt_id
+    if active_attempt_id is None:
+        raise ValueError("fill_order_lifecycle_has_no_active_attempt")
+    attempt = next(item for item in lifecycle.attempts if item.attempt_id == active_attempt_id)
+    supplied_policy_hash = execution_policy_hash(
+        order_type=order.order_type,
+        time_in_force=order.time_in_force,
+        post_only=order.post_only,
+        liquidity_role=order.liquidity_role,
+        price_source=order.price_source,
+    )
+    if supplied_policy_hash != attempt.execution_policy_hash:
+        raise ValueError("fill_order_execution_policy_changed_without_replacement")
+    if str(order.side).strip().lower() != lifecycle.request.side:
+        raise ValueError("fill_order_side_changed_during_order_lifetime")
+
+
+def execute_fill_order_with_lifecycle(
+    executor: OrderFillExecutor,
+    order: FillOrder,
+    *,
+    lifecycle: Optional[CanonicalOrderLifecycle] = None,
+) -> LifecycleFillExecution:
+    """Execute one lifecycle step without taking ownership of accounting."""
 
     effective_order = order
+    starting_seq = len(lifecycle.events) if lifecycle is not None else 0
+    if lifecycle is not None:
+        _validate_existing_lifecycle(order, lifecycle)
     if order.execution_context is not None:
         conformance = order.execution_context.validate_order(
             order_type=order.order_type,
@@ -149,9 +329,40 @@ def execute_fill_order(
             liquidity_role=order.liquidity_role,
         )
         if not conformance.accepted:
-            return None, FillRejection(
+            if lifecycle is None:
+                request = canonical_order_request_for_fill_order(order)
+                attempt = build_initial_order_attempt(
+                    request,
+                    attempt_id=str(dict(order.metadata or {}).get("order_attempt_id") or "") or None,
+                )
+                lifecycle = CanonicalOrderLifecycle.create(
+                    request,
+                    attempt,
+                    venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.REQUESTED),
+                )
+            active_attempt_id = lifecycle.snapshot().active_attempt_id
+            if active_attempt_id is None:
+                raise ValueError("rejected_fill_order_has_no_active_attempt")
+            lifecycle.transition(
+                attempt_id=active_attempt_id,
+                state=CanonicalOrderState.REJECTED,
+                known_at=_compatibility_known_at(order),
                 reason=str(conformance.reason or "ORDER_CONFORMANCE_FAILED"),
+                venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.REJECTED),
                 metadata=dict(conformance.metadata),
+            )
+            rejection = FillRejection(
+                reason=str(conformance.reason or "ORDER_CONFORMANCE_FAILED"),
+                metadata={
+                    **dict(conformance.metadata),
+                    **_lifecycle_evidence(lifecycle),
+                },
+            )
+            return LifecycleFillExecution(
+                fill=None,
+                rejection=rejection,
+                lifecycle=lifecycle,
+                emitted_event_ids=tuple(event.event_id for event in lifecycle.events_after(starting_seq)),
             )
         effective_order = replace(
             order,
@@ -159,6 +370,50 @@ def execute_fill_order(
             price=float(conformance.normalized_price or order.price),
             metadata={**dict(order.metadata or {}), **dict(conformance.metadata)},
         )
+    if lifecycle is None:
+        request = canonical_order_request_for_fill_order(order)
+        attempt = build_initial_order_attempt(
+            request,
+            attempt_id=str(dict(order.metadata or {}).get("order_attempt_id") or "") or None,
+        )
+        lifecycle = CanonicalOrderLifecycle.create(
+            request,
+            attempt,
+            venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.REQUESTED),
+        )
+    snapshot = lifecycle.snapshot()
+    active_attempt_id = snapshot.active_attempt_id
+    if active_attempt_id is None:
+        raise ValueError("fill_order_lifecycle_has_no_active_attempt")
+    active_snapshot = lifecycle.attempt_snapshot(active_attempt_id)
+    if active_snapshot is None:
+        raise ValueError("fill_order_active_attempt_has_no_state")
+    if active_snapshot.state == CanonicalOrderState.REQUESTED:
+        lifecycle.transition(
+            attempt_id=active_attempt_id,
+            state=CanonicalOrderState.VALIDATED,
+            known_at=_compatibility_known_at(order),
+            venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.VALIDATED),
+        )
+        active_snapshot = lifecycle.attempt_snapshot(active_attempt_id)
+    if active_snapshot is not None and active_snapshot.state == CanonicalOrderState.VALIDATED:
+        lifecycle.transition(
+            attempt_id=active_attempt_id,
+            state=CanonicalOrderState.ACCEPTED,
+            known_at=_compatibility_known_at(order),
+            venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.ACCEPTED),
+        )
+        active_snapshot = lifecycle.attempt_snapshot(active_attempt_id)
+    if active_snapshot is None or active_snapshot.state not in {
+        CanonicalOrderState.ACCEPTED,
+        CanonicalOrderState.OPEN,
+        CanonicalOrderState.PARTIALLY_FILLED,
+    }:
+        raise ValueError(f"fill_order_attempt_not_executable state={active_snapshot.state.value if active_snapshot else None}")
+    effective_order = replace(
+        effective_order,
+        requested_qty=float(active_snapshot.remaining_qty),
+    )
     execute_order = getattr(executor, "execute_order", None)
     if not callable(execute_order):
         raise RuntimeError(
@@ -175,11 +430,97 @@ def execute_fill_order(
             filled_qty=fill.filled_qty,
         )
         if not protection.accepted:
-            return None, FillRejection(
+            lifecycle.transition(
+                attempt_id=active_attempt_id,
+                state=CanonicalOrderState.REJECTED,
+                known_at=_compatibility_known_at(order),
                 reason=str(protection.reason or "MARKET_PROTECTION_FAILED"),
+                venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.REJECTED),
                 metadata=dict(protection.metadata),
             )
-    return annotate_fill_order(fill, effective_order), rejection
+            protected_rejection = FillRejection(
+                reason=str(protection.reason or "MARKET_PROTECTION_FAILED"),
+                metadata={
+                    **dict(protection.metadata),
+                    **_lifecycle_evidence(lifecycle),
+                },
+            )
+            return LifecycleFillExecution(
+                fill=None,
+                rejection=protected_rejection,
+                lifecycle=lifecycle,
+                emitted_event_ids=tuple(event.event_id for event in lifecycle.events_after(starting_seq)),
+            )
+    if rejection is not None:
+        lifecycle.transition(
+            attempt_id=active_attempt_id,
+            state=CanonicalOrderState.REJECTED,
+            known_at=_compatibility_known_at(order),
+            reason=rejection.reason,
+            venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.REJECTED),
+            metadata=dict(rejection.metadata or {}),
+        )
+        rejection = replace(
+            rejection,
+            metadata={
+                **dict(rejection.metadata or {}),
+                **_lifecycle_evidence(lifecycle),
+            },
+        )
+    elif fill is None:
+        if active_snapshot.state == CanonicalOrderState.ACCEPTED:
+            lifecycle.transition(
+                attempt_id=active_attempt_id,
+                state=CanonicalOrderState.OPEN,
+                known_at=_compatibility_known_at(order),
+                venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.OPEN),
+            )
+    else:
+        fill_material = {
+            "request_id": lifecycle.request.request_id,
+            "attempt_id": active_attempt_id,
+            "next_event_seq": len(lifecycle.events) + 1,
+            "known_at": _compatibility_known_at(order),
+            "filled_qty": fill.filled_qty,
+            "fill_price": fill.fill_price,
+            "fee": fill.fee,
+        }
+        fill_id = str(
+            dict(fill.metadata or {}).get("fill_id")
+            or dict(order.metadata or {}).get("fill_id")
+            or stable_order_identity("order_fill", fill_material)
+        )
+        fill_event = lifecycle.record_fill(
+            attempt_id=active_attempt_id,
+            fill_id=fill_id,
+            fill_qty=fill.filled_qty,
+            fill_price=fill.fill_price,
+            fill_fee=fill.fee,
+            known_at=_compatibility_known_at(order),
+            venue_event_name=venue_lifecycle_event_name(
+                order.execution_context,
+                (
+                    CanonicalOrderState.FILLED
+                    if abs(float(fill.filled_qty) - float(active_snapshot.remaining_qty)) <= 1e-12
+                    else CanonicalOrderState.PARTIALLY_FILLED
+                ),
+            ),
+        )
+        fill = annotate_fill_order(fill, effective_order)
+        if fill is not None:
+            fill = replace(
+                fill,
+                metadata={
+                    **dict(fill.metadata or {}),
+                    **_lifecycle_evidence(lifecycle, fill_id=fill_event.fill_id),
+                },
+            )
+    return LifecycleFillExecution(
+        fill=fill,
+        rejection=rejection,
+        lifecycle=lifecycle,
+        emitted_event_ids=tuple(event.event_id for event in lifecycle.events_after(starting_seq)),
+    )
 
 
 def annotate_fill_order(fill: Optional[FillResult], order: FillOrder) -> Optional[FillResult]:
@@ -212,9 +553,12 @@ def annotate_fill_order(fill: Optional[FillResult], order: FillOrder) -> Optiona
 
 __all__ = [
     "FillOrder",
+    "LifecycleFillExecution",
     "OrderFillExecutor",
     "OrderType",
     "annotate_fill_order",
     "build_fill_order",
+    "canonical_order_request_for_fill_order",
     "execute_fill_order",
+    "execute_fill_order_with_lifecycle",
 ]
