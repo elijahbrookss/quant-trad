@@ -27,6 +27,7 @@ from ..execution_runtime import DeterministicExecutionModel
 from ..exit_settlement import ExitSettlement, ExitSettlementService
 from ..fees import FeeResolver, executed_fee, executed_notional
 from ..margin import calculate_max_qty_by_margin
+from ..order_lifecycle import CanonicalOrderLifecycle, CanonicalOrderLifecycleEvent
 from ..wallet import WalletLedger, trace_wallet_balance
 from ..wallet_gateway import WalletGateway
 from .models import (
@@ -176,6 +177,9 @@ class LadderRiskEngine:
         self.entry_settlement: EntrySettlement = EntrySettlementService(self)
         self.exit_settlement: ExitSettlement = ExitSettlementService(None)
         self.entry_execution = EntryExecutionCoordinator(self)
+        self._order_lifecycle_events: List[CanonicalOrderLifecycleEvent] = []
+        self._order_lifecycle_replay: Dict[str, CanonicalOrderLifecycle] = {}
+        self._pending_entry_fills: List[LadderPosition] = []
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
         self.trade_revision: int = 0
@@ -197,6 +201,57 @@ class LadderRiskEngine:
     def set_runtime_context(self, **fields: Optional[object]) -> None:
         """Merge additional context fields into engine log context."""
         self._runtime_log_context = merge_log_context(self._runtime_log_context, build_log_context(**fields))
+        for identity_field in ("run_id", "bot_id", "strategy_id"):
+            value = fields.get(identity_field)
+            if value not in (None, ""):
+                setattr(self, identity_field, str(value))
+
+    def record_order_lifecycle(self, lifecycle: CanonicalOrderLifecycle, *, after_seq: int = 0) -> None:
+        """Queue immutable lifecycle facts for the runtime's canonical event owner."""
+
+        if not isinstance(lifecycle, CanonicalOrderLifecycle):
+            raise ValueError("record_order_lifecycle requires CanonicalOrderLifecycle")
+        request_id = lifecycle.request.request_id
+        existing = self._order_lifecycle_replay.get(request_id)
+        if existing is not None and existing.replay_hash != lifecycle.replay_hash:
+            existing_ids = {event.event_id for event in existing.events}
+            incoming_prefix = tuple(event for event in lifecycle.events if event.event_id in existing_ids)
+            if tuple(existing.events) != incoming_prefix:
+                raise ValueError("order_lifecycle_trace_diverged_for_request")
+        self._order_lifecycle_replay[request_id] = lifecycle
+        queued_ids = {event.event_id for event in self._order_lifecycle_events}
+        self._order_lifecycle_events.extend(
+            event
+            for event in lifecycle.events_after(after_seq)
+            if event.event_id not in queued_ids
+        )
+
+    def drain_order_lifecycle_events(self) -> List[CanonicalOrderLifecycleEvent]:
+        """Transfer queued lifecycle facts without changing their order."""
+
+        events = list(self._order_lifecycle_events)
+        self._order_lifecycle_events.clear()
+        return events
+
+    def order_lifecycle_traces(self) -> Dict[str, Dict[str, Any]]:
+        """Return replayable traces for artifacts and restart recovery."""
+
+        return {
+            request_id: lifecycle.to_dict()
+            for request_id, lifecycle in sorted(self._order_lifecycle_replay.items())
+        }
+
+    def order_lifecycle_for(self, request_id: str) -> Optional[CanonicalOrderLifecycle]:
+        """Return the in-memory replay authority for runtime publication."""
+
+        return self._order_lifecycle_replay.get(str(request_id))
+
+    def drain_pending_entry_fills(self) -> List[LadderPosition]:
+        """Transfer delayed entry fills to the runtime publication owner."""
+
+        fills = list(self._pending_entry_fills)
+        self._pending_entry_fills.clear()
+        return fills
 
     def runtime_log_context(self, **fields: Optional[object]) -> Dict[str, object]:
         """Build context for runtime-domain logs with stable engine fields."""
@@ -298,12 +353,18 @@ class LadderRiskEngine:
         ]
 
     @staticmethod
-    def _new_order_intent_id() -> str:
-        return str(uuid.uuid4())
+    def _new_order_intent_id(stable_seed: str) -> str:
+        seed = str(stable_seed or "").strip()
+        if not seed:
+            raise ValueError("stable order intent identity seed is required")
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"canonical_order_intent|{seed}"))
 
     @staticmethod
-    def _new_trade_id() -> str:
-        return str(uuid.uuid4())
+    def _new_trade_id(stable_seed: str) -> str:
+        seed = str(stable_seed or "").strip()
+        if not seed:
+            raise ValueError("stable trade identity seed is required")
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"canonical_trade|{seed}"))
 
     def _entry_request_id(self, candle: Candle, direction: str) -> str:
         bar_time = candle.time.isoformat() if getattr(candle, "time", None) is not None else ""
@@ -700,8 +761,8 @@ class LadderRiskEngine:
         if order_type == "limit_maker":
             limit_params = self._build_limit_params(candle, direction=direction, r_value=r_value)
 
-        order_intent_id = self._new_order_intent_id()
-        trade_id = self._new_trade_id()
+        order_intent_id = self._new_order_intent_id(entry_request_id)
+        trade_id = self._new_trade_id(entry_request_id)
         side = "buy" if direction == "long" else "sell"
         intent = ExecutionIntent(
             order_id=order_intent_id,
@@ -1244,6 +1305,8 @@ class LadderRiskEngine:
             signal_id=getattr(self, "last_signal_id", None),
             decision_id=getattr(self, "last_decision_id", None),
             strategy_id=str(self.strategy_id) if getattr(self, "strategy_id", None) else None,
+            run_id=str(self.run_id) if getattr(self, "run_id", None) else None,
+            bot_id=str(self.bot_id) if getattr(self, "bot_id", None) else None,
             bar_time=candle.time,
             atr_at_entry=atr_at_entry,
             r_multiple_at_entry=r_multiple_at_entry,
@@ -1743,10 +1806,13 @@ class LadderRiskEngine:
             if new_trade:
                 self.active_trade = new_trade
                 self.trades.append(self.active_trade)
+                self._pending_entry_fills.append(new_trade)
                 touched_trade = new_trade
         if self.active_trade is None:
             return []
         events = self.active_trade.apply_bar(candle, same_bar_policy=same_bar_policy)
+        for lifecycle, after_seq in self.active_trade.drain_order_lifecycle_updates():
+            self.record_order_lifecycle(lifecycle, after_seq=after_seq)
         if not self.active_trade.is_active():
             self.active_trade = None
         self._bump_trade_revision_if_material_changed(
@@ -1815,6 +1881,8 @@ class LadderRiskEngine:
             candle,
             reason_code=reason_code,
         )
+        for lifecycle, after_seq in touched_trade.drain_order_lifecycle_updates():
+            self.record_order_lifecycle(lifecycle, after_seq=after_seq)
         if self.active_trade is not None and not self.active_trade.is_active():
             self.active_trade = None
         self._bump_trade_revision_if_material_changed(

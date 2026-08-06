@@ -2,7 +2,14 @@ from datetime import datetime, timezone
 import threading
 from typing import Optional
 
-from engines.bot_runtime.core import CandleSnapshot, EntryFill, EntryFillResult, FillOrder, PendingEntry
+from engines.bot_runtime.core import (
+    CandleSnapshot,
+    CanonicalOrderState,
+    EntryFill,
+    EntryFillResult,
+    FillOrder,
+    PendingEntry,
+)
 from engines.bot_runtime.core.domain import Candle, EntryRequest, EntryValidation, LadderRiskEngine
 from engines.bot_runtime.core.execution import FillRejection, FillResult
 from engines.bot_runtime.core.execution_intent import ExecutionIntent, ExecutionOutcome
@@ -134,6 +141,33 @@ class _RejectSellAdapter(_FillAdapter):
                 metadata={"order_type": order.order_type},
             )
         return super().execute_order(order)
+
+
+class _PartialSellAdapter(_FillAdapter):
+    def __init__(self, sell_fill_quantities: list[float]) -> None:
+        self._sell_fill_quantities = list(sell_fill_quantities)
+
+    def execute_order(self, order: FillOrder):
+        if order.side != "sell":
+            return super().execute_order(order)
+        quantity = min(float(self._sell_fill_quantities.pop(0)), float(order.requested_qty))
+        return (
+            FillResult(
+                filled_qty=quantity,
+                fill_price=float(order.price),
+                notional=executed_notional(price=order.price, quantity=quantity, contract_size=1.0),
+                fee=executed_fee(
+                    price=order.price,
+                    quantity=quantity,
+                    contract_size=1.0,
+                    fee_rate=order.fee_rate,
+                ),
+                fee_rate=float(order.fee_rate or 0.0),
+                side=order.side,
+                metadata={"source": "partial-test"},
+            ),
+            None,
+        )
 
 
 def _enable_runtime_execution(engine: LadderRiskEngine) -> None:
@@ -338,6 +372,92 @@ def test_limit_maker_entry_does_not_fill_from_signal_bar_range():
 
     assert position is not None
     assert position.entry_price == 95.0
+
+
+def test_partial_entry_is_retained_but_cannot_be_abandoned_before_phase_3():
+    limit_maker = {
+        "anchor_price": "signal_price",
+        "offset_type": "ticks",
+        "offset_value": 5,
+        "validity_window": 2,
+        "fallback": "cancel",
+    }
+    engine = _build_spot_engine(
+        execution_mode="limit_maker",
+        limit_maker=limit_maker,
+        base_risk_per_trade=8,
+    )
+    signal_bar = _build_candle(close=100.0, atr=2.0)
+
+    class SequenceModel:
+        def __init__(self) -> None:
+            self._statuses = ["open", "partially_filled", "canceled"]
+
+        def evaluate(self, intent, *, candle_high, candle_low, candle_close, candle_open):
+            status = self._statuses.pop(0)
+            filled_qty = 1.0 if status == "partially_filled" else 0.0
+            remaining_qty = max(float(intent.qty) - filled_qty, 0.0)
+            return (
+                ExecutionOutcome(
+                    order_id=intent.order_id,
+                    status=status,
+                    filled_qty=filled_qty,
+                    avg_fill_price=float(candle_close) if filled_qty else None,
+                    fee_paid=0.0,
+                    fee_role="maker",
+                    fee_rate=0.0,
+                    fee_source="test",
+                    fee_version="test",
+                    created_at="now",
+                    updated_at="now",
+                    filled_at="now" if filled_qty else None,
+                    remaining_qty=remaining_qty,
+                    limit_price=(
+                        float(intent.limit_params.limit_price)
+                        if intent.limit_params is not None
+                        and intent.limit_params.limit_price is not None
+                        else None
+                    ),
+                ),
+                None,
+            )
+
+    engine.attach_execution_model(SequenceModel())
+    assert engine.entry_execution.submit_entry(signal_bar, "long") is None
+
+    partial_bar = Candle(
+        time=datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+        open=95.0,
+        high=96.0,
+        low=94.0,
+        close=95.0,
+        atr=2.0,
+    )
+    assert engine.entry_execution.process_pending(partial_bar) is None
+    pending = engine.entry_execution.pending_entry
+    assert pending is not None
+    assert pending.filled_qty == 1.0
+    assert pending.remaining_qty == pending.requested_qty - 1.0
+    assert pending.order_lifecycle is not None
+    assert pending.order_lifecycle.snapshot().state == CanonicalOrderState.PARTIALLY_FILLED
+
+    canceled_bar = Candle(
+        time=datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+        open=96.0,
+        high=97.0,
+        low=95.0,
+        close=96.0,
+        atr=2.0,
+    )
+    try:
+        engine.entry_execution.process_pending(canceled_bar)
+    except RuntimeError as exc:
+        assert "partial entry disposition is not admitted" in str(exc)
+    else:
+        raise AssertionError("expected partial entry cancellation to fail closed")
+
+    assert engine.entry_execution.pending_entry is pending
+    assert pending.order_lifecycle.snapshot().state == CanonicalOrderState.PARTIALLY_FILLED
 
 
 def test_submit_entry_limit_maker_rejects_marketable_post_only_order():
@@ -799,6 +919,56 @@ def test_target_fill_status_and_quantity_change_bumps_trade_revision():
     assert position.is_active()
     assert [leg.status for leg in position.legs] == ["target", "open"]
     assert engine.trade_revision == revision_after_open + 1
+
+
+def test_partial_exit_preserves_residual_and_reuses_one_canonical_order() -> None:
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    _enable_runtime_execution(engine)
+    position = engine.maybe_enter(_build_candle(close=100.0, atr=2.0), "long")
+    assert position is not None
+    engine.drain_order_lifecycle_events()
+    partial_adapter = _PartialSellAdapter([1.0, 1.0])
+    engine.attach_execution_adapter(partial_adapter)
+    position.execution_adapter = partial_adapter
+
+    first_events = engine.step(
+        Candle(
+            time=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            open=110.0,
+            high=111.0,
+            low=109.0,
+            close=110.0,
+            atr=2.0,
+        )
+    )
+    first_lifecycle = engine.drain_order_lifecycle_events()
+
+    assert [event["contracts"] for event in first_events if event["type"] == "target"] == [1.0]
+    assert position.legs[0].status == "open"
+    assert position.legs[0].contracts == 1.0
+    assert first_lifecycle[-1].state == CanonicalOrderState.PARTIALLY_FILLED
+    assert first_lifecycle[-1].order_remaining_qty == 1.0
+    request_id = first_lifecycle[-1].request_id
+
+    second_events = engine.step(
+        Candle(
+            time=datetime(2024, 1, 3, tzinfo=timezone.utc),
+            open=110.0,
+            high=111.0,
+            low=109.0,
+            close=110.0,
+            atr=2.0,
+        )
+    )
+    second_lifecycle = engine.drain_order_lifecycle_events()
+
+    assert [event["contracts"] for event in second_events if event["type"] == "target"] == [1.0]
+    assert sum(event["contracts"] for event in first_events + second_events if event["type"] == "target") == 2.0
+    assert second_lifecycle[-1].request_id == request_id
+    assert second_lifecycle[-1].state == CanonicalOrderState.FILLED
+    assert second_lifecycle[-1].order_cumulative_filled_qty == 2.0
+    assert second_lifecycle[-1].order_remaining_qty == 0.0
+    assert engine.active_trade is None
 
 
 def test_take_profit_size_fractions_drive_integer_contract_allocation():

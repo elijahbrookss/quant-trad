@@ -12,6 +12,7 @@ from engines.bot_runtime.core.domain import Candle, StrategySignal
 from engines.bot_runtime.core.runtime_events import (
     EntryFilledContext,
     ExitKind,
+    OrderLifecycleChangedContext,
     ReasonCode,
     RuntimeEventName,
     WalletDelta,
@@ -760,6 +761,61 @@ def test_wallet_initialized_round_trip_preserves_wallet_commit_clock() -> None:
     assert restored.context.wallet_eval_seq == 0
     assert facts[0]["wallet_event"]["wallet_commit_seq"] == 0
     assert facts[0]["wallet_event"]["wallet_commit_seq_status"] == "runtime_assigned"
+
+
+def test_order_lifecycle_runtime_event_round_trip_preserves_residual_and_pins() -> None:
+    event = new_runtime_event(
+        event_name=RuntimeEventName.ORDER_LIFECYCLE_CHANGED,
+        event_id="order-event-4",
+        correlation_id="run-1:BTC-USD:1h:2026-02-01T00:00:00.000Z",
+        root_id="signal-1",
+        parent_id="decision-1",
+        event_ts=datetime(2026, 2, 1, 1, tzinfo=timezone.utc),
+        context=OrderLifecycleChangedContext(
+            run_id="run-1",
+            bot_id="bot-1",
+            strategy_id="strategy-1",
+            series_key="instrument-btc|1h",
+            instrument_id="instrument-btc",
+            symbol="BTC-USD",
+            timeframe="1h",
+            bar_ts=datetime(2026, 2, 1, 1, tzinfo=timezone.utc),
+            order_request_id="order-1",
+            order_request_manifest_hash="request-hash",
+            attempt_id="attempt-1",
+            order_attempt_manifest_hash="attempt-hash",
+            order_event_seq=4,
+            previous_state="open",
+            state="partially_filled",
+            known_at=datetime(2026, 2, 1, 1, tzinfo=timezone.utc),
+            side="buy",
+            requested_qty=10.0,
+            attempt_requested_qty=10.0,
+            attempt_cumulative_filled_qty=4.0,
+            attempt_remaining_qty=6.0,
+            order_cumulative_filled_qty=4.0,
+            order_remaining_qty=6.0,
+            execution_context_hash="context-hash",
+            execution_policy_hash="policy-hash",
+            order_lifecycle_replay_hash="replay-prefix-hash",
+            trade_id="trade-1",
+            signal_id="signal-domain-1",
+            decision_id="decision-domain-1",
+            fill_id="fill-1",
+            fill_qty=4.0,
+            fill_price=100.0,
+            fill_fee=0.04,
+            venue_event_name="open",
+        ),
+    )
+
+    restored = runtime_event_from_dict(event.serialize())
+
+    assert restored.serialize() == event.serialize()
+    assert restored.context.state == "partially_filled"
+    assert restored.context.order_remaining_qty == 6.0
+    assert restored.context.execution_context_hash == "context-hash"
+    assert restored.context.execution_policy_hash == "policy-hash"
 
 
 def test_wallet_facts_emit_exit_ledger_with_absolute_release_state() -> None:

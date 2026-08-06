@@ -1589,6 +1589,17 @@ class RuntimeSetupPrepareMixin:
             exit_settlement,
             execution_profile=getattr(series, "execution_profile", None),
         )
+        self._drain_order_lifecycle_events(series=series)
+        drain_pending_entry_fills = getattr(engine, "drain_pending_entry_fills", None)
+        if callable(drain_pending_entry_fills):
+            for delayed_trade in drain_pending_entry_fills():
+                self._emit_entry_filled_event(
+                    series=series,
+                    candle=minute_bar,
+                    trade=delayed_trade,
+                    direction=str(getattr(delayed_trade, "direction", "") or ""),
+                )
+                self._persist_trade_entry(series, delayed_trade)
         if fallback_triggered:
             state.intrabar_candles = []
             temp_candle = state.active_candle

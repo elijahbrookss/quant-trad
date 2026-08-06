@@ -465,6 +465,7 @@ class RuntimeExecutionLoopMixin:
                     exit_settlement,
                     execution_profile=getattr(series, "execution_profile", None),
                 )
+                self._drain_order_lifecycle_events(series=series)
                 for event in events:
                     trade_time = self._trade_entry_time(series, event.get("trade_id"))
                     self._log_event(
@@ -910,8 +911,18 @@ class RuntimeExecutionLoopMixin:
 
                 # Log decision event
                 if direction is not None:
-                    if new_trade is not None:
-                        # Signal was accepted and trade was opened
+                    pending_entry = getattr(
+                        getattr(series.risk_engine, "entry_execution", None),
+                        "pending_entry",
+                        None,
+                    )
+                    if new_trade is not None or pending_entry is not None:
+                        # An accepted order may be open before a position exists.
+                        accepted_trade_id = (
+                            new_trade.trade_id
+                            if new_trade is not None
+                            else str(getattr(pending_entry, "trade_id", "") or "") or None
+                        )
                         decision_events_logged += 1
                         self._emit_decision_event(
                             series=series,
@@ -923,14 +934,17 @@ class RuntimeExecutionLoopMixin:
                             signal_price=float(candle.close),
                             reason_code="DECISION_ACCEPTED",
                             message=None,
-                            trade_id=new_trade.trade_id,
+                            trade_id=accepted_trade_id,
                             wallet_evidence=(
                                 {
                                     **dict(getattr(new_trade, "wallet_fill_metadata", {}) or {}),
                                     "position_commit_seq": int(getattr(new_trade, "position_commit_seq", 0) or 0),
                                 }
-                                if isinstance(getattr(new_trade, "wallet_fill_metadata", None), Mapping)
+                                if new_trade is not None
+                                and isinstance(getattr(new_trade, "wallet_fill_metadata", None), Mapping)
                                 else {"position_commit_seq": int(getattr(new_trade, "position_commit_seq", 0) or 0)}
+                                if new_trade is not None
+                                else {}
                             ),
                         )
                         decision_order_outcome = "accepted"
@@ -999,6 +1013,8 @@ class RuntimeExecutionLoopMixin:
                             wallet_evidence=rejection_context,
                         )
                         decision_order_outcome = "rejected"
+
+                self._drain_order_lifecycle_events(series=series)
 
                 if new_trade is not None:
                     entry_created = True
@@ -1151,6 +1167,24 @@ class RuntimeExecutionLoopMixin:
                     exit_settlement,
                     execution_profile=getattr(series, "execution_profile", None),
                 )
+                lifecycle_events_emitted = self._drain_order_lifecycle_events(series=series)
+                delayed_entry_fills = []
+                drain_pending_entry_fills = getattr(
+                    series.risk_engine,
+                    "drain_pending_entry_fills",
+                    None,
+                )
+                if callable(drain_pending_entry_fills):
+                    delayed_entry_fills = list(drain_pending_entry_fills())
+                for delayed_trade in delayed_entry_fills:
+                    execution_events_logged += 1
+                    self._emit_entry_filled_event(
+                        series=series,
+                        candle=candle,
+                        trade=delayed_trade,
+                        direction=str(getattr(delayed_trade, "direction", "") or ""),
+                    )
+                    self._persist_trade_entry(series, delayed_trade)
                 self._record_step_trace(
                     "settlement_apply",
                     started_at=settlement_started,
@@ -1159,7 +1193,13 @@ class RuntimeExecutionLoopMixin:
                     strategy_id=getattr(series, "strategy_id", None),
                     symbol=getattr(series, "symbol", None),
                     timeframe=getattr(series, "timeframe", None),
-                    context={"bar_index": state.bar_index, "bar_time": bar_time, "events": len(trade_events)},
+                    context={
+                        "bar_index": state.bar_index,
+                        "bar_time": bar_time,
+                        "events": len(trade_events),
+                        "order_lifecycle_events": lifecycle_events_emitted,
+                        "delayed_entry_fills": len(delayed_entry_fills),
+                    },
                 )
             except Exception as exc:
                 self._record_step_trace(

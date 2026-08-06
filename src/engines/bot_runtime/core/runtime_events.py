@@ -38,6 +38,7 @@ class RuntimeEventName(str, Enum):
     DECISION_REJECTED = "DECISION_REJECTED"
     ENTRY_FILLED = "ENTRY_FILLED"
     EXIT_FILLED = "EXIT_FILLED"
+    ORDER_LIFECYCLE_CHANGED = "ORDER_LIFECYCLE_CHANGED"
     EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC = "execution_intrabar_fallback_pessimistic"
     WALLET_INITIALIZED = "WALLET_INITIALIZED"
     WALLET_DEPOSITED = "WALLET_DEPOSITED"
@@ -78,6 +79,7 @@ _EVENT_DEFAULT_CATEGORY: Dict[RuntimeEventName, RuntimeEventCategory] = {
     RuntimeEventName.DECISION_REJECTED: RuntimeEventCategory.DECISION,
     RuntimeEventName.ENTRY_FILLED: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.EXIT_FILLED: RuntimeEventCategory.OUTCOME,
+    RuntimeEventName.ORDER_LIFECYCLE_CHANGED: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.WALLET_INITIALIZED: RuntimeEventCategory.WALLET,
     RuntimeEventName.WALLET_DEPOSITED: RuntimeEventCategory.WALLET,
@@ -585,6 +587,122 @@ class EntryFilledContext(RuntimeEventContextBase):
             object.__setattr__(self, "position_commit_seq", int(self.position_commit_seq))
 
 
+_CANONICAL_ORDER_STATES = frozenset(
+    {
+        "requested",
+        "validated",
+        "accepted",
+        "open",
+        "partially_filled",
+        "filled",
+        "rejected",
+        "expired",
+        "canceled",
+        "replaced",
+    }
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class OrderLifecycleChangedContext(RuntimeEventContextBase):
+    """Durable projection of one canonical order lifecycle transition."""
+
+    order_request_id: str
+    order_request_manifest_hash: str
+    attempt_id: str
+    order_attempt_manifest_hash: str
+    order_event_seq: int
+    previous_state: Optional[str]
+    state: str
+    known_at: datetime
+    side: str
+    requested_qty: float
+    attempt_requested_qty: float
+    attempt_cumulative_filled_qty: float
+    attempt_remaining_qty: float
+    order_cumulative_filled_qty: float
+    order_remaining_qty: float
+    execution_context_hash: str
+    execution_policy_hash: str
+    order_lifecycle_replay_hash: str
+    trade_id: Optional[str] = None
+    signal_id: Optional[str] = None
+    decision_id: Optional[str] = None
+    source_sequence: Optional[int] = None
+    fill_id: Optional[str] = None
+    fill_qty: Optional[float] = None
+    fill_price: Optional[float] = None
+    fill_fee: Optional[float] = None
+    reason: Optional[str] = None
+    replacement_attempt_id: Optional[str] = None
+    venue_event_name: Optional[str] = None
+    event_subtype: str = "order_lifecycle"
+    category: RuntimeEventCategory = RuntimeEventCategory.EXECUTION
+    reason_code: Optional[ReasonCode] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for field_name in (
+            "order_request_id",
+            "order_request_manifest_hash",
+            "attempt_id",
+            "order_attempt_manifest_hash",
+            "execution_context_hash",
+            "execution_policy_hash",
+            "order_lifecycle_replay_hash",
+        ):
+            object.__setattr__(self, field_name, _require_str({field_name: getattr(self, field_name)}, field_name))
+        if isinstance(self.order_event_seq, bool) or int(self.order_event_seq) <= 0:
+            raise ValueError("context.order_event_seq must be a positive integer")
+        object.__setattr__(self, "order_event_seq", int(self.order_event_seq))
+        previous_state = _optional_text(self.previous_state)
+        state = _require_str({"state": self.state}, "state").lower()
+        if previous_state is not None and previous_state.lower() not in _CANONICAL_ORDER_STATES:
+            raise ValueError("context.previous_state must be a canonical order state")
+        if state not in _CANONICAL_ORDER_STATES:
+            raise ValueError("context.state must be a canonical order state")
+        object.__setattr__(self, "previous_state", previous_state.lower() if previous_state else None)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "known_at", normalize_utc_datetime(self.known_at))
+        side = _require_str({"side": self.side}, "side").lower()
+        if side not in {"buy", "sell", "long", "short"}:
+            raise ValueError("context.side must be buy, sell, long, or short")
+        object.__setattr__(self, "side", side)
+        for field_name in (
+            "requested_qty",
+            "attempt_requested_qty",
+            "attempt_cumulative_filled_qty",
+            "attempt_remaining_qty",
+            "order_cumulative_filled_qty",
+            "order_remaining_qty",
+        ):
+            value = float(getattr(self, field_name))
+            if value < 0.0:
+                raise ValueError(f"context.{field_name} must be >= 0")
+            object.__setattr__(self, field_name, value)
+        if self.source_sequence is not None:
+            if isinstance(self.source_sequence, bool) or int(self.source_sequence) < 0:
+                raise ValueError("context.source_sequence must be a non-negative integer")
+            object.__setattr__(self, "source_sequence", int(self.source_sequence))
+        for field_name in (
+            "trade_id",
+            "signal_id",
+            "decision_id",
+            "fill_id",
+            "reason",
+            "replacement_attempt_id",
+            "venue_event_name",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        for field_name in ("fill_qty", "fill_price", "fill_fee"):
+            value = getattr(self, field_name)
+            if value is not None:
+                numeric = float(value)
+                if numeric < 0.0:
+                    raise ValueError(f"context.{field_name} must be >= 0")
+                object.__setattr__(self, field_name, numeric)
+
+
 @dataclass(frozen=True, kw_only=True)
 class ExitFilledContext(RuntimeEventContextBase):
     trade_id: str
@@ -854,6 +972,7 @@ RuntimeEventContext = (
     | DecisionRejectedContext
     | EntryFilledContext
     | ExitFilledContext
+    | OrderLifecycleChangedContext
     | WalletInitializedContext
     | WalletDepositedContext
     | RuntimeErrorContext
@@ -868,6 +987,7 @@ _CONTEXT_TYPE_BY_EVENT: Dict[RuntimeEventName, type[RuntimeEventContextBase]] = 
     RuntimeEventName.DECISION_REJECTED: DecisionRejectedContext,
     RuntimeEventName.ENTRY_FILLED: EntryFilledContext,
     RuntimeEventName.EXIT_FILLED: ExitFilledContext,
+    RuntimeEventName.ORDER_LIFECYCLE_CHANGED: OrderLifecycleChangedContext,
     RuntimeEventName.WALLET_INITIALIZED: WalletInitializedContext,
     RuntimeEventName.WALLET_DEPOSITED: WalletDepositedContext,
     RuntimeEventName.RUNTIME_ERROR: RuntimeErrorContext,
@@ -1101,6 +1221,46 @@ def _runtime_context_from_dict(
             reason_code=reason_code or ReasonCode.EXEC_EXIT_CLOSE,
         )
 
+    if event_name == RuntimeEventName.ORDER_LIFECYCLE_CHANGED:
+        known_at = parse_optional_datetime(data.get("known_at"))
+        if known_at is None:
+            raise ValueError("context.known_at is required")
+        return OrderLifecycleChangedContext(
+            **common,
+            order_request_id=_require_str(data, "order_request_id"),
+            order_request_manifest_hash=_require_str(data, "order_request_manifest_hash"),
+            attempt_id=_require_str(data, "attempt_id"),
+            order_attempt_manifest_hash=_require_str(data, "order_attempt_manifest_hash"),
+            order_event_seq=int(data.get("order_event_seq") or 0),
+            previous_state=_optional_text(data.get("previous_state")),
+            state=_require_str(data, "state"),
+            known_at=known_at,
+            side=_require_str(data, "side"),
+            requested_qty=_require_numeric(data, "requested_qty"),
+            attempt_requested_qty=_require_numeric(data, "attempt_requested_qty"),
+            attempt_cumulative_filled_qty=_require_numeric(data, "attempt_cumulative_filled_qty"),
+            attempt_remaining_qty=_require_numeric(data, "attempt_remaining_qty"),
+            order_cumulative_filled_qty=_require_numeric(data, "order_cumulative_filled_qty"),
+            order_remaining_qty=_require_numeric(data, "order_remaining_qty"),
+            execution_context_hash=_require_str(data, "execution_context_hash"),
+            execution_policy_hash=_require_str(data, "execution_policy_hash"),
+            order_lifecycle_replay_hash=_require_str(data, "order_lifecycle_replay_hash"),
+            trade_id=_optional_text(data.get("trade_id")),
+            signal_id=_optional_text(data.get("signal_id")),
+            decision_id=_optional_text(data.get("decision_id")),
+            source_sequence=(int(data["source_sequence"]) if data.get("source_sequence") is not None else None),
+            fill_id=_optional_text(data.get("fill_id")),
+            fill_qty=(float(data["fill_qty"]) if data.get("fill_qty") is not None else None),
+            fill_price=(float(data["fill_price"]) if data.get("fill_price") is not None else None),
+            fill_fee=(float(data["fill_fee"]) if data.get("fill_fee") is not None else None),
+            reason=_optional_text(data.get("reason")),
+            replacement_attempt_id=_optional_text(data.get("replacement_attempt_id")),
+            venue_event_name=_optional_text(data.get("venue_event_name")),
+            event_subtype=_optional_text(data.get("event_subtype")) or "order_lifecycle",
+            category=category,
+            reason_code=reason_code,
+        )
+
     if event_name == RuntimeEventName.WALLET_INITIALIZED:
         return WalletInitializedContext(
             **common,
@@ -1223,6 +1383,7 @@ def new_runtime_event(
         RuntimeEventName.DECISION_REJECTED,
         RuntimeEventName.ENTRY_FILLED,
         RuntimeEventName.EXIT_FILLED,
+        RuntimeEventName.ORDER_LIFECYCLE_CHANGED,
     } and not resolved_parent_id and not allow_missing_parent:
         raise ValueError(f"parent_id is required for {event_name.value}")
 
@@ -1257,6 +1418,8 @@ def decision_trace_entry_from_runtime_event(event: RuntimeEvent) -> Optional[Dic
         event_subtype = "entry"
     elif event.event_name == RuntimeEventName.EXIT_FILLED:
         event_subtype = str(serialized_context.get("exit_kind") or "close").lower()
+    elif event.event_name == RuntimeEventName.ORDER_LIFECYCLE_CHANGED:
+        event_subtype = "order_lifecycle"
     elif event.event_name == RuntimeEventName.RUNTIME_ERROR:
         event_subtype = "runtime_error"
 
@@ -1301,6 +1464,7 @@ __all__ = [
     "ExecutionIntrabarFallbackContext",
     "ExitFilledContext",
     "ExitKind",
+    "OrderLifecycleChangedContext",
     "ReasonCode",
     "RuntimeBar",
     "RuntimeErrorContext",
