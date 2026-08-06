@@ -173,14 +173,19 @@ true next-bar entry model requires its own pending signal-entry lifecycle so
 reports can distinguish when the signal was known from when the order became
 executable.
 
-Executable fills use the sole adapter contract, `execute_order(FillOrder)`, so
-side, quantity, price, order type, liquidity role, price source, and fee rate
-are known before the adapter applies the fill. Phase 2A also carries TIF,
-post-only intent, and the exact resolved context; startup and per-order
-conformance fail before a fill when the venue profile does not support them.
-Adapters that do not implement the typed order surface fail before a fill can
-be produced. `FillOrder` remains an immediate full-fill compatibility adapter;
-durable partial/open order lifecycle is not yet implemented.
+Executable fills retain `execute_order(FillOrder)` as the immediate adapter
+contract, so side, quantity, price, order type, liquidity role, price source,
+fee rate, TIF, post-only intent, and the exact resolved context are known before
+the adapter applies a fill. The authoritative long-term order contract is now
+the Phase 2B `CanonicalOrderRequest` plus immutable attempts and append-only
+lifecycle events. Entry and exit callers reach the adapter through that
+lifecycle; fills then continue through existing accounting owners. `FillOrder`
+must remain a compatibility seam and must not own durable state.
+
+Phase 2B lifecycle evidence does not imply book execution. Current production
+bar models remain full-fill. Canonical partial exits settle per fill; a partial
+entry cannot be abandoned until Phase 3 adds incremental entry accounting.
+See [the Phase 2B contract](PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md).
 
 The runtime reads entry order semantics only from the immutable compiled plan.
 Unknown liquidity roles, exit-event types, and same-bar conflict policies are

@@ -39,9 +39,10 @@ bundle in the immutable run snapshot. Generic execution code consumes the
 resolved context without branching on venue names.
 
 This is an architectural credibility boundary, not a claim of book or venue
-fill realism. Durable open-order lifecycle, partial fills, L2 walking, queue and
-latency models, shadow execution, external order submission, calibration, and
-expanded derivative economics remain outside Phase 2A.
+fill realism. Phase 2B now supplies the durable canonical order lifecycle while
+preserving this context authority. L2 walking, book-generated partial entries,
+queue and latency models, shadow execution, external order submission,
+calibration, and expanded derivative economics remain outside Phase 2A.
 
 The composition is illustrated in
 [resolved-execution-context.mmd](diagrams/resolved-execution-context.mmd).
@@ -110,13 +111,12 @@ enforces:
 - venue-owned price and quantity increment policy; and
 - configured market-order notional protection.
 
-`FillOrder` now carries TIF, post-only, fee-schedule identity, and the resolved
+`FillOrder` carries TIF, post-only, fee-schedule identity, and the resolved
 context as a compatibility request adapter. Current bar execution remains an
-immediate deterministic full-fill path. `FillOrder` is not being relabeled as a
-durable order, and the existing bounded maker-entry state is not a general
-venue order lifecycle. Phase 2B must introduce durable requested, accepted,
-open, partial, fill, cancel, replace, reject, and expiry semantics without
-creating a second accounting ledger.
+immediate deterministic full-fill path. Phase 2B now wraps that seam with
+durable requested, validated, accepted, open, partial, fill, cancel, replace,
+reject, and expiry semantics. `FillOrder` is not a durable order and must not
+accumulate lifecycle, venue, or calibration ownership.
 
 ## Execution and evidence wiring
 
@@ -187,10 +187,11 @@ Phase 2A proves rule conformance and reproducibility, not empirical fill truth.
 It also does not settle non-quote fees or rebates; those require an explicit
 canonical accounting and event-contract version rather than a profile-only
 change.
-The next coherent campaign is Phase 2B: introduce a durable canonical order
-lifecycle and idempotent order/event identities while retaining the same
-context and accounting owners. L2 replay remains independent until that
-lifecycle can represent partial and residual quantities without loss.
+Phase 2B is now implemented and retains the same context and accounting owners.
+The next coherent campaign is Phase 3A: consume replay-certified spread/L2 facts
+through that lifecycle, add aggressive book walking and atomic per-fill entry
+settlement, and preserve explicit residual/TIF behavior without claiming queue
+or latency realism.
 
 ## References
 
@@ -198,4 +199,6 @@ lifecycle can represent partial and residual quantities without loss.
 - [Phase 1 economic execution contract](PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md)
 - [Execution runtime boundary](EXECUTION_RUNTIME_BOUNDARY.md)
 - [ADR 0056](../decisions/0056-pin-venue-neutral-execution-contexts-per-run.md)
+- [Phase 2B durable canonical order lifecycle](PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+- [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md)
 - [ADR 0049](../decisions/0049-keep-live-order-submission-closed.md)

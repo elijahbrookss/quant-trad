@@ -82,3 +82,4 @@ respect.
 | [0054](0054-keep-blocking-api-work-off-the-event-loop.md) | Keep blocking API work off the event loop | Accepted |
 | [0055](0055-separate-bounded-botlens-hot-state-from-durable-inspection.md) | Separate bounded BotLens hot state from durable inspection | Accepted |
 | [0056](0056-pin-venue-neutral-execution-contexts-per-run.md) | Pin venue-neutral execution contexts per run | Accepted |
+| [0057](0057-use-append-only-canonical-order-lifecycle.md) | Use an append-only canonical order lifecycle | Accepted |

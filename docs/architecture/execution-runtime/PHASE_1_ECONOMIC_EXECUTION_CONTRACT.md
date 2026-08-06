@@ -186,7 +186,8 @@ economic gates. They still may not create unrestricted strategy code, certify
 their own evidence, mutate promotion state, submit venue orders, or deploy
 capital.
 
-Phase 2A now adds the venue-neutral capability/rule/fee/model contracts and
-pins their resolved bundle per run. Phase 2B must add the durable order
-lifecycle before Phase 3 consumes L2 through that boundary. None of these
-contracts may reinterpret X2 as book-level execution evidence.
+Phase 2A adds the venue-neutral capability/rule/fee/model contracts and pins
+their resolved bundle per run. Phase 2B now adds the durable order lifecycle.
+Phase 3 may consume L2 only through those implemented boundaries and must add
+atomic per-fill entry settlement before admitting book-driven partial entries.
+None of these contracts may reinterpret X2 as book-level execution evidence.

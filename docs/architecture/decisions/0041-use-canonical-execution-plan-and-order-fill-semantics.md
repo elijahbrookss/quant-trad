@@ -58,10 +58,10 @@ Runtime now has two canonical execution layers:
 
 Phase 2A extends `FillOrder` with time in force, post-only intent, pinned fee
 schedule identity, and `ResolvedExecutionContext`. It remains an immediate
-full-fill request adapter, not a durable venue order. The accepted successor
-must represent requested, accepted, open, partial, fill, cancel, replace,
-reject, and expiry states; that migration is Phase 2B and must preserve this
-adapter until existing callers have moved.
+full-fill request adapter, not a durable venue order. ADR 0057 and Phase 2B now
+provide the accepted successor: immutable requests and attempts plus requested,
+validated, accepted, open, partial, fill, cancel, replace, reject, and expiry
+events. The adapter remains only for incremental caller compatibility.
 
 ATM schema version 2 has one accepted authoring shape: snake-case field names,
 `take_profit_orders` with explicit stable IDs and `size_fraction` values,
@@ -108,6 +108,8 @@ interpretations.
 - Maker/taker and order-type fields are attached before fills reach adapters.
 - Startup and per-order conformance reject semantics unsupported by the pinned
   venue profile before an adapter can fabricate a fill.
+- Durable state, residual quantity, replacement lineage, and replay now belong
+  to the Phase 2B lifecycle rather than `FillOrder`.
 - Disabled trailing cannot activate from stale distance fields.
 - Malformed targets and exit rules fail during normalization or plan
   compilation instead of silently becoming market entry, disabled policy, or

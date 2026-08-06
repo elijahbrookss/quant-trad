@@ -49,9 +49,10 @@ schedules own rate, currency, basis, tier, and rounding. Model artifacts own
 fill-model evidence and the execution-quality ceiling.
 
 `SeriesExecutionProfile` remains a compatibility compiler into the instrument
-slice. `FillOrder` remains the Phase 2A pre-fill compatibility adapter. Durable
-open-order lifecycle is explicitly deferred to Phase 2B. External order
-submission remains disabled and governed by ADR 0049.
+slice. `FillOrder` remains the Phase 2A pre-fill compatibility adapter. ADR
+0057 and Phase 2B now bind each durable request to the resolved context hash for
+its full append-only lifecycle. External order submission remains disabled and
+governed by ADR 0049.
 
 ## Invariants
 
@@ -74,8 +75,8 @@ submission remains disabled and governed by ADR 0049.
   profile rather than silent defaults.
 - Production venue profiles still require authoritative evidence; a valid
   manifest proves implemented rules, not realistic fills.
-- Phase 2B and Phase 3 can add lifecycle and book mechanics behind the same
-  contracts without coupling strategy semantics to a venue.
+- Phase 2B adds lifecycle behind these contracts; Phase 3 can add book mechanics
+  without coupling strategy semantics to a venue.
 
 ## Rejected alternatives
 
@@ -100,4 +101,6 @@ submission remains disabled and governed by ADR 0049.
 - [ADR 0027](0027-use-execution-profiles-as-runtime-instrument-authority.md)
 - [ADR 0041](0041-use-canonical-execution-plan-and-order-fill-semantics.md)
 - [ADR 0049](0049-keep-live-order-submission-closed.md)
+- [ADR 0057](0057-use-append-only-canonical-order-lifecycle.md)
+- [Phase 2B durable canonical order lifecycle](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
