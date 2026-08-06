@@ -172,6 +172,17 @@ def _compatibility_known_at(order: FillOrder) -> str:
     return "1970-01-01T00:00:00Z"
 
 
+def _execution_known_at(order: FillOrder, evidence: Dict[str, Any] | None = None) -> str:
+    """Prefer the causal model-event time while retaining legacy behavior."""
+
+    payload = dict(evidence or {})
+    for key in ("queue_evaluation_at", "order_arrival_at"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return _compatibility_known_at(order)
+
+
 def canonical_order_request_for_fill_order(order: FillOrder) -> CanonicalOrderRequest:
     """Adapt an immediate FillOrder into the immutable Phase 2B request."""
 
@@ -416,6 +427,12 @@ def execute_fill_order_with_lifecycle(
     effective_order = replace(
         effective_order,
         requested_qty=float(active_snapshot.remaining_qty),
+        metadata={
+            **dict(effective_order.metadata or {}),
+            "order_request_id": lifecycle.request.request_id,
+            "order_original_requested_qty": float(lifecycle.request.requested_qty),
+            "order_cumulative_filled_qty": float(active_snapshot.cumulative_filled_qty),
+        },
     )
     execute_order_batch = getattr(executor, "execute_order_batch", None)
     execute_order = getattr(executor, "execute_order", None)
@@ -477,10 +494,11 @@ def execute_fill_order_with_lifecycle(
                 emitted_event_ids=tuple(event.event_id for event in lifecycle.events_after(starting_seq)),
             )
     if rejection is not None:
+        rejection_known_at = _execution_known_at(order, dict(rejection.metadata or {}))
         lifecycle.transition(
             attempt_id=active_attempt_id,
             state=CanonicalOrderState.REJECTED,
-            known_at=_compatibility_known_at(order),
+            known_at=rejection_known_at,
             reason=rejection.reason,
             venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.REJECTED),
             metadata=dict(rejection.metadata or {}),
@@ -499,11 +517,12 @@ def execute_fill_order_with_lifecycle(
             if current_snapshot is None:
                 raise ValueError("fill_order_active_attempt_has_no_state")
             level_metadata = dict(level_fill.metadata or {})
+            fill_known_at = _execution_known_at(order, level_metadata)
             fill_material = {
                 "request_id": lifecycle.request.request_id,
                 "attempt_id": active_attempt_id,
                 "next_event_seq": len(lifecycle.events) + 1,
-                "known_at": _compatibility_known_at(order),
+                "known_at": fill_known_at,
                 "filled_qty": level_fill.filled_qty,
                 "fill_price": level_fill.fill_price,
                 "fee": level_fill.fee,
@@ -518,7 +537,7 @@ def execute_fill_order_with_lifecycle(
                 fill_qty=level_fill.filled_qty,
                 fill_price=level_fill.fill_price,
                 fill_fee=level_fill.fee,
-                known_at=_compatibility_known_at(order),
+                known_at=fill_known_at,
                 source_sequence=level_metadata.get("book_level_index"),
                 venue_event_name=venue_lifecycle_event_name(
                     order.execution_context,
@@ -545,7 +564,7 @@ def execute_fill_order_with_lifecycle(
                 lifecycle.transition(
                     attempt_id=active_attempt_id,
                     state=terminal_state,
-                    known_at=_compatibility_known_at(order),
+                    known_at=_execution_known_at(order, batch_evidence),
                     reason=f"residual_{residual_disposition}",
                     venue_event_name=venue_lifecycle_event_name(
                         order.execution_context,
@@ -573,7 +592,7 @@ def execute_fill_order_with_lifecycle(
             lifecycle.transition(
                 attempt_id=active_attempt_id,
                 state=terminal_state,
-                known_at=_compatibility_known_at(order),
+                known_at=_execution_known_at(order, batch_evidence),
                 reason=str(batch_evidence.get("block_reason") or f"order_{batch_status}"),
                 venue_event_name=venue_lifecycle_event_name(
                     order.execution_context,
@@ -585,16 +604,17 @@ def execute_fill_order_with_lifecycle(
             lifecycle.transition(
                 attempt_id=active_attempt_id,
                 state=CanonicalOrderState.OPEN,
-                known_at=_compatibility_known_at(order),
+                known_at=_execution_known_at(order, batch_evidence),
                 venue_event_name=venue_lifecycle_event_name(order.execution_context, CanonicalOrderState.OPEN),
                 metadata=batch_evidence,
             )
     else:
+        fill_known_at = _execution_known_at(order, dict(fill.metadata or {}))
         fill_material = {
             "request_id": lifecycle.request.request_id,
             "attempt_id": active_attempt_id,
             "next_event_seq": len(lifecycle.events) + 1,
-            "known_at": _compatibility_known_at(order),
+            "known_at": fill_known_at,
             "filled_qty": fill.filled_qty,
             "fill_price": fill.fill_price,
             "fee": fill.fee,
@@ -610,7 +630,7 @@ def execute_fill_order_with_lifecycle(
             fill_qty=fill.filled_qty,
             fill_price=fill.fill_price,
             fill_fee=fill.fee,
-            known_at=_compatibility_known_at(order),
+            known_at=fill_known_at,
             venue_event_name=venue_lifecycle_event_name(
                 order.execution_context,
                 (

@@ -352,14 +352,17 @@ class EntryExecutionCoordinator:
             )
             logger.warning(with_log_context("entry_rejected", context))
             return None
-        intent = replace(
-            intent,
-            metadata={
-                **dict(intent.metadata),
-                "known_at": candle.time,
-                "arrival_at": candle.time,
-            },
-        )
+        execution_context = engine.execution_context
+        intent_metadata = {
+            **dict(intent.metadata),
+            "known_at": candle.time,
+        }
+        if execution_context.model.supports_latency:
+            intent_metadata.pop("arrival_at", None)
+            intent_metadata["decision_known_at"] = candle.time
+        else:
+            intent_metadata["arrival_at"] = candle.time
+        intent = replace(intent, metadata=intent_metadata)
         request = replace(request, intent=intent)
 
         lifecycle = self._create_order_lifecycle(
@@ -368,7 +371,6 @@ class EntryExecutionCoordinator:
             candle=candle,
         )
         lifecycle_start_seq = 0
-        execution_context = engine.execution_context
         conformance = execution_context.validate_order(
             order_type=intent.order_type,
             time_in_force=intent.time_in_force,
@@ -436,7 +438,11 @@ class EntryExecutionCoordinator:
             lifecycle=lifecycle,
             outcome=outcome,
             rejection=rejection,
-            known_at=candle.time,
+            known_at=(
+                outcome.updated_at
+                if execution_context.model.supports_latency
+                else candle.time
+            ),
         )
         self._record_lifecycle(lifecycle, after_seq=lifecycle_start_seq)
         if rejection:
@@ -548,15 +554,34 @@ class EntryExecutionCoordinator:
             raise RuntimeError("pending entry is missing its canonical order lifecycle")
         lifecycle_start_seq = len(lifecycle.events)
         execution_model = engine._resolve_execution_model()
+        pending_metadata = {
+            **dict(pending.intent.metadata),
+            "pending_evaluation": True,
+        }
+        if engine.execution_context.model.supports_latency:
+            active_attempt_id = lifecycle.snapshot().active_attempt_id
+            active_snapshot = (
+                lifecycle.attempt_snapshot(active_attempt_id)
+                if active_attempt_id is not None
+                else None
+            )
+            if active_snapshot is None:
+                raise RuntimeError("pending entry lifecycle has no active attempt state")
+            pending_metadata.pop("arrival_at", None)
+            pending_metadata.update(
+                {
+                    "evaluation_at": candle.time,
+                    "order_request_id": lifecycle.request.request_id,
+                    "order_original_requested_qty": float(lifecycle.request.requested_qty),
+                    "order_cumulative_filled_qty": float(active_snapshot.cumulative_filled_qty),
+                }
+            )
+        else:
+            pending_metadata.update({"known_at": candle.time, "arrival_at": candle.time})
         pending_intent = replace(
             pending.intent,
             qty=float(pending.remaining_qty or pending.intent.qty),
-            metadata={
-                **dict(pending.intent.metadata),
-                "pending_evaluation": True,
-                "known_at": candle.time,
-                "arrival_at": candle.time,
-            },
+            metadata=pending_metadata,
         )
         outcome, rejection = execution_model.evaluate(
             pending_intent,
@@ -579,7 +604,11 @@ class EntryExecutionCoordinator:
             lifecycle=lifecycle,
             outcome=outcome,
             rejection=rejection,
-            known_at=candle.time,
+            known_at=(
+                outcome.updated_at
+                if engine.execution_context.model.supports_latency
+                else candle.time
+            ),
         )
         self._record_lifecycle(lifecycle, after_seq=lifecycle_start_seq)
         if rejection:

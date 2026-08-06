@@ -21,6 +21,7 @@ from .fees import FEE_SCHEDULE_SCHEMA_VERSION, FeeSchedule
 INSTRUMENT_EXECUTION_CONTRACT_SCHEMA_VERSION = "instrument_execution_contract.v1"
 VENUE_EXECUTION_PROFILE_SCHEMA_VERSION = "venue_execution_profile.v1"
 EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION = "execution_model_artifact.v1"
+EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION_V2 = "execution_model_artifact.v2"
 RESOLVED_EXECUTION_CONTEXT_SCHEMA_VERSION = "resolved_execution_context.v1"
 RESOLVED_EXECUTION_CONTEXT_BUNDLE_SCHEMA_VERSION = "resolved_execution_context_bundle.v1"
 
@@ -373,29 +374,40 @@ class ExecutionModelArtifact:
     supports_latency: bool
     calibration_artifact_hash: str | None
     source: str
+    parameters: Mapping[str, Any]
     artifact_hash: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION:
+        if self.schema_version not in {
+            EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION,
+            EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION_V2,
+        }:
             raise ValueError(f"unsupported execution model artifact schema: {self.schema_version}")
         _required_text(self.artifact_id, field="execution_model_artifact.artifact_id")
         _required_text(self.version, field="execution_model_artifact.version")
         _required_text(self.assumption_manifest_hash, field="execution_model_artifact.assumption_manifest_hash")
         _required_text(self.source, field="execution_model_artifact.source")
-        if self.execution_quality_ceiling not in {"X0", "X1", "X2", "X3", "X4"}:
-            raise ValueError("execution model quality ceiling must be X0 through X4")
+        if self.execution_quality_ceiling not in {"X0", "X1", "X2", "X3", "X4", "X5"}:
+            raise ValueError("execution model quality ceiling must be X0 through X5")
         if self.input_capability not in _BOOK_CAPABILITIES:
             raise ValueError("execution model input_capability must be bars, l1, l2, or l3")
         for name in ("supports_partial_fills", "supports_resting_orders", "supports_latency"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"execution_model_artifact.{name} must be boolean")
+        parameters = dict(self.parameters or {})
+        if self.schema_version == EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION and parameters:
+            raise ValueError("execution_model_artifact.v1 cannot carry model parameters")
+        object.__setattr__(self, "parameters", parameters)
         expected = _stable_hash(self._material())
         if self.artifact_hash and self.artifact_hash != expected:
             raise ValueError("execution_model_artifact_hash_mismatch")
         object.__setattr__(self, "artifact_hash", expected)
 
     def _material(self) -> dict[str, Any]:
-        return {key: value for key, value in asdict(self).items() if key != "artifact_hash"}
+        payload = {key: value for key, value in asdict(self).items() if key != "artifact_hash"}
+        if self.schema_version == EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION:
+            payload.pop("parameters", None)
+        return payload
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -416,6 +428,7 @@ class ExecutionModelArtifact:
             supports_latency=raw.get("supports_latency"),
             calibration_artifact_hash=str(raw.get("calibration_artifact_hash") or "").strip() or None,
             source=str(raw.get("source") or "").strip(),
+            parameters=dict(raw.get("parameters") or {}),
             artifact_hash=str(raw.get("artifact_hash") or "").strip(),
         )
 
@@ -465,6 +478,15 @@ class ResolvedExecutionContext:
                 raise ValueError("x4_execution_model_requires_l2_or_l3")
             if not self.model.supports_partial_fills:
                 raise ValueError("x4_execution_model_requires_partial_fills")
+        if self.model.execution_quality_ceiling == "X5":
+            if self.model.input_capability not in {"l2", "l3"}:
+                raise ValueError("x5_execution_model_requires_l2_or_l3")
+            if not self.model.supports_partial_fills:
+                raise ValueError("x5_execution_model_requires_partial_fills")
+            if not self.model.supports_resting_orders:
+                raise ValueError("x5_execution_model_requires_resting_orders")
+            if not self.model.supports_latency:
+                raise ValueError("x5_execution_model_requires_latency")
         _required_text(self.source, field="resolved_execution_context.source")
         if not str(self.fee_schedule.version or "").strip():
             raise ValueError("resolved execution context requires a versioned fee schedule")
@@ -1039,6 +1061,7 @@ def execution_model_artifact_from_assumptions(
         supports_latency=False,
         calibration_artifact_hash=None,
         source="execution_assumptions_manifest",
+        parameters={},
         artifact_hash="",
     )
 
@@ -1070,6 +1093,55 @@ def execution_model_artifact_from_book_tape(
         supports_latency=False,
         calibration_artifact_hash=None,
         source="replay_certified_execution_book_tape",
+        parameters={},
+        artifact_hash="",
+    )
+
+
+def execution_model_artifact_from_passive_policy(
+    assumptions: ResolvedExecutionAssumptions,
+    *,
+    source_capability: str,
+    execution_book_tape_hash: str,
+    queue_policy: Any,
+) -> ExecutionModelArtifact:
+    """Build one immutable X5 queue/latency model from declared assumptions."""
+
+    capability = str(source_capability or "").strip().lower()
+    if capability not in {"l2", "l3"}:
+        raise ValueError("passive queue execution requires l2 or l3 capability")
+    tape_hash = _required_text(
+        execution_book_tape_hash,
+        field="execution_book_tape_hash",
+    )
+    from .passive_execution import PASSIVE_QUEUE_MODEL_VERSION, PassiveQueuePolicy
+
+    if not isinstance(queue_policy, PassiveQueuePolicy):
+        raise ValueError("queue_policy must be a PassiveQueuePolicy")
+    resolved_input_bundle_hash = _stable_hash(
+        {
+            "execution_assumptions_manifest_hash": assumptions.manifest_hash,
+            "execution_book_tape_hash": tape_hash,
+            "passive_queue_policy_hash": queue_policy.policy_hash,
+        }
+    )
+    return ExecutionModelArtifact(
+        schema_version=EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION_V2,
+        artifact_id="deterministic_passive_queue_execution",
+        version=PASSIVE_QUEUE_MODEL_VERSION,
+        assumption_manifest_hash=assumptions.manifest_hash,
+        input_capability=capability,
+        execution_quality_ceiling="X5",
+        supports_partial_fills=True,
+        supports_resting_orders=True,
+        supports_latency=True,
+        calibration_artifact_hash=None,
+        source="replay_certified_book_and_trade_tape_with_declared_queue_policy",
+        parameters={
+            "execution_book_tape_hash": tape_hash,
+            "passive_queue_policy": queue_policy.to_dict(),
+            "resolved_input_bundle_hash": resolved_input_bundle_hash,
+        },
         artifact_hash="",
     )
 
@@ -1146,6 +1218,7 @@ def validate_context_against_runtime(
 
 __all__ = [
     "EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION",
+    "EXECUTION_MODEL_ARTIFACT_SCHEMA_VERSION_V2",
     "INSTRUMENT_EXECUTION_CONTRACT_SCHEMA_VERSION",
     "RESOLVED_EXECUTION_CONTEXT_BUNDLE_SCHEMA_VERSION",
     "RESOLVED_EXECUTION_CONTEXT_SCHEMA_VERSION",
@@ -1159,6 +1232,7 @@ __all__ = [
     "build_execution_context_bundle",
     "execution_model_artifact_from_assumptions",
     "execution_model_artifact_from_book_tape",
+    "execution_model_artifact_from_passive_policy",
     "instrument_execution_contract_from_profile",
     "resolve_execution_context",
     "resolve_fee_schedule",

@@ -10,6 +10,8 @@ from engines.bot_runtime.core.book_execution import (
     EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION,
     EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
     EXECUTION_BOOK_TAPE_SCHEMA_VERSION,
+    EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2,
+    EXECUTION_TRADE_PRINT_SCHEMA_VERSION,
     BookExecutionModel,
     ExecutionBookLevel,
     ExecutionBookSnapshot,
@@ -17,6 +19,8 @@ from engines.bot_runtime.core.book_execution import (
     ExecutionBookTape,
     ExecutionBookTapeBundle,
     ExecutionBookValidityClosure,
+    ExecutionTradePrint,
+    ExecutionTradeSourceReference,
 )
 from engines.bot_runtime.core.execution_assumptions import (
     CONSERVATIVE_BAR_MODEL_VERSION,
@@ -24,11 +28,20 @@ from engines.bot_runtime.core.execution_assumptions import (
 )
 from engines.bot_runtime.core.execution_context import (
     execution_model_artifact_from_book_tape,
+    execution_model_artifact_from_passive_policy,
     resolve_execution_context,
 )
 from engines.bot_runtime.core.execution_order import FillOrder, execute_fill_order_with_lifecycle
 from engines.bot_runtime.core.order_lifecycle import CanonicalOrderState
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile
+from engines.bot_runtime.core.passive_execution import (
+    EXECUTION_LATENCY_SCENARIO_SCHEMA_VERSION,
+    PASSIVE_QUEUE_POLICY_SCHEMA_VERSION,
+    ExecutionLatencyScenario,
+    PassiveBookExecutionModel,
+    PassiveQueuePolicy,
+    PassiveQueueScenario,
+)
 
 
 BASE = datetime(2026, 8, 5, 14, 0, tzinfo=UTC)
@@ -183,6 +196,91 @@ def _context(*, capability: str = "l2"):
             source_capability=capability,
         ),
         source="phase3a-test",
+    )
+
+
+def _trade(ordinal: int, *, known_offset: int, quantity: str) -> ExecutionTradePrint:
+    return ExecutionTradePrint(
+        schema_version=EXECUTION_TRADE_PRINT_SCHEMA_VERSION,
+        trade_id=f"trade-{ordinal}",
+        price="100",
+        quantity=quantity,
+        maker_side="buy",
+        aggressor_side="sell",
+        effective_at=BASE + timedelta(seconds=known_offset - 1),
+        known_at=BASE + timedelta(seconds=known_offset),
+        source_reference=ExecutionTradeSourceReference(
+            version_id=f"trade-version-{ordinal}",
+            series_id=9,
+            market_commit_seq=ordinal,
+            connection_epoch=0,
+            receive_ordinal=ordinal,
+            event_ordinal=0,
+            trade_ordinal=0,
+        ),
+        material_hash=f"trade-material-{ordinal}",
+    )
+
+
+def _passive_policy(
+    scenario: PassiveQueueScenario = PassiveQueueScenario.TAIL_OBSERVED_TRADE_PROGRESS,
+    *,
+    cancellation_credit_fraction: float = 0.0,
+) -> PassiveQueuePolicy:
+    return PassiveQueuePolicy(
+        schema_version=PASSIVE_QUEUE_POLICY_SCHEMA_VERSION,
+        policy_id=f"fixture-{scenario.value.lower()}",
+        scenario=scenario,
+        latency=ExecutionLatencyScenario(
+            schema_version=EXECUTION_LATENCY_SCENARIO_SCHEMA_VERSION,
+            scenario_id="fixture-50ms",
+            decision_latency_ms=10,
+            network_latency_ms=30,
+            acknowledgement_latency_ms=10,
+            cancellation_latency_ms=40,
+            replacement_latency_ms=60,
+        ),
+        cancellation_credit_fraction=cancellation_credit_fraction,
+    )
+
+
+def _passive_tape() -> ExecutionBookTape:
+    return ExecutionBookTape(
+        schema_version=EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2,
+        tape_id="",
+        instrument_id="btc-usd",
+        source_capability="l2",
+        reconstruction_version="fixture-reconstruction.v1",
+        replay_fingerprint="fixture-passive-replay-hash",
+        replay_certified=True,
+        snapshots=(
+            _snapshot(1, known_offset=1, bids=(("99", "3"), ("100", "2"))),
+            _snapshot(2, known_offset=3, bids=(("99", "3"), ("100", "0.5"))),
+            _snapshot(3, known_offset=5, bids=(("99", "3"),)),
+        ),
+        trades=(
+            _trade(1, known_offset=3, quantity="2.5"),
+            _trade(2, known_offset=5, quantity="1"),
+        ),
+        limitations=("aggregated_depth_only",),
+    )
+
+
+def _passive_context(tape: ExecutionBookTape, policy: PassiveQueuePolicy):
+    assumptions = _assumptions()
+    instrument = _instrument(capability="l2")
+    profile = compile_series_execution_profile(instrument)
+    return resolve_execution_context(
+        profile,
+        assumptions,
+        instrument_payload=instrument,
+        execution_model_artifact=execution_model_artifact_from_passive_policy(
+            assumptions,
+            source_capability=tape.source_capability,
+            execution_book_tape_hash=tape.tape_hash,
+            queue_policy=policy,
+        ),
+        source="phase3b-test",
     )
 
 
@@ -484,3 +582,156 @@ def test_arrival_during_closed_validity_interval_fails_closed() -> None:
     ).execute_order_batch(order)
     assert result.rejection is not None
     assert result.rejection.reason == "BOOK_STATE_INVALID_AT_ARRIVAL"
+
+
+def _passive_order(*, evaluation_offset: float, cancel_offset: float | None = None) -> FillOrder:
+    tape = _passive_tape()
+    policy = _passive_policy()
+    context = _passive_context(tape, policy)
+    metadata = {
+        "order_id": "passive-order-1",
+        "order_request_id": "passive-order-1",
+        "known_at": BASE + timedelta(seconds=1),
+        "decision_known_at": BASE + timedelta(seconds=1),
+        "evaluation_at": BASE + timedelta(seconds=evaluation_offset),
+    }
+    if cancel_offset is not None:
+        metadata["cancel_requested_at"] = BASE + timedelta(seconds=cancel_offset)
+    return FillOrder(
+        side="buy",
+        requested_qty=1.0,
+        price=100.0,
+        order_type="limit_maker",
+        liquidity_role="maker",
+        price_source="limit_price",
+        fee_rate=context.fee_schedule.maker_rate,
+        fee_source=context.fee_schedule.source,
+        fee_version=context.fee_schedule.version,
+        time_in_force="gtc",
+        post_only=True,
+        execution_context=context,
+        metadata=metadata,
+    )
+
+
+def test_x5_trade_tape_and_queue_policy_hashes_detect_tampering() -> None:
+    tape = _passive_tape()
+    assert ExecutionBookTape.from_dict(tape.to_dict()) == tape
+    tampered_tape = deepcopy(tape.to_dict())
+    tampered_tape["trades"][0]["quantity"] = "999"
+    with pytest.raises(ValueError, match="execution_trade_hash_mismatch"):
+        ExecutionBookTape.from_dict(tampered_tape)
+
+    policy = _passive_policy()
+    assert PassiveQueuePolicy.from_dict(policy.to_dict()) == policy
+    tampered_policy = deepcopy(policy.to_dict())
+    tampered_policy["latency"]["network_latency_ms"] = 999
+    with pytest.raises(ValueError, match="execution_latency_scenario_hash_mismatch"):
+        PassiveQueuePolicy.from_dict(tampered_policy)
+
+
+def test_x5_passive_order_progresses_from_trade_evidence_and_canonical_cumulative_state() -> None:
+    tape = _passive_tape()
+    policy = _passive_policy()
+    order = _passive_order(evaluation_offset=3.5)
+    model = PassiveBookExecutionModel(
+        execution_context=order.execution_context,
+        tape=tape,
+        queue_policy=policy,
+    )
+
+    first = execute_fill_order_with_lifecycle(model, order)
+    assert first.fill is not None
+    assert first.fill.filled_qty == pytest.approx(0.5)
+    assert first.lifecycle.snapshot().state is CanonicalOrderState.PARTIALLY_FILLED
+    assert first.fill.metadata["passive_fill_support"] == "definitely_supported"
+    assert first.fill.metadata["initial_displayed_quantity_ahead"] == 2.0
+    assert first.fill.metadata["observed_execution_quantity_at_price"] == 2.5
+    assert first.fill.metadata["arrival_latency_ms"] == 50.0
+
+    second_order = replace(
+        order,
+        metadata={
+            **dict(order.metadata or {}),
+            "evaluation_at": BASE + timedelta(seconds=5.5),
+        },
+    )
+    second = execute_fill_order_with_lifecycle(
+        model,
+        second_order,
+        lifecycle=first.lifecycle,
+    )
+    assert second.fill is not None
+    assert second.fill.filled_qty == pytest.approx(0.5)
+    snapshot = second.lifecycle.snapshot()
+    assert snapshot.state is CanonicalOrderState.FILLED
+    assert snapshot.cumulative_filled_qty == pytest.approx(1.0)
+    assert snapshot.remaining_qty == pytest.approx(0.0)
+    fill_events = [event for event in second.lifecycle.events if event.fill_id]
+    assert [event.known_at for event in fill_events] == [
+        (BASE + timedelta(seconds=3.5)).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        (BASE + timedelta(seconds=5.5)).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    ]
+
+
+def test_x5_cancellation_latency_allows_only_pre_effective_cancel_progress() -> None:
+    order = _passive_order(evaluation_offset=5.5, cancel_offset=2.97)
+    policy = _passive_policy()
+    model = PassiveBookExecutionModel(
+        execution_context=order.execution_context,
+        tape=_passive_tape(),
+        queue_policy=policy,
+    )
+    result = execute_fill_order_with_lifecycle(model, order)
+
+    assert result.fill is not None
+    assert result.fill.filled_qty == pytest.approx(0.5)
+    assert result.lifecycle.snapshot().state is CanonicalOrderState.CANCELED
+    assert result.fill.metadata["queue_evaluation_at"] == (
+        BASE + timedelta(seconds=3.01)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    assert result.fill.metadata["residual_disposition"] == "canceled"
+
+
+def test_x5_replacement_latency_exposes_effective_boundary_before_new_attempt() -> None:
+    order = _passive_order(evaluation_offset=5.5)
+    order = replace(
+        order,
+        metadata={
+            **dict(order.metadata or {}),
+            "replacement_requested_at": BASE + timedelta(seconds=2.95),
+        },
+    )
+    policy = _passive_policy()
+    batch = PassiveBookExecutionModel(
+        execution_context=order.execution_context,
+        tape=_passive_tape(),
+        queue_policy=policy,
+    ).execute_order_batch(order)
+
+    assert batch.fill is not None
+    assert batch.fill.filled_qty == pytest.approx(0.5)
+    assert batch.status == "partially_filled"
+    assert batch.residual_disposition == "replaced"
+    assert batch.evidence["replacement_ready"] is True
+    assert batch.evidence["terminal_effective_at"] == (
+        BASE + timedelta(seconds=3.01)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def test_x5_aggregated_l2_discloses_bounded_not_exact_queue_truth() -> None:
+    order = _passive_order(evaluation_offset=2.0)
+    policy = _passive_policy(PassiveQueueScenario.TAIL_NO_CANCEL_CREDIT)
+    context = _passive_context(_passive_tape(), policy)
+    order = replace(order, execution_context=context)
+    batch = PassiveBookExecutionModel(
+        execution_context=context,
+        tape=_passive_tape(),
+        queue_policy=policy,
+    ).execute_order_batch(order)
+
+    assert batch.fill is None
+    assert batch.status == "open"
+    assert batch.evidence["passive_fill_support"] == "not_supported"
+    assert "exact_queue_position_unavailable" in batch.evidence["limitations"]
+    assert "fill_probability" not in batch.evidence

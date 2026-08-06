@@ -25,7 +25,9 @@ from .fees import FeeResolver
 
 EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION = "execution_book_snapshot.v1"
 EXECUTION_BOOK_TAPE_SCHEMA_VERSION = "execution_book_tape.v1"
+EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2 = "execution_book_tape.v2"
 EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION = "execution_book_tape_bundle.v1"
+EXECUTION_TRADE_PRINT_SCHEMA_VERSION = "execution_trade_print.v1"
 BOOK_EXECUTION_EVIDENCE_SCHEMA_VERSION = "book_execution_evidence.v1"
 SPREAD_AWARE_MODEL_VERSION = "spread_aware_top.v1"
 AGGREGATED_L2_MODEL_VERSION = "aggregated_l2_walk.v1"
@@ -331,6 +333,169 @@ class ExecutionBookValidityClosure:
 
 
 @dataclass(frozen=True)
+class ExecutionTradeSourceReference:
+    """Provider-neutral immutable identity for one canonical market trade."""
+
+    version_id: str
+    series_id: int
+    market_commit_seq: int
+    connection_epoch: int
+    receive_ordinal: int
+    event_ordinal: int
+    trade_ordinal: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "version_id",
+            _required_text(self.version_id, field_name="execution_trade_source.version_id"),
+        )
+        for name in ("series_id", "market_commit_seq", "receive_ordinal"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or int(value) <= 0:
+                raise ValueError(f"execution_trade_source.{name} must be positive")
+            object.__setattr__(self, name, int(value))
+        for name in ("connection_epoch", "event_ordinal", "trade_ordinal"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or int(value) < 0:
+                raise ValueError(f"execution_trade_source.{name} must be non-negative")
+            object.__setattr__(self, name, int(value))
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "ExecutionTradeSourceReference":
+        return cls(
+            version_id=str(raw.get("version_id") or ""),
+            series_id=raw.get("series_id"),
+            market_commit_seq=raw.get("market_commit_seq"),
+            connection_epoch=raw.get("connection_epoch"),
+            receive_ordinal=raw.get("receive_ordinal"),
+            event_ordinal=raw.get("event_ordinal"),
+            trade_ordinal=raw.get("trade_ordinal"),
+        )
+
+
+@dataclass(frozen=True)
+class ExecutionTradePrint:
+    """One causal trade print eligible for deterministic queue progression."""
+
+    schema_version: str
+    trade_id: str
+    price: Decimal
+    quantity: Decimal
+    maker_side: str
+    aggressor_side: str | None
+    effective_at: str
+    known_at: str
+    source_reference: ExecutionTradeSourceReference
+    material_hash: str
+    trade_hash: str = ""
+
+    def __post_init__(self) -> None:
+        if self.schema_version != EXECUTION_TRADE_PRINT_SCHEMA_VERSION:
+            raise ValueError(f"unsupported execution trade print schema: {self.schema_version}")
+        object.__setattr__(self, "trade_id", _required_text(self.trade_id, field_name="execution_trade.trade_id"))
+        object.__setattr__(self, "price", _decimal(self.price, field_name="execution_trade.price"))
+        object.__setattr__(self, "quantity", _decimal(self.quantity, field_name="execution_trade.quantity"))
+        maker_side = str(self.maker_side or "").strip().lower()
+        if maker_side not in {"buy", "sell"}:
+            raise ValueError("execution_trade.maker_side must be buy or sell")
+        object.__setattr__(self, "maker_side", maker_side)
+        aggressor_side = str(self.aggressor_side or "").strip().lower() or None
+        if aggressor_side not in {None, "buy", "sell"}:
+            raise ValueError("execution_trade.aggressor_side must be buy, sell, or null")
+        object.__setattr__(self, "aggressor_side", aggressor_side)
+        object.__setattr__(self, "effective_at", _time_text(self.effective_at, field_name="execution_trade.effective_at"))
+        object.__setattr__(self, "known_at", _time_text(self.known_at, field_name="execution_trade.known_at"))
+        object.__setattr__(self, "material_hash", _required_text(self.material_hash, field_name="execution_trade.material_hash"))
+        expected = _stable_hash(self._material())
+        if self.trade_hash and self.trade_hash != expected:
+            raise ValueError("execution_trade_hash_mismatch")
+        object.__setattr__(self, "trade_hash", expected)
+
+    @property
+    def known_at_time(self) -> datetime:
+        return _utc(self.known_at, field_name="execution_trade.known_at")
+
+    def _material(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "trade_id": self.trade_id,
+            "price": _decimal_text(self.price),
+            "quantity": _decimal_text(self.quantity),
+            "maker_side": self.maker_side,
+            "aggressor_side": self.aggressor_side,
+            "effective_at": self.effective_at,
+            "known_at": self.known_at,
+            "source_reference": self.source_reference.to_dict(),
+            "material_hash": self.material_hash,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**self._material(), "trade_hash": self.trade_hash}
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "ExecutionTradePrint":
+        return cls(
+            schema_version=str(raw.get("schema_version") or ""),
+            trade_id=str(raw.get("trade_id") or ""),
+            price=raw.get("price"),
+            quantity=raw.get("quantity"),
+            maker_side=str(raw.get("maker_side") or ""),
+            aggressor_side=raw.get("aggressor_side"),
+            effective_at=raw.get("effective_at"),
+            known_at=raw.get("known_at"),
+            source_reference=ExecutionTradeSourceReference.from_dict(raw.get("source_reference") or {}),
+            material_hash=str(raw.get("material_hash") or ""),
+            trade_hash=str(raw.get("trade_hash") or ""),
+        )
+
+    @classmethod
+    def from_market_trade_record(
+        cls,
+        record: Any,
+        *,
+        quantity_unit: str,
+    ) -> "ExecutionTradePrint":
+        fact = record.fact
+        normalized_unit = str(quantity_unit or "").strip().lower()
+        if normalized_unit == "contracts":
+            quantity = fact.contract_quantity
+        elif normalized_unit == "base":
+            quantity = fact.base_quantity
+        else:
+            raise ValueError(f"unsupported execution trade quantity unit: {normalized_unit}")
+        if quantity is None:
+            raise ValueError("execution trade quantity is unavailable for book quantity unit")
+        return cls(
+            schema_version=EXECUTION_TRADE_PRINT_SCHEMA_VERSION,
+            trade_id=str(fact.provider_trade_id),
+            price=fact.price,
+            quantity=quantity,
+            maker_side=str(getattr(fact.maker_side, "value", fact.maker_side)).lower(),
+            aggressor_side=(
+                str(getattr(fact.aggressor_side, "value", fact.aggressor_side)).lower()
+                if fact.aggressor_side is not None
+                else None
+            ),
+            effective_at=fact.provider_event_time,
+            known_at=fact.known_at,
+            source_reference=ExecutionTradeSourceReference(
+                version_id=record.version_id,
+                series_id=record.series_id,
+                market_commit_seq=record.market_commit_seq,
+                connection_epoch=fact.connection_epoch,
+                receive_ordinal=fact.receive_ordinal,
+                event_ordinal=fact.event_ordinal,
+                trade_ordinal=fact.trade_ordinal,
+            ),
+            material_hash=fact.material_hash,
+        )
+
+
+@dataclass(frozen=True)
 class ExecutionBookTape:
     """Hash-verified causal sequence of replay-certified book states."""
 
@@ -342,12 +507,16 @@ class ExecutionBookTape:
     replay_fingerprint: str
     replay_certified: bool
     snapshots: tuple[ExecutionBookSnapshot, ...]
+    trades: tuple[ExecutionTradePrint, ...] = ()
     validity_closures: tuple[ExecutionBookValidityClosure, ...] = ()
     limitations: tuple[str, ...] = ()
     tape_hash: str = ""
 
     def __post_init__(self) -> None:
-        if self.schema_version != EXECUTION_BOOK_TAPE_SCHEMA_VERSION:
+        if self.schema_version not in {
+            EXECUTION_BOOK_TAPE_SCHEMA_VERSION,
+            EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2,
+        }:
             raise ValueError(f"unsupported execution book tape schema: {self.schema_version}")
         object.__setattr__(self, "instrument_id", _required_text(self.instrument_id, field_name="execution_book_tape.instrument_id"))
         capability = str(self.source_capability or "").strip().lower()
@@ -369,6 +538,12 @@ class ExecutionBookTape:
         if len({row.snapshot_hash for row in snapshots}) != len(snapshots):
             raise ValueError("execution_book_tape contains duplicate snapshots")
         object.__setattr__(self, "snapshots", snapshots)
+        trades = tuple(sorted(self.trades, key=self._trade_selection_key))
+        if self.schema_version == EXECUTION_BOOK_TAPE_SCHEMA_VERSION and trades:
+            raise ValueError("execution_book_tape.v1 cannot contain trade prints")
+        if len({row.trade_hash for row in trades}) != len(trades):
+            raise ValueError("execution_book_tape contains duplicate trade prints")
+        object.__setattr__(self, "trades", trades)
         closures = tuple(
             sorted(
                 self.validity_closures,
@@ -409,6 +584,19 @@ class ExecutionBookTape:
             snapshot.snapshot_hash,
         )
 
+    @staticmethod
+    def _trade_selection_key(trade: ExecutionTradePrint) -> tuple[Any, ...]:
+        source = trade.source_reference
+        return (
+            trade.known_at_time,
+            source.market_commit_seq,
+            source.connection_epoch,
+            source.receive_ordinal,
+            source.event_ordinal,
+            source.trade_ordinal,
+            trade.trade_hash,
+        )
+
     def _material(self, *, include_tape_id: bool = True) -> dict[str, Any]:
         payload = {
             "schema_version": self.schema_version,
@@ -422,6 +610,9 @@ class ExecutionBookTape:
             "validity_closures": [row.to_dict() for row in self.validity_closures],
             "limitations": list(self.limitations),
         }
+        if self.schema_version == EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2:
+            payload["trade_hashes"] = [row.trade_hash for row in self.trades]
+            payload["trades"] = [row.to_dict() for row in self.trades]
         if include_tape_id:
             payload["tape_id"] = self.tape_id
         return payload
@@ -440,6 +631,7 @@ class ExecutionBookTape:
             replay_fingerprint=str(raw.get("replay_fingerprint") or ""),
             replay_certified=raw.get("replay_certified"),
             snapshots=tuple(ExecutionBookSnapshot.from_dict(row) for row in raw.get("snapshots") or ()),
+            trades=tuple(ExecutionTradePrint.from_dict(row) for row in raw.get("trades") or ()),
             validity_closures=tuple(
                 ExecutionBookValidityClosure.from_dict(row)
                 for row in raw.get("validity_closures") or ()
@@ -459,6 +651,7 @@ class ExecutionBookTape:
         replay_certified: bool = True,
         limitations: Sequence[str] = (),
         validity_closures: Sequence[ExecutionBookValidityClosure] = (),
+        trade_records: Sequence[Any] = (),
     ) -> "ExecutionBookTape":
         snapshots = tuple(
             sorted(
@@ -466,8 +659,27 @@ class ExecutionBookTape:
                 key=cls._selection_key,
             )
         )
+        quantity_units = {snapshot.quantity_unit for snapshot in snapshots}
+        if len(quantity_units) != 1:
+            raise ValueError("execution_book_tape snapshots must use one quantity unit")
+        trades = tuple(
+            sorted(
+                (
+                    ExecutionTradePrint.from_market_trade_record(
+                        record,
+                        quantity_unit=next(iter(quantity_units)),
+                    )
+                    for record in trade_records
+                ),
+                key=cls._trade_selection_key,
+            )
+        )
         return cls(
-            schema_version=EXECUTION_BOOK_TAPE_SCHEMA_VERSION,
+            schema_version=(
+                EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2
+                if trades
+                else EXECUTION_BOOK_TAPE_SCHEMA_VERSION
+            ),
             tape_id="",
             instrument_id=instrument_id,
             source_capability=source_capability,
@@ -475,6 +687,7 @@ class ExecutionBookTape:
             replay_fingerprint=replay_fingerprint,
             replay_certified=replay_certified,
             snapshots=snapshots,
+            trades=trades,
             validity_closures=tuple(validity_closures),
             limitations=tuple(limitations),
         )
@@ -504,6 +717,32 @@ class ExecutionBookTape:
                 f"status={latest.status} reason={latest.reason}"
             )
         return selected
+
+    def trades_between(
+        self,
+        *,
+        after: Any,
+        through: Any,
+        price: Decimal,
+        maker_side: str,
+    ) -> tuple[ExecutionTradePrint, ...]:
+        """Return only matching trade prints known in ``(after, through]``."""
+
+        lower = _utc(after, field_name="execution_trade_window.after")
+        upper = _utc(through, field_name="execution_trade_window.through")
+        if upper < lower:
+            raise ValueError("execution trade window ends before it starts")
+        normalized_side = str(maker_side or "").strip().lower()
+        if normalized_side not in {"buy", "sell"}:
+            raise ValueError("execution trade window maker_side must be buy or sell")
+        target_price = _decimal(price, field_name="execution_trade_window.price")
+        return tuple(
+            row
+            for row in self.trades
+            if lower < row.known_at_time <= upper
+            and row.price == target_price
+            and row.maker_side == normalized_side
+        )
 
 
 @dataclass(frozen=True)
@@ -593,6 +832,26 @@ class BookExecutionModel:
                 return _time_text(metadata[key], field_name=f"order.{key}")
         raise ValueError("book execution requires deterministic arrival_at or known_at")
 
+    def _resolve_arrival(
+        self,
+        metadata: Mapping[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        """Resolve arrival plus disclosed latency evidence.
+
+        Phase 3A models retain their exact zero-latency behavior. Phase 3B
+        subclasses override this seam with a pinned deterministic scenario.
+        """
+
+        return self._arrival(metadata), {
+            "latency_scenario_id": "deterministic_zero_latency",
+            "arrival_latency_ms": 0,
+            "decision_latency_ms": 0,
+            "network_latency_ms": 0,
+            "acknowledgement_latency_ms": 0,
+            "cancellation_latency_ms": 0,
+            "replacement_latency_ms": 0,
+        }
+
     @staticmethod
     def _is_buy(side: Any) -> bool:
         normalized = str(side or "").strip().lower()
@@ -634,6 +893,7 @@ class BookExecutionModel:
         requested_qty: Decimal,
         reference_price: Decimal,
         time_in_force: str,
+        latency_trace: Mapping[str, Any],
     ) -> dict[str, Any]:
         spread = snapshot.best_ask.price - snapshot.best_bid.price
         return {
@@ -655,7 +915,7 @@ class BookExecutionModel:
             "execution_book_effective_at": snapshot.effective_at,
             "execution_book_known_at": snapshot.known_at,
             "order_arrival_at": arrival_at,
-            "arrival_latency_ms": 0,
+            **dict(latency_trace),
             "order_type": order_type,
             "side": side,
             "time_in_force": time_in_force,
@@ -665,12 +925,21 @@ class BookExecutionModel:
             "best_ask": float(snapshot.best_ask.price),
             "spread": float(spread),
             "limitations": list(self.tape.limitations)
-            + ["deterministic_zero_latency", "passive_queue_not_modeled"],
+            + (
+                []
+                if self.execution_context.model.supports_latency
+                else ["deterministic_zero_latency"]
+            )
+            + (
+                []
+                if self.execution_context.model.supports_resting_orders
+                else ["passive_queue_not_modeled"]
+            ),
         }
 
     def execute_order_batch(self, order: Any) -> BookOrderExecutionBatch:
         metadata = dict(getattr(order, "metadata", None) or {})
-        arrival_at = self._arrival(metadata)
+        arrival_at, latency_trace = self._resolve_arrival(metadata)
         try:
             snapshot = self.tape.select_at(arrival_at)
         except LookupError as exc:
@@ -704,6 +973,7 @@ class BookExecutionModel:
             requested_qty=requested_qty,
             reference_price=reference_price,
             time_in_force=time_in_force,
+            latency_trace=latency_trace,
         )
         if order_type in {"limit_maker", "limit_resting"}:
             evidence["residual_disposition"] = "open"
@@ -888,7 +1158,7 @@ class BookExecutionModel:
         return batch.fill, batch.rejection
 
     def submit(self, intent: ExecutionIntent) -> ExecutionOutcome:
-        arrival = self._arrival(intent.metadata)
+        arrival, latency_trace = self._resolve_arrival(intent.metadata)
         return ExecutionOutcome(
             order_id=intent.order_id,
             status="submitted",
@@ -909,6 +1179,7 @@ class BookExecutionModel:
                 **dict(intent.metadata),
                 **self.execution_context.evidence_metadata(),
                 "order_arrival_at": arrival,
+                **latency_trace,
             },
         )
 
@@ -951,20 +1222,21 @@ class BookExecutionModel:
         )
         batch = self.execute_order_batch(order)
         base = self.submit(intent)
+        arrival, _latency_trace = self._resolve_arrival(intent.metadata)
+        outcome_at = str(batch.evidence.get("queue_evaluation_at") or arrival)
         if batch.rejection is not None:
             return (
                 ExecutionOutcome(
                     **{
                         **asdict(base),
                         "status": "rejected",
-                        "updated_at": self._arrival(intent.metadata),
+                        "updated_at": outcome_at,
                         "metadata": {**dict(base.metadata), **dict(batch.rejection.metadata)},
                     }
                 ),
                 batch.rejection,
             )
         fill = batch.fill
-        arrival = self._arrival(intent.metadata)
         return (
             ExecutionOutcome(
                 order_id=intent.order_id,
@@ -977,8 +1249,8 @@ class BookExecutionModel:
                 fee_source=str(fill.fee_source if fill is not None else self.execution_context.fee_schedule.source),
                 fee_version=fill.fee_version if fill is not None else self.execution_context.fee_schedule.version,
                 created_at=arrival,
-                updated_at=arrival,
-                filled_at=arrival if fill is not None else None,
+                updated_at=outcome_at,
+                filled_at=outcome_at if fill is not None else None,
                 remaining_qty=batch.remaining_qty,
                 fallback_applied=False,
                 fallback_reason=None,
@@ -1001,11 +1273,15 @@ __all__ = [
     "EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION",
     "EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION",
     "EXECUTION_BOOK_TAPE_SCHEMA_VERSION",
+    "EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2",
+    "EXECUTION_TRADE_PRINT_SCHEMA_VERSION",
     "ExecutionBookLevel",
     "ExecutionBookSnapshot",
     "ExecutionBookSourceReference",
     "ExecutionBookTape",
     "ExecutionBookTapeBundle",
     "ExecutionBookValidityClosure",
+    "ExecutionTradePrint",
+    "ExecutionTradeSourceReference",
     "SPREAD_AWARE_MODEL_VERSION",
 ]
