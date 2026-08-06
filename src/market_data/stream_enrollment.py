@@ -124,7 +124,9 @@ class StreamEnrollment:
             "contract_version",
         ):
             object.__setattr__(self, name, _required(getattr(self, name), field=name))
-        channels = tuple(sorted({_required(value, field="channel") for value in self.channels}))
+        channels = tuple(
+            dict.fromkeys(_required(value, field="channel") for value in self.channels)
+        )
         if not channels:
             raise ValueError("stream enrollment requires channels")
         object.__setattr__(self, "channels", channels)

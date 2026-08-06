@@ -123,6 +123,7 @@ from .collector_safety import evaluate_collector_safety
 logger = logging.getLogger(__name__)
 
 AUTHENTICATED_STREAM_PROOF_EFFECTIVE_AT = datetime(2026, 8, 2, tzinfo=UTC)
+ENROLLMENT_PRODUCT_CONTRACT_EFFECTIVE_AT = datetime(2026, 8, 6, tzinfo=UTC)
 AUTHENTICATED_STREAM_PROOF_SHA256 = (
     "81fe668956a794aada0821ee83d202938c5b8ed3c0d1ffb3e83219e83cead032"
 )
@@ -383,7 +384,7 @@ class MarketStructureService:
                 contract_size=contract.contract_size,
                 price_increment=_instrument_decimal(instrument, "tick_size"),
                 base_increment=_instrument_decimal(instrument, "qty_step"),
-                effective_at=AUTHENTICATED_STREAM_PROOF_EFFECTIVE_AT,
+                effective_at=ENROLLMENT_PRODUCT_CONTRACT_EFFECTIVE_AT,
                 received_at=now,
                 provenance={
                     "schema_version": "market.product_contract_provenance.v1",
