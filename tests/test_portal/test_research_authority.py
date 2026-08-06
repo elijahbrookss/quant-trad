@@ -83,6 +83,8 @@ def _protocol_payload(protocol_id: str) -> dict:
         ],
         "benchmark_ids": ["buy-and-hold"],
         "primary_metric": "net_sharpe",
+        "primary_metric_direction": "maximize",
+        "minimum_effect_size": 0.1,
         "secondary_metrics": ["net_return"],
         "safety_metrics": ["max_drawdown"],
         "alpha": 0.05,
@@ -391,6 +393,9 @@ def test_complete_family_flow_retains_failures_and_enforces_one_holdout_use(
             "net_return": 0.12,
             "max_drawdown": -0.08,
         },
+        "benchmark_metric_results": {
+            "buy-and-hold": {"net_sharpe": 0.5},
+        },
         "p_value": 0.001,
         "walk_forward_fold_count": 3,
         "purge_bars": 20,
@@ -417,6 +422,26 @@ def test_complete_family_flow_retains_failures_and_enforces_one_holdout_use(
             actor_id="runner:offline",
             actor_role="experiment_runner",
             request_id=f"request-complete-validation-insufficient-{suffix}",
+        )
+    insufficient_effect = {
+        **validation_evidence,
+        "benchmark_metric_results": {
+            "buy-and-hold": {"net_sharpe": 1.05},
+        },
+    }
+    with pytest.raises(
+        ValueError, match="validation_effect_size_below_protocol_minimum"
+    ):
+        repository.complete_attempt(
+            attempt_id=validation["id"],
+            status="completed",
+            result_evidence=insufficient_effect,
+            error=None,
+            actual_runtime_seconds=8,
+            actual_compute_units=0.8,
+            actor_id="runner:offline",
+            actor_role="experiment_runner",
+            request_id=f"request-complete-validation-effect-{suffix}",
         )
     repository.complete_attempt(
         attempt_id=validation["id"],
@@ -490,6 +515,9 @@ def test_complete_family_flow_retains_failures_and_enforces_one_holdout_use(
             "net_sharpe": 1.0,
             "net_return": 0.10,
             "max_drawdown": -0.09,
+        },
+        "benchmark_metric_results": {
+            "buy-and-hold": {"net_sharpe": 0.5},
         },
         "p_value": 0.001,
         "confidence_interval_low": 0.1,
@@ -841,6 +869,9 @@ def test_offline_governance_reaches_research_certified_and_no_further(
             "net_return": 0.12,
             "max_drawdown": -0.08,
         },
+        "benchmark_metric_results": {
+            "buy-and-hold": {"net_sharpe": 0.5},
+        },
         "p_value": 0.001,
         "walk_forward_fold_count": 3,
         "purge_bars": 20,
@@ -916,6 +947,9 @@ def test_offline_governance_reaches_research_certified_and_no_further(
                 "net_sharpe": 1.0,
                 "net_return": 0.10,
                 "max_drawdown": -0.09,
+            },
+            "benchmark_metric_results": {
+                "buy-and-hold": {"net_sharpe": 0.5},
             },
             "p_value": 0.001,
             "confidence_interval_low": 0.1,

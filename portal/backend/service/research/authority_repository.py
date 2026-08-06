@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import secrets
 import uuid
 from datetime import UTC, datetime
@@ -36,6 +37,39 @@ RUNNER_TERMINAL_ATTEMPT_STATUSES = {
 }
 TERMINAL_ATTEMPT_STATUSES = {*RUNNER_TERMINAL_ATTEMPT_STATUSES, "duplicate"}
 _EXECUTION_QUALITY_RANK = {f"X{index}": index for index in range(6)}
+
+
+def _protocol_effect_size(
+    protocol: ScientificProtocol,
+    result_evidence: Mapping[str, Any],
+    *,
+    prefix: str,
+) -> float:
+    metric_results = dict(result_evidence.get("metric_results") or {})
+    benchmark_results = dict(
+        result_evidence.get("benchmark_metric_results") or {}
+    )
+    try:
+        candidate_value = float(metric_results[protocol.primary_metric])
+        comparison_values = [
+            float(dict(benchmark_results[benchmark_id])[protocol.primary_metric])
+            for benchmark_id in protocol.benchmark_ids
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{prefix}_benchmark_metric_results_incomplete") from exc
+    if (
+        not math.isfinite(candidate_value)
+        or not comparison_values
+        or not all(math.isfinite(value) for value in comparison_values)
+    ):
+        raise ValueError(f"{prefix}_benchmark_metric_results_nonfinite")
+    if protocol.primary_metric_direction == "maximize":
+        effect_size = candidate_value - max(comparison_values)
+    else:
+        effect_size = min(comparison_values) - candidate_value
+    if effect_size < protocol.minimum_effect_size:
+        raise ValueError(f"{prefix}_effect_size_below_protocol_minimum")
+    return effect_size
 
 
 def _now() -> datetime:
@@ -580,6 +614,7 @@ def complete_attempt(
     request_id: str,
 ) -> dict[str, Any]:
     normalized_status = str(status or "").strip().lower()
+    result_payload = dict(result_evidence)
     if normalized_status not in RUNNER_TERMINAL_ATTEMPT_STATUSES:
         raise ValueError("attempt status must be completed, failed, abandoned, or invalid")
     with db.session() as session:
@@ -654,6 +689,11 @@ def complete_attempt(
                     "validation_metric_results_incomplete: "
                     + ",".join(missing_metrics)
                 )
+            result_payload["benchmark_effect_size"] = _protocol_effect_size(
+                protocol,
+                result_payload,
+                prefix="validation",
+            )
             for field, minimum in (
                 ("sample_count", protocol.minimum_sample_count),
                 ("trade_count", protocol.minimum_trade_count),
@@ -664,7 +704,7 @@ def complete_attempt(
             if float(result_evidence.get("exposure") or 0.0) < protocol.minimum_exposure:
                 raise ValueError("validation_exposure_below_protocol_minimum")
         attempt.status = normalized_status
-        attempt.result_evidence = dict(result_evidence)
+        attempt.result_evidence = result_payload
         attempt.error = str(error or "").strip() or None
         attempt.actual_runtime_seconds = float(actual_runtime_seconds)
         attempt.actual_compute_units = float(actual_compute_units)
@@ -681,7 +721,7 @@ def complete_attempt(
             actor_role=actor_role,
             request_id=request_id,
             idempotency_key=f"attempt-complete:{attempt.id}:{request_id}",
-            payload={"attempt_id": attempt.id, "status": normalized_status, "result_evidence_hash": _stable_hash(dict(result_evidence))},
+            payload={"attempt_id": attempt.id, "status": normalized_status, "result_evidence_hash": _stable_hash(result_payload)},
         )
         return attempt.to_dict()
 
@@ -858,6 +898,7 @@ def execute_holdout_internal(
     """Record internally produced holdout evidence; never returns the dataset binding."""
 
     supplied_hash = hashlib.sha256(_required(reservation_token, field="reservation_token").encode("utf-8")).hexdigest()
+    result_payload = dict(result_evidence)
     with db.session() as session:
         holdout = session.scalar(
             select(ResearchHoldoutUseRecord)
@@ -912,6 +953,11 @@ def execute_holdout_internal(
             raise ValueError(
                 "holdout_metric_results_incomplete: " + ",".join(missing_metrics)
             )
+        result_payload["benchmark_effect_size"] = _protocol_effect_size(
+            protocol,
+            result_payload,
+            prefix="holdout",
+        )
         for field, minimum in (
             ("sample_count", protocol.minimum_sample_count),
             ("trade_count", protocol.minimum_trade_count),
@@ -923,7 +969,7 @@ def execute_holdout_internal(
             raise ValueError("holdout_exposure_below_protocol_minimum")
         holdout.status = "completed"
         holdout.executor_actor = _required(executor_actor, field="executor_actor")
-        holdout.result_evidence = dict(result_evidence)
+        holdout.result_evidence = result_payload
         holdout.completed_at = _now()
         family.status = "holdout_completed"
         session.flush()
@@ -936,7 +982,7 @@ def execute_holdout_internal(
             actor_role="holdout_executor",
             request_id=request_id,
             idempotency_key=f"holdout-complete:{request_id}",
-            payload={"holdout_use_id": holdout.id, "result_evidence_hash": _stable_hash(dict(result_evidence))},
+            payload={"holdout_use_id": holdout.id, "result_evidence_hash": _stable_hash(result_payload)},
         )
         return holdout.to_dict(include_result=False)
 

@@ -464,6 +464,9 @@ def _scientific_evidence_from_family(
     candidate_before_holdout = bool(candidate_created and holdout_reserved and candidate_created <= holdout_reserved)
     required_robustness = protocol.robustness_requirements
     passed_robustness = tuple(robustness.get("passed") or holdout_result.get("robustness_passed") or ())
+    effect_value = holdout_result.get("benchmark_effect_size")
+    if effect_value is None:
+        effect_value = candidate_result.get("benchmark_effect_size")
     evidence = ScientificEvidence(
         schema_version=SCIENTIFIC_EVIDENCE_SCHEMA_VERSION,
         reproducible=bool(candidate_result.get("reproducible")) and bool(holdout_result.get("reproducible")),
@@ -521,6 +524,14 @@ def _scientific_evidence_from_family(
                 or candidate_result.get("metric_results")
                 or {}
             )
+        ),
+        effect_size=(
+            float(effect_value) if effect_value is not None else None
+        ),
+        minimum_effect_size=protocol.minimum_effect_size,
+        effect_size_sufficient=(
+            effect_value is not None
+            and float(effect_value) >= protocol.minimum_effect_size
         ),
         raw_p_value=float(holdout_p) if holdout_p is not None else None,
         adjusted_p_value=adjusted_holdout,

@@ -399,6 +399,8 @@ class ScientificProtocol:
     allowed_mutation_dimensions: tuple[str, ...]
     benchmark_ids: tuple[str, ...]
     primary_metric: str
+    primary_metric_direction: str
+    minimum_effect_size: float
     secondary_metrics: tuple[str, ...]
     safety_metrics: tuple[str, ...]
     alpha: float
@@ -462,6 +464,21 @@ class ScientificProtocol:
         if intent in {"selection", "promotion"} and not benchmarks:
             raise ValueError("selection-oriented protocol requires a benchmark")
         object.__setattr__(self, "benchmark_ids", benchmarks)
+        direction = str(self.primary_metric_direction or "").strip().lower()
+        if direction not in {"maximize", "minimize"}:
+            raise ValueError(
+                "protocol.primary_metric_direction must be maximize or minimize"
+            )
+        object.__setattr__(self, "primary_metric_direction", direction)
+        object.__setattr__(
+            self,
+            "minimum_effect_size",
+            _finite(
+                self.minimum_effect_size,
+                field="protocol.minimum_effect_size",
+                minimum=0.0,
+            ),
+        )
         secondary = _string_set(self.secondary_metrics, field="protocol.secondary_metric")
         safety = _string_set(self.safety_metrics, field="protocol.safety_metric")
         if intent in {"selection", "promotion"} and (not secondary or not safety):
@@ -530,6 +547,8 @@ class ScientificProtocol:
             "allowed_mutation_dimensions": list(self.allowed_mutation_dimensions),
             "benchmark_ids": list(self.benchmark_ids),
             "primary_metric": self.primary_metric,
+            "primary_metric_direction": self.primary_metric_direction,
+            "minimum_effect_size": self.minimum_effect_size,
             "secondary_metrics": list(self.secondary_metrics),
             "safety_metrics": list(self.safety_metrics),
             "alpha": self.alpha,
@@ -611,6 +630,8 @@ class ScientificProtocol:
             allowed_mutation_dimensions=tuple(raw.get("allowed_mutation_dimensions") or ()),
             benchmark_ids=tuple(raw.get("benchmark_ids") or ()),
             primary_metric=str(raw.get("primary_metric") or ""),
+            primary_metric_direction=str(raw.get("primary_metric_direction") or ""),
+            minimum_effect_size=raw.get("minimum_effect_size"),
             secondary_metrics=tuple(raw.get("secondary_metrics") or ()),
             safety_metrics=tuple(raw.get("safety_metrics") or ()),
             alpha=raw.get("alpha"),
@@ -737,6 +758,9 @@ class ScientificEvidence:
     minimum_exposure: float
     execution_quality_sufficient: bool
     safety_metrics_passed: bool
+    effect_size: float | None
+    minimum_effect_size: float
+    effect_size_sufficient: bool
     raw_p_value: float | None
     adjusted_p_value: float | None
     alpha: float
@@ -766,6 +790,21 @@ class ScientificEvidence:
             object.__setattr__(self, name, _positive_int(getattr(self, name), field=f"scientific_evidence.{name}", allow_zero=True))
         for name in ("exposure", "minimum_exposure"):
             object.__setattr__(self, name, _finite(getattr(self, name), field=f"scientific_evidence.{name}", minimum=0.0))
+        object.__setattr__(
+            self,
+            "minimum_effect_size",
+            _finite(
+                self.minimum_effect_size,
+                field="scientific_evidence.minimum_effect_size",
+                minimum=0.0,
+            ),
+        )
+        if self.effect_size is not None:
+            object.__setattr__(
+                self,
+                "effect_size",
+                _finite(self.effect_size, field="scientific_evidence.effect_size"),
+            )
         alpha = _finite(self.alpha, field="scientific_evidence.alpha", minimum=0.0)
         if alpha <= 0.0 or alpha >= 1.0:
             raise ValueError("scientific_evidence.alpha must be between zero and one")
@@ -831,6 +870,7 @@ def classify_scientific_quality(evidence: ScientificEvidence) -> ScientificQuali
         and evidence.exposure >= evidence.minimum_exposure
         and evidence.execution_quality_sufficient
         and evidence.safety_metrics_passed
+        and evidence.effect_size_sufficient
     )
     if s2:
         actual = ScientificQualityClass.S2

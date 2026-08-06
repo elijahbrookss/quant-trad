@@ -73,7 +73,8 @@ The same manifest pins the complete research contract:
 
 - frozen instrument universe and train/validation/holdout assignments;
 - allowed strategy mutation dimensions and complete search/feedback budget;
-- primary, secondary, safety, and benchmark metrics;
+- primary metric direction and minimum benchmark-relative effect, plus
+  secondary, safety, and benchmark metrics;
 - minimum samples, trades, calendar coverage, and exposure;
 - minimum execution-quality class and named execution stresses;
 - walk-forward, purge, embargo, significance, multiplicity, and robustness
@@ -144,6 +145,7 @@ A completed validation attempt must prove:
 - execution quality at or above the protocol minimum;
 - every named execution stress;
 - every primary, secondary, and safety metric; and
+- the benchmark-relative effect floor; and
 - minimum sample, trade, calendar, and exposure thresholds.
 
 The sealed holdout executor enforces the same execution, stress, metric, and
@@ -178,7 +180,7 @@ economics, and governance state.
 |---|---|
 | `S0` | Reproducible exploration only. |
 | `S1` | Immutable protocol, benchmark, complete search accounting, retained failures, and budget compliance. |
-| `S2` | S1 plus chronological walk-forward, derived leakage/boundary controls, frozen candidate, minimum sample/trade/calendar/exposure, protocol-required execution quality, and safety metrics. |
+| `S2` | S1 plus chronological walk-forward, derived leakage/boundary controls, frozen candidate, benchmark-relative effect, minimum sample/trade/calendar/exposure, protocol-required execution quality, and safety metrics. |
 | `S3` | S2 plus a database-unique one-use sealed holdout and candidate-before-holdout evidence. |
 | `S4` | S3 plus declared robustness, adjusted multiplicity, positive uncertainty bound, cost stress, and latency stress. |
 
