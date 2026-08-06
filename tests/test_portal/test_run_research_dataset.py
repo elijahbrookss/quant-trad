@@ -1650,6 +1650,68 @@ def test_dataset_enriches_trade_entry_risk_excursion_and_fallback_flags(monkeypa
     assert trade["legs"][0]["intrabar_fallback_within_leg"] is True
 
 
+def test_x5_passive_quality_requires_named_bounds_latency_and_limitations() -> None:
+    evidence = {
+        "schema_version": "book_execution_evidence.v1",
+        "passive_queue_schema_version": "passive_queue_evidence.v1",
+        "execution_model_artifact_hash": "a" * 64,
+        "execution_book_tape_hash": "b" * 64,
+        "execution_book_replay_fingerprint": "c" * 64,
+        "execution_book_replay_certified": True,
+        "execution_book_source_capability": "l2",
+        "execution_book_snapshot_hash": "d" * 64,
+        "order_arrival_at": "2026-03-01T00:00:00.050000Z",
+        "queue_evaluation_at": "2026-03-01T00:00:03.000000Z",
+        "latency_scenario_id": "arrival_50ms",
+        "latency_scenario_hash": "e" * 64,
+        "arrival_latency_ms": 50.0,
+        "queue_model_version": "passive_queue_bounds.v1",
+        "queue_policy_id": "tail-trades",
+        "queue_policy_hash": "f" * 64,
+        "queue_scenario": "TAIL_OBSERVED_TRADE_PROGRESS",
+        "initial_displayed_quantity_ahead": 2.0,
+        "observed_execution_quantity_at_price": 2.5,
+        "definitely_supported_total_fill_qty": 0.5,
+        "scenario_supported_total_fill_qty": 0.5,
+        "passive_fill_support": "definitely_supported",
+        "observed_trade_hashes": ["1" * 64],
+        "new_fill_qty": 0.5,
+        "limitations": [
+            "aggregated_depth_queue_bound",
+            "exact_queue_position_unavailable",
+        ],
+    }
+    execution = {
+        "order_lifecycle": {
+            "events": [
+                {
+                    "event_id": "event-1",
+                    "fill_id": "fill-1",
+                    "fill_qty": 0.5,
+                    "book_execution_evidence": evidence,
+                }
+            ]
+        }
+    }
+
+    assessment = run_research_dataset._passive_execution_quality_assessment(
+        execution=execution
+    )
+    assert assessment["status"] == "available"
+    assert assessment["policy_hashes"] == ["f" * 64]
+    assert assessment["queue_scenarios"] == ["TAIL_OBSERVED_TRADE_PROGRESS"]
+
+    undisclosed = copy.deepcopy(execution)
+    undisclosed["order_lifecycle"]["events"][0]["book_execution_evidence"][
+        "limitations"
+    ] = []
+    invalid = run_research_dataset._passive_execution_quality_assessment(
+        execution=undisclosed
+    )
+    assert invalid["status"] == "invalid"
+    assert "passive_queue_limitation_disclosure_missing" in invalid["blocking_reasons"]
+
+
 def test_excursion_candle_reads_scale_with_unique_series_not_trade_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

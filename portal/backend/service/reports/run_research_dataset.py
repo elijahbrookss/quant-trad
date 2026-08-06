@@ -2052,6 +2052,8 @@ def _book_execution_quality_assessment(
         if evidence is None:
             blockers.append("per_level_execution_book_evidence_missing")
             continue
+        if evidence.get("passive_queue_schema_version") is not None:
+            continue
         if require_l2:
             required_level_fields = (
                 "book_level_index",
@@ -2080,6 +2082,8 @@ def _book_execution_quality_assessment(
         grouped: Dict[tuple[str, str, str], Dict[str, float]] = {}
         for row in level_rows:
             evidence = evidence_by_event.get(str(row.get("event_id") or ""), {})
+            if evidence.get("passive_queue_schema_version") is not None:
+                continue
             key = (
                 str(row.get("order_request_id") or ""),
                 str(evidence.get("execution_book_snapshot_hash") or ""),
@@ -2152,6 +2156,153 @@ def _book_execution_quality_assessment(
                 str(evidence.get("execution_book_replay_fingerprint"))
                 for _row, evidence in evidence_rows
                 if evidence.get("execution_book_replay_fingerprint")
+            }
+        ),
+        "limitations": sorted(
+            {
+                str(item)
+                for _row, evidence in evidence_rows
+                for item in evidence.get("limitations") or []
+            }
+        ),
+        "blocking_reasons": sorted(dict.fromkeys(blockers)),
+    }
+    payload["evidence_hash"] = _stable_hash(payload)
+    return payload
+
+
+def _passive_execution_quality_assessment(
+    *,
+    execution: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate named, deterministic X5 queue bounds without claiming exact position."""
+
+    lifecycle = _mapping(execution.get("order_lifecycle"))
+    rows = [dict(row) for row in lifecycle.get("events") or [] if isinstance(row, Mapping)]
+    evidence_rows = [
+        (row, dict(row.get("book_execution_evidence") or {}))
+        for row in rows
+        if isinstance(row.get("book_execution_evidence"), Mapping)
+        and row.get("book_execution_evidence", {}).get("passive_queue_schema_version") is not None
+    ]
+    blockers: List[str] = []
+    required_fields = (
+        "schema_version",
+        "passive_queue_schema_version",
+        "execution_model_artifact_hash",
+        "execution_book_tape_hash",
+        "execution_book_replay_fingerprint",
+        "execution_book_snapshot_hash",
+        "order_arrival_at",
+        "queue_evaluation_at",
+        "latency_scenario_id",
+        "latency_scenario_hash",
+        "arrival_latency_ms",
+        "queue_model_version",
+        "queue_policy_id",
+        "queue_policy_hash",
+        "queue_scenario",
+        "initial_displayed_quantity_ahead",
+        "observed_execution_quantity_at_price",
+        "definitely_supported_total_fill_qty",
+        "scenario_supported_total_fill_qty",
+        "passive_fill_support",
+        "observed_trade_hashes",
+        "limitations",
+    )
+    admitted_support = {
+        "definitely_supported",
+        "possibly_supported",
+        "not_supported",
+        "assumption_dependent",
+    }
+    admitted_scenarios = {
+        "TAIL_NO_CANCEL_CREDIT",
+        "TAIL_OBSERVED_TRADE_PROGRESS",
+        "BOUNDED_CANCEL_CREDIT",
+    }
+    for row, evidence in evidence_rows:
+        if any(evidence.get(field) is None for field in required_fields):
+            blockers.append("passive_queue_evidence_incomplete")
+            continue
+        if str(evidence.get("schema_version") or "") != "book_execution_evidence.v1":
+            blockers.append("passive_queue_book_evidence_schema_invalid")
+        if str(evidence.get("passive_queue_schema_version") or "") != "passive_queue_evidence.v1":
+            blockers.append("passive_queue_evidence_schema_invalid")
+        if evidence.get("execution_book_replay_certified") is not True:
+            blockers.append("passive_queue_book_replay_uncertified")
+        if str(evidence.get("execution_book_source_capability") or "").lower() not in {"l2", "l3"}:
+            blockers.append("passive_queue_capability_below_l2")
+        arrival_at = _parse_iso(evidence.get("order_arrival_at"))
+        evaluation_at = _parse_iso(evidence.get("queue_evaluation_at"))
+        if arrival_at is None or evaluation_at is None or evaluation_at < arrival_at:
+            blockers.append("passive_queue_evaluation_not_causal")
+        if str(evidence.get("queue_scenario") or "") not in admitted_scenarios:
+            blockers.append("passive_queue_scenario_invalid")
+        if str(evidence.get("passive_fill_support") or "") not in admitted_support:
+            blockers.append("passive_fill_support_invalid")
+        if not isinstance(evidence.get("observed_trade_hashes"), list):
+            blockers.append("passive_queue_trade_lineage_missing")
+        limitations = evidence.get("limitations")
+        if not isinstance(limitations, list) or "exact_queue_position_unavailable" not in limitations:
+            blockers.append("passive_queue_limitation_disclosure_missing")
+        initial_ahead = _safe_float(evidence.get("initial_displayed_quantity_ahead"))
+        definitely_total = _safe_float(evidence.get("definitely_supported_total_fill_qty"))
+        scenario_total = _safe_float(evidence.get("scenario_supported_total_fill_qty"))
+        if (
+            initial_ahead is None
+            or definitely_total is None
+            or scenario_total is None
+            or initial_ahead < 0.0
+            or definitely_total < 0.0
+            or scenario_total + 1e-12 < definitely_total
+        ):
+            blockers.append("passive_queue_quantity_bound_invalid")
+        if str(row.get("fill_id") or ""):
+            fill_qty = _safe_float(row.get("fill_qty"))
+            new_fill_qty = _safe_float(evidence.get("new_fill_qty"))
+            if (
+                fill_qty is None
+                or new_fill_qty is None
+                or fill_qty <= 0.0
+                or abs(fill_qty - new_fill_qty) > 1e-12
+            ):
+                blockers.append("passive_queue_fill_bound_invalid")
+            if str(evidence.get("passive_fill_support") or "") not in {
+                "definitely_supported",
+                "assumption_dependent",
+            }:
+                blockers.append("passive_queue_fill_support_invalid")
+
+    payload = {
+        "schema_version": "passive_execution_quality_evidence.v1",
+        "status": (
+            "available"
+            if evidence_rows and not blockers
+            else "invalid"
+            if blockers
+            else "not_exercised"
+        ),
+        "evidence_event_count": len(evidence_rows),
+        "policy_hashes": sorted(
+            {
+                str(evidence.get("queue_policy_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("queue_policy_hash")
+            }
+        ),
+        "latency_scenario_hashes": sorted(
+            {
+                str(evidence.get("latency_scenario_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("latency_scenario_hash")
+            }
+        ),
+        "queue_scenarios": sorted(
+            {
+                str(evidence.get("queue_scenario"))
+                for _row, evidence in evidence_rows
+                if evidence.get("queue_scenario")
             }
         ),
         "limitations": sorted(
@@ -2337,6 +2488,7 @@ def _execution_quality_evidence(
         execution=execution,
         require_l2=True,
     )
+    x5_evidence = _passive_execution_quality_assessment(execution=execution)
     x3_blockers = (
         list(x3_evidence.get("blocking_reasons") or [])
         if execution_quality_meets(ceiling, "X3")
@@ -2347,15 +2499,26 @@ def _execution_quality_evidence(
         if execution_quality_meets(ceiling, "X4")
         else []
     )
+    x5_blockers = (
+        list(x5_evidence.get("blocking_reasons") or [])
+        if execution_quality_meets(ceiling, "X5")
+        else []
+    )
+    if execution_quality_meets(ceiling, "X5") and x5_evidence.get("status") == "not_exercised":
+        x5_blockers.append("passive_queue_evidence_not_exercised")
     if base_blockers:
         actual = "X0"
+    elif execution_quality_meets(ceiling, "X5"):
+        actual = "X2" if x3_blockers else "X3" if x4_blockers else "X4" if x5_blockers else "X5"
     elif execution_quality_meets(ceiling, "X4"):
         actual = "X2" if x3_blockers else "X3" if x4_blockers else "X4"
     elif execution_quality_meets(ceiling, "X3"):
         actual = "X2" if x3_blockers else "X3"
     else:
         actual = ceiling
-    all_blockers = sorted(dict.fromkeys([*base_blockers, *x3_blockers, *x4_blockers]))
+    all_blockers = sorted(
+        dict.fromkeys([*base_blockers, *x3_blockers, *x4_blockers, *x5_blockers])
+    )
     return {
         "schema_version": "execution_quality_evidence.v1",
         "economic_claim_intent": intent,
@@ -2373,6 +2536,7 @@ def _execution_quality_evidence(
         "resolved_execution_context_evidence": context_evidence,
         "spread_execution_evidence": x3_evidence,
         "l2_execution_evidence": x4_evidence,
+        "passive_execution_evidence": x5_evidence,
     }
 
 

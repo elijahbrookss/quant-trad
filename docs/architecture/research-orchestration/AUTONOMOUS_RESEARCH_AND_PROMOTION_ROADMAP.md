@@ -56,13 +56,14 @@ expansion, and keeps L2 work independent until the venue-neutral lifecycle
 boundary exists. It also requires `economic_claim_intent` to be immutable per
 run so exploratory evidence cannot be relabeled after completion.
 
-Phase 1, Phase 2A, Phase 2B, and Phase 3A are implemented by the
+Phase 1, Phase 2A, Phase 2B, Phase 3A, and Phase 3B are implemented by the
 [Phase 1 economic execution contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md),
 [Phase 2A venue-neutral execution context](../execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md),
 the [Phase 2B durable canonical order lifecycle](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md),
-and [Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md).
+the [Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md),
+and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md).
 The verified inventory below is maintained as current production wiring rather
-than the original gap list. Phase 3B and later remain proposed, and no live-order,
+than the original gap list. Phase 4 and later remain proposed, and no live-order,
 promotion, or capital authority is opened by these implementations.
 
 Market-data acquisition and coverage are deliberately outside the critical
@@ -81,7 +82,7 @@ canonical wallet and fill accounting, materialized research reports, bounded
 experiment orchestration, and production-wired streaming paper runs. It is
 suitable for reproducible signal research and predefined experiments.
 
-It is now suitable for explicitly bounded X0-X4 execution research, but not for
+It is now suitable for explicitly bounded X0-X5 execution research, but not for
 venue-realized execution claims or autonomous strategy selection and promotion.
 The most important remaining blockers are not market data:
 
@@ -125,16 +126,16 @@ Wiring classifications used below are `production`, `bounded production`,
 | Causal deterministic replay | One walk-forward runtime and causal bar-time checks in `src/engines/bot_runtime/runtime/runtime.py::BotRuntime`, `src/strategies/evaluator.py::evaluate_strategy_bar`, and the canonical platform contracts. | Production | Preserve unchanged; extend every new expression, execution, and calibration input with known-at and prefix-invariance tests. |
 | Frozen datasets | Immutable backtest planning, validation, material hashes, and preparation in `portal/backend/service/market/backtest_dataset_service.py::{derive_backtest_dataset_plan,validate_backtest_dataset,prepare_backtest_dataset}`. | Production | Scientific split assignments and holdout-use identity do not yet exist above the dataset boundary. |
 | Typed strategy decisions | `src/strategies/compiler.py::compile_strategy`, `DecisionRuleSpec`, and `evaluate_strategy_bar` compile and evaluate one signal trigger with typed indicator-output guards and deterministic priority arbitration. | Production | Only long/short entry intent is expressed. There is no general boolean expression graph or position, risk, session, prior-signal, order, and execution fact vocabulary. |
-| Canonical execution intent and order lifecycle | `RuntimeExecutionPlan` expresses policy; `CanonicalOrderRequest`, immutable attempts, and append-only lifecycle events own requested/validated/accepted/open/partial/fill/reject/expire/cancel/replace state, residual quantity, replay hashes, and context/policy binding. `FillOrder` remains an immediate compatibility adapter behind that authority. Entry, pending fallback, exits, runtime events, artifacts, BotLens, and reports are production-wired. | Production for X0-X4 backtest lifecycle simulation | Book-driven entry levels now settle incrementally and retain residual custody. Passive queue progress, nonzero latency, and paper/live book execution remain Phase 3B/later work. `FillOrder` must not regain long-term order ownership. |
-| Instrument and execution-context authority | `SeriesExecutionProfile` compiles instrument/risk inputs; `execution_context.py` separately resolves immutable instrument, venue, fee, and model contracts and pins their complete hash-validated bundle per run. Every durable order pins the context and execution-policy hashes for its lifetime. | Production for X0-X4 backtests | Production-verified venue schedules and calibration artifacts are absent. X3/X4 use replay artifacts and deterministic zero latency. |
+| Canonical execution intent and order lifecycle | `RuntimeExecutionPlan` expresses policy; `CanonicalOrderRequest`, immutable attempts, and append-only lifecycle events own requested/validated/accepted/open/partial/fill/reject/expire/cancel/replace state, residual quantity, replay hashes, and context/policy binding. `FillOrder` remains an immediate compatibility adapter behind that authority. Entry, pending fallback, exits, runtime events, artifacts, BotLens, and reports are production-wired. | Production for X0-X5 backtest lifecycle simulation | Book-driven aggressive and passive entry fills settle incrementally and retain residual custody. Paper/live book execution remains closed. `FillOrder` must not regain long-term order ownership. |
+| Instrument and execution-context authority | `SeriesExecutionProfile` compiles instrument/risk inputs; `execution_context.py` separately resolves immutable instrument, venue, fee, and model contracts and pins their complete hash-validated bundle per run. Every durable order pins the context and execution-policy hashes for its lifetime. X5 additionally pins the book/trade tape and queue/latency policy hashes. | Production for X0-X5 backtests | Production-verified venue schedules and calibration artifacts are absent. X5 latency is a declared deterministic stress scenario, not an empirical venue distribution. |
 | Bar execution | Phase 1 `DeterministicExecutionModel`, spot/derivative models, adapters, and position execution apply pinned market/stop slippage, strict-penetration X2 passive fills, full-fill disclosure, maker/taker fees, adverse gaps, and pessimistic ambiguous-bar arbitration through the resolved context. | Production for X0-X2 | Remains the immutable fallback/compatibility family. It makes no observed spread, depth, queue, latency, or capacity claim. |
 | Slippage | One immutable Phase 1 assumption manifest drives entry and exit adverse-BPS behavior and per-fill evidence; reports validate the matching model/context hashes. | Production for X0-X2 | Slippage is conservative configuration, not venue-calibrated evidence. Spread-, size-, regime-, and latency-sensitive models remain absent. |
 | Fees | The resolved `FeeSchedule` owns maker/taker rates, source, version, profile binding, currency, basis, deterministic rounding, precision, tier, configured/verified-zero status, and hash. Phase 2A admits only non-negative quote-notional fees in the instrument quote currency because canonical wallet/event accounting can settle exactly that subset. | Production for admitted pinned bar schedules | Effective-time/account-tier resolution against authoritative production venues is not yet implemented; non-quote fees, base-quantity fees, and rebates require a new canonical accounting/event contract and fail context resolution today. Missing economic assumptions still fail or downgrade under Phase 1 rules. |
-| Partial fills and resting orders | The lifecycle owns cumulative/residual quantity and replacement lineage; partial exits settle per fill. Phase 3A applies every exact book-entry level idempotently to the canonical wallet and position, permits later GTC completion, and preserves filled exposure when residual cancels/expires. Resting/maker limits remain open without simulated progress. | Production for aggressive X4 backtests; resting progress absent | Add capability-aware passive progress, cancellation-ahead/queue bounds, and latency before X5. |
-| Book and latency simulation | Certified market-structure replay exports immutable, validity-aware execution tapes. `BookExecutionModel` selects only the state known at arrival, limits X3 to top of book, walks aggressive X4 levels, emits exact fills, and enforces visible depth and TIF residuals. Reports validate tape/snapshot/model evidence and deterministic X4→X3→X2 downgrades. | Production for backtest X3-X4; paper/live closed | Add Phase 3B resting progress, bounded nonzero latency, and queue uncertainty. Hidden liquidity and venue-realized calibration remain later phases. |
+| Partial fills and resting orders | The lifecycle owns cumulative/residual quantity and replacement lineage; partial fills settle through the canonical wallet and position. `PassiveBookExecutionModel` uses initial displayed quantity ahead, causal trade prints, and an optional bounded cancellation-credit policy to produce deterministic maker-fill bounds while residual custody remains in the existing lifecycle. | Production for bounded passive X5 backtests | Aggregated L2 cannot prove exact queue position, hidden liquidity, or whether a particular cancellation was ahead. Those limitations remain mandatory evidence until later shadow/live calibration. |
+| Book and latency simulation | Certified market-structure replay exports immutable, validity-aware book-and-trade tapes. `BookExecutionModel` selects causal X3/X4 state; `PassiveBookExecutionModel` applies a pinned decision/network/ack/cancel/replace latency scenario, trade-driven queue progress, expiration, and deterministic cancel/replace race boundaries. Reports validate X5 queue evidence and deterministically downgrade X5→X4→X3→X2. | Production for backtest X3-X5; paper/live closed | Declared latency is stress input rather than venue calibration. Hidden liquidity, exact queue truth, paper/shadow reconciliation, and venue-realized models remain later phases. |
 | Paper, shadow, and live | `PaperMarketStreamRunner` is started by `container_runtime.py`; `PaperAdapter` delegates to `BacktestAdapter`; observe-only intake is also implemented. `LiveAdapter` is an injected forwarding seam. | Paper: production. Shadow: absent. Live: closed seam. | Paper does not replay the live book. No local shadow order lifecycle or simulated-versus-realized reconciliation exists. No production venue trading adapter is authorized; ADR 0049 remains controlling. |
 | Canonical accounting | Fill-driven wallet settlement, position state, margin reservation, fee/PnL accounting, and report reconciliation live under `src/engines/bot_runtime/core` and `portal/backend/service/reports`. | Production | New partial fills, funding, liquidation, and venue fees must enter through these owners rather than parallel ledgers. |
-| Research evidence and comparison | `RunResearchDataset`, comparisons, semantic fingerprints, continuity, wallet reconciliation, golden reproducibility, X0-X4 assessment, context/tape validation, cost stress, and separate quality dimensions are production-wired. | Production | Scientific authority remains S0; golden and X class do not confer selection, promotion, or deployment eligibility. Historical runs without context bundles remain explicit legacy evidence. |
+| Research evidence and comparison | `RunResearchDataset`, comparisons, semantic fingerprints, continuity, wallet reconciliation, golden reproducibility, X0-X5 assessment, context/tape/policy validation, cost stress, and separate quality dimensions are production-wired. | Production | Scientific authority remains S0; golden and X class do not confer selection, promotion, or deployment eligibility. Historical runs without context bundles remain explicit legacy evidence. |
 | Experiment orchestration | Immutable local plans/events, explicit immutable claim intent, run/report/comparison composition, resume state, baseline/golden/X2-or-higher requirements, and non-empty selection-oriented gates are wired in `cli/experiments`. | Bounded production | Plans remain local orchestration pointers rather than a canonical protocol/trial/search-budget ledger. Holdout and multiple-testing authority remain absent. |
 | Scientific controls | Frozen inputs and deterministic reruns provide an excellent base. Research checks and sweeps retain ranked evidence and can create observations. | Reproducibility production; selection controls absent | No immutable train/validation/final-holdout assignment, purge/embargo, search budget, complete trial accounting, multiple-testing control, uncertainty interval, parameter-neighborhood test, or holdout reuse prevention is wired. “Walk-forward” currently describes runtime chronology, not a statistical validation protocol. |
 | Research memory | Observations, checks, hypotheses, studies, links, async jobs, and run evidence are exposed by `portal/backend/service/research/service.py`. | Production | It is evidence memory, not a promotion authority. `create_research_item` accepts statuses including `promoted`; there is no enforced transition graph or separation of proposer and approver. |
@@ -547,12 +548,14 @@ and [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md).
 
 ## Phase 3 — L2 replay, partial fills, resting orders, queue bounds, and latency
 
-**Implementation record:** Release 3A is implemented by
-[Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md).
-It covers X3 spread/top-of-book, aggressive X4 L2 walking, exact level fills,
-incremental entry accounting, TIF/residual custody, report classification, and
-comparison enforcement for backtests. Resting progress, queue bounds, nonzero
-latency, X5, paper/shadow use, and calibration remain Phase 3B or later.
+**Implementation record:** Releases 3A and 3B are implemented by
+[Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md)
+and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md).
+Together they cover X3 spread/top-of-book, aggressive X4 L2 walking, exact level
+fills, incremental accounting, TIF/residual custody, deterministic resting
+progress, bounded queue uncertainty, nonzero latency scenarios, and X5 report
+classification for backtests. Paper/shadow use and empirical calibration remain
+later work.
 
 - **Objective:** Model canonical order behavior against visible liquidity without
   claiming unknowable queue precision.
@@ -991,14 +994,14 @@ dataset, provenance, provider-isolation, and live-closed boundaries.
 
 ## Recommended next implementation campaign
 
-Execute Phase 3B only after human review of its queue and latency policy: add
-deterministic resting-order progress, cancellation-ahead bounds, capability-
-aware L2/L3 queue uncertainty, explicit cancel/replace arrival ordering, and a
-versioned bounded-latency model behind the Phase 3A tape/model seam. It may raise
-eligible evidence to X5 but must not introduce fitted fill probability,
-shadow/live submission, or empirical calibration. If the queue/latency policy is
-not ready for ratification, Phase 4 scientific protocol/search-budget authority
-is the safer independent next campaign and does not require X5.
+Execute Phase 4 as the next bounded campaign: add in-application immutable
+scientific protocols, complete attempt/search-budget accounting, walk-forward
+fold authority, derived purge/embargo, frozen candidate identity, one-use
+concurrent-safe holdout access, explicit blindness classes, and S0-S4 evidence
+classification. Keep provider access, typed strategy generation, promotion,
+shadow/paper/live execution, and capital authority structurally outside that
+campaign. Phase 4 must make exhaustive attempt retention and holdout non-reuse
+enforceable before Phase 5 expands the search landscape.
 
 ## Explicit deprecations
 
