@@ -187,7 +187,11 @@ def test_backtest_start_sends_the_existing_dataset_identity(monkeypatch) -> None
     assert observed == {
         "method": "POST",
         "path": "/api/bots/bot-1/runs/start",
-        "body": {"run_type": "backtest", "dataset_id": "mds_123"},
+        "body": {
+            "run_type": "backtest",
+            "dataset_id": "mds_123",
+            "economic_claim_intent": "exploration",
+        },
     }
 
 
