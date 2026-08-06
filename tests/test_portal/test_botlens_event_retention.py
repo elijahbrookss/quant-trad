@@ -18,6 +18,7 @@ def test_retention_tier_map_keeps_material_truth_permanent() -> None:
         "DECISION_EMITTED",
         "DECISION_ACCEPTED",
         "DECISION_REJECTED",
+        "ORDER_LIFECYCLE_CHANGED",
         "ENTRY_FILLED",
         "EXIT_FILLED",
         "TRADE_OPENED",

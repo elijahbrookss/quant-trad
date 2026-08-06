@@ -2346,9 +2346,56 @@ def _execution_section(
         warnings.extend(dict(entry) for entry in config.get(key) or [] if isinstance(entry, Mapping))
     fallback_rows: Dict[str, Dict[str, Any]] = {}
     fill_rows: List[Dict[str, Any]] = []
+    order_rows: List[Dict[str, Any]] = []
     for row in events:
         name = _event_name_key(row)
         context = _context(row)
+        if name == "order_lifecycle_changed":
+            order_rows.append(
+                {
+                    "event_id": row.get("event_id") or _payload(row).get("event_id"),
+                    "source_event_id": context.get("source_event_id"),
+                    "source_run_seq": context.get("source_run_seq"),
+                    "event_time": _payload(row).get("event_ts"),
+                    "known_at": context.get("known_at") or context.get("bar_time"),
+                    "series_key": context.get("series_key"),
+                    "instrument_id": context.get("instrument_id"),
+                    "symbol": context.get("symbol"),
+                    "timeframe": context.get("timeframe"),
+                    "strategy_id": context.get("strategy_id"),
+                    "trade_id": context.get("trade_id"),
+                    "signal_id": context.get("signal_id"),
+                    "decision_id": context.get("decision_id"),
+                    "order_request_id": context.get("order_request_id"),
+                    "order_request_manifest_hash": context.get("order_request_manifest_hash"),
+                    "attempt_id": context.get("attempt_id"),
+                    "order_attempt_manifest_hash": context.get("order_attempt_manifest_hash"),
+                    "order_event_seq": context.get("order_event_seq"),
+                    "previous_state": context.get("previous_state"),
+                    "state": context.get("state"),
+                    "side": context.get("side"),
+                    "requested_qty": context.get("requested_qty"),
+                    "attempt_requested_qty": context.get("attempt_requested_qty"),
+                    "attempt_cumulative_filled_qty": context.get("attempt_cumulative_filled_qty"),
+                    "attempt_remaining_qty": context.get("attempt_remaining_qty"),
+                    "order_cumulative_filled_qty": context.get("order_cumulative_filled_qty"),
+                    "order_remaining_qty": context.get("order_remaining_qty"),
+                    "execution_context_hash": context.get("execution_context_hash"),
+                    "execution_policy_hash": context.get("execution_policy_hash"),
+                    "order_lifecycle_replay_hash": context.get("order_lifecycle_replay_hash"),
+                    "source_sequence": context.get("source_sequence"),
+                    "fill_id": context.get("fill_id"),
+                    "fill_qty": context.get("fill_qty"),
+                    "fill_price": context.get("fill_price"),
+                    "fill_fee": context.get("fill_fee"),
+                    "reason": context.get("reason"),
+                    "replacement_attempt_id": context.get("replacement_attempt_id"),
+                    "venue_event_name": context.get("venue_event_name"),
+                    "correlation_id": _payload(row).get("correlation_id"),
+                    "root_id": _payload(row).get("root_id"),
+                    "parent_id": _payload(row).get("parent_id"),
+                }
+            )
         if name in {"entry_filled", "exit_filled"}:
             fill_rows.append(
                 {
@@ -2436,6 +2483,29 @@ def _execution_section(
             },
         )
     reason_distribution = Counter(str(row.get("reason") or "unknown") for row in fallback_rows.values())
+    order_state_distribution = Counter(str(row.get("state") or "unknown") for row in order_rows)
+    latest_orders: Dict[str, Dict[str, Any]] = {}
+    for row in sorted(
+        order_rows,
+        key=lambda item: (
+            str(item.get("order_request_id") or ""),
+            int(item.get("order_event_seq") or 0),
+            str(item.get("event_id") or ""),
+        ),
+    ):
+        order_request_id = str(row.get("order_request_id") or "").strip()
+        if order_request_id:
+            latest_orders[order_request_id] = row
+    lifecycle_event_ids = {
+        str(row.get("event_id") or "")
+        for row in order_rows
+        if str(row.get("event_id") or "")
+    }
+    for fill in fill_rows:
+        parent_id = str(fill.get("parent_id") or "")
+        fill["order_lifecycle_event_id"] = parent_id if parent_id in lifecycle_event_ids else None
+    open_states = {"requested", "validated", "accepted", "open", "partially_filled"}
+    open_orders = [row for row in latest_orders.values() if str(row.get("state") or "") in open_states]
     fast_full_caveats = []
     if fallback_rows and _execution_mode(run) == "full":
         fast_full_caveats.append("FULL mode used pessimistic same-bar fallback for some bars.")
@@ -2446,6 +2516,16 @@ def _execution_section(
         "fallback_bars": list(fallback_rows.values()),
         "fill_count": len(fill_rows),
         "fills": fill_rows,
+        "order_lifecycle": {
+            "schema_version": "canonical_order_lifecycle.v1",
+            "event_count": len(order_rows),
+            "order_count": len(latest_orders),
+            "state_distribution": dict(sorted(order_state_distribution.items())),
+            "open_order_count": len(open_orders),
+            "open_orders": open_orders,
+            "latest_orders": [latest_orders[key] for key in sorted(latest_orders)],
+            "events": order_rows,
+        },
         "fast_full_caveats": fast_full_caveats,
     }
 

@@ -41,6 +41,7 @@ _SERIES_SCOPED_EVENT_NAMES = frozenset(
         "SERIES_STATS_REPORTED",
         "SIGNAL_EMITTED",
         "DECISION_EMITTED",
+        "ORDER_LIFECYCLE_CHANGED",
         "ENTRY_FILLED",
         "EXIT_FILLED",
         "TRADE_OPENED",
@@ -63,6 +64,20 @@ _LIFECYCLE_EVENT_NAMES = frozenset(
     }
 )
 _CLOSED_DECISION_STATES = frozenset({"accepted", "rejected"})
+_CANONICAL_ORDER_STATES = frozenset(
+    {
+        "requested",
+        "validated",
+        "accepted",
+        "open",
+        "partially_filled",
+        "filled",
+        "rejected",
+        "expired",
+        "canceled",
+        "replaced",
+    }
+)
 _OVERLAY_PAYLOAD_LIST_KEYS = (
     "price_lines",
     "markers",
@@ -120,6 +135,7 @@ class BotLensDomainEventName(str, Enum):
     SERIES_STATS_REPORTED = "SERIES_STATS_REPORTED"
     SIGNAL_EMITTED = "SIGNAL_EMITTED"
     DECISION_EMITTED = "DECISION_EMITTED"
+    ORDER_LIFECYCLE_CHANGED = "ORDER_LIFECYCLE_CHANGED"
     ENTRY_FILLED = "ENTRY_FILLED"
     EXIT_FILLED = "EXIT_FILLED"
     TRADE_OPENED = "TRADE_OPENED"
@@ -1104,6 +1120,111 @@ class DecisionEmittedContext(BotLensSeriesContextBase):
 
 
 @dataclass(frozen=True, kw_only=True)
+class OrderLifecycleChangedContext(BotLensSeriesContextBase):
+    source_event_id: str
+    source_run_seq: Optional[int]
+    order_request_id: str
+    order_request_manifest_hash: str
+    attempt_id: str
+    order_attempt_manifest_hash: str
+    order_event_seq: int
+    previous_state: Optional[str]
+    state: str
+    known_at: datetime
+    side: str
+    requested_qty: float
+    attempt_requested_qty: float
+    attempt_cumulative_filled_qty: float
+    attempt_remaining_qty: float
+    order_cumulative_filled_qty: float
+    order_remaining_qty: float
+    execution_context_hash: str
+    execution_policy_hash: str
+    order_lifecycle_replay_hash: str
+    signal_id: Optional[str] = None
+    decision_id: Optional[str] = None
+    source_sequence: Optional[int] = None
+    fill_id: Optional[str] = None
+    fill_qty: Optional[float] = None
+    fill_price: Optional[float] = None
+    fill_fee: Optional[float] = None
+    reason: Optional[str] = None
+    replacement_attempt_id: Optional[str] = None
+    venue_event_name: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._require_series_key(event_name="ORDER_LIFECYCLE_CHANGED")
+        if self.bar_time is None:
+            raise ValueError("context.bar_time is required for ORDER_LIFECYCLE_CHANGED")
+        for field_name in (
+            "source_event_id",
+            "order_request_id",
+            "order_request_manifest_hash",
+            "attempt_id",
+            "order_attempt_manifest_hash",
+            "execution_context_hash",
+            "execution_policy_hash",
+            "order_lifecycle_replay_hash",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _require_text(getattr(self, field_name), field_name=f"context.{field_name}"),
+            )
+        if self.source_run_seq is not None:
+            object.__setattr__(self, "source_run_seq", int(self.source_run_seq))
+        if isinstance(self.order_event_seq, bool) or int(self.order_event_seq) <= 0:
+            raise ValueError("context.order_event_seq must be a positive integer")
+        object.__setattr__(self, "order_event_seq", int(self.order_event_seq))
+        previous_state = _optional_text(self.previous_state)
+        state = _require_text(self.state, field_name="context.state").lower()
+        if previous_state is not None and previous_state.lower() not in _CANONICAL_ORDER_STATES:
+            raise ValueError("context.previous_state must be a canonical order state")
+        if state not in _CANONICAL_ORDER_STATES:
+            raise ValueError("context.state must be a canonical order state")
+        object.__setattr__(self, "previous_state", previous_state.lower() if previous_state else None)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "known_at", normalize_utc_datetime(self.known_at))
+        side = _require_text(self.side, field_name="context.side").lower()
+        if side not in {"buy", "sell", "long", "short"}:
+            raise ValueError("context.side must be buy, sell, long, or short")
+        object.__setattr__(self, "side", side)
+        for field_name in (
+            "requested_qty",
+            "attempt_requested_qty",
+            "attempt_cumulative_filled_qty",
+            "attempt_remaining_qty",
+            "order_cumulative_filled_qty",
+            "order_remaining_qty",
+        ):
+            value = _finite_float(getattr(self, field_name), field_name=f"context.{field_name}")
+            if value < 0.0:
+                raise ValueError(f"context.{field_name} must be >= 0")
+            object.__setattr__(self, field_name, value)
+        if self.source_sequence is not None:
+            if isinstance(self.source_sequence, bool) or int(self.source_sequence) < 0:
+                raise ValueError("context.source_sequence must be a non-negative integer")
+            object.__setattr__(self, "source_sequence", int(self.source_sequence))
+        for field_name in (
+            "signal_id",
+            "decision_id",
+            "fill_id",
+            "reason",
+            "replacement_attempt_id",
+            "venue_event_name",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        for field_name in ("fill_qty", "fill_price", "fill_fee"):
+            value = getattr(self, field_name)
+            if value is not None:
+                numeric = _finite_float(value, field_name=f"context.{field_name}")
+                if numeric < 0.0:
+                    raise ValueError(f"context.{field_name} must be >= 0")
+                object.__setattr__(self, field_name, numeric)
+
+
+@dataclass(frozen=True, kw_only=True)
 class ExecutionFillContext(BotLensSeriesContextBase):
     fill_kind: str
     source_event_id: str
@@ -1675,6 +1796,7 @@ BotLensDomainContext = (
     | SeriesStatsReportedContext
     | SignalEmittedContext
     | DecisionEmittedContext
+    | OrderLifecycleChangedContext
     | ExecutionFillContext
     | TradeLifecycleContext
     | WalletLedgerContext
@@ -1972,13 +2094,58 @@ def _decision_identifier(decision_context: Mapping[str, Any]) -> Optional[str]:
     return _optional_text(decision_context.get("decision_id"))
 
 
-def _decision_reference_prefix(decision_name: str) -> str:
-    if decision_name in {"SIGNAL_EMITTED", "DECISION_ACCEPTED", "DECISION_REJECTED"}:
+def _decision_output_prefix(decision_name: str) -> str:
+    if decision_name == "SIGNAL_EMITTED":
         return BotLensDomainEventName.SIGNAL_EMITTED.value.lower()
+    if decision_name in {"DECISION_ACCEPTED", "DECISION_REJECTED"}:
+        return BotLensDomainEventName.DECISION_EMITTED.value.lower()
+    if decision_name == "ORDER_LIFECYCLE_CHANGED":
+        return "runtime_event"
+    if decision_name == "ENTRY_FILLED":
+        return BotLensDomainEventName.ENTRY_FILLED.value.lower()
+    if decision_name == "EXIT_FILLED":
+        return BotLensDomainEventName.EXIT_FILLED.value.lower()
     if decision_name == "RUNTIME_ERROR":
         return BotLensDomainEventName.FAULT_RECORDED.value.lower()
+    raise ValueError(f"unsupported decision event output prefix for {decision_name}")
+
+
+def _decision_reference_prefix(
+    decision_name: str,
+    *,
+    reference_role: str,
+    parent_missing: bool = False,
+) -> str:
+    """Resolve historical references when their source event is outside a batch.
+
+    In-batch references are resolved from the source event's actual projected
+    type.  These defaults preserve the runtime causal contract for independently
+    delivered facts: signal roots, decision parents for lifecycle events, and
+    lifecycle parents for canonical fills.
+    """
+
+    role = str(reference_role or "").strip().lower()
+    if role not in {"root", "parent"}:
+        raise ValueError(f"unsupported decision reference role {reference_role!r}")
+    if role == "root":
+        if decision_name == "RUNTIME_ERROR":
+            return BotLensDomainEventName.FAULT_RECORDED.value.lower()
+        return BotLensDomainEventName.SIGNAL_EMITTED.value.lower()
+    if decision_name in {"SIGNAL_EMITTED", "DECISION_ACCEPTED", "DECISION_REJECTED"}:
+        return BotLensDomainEventName.SIGNAL_EMITTED.value.lower()
+    if decision_name == "ORDER_LIFECYCLE_CHANGED":
+        return (
+            BotLensDomainEventName.SIGNAL_EMITTED.value.lower()
+            if parent_missing
+            else BotLensDomainEventName.DECISION_EMITTED.value.lower()
+        )
     if decision_name in {"ENTRY_FILLED", "EXIT_FILLED"}:
-        return "runtime_event"
+        # Historical single-event fact deliveries linked fills directly to the
+        # accepted decision.  Complete Phase 2B batches resolve the actual
+        # lifecycle parent from ``decision_output_prefixes`` above.
+        return BotLensDomainEventName.DECISION_EMITTED.value.lower()
+    if decision_name == "RUNTIME_ERROR":
+        return BotLensDomainEventName.FAULT_RECORDED.value.lower()
     raise ValueError(f"unsupported decision event reference prefix for {decision_name}")
 
 
@@ -2220,6 +2387,40 @@ _EXECUTION_FILL_CONTEXT_KEYS = _SERIES_CONTEXT_BASE_KEYS | frozenset(
         "position_commit_seq",
     }
 )
+_ORDER_LIFECYCLE_CONTEXT_KEYS = _SERIES_CONTEXT_BASE_KEYS | frozenset(
+    {
+        "source_event_id",
+        "source_run_seq",
+        "order_request_id",
+        "order_request_manifest_hash",
+        "attempt_id",
+        "order_attempt_manifest_hash",
+        "order_event_seq",
+        "previous_state",
+        "state",
+        "known_at",
+        "side",
+        "requested_qty",
+        "attempt_requested_qty",
+        "attempt_cumulative_filled_qty",
+        "attempt_remaining_qty",
+        "order_cumulative_filled_qty",
+        "order_remaining_qty",
+        "execution_context_hash",
+        "execution_policy_hash",
+        "order_lifecycle_replay_hash",
+        "signal_id",
+        "decision_id",
+        "source_sequence",
+        "fill_id",
+        "fill_qty",
+        "fill_price",
+        "fill_fee",
+        "reason",
+        "replacement_attempt_id",
+        "venue_event_name",
+    }
+)
 _EVENT_ENVELOPE_KEYS = frozenset(
     {
         "schema_version",
@@ -2267,6 +2468,7 @@ _ALLOWED_CONTEXT_KEYS_BY_EVENT = {
             "position_commit_seq",
         }
     ),
+    BotLensDomainEventName.ORDER_LIFECYCLE_CHANGED: _ORDER_LIFECYCLE_CONTEXT_KEYS,
     BotLensDomainEventName.ENTRY_FILLED: _EXECUTION_FILL_CONTEXT_KEYS,
     BotLensDomainEventName.EXIT_FILLED: _EXECUTION_FILL_CONTEXT_KEYS,
     BotLensDomainEventName.TRADE_OPENED: _SERIES_CONTEXT_BASE_KEYS
@@ -2395,6 +2597,43 @@ def deserialize_botlens_domain_context(
             event_key=context_payload.get("event_key"),
             wallet_snapshot=_mapping(context_payload.get("wallet_snapshot")),
             margin_requirement=_mapping(context_payload.get("margin_requirement")),
+        )
+    if event_name == BotLensDomainEventName.ORDER_LIFECYCLE_CHANGED:
+        known_at = parse_optional_datetime(context_payload.get("known_at"))
+        if known_at is None:
+            raise ValueError("context.known_at is required")
+        return OrderLifecycleChangedContext(
+            **_serialized_series_context_base_fields(context_payload),
+            source_event_id=_require_text(context_payload.get("source_event_id"), field_name="context.source_event_id"),
+            source_run_seq=context_payload.get("source_run_seq"),
+            order_request_id=_require_text(context_payload.get("order_request_id"), field_name="context.order_request_id"),
+            order_request_manifest_hash=_require_text(context_payload.get("order_request_manifest_hash"), field_name="context.order_request_manifest_hash"),
+            attempt_id=_require_text(context_payload.get("attempt_id"), field_name="context.attempt_id"),
+            order_attempt_manifest_hash=_require_text(context_payload.get("order_attempt_manifest_hash"), field_name="context.order_attempt_manifest_hash"),
+            order_event_seq=int(context_payload.get("order_event_seq") or 0),
+            previous_state=context_payload.get("previous_state"),
+            state=_require_text(context_payload.get("state"), field_name="context.state"),
+            known_at=known_at,
+            side=_require_text(context_payload.get("side"), field_name="context.side"),
+            requested_qty=_require_float_field(context_payload, "requested_qty", field_name="context.requested_qty"),
+            attempt_requested_qty=_require_float_field(context_payload, "attempt_requested_qty", field_name="context.attempt_requested_qty"),
+            attempt_cumulative_filled_qty=_require_float_field(context_payload, "attempt_cumulative_filled_qty", field_name="context.attempt_cumulative_filled_qty"),
+            attempt_remaining_qty=_require_float_field(context_payload, "attempt_remaining_qty", field_name="context.attempt_remaining_qty"),
+            order_cumulative_filled_qty=_require_float_field(context_payload, "order_cumulative_filled_qty", field_name="context.order_cumulative_filled_qty"),
+            order_remaining_qty=_require_float_field(context_payload, "order_remaining_qty", field_name="context.order_remaining_qty"),
+            execution_context_hash=_require_text(context_payload.get("execution_context_hash"), field_name="context.execution_context_hash"),
+            execution_policy_hash=_require_text(context_payload.get("execution_policy_hash"), field_name="context.execution_policy_hash"),
+            order_lifecycle_replay_hash=_require_text(context_payload.get("order_lifecycle_replay_hash"), field_name="context.order_lifecycle_replay_hash"),
+            signal_id=context_payload.get("signal_id"),
+            decision_id=context_payload.get("decision_id"),
+            source_sequence=context_payload.get("source_sequence"),
+            fill_id=context_payload.get("fill_id"),
+            fill_qty=_optional_float_field(context_payload, "fill_qty", field_name="context.fill_qty"),
+            fill_price=_optional_float_field(context_payload, "fill_price", field_name="context.fill_price"),
+            fill_fee=_optional_float_field(context_payload, "fill_fee", field_name="context.fill_fee"),
+            reason=context_payload.get("reason"),
+            replacement_attempt_id=context_payload.get("replacement_attempt_id"),
+            venue_event_name=context_payload.get("venue_event_name"),
         )
     if event_name in {
         BotLensDomainEventName.ENTRY_FILLED,
@@ -2686,7 +2925,18 @@ def build_botlens_domain_events_from_fact_batch(
         raise ValueError("BotLens fact batch known_at/event_time is required")
     observed_at = parse_optional_datetime(payload.get("observed_at") or payload.get("ingested_at"))
     events: List[BotLensDomainEvent] = []
-    for fact in normalize_fact_entries(payload.get("facts")):
+    facts = normalize_fact_entries(payload.get("facts"))
+    decision_output_prefixes: Dict[str, str] = {}
+    for indexed_fact in facts:
+        if str(indexed_fact.get("fact_type") or "").strip().lower() != FACT_TYPE_DECISION_EMITTED:
+            continue
+        indexed_root = _decision_fact_root(indexed_fact)
+        indexed_event_id = _optional_text(indexed_root.get("event_id"))
+        if indexed_event_id is None:
+            continue
+        indexed_name = _decision_event_name(indexed_root)
+        decision_output_prefixes[indexed_event_id] = _decision_output_prefix(indexed_name)
+    for fact in facts:
         fact_type = str(fact.get("fact_type") or "").strip().lower()
         if fact_type == FACT_TYPE_CANDLE_CONTINUITY_SUMMARY:
             summary = _mapping(fact.get("summary"))
@@ -3074,6 +3324,112 @@ def build_botlens_domain_events_from_fact_batch(
                     position_commit_seq=_coerce_int(decision_context.get("position_commit_seq")),
                 )
                 event_name = BotLensDomainEventName.DECISION_EMITTED
+            elif decision_name == "ORDER_LIFECYCLE_CHANGED":
+                known_at = parse_optional_datetime(decision_context.get("known_at"))
+                if known_at is None:
+                    raise ValueError("decision.context.known_at is required")
+                context = OrderLifecycleChangedContext(
+                    **base,
+                    source_event_id=_require_text(
+                        decision_root.get("event_id"),
+                        field_name="decision.event_id",
+                    ),
+                    source_run_seq=_coerce_int(decision_root.get("seq")),
+                    order_request_id=_require_text(
+                        decision_context.get("order_request_id"),
+                        field_name="decision.context.order_request_id",
+                    ),
+                    order_request_manifest_hash=_require_text(
+                        decision_context.get("order_request_manifest_hash"),
+                        field_name="decision.context.order_request_manifest_hash",
+                    ),
+                    attempt_id=_require_text(
+                        decision_context.get("attempt_id"),
+                        field_name="decision.context.attempt_id",
+                    ),
+                    order_attempt_manifest_hash=_require_text(
+                        decision_context.get("order_attempt_manifest_hash"),
+                        field_name="decision.context.order_attempt_manifest_hash",
+                    ),
+                    order_event_seq=int(decision_context.get("order_event_seq") or 0),
+                    previous_state=_optional_text(decision_context.get("previous_state")),
+                    state=_require_text(
+                        decision_context.get("state"),
+                        field_name="decision.context.state",
+                    ),
+                    known_at=known_at,
+                    side=_require_text(
+                        decision_context.get("side"),
+                        field_name="decision.context.side",
+                    ),
+                    requested_qty=_require_float_field(
+                        decision_context,
+                        "requested_qty",
+                        field_name="decision.context.requested_qty",
+                    ),
+                    attempt_requested_qty=_require_float_field(
+                        decision_context,
+                        "attempt_requested_qty",
+                        field_name="decision.context.attempt_requested_qty",
+                    ),
+                    attempt_cumulative_filled_qty=_require_float_field(
+                        decision_context,
+                        "attempt_cumulative_filled_qty",
+                        field_name="decision.context.attempt_cumulative_filled_qty",
+                    ),
+                    attempt_remaining_qty=_require_float_field(
+                        decision_context,
+                        "attempt_remaining_qty",
+                        field_name="decision.context.attempt_remaining_qty",
+                    ),
+                    order_cumulative_filled_qty=_require_float_field(
+                        decision_context,
+                        "order_cumulative_filled_qty",
+                        field_name="decision.context.order_cumulative_filled_qty",
+                    ),
+                    order_remaining_qty=_require_float_field(
+                        decision_context,
+                        "order_remaining_qty",
+                        field_name="decision.context.order_remaining_qty",
+                    ),
+                    execution_context_hash=_require_text(
+                        decision_context.get("execution_context_hash"),
+                        field_name="decision.context.execution_context_hash",
+                    ),
+                    execution_policy_hash=_require_text(
+                        decision_context.get("execution_policy_hash"),
+                        field_name="decision.context.execution_policy_hash",
+                    ),
+                    order_lifecycle_replay_hash=_require_text(
+                        decision_context.get("order_lifecycle_replay_hash"),
+                        field_name="decision.context.order_lifecycle_replay_hash",
+                    ),
+                    signal_id=_optional_text(decision_context.get("signal_id")),
+                    decision_id=_optional_text(decision_context.get("decision_id")),
+                    source_sequence=_coerce_int(decision_context.get("source_sequence")),
+                    fill_id=_optional_text(decision_context.get("fill_id")),
+                    fill_qty=_optional_float_field(
+                        decision_context,
+                        "fill_qty",
+                        field_name="decision.context.fill_qty",
+                    ),
+                    fill_price=_optional_float_field(
+                        decision_context,
+                        "fill_price",
+                        field_name="decision.context.fill_price",
+                    ),
+                    fill_fee=_optional_float_field(
+                        decision_context,
+                        "fill_fee",
+                        field_name="decision.context.fill_fee",
+                    ),
+                    reason=_optional_text(decision_context.get("reason")),
+                    replacement_attempt_id=_optional_text(
+                        decision_context.get("replacement_attempt_id")
+                    ),
+                    venue_event_name=_optional_text(decision_context.get("venue_event_name")),
+                )
+                event_name = BotLensDomainEventName.ORDER_LIFECYCLE_CHANGED
             elif decision_name in {"ENTRY_FILLED", "EXIT_FILLED"}:
                 context = ExecutionFillContext(
                     **base,
@@ -3256,8 +3612,29 @@ def build_botlens_domain_events_from_fact_batch(
             decision_root_id = _optional_text(decision_root.get("root_id"))
             decision_parent_id = _optional_text(decision_root.get("parent_id"))
             correlation_id = _require_text(decision_root.get("correlation_id"), field_name="decision.correlation_id")
-            decision_ref_prefix = _decision_reference_prefix(decision_name)
-            event_id = f"botlens:{event_name.value.lower()}:{decision_event_id}"
+            root_ref_prefix = (
+                decision_output_prefixes.get(decision_root_id)
+                if decision_root_id
+                else None
+            ) or _decision_reference_prefix(
+                decision_name,
+                reference_role="root",
+                parent_missing=bool(decision_context.get("parent_missing")),
+            )
+            parent_ref_prefix = (
+                decision_output_prefixes.get(decision_parent_id)
+                if decision_parent_id
+                else None
+            ) or _decision_reference_prefix(
+                decision_name,
+                reference_role="parent",
+                parent_missing=bool(decision_context.get("parent_missing")),
+            )
+            event_id = (
+                f"botlens:runtime_event:{decision_event_id}"
+                if event_name == BotLensDomainEventName.ORDER_LIFECYCLE_CHANGED
+                else f"botlens:{event_name.value.lower()}:{decision_event_id}"
+            )
             events.append(
                 _new_event(
                     event_name=event_name,
@@ -3265,12 +3642,12 @@ def build_botlens_domain_events_from_fact_batch(
                     event_ts=event_ts,
                     correlation_id=correlation_id,
                     root_id=(
-                        f"botlens:{decision_ref_prefix}:{decision_root_id}"
+                        f"botlens:{root_ref_prefix}:{decision_root_id}"
                         if decision_root_id
                         else None
                     ),
                     parent_id=(
-                        f"botlens:{decision_ref_prefix}:{decision_parent_id}"
+                        f"botlens:{parent_ref_prefix}:{decision_parent_id}"
                         if decision_parent_id
                         else None
                     ),
@@ -3679,6 +4056,7 @@ __all__ = [
     "BotLensDomainEvent",
     "BotLensDomainEventName",
     "ExecutionFillContext",
+    "OrderLifecycleChangedContext",
     "WalletLedgerContext",
     "botlens_domain_event_type",
     "build_botlens_domain_events_from_fact_batch",

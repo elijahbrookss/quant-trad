@@ -269,6 +269,70 @@ def _event(seq: int, event_name: str, context: dict[str, Any], *, event_type: st
     }
 
 
+def test_execution_section_projects_order_lifecycle_residuals_and_fill_parent() -> None:
+    lifecycle_event = _event(
+        80,
+        "ORDER_LIFECYCLE_CHANGED",
+        {
+            "event_time": "2026-03-15T01:00:00Z",
+            "bar_time": "2026-03-15T01:00:00Z",
+            "known_at": "2026-03-15T01:00:00Z",
+            "trade_id": "trade-1",
+            "signal_id": "signal-1",
+            "decision_id": "decision-1",
+            "order_request_id": "order-1",
+            "order_request_manifest_hash": "request-hash",
+            "attempt_id": "attempt-1",
+            "order_attempt_manifest_hash": "attempt-hash",
+            "order_event_seq": 4,
+            "previous_state": "open",
+            "state": "partially_filled",
+            "side": "buy",
+            "requested_qty": 10.0,
+            "attempt_requested_qty": 10.0,
+            "attempt_cumulative_filled_qty": 4.0,
+            "attempt_remaining_qty": 6.0,
+            "order_cumulative_filled_qty": 4.0,
+            "order_remaining_qty": 6.0,
+            "execution_context_hash": "context-hash",
+            "execution_policy_hash": "policy-hash",
+            "order_lifecycle_replay_hash": "replay-prefix-hash",
+            "fill_id": "fill-1",
+            "fill_qty": 4.0,
+            "fill_price": 100.0,
+            "fill_fee": 0.04,
+            "venue_event_name": "open",
+        },
+    )
+    fill_event = _event(
+        81,
+        "ENTRY_FILLED",
+        {
+            "bar_time": "2026-03-15T01:00:00Z",
+            "trade_id": "trade-1",
+            "side": "buy",
+            "direction": "long",
+            "qty": 4.0,
+            "price": 100.0,
+            "notional": 400.0,
+            "fee_paid": 0.04,
+        },
+    )
+    fill_event["payload"]["parent_id"] = lifecycle_event["event_id"]
+
+    execution = run_research_dataset._execution_section(
+        run=_run(),
+        events=[lifecycle_event, fill_event],
+    )
+
+    assert execution["order_lifecycle"]["event_count"] == 1
+    assert execution["order_lifecycle"]["order_count"] == 1
+    assert execution["order_lifecycle"]["open_order_count"] == 1
+    assert execution["order_lifecycle"]["state_distribution"] == {"partially_filled": 1}
+    assert execution["order_lifecycle"]["latest_orders"][0]["order_remaining_qty"] == 6.0
+    assert execution["fills"][0]["order_lifecycle_event_id"] == lifecycle_event["event_id"]
+
+
 def _decision(seq: int, decision_id: str, state: str, *, trade_id: str | None = None, reason_code: str | None = None) -> dict[str, Any]:
     context = {
         "decision_id": decision_id,

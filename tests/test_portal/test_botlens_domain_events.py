@@ -231,6 +231,102 @@ def test_spot_entry_fill_round_trips_with_wallet_and_execution_evidence() -> Non
     assert payload["context"]["wallet_before"]["balances"]["USD"] == 1000.0
     assert payload["context"]["wallet_delta"]["fee_paid"] == 1.0
     assert payload["context"]["wallet_commit_seq"] == 1
+    assert payload["root_id"] == "botlens:signal_emitted:runtime-signal-1"
+    assert payload["parent_id"] == "botlens:decision_emitted:runtime-decision-1"
+
+
+def test_order_lifecycle_fact_round_trips_as_canonical_runtime_parent() -> None:
+    events = build_botlens_domain_events_from_fact_batch(
+        bot_id="bot-1",
+        run_id="run-1",
+        payload={
+            "known_at": "2026-02-01T01:00:00Z",
+            "facts": [
+                {
+                    "fact_type": "decision_emitted",
+                    "decision": {
+                        "event_id": "order-event-4",
+                        "event_name": "ORDER_LIFECYCLE_CHANGED",
+                        "seq": 14,
+                        "event_ts": "2026-02-01T01:00:00Z",
+                        "correlation_id": "run-1:BTC/USD:1h:2026-02-01T00:00:00.000Z",
+                        "root_id": "runtime-signal-1",
+                        "parent_id": "runtime-decision-1",
+                        "context": {
+                            "run_id": "run-1",
+                            "bot_id": "bot-1",
+                            "strategy_id": "strategy-1",
+                            "series_key": "instrument-btc|1h",
+                            "instrument_id": "instrument-btc",
+                            "symbol": "BTC/USD",
+                            "timeframe": "1h",
+                            "bar_ts": "2026-02-01T01:00:00Z",
+                            "trade_id": "trade-1",
+                            "order_request_id": "order-1",
+                            "order_request_manifest_hash": "request-hash",
+                            "attempt_id": "attempt-1",
+                            "order_attempt_manifest_hash": "attempt-hash",
+                            "order_event_seq": 4,
+                            "previous_state": "open",
+                            "state": "partially_filled",
+                            "known_at": "2026-02-01T01:00:00Z",
+                            "side": "buy",
+                            "requested_qty": 10.0,
+                            "attempt_requested_qty": 10.0,
+                            "attempt_cumulative_filled_qty": 4.0,
+                            "attempt_remaining_qty": 6.0,
+                            "order_cumulative_filled_qty": 4.0,
+                            "order_remaining_qty": 6.0,
+                            "execution_context_hash": "context-hash",
+                            "execution_policy_hash": "policy-hash",
+                            "order_lifecycle_replay_hash": "replay-prefix-hash",
+                            "signal_id": "signal-domain-1",
+                            "decision_id": "decision-domain-1",
+                            "fill_id": "fill-1",
+                            "fill_qty": 4.0,
+                            "fill_price": 100.0,
+                            "fill_fee": 0.04,
+                            "venue_event_name": "open",
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    event = next(item for item in events if item.event_name.value == "ORDER_LIFECYCLE_CHANGED")
+    payload = serialize_botlens_domain_event(
+        deserialize_botlens_domain_event(serialize_botlens_domain_event(event))
+    )
+
+    assert payload["event_id"] == "botlens:runtime_event:order-event-4"
+    assert payload["context"]["state"] == "partially_filled"
+    assert payload["context"]["order_remaining_qty"] == 6.0
+    assert payload["context"]["order_lifecycle_replay_hash"] == "replay-prefix-hash"
+    assert payload["context"]["source_event_id"] == "order-event-4"
+    assert payload["root_id"] == "botlens:signal_emitted:runtime-signal-1"
+    assert payload["parent_id"] == "botlens:decision_emitted:runtime-decision-1"
+
+
+def test_phase_2b_reference_prefixes_match_runtime_causal_owners() -> None:
+    assert botlens_domain_events._decision_output_prefix("SIGNAL_EMITTED") == "signal_emitted"
+    assert botlens_domain_events._decision_output_prefix("DECISION_ACCEPTED") == "decision_emitted"
+    assert botlens_domain_events._decision_output_prefix("ORDER_LIFECYCLE_CHANGED") == "runtime_event"
+    assert botlens_domain_events._decision_output_prefix("ENTRY_FILLED") == "entry_filled"
+    assert (
+        botlens_domain_events._decision_reference_prefix(
+            "ORDER_LIFECYCLE_CHANGED",
+            reference_role="parent",
+        )
+        == "decision_emitted"
+    )
+    assert (
+        botlens_domain_events._decision_reference_prefix(
+            "ENTRY_FILLED",
+            reference_role="root",
+        )
+        == "signal_emitted"
+    )
 
 
 def test_fault_recorded_uses_structured_fields_without_raw_failure_blob() -> None:
