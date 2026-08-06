@@ -589,6 +589,7 @@ def _load_runtime_bot_snapshot(bot_id: str, run_id: str) -> tuple[Dict[str, Any]
             "execution_assumptions",
             "resolved_execution_context_bundle",
             "execution_book_tape_bundle",
+            "passive_queue_policy",
         ):
             if field in config_snapshot:
                 value = config_snapshot.get(field)

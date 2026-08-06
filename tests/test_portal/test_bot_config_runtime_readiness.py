@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -12,11 +12,22 @@ from engines.bot_runtime.core.book_execution import (
     EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION,
     EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
     EXECUTION_BOOK_TAPE_SCHEMA_VERSION,
+    EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2,
+    EXECUTION_TRADE_PRINT_SCHEMA_VERSION,
     ExecutionBookLevel,
     ExecutionBookSnapshot,
     ExecutionBookSourceReference,
     ExecutionBookTape,
     ExecutionBookTapeBundle,
+    ExecutionTradePrint,
+    ExecutionTradeSourceReference,
+)
+from engines.bot_runtime.core.passive_execution import (
+    EXECUTION_LATENCY_SCENARIO_SCHEMA_VERSION,
+    PASSIVE_QUEUE_POLICY_SCHEMA_VERSION,
+    ExecutionLatencyScenario,
+    PassiveQueuePolicy,
+    PassiveQueueScenario,
 )
 
 
@@ -275,6 +286,62 @@ def _execution_book_bundle() -> dict:
     ).to_dict()
 
 
+def _execution_book_bundle_with_trades() -> dict:
+    base = ExecutionBookTapeBundle.from_dict(_execution_book_bundle()).tapes[0]
+    trade = ExecutionTradePrint(
+        schema_version=EXECUTION_TRADE_PRINT_SCHEMA_VERSION,
+        trade_id="trade-1",
+        price="99",
+        quantity="3",
+        maker_side="buy",
+        aggressor_side="sell",
+        effective_at=datetime(2026, 1, 1, tzinfo=UTC),
+        known_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(milliseconds=100),
+        source_reference=ExecutionTradeSourceReference(
+            version_id="trade-version-1",
+            series_id=18,
+            market_commit_seq=1,
+            connection_epoch=0,
+            receive_ordinal=1,
+            event_ordinal=0,
+            trade_ordinal=0,
+        ),
+        material_hash="trade-material-1",
+    )
+    tape = ExecutionBookTape(
+        schema_version=EXECUTION_BOOK_TAPE_SCHEMA_VERSION_V2,
+        tape_id="",
+        instrument_id=base.instrument_id,
+        source_capability=base.source_capability,
+        reconstruction_version=base.reconstruction_version,
+        replay_fingerprint="replay-hash-with-trades",
+        replay_certified=True,
+        snapshots=base.snapshots,
+        trades=(trade,),
+    )
+    return ExecutionBookTapeBundle(
+        schema_version=EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+        tapes=(tape,),
+    ).to_dict()
+
+
+def _passive_queue_policy() -> dict:
+    return PassiveQueuePolicy(
+        schema_version=PASSIVE_QUEUE_POLICY_SCHEMA_VERSION,
+        policy_id="readiness-tail-trades",
+        scenario=PassiveQueueScenario.TAIL_OBSERVED_TRADE_PROGRESS,
+        latency=ExecutionLatencyScenario(
+            schema_version=EXECUTION_LATENCY_SCENARIO_SCHEMA_VERSION,
+            scenario_id="readiness-50ms",
+            decision_latency_ms=10,
+            network_latency_ms=30,
+            acknowledgement_latency_ms=10,
+            cancellation_latency_ms=40,
+            replacement_latency_ms=60,
+        ),
+    ).to_dict()
+
+
 def test_runtime_readiness_pins_x4_book_model_and_tape(monkeypatch):
     service = BotConfigService()
     strategy = _strategy_with_instrument(
@@ -352,5 +419,75 @@ def test_runtime_readiness_pins_x4_book_model_and_tape(monkeypatch):
             _bot_payload(
                 execution_semantics="spot",
                 execution_book_tape_bundle=_execution_book_bundle(),
+            )
+        )
+
+
+def test_runtime_readiness_pins_x5_queue_policy_and_trade_tape(monkeypatch):
+    service = BotConfigService()
+    strategy = _strategy_with_instrument(
+        {
+            "id": "instrument-1",
+            "symbol": "BTC-USD",
+            "instrument_type": "spot",
+            "venue_execution_profile": {
+                "profile_id": "l2-fixture",
+                "version": "l2-fixture.v1",
+                "venue_id": "synthetic-l2",
+                "supported_order_types": [
+                    "market",
+                    "limit_aggressive",
+                    "limit_maker",
+                    "limit_resting",
+                    "stop_market",
+                ],
+                "supported_time_in_force": ["gtc", "ioc", "fok"],
+                "post_only_supported": True,
+                "post_only_behavior": "reject_would_cross",
+                "liquidity_role_by_order_type": {
+                    "market": "taker",
+                    "limit_aggressive": "taker",
+                    "limit_maker": "maker",
+                    "limit_resting": "maker",
+                    "stop_market": "taker",
+                },
+                "price_increment_policy": "reject",
+                "quantity_increment_policy": "reject",
+                "max_market_order_notional": None,
+                "market_price_collar_bps": None,
+                "book_data_capability": "l2",
+                "lifecycle_event_mapping": {},
+                "external_order_submission_enabled": False,
+                "source": "test_fixture",
+            },
+        }
+    )
+    _patch_strategy_lookup(monkeypatch, strategy)
+    monkeypatch.setattr(
+        "portal.backend.service.market.instrument_service.resolve_instrument",
+        lambda _datasource, _exchange, _symbol: None,
+    )
+
+    artifacts = service.prepare_startup_artifacts(
+        _bot_payload(
+            execution_semantics="spot",
+            execution_book_tape_bundle=_execution_book_bundle_with_trades(),
+            passive_queue_policy=_passive_queue_policy(),
+        )
+    )
+
+    context = artifacts["resolved_execution_context_bundle"]["contexts"][0]
+    profile = artifacts["runtime_readiness"]["profiles"][0]
+    assert context["model"]["execution_quality_ceiling"] == "X5"
+    assert context["model"]["supports_resting_orders"] is True
+    assert context["model"]["supports_latency"] is True
+    assert context["model"]["parameters"]["execution_book_tape_hash"]
+    assert profile["passive_queue_policy_hash"] == artifacts["passive_queue_policy"]["policy_hash"]
+
+    with pytest.raises(ValueError, match="requires execution_book_tape_bundle"):
+        service.prepare_startup_artifacts(
+            _bot_payload(
+                execution_semantics="spot",
+                passive_queue_policy=_passive_queue_policy(),
             )
         )

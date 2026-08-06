@@ -141,6 +141,8 @@ class BotStartRequest(BaseModel):
     duration_seconds: Optional[float] = Field(default=None, gt=0)
     market_data_stream_policy: Optional[Dict[str, Any]] = None
     execution_assumptions: Optional[Dict[str, Any]] = None
+    execution_book_tape_bundle: Optional[Dict[str, Any]] = None
+    passive_queue_policy: Optional[Dict[str, Any]] = None
 
 
 class BotStopRequest(BaseModel):

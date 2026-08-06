@@ -37,12 +37,17 @@ from engines.bot_runtime.core.execution_context import (
     ResolvedExecutionContext,
     ResolvedExecutionContextBundle,
     execution_model_artifact_from_book_tape,
+    execution_model_artifact_from_passive_policy,
     resolve_execution_context,
     validate_context_against_runtime,
 )
 from engines.bot_runtime.core.book_execution import (
     BookExecutionModel,
     ExecutionBookTapeBundle,
+)
+from engines.bot_runtime.core.passive_execution import (
+    PassiveBookExecutionModel,
+    PassiveQueuePolicy,
 )
 from market_data.backtest import resolve_backtest_warmup_bars
 from atm import normalise_template
@@ -438,8 +443,18 @@ class SeriesBuilderConstructionMixin:
             if book_bundle is not None
             else None
         )
+        raw_queue_policy = self.config.get("passive_queue_policy")
+        if raw_queue_policy is not None and not isinstance(raw_queue_policy, Mapping):
+            raise RuntimeError("passive_queue_policy must be an object")
+        passive_queue_policy = (
+            PassiveQueuePolicy.from_dict(raw_queue_policy)
+            if isinstance(raw_queue_policy, Mapping) and raw_queue_policy
+            else None
+        )
+        if passive_queue_policy is not None and book_tape is None:
+            raise RuntimeError("passive_queue_policy requires an immutable execution book tape")
         if book_tape is not None and self.run_type != "backtest":
-            raise RuntimeError("execution book replay is admitted only for backtest runs in Phase 3A")
+            raise RuntimeError("execution book replay is admitted only for backtest runs")
         if isinstance(raw_context_bundle, Mapping) and raw_context_bundle:
             context_bundle = ResolvedExecutionContextBundle.from_dict(raw_context_bundle)
             execution_context = context_bundle.context_for(
@@ -459,9 +474,18 @@ class SeriesBuilderConstructionMixin:
                 execution_assumptions,
                 instrument_payload=instrument or {},
                 execution_model_artifact=(
-                    execution_model_artifact_from_book_tape(
-                        execution_assumptions,
-                        source_capability=book_tape.source_capability,
+                    (
+                        execution_model_artifact_from_passive_policy(
+                            execution_assumptions,
+                            source_capability=book_tape.source_capability,
+                            execution_book_tape_hash=book_tape.tape_hash,
+                            queue_policy=passive_queue_policy,
+                        )
+                        if passive_queue_policy is not None
+                        else execution_model_artifact_from_book_tape(
+                            execution_assumptions,
+                            source_capability=book_tape.source_capability,
+                        )
                     )
                     if book_tape is not None
                     else None
@@ -473,6 +497,14 @@ class SeriesBuilderConstructionMixin:
             raise RuntimeError("book execution context is missing its immutable execution book tape")
         if execution_context.model.input_capability == "bars" and book_tape is not None:
             raise RuntimeError("execution book tape was supplied to a bar execution context")
+        if execution_context.model.execution_quality_ceiling == "X5" and passive_queue_policy is None:
+            raise RuntimeError("X5 execution context is missing its immutable passive queue policy")
+        if passive_queue_policy is not None:
+            pinned_policy = dict(execution_context.model.parameters or {}).get("passive_queue_policy")
+            if not isinstance(pinned_policy, Mapping):
+                raise RuntimeError("execution context does not pin a passive queue policy")
+            if str(pinned_policy.get("policy_hash") or "") != passive_queue_policy.policy_hash:
+                raise RuntimeError("passive_queue_policy_hash_mismatch")
         profile_context = self._strategy_log_context(
             strategy,
             symbol=symbol,
@@ -519,9 +551,17 @@ class SeriesBuilderConstructionMixin:
             execution_context,
         )
         if book_tape is not None:
-            book_model = BookExecutionModel(
-                execution_context=execution_context,
-                tape=book_tape,
+            book_model = (
+                PassiveBookExecutionModel(
+                    execution_context=execution_context,
+                    tape=book_tape,
+                    queue_policy=passive_queue_policy,
+                )
+                if passive_queue_policy is not None
+                else BookExecutionModel(
+                    execution_context=execution_context,
+                    tape=book_tape,
+                )
             )
             risk_engine.attach_execution_model(book_model)
             risk_engine.attach_execution_adapter(book_model)

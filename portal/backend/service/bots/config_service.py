@@ -14,9 +14,11 @@ from engines.bot_runtime.core.execution_assumptions import (
 from engines.bot_runtime.core.execution_context import (
     build_execution_context_bundle,
     execution_model_artifact_from_book_tape,
+    execution_model_artifact_from_passive_policy,
     resolve_execution_context,
 )
 from engines.bot_runtime.core.book_execution import ExecutionBookTapeBundle
+from engines.bot_runtime.core.passive_execution import PassiveQueuePolicy
 from engines.bot_runtime.core.execution_plan import compile_runtime_execution_plan
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, normalize_execution_semantics
 from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
@@ -689,6 +691,17 @@ class BotConfigService:
             execution_book_bundle = ExecutionBookTapeBundle.from_dict(raw_book_bundle)
         else:
             execution_book_bundle = None
+        raw_queue_policy = bot.get("passive_queue_policy")
+        if raw_queue_policy is not None:
+            if run_type != "backtest":
+                raise ValueError("passive_queue_policy is admitted only for backtest runs")
+            if not isinstance(raw_queue_policy, Mapping):
+                raise ValueError("passive_queue_policy must be an object")
+            passive_queue_policy = PassiveQueuePolicy.from_dict(raw_queue_policy)
+            if execution_book_bundle is None:
+                raise ValueError("passive_queue_policy requires execution_book_tape_bundle")
+        else:
+            passive_queue_policy = None
 
         execution_plan = compile_runtime_execution_plan(
             normalise_template(getattr(strategy, "atm_template", None))
@@ -742,9 +755,18 @@ class BotConfigService:
                     execution_assumptions,
                     instrument_payload=instrument,
                     execution_model_artifact=(
-                        execution_model_artifact_from_book_tape(
-                            execution_assumptions,
-                            source_capability=book_tape.source_capability,
+                        (
+                            execution_model_artifact_from_passive_policy(
+                                execution_assumptions,
+                                source_capability=book_tape.source_capability,
+                                execution_book_tape_hash=book_tape.tape_hash,
+                                queue_policy=passive_queue_policy,
+                            )
+                            if passive_queue_policy is not None
+                            else execution_model_artifact_from_book_tape(
+                                execution_assumptions,
+                                source_capability=book_tape.source_capability,
+                            )
                         )
                         if book_tape is not None
                         else None
@@ -783,6 +805,11 @@ class BotConfigService:
                         "execution_book_replay_fingerprint": (
                             book_tape.replay_fingerprint if book_tape is not None else None
                         ),
+                        "passive_queue_policy_hash": (
+                            passive_queue_policy.policy_hash
+                            if passive_queue_policy is not None
+                            else None
+                        ),
                         "order_policy_conformance": policy_conformance,
                     }
                 )
@@ -811,6 +838,9 @@ class BotConfigService:
             "execution_book_tape_bundle": (
                 execution_book_bundle.to_dict() if execution_book_bundle is not None else None
             ),
+            "passive_queue_policy": (
+                passive_queue_policy.to_dict() if passive_queue_policy is not None else None
+            ),
             "runtime_readiness": {
                 "datasource": strategy.datasource,
                 "exchange": strategy.exchange,
@@ -821,6 +851,11 @@ class BotConfigService:
                 "execution_book_tape_bundle_hash": (
                     execution_book_bundle.bundle_hash
                     if execution_book_bundle is not None
+                    else None
+                ),
+                "passive_queue_policy_hash": (
+                    passive_queue_policy.policy_hash
+                    if passive_queue_policy is not None
                     else None
                 ),
             },

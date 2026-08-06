@@ -12,6 +12,7 @@ from core.settings import get_settings
 from engines.bot_runtime.strategy.models import Strategy
 from engines.bot_runtime.core.execution_context import ResolvedExecutionContextBundle
 from engines.bot_runtime.core.book_execution import ExecutionBookTapeBundle
+from engines.bot_runtime.core.passive_execution import PassiveQueuePolicy
 
 from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
 from ..market.backtest_dataset_service import validate_backtest_dataset
@@ -75,6 +76,7 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "execution_assumptions",
         "resolved_execution_context_bundle",
         "execution_book_tape_bundle",
+        "passive_queue_policy",
         "run_type",
         "playback_speed",
         "backtest_start",
@@ -202,6 +204,14 @@ class BotStartupOrchestrator:
                 ctx.bot_record["execution_book_tape_bundle"] = book_bundle.to_dict()
             else:
                 book_bundle = None
+            raw_queue_policy = artifacts.get("passive_queue_policy")
+            if raw_queue_policy is not None:
+                if not isinstance(raw_queue_policy, Mapping):
+                    raise TypeError("startup artifacts passive_queue_policy must be a mapping")
+                queue_policy = PassiveQueuePolicy.from_dict(raw_queue_policy)
+                ctx.bot_record["passive_queue_policy"] = queue_policy.to_dict()
+            else:
+                queue_policy = None
             symbols = list(ctx.runtime_readiness.get("symbols") or [])
             ctx.runtime_dependency_metadata = {
                 "symbols": symbols,
@@ -219,6 +229,9 @@ class BotStartupOrchestrator:
                 ),
                 "execution_book_tape_count": (
                     len(book_bundle.tapes) if book_bundle is not None else 0
+                ),
+                "passive_queue_policy_hash": (
+                    queue_policy.policy_hash if queue_policy is not None else None
                 ),
             }
             ctx.bot_record["wallet_config"] = dict(ctx.wallet_config)
@@ -422,6 +435,14 @@ class BotStartupOrchestrator:
         start_request_overrides["economic_claim_intent"] = ctx.bot_record.get("economic_claim_intent")
         if isinstance(ctx.bot_record.get("execution_assumptions"), Mapping):
             start_request_overrides["execution_assumptions"] = dict(ctx.bot_record["execution_assumptions"])
+        if isinstance(ctx.bot_record.get("execution_book_tape_bundle"), Mapping):
+            start_request_overrides["execution_book_tape_bundle"] = dict(
+                ctx.bot_record["execution_book_tape_bundle"]
+            )
+        if isinstance(ctx.bot_record.get("passive_queue_policy"), Mapping):
+            start_request_overrides["passive_queue_policy"] = dict(
+                ctx.bot_record["passive_queue_policy"]
+            )
         if duration_seconds is not None:
             start_request_overrides["duration_seconds"] = duration_seconds
         if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
@@ -457,6 +478,9 @@ class BotStartupOrchestrator:
                     ),
                     "execution_book_tape_bundle": dict(
                         ctx.bot_record.get("execution_book_tape_bundle") or {}
+                    ),
+                    "passive_queue_policy": dict(
+                        ctx.bot_record.get("passive_queue_policy") or {}
                     ),
                     "dataset_binding": dict(ctx.dataset_binding),
                     "request_id": ctx.request_id or None,

@@ -199,6 +199,7 @@ def _build_execution_book_tape_from_replay(
     closing_validity: Sequence[Any],
     instrument_id: str,
     replay_fingerprint: str,
+    trade_records: Sequence[Any] = (),
 ) -> ExecutionBookTape:
     """Project certified provider-neutral replay facts into an execution tape."""
 
@@ -228,18 +229,23 @@ def _build_execution_book_tape_from_replay(
         )
         for row in closing_validity
     )
+    limitations = {
+        "aggregated_depth_only",
+        "exact_queue_position_unavailable",
+    }
+    if trade_records:
+        limitations.add("passive_queue_requires_explicit_bounded_policy")
+    else:
+        limitations.add("resting_order_execution_not_modeled")
     return ExecutionBookTape.from_book_states(
         states,
         instrument_id=normalized_instrument_id,
         replay_fingerprint=replay_fingerprint,
         source_capability="l2",
         replay_certified=True,
-        limitations=(
-            "aggregated_depth_only",
-            "exact_queue_position_unavailable",
-            "resting_order_execution_not_modeled",
-        ),
+        limitations=tuple(sorted(limitations)),
         validity_closures=closures,
+        trade_records=trade_records,
     )
 
 
@@ -703,6 +709,16 @@ class MarketStructureService:
             basis_facts=basis_facts,
             derivative_facts=derivative_facts,
         )
+        execution_trade_records = ()
+        if replay_states and config.get("trade_series_id") is not None:
+            execution_trade_records = tuple(
+                self.repository.read_trades(
+                    series_id=int(config["trade_series_id"]),
+                    start=min(row.effective_at for row in replay_states) - timedelta(seconds=2),
+                    end=max(row.effective_at for row in replay_states) + timedelta(seconds=2),
+                    known_at_lte=max(row.known_at for row in replay_states),
+                )
+            )
         fingerprint = _stable_hash(
             {
                 "schema_version": "market.cross_stream_materialization.v1",
@@ -2446,6 +2462,12 @@ class MarketStructureService:
                 "checkpoint_checks": checkpoint_checks,
                 "bbo_feature_hashes": sorted(row.material_hash for row in replay_bbo),
                 "depth_feature_hashes": sorted(row.material_hash for row in replay_depth),
+                "execution_trade_version_ids": [
+                    row.version_id for row in execution_trade_records
+                ],
+                "execution_trade_material_hashes": [
+                    row.fact.material_hash for row in execution_trade_records
+                ],
                 "transport_quality_hashes": sorted(
                     str(row["evidence_hash"])
                     for row in quality_rows
@@ -2460,6 +2482,7 @@ class MarketStructureService:
                 closing_validity=closing_validity,
                 instrument_id=execution_instrument_id,
                 replay_fingerprint=fingerprint,
+                trade_records=execution_trade_records,
             ).to_dict()
         result = {
             "schema_version": "market.book_session_replay.v1",
