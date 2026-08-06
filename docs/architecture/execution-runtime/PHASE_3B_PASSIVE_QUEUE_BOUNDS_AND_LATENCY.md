@@ -203,4 +203,3 @@ bound, and no X5 claim may imply exact queue truth or calibrated venue behavior.
 - exact L2 queue claims;
 - autonomous policy choice outside an approved experiment protocol;
 - promotion, deployment, or capital authority.
-
