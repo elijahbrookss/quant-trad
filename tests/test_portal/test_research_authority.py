@@ -324,6 +324,17 @@ def test_complete_family_flow_retains_failures_and_enforces_one_holdout_use(
         actor_id="agent:researcher",
         actor_role="research_agent",
     )
+    idempotent_retry = repository.register_attempt(
+        family_id=family["id"],
+        request_id=f"request-attempt-failed-{suffix}",
+        dataset_role="train",
+        trial_inputs={"strategy_graph_hash": "1" * 64},
+        estimated_runtime_seconds=10,
+        estimated_compute_units=1,
+        actor_id="agent:researcher",
+        actor_role="research_agent",
+    )
+    assert idempotent_retry["id"] == failed["id"]
     repository.complete_attempt(
         attempt_id=failed["id"],
         status="failed",
@@ -335,6 +346,20 @@ def test_complete_family_flow_retains_failures_and_enforces_one_holdout_use(
         actor_role="experiment_runner",
         request_id=f"request-complete-failed-{suffix}",
     )
+    duplicate = repository.register_attempt(
+        family_id=family["id"],
+        request_id=f"request-attempt-duplicate-{suffix}",
+        dataset_role="train",
+        trial_inputs={"strategy_graph_hash": "1" * 64},
+        estimated_runtime_seconds=999,
+        estimated_compute_units=999,
+        actor_id="agent:researcher",
+        actor_role="research_agent",
+    )
+    assert duplicate["status"] == "duplicate"
+    assert duplicate["estimated_runtime_seconds"] == 0.0
+    assert duplicate["estimated_compute_units"] == 0.0
+    assert duplicate["result_evidence"]["duplicate_of_attempt_id"] == failed["id"]
     validation = repository.register_attempt(
         family_id=family["id"],
         request_id=f"request-attempt-validation-{suffix}",
@@ -511,7 +536,20 @@ def test_complete_family_flow_retains_failures_and_enforces_one_holdout_use(
     assert certificate["status"] == "qualified"
     released = repository.family_evidence(family["id"])
     assert released["holdout"]["result_evidence"]["artifact_hash"] == "7" * 64
-    assert [row["status"] for row in released["attempts"]] == ["failed", "completed"]
+    assert [row["status"] for row in released["attempts"]] == [
+        "failed",
+        "duplicate",
+        "completed",
+    ]
+    assert released["budget_usage"] == {
+        "schema_version": "research_search_budget_usage.v1",
+        "attempts": {"maximum": 5, "used": 3, "remaining": 2},
+        "runtime_seconds": {"maximum": 500.0, "reserved": 20.0, "remaining": 480.0},
+        "compute_units": {"maximum": 50.0, "reserved": 2.0, "remaining": 48.0},
+        "validation_feedback_uses": {"maximum": 2, "used": 0, "remaining": 2},
+        "attempt_status_counts": {"completed": 1, "duplicate": 1, "failed": 1},
+        "rejected_proposal_count": 0,
+    }
 
 
 def test_search_budget_denial_does_not_create_an_unaccounted_trial(

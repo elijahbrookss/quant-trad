@@ -28,7 +28,13 @@ from research_science import CandidateSnapshot, DatasetRole, ScientificProtocol
 from strategies.typed_graph import TypedStrategyGraph, compile_typed_strategy_graph
 
 
-TERMINAL_ATTEMPT_STATUSES = {"completed", "failed", "abandoned", "invalid"}
+RUNNER_TERMINAL_ATTEMPT_STATUSES = {
+    "completed",
+    "failed",
+    "abandoned",
+    "invalid",
+}
+TERMINAL_ATTEMPT_STATUSES = {*RUNNER_TERMINAL_ATTEMPT_STATUSES, "duplicate"}
 _EXECUTION_QUALITY_RANK = {f"X{index}": index for index in range(6)}
 
 
@@ -404,6 +410,27 @@ def register_attempt(
             > protocol.budget.max_validation_feedback_uses
         ):
             raise ValueError("validation_feedback_budget_exhausted")
+        assignment = protocol.assignment(normalized_role)
+        trial_fingerprint = _stable_hash(
+            {
+                "schema_version": "research_trial_fingerprint.v1",
+                "protocol_hash": protocol.protocol_hash,
+                "family_hash": family.family_hash,
+                "dataset_role": normalized_role.value,
+                "dataset_hash": assignment.dataset_hash,
+                "trial_inputs": dict(trial_inputs),
+                "lineage": {key: list(value) for key, value in lineage.items()},
+            }
+        )
+        duplicate_of = next(
+            (
+                row
+                for row in prior_attempts
+                if dict(row.trial_manifest or {}).get("trial_fingerprint")
+                == trial_fingerprint
+            ),
+            None,
+        )
         attempt_count = int(
             session.scalar(
                 select(func.count()).select_from(ResearchAttemptRecord).where(
@@ -425,13 +452,14 @@ def register_attempt(
         budget_blockers = []
         if attempt_count >= protocol.budget.max_attempts:
             budget_blockers.append("attempt_budget_exhausted")
-        if float(estimated_runtime_used or 0.0) + runtime > protocol.budget.max_runtime_seconds:
+        reserved_runtime = 0.0 if duplicate_of else runtime
+        reserved_compute = 0.0 if duplicate_of else compute
+        if float(estimated_runtime_used or 0.0) + reserved_runtime > protocol.budget.max_runtime_seconds:
             budget_blockers.append("runtime_budget_exhausted")
-        if float(estimated_compute_used or 0.0) + compute > protocol.budget.max_compute_units:
+        if float(estimated_compute_used or 0.0) + reserved_compute > protocol.budget.max_compute_units:
             budget_blockers.append("compute_budget_exhausted")
         if budget_blockers:
             raise ValueError("research_search_budget_exhausted: " + ",".join(budget_blockers))
-        assignment = protocol.assignment(normalized_role)
         ordinal = attempt_count + 1
         manifest = {
             "schema_version": "research_trial_manifest.v1",
@@ -444,8 +472,12 @@ def register_attempt(
             "dataset_binding": assignment.to_private_dict(),
             "trial_inputs": dict(trial_inputs),
             "lineage": {key: list(value) for key, value in lineage.items()},
-            "estimated_runtime_seconds": runtime,
-            "estimated_compute_units": compute,
+            "trial_fingerprint": trial_fingerprint,
+            "duplicate_of_attempt_id": duplicate_of.id if duplicate_of else None,
+            "requested_runtime_seconds": runtime,
+            "requested_compute_units": compute,
+            "estimated_runtime_seconds": reserved_runtime,
+            "estimated_compute_units": reserved_compute,
         }
         manifest_hash = _stable_hash(manifest)
         record = ResearchAttemptRecord(
@@ -455,13 +487,23 @@ def register_attempt(
             attempt_ordinal=ordinal,
             request_id=request_id,
             dataset_role=normalized_role.value,
-            status="registered",
+            status="duplicate" if duplicate_of else "registered",
             trial_manifest_hash=manifest_hash,
             trial_manifest=manifest,
-            estimated_runtime_seconds=runtime,
-            estimated_compute_units=compute,
+            estimated_runtime_seconds=reserved_runtime,
+            estimated_compute_units=reserved_compute,
+            result_evidence=(
+                {
+                    "schema_version": "duplicate_trial_evidence.v1",
+                    "duplicate_of_attempt_id": duplicate_of.id,
+                    "trial_fingerprint": trial_fingerprint,
+                }
+                if duplicate_of
+                else None
+            ),
             created_by=actor_id,
             created_at=_now(),
+            finished_at=_now() if duplicate_of else None,
         )
         session.add(record)
         session.flush()
@@ -469,12 +511,22 @@ def register_attempt(
             session,
             aggregate_type="family",
             aggregate_id=family.id,
-            event_type="ATTEMPT_REGISTERED",
+            event_type=(
+                "ATTEMPT_DUPLICATE_RETAINED"
+                if duplicate_of
+                else "ATTEMPT_REGISTERED"
+            ),
             actor_id=actor_id,
             actor_role=actor_role,
             request_id=request_id,
             idempotency_key=f"attempt:{request_id}",
-            payload={"attempt_id": record.id, "trial_manifest_hash": manifest_hash, "dataset_role": normalized_role.value},
+            payload={
+                "attempt_id": record.id,
+                "trial_manifest_hash": manifest_hash,
+                "trial_fingerprint": trial_fingerprint,
+                "dataset_role": normalized_role.value,
+                "duplicate_of_attempt_id": duplicate_of.id if duplicate_of else None,
+            },
         )
         return record.to_dict()
 
@@ -528,7 +580,7 @@ def complete_attempt(
     request_id: str,
 ) -> dict[str, Any]:
     normalized_status = str(status or "").strip().lower()
-    if normalized_status not in TERMINAL_ATTEMPT_STATUSES:
+    if normalized_status not in RUNNER_TERMINAL_ATTEMPT_STATUSES:
         raise ValueError("attempt status must be completed, failed, abandoned, or invalid")
     with db.session() as session:
         attempt = session.scalar(
@@ -1090,6 +1142,68 @@ def family_evidence(family_id: str, *, private: bool = False) -> dict[str, Any]:
             )
             .order_by(ResearchAuthorityEventRecord.event_seq)
         ).all()
+        protocol_contract = (
+            ScientificProtocol.from_dict(protocol.private_manifest)
+            if protocol is not None
+            else None
+        )
+        runtime_reserved = sum(
+            float(row.estimated_runtime_seconds or 0.0) for row in attempts
+        )
+        compute_reserved = sum(
+            float(row.estimated_compute_units or 0.0) for row in attempts
+        )
+        feedback_used = sum(
+            len(
+                tuple(
+                    dict(row.trial_manifest.get("lineage") or {}).get(
+                        "influenced_by_attempt_ids"
+                    )
+                    or ()
+                )
+            )
+            for row in attempts
+        )
+        status_counts: dict[str, int] = {}
+        for row in attempts:
+            status_counts[row.status] = status_counts.get(row.status, 0) + 1
+        rejected_count = sum(
+            1 for row in events if row.event_type == "TRIAL_PROPOSAL_REJECTED"
+        )
+        budget_usage = None
+        if protocol_contract is not None:
+            budget = protocol_contract.budget
+            budget_usage = {
+                "schema_version": "research_search_budget_usage.v1",
+                "attempts": {
+                    "maximum": budget.max_attempts,
+                    "used": len(attempts),
+                    "remaining": max(budget.max_attempts - len(attempts), 0),
+                },
+                "runtime_seconds": {
+                    "maximum": budget.max_runtime_seconds,
+                    "reserved": runtime_reserved,
+                    "remaining": max(
+                        budget.max_runtime_seconds - runtime_reserved, 0.0
+                    ),
+                },
+                "compute_units": {
+                    "maximum": budget.max_compute_units,
+                    "reserved": compute_reserved,
+                    "remaining": max(
+                        budget.max_compute_units - compute_reserved, 0.0
+                    ),
+                },
+                "validation_feedback_uses": {
+                    "maximum": budget.max_validation_feedback_uses,
+                    "used": feedback_used,
+                    "remaining": max(
+                        budget.max_validation_feedback_uses - feedback_used, 0
+                    ),
+                },
+                "attempt_status_counts": dict(sorted(status_counts.items())),
+                "rejected_proposal_count": rejected_count,
+            }
         return {
             "schema_version": "research_family_evidence.v1",
             "family": family.to_dict(),
@@ -1097,6 +1211,7 @@ def family_evidence(family_id: str, *, private: bool = False) -> dict[str, Any]:
             "attempts": [row.to_dict() for row in attempts],
             "candidates": [row.to_dict() for row in candidates],
             "strategy_graphs": [row.to_dict() for row in strategy_graphs],
+            "budget_usage": budget_usage,
             "holdout": (
                 holdout.to_dict(
                     include_result=bool(private or holdout.feedback_released)

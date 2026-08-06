@@ -112,13 +112,18 @@ binding, immutable input hash, estimated/actual time and compute, lineage, and a
 terminal result of `completed`, `failed`, `invalid`, or `abandoned`. Rejected
 agent proposals are retained as append-only family events without pretending
 they ran. Idempotent retries with the same request identity return the original
-attempt. Meaningfully new requests consume budget even if their content is
-similar.
+attempt. A new request with the same protocol-bound trial fingerprint is
+retained as a terminal `duplicate`, links the original attempt, consumes an
+attempt slot, and reserves no runtime or compute because it is not run.
+Meaningfully different requests consume the declared resources.
 
 The protocol caps attempts, estimated runtime, compute, and validation-feedback
 uses. `parent_attempt_ids` must name attempts in the same family.
 `influenced_by_attempt_ids` must name completed validation attempts and consumes
 the separate feedback budget. Exhaustion fails before admission.
+Every family evidence view reports maximum, used/reserved, and remaining budget
+for attempts, runtime, compute, and validation feedback, plus terminal-status
+and rejected-proposal counts.
 
 ## Walk-forward and leakage controls
 
