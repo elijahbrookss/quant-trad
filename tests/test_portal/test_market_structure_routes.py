@@ -185,10 +185,21 @@ def test_market_structure_pair_route_never_implies_production(monkeypatch) -> No
 def test_market_structure_operator_routes_preserve_typed_boundaries(
     monkeypatch,
 ) -> None:
+    observed_book_replay = {}
+
     async def fake_capture(**kwargs):
         assert kwargs["definition_id"] == "definition-a"
         assert kwargs["duration_seconds"] == 12.0
         return {"schema_version": "market_structure_bounded_capture.v1"}
+
+    def fake_book_replay(**kwargs):
+        observed_book_replay.update(kwargs)
+        return {
+            "schema_version": "market_structure_book_replay.v1",
+            "definition_id": kwargs["definition_id"],
+            "session_id": kwargs["session_id"],
+            "checkpoint_delta_equal": True,
+        }
 
     monkeypatch.setattr(
         controller.market_structure_service,
@@ -214,12 +225,7 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
     monkeypatch.setattr(
         controller.market_structure_service,
         "replay_book_session",
-        lambda **kwargs: {
-            "schema_version": "market_structure_book_replay.v1",
-            "definition_id": kwargs["definition_id"],
-            "session_id": kwargs["session_id"],
-            "checkpoint_delta_equal": True,
-        },
+        fake_book_replay,
     )
     monkeypatch.setattr(
         controller.market_structure_service,
@@ -284,7 +290,7 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
     )
     book_replay = client.post(
         "/api/market-data/market-structure/definitions/definition-a/sessions/session-a/replay-book",
-        json={},
+        json={"execution_instrument_id": "instrument-btc"},
     )
     compact = client.post(
         "/api/market-data/market-structure/definitions/definition-a/sessions/session-a/compact",
@@ -315,6 +321,7 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
     assert replay.json()["manifest_id"] == "manifest-a"
     assert book_replay.json()["checkpoint_delta_equal"] is True
     assert book_replay.json()["session_id"] == "session-a"
+    assert observed_book_replay["execution_instrument_id"] == "instrument-btc"
     assert compact.json()["replacement_manifest_id"] == "manifest-compact"
     assert pin.json()["version_id"] == "pin-version-a"
     assert retention.json()["pinned"] is True

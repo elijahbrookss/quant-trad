@@ -104,6 +104,22 @@ def test_selection_plan_rejects_empty_pass_gates() -> None:
         normalize_plan(raw)
 
 
+def test_selection_plan_accepts_higher_execution_quality_floor() -> None:
+    raw = yaml.safe_load(_plan_text())
+    raw["comparison_policy"] = {
+        "require_golden": True,
+        "minimum_execution_quality_class": "X4",
+    }
+
+    normalized = normalize_plan(raw)
+
+    assert normalized["comparison_policy"]["minimum_execution_quality_class"] == "X4"
+
+    raw["comparison_policy"]["minimum_execution_quality_class"] = "X1"
+    with pytest.raises(ValueError, match="X2 or higher"):
+        normalize_plan(raw)
+
+
 def test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates(tmp_path, monkeypatch):
     plan_path = tmp_path / "plan.yaml"
     plan_path.write_text(_plan_text(), encoding="utf-8")

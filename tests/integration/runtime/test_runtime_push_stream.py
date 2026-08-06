@@ -806,6 +806,13 @@ def test_order_lifecycle_runtime_event_round_trip_preserves_residual_and_pins() 
             fill_price=100.0,
             fill_fee=0.04,
             venue_event_name="open",
+            book_execution_evidence={
+                "schema_version": "book_execution_evidence.v1",
+                "execution_book_tape_hash": "a" * 64,
+                "execution_book_snapshot_hash": "b" * 64,
+                "book_level_index": 1,
+                "consumed_level_qty": 4.0,
+            },
         ),
     )
 
@@ -816,6 +823,9 @@ def test_order_lifecycle_runtime_event_round_trip_preserves_residual_and_pins() 
     assert restored.context.order_remaining_qty == 6.0
     assert restored.context.execution_context_hash == "context-hash"
     assert restored.context.execution_policy_hash == "policy-hash"
+    assert restored.context.book_execution_evidence[
+        "execution_book_snapshot_hash"
+    ] == "b" * 64
 
 
 def test_wallet_facts_emit_exit_ledger_with_absolute_release_state() -> None:

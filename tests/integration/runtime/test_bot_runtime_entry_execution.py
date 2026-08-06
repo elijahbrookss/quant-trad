@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 import threading
 from typing import Optional
 
+import pytest
+
 from engines.bot_runtime.core import (
     CandleSnapshot,
     CanonicalOrderState,
@@ -1091,6 +1093,86 @@ def test_apply_entry_fill_accumulates_partial_fills():
     assert result_two.position is not None
     assert result_two.position.entry_price == 105.0
     assert result_two.position.fees_paid == 0.1
+
+
+def test_book_entry_fills_mutate_wallet_and_position_once_per_price_level():
+    proxy = _wallet_proxy({"USD": 1_000.0, "BTC": 0.0})
+    gateway = SharedWalletGateway(proxy)
+    engine = _build_spot_engine(base_risk_per_trade=8)
+    engine.attach_wallet_gateway(gateway)
+    engine.attach_execution_adapter(_FillAdapter())
+    candle = _build_candle(close=100.0, atr=2.0)
+    request = engine.build_entry_request(candle, "long")
+    pending = _build_pending(request)
+
+    def book_fill(fill_id: str, *, qty: float, price: float, fee: float) -> EntryFill:
+        return EntryFill(
+            order_intent_id=str(request.order_intent_id),
+            trade_id=str(request.trade_id),
+            candle=_snapshot(candle),
+            filled_qty=qty,
+            fill_price=price,
+            fee_paid=fee,
+            liquidity_role="taker",
+            fill_time=fill_id,
+            fee_rate=0.001,
+            fee_source="fixture",
+            fee_version="fees.v1",
+            fill_id=fill_id,
+            raw={
+                "outcome": {
+                    "metadata": {
+                        "schema_version": "book_execution_evidence.v1",
+                        "fill_id": fill_id,
+                        "execution_book_snapshot_hash": "snapshot-hash",
+                    }
+                }
+            },
+        )
+
+    first = engine.apply_entry_fill(
+        request=request,
+        pending=pending,
+        fill=book_fill("level-1", qty=1.0, price=100.0, fee=0.10),
+    )
+    assert first.status == "opened_partial"
+    assert first.position is not None and first.pending is not None
+    assert sum(leg.contracts for leg in first.position.legs) == 1.0
+    assert first.position.entry_price == 100.0
+    assert first.position.fees_paid == 0.10
+    assert gateway.project().balances["BTC"] == 1.0
+    assert gateway.project().balances["USD"] == pytest.approx(899.90)
+
+    engine.active_trade = first.position
+    engine.trades.append(first.position)
+    second_fill = book_fill("level-2", qty=1.0, price=110.0, fee=0.11)
+    second = engine.apply_entry_fill(
+        request=request,
+        pending=first.pending,
+        fill=second_fill,
+    )
+    assert second.status == "augmented"
+    assert second.pending is None
+    assert second.position is first.position
+    assert sum(leg.contracts for leg in second.position.legs) == 2.0
+    assert second.position.entry_price == 105.0
+    assert second.position.stop_price == 101.0
+    assert second.position.legs[0].target_price == 115.0
+    assert second.position.fees_paid == pytest.approx(0.21)
+    assert second.position.entry_outcome["entry_fill_ids"] == ["level-1", "level-2"]
+    assert gateway.project().balances["BTC"] == 2.0
+    assert gateway.project().balances["USD"] == pytest.approx(789.79)
+
+    wallet_event_count = len(list(gateway.events()))
+    duplicate = engine.apply_entry_fill(
+        request=request,
+        pending=first.pending,
+        fill=second_fill,
+    )
+    assert duplicate.status == "duplicate"
+    assert len(list(gateway.events())) == wallet_event_count
+    assert duplicate.position.entry_price == 105.0
+    assert duplicate.position.fees_paid == pytest.approx(0.21)
 
 
 def test_apply_entry_fill_opens_position_with_expected_stop():

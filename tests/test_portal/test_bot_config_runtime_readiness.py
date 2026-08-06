@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import UTC, datetime
 
 import pytest
 
 pytest.importorskip("sqlalchemy")
 
 from portal.backend.service.bots.config_service import BotConfigService
+from engines.bot_runtime.core.book_execution import (
+    EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION,
+    EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+    EXECUTION_BOOK_TAPE_SCHEMA_VERSION,
+    ExecutionBookLevel,
+    ExecutionBookSnapshot,
+    ExecutionBookSourceReference,
+    ExecutionBookTape,
+    ExecutionBookTapeBundle,
+)
 
 
 def _bot_payload(**overrides: object) -> dict:
@@ -223,3 +234,123 @@ def test_runtime_readiness_rejects_strategy_orders_unsupported_by_venue_profile(
         match=r"venue_profile_unsupported_order_types .*limit_resting,stop_market",
     ):
         service.prepare_startup_artifacts(_bot_payload(execution_semantics="spot"))
+
+
+def _execution_book_bundle() -> dict:
+    snapshot = ExecutionBookSnapshot(
+        schema_version=EXECUTION_BOOK_SNAPSHOT_SCHEMA_VERSION,
+        instrument_id="instrument-1",
+        series_id=17,
+        validity_interval_id="validity-1",
+        source_reference=ExecutionBookSourceReference(
+            definition_id="definition-1",
+            session_id="session-1",
+            connection_epoch=0,
+            source_product_id="BTC-USD",
+            source_sequence=1,
+            receive_ordinal=1,
+            event_ordinal=0,
+        ),
+        product_definition_version_id="btc-usd.v1",
+        quantity_unit="base",
+        effective_at=datetime(2026, 1, 1, tzinfo=UTC),
+        known_at=datetime(2026, 1, 1, tzinfo=UTC),
+        reconstruction_state_hash="state-hash",
+        bids=(ExecutionBookLevel("99", "2"),),
+        asks=(ExecutionBookLevel("101", "2"),),
+    )
+    tape = ExecutionBookTape(
+        schema_version=EXECUTION_BOOK_TAPE_SCHEMA_VERSION,
+        tape_id="",
+        instrument_id="instrument-1",
+        source_capability="l2",
+        reconstruction_version="fixture.v1",
+        replay_fingerprint="replay-hash",
+        replay_certified=True,
+        snapshots=(snapshot,),
+    )
+    return ExecutionBookTapeBundle(
+        schema_version=EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+        tapes=(tape,),
+    ).to_dict()
+
+
+def test_runtime_readiness_pins_x4_book_model_and_tape(monkeypatch):
+    service = BotConfigService()
+    strategy = _strategy_with_instrument(
+        {
+            "id": "instrument-1",
+            "symbol": "BTC-USD",
+            "instrument_type": "spot",
+            "venue_execution_profile": {
+                "profile_id": "l2-fixture",
+                "version": "l2-fixture.v1",
+                "venue_id": "synthetic-l2",
+                "supported_order_types": [
+                    "market",
+                    "limit_aggressive",
+                    "limit_maker",
+                    "limit_resting",
+                    "stop_market",
+                ],
+                "supported_time_in_force": ["gtc", "ioc", "fok"],
+                "post_only_supported": True,
+                "post_only_behavior": "reject_would_cross",
+                "liquidity_role_by_order_type": {
+                    "market": "taker",
+                    "limit_aggressive": "taker",
+                    "limit_maker": "maker",
+                    "limit_resting": "maker",
+                    "stop_market": "taker",
+                },
+                "price_increment_policy": "reject",
+                "quantity_increment_policy": "reject",
+                "max_market_order_notional": None,
+                "market_price_collar_bps": None,
+                "book_data_capability": "l2",
+                "lifecycle_event_mapping": {},
+                "external_order_submission_enabled": False,
+                "source": "test_fixture",
+            },
+        }
+    )
+    _patch_strategy_lookup(monkeypatch, strategy)
+    monkeypatch.setattr(
+        "portal.backend.service.market.instrument_service.resolve_instrument",
+        lambda _datasource, _exchange, _symbol: None,
+    )
+
+    artifacts = service.prepare_startup_artifacts(
+        _bot_payload(
+            execution_semantics="spot",
+            execution_book_tape_bundle=_execution_book_bundle(),
+        )
+    )
+
+    profile = artifacts["runtime_readiness"]["profiles"][0]
+    context = artifacts["resolved_execution_context_bundle"]["contexts"][0]
+    assert context["model"]["execution_quality_ceiling"] == "X4"
+    assert context["model"]["input_capability"] == "l2"
+    assert context["model"]["supports_partial_fills"] is True
+    assert profile["execution_book_tape_hash"]
+    assert artifacts["execution_book_tape_bundle"]["bundle_hash"]
+
+    with pytest.raises(ValueError, match="only for backtest"):
+        service.prepare_startup_artifacts(
+            _bot_payload(
+                run_type="paper",
+                execution_semantics="spot",
+                execution_book_tape_bundle=_execution_book_bundle(),
+            )
+        )
+
+    strategy.instrument_links[0].instrument_snapshot[
+        "venue_execution_profile"
+    ]["book_data_capability"] = "l1"
+    with pytest.raises(ValueError, match="venue_book_capability"):
+        service.prepare_startup_artifacts(
+            _bot_payload(
+                execution_semantics="spot",
+                execution_book_tape_bundle=_execution_book_bundle(),
+            )
+        )

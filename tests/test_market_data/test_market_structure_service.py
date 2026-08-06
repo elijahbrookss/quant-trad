@@ -3,16 +3,29 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import portal.backend.service.market.market_structure_service as market_structure_module
 import pytest
 from data_providers.streams.contracts import ProviderRawMessage
 from market_data.fact_registry import get_fact_contract
-from market_data.order_book import BookLifecycle
-from market_data.structure import MarketTradeRecord
+from market_data.order_book import (
+    BookLifecycle,
+    BookSide,
+    BookSourcePosition,
+    L2EventFact,
+    L2EventType,
+    L2Mutation,
+    L2ProductContract,
+    Level2BookReconstructor,
+)
+from market_data.structure import MarketTradeRecord, ProviderSizeUnit
 from market_data.market_state import DERIVATIVE_STATE_FACT_TYPE
-from portal.backend.service.market.market_structure_service import MarketStructureService
+from portal.backend.service.market.market_structure_service import (
+    MarketStructureService,
+    _build_execution_book_tape_from_replay,
+)
 from portal.backend.service.storage.repos.market_structure import (
     AggregateIngestionOutcome,
     ArchiveCommitResult,
@@ -458,6 +471,89 @@ def test_bounded_l2_reports_terminal_invalid_state_without_false_clean_close(
     assert repository.last_book_ingest["final_connection_epoch"] == 0
     assert repository.last_book_ingest["final_receive_ordinal"] == 4
     assert repository.released is True
+
+
+def test_replay_projection_builds_causal_hash_verified_tape_and_closes_gaps() -> None:
+    base = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    contract = L2ProductContract(
+        provider_product_id="BTC-USD",
+        product_definition_version_id="btc-product.v1",
+        provider_size_unit=ProviderSizeUnit.BASE,
+        price_increment=Decimal("1"),
+        quantity_increment=Decimal("0.1"),
+    )
+
+    def event(
+        event_type: L2EventType,
+        ordinal: int,
+        updates: list[tuple[BookSide, str, str]],
+    ) -> L2EventFact:
+        observed = base + timedelta(seconds=ordinal)
+        return L2EventFact(
+            event_type=event_type,
+            position=BookSourcePosition(
+                definition_id="definition-1",
+                session_id="session-1",
+                connection_epoch=0,
+                provider_product_id="BTC-USD",
+                provider_sequence_num=ordinal,
+                receive_ordinal=ordinal,
+                event_ordinal=0,
+            ),
+            product_definition_version_id="btc-product.v1",
+            mutations=tuple(
+                L2Mutation(
+                    mutation_ordinal=index,
+                    side=side,
+                    price=price,
+                    new_quantity=quantity,
+                    provider_event_time=observed,
+                    provider_size_unit=ProviderSizeUnit.BASE,
+                )
+                for index, (side, price, quantity) in enumerate(updates)
+            ),
+            provider_message_time=observed,
+            received_at=observed + timedelta(milliseconds=1),
+            accepted_at=observed + timedelta(milliseconds=2),
+            known_at=observed + timedelta(milliseconds=2),
+            raw_record_id=f"raw-{ordinal}",
+        )
+
+    reducer = Level2BookReconstructor(series_id=20, contract=contract)
+    opened = reducer.process(
+        event(
+            L2EventType.SNAPSHOT,
+            1,
+            [
+                (BookSide.BID, "99", "2"),
+                (BookSide.ASK, "101", "3"),
+            ],
+        )
+    )
+    assert opened.state is not None
+    invalidated = reducer.process(
+        event(
+            L2EventType.UPDATE,
+            2,
+            [(BookSide.BID, "101", "1")],
+        )
+    )
+    assert invalidated.validity_versions
+    tape = _build_execution_book_tape_from_replay(
+        states=[opened.state],
+        closing_validity=invalidated.validity_versions,
+        instrument_id="instrument-btc",
+        replay_fingerprint="f" * 64,
+    )
+
+    assert tape.replay_certified is True
+    assert tape.source_capability == "l2"
+    assert tape.snapshots[0].reconstruction_state_hash == opened.state.state_hash
+    assert tape.validity_closures[0].source_reference.receive_ordinal == 2
+    assert tape.tape_hash == type(tape).from_dict(tape.to_dict()).tape_hash
+    assert tape.select_at(opened.state.known_at).snapshot_hash == tape.snapshots[0].snapshot_hash
+    with pytest.raises(LookupError, match="invalid_at_arrival"):
+        tape.select_at(invalidated.validity_versions[0].known_at)
 
 
 def test_bounded_collector_spools_archives_persists_and_aggregates(
