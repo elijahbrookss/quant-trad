@@ -20,7 +20,7 @@ from market_data.order_book import (
     L2ProductContract,
     Level2BookReconstructor,
 )
-from market_data.structure import MarketTradeRecord, ProviderSizeUnit
+from market_data.structure import MarketTradeRecord, ProductContract, ProviderSizeUnit
 from market_data.market_state import DERIVATIVE_STATE_FACT_TYPE
 from portal.backend.service.market.market_structure_service import (
     MarketStructureService,
@@ -36,32 +36,16 @@ from portal.backend.service.storage.repos.market_structure import (
 )
 
 
-class _AdmissionRepository:
+class _SafetyRepository:
     def __init__(self) -> None:
         self.persisted = None
 
-    def continuous_validation_evidence(self, **kwargs):
-        return {
-            "schema_version": "market.continuous_validation_evidence.v1",
-            "definition_id": kwargs["definition_id"],
-            "validation_session_id": kwargs["session_id"],
-            "continuous_capture_completed": True,
-            "blockers": [],
-        }
-
-    def set_production_admission(self, **kwargs):
+    def record_safety_event(self, **kwargs):
         self.persisted = kwargs
-        return {
-            "id": kwargs["definition_id"],
-            "enabled": False,
-            "production_admitted": kwargs["admitted"],
-            "config": {
-                "production_admission": {
-                    "evidence": kwargs["evidence"],
-                    "storage_budget": kwargs["storage_budget"],
-                }
-            },
-        }
+        return dict(kwargs)
+
+    def list_safety_events(self, **_kwargs):
+        return []
 
 
 class _FakeStream:
@@ -196,6 +180,7 @@ class _FakeRepository:
             max_spool_bytes=10 * 1024 * 1024,
             max_segment_bytes=1024 * 1024,
             config={
+                "product_definition_version_id": "coinbase.BTC-USD.product_contract.v1",
                 "aggregate_series_ids": {"1": 11, "60": 12},
                 "flow_feature_series_ids": {"1": 13, "60": 14},
             },
@@ -204,6 +189,15 @@ class _FakeRepository:
             lease_generation=1,
             lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
             session_id="test-session",
+        )
+
+    def get_product_contract(self, _definition_version_id: str) -> ProductContract:
+        return ProductContract(
+            provider_product_id="BTC-USD",
+            provider_size_unit="base",
+            base_currency="BTC",
+            quote_currency="USD",
+            product_definition_version_id="coinbase.BTC-USD.product_contract.v1",
         )
 
     def append_session_event(self, _claim, *, event_ordinal, **_kwargs) -> str:
@@ -623,7 +617,7 @@ class _ContractValidatingMarketDataRepository:
 def test_configure_pair_registers_derivative_state_without_timeframe(
     monkeypatch,
 ) -> None:
-    pair = market_structure_module.PHASE1_PAIRS["bip_btc"]
+    pair = market_structure_module.MARKET_STRUCTURE_PAIRS["bip_btc"]
     futures = {
         "id": "future-instrument",
         "symbol": pair.futures_product_id,
@@ -668,58 +662,34 @@ def test_configure_pair_registers_derivative_state_without_timeframe(
     assert derivative_calls[0]["timeframe_seconds"] is None
 
 
-def test_production_admission_uses_canonical_proof_and_authoritative_capacity() -> None:
-    repository = _AdmissionRepository()
+def test_operator_safety_halt_is_explicit_and_audited() -> None:
+    repository = _SafetyRepository()
     service = MarketStructureService(repository=repository)
-    storage_budget = {
-        "capacity_resource_id": "docker-backing-volume",
-        "capacity_scope": "physical_host_volume",
-        "capacity_authority": "physical_host_filesystem",
-        "physical_host_visible": True,
-        "capacity_observed_at": "2026-08-05T12:00:00Z",
-        "observed_available_bytes": 500 * 1024**3,
-        "observed_growth_bytes_per_day": 2 * 1024**3,
-        "growth_budget_bytes_per_day": 5 * 1024**3,
-        "minimum_headroom_bytes": 100 * 1024**3,
-    }
-
-    result = service.set_production_admission(
-        definition_id="definition-a",
-        admitted=True,
-        approved_by="operator-a",
-        evidence={
-            "validation_session_id": "session-a",
-            "continuous_capture_completed": True,
-        },
-        storage_budget=storage_budget,
+    result = service.set_safety_halt(
+        request_id="request-a",
+        scope_type="stream",
+        scope_id="definition-a",
+        requested_by="operator-a",
+        reason="operator test",
+        policy_hash="a" * 64,
+        evidence={"ticket": "test"},
     )
 
-    assert result["production_admitted"] is True
-    assert repository.persisted["evidence"]["validation_session_id"] == "session-a"
-    assert repository.persisted["evidence"] != {
-        "validation_session_id": "session-a",
-        "continuous_capture_completed": True,
-    }
+    assert result["event_type"] == "halted"
+    assert repository.persisted["scope_id"] == "definition-a"
 
 
-def test_production_admission_rejects_virtual_guest_capacity() -> None:
-    service = MarketStructureService(repository=_AdmissionRepository())
+def test_operator_safety_acknowledgement_is_a_separate_event() -> None:
+    repository = _SafetyRepository()
+    service = MarketStructureService(repository=repository)
 
-    with pytest.raises(ValueError, match="virtual guest capacity is insufficient"):
-        service.set_production_admission(
-            definition_id="definition-a",
-            admitted=True,
-            approved_by="operator-a",
-            evidence={"validation_session_id": "session-a"},
-            storage_budget={
-                "capacity_resource_id": "docker-engine-storage",
-                "capacity_scope": "docker_engine_storage",
-                "capacity_authority": "virtual_guest_storage",
-                "physical_host_visible": False,
-                "capacity_observed_at": "2026-08-05T12:00:00Z",
-                "observed_available_bytes": 900 * 1024**3,
-                "observed_growth_bytes_per_day": 1,
-                "growth_budget_bytes_per_day": 2,
-                "minimum_headroom_bytes": 1,
-            },
-        )
+    result = service.acknowledge_safety_halt(
+        request_id="request-b",
+        scope_type="fleet",
+        scope_id="coinbase_perpetual_trades",
+        requested_by="operator-a",
+        reason="condition cleared",
+        policy_hash="a" * 64,
+    )
+
+    assert result["event_type"] == "acknowledged"

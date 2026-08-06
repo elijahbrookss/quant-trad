@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+from market_data.structure import ProductContract
+
 from portal.backend.service.market.collector_supervisor import (
     CollectorAdapterRegistry,
     ContinuousCollectorSupervisor,
@@ -10,13 +12,29 @@ from portal.backend.service.market.collector_supervisor import (
 
 
 class _Repository:
+    def __init__(self):
+        self.safety_events = []
+
     def list_stream_definitions(self):
         runtime = {
             "collector_runtime": {
-                "mode": "production",
+                "mode": "continuous",
                 "stop_at": None,
                 "policy": {},
-            }
+            },
+            "fleet_id": "test-fleet",
+            "product_definition_version_id": "test.product.v1",
+            "safety_policy": {
+                "schema_version": "market.collector_safety_policy.v1",
+                "policy_id": "test.v1",
+                "warning_free_bytes": 2,
+                "critical_free_bytes": 1,
+                "warning_spool_ratio": 0.7,
+                "critical_spool_ratio": 0.9,
+                "warning_projected_exhaustion_hours": 2,
+                "critical_projected_exhaustion_hours": 1,
+                "evaluation_interval_seconds": 5,
+            },
         }
         return [
             {
@@ -24,6 +42,7 @@ class _Repository:
                 "enabled": True,
                 "provider": "TEST",
                 "channels": ("trades",),
+                "max_spool_bytes": 1024,
                 "config": runtime,
             },
             {
@@ -31,9 +50,32 @@ class _Repository:
                 "enabled": True,
                 "provider": "UNKNOWN",
                 "channels": ("future",),
+                "max_spool_bytes": 1024,
                 "config": runtime,
             },
         ]
+
+    def active_safety_halts(self, **_kwargs):
+        return []
+
+    def get_product_contract(self, _definition_version_id):
+        return ProductContract(
+            provider_product_id="TEST-USD",
+            provider_size_unit="base",
+            base_currency="TEST",
+            quote_currency="USD",
+            product_definition_version_id="test.product.v1",
+        )
+
+    def stream_storage_growth(self, **_kwargs):
+        return {"bytes_per_hour": 0.0, "window_seconds": 0.0}
+
+    def record_safety_event(self, **kwargs):
+        self.safety_events.append(kwargs)
+        return kwargs
+
+    def configure_continuous_runtime(self, **kwargs):
+        return kwargs
 
 
 class _Adapter:
@@ -76,7 +118,7 @@ def test_supervisor_quarantines_unsupported_definition_without_stopping_others()
     try:
         assert snapshot["state"] == "running"
         assert snapshot["tasks"]["supported"]["adapter_id"] == "test.trades.v1"
-        assert "adapter_resolution_failed" in snapshot["errors"]["unsupported"]
+        assert "collector_safety_not_qualified" in snapshot["errors"]["unsupported"]
     finally:
         supervisor.stop(timeout_seconds=2.0)
     assert supervisor.snapshot()["state"] == "stopped"

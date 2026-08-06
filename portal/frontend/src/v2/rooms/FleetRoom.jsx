@@ -276,7 +276,7 @@ function MarketDataTable({ pageModel, loading, streamCount, onPageChange, showPa
       </div>
       <div className="qt2-table-wrap">
         <table className="qt2-data-table qt2-market-table">
-          <thead><tr><th>Pair</th><th>Collection</th><th>Coverage / book</th><th>Archive / normalization</th><th>Admission</th></tr></thead>
+          <thead><tr><th>Pair</th><th>Collection</th><th>Coverage / book</th><th>Archive / normalization</th><th>Safety</th></tr></thead>
           <tbody>
             {pageModel.rows.map((row) => (
               <tr key={row.id}>
@@ -284,7 +284,7 @@ function MarketDataTable({ pageModel, loading, streamCount, onPageChange, showPa
                 <td><StatusBadge value={row.collection.label} tone={row.collection.tone} /><small>{row.collection.detail}</small></td>
                 <td><StatusBadge value={row.coverage.label} tone={row.coverage.tone} /><small>{row.book.label} · {row.qualityCount} quality records</small></td>
                 <td><StatusBadge value={row.archive.label} tone={row.archive.tone} /><small>{row.normalization.label}</small></td>
-                <td><StatusBadge value={row.admission.label} tone={row.admission.tone} /></td>
+                <td><StatusBadge value={row.safety.label} tone={row.safety.tone} /></td>
               </tr>
             ))}
           </tbody>
@@ -317,7 +317,7 @@ function ResearchTable({ pageModel, loading, onPageChange }) {
 
 function matchesMarketQuery(row, query) {
   const needle = query.trim().toLowerCase()
-  return !needle || [row.label, ...row.products, row.collection.label, row.coverage.label, row.admission.label]
+  return !needle || [row.label, ...row.products, row.collection.label, row.coverage.label, row.safety.label]
     .some((value) => String(value || '').toLowerCase().includes(needle))
 }
 
@@ -487,7 +487,7 @@ export function FleetRoom() {
               <CollectorsTable pageModel={collectorPageModel} loading={collectorFeed.loading} showPagination={false} />
             </section>
             <section aria-labelledby="structure-streams-heading">
-              <div className="qt2-inventory-heading"><div><h2 id="structure-streams-heading">Structure streams</h2><p>Coverage, book validity, archive, normalization, and admission.</p></div><span>{postureRows.length}</span></div>
+              <div className="qt2-inventory-heading"><div><h2 id="structure-streams-heading">Structure streams</h2><p>Coverage, book validity, archive, normalization, and safety policy.</p></div><span>{postureRows.length}</span></div>
               {marketFeed.error ? <OperatorErrorNotice error={marketFeed.error} compact /> : null}
               {marketFeed.streamError ? <OperatorErrorNotice error={marketFeed.streamError} compact /> : null}
               {marketComponentErrors.map(({ component, error }) => <div className="qt2-component-boundary" data-component={component} key={component}><OperatorErrorNotice error={error} compact /></div>)}

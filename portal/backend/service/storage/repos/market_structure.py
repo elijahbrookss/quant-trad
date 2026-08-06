@@ -50,6 +50,7 @@ from market_data.structure import (
     MarketSide,
     MarketTradeFact,
     MarketTradeRecord,
+    ProductContract,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
     TradeDeliveryKind,
@@ -397,7 +398,7 @@ def _book_position_from_material(value: Mapping[str, Any]) -> BookSourcePosition
         event_ordinal=int(value["event_ordinal"]),
     )
 class PostgresMarketStructureRepository:
-    """One transactional authority for Phase 1 stream facts and projections."""
+    """One transactional authority for stream facts and projections."""
 
     def upsert_stream_definition(
         self,
@@ -414,7 +415,6 @@ class PostgresMarketStructureRepository:
         max_spool_bytes: int,
         max_segment_bytes: int,
         enabled: Optional[bool] = None,
-        production_admitted: Optional[bool] = None,
         config: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         normalized_channels = tuple(
@@ -446,15 +446,11 @@ class PostgresMarketStructureRepository:
         }
         identity_key = _stable_hash(identity)
         insert_enabled = bool(enabled) if enabled is not None else False
-        insert_admitted = (
-            bool(production_admitted) if production_admitted is not None else False
-        )
         material = {
             "auth_mode": normalized_auth,
             "max_spool_bytes": spool_bytes,
             "max_segment_bytes": segment_bytes,
             "enabled": insert_enabled,
-            "production_admitted": insert_admitted,
             "config": dict(config or {}),
         }
         with db.session() as session:
@@ -475,12 +471,12 @@ class PostgresMarketStructureRepository:
                         INSERT INTO market.stream_definitions (
                             id, identity_key, source_id, series_id, provider, venue,
                             provider_product_id, channels, auth_mode, contract_version,
-                            enabled, production_admitted, max_spool_bytes,
+                            enabled, max_spool_bytes,
                             max_segment_bytes, generation, config
                         ) VALUES (
                             :id, :identity_key, :source_id, :series_id, :provider,
                             :venue, :product_id, CAST(:channels AS jsonb), :auth_mode,
-                            :contract_version, :enabled, :production_admitted,
+                            :contract_version, :enabled,
                             :max_spool_bytes, :max_segment_bytes, 1, CAST(:config AS jsonb)
                         )
                         """
@@ -497,7 +493,6 @@ class PostgresMarketStructureRepository:
                         "auth_mode": normalized_auth,
                         "contract_version": str(contract_version),
                         "enabled": insert_enabled,
-                        "production_admitted": insert_admitted,
                         "max_spool_bytes": spool_bytes,
                         "max_segment_bytes": segment_bytes,
                         "config": _json(config),
@@ -506,7 +501,7 @@ class PostgresMarketStructureRepository:
             else:
                 next_config = dict(config or {})
                 existing_config = dict(existing["config"] or {})
-                for operational_key in ("collector_runtime", "production_admission"):
+                for operational_key in ("collector_runtime",):
                     if (
                         operational_key in existing_config
                         and operational_key not in next_config
@@ -515,15 +510,9 @@ class PostgresMarketStructureRepository:
                 next_enabled = (
                     bool(existing["enabled"]) if enabled is None else bool(enabled)
                 )
-                next_admitted = (
-                    bool(existing["production_admitted"])
-                    if production_admitted is None
-                    else bool(production_admitted)
-                )
                 material = {
                     **material,
                     "enabled": next_enabled,
-                    "production_admitted": next_admitted,
                     "config": next_config,
                 }
                 existing_material = {
@@ -531,7 +520,6 @@ class PostgresMarketStructureRepository:
                     "max_spool_bytes": int(existing["max_spool_bytes"]),
                     "max_segment_bytes": int(existing["max_segment_bytes"]),
                     "enabled": bool(existing["enabled"]),
-                    "production_admitted": bool(existing["production_admitted"]),
                     "config": dict(existing["config"] or {}),
                 }
                 generation = int(existing["generation"]) + (existing_material != material)
@@ -540,7 +528,6 @@ class PostgresMarketStructureRepository:
                         """
                         UPDATE market.stream_definitions
                         SET auth_mode = :auth_mode, enabled = :enabled,
-                            production_admitted = :production_admitted,
                             max_spool_bytes = :max_spool_bytes,
                             max_segment_bytes = :max_segment_bytes,
                             generation = :generation, config = CAST(:config AS jsonb),
@@ -552,7 +539,6 @@ class PostgresMarketStructureRepository:
                         "id": str(existing["id"]),
                         "auth_mode": normalized_auth,
                         "enabled": next_enabled,
-                        "production_admitted": next_admitted,
                         "max_spool_bytes": spool_bytes,
                         "max_segment_bytes": segment_bytes,
                         "generation": generation,
@@ -590,6 +576,258 @@ class PostgresMarketStructureRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def record_safety_event(
+        self,
+        *,
+        request_id: str,
+        scope_type: str,
+        scope_id: str,
+        event_type: str,
+        severity: str,
+        actor_id: str,
+        reason: str,
+        policy_hash: str,
+        evidence: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Append idempotent safety evidence and update the persistent latch."""
+
+        request = str(request_id or "").strip()
+        scope = str(scope_type or "").strip().lower()
+        scoped_id = str(scope_id or "").strip()
+        event = str(event_type or "").strip().lower()
+        level = str(severity or "").strip().lower()
+        actor = str(actor_id or "").strip()
+        explanation = str(reason or "").strip()
+        policy = str(policy_hash or "").strip()
+        if not all((request, scoped_id, actor, explanation, policy)):
+            raise ValueError("collector_safety_event_invalid: required field is empty")
+        if scope not in {"global", "fleet", "stream"}:
+            raise ValueError("collector_safety_event_invalid: unsupported scope")
+        if event not in {"warning", "halted", "acknowledged"}:
+            raise ValueError("collector_safety_event_invalid: unsupported event type")
+        if level not in {"warning", "critical", "operator"}:
+            raise ValueError("collector_safety_event_invalid: unsupported severity")
+        occurred_at = datetime.now(UTC)
+        evidence_payload = dict(evidence or {})
+        evidence_hash = _stable_hash(evidence_payload)
+        event_id = _version_id(
+            "cse",
+            {
+                "schema_version": "market.collector_safety_event.v1",
+                "request_id": request,
+                "scope_type": scope,
+                "scope_id": scoped_id,
+                "event_type": event,
+                "severity": level,
+                "actor_id": actor,
+                "reason": explanation,
+                "policy_hash": policy,
+                "evidence_hash": evidence_hash,
+            },
+        )
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.collector_safety_events (
+                        id, request_id, scope_type, scope_id, event_type,
+                        severity, occurred_at, actor_id, reason, policy_hash,
+                        evidence_hash, evidence
+                    ) VALUES (
+                        :id, :request_id, :scope_type, :scope_id, :event_type,
+                        :severity, :occurred_at, :actor_id, :reason, :policy_hash,
+                        :evidence_hash, CAST(:evidence AS jsonb)
+                    ) ON CONFLICT (request_id) DO NOTHING
+                    """
+                ),
+                {
+                    "id": event_id,
+                    "request_id": request,
+                    "scope_type": scope,
+                    "scope_id": scoped_id,
+                    "event_type": event,
+                    "severity": level,
+                    "occurred_at": occurred_at,
+                    "actor_id": actor,
+                    "reason": explanation,
+                    "policy_hash": policy,
+                    "evidence_hash": evidence_hash,
+                    "evidence": _json(evidence_payload),
+                },
+            )
+            stored = session.execute(
+                text(
+                    """
+                    SELECT * FROM market.collector_safety_events
+                    WHERE request_id = :request_id
+                    """
+                ),
+                {"request_id": request},
+            ).mappings().one()
+            stored_identity = {
+                "scope_type": str(stored["scope_type"]),
+                "scope_id": str(stored["scope_id"]),
+                "event_type": str(stored["event_type"]),
+                "severity": str(stored["severity"]),
+                "actor_id": str(stored["actor_id"]),
+                "reason": str(stored["reason"]),
+                "policy_hash": str(stored["policy_hash"]),
+                "evidence_hash": str(stored["evidence_hash"]),
+            }
+            requested_identity = {
+                "scope_type": scope,
+                "scope_id": scoped_id,
+                "event_type": event,
+                "severity": level,
+                "actor_id": actor,
+                "reason": explanation,
+                "policy_hash": policy,
+                "evidence_hash": evidence_hash,
+            }
+            if stored_identity != requested_identity:
+                raise ValueError("collector_safety_request_conflict")
+            if event in {"halted", "acknowledged"}:
+                active = event == "halted"
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.collector_safety_state (
+                            scope_type, scope_id, active, halt_event_id,
+                            acknowledged_event_id, reason, updated_at
+                        ) VALUES (
+                            :scope_type, :scope_id, :active, :halt_event_id,
+                            :acknowledged_event_id, :reason, :updated_at
+                        ) ON CONFLICT (scope_type, scope_id) DO UPDATE
+                        SET active = EXCLUDED.active,
+                            halt_event_id = CASE
+                                WHEN EXCLUDED.active THEN EXCLUDED.halt_event_id
+                                ELSE market.collector_safety_state.halt_event_id
+                            END,
+                            acknowledged_event_id = CASE
+                                WHEN EXCLUDED.active THEN NULL
+                                ELSE EXCLUDED.acknowledged_event_id
+                            END,
+                            reason = EXCLUDED.reason,
+                            updated_at = EXCLUDED.updated_at
+                        """
+                    ),
+                    {
+                        "scope_type": scope,
+                        "scope_id": scoped_id,
+                        "active": active,
+                        "halt_event_id": str(stored["id"]) if active else None,
+                        "acknowledged_event_id": (
+                            None if active else str(stored["id"])
+                        ),
+                        "reason": explanation,
+                        "updated_at": occurred_at,
+                    },
+                )
+            result = session.execute(
+                text(
+                    """
+                    SELECT events.*, states.active
+                    FROM market.collector_safety_events AS events
+                    LEFT JOIN market.collector_safety_state AS states
+                      ON states.scope_type = events.scope_type
+                     AND states.scope_id = events.scope_id
+                    WHERE events.request_id = :request_id
+                    """
+                ),
+                {"request_id": request},
+            ).mappings().one()
+        return dict(result)
+
+    def active_safety_halts(
+        self,
+        *,
+        fleet_id: Optional[str] = None,
+        definition_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        scopes: list[tuple[str, str]] = [("global", "*")]
+        if fleet_id:
+            scopes.append(("fleet", str(fleet_id)))
+        if definition_id:
+            scopes.append(("stream", str(definition_id)))
+        clauses = " OR ".join(
+            f"(scope_type = :scope_type_{index} AND scope_id = :scope_id_{index})"
+            for index in range(len(scopes))
+        )
+        params: dict[str, Any] = {}
+        for index, (scope, scoped_id) in enumerate(scopes):
+            params[f"scope_type_{index}"] = scope
+            params[f"scope_id_{index}"] = scoped_id
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT * FROM market.collector_safety_state
+                    WHERE active AND ({clauses})
+                    ORDER BY scope_type, scope_id
+                    """
+                ),
+                params,
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def list_safety_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT events.*, states.active
+                    FROM market.collector_safety_events AS events
+                    LEFT JOIN market.collector_safety_state AS states
+                      ON states.scope_type = events.scope_type
+                     AND states.scope_id = events.scope_id
+                    ORDER BY events.occurred_at DESC, events.id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": max(1, min(int(limit), 1000))},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def stream_storage_growth(self, *, definition_id: str) -> dict[str, Any]:
+        """Derive recent canonical archive growth without operator estimates."""
+
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT COALESCE(sum(byte_count), 0)::bigint AS byte_count,
+                           min(acknowledged_at) AS first_at,
+                           max(acknowledged_at) AS last_at,
+                           now() AS observed_at
+                    FROM market.raw_archive_manifests
+                    WHERE definition_id = :definition_id
+                      AND acknowledged_at >= now() - interval '24 hours'
+                    """
+                ),
+                {"definition_id": str(definition_id)},
+            ).mappings().one()
+        byte_count = int(row["byte_count"])
+        first_at = row["first_at"]
+        observed_at = row["observed_at"]
+        window_seconds = (
+            max((_utc(observed_at) - _utc(first_at)).total_seconds(), 1.0)
+            if first_at is not None
+            else 0.0
+        )
+        bytes_per_hour = (
+            byte_count * 3600.0 / window_seconds if window_seconds > 0 else 0.0
+        )
+        return {
+            "schema_version": "market.stream_storage_growth.v1",
+            "definition_id": str(definition_id),
+            "byte_count": byte_count,
+            "window_seconds": window_seconds,
+            "bytes_per_hour": bytes_per_hour,
+            "first_at": first_at,
+            "last_at": row["last_at"],
+            "observed_at": observed_at,
+        }
+
     def configure_continuous_runtime(
         self,
         *,
@@ -600,10 +838,15 @@ class PostgresMarketStructureRepository:
         policy: Mapping[str, Any],
         stop_at: Optional[datetime] = None,
     ) -> dict[str, Any]:
-        """Configure worker-owned stream execution without changing admission."""
+        """Configure worker-owned stream execution."""
 
         normalized_mode = str(mode or "").strip().lower()
-        if normalized_mode not in {"validation", "production", "stopped"}:
+        if normalized_mode not in {
+            "validation",
+            "continuous",
+            "stopped",
+            "safety_halted",
+        }:
             raise ValueError("market_stream_runtime_invalid: unsupported mode")
         requester = str(requested_by or "").strip()
         if not requester:
@@ -632,13 +875,6 @@ class PostgresMarketStructureRepository:
                 raise ValueError(
                     f"market_stream_definition_unknown: definition_id={definition_id}"
                 )
-            if (
-                normalized_mode == "production"
-                and not bool(definition["production_admitted"])
-            ):
-                raise ValueError(
-                    "market_stream_production_not_admitted: explicit admission is required"
-                )
             config = dict(definition["config"] or {})
             config["collector_runtime"] = {
                 "schema_version": "market.continuous_collector_runtime.v1",
@@ -661,73 +897,6 @@ class PostgresMarketStructureRepository:
                 {
                     "definition_id": str(definition_id),
                     "enabled": bool(enabled),
-                    "config": _json(config),
-                },
-            ).mappings().one()
-        return dict(row)
-
-    def set_production_admission(
-        self,
-        *,
-        definition_id: str,
-        admitted: bool,
-        approved_by: str,
-        evidence: Mapping[str, Any],
-        storage_budget: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Persist explicit operator admission evidence without enabling a stream."""
-
-        approver = str(approved_by or "").strip()
-        if not approver:
-            raise ValueError("market_stream_admission_invalid: approved_by is required")
-        evidence_payload = dict(evidence or {})
-        budget_payload = dict(storage_budget or {})
-        if admitted and (
-            not evidence_payload.get("continuous_capture_completed")
-            or not budget_payload.get("growth_budget_bytes_per_day")
-            or not budget_payload.get("minimum_headroom_bytes")
-        ):
-            raise ValueError(
-                "market_stream_admission_invalid: continuous proof and explicit byte/headroom budgets are required"
-            )
-        with db.session() as session:
-            definition = session.execute(
-                text(
-                    """
-                    SELECT * FROM market.stream_definitions
-                    WHERE id = :definition_id
-                    FOR UPDATE
-                    """
-                ),
-                {"definition_id": str(definition_id)},
-            ).mappings().first()
-            if definition is None:
-                raise ValueError(
-                    f"market_stream_definition_unknown: definition_id={definition_id}"
-                )
-            config = dict(definition["config"] or {})
-            config["production_admission"] = {
-                "schema_version": "market.stream_production_admission.v1",
-                "admitted": bool(admitted),
-                "approved_by": approver,
-                "approved_at": datetime.now(UTC).isoformat(),
-                "evidence": evidence_payload,
-                "storage_budget": budget_payload,
-            }
-            row = session.execute(
-                text(
-                    """
-                    UPDATE market.stream_definitions
-                    SET production_admitted = :admitted,
-                        enabled = CASE WHEN :admitted THEN enabled ELSE false END,
-                        config = CAST(:config AS jsonb), updated_at = now()
-                    WHERE id = :definition_id
-                    RETURNING *
-                    """
-                ),
-                {
-                    "definition_id": str(definition_id),
-                    "admitted": bool(admitted),
                     "config": _json(config),
                 },
             ).mappings().one()
@@ -765,12 +934,9 @@ class PostgresMarketStructureRepository:
                 raise ValueError(
                     f"market_stream_definition_unknown: definition_id={definition_id}"
                 )
-            if not bounded and (
-                not bool(definition["enabled"])
-                or not bool(definition["production_admitted"])
-            ):
+            if not bounded and not bool(definition["enabled"]):
                 raise ValueError(
-                    "market_stream_production_not_admitted: enabled and post-Phase-4 capacity admission are required"
+                    "market_stream_not_enabled: continuous collection requires an enabled definition"
                 )
             if requested_session_id is not None:
                 resumable = session.execute(
@@ -1099,6 +1265,39 @@ class PostgresMarketStructureRepository:
                 },
             )
         return definition_version_id
+
+    def get_product_contract(self, definition_version_id: str) -> ProductContract:
+        """Resolve the immutable provider translation contract by exact version."""
+
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT id, provider_product_id, provider_size_unit,
+                           base_currency, quote_currency, contract_size
+                    FROM market.product_definition_versions
+                    WHERE id = :id
+                    """
+                ),
+                {"id": str(definition_version_id)},
+            ).mappings().first()
+        if row is None:
+            raise ValueError(
+                "market_product_contract_unknown: "
+                f"definition_version_id={definition_version_id}"
+            )
+        return ProductContract(
+            provider_product_id=str(row["provider_product_id"]),
+            provider_size_unit=str(row["provider_size_unit"]),
+            base_currency=str(row["base_currency"]),
+            quote_currency=str(row["quote_currency"]),
+            product_definition_version_id=str(row["id"]),
+            contract_size=(
+                Decimal(str(row["contract_size"]))
+                if row["contract_size"] is not None
+                else None
+            ),
+        )
 
     def register_instrument_mapping(
         self,
@@ -3225,7 +3424,7 @@ class PostgresMarketStructureRepository:
                 text(
                     """
                     SELECT id, series_id, provider_product_id, enabled,
-                           production_admitted, max_spool_bytes,
+                           max_spool_bytes,
                            max_segment_bytes, config
                     FROM market.stream_definitions
                     WHERE id = :definition_id
@@ -3419,12 +3618,7 @@ class PostgresMarketStructureRepository:
                 "max_spool_bytes": int(definition["max_spool_bytes"]),
                 "max_segment_bytes": int(definition["max_segment_bytes"]),
             },
-            "production_admitted": bool(definition["production_admitted"]),
-            "production_enabled": bool(definition["enabled"]),
-            "production_blockers": [
-                "post_phase4_24h_implemented_path_capture",
-                "explicit_storage_and_cost_budget",
-            ],
+            "continuous_enabled": bool(definition["enabled"]),
         }
 
     def get_manifest(self, manifest_id: str) -> dict[str, Any]:
@@ -3958,7 +4152,7 @@ class PostgresMarketStructureRepository:
         derivative_facts: Iterable[DerivativeStateFeatureFact] = (),
         response_facts: Iterable[ResponseFeatureFact] = (),
     ) -> FeatureIngestionOutcome:
-        """Persist one deterministic append-only Phase 3 feature batch."""
+        """Persist one deterministic append-only market-state feature batch."""
 
         bbo_rows = tuple(bbo_facts)
         depth_rows = tuple(depth_facts)
@@ -4702,7 +4896,7 @@ class PostgresMarketStructureRepository:
         known_at: Optional[datetime] = None,
         as_of_commit_seq: Optional[int] = None,
     ) -> tuple[TypedFeatureRecord, ...]:
-        """Read one registered Phase 3 fact as storage-backed typed revisions."""
+        """Read one registered market-state fact as storage-backed typed revisions."""
 
         definitions = {
             "market.bbo": (

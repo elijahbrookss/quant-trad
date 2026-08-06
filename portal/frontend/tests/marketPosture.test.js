@@ -5,15 +5,14 @@ import { buildMarketPostureRows } from '../src/features/market-structure/buildMa
 
 const NOW = Date.parse('2026-08-02T12:00:00Z')
 
-test('market posture never infers BIP/BTC admission from configuration or recent collection', () => {
+test('market posture exposes pinned collector safety independently from collection', () => {
   const rows = buildMarketPostureRows({
     definitions: [{
       id: 'stream-1',
       enabled: true,
-      production_admitted: false,
       provider_product_id: 'BIP-20DEC30-CDE',
       instrument_id: 'bip-future',
-      config: { pair_id: 'bip_btc' },
+      config: { pair_id: 'bip_btc', safety_policy: { policy_id: 'policy-v1' } },
     }],
     collectors: [{
       definition: {
@@ -34,7 +33,7 @@ test('market posture never infers BIP/BTC admission from configuration or recent
   assert.equal(rows[0].label, 'BIP / BTC')
   assert.equal(rows[0].collection.value, 'recent_success')
   assert.match(rows[0].collection.detail, /worker heartbeat current/)
-  assert.equal(rows[0].admission.value, 'not_admitted')
+  assert.equal(rows[0].safety.value, 'policy_pinned')
   assert.equal(rows[0].coverage.value, 'unavailable')
 })
 
@@ -43,7 +42,6 @@ test('market posture reports invalid coverage independently from archive availab
     definitions: [{
       id: 'stream-1',
       enabled: true,
-      production_admitted: false,
       provider_product_id: 'ETP-20DEC30-CDE',
       config: { pair_id: 'etp_eth' },
     }],
@@ -67,7 +65,6 @@ test('market posture marks normalization unavailable when its snapshot component
     definitions: [{
       id: 'stream-1',
       enabled: true,
-      production_admitted: false,
       provider_product_id: 'SLP-20DEC30-CDE',
       config: { pair_id: 'slp_sol' },
     }],

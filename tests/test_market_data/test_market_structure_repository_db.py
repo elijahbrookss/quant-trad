@@ -45,8 +45,7 @@ from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
     OrderingAssurance,
-    PHASE1_COINBASE_TRADE_CONTRACTS,
-    ProductTradeContract,
+    ProductContract,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
     aggregate_trade_bucket,
@@ -112,6 +111,54 @@ def _btc_l2_frames() -> list[str]:
         if observed_types == {"snapshot", "update"}:
             return selected
     raise AssertionError("BTC Level 2 snapshot/update fixtures missing")
+
+
+def test_collector_safety_halt_is_persistent_idempotent_and_acknowledged() -> None:
+    token = uuid.uuid4().hex
+    request_id = f"safety-halt-{token}"
+    halted = market_structure_repository.record_safety_event(
+        request_id=request_id,
+        scope_type="fleet",
+        scope_id=f"fleet-{token}",
+        event_type="halted",
+        severity="operator",
+        actor_id="test",
+        reason="database safety latch proof",
+        policy_hash="a" * 64,
+        evidence={"token": token},
+    )
+    replayed = market_structure_repository.record_safety_event(
+        request_id=request_id,
+        scope_type="fleet",
+        scope_id=f"fleet-{token}",
+        event_type="halted",
+        severity="operator",
+        actor_id="test",
+        reason="database safety latch proof",
+        policy_hash="a" * 64,
+        evidence={"token": token},
+    )
+
+    assert halted["id"] == replayed["id"]
+    assert market_structure_repository.active_safety_halts(
+        fleet_id=f"fleet-{token}"
+    )
+
+    market_structure_repository.record_safety_event(
+        request_id=f"safety-ack-{token}",
+        scope_type="fleet",
+        scope_id=f"fleet-{token}",
+        event_type="acknowledged",
+        severity="operator",
+        actor_id="test",
+        reason="condition cleared",
+        policy_hash="a" * 64,
+        evidence={"halt_event_id": halted["id"]},
+    )
+
+    assert not market_structure_repository.active_safety_halts(
+        fleet_id=f"fleet-{token}"
+    )
 
 
 def test_continuous_validation_evidence_reports_active_elapsed_time() -> None:
@@ -237,13 +284,12 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         timeframe_seconds=1,
         contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
     )
-    base_contract = PHASE1_COINBASE_TRADE_CONTRACTS["BTC-USD"]
     product_definition_id = f"coinbase.BTC-USD.db-test.{token}"
-    contract = ProductTradeContract(
-        provider_product_id=base_contract.provider_product_id,
-        provider_size_unit=base_contract.provider_size_unit,
-        base_currency=base_contract.base_currency,
-        quote_currency=base_contract.quote_currency,
+    contract = ProductContract(
+        provider_product_id="BTC-USD",
+        provider_size_unit="base",
+        base_currency="BTC",
+        quote_currency="USD",
         product_definition_version_id=product_definition_id,
     )
     market_structure_repository.register_product_definition(

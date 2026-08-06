@@ -774,13 +774,80 @@ class MarketStreamDefinitionRecord(Base):
     auth_mode = Column(String(32), nullable=False)
     contract_version = Column(String(64), nullable=False)
     enabled = Column(Boolean, nullable=False, default=False, server_default="false")
-    production_admitted = Column(Boolean, nullable=False, default=False, server_default="false")
     max_spool_bytes = Column(BigInteger, nullable=False)
     max_segment_bytes = Column(BigInteger, nullable=False)
     generation = Column(BigInteger, nullable=False, default=1, server_default="1")
     config = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketCollectorSafetyEventRecord(Base):
+    """Append-only warning, halt, and acknowledgement evidence."""
+
+    __tablename__ = "collector_safety_events"
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_market_collector_safety_request"),
+        CheckConstraint(
+            "scope_type IN ('global', 'fleet', 'stream')",
+            name="ck_market_collector_safety_scope",
+        ),
+        CheckConstraint(
+            "event_type IN ('warning', 'halted', 'acknowledged')",
+            name="ck_market_collector_safety_event_type",
+        ),
+        CheckConstraint(
+            "severity IN ('warning', 'critical', 'operator')",
+            name="ck_market_collector_safety_severity",
+        ),
+        Index(
+            "ix_market_collector_safety_scope_time",
+            "scope_type",
+            "scope_id",
+            "occurred_at",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), primary_key=True)
+    request_id = Column(String(128), nullable=False)
+    scope_type = Column(String(16), nullable=False)
+    scope_id = Column(String(128), nullable=False)
+    event_type = Column(String(32), nullable=False)
+    severity = Column(String(16), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    actor_id = Column(String(128), nullable=False)
+    reason = Column(Text, nullable=False)
+    policy_hash = Column(String(64), nullable=False)
+    evidence_hash = Column(String(64), nullable=False)
+    evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketCollectorSafetyStateRecord(Base):
+    """Restart-persistent current safety latch derived from immutable events."""
+
+    __tablename__ = "collector_safety_state"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "scope_type",
+            "scope_id",
+            name="pk_market_collector_safety_state",
+        ),
+        CheckConstraint(
+            "scope_type IN ('global', 'fleet', 'stream')",
+            name="ck_market_collector_safety_state_scope",
+        ),
+        Index("ix_market_collector_safety_state_active", "active", "scope_type"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    scope_type = Column(String(16), nullable=False)
+    scope_id = Column(String(128), nullable=False)
+    active = Column(Boolean, nullable=False, default=False, server_default="false")
+    halt_event_id = Column(String(128), nullable=True)
+    acknowledged_event_id = Column(String(128), nullable=True)
+    reason = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class MarketStreamLeaseStateRecord(Base):
@@ -2166,6 +2233,8 @@ __all__ = [
     "MarketCandleVersionRecord",
     "MarketCollectionAttemptRecord",
     "MarketCollectionDefinitionRecord",
+    "MarketCollectorSafetyEventRecord",
+    "MarketCollectorSafetyStateRecord",
     "MarketDataIngestionRunRecord",
     "MarketDataSeriesRecord",
     "MarketDataSourceRecord",

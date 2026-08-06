@@ -163,23 +163,25 @@ def test_market_structure_snapshot_isolates_normalization_integrity_failure(monk
     assert "hash mismatch" in error["details"]
 
 
-def test_market_structure_pair_route_never_implies_production(monkeypatch) -> None:
+def test_market_structure_enrollment_route_applies_manifest(monkeypatch) -> None:
     observed = {}
 
-    def fake_configure(**kwargs):
+    def fake_enroll(**kwargs):
         observed.update(kwargs)
-        return {"pair_id": kwargs["pair_id"], "production_admitted": False}
+        return {"fleet_id": "coinbase_perpetual_trades"}
 
     monkeypatch.setattr(
-        controller.market_structure_service, "configure_pair", fake_configure
+        controller.market_structure_service,
+        "apply_stream_enrollment_manifest",
+        fake_enroll,
     )
     response = _client().post(
-        "/api/market-data/market-structure/pairs",
-        json={"pair_id": "bip_btc", "auth_mode": "authenticated"},
+        "/api/market-data/market-structure/enrollments/apply",
+        json={"manifest_path": "config/fleet.json"},
     )
     assert response.status_code == 200
-    assert response.json()["production_admitted"] is False
-    assert observed["enable_production"] is False
+    assert response.json()["fleet_id"] == "coinbase_perpetual_trades"
+    assert str(observed["manifest_path"]) == "config/fleet.json"
 
 
 def test_market_structure_operator_routes_preserve_typed_boundaries(
@@ -201,16 +203,6 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
             "checkpoint_delta_equal": True,
         }
 
-    monkeypatch.setattr(
-        controller.market_structure_service,
-        "materialize_pair_features",
-        lambda **kwargs: {
-            "schema_version": "market.cross_stream_materialization.v1",
-            "pair_id": kwargs["pair_id"],
-            "basis_count": 2,
-            "source_commit_seq": 42,
-        },
-    )
     monkeypatch.setattr(
         controller.market_structure_service, "capture_bounded", fake_capture
     )
@@ -251,7 +243,7 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
         lambda **_kwargs: {
             "schema_version": "market.stream_archive_status.v1",
             "archive_mapping_lag_records": 0,
-            "production_admitted": False,
+            "continuous_enabled": False,
         },
     )
     monkeypatch.setattr(
@@ -269,14 +261,6 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
         },
     )
     client = _client()
-    materialize = client.post(
-        "/api/market-data/market-structure/pairs/bip_btc/materialize",
-        json={
-            "start": "2026-08-02T14:00:00Z",
-            "end": "2026-08-02T14:01:00Z",
-            "known_at": "2026-08-02T14:02:00Z",
-        },
-    )
     capture = client.post(
         "/api/market-data/market-structure/definitions/definition-a/capture",
         json={"duration_seconds": 12},
@@ -313,8 +297,6 @@ def test_market_structure_operator_routes_preserve_typed_boundaries(
         params={"limit": 25},
     )
     assert capture.status_code == status.status_code == 200
-    assert materialize.status_code == 200
-    assert materialize.json()["source_commit_seq"] == 42
     assert replay.status_code == book_replay.status_code == compact.status_code == 200
     assert pin.status_code == retention.status_code == recent.status_code == 200
     assert status.json()["archive_mapping_lag_records"] == 0
@@ -410,8 +392,8 @@ def test_continuous_collector_control_routes_are_non_blocking_and_typed(
     )
     monkeypatch.setattr(
         controller.market_structure_service,
-        "start_continuous_production",
-        record("start", {"mode": "production"}),
+        "start_continuous",
+        record("start", {"mode": "continuous"}),
     )
     monkeypatch.setattr(
         controller.market_structure_service,
@@ -420,8 +402,8 @@ def test_continuous_collector_control_routes_are_non_blocking_and_typed(
     )
     monkeypatch.setattr(
         controller.market_structure_service,
-        "set_production_admission",
-        record("admit", {"production_admitted": True}),
+        "set_safety_halt",
+        record("halt", {"event_type": "halted"}),
     )
     monkeypatch.setattr(
         controller.market_structure_repository,
@@ -445,13 +427,15 @@ def test_continuous_collector_control_routes_are_non_blocking_and_typed(
         "/api/market-data/market-structure/definitions/definition-a/continuous/stop",
         json={"requested_by": "operator-a"},
     )
-    admit = client.post(
-        "/api/market-data/market-structure/definitions/definition-a/continuous/admission",
+    halt = client.post(
+        "/api/market-data/market-structure/safety/halt",
         json={
-            "admitted": True,
-            "approved_by": "operator-a",
-            "evidence": {"validation_session_id": "session-a"},
-            "storage_budget": {"capacity_resource_id": "volume-a"},
+            "request_id": "request-a",
+            "scope_type": "stream",
+            "scope_id": "definition-a",
+            "requested_by": "operator-a",
+            "reason": "operator test",
+            "policy_hash": "abc123",
         },
     )
     evidence = client.get(
@@ -460,15 +444,14 @@ def test_continuous_collector_control_routes_are_non_blocking_and_typed(
 
     assert all(
         response.status_code == 200
-        for response in (validate, start, stop, admit, evidence)
+        for response in (validate, start, stop, halt, evidence)
     )
     assert observed["validate"]["duration_seconds"] == 86400.0
     assert observed["validate"]["policy"] == {"max_inflight_segments": 3}
     assert observed["start"]["requested_by"] == "operator-a"
     assert observed["stop"]["definition_id"] == "definition-a"
-    assert observed["admit"]["evidence"] == {
-        "validation_session_id": "session-a"
-    }
+    assert observed["halt"]["scope_id"] == "definition-a"
+    assert observed["halt"]["evidence"] is None
     assert observed["evidence"] == {
         "definition_id": "definition-a",
         "session_id": "session-a",

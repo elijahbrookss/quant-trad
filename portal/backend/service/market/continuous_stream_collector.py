@@ -39,7 +39,6 @@ from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
     OrderingAssurance,
-    PHASE1_COINBASE_TRADE_CONTRACTS,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
     aggregate_trade_bucket,
@@ -781,9 +780,9 @@ class ContinuousMarketStructureCollector:
                     translated.append(
                         translate_coinbase_market_trade(
                             event,
-                            contract=PHASE1_COINBASE_TRADE_CONTRACTS[
-                                claim.provider_product_id
-                            ],
+                            contract=self.repository.get_product_contract(
+                                str(claim.config["product_definition_version_id"])
+                            ),
                             raw_record_id=record.raw_record_id,
                             connection_epoch=record.connection_epoch,
                             receive_ordinal=record.receive_ordinal,
@@ -1056,9 +1055,9 @@ class ContinuousMarketStructureCollector:
                 translated.append(
                     translate_coinbase_market_trade(
                         event,
-                        contract=PHASE1_COINBASE_TRADE_CONTRACTS[
-                            claim.provider_product_id
-                        ],
+                        contract=self.repository.get_product_contract(
+                            str(claim.config["product_definition_version_id"])
+                        ),
                         raw_record_id=record.raw_record_id,
                         connection_epoch=record.connection_epoch,
                         receive_ordinal=record.receive_ordinal,

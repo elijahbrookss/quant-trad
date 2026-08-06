@@ -1425,33 +1425,12 @@ def _cmd_data_market_structure_proof(args: argparse.Namespace) -> int:
     return 0 if result.get("status") == "completed" else 1
 
 
-def _cmd_data_market_structure_configure(args: argparse.Namespace) -> int:
+def _cmd_data_market_structure_enroll(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
             "POST",
-            "/api/market-data/market-structure/pairs",
-            payload={
-                "pair_id": args.pair,
-                "auth_mode": args.auth_mode,
-                "max_spool_bytes": int(args.spool_gib * 1024**3),
-                "max_segment_bytes": int(args.segment_mib * 1024**2),
-                "enable_production": False,
-            },
-        )
-    )
-    return 0
-
-
-def _cmd_data_market_structure_materialize(args: argparse.Namespace) -> int:
-    _print_json(
-        _client(args).request_json(
-            "POST",
-            f"/api/market-data/market-structure/pairs/{quote(args.pair, safe='')}/materialize",
-            payload={
-                "start": args.start,
-                "end": args.end,
-                "known_at": args.known_at,
-            },
+            "/api/market-data/market-structure/enrollments/apply",
+            payload={"manifest_path": args.manifest_path},
         )
     )
     return 0
@@ -1615,21 +1594,30 @@ def _cmd_data_market_structure_continuous_stop(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_data_market_structure_continuous_admit(args: argparse.Namespace) -> int:
+def _cmd_data_market_structure_safety_change(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
             "POST",
-            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/admission",
+            f"/api/market-data/market-structure/safety/{args.safety_action}",
             payload={
-                "admitted": not args.revoke,
-                "approved_by": args.approved_by,
-                "evidence": _read_json_object_arg(
-                    args.evidence_json, label="--evidence-json"
-                ),
-                "storage_budget": _read_json_object_arg(
-                    args.storage_budget_json, label="--storage-budget-json"
-                ),
+                "request_id": args.request_id,
+                "scope_type": args.scope_type,
+                "scope_id": args.scope_id,
+                "requested_by": args.requested_by,
+                "reason": args.reason,
+                "policy_hash": args.policy_hash,
+                "evidence": _read_json_object_arg(args.evidence_json, label="--evidence-json") or None,
             },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_safety_status(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/safety?limit={int(args.limit)}",
         )
     )
     return 0
@@ -3659,43 +3647,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="data_market_structure_command",
         required=True,
     )
-    data_market_structure_configure = data_market_structure_sub.add_parser(
-        "configure-pair",
-        help="Register one approved futures/spot pair without production enrollment.",
+    data_market_structure_enroll = data_market_structure_sub.add_parser(
+        "enroll",
+        help="Apply a validated product and stream enrollment manifest.",
     )
-    data_market_structure_configure.add_argument(
-        "--pair",
-        choices=["bip_btc", "etp_eth", "slp_sol"],
-        default="bip_btc",
-    )
-    data_market_structure_configure.add_argument(
-        "--auth-mode",
-        choices=["public", "authenticated"],
-        default="authenticated",
-    )
-    data_market_structure_configure.add_argument("--spool-gib", type=float, default=8.0)
-    data_market_structure_configure.add_argument("--segment-mib", type=float, default=128.0)
-    data_market_structure_configure.set_defaults(
-        func=_cmd_data_market_structure_configure
-    )
-    data_market_structure_materialize = data_market_structure_sub.add_parser(
-        "materialize",
-        help="Materialize causal basis and OI/funding relationship facts at one commit watermark.",
-    )
-    data_market_structure_materialize.add_argument(
-        "--pair",
-        choices=["bip_btc", "etp_eth", "slp_sol"],
-        default="bip_btc",
-    )
-    data_market_structure_materialize.add_argument("--start", required=True)
-    data_market_structure_materialize.add_argument("--end", required=True)
-    data_market_structure_materialize.add_argument("--known-at", required=True)
-    data_market_structure_materialize.set_defaults(
-        func=_cmd_data_market_structure_materialize
-    )
+    data_market_structure_enroll.add_argument("--manifest-path")
+    data_market_structure_enroll.set_defaults(func=_cmd_data_market_structure_enroll)
     data_normalization_specs_install = data_market_structure_sub.add_parser(
         "normalization-specs-install",
-        help="Install the immutable approved Phase 4 normalization specs.",
+        help="Install the immutable approved normalization specs.",
     )
     data_normalization_specs_install.add_argument("--approved-by", required=True)
     data_normalization_specs_install.set_defaults(
@@ -3732,7 +3692,7 @@ def build_parser() -> argparse.ArgumentParser:
         normalization_parser.set_defaults(func=handler)
     data_market_structure_definitions = data_market_structure_sub.add_parser(
         "definitions",
-        help="Inspect bounded definitions, production blockers, and leases.",
+        help="Inspect stream definitions, runtime state, and leases.",
     )
     data_market_structure_definitions.add_argument("--definition-id")
     data_market_structure_definitions.set_defaults(
@@ -3753,7 +3713,7 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_status.set_defaults(func=_cmd_data_market_structure_status)
     data_market_structure_capture = data_market_structure_sub.add_parser(
         "capture",
-        help="Run one explicitly bounded non-production trade or Level 2 capture.",
+        help="Run one explicitly bounded trade or Level 2 capture.",
     )
     data_market_structure_capture.add_argument("definition_id")
     data_market_structure_capture.add_argument("--duration", type=float, default=60.0)
@@ -3777,7 +3737,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_market_structure_continuous_start = data_market_structure_sub.add_parser(
         "continuous-start",
-        help="Start an explicitly admitted worker-owned production stream.",
+        help="Start a system-qualified worker-owned continuous stream.",
     )
     data_market_structure_continuous_start.add_argument("definition_id")
     data_market_structure_continuous_start.add_argument(
@@ -3798,19 +3758,35 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_continuous_stop.set_defaults(
         func=_cmd_data_market_structure_continuous_stop
     )
-    data_market_structure_continuous_admit = data_market_structure_sub.add_parser(
-        "continuous-admit",
-        help="Record or revoke explicit production admission and storage budgets.",
+    for safety_action in ("halt", "acknowledge"):
+        safety_parser = data_market_structure_sub.add_parser(
+            f"safety-{safety_action}",
+            help=(
+                "Latch collection off at a global, fleet, or stream scope."
+                if safety_action == "halt"
+                else "Acknowledge and release a persistent collector safety latch."
+            ),
+        )
+        safety_parser.add_argument(
+            "--scope-type", choices=["global", "fleet", "stream"], required=True
+        )
+        safety_parser.add_argument("--scope-id", required=True)
+        safety_parser.add_argument("--request-id", required=True)
+        safety_parser.add_argument("--requested-by", required=True)
+        safety_parser.add_argument("--reason", required=True)
+        safety_parser.add_argument("--policy-hash", required=True)
+        safety_parser.add_argument("--evidence-json")
+        safety_parser.set_defaults(
+            func=_cmd_data_market_structure_safety_change,
+            safety_action=safety_action,
+        )
+    data_market_structure_safety_status = data_market_structure_sub.add_parser(
+        "safety-status",
+        help="Inspect persistent collector safety latches and immutable events.",
     )
-    data_market_structure_continuous_admit.add_argument("definition_id")
-    data_market_structure_continuous_admit.add_argument(
-        "--approved-by", required=True
-    )
-    data_market_structure_continuous_admit.add_argument("--evidence-json")
-    data_market_structure_continuous_admit.add_argument("--storage-budget-json")
-    data_market_structure_continuous_admit.add_argument("--revoke", action="store_true")
-    data_market_structure_continuous_admit.set_defaults(
-        func=_cmd_data_market_structure_continuous_admit
+    data_market_structure_safety_status.add_argument("--limit", type=int, default=100)
+    data_market_structure_safety_status.set_defaults(
+        func=_cmd_data_market_structure_safety_status
     )
     data_market_structure_continuous_evidence = data_market_structure_sub.add_parser(
         "continuous-evidence",

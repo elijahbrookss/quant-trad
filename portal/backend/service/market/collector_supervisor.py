@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import threading
 import time
@@ -17,8 +18,10 @@ from ..storage.repos.market_structure import (
 )
 from .continuous_stream_collector import (
     ContinuousMarketStructureCollector,
+    DEFAULT_STORAGE_ROOT,
     continuous_market_structure_collector,
 )
+from .collector_safety import evaluate_collector_safety
 
 
 logger = logging.getLogger(__name__)
@@ -240,7 +243,7 @@ class ContinuousCollectorSupervisor:
                 if not isinstance(runtime, Mapping):
                     continue
                 mode = str(runtime.get("mode") or "").lower()
-                if mode not in {"validation", "production"}:
+                if mode not in {"validation", "continuous"}:
                     continue
                 raw_stop = runtime.get("stop_at")
                 stop_at = (
@@ -251,6 +254,66 @@ class ContinuousCollectorSupervisor:
                 if stop_at is not None and stop_at.tzinfo is None:
                     stop_at = stop_at.replace(tzinfo=UTC)
                 if stop_at is not None and now >= stop_at:
+                    continue
+                adapter_supported = True
+                try:
+                    self.registry.resolve(definition)
+                except ValueError:
+                    adapter_supported = False
+                qualification, safety = evaluate_collector_safety(
+                    definition=definition,
+                    repository=self.repository,
+                    adapter_supported=adapter_supported,
+                    storage_root=DEFAULT_STORAGE_ROOT,
+                )
+                if safety.severity == "warning":
+                    window = int(now.timestamp()) // 300
+                    reason_key = ",".join(safety.reasons)
+                    request_digest = hashlib.sha256(
+                        f"{definition_id}:{window}:{reason_key}".encode("utf-8")
+                    ).hexdigest()
+                    self.repository.record_safety_event(
+                        request_id=f"auto-warning:{request_digest}",
+                        scope_type="stream",
+                        scope_id=definition_id,
+                        event_type="warning",
+                        severity="warning",
+                        actor_id=f"supervisor:{self.owner_id}",
+                        reason=reason_key,
+                        policy_hash=qualification.policy_hash,
+                        evidence=safety.evidence,
+                    )
+                if not qualification.qualified:
+                    if "safety_halt_active" not in qualification.reasons:
+                        reason_key = ",".join(qualification.reasons)
+                        request_digest = hashlib.sha256(
+                            (
+                                f"{definition_id}:{qualification.policy_hash}:"
+                                f"{reason_key}"
+                            ).encode("utf-8")
+                        ).hexdigest()
+                        self.repository.record_safety_event(
+                            request_id=f"auto-halt:{request_digest}",
+                            scope_type="stream",
+                            scope_id=definition_id,
+                            event_type="halted",
+                            severity="critical",
+                            actor_id=f"supervisor:{self.owner_id}",
+                            reason=reason_key,
+                            policy_hash=qualification.policy_hash,
+                            evidence=safety.evidence,
+                        )
+                        self.repository.configure_continuous_runtime(
+                            definition_id=definition_id,
+                            enabled=False,
+                            mode="safety_halted",
+                            requested_by=f"supervisor:{self.owner_id}",
+                            policy={"policy_hash": qualification.policy_hash},
+                        )
+                    task_errors[definition_id] = (
+                        "collector_safety_not_qualified: "
+                        + ",".join(qualification.reasons)
+                    )
                     continue
                 desired[definition_id] = (definition, mode, stop_at)
 

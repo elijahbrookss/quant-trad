@@ -1,7 +1,7 @@
 """Bounded Coinbase market-structure provider and capacity proof harness.
 
 This module intentionally creates local proof evidence only. Its Parquet files
-are not production raw archives, have no archive manifest acknowledgement, and
+are not canonical raw archives, have no archive manifest acknowledgement, and
 are never eligible for a frozen dataset.
 """
 
@@ -601,7 +601,7 @@ async def run_coinbase_market_structure_proof(
     quantity_semantics = _quantity_semantics(rest_results, stream_results)
     trade_side_semantics = _trade_side_semantics(stream_results)
     status = "completed" if all(row.get("status") == "completed" for row in stream_results) else "failed"
-    implementation_readiness = _phase1_implementation_readiness(
+    implementation_readiness = _continuous_implementation_readiness(
         stream_results,
         rest_results,
         capacity,
@@ -609,7 +609,7 @@ async def run_coinbase_market_structure_proof(
         trade_side_semantics=trade_side_semantics,
         duration_seconds=duration,
     )
-    production_capacity_admission = _phase1_admission(
+    collector_capacity_assessment = _capacity_assessment(
         stream_results,
         rest_results,
         capacity,
@@ -641,16 +641,16 @@ async def run_coinbase_market_structure_proof(
         "quantity_semantics": quantity_semantics,
         "trade_side_semantics": trade_side_semantics,
         "capacity": capacity,
-        "phase1_implementation_readiness": implementation_readiness,
-        "production_capacity_admission": production_capacity_admission,
+        "continuous_implementation_readiness": implementation_readiness,
+        "collector_capacity_assessment": collector_capacity_assessment,
         "explicit_limitations": [
             "raw_frame is the exact WebSocket application-message payload, not TCP/WebSocket framing or compression bytes",
-            "proof Parquet files are local evidence, not acknowledged production archives",
+            "proof Parquet files are local evidence, not acknowledged canonical archives",
             "recent REST trades are bounded reconciliation evidence, not historical completeness",
             "observed contiguity cannot upgrade undocumented recovery semantics",
             "futures quantity decisions require contract metadata plus observed trade and L2 increment reconciliation",
             "spot sizes remain provider base quantities and are not assigned futures contract semantics",
-            "implementation readiness does not authorize production enrollment; the deferred 24-hour capacity and explicit budget gates still apply",
+            "implementation readiness does not bypass system qualification or persistent safety latches",
         ],
     }
     report_bytes = json.dumps(report, indent=2, sort_keys=True, default=str).encode("utf-8") + b"\n"
@@ -665,8 +665,8 @@ async def run_coinbase_market_structure_proof(
         "report_sha256": report_sha,
         "checksum_path": str(checksum_path),
         "capacity": capacity,
-        "phase1_implementation_readiness": implementation_readiness,
-        "production_capacity_admission": production_capacity_admission,
+        "continuous_implementation_readiness": implementation_readiness,
+        "collector_capacity_assessment": collector_capacity_assessment,
     }
 
 
@@ -1202,13 +1202,13 @@ def _capacity_summary(
         "deferred_measurements": {
             "object_upload_latency_and_backlog": {
                 "status": "not_measured",
-                "reason": "Phase 1 archive uploader and manifest acknowledgement do not exist yet",
-                "required_before": "production collector enrollment",
+                "reason": "canonical archive uploader and manifest acknowledgement are not part of this proof",
+                "required_before": "continuous collector enrollment",
             },
             "typed_hot_store_bytes_and_index_amplification": {
                 "status": "not_measured",
-                "reason": "Phase 1 canonical trade tables and indexes do not exist yet",
-                "required_before": "production collector enrollment",
+                "reason": "canonical trade persistence is not part of this proof",
+                "required_before": "continuous collector enrollment",
             },
         },
         "full_replay": {
@@ -1239,7 +1239,7 @@ def _capacity_summary(
     }
 
 
-def _phase1_admission(
+def _capacity_assessment(
     streams: Sequence[Mapping[str, Any]],
     rest: Mapping[str, Any],
     capacity: Mapping[str, Any],
@@ -1247,12 +1247,12 @@ def _phase1_admission(
     duration_seconds: float,
     quantity_semantics: Mapping[str, Any] | None = None,
     trade_side_semantics: Mapping[str, Any] | None = None,
-    require_production_capacity: bool = True,
+    require_capacity_evidence: bool = True,
 ) -> dict[str, Any]:
-    """Evaluate provider correctness plus optional production capacity gates."""
+    """Evaluate provider correctness plus optional capacity evidence."""
 
     reasons: list[str] = []
-    if require_production_capacity:
+    if require_capacity_evidence:
         if duration_seconds < 86_400 or not capacity.get("measurement_duration_gate_pass"):
             reasons.append("24_hour_capacity_capture_required")
     elif duration_seconds < 3_600:
@@ -1342,7 +1342,7 @@ def _phase1_admission(
     cde_public_history = rest.get("cde_public_history") or {}
     if cde_public_history.get("status") not in {"unsupported", "admitted"}:
         reasons.append("cde_public_history_contract_unresolved")
-    if require_production_capacity:
+    if require_capacity_evidence:
         if capacity.get("annual_archive_budget_pass") is None:
             reasons.append("operator_annual_archive_budget_required")
         elif capacity.get("annual_archive_budget_pass") is False:
@@ -1365,7 +1365,7 @@ def _phase1_admission(
     }
 
 
-def _phase1_implementation_readiness(
+def _continuous_implementation_readiness(
     streams: Sequence[Mapping[str, Any]],
     rest: Mapping[str, Any],
     capacity: Mapping[str, Any],
@@ -1376,14 +1376,14 @@ def _phase1_implementation_readiness(
 ) -> dict[str, Any]:
     """Authorize implementation only; this never authorizes collector enrollment."""
 
-    return _phase1_admission(
+    return _capacity_assessment(
         streams,
         rest,
         capacity,
         duration_seconds=duration_seconds,
         quantity_semantics=quantity_semantics,
         trade_side_semantics=trade_side_semantics,
-        require_production_capacity=False,
+        require_capacity_evidence=False,
     )
 
 

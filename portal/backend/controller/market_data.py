@@ -214,18 +214,8 @@ class MarketNormalizationMaterializeRequest(BaseModel):
     known_at: str
     as_of_commit_seq: Optional[int] = None
 
-class MarketStructurePairRequest(BaseModel):
-    pair_id: str = "bip_btc"
-    auth_mode: str = "authenticated"
-    max_spool_bytes: int = 8 * 1024**3
-    max_segment_bytes: int = 128 * 1024**2
-    enable_production: bool = False
-
-
-class MarketStructureMaterializeRequest(BaseModel):
-    start: str
-    end: str
-    known_at: str
+class MarketStreamEnrollmentRequest(BaseModel):
+    manifest_path: Optional[str] = None
 
 
 class MarketStructureCaptureRequest(BaseModel):
@@ -249,11 +239,14 @@ class MarketStructureContinuousStopRequest(BaseModel):
     requested_by: str
 
 
-class MarketStructureAdmissionRequest(BaseModel):
-    admitted: bool
-    approved_by: str
-    evidence: dict[str, Any]
-    storage_budget: dict[str, Any]
+class MarketCollectorSafetyRequest(BaseModel):
+    request_id: str
+    scope_type: str
+    scope_id: str
+    requested_by: str
+    reason: str
+    policy_hash: str
+    evidence: Optional[dict[str, Any]] = None
 
 
 class MarketStructureReplayRequest(BaseModel):
@@ -464,33 +457,16 @@ def latest_funding_rate(
     return _record_payload(result)
 
 
-@router.post("/market-structure/pairs")
-def configure_market_structure_pair(
-    req: MarketStructurePairRequest,
+@router.post("/market-structure/enrollments/apply")
+def apply_market_stream_enrollment(
+    req: MarketStreamEnrollmentRequest,
 ) -> dict[str, Any]:
     try:
-        return market_structure_service.configure_pair(
-            pair_id=req.pair_id,
-            auth_mode=req.auth_mode,
-            max_spool_bytes=req.max_spool_bytes,
-            max_segment_bytes=req.max_segment_bytes,
-            enable_production=req.enable_production,
-        )
-    except (KeyError, ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/market-structure/pairs/{pair_id}/materialize")
-def materialize_market_structure_pair(
-    pair_id: str,
-    req: MarketStructureMaterializeRequest,
-) -> dict[str, Any]:
-    try:
-        return market_structure_service.materialize_pair_features(
-            pair_id=pair_id,
-            start=_time(req.start),
-            end=_time(req.end),
-            known_at=_time(req.known_at),
+        kwargs = {}
+        if req.manifest_path:
+            kwargs["manifest_path"] = Path(req.manifest_path)
+        return market_structure_service.apply_stream_enrollment_manifest(
+            **kwargs
         )
     except (KeyError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -685,7 +661,7 @@ def start_continuous_market_structure(
     req: MarketStructureContinuousStartRequest,
 ) -> dict[str, Any]:
     try:
-        return market_structure_service.start_continuous_production(
+        return market_structure_service.start_continuous(
             definition_id=definition_id,
             requested_by=req.requested_by,
             policy=req.policy,
@@ -711,20 +687,35 @@ def stop_continuous_market_structure(
 
 
 @router.post(
-    "/market-structure/definitions/{definition_id}/continuous/admission"
+    "/market-structure/safety/halt"
 )
-def set_continuous_market_structure_admission(
-    definition_id: str,
-    req: MarketStructureAdmissionRequest,
+def set_market_collector_safety_halt(
+    req: MarketCollectorSafetyRequest,
 ) -> dict[str, Any]:
     try:
-        return market_structure_service.set_production_admission(
-            definition_id=definition_id,
-            admitted=req.admitted,
-            approved_by=req.approved_by,
-            evidence=req.evidence,
-            storage_budget=req.storage_budget,
+        return market_structure_service.set_safety_halt(
+            **req.model_dump()
         )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-structure/safety/acknowledge")
+def acknowledge_market_collector_safety_halt(
+    req: MarketCollectorSafetyRequest,
+) -> dict[str, Any]:
+    try:
+        return market_structure_service.acknowledge_safety_halt(
+            **req.model_dump()
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/market-structure/safety")
+def get_market_collector_safety_status(limit: int = 100) -> dict[str, Any]:
+    try:
+        return market_structure_service.safety_status(limit=limit)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

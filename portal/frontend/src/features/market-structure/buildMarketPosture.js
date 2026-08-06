@@ -219,9 +219,9 @@ export function buildMarketPostureRows({
       instrumentIds.has(definition?.instrument_id))
     const collection = collectorState(pairCollectors, nowEpochMs)
     const latestSession = latestSessionForDefinitions(sessions, definitionIds)
-    const productionAdmitted = (
+    const safetyPolicyPresent = (
       pairDefinitions.length > 0
-      && pairDefinitions.every((definition) => Boolean(definition.production_admitted))
+      && pairDefinitions.every((definition) => Boolean(definition?.config?.safety_policy))
     )
     const enabledCount = pairDefinitions.filter((definition) => definition.enabled).length
     const currentLeaseCount = pairDefinitions.filter((definition) => definition.lease_current).length
@@ -291,10 +291,10 @@ export function buildMarketPostureRows({
       book: bookState(statuses),
       archive: archiveState(statuses),
       normalization,
-      admission: {
-        label: productionAdmitted ? 'Production admitted' : 'Not production admitted',
-        tone: productionAdmitted ? 'success' : 'warning',
-        value: productionAdmitted ? 'admitted' : 'not_admitted',
+      safety: {
+        label: safetyPolicyPresent ? 'Safety policy pinned' : 'Safety policy absent',
+        tone: safetyPolicyPresent ? 'success' : 'warning',
+        value: safetyPolicyPresent ? 'policy_pinned' : 'policy_absent',
       },
       stream: currentLeaseCount
         ? {

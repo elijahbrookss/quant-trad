@@ -33,11 +33,11 @@ from market_data.order_book import (
 )
 from market_data.structure import (
     OrderingAssurance,
-    PHASE1_COINBASE_TRADE_CONTRACTS,
     ProviderSizeUnit,
     RawStreamRecord,
     build_spool_segment_id,
 )
+from market_data.stream_enrollment import load_stream_enrollment_manifest
 
 
 FIXTURE_PATH = (
@@ -48,7 +48,28 @@ BASE_TIME = datetime(2026, 8, 2, 8, 0, tzinfo=UTC)
 
 
 def _contract(product_id: str = "BIP-20DEC30-CDE") -> L2ProductContract:
-    trade = PHASE1_COINBASE_TRADE_CONTRACTS[product_id]
+    manifest = load_stream_enrollment_manifest(
+        "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
+    )
+    trade = next(
+        (
+            enrollment.product_contract
+            for enrollment in manifest.enrollments
+            if enrollment.product_contract.provider_product_id == product_id
+        ),
+        None,
+    )
+    if trade is None:
+        from market_data.structure import ProductContract
+
+        base, quote = product_id.split("-", maxsplit=1)
+        trade = ProductContract(
+            provider_product_id=product_id,
+            provider_size_unit="base",
+            base_currency=base,
+            quote_currency=quote,
+            product_definition_version_id=f"coinbase.{product_id}.product_contract.v1",
+        )
     return L2ProductContract(
         provider_product_id=product_id,
         product_definition_version_id=trade.product_definition_version_id,
@@ -78,7 +99,7 @@ def _event(
             receive_ordinal=receive_ordinal,
             event_ordinal=event_ordinal,
         ),
-        product_definition_version_id="coinbase.BIP-20DEC30-CDE.phase0.v1",
+        product_definition_version_id="coinbase.BIP-20DEC30-CDE.product_contract.v1",
         mutations=tuple(
             L2Mutation(
                 mutation_ordinal=ordinal,

@@ -313,8 +313,8 @@ class RawStreamRecord:
 
 
 @dataclass(frozen=True)
-class ProductTradeContract:
-    """A Phase-0-proven translation contract for one provider product."""
+class ProductContract:
+    """Versioned translation contract for one provider product."""
 
     provider_product_id: str
     provider_size_unit: ProviderSizeUnit | str
@@ -362,55 +362,6 @@ class ProductTradeContract:
             raise ValueError(
                 "market_trade_contract_invalid: only proven connection_epoch sequence scope is supported"
             )
-
-
-PHASE1_COINBASE_TRADE_CONTRACTS: Mapping[str, ProductTradeContract] = {
-    "BIP-20DEC30-CDE": ProductTradeContract(
-        provider_product_id="BIP-20DEC30-CDE",
-        provider_size_unit=ProviderSizeUnit.CONTRACTS,
-        contract_size=Decimal("0.01"),
-        base_currency="BTC",
-        quote_currency="USD",
-        product_definition_version_id="coinbase.BIP-20DEC30-CDE.phase0.v1",
-    ),
-    "BTC-USD": ProductTradeContract(
-        provider_product_id="BTC-USD",
-        provider_size_unit=ProviderSizeUnit.BASE,
-        base_currency="BTC",
-        quote_currency="USD",
-        product_definition_version_id="coinbase.BTC-USD.phase0.v1",
-    ),
-    "ETP-20DEC30-CDE": ProductTradeContract(
-        provider_product_id="ETP-20DEC30-CDE",
-        provider_size_unit=ProviderSizeUnit.CONTRACTS,
-        contract_size=Decimal("0.1"),
-        base_currency="ETH",
-        quote_currency="USD",
-        product_definition_version_id="coinbase.ETP-20DEC30-CDE.phase0.v1",
-    ),
-    "ETH-USD": ProductTradeContract(
-        provider_product_id="ETH-USD",
-        provider_size_unit=ProviderSizeUnit.BASE,
-        base_currency="ETH",
-        quote_currency="USD",
-        product_definition_version_id="coinbase.ETH-USD.phase0.v1",
-    ),
-    "SLP-20DEC30-CDE": ProductTradeContract(
-        provider_product_id="SLP-20DEC30-CDE",
-        provider_size_unit=ProviderSizeUnit.CONTRACTS,
-        contract_size=Decimal("5"),
-        base_currency="SOL",
-        quote_currency="USD",
-        product_definition_version_id="coinbase.SLP-20DEC30-CDE.phase0.v1",
-    ),
-    "SOL-USD": ProductTradeContract(
-        provider_product_id="SOL-USD",
-        provider_size_unit=ProviderSizeUnit.BASE,
-        base_currency="SOL",
-        quote_currency="USD",
-        product_definition_version_id="coinbase.SOL-USD.phase0.v1",
-    ),
-}
 
 
 @dataclass(frozen=True)
@@ -637,7 +588,7 @@ class MarketTradeRecord:
 def translate_coinbase_market_trade(
     event: CanonicalMarketEvent,
     *,
-    contract: ProductTradeContract,
+    contract: ProductContract,
     raw_record_id: str,
     connection_epoch: int,
     receive_ordinal: int,
@@ -1403,8 +1354,7 @@ __all__ = [
     "MarketTradeFact",
     "MarketTradeRecord",
     "OrderingAssurance",
-    "PHASE1_COINBASE_TRADE_CONTRACTS",
-    "ProductTradeContract",
+    "ProductContract",
     "ProviderSizeUnit",
     "RawStreamRecord",
     "TRADE_FLOW_FACT_TYPE",

@@ -80,7 +80,7 @@ function marketIssueCount(rows) {
     row.book,
     row.archive,
     row.normalization,
-    row.admission,
+    row.safety,
   ].some((state) => ['danger', 'warning', 'rose', 'amber'].includes(state?.tone)) || Number(row.unavailableStatusCount || 0) > 0).length
 }
 
