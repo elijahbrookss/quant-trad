@@ -3,7 +3,7 @@ component: btc-perp-market-structure-campaign-v1
 subsystem: research-orchestration
 layer: operation
 doc_type: campaign-charter
-status: pre-activation
+status: invalidated-archived
 tags:
   - research
   - autonomous-campaign
@@ -16,6 +16,19 @@ code_paths:
   - portal/backend/service/research/campaign_runner.py
 ---
 # BTC PERP Market-Structure Campaign V1
+
+## Terminal activation result
+
+V1 was invalidated and governed to `REJECTED -> ARCHIVED` on 2026-08-06.
+Protocol activation succeeded, but family creation failed because the runner's
+display name did not exactly equal the immutable protocol family name. The
+authority correctly rejected the mismatch. No family, trial, graph evaluation,
+candidate, holdout reservation, holdout evaluation, certificate, promotion, or
+external order was created. This identity may not be retried.
+
+The replacement V2 campaign uses a new protocol identity, corrected pinned
+runner revision, and a materially distinct frozen holdout artifact. V1's sealed
+holdout was never opened or consumed.
 
 ## Campaign decision
 

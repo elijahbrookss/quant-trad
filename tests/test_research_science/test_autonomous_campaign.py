@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from portal.backend.service.research.campaign_runner import (
+    _campaign_family_name,
     _gate_failures,
     _protocol_manifest,
 )
@@ -16,6 +17,7 @@ from research_science import (
     CampaignCharter,
     CampaignExecutionCosts,
     FrozenCampaignBar,
+    ScientificProtocol,
     build_campaign_features,
     build_campaign_graph_manifest,
     campaign_graph_specs,
@@ -32,6 +34,7 @@ CHARTER_PATH = (
     / "research_campaigns"
     / "btc_perp_market_structure_v1.json"
 )
+CHARTER_V2_PATH = CHARTER_PATH.with_name("btc_perp_market_structure_v2.json")
 
 
 def _charter_raw() -> dict:
@@ -278,6 +281,7 @@ def test_campaign_protocol_manifest_pins_every_scientific_boundary() -> None:
     charter = _charter()
     manifest = _protocol_manifest(charter, code_revision="abcdef123456")
     assert manifest["economic_claim_intent"] == "selection"
+    assert manifest["family_name"] == _campaign_family_name(charter)
     assert manifest["policy_versions"]["code_revision"] == "abcdef123456"
     assert manifest["leakage"]["purge_bars"] == 10
     assert manifest["leakage"]["embargo_bars"] == 10
@@ -292,6 +296,36 @@ def test_campaign_protocol_manifest_pins_every_scientific_boundary() -> None:
     holdout = next(row for row in manifest["datasets"] if row["role"] == "holdout")
     assert holdout["dataset_id"] == "sealed-holdout-id"
     assert holdout["blind_alias"] == "btc-perp-final-session-v1"
+    protocol = ScientificProtocol.from_dict(
+        {
+            **manifest,
+            "created_by": "campaign_protocol_authority",
+            "authorized_by": "campaign_protocol_authority",
+            "authorization_request_id": "campaign-protocol-authorization",
+        }
+    )
+    assert protocol.family_name == _campaign_family_name(charter)
+
+
+def test_replacement_campaign_has_a_new_identity_and_sealed_assignment() -> None:
+    raw = json.loads(CHARTER_V2_PATH.read_text(encoding="utf-8"))
+    charter = resolve_campaign_charter(
+        raw,
+        sealed_holdout_binding={
+            "dataset_id": "replacement-sealed-holdout-id",
+            "dataset_hash": "replacement-sealed-holdout-hash",
+            "window_start": "2026-08-05T15:31:00Z",
+            "window_end": "2026-08-05T16:33:00Z",
+        },
+    )
+    assert charter.campaign_id == "btc_perp_market_structure_v2"
+    assert charter.dataset("holdout").blind_alias == "btc-perp-final-session-v2"
+    assert charter.dataset("holdout").dataset_id != _charter().dataset(
+        "holdout"
+    ).dataset_id
+    assert _campaign_family_name(charter) == _protocol_manifest(
+        charter, code_revision="replacement-code-revision"
+    )["family_name"]
 
 
 def test_campaign_validation_gate_is_mandatory_and_fail_closed() -> None:

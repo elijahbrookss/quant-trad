@@ -61,6 +61,12 @@ SCIENCE_AUTHORITY_ID = "campaign_science_authority"
 HUMAN_OWNER_ID = "campaign_human_research_owner"
 
 
+def _campaign_family_name(charter: CampaignCharter) -> str:
+    """Return the one family name pinned by both protocol and family records."""
+
+    return charter.campaign_id
+
+
 def _load_public_charter(path: str | Path) -> dict[str, Any]:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -285,7 +291,7 @@ def _protocol_manifest(
     return {
         "schema_version": "scientific_protocol.v1",
         "protocol_id": f"protocol:{charter.campaign_id}",
-        "family_name": charter.campaign_id,
+        "family_name": _campaign_family_name(charter),
         "economic_claim_intent": charter.economic_claim_intent,
         "datasets": [row.to_dict() for row in charter.datasets],
         "blindness": "PLATFORM_CONTROLLED_HISTORICAL",
@@ -606,7 +612,7 @@ def execute_campaign(path: str | Path, *, code_revision: str) -> dict[str, Any]:
             "request_id": f"{charter.campaign_id}:family-create",
             "protocol_id": protocol["id"],
             "family_id": f"family:{charter.campaign_id}",
-            "name": "BTC PERP causal market-structure family v1",
+            "name": _campaign_family_name(charter),
         }
     )
     _transition(
