@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from engines.bot_runtime.core.execution_assumptions import legacy_execution_assumptions
+from engines.bot_runtime.core.execution_context import (
+    build_execution_context_bundle,
+    resolve_execution_context,
+)
+from engines.bot_runtime.core.execution_profile import compile_series_execution_profile
 from engines.bot_runtime.strategy.models import Strategy
 import portal.backend.service.bots.startup_service as startup_mod
 from portal.backend.service.bots.startup_lifecycle import BotLifecyclePhase
@@ -39,6 +45,35 @@ def _strategy() -> Strategy:
     )
 
 
+def _resolved_execution_context_bundle() -> dict:
+    instrument = {
+        "id": "instrument-btc-usd",
+        "symbol": "BTC-USD",
+        "instrument_type": "spot",
+        "datasource": "demo",
+        "exchange": "paper",
+        "tick_size": 0.01,
+        "contract_size": 1.0,
+        "tick_value": 0.01,
+        "base_currency": "BTC",
+        "quote_currency": "USD",
+        "min_order_size": 0.001,
+        "qty_step": 0.001,
+        "maker_fee_rate": 0.001,
+        "taker_fee_rate": 0.002,
+        "fee_source": "startup_test_fixture",
+        "fee_schedule_version": "startup_test_fees.v1",
+    }
+    profile = compile_series_execution_profile(instrument, execution_semantics="spot")
+    context = resolve_execution_context(
+        profile,
+        legacy_execution_assumptions(),
+        instrument_payload=instrument,
+        source="startup_test_fixture",
+    )
+    return build_execution_context_bundle([context]).to_dict()
+
+
 class _FakeConfig:
     def __init__(self) -> None:
         self._bot = {
@@ -63,6 +98,7 @@ class _FakeConfig:
 
     def prepare_startup_artifacts(self, bot):
         assert bot["id"] == "bot-1"
+        context_bundle = _resolved_execution_context_bundle()
         return {
             "strategy_id": "strategy-1",
             "wallet_config": {"balances": {"USDC": 100.0}},
@@ -70,7 +106,9 @@ class _FakeConfig:
             "runtime_readiness": {
                 "symbols": ["BTCUSDT", "ETHUSDT"],
                 "profiles": [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+                "resolved_execution_context_bundle": context_bundle,
             },
+            "resolved_execution_context_bundle": context_bundle,
         }
 
 
@@ -162,6 +200,19 @@ def test_startup_orchestrator_creates_run_before_container_launch():
     assert configured_run["config_snapshot"]["run_strategy_snapshot"]["strategy_hash"] == (
         "compiled-strategy-hash"
     )
+    pinned_bundle = configured_run["config_snapshot"]["resolved_execution_context_bundle"]
+    assert pinned_bundle["bundle_hash"]
+    assert len(pinned_bundle["contexts"]) == 1
+    assert runner.calls[0]["bot"]["resolved_execution_context_bundle"] == pinned_bundle
+    dependency_phase = next(
+        row
+        for row in storage.lifecycle
+        if row["phase"] == BotLifecyclePhase.RESOLVING_RUNTIME_DEPENDENCIES.value
+    )
+    assert dependency_phase["metadata"]["resolved_execution_context_bundle_hash"] == (
+        pinned_bundle["bundle_hash"]
+    )
+    assert dependency_phase["metadata"]["resolved_execution_context_count"] == 1
     assert [row["phase"] for row in storage.lifecycle[:5]] == [
         BotLifecyclePhase.START_REQUESTED.value,
         BotLifecyclePhase.VALIDATING_CONFIGURATION.value,

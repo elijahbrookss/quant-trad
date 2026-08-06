@@ -80,3 +80,5 @@ respect.
 | [0052](0052-use-typed-fact-collectors-and-explicit-instrument-roles.md) | Use typed fact collectors and explicit instrument roles | Accepted |
 | [0053](0053-use-tiered-market-structure-archive-and-replay-boundary.md) | Use a tiered market-structure archive and replay boundary | Accepted |
 | [0054](0054-keep-blocking-api-work-off-the-event-loop.md) | Keep blocking API work off the event loop | Accepted |
+| [0055](0055-separate-bounded-botlens-hot-state-from-durable-inspection.md) | Separate bounded BotLens hot state from durable inspection | Accepted |
+| [0056](0056-pin-venue-neutral-execution-contexts-per-run.md) | Pin venue-neutral execution contexts per run | Accepted |

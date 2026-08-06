@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Optional
 
+from engines.bot_runtime.core.execution_assumptions import execution_quality_meets
+
 from .materialization import (
     RunReportMaterializationNotTerminal,
     materialized_run_report,
@@ -34,6 +36,7 @@ def compare_materialized_run_reports(
     *,
     include_golden: bool = True,
     require_golden: bool = False,
+    minimum_execution_quality_class: str = "X0",
 ) -> RunComparisonDTO:
     """Compare two ready materialized RunReportDTO artifacts without building them."""
 
@@ -52,6 +55,16 @@ def compare_materialized_run_reports(
 
     left = RunReportDTO.model_validate(left_payload)
     right = RunReportDTO.model_validate(right_payload)
+    for side, report in (("left", left), ("right", right)):
+        actual = report.trust.execution_quality_class
+        if not execution_quality_meets(actual, minimum_execution_quality_class):
+            return _blocked_comparison(
+                left_run_id,
+                right_run_id,
+                f"{side}_execution_quality_below_{str(minimum_execution_quality_class).upper()}",
+                left_status,
+                right_status,
+            )
     golden_evidence = (
         _report_golden_evidence(read_golden_comparison_evidence(left_run_id, right_run_id), left, right)
         if include_golden

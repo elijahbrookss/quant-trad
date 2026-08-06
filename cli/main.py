@@ -480,7 +480,9 @@ def _cmd_bots_update(args: argparse.Namespace) -> int:
 
 
 def _cmd_bots_start(args: argparse.Namespace) -> int:
-    body = {"request_id": args.request_id} if args.request_id else {}
+    body = {"economic_claim_intent": str(args.economic_claim_intent)}
+    if args.request_id:
+        body["request_id"] = args.request_id
     if getattr(args, "run_type", None):
         body["run_type"] = args.run_type
     if getattr(args, "dataset_id", None):
@@ -495,6 +497,11 @@ def _cmd_bots_start(args: argparse.Namespace) -> int:
         body["market_data_stream_policy"] = _read_json_object_arg(
             args.market_data_stream_policy_json,
             label="--market-data-stream-policy-json",
+        )
+    if getattr(args, "execution_assumptions_json", None):
+        body["execution_assumptions"] = _read_json_object_arg(
+            args.execution_assumptions_json,
+            label="--execution-assumptions-json",
         )
     _print_json(_client(args).request_json("POST", f"/api/bots/{args.bot_id}/runs/start", payload=body))
     return 0
@@ -2567,6 +2574,7 @@ def _start_experiment(args: argparse.Namespace, client: ApiClient) -> dict[str, 
     start_body: dict[str, Any] = {
         "run_type": "backtest",
         "dataset_id": args.dataset_id,
+        "economic_claim_intent": "exploration",
     }
     if bool(getattr(args, "profile", False)):
         start_body["profile"] = True
@@ -2950,6 +2958,16 @@ def build_parser() -> argparse.ArgumentParser:
     bots_start = bots_sub.add_parser("start", help="Start a bot run through the backend API.")
     bots_start.add_argument("bot_id")
     bots_start.add_argument("--request-id")
+    bots_start.add_argument(
+        "--economic-claim-intent",
+        choices=["exploration", "economic", "selection", "promotion"],
+        default="exploration",
+        help="Immutable economic interpretation for this run (default: exploration).",
+    )
+    bots_start.add_argument(
+        "--execution-assumptions-json",
+        help="Versioned execution_assumptions JSON object path, inline object, or '-'.",
+    )
     bots_start.add_argument("--run-type", choices=["backtest", "sim_trade", "paper", "live"])
     bots_start.add_argument("--execution-behavior", "--execution", choices=["simulated", "observe-only"], dest="execution_behavior")
     bots_start.add_argument("--dataset-id", help="Required immutable dataset identity for backtest runs.")

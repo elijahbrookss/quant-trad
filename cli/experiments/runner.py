@@ -237,6 +237,8 @@ class ExperimentRunner:
                     "request_id": request_id,
                     "run_type": "backtest",
                     "dataset_id": dataset_id,
+                    "economic_claim_intent": plan.get("economic_claim_intent"),
+                    "execution_assumptions": plan.get("execution_assumptions"),
                 },
             )
             if not isinstance(start_payload, dict):
@@ -460,6 +462,9 @@ class ExperimentRunner:
                         "right_run_id": candidate.get("run_id"),
                         "include_golden": bool(policy.get("include_golden", True)),
                         "require_golden": bool(policy.get("require_golden", False)),
+                        "minimum_execution_quality_class": str(
+                            policy.get("minimum_execution_quality_class") or "X0"
+                        ).upper(),
                     },
                 )
                 path = store.artifacts_dir / "comparisons" / f"{safe_path_part(window_id)}__{safe_path_part(str(comparison.get('id')))}.json"
@@ -529,4 +534,3 @@ class ExperimentRunner:
         state["notification_status"] = result
         _set_step_status(state, step_id, "COMPLETED", artifact_refs=[{"type": "notifications", "path": str(store.notifications_path)}])
         events.append(event_type="result", operation="notify_terminal_state", status="succeeded", step_id=step_id, target=result)
-

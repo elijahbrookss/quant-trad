@@ -544,7 +544,7 @@ def test_run_report_builds_from_existing_dataset(monkeypatch) -> None:
     assert payload["identity"]["run_id"] == "run-1"
     assert payload["identity"]["dataset_id"] == "mds_test"
     assert payload["identity"]["dataset_hash"] == "dataset-hash"
-    assert payload["trust"]["research_status"] == "research_valid"
+    assert payload["trust"]["research_status"] == "reproducible"
     assert payload["performance"]["net_pnl"]["value"] == 14.0
     assert payload["behavior"]["total_decisions"] == 2
     assert payload["wallet"]["wallet_trace_complete"] is True

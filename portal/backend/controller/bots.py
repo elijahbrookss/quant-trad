@@ -132,6 +132,7 @@ class BotUpdateRequest(BaseModel):
 
 
 class BotStartRequest(BaseModel):
+    economic_claim_intent: str = Field(pattern="^(exploration|economic|selection|promotion)$")
     request_id: Optional[str] = None
     run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
     dataset_id: Optional[str] = None
@@ -139,6 +140,7 @@ class BotStartRequest(BaseModel):
     execution_behavior: Optional[str] = Field(default=None, pattern="^(simulated|observe-only)$")
     duration_seconds: Optional[float] = Field(default=None, gt=0)
     market_data_stream_policy: Optional[Dict[str, Any]] = None
+    execution_assumptions: Optional[Dict[str, Any]] = None
 
 
 class BotStopRequest(BaseModel):
@@ -326,11 +328,11 @@ def delete_bot(bot_id: str) -> Response:
 @router.post("/{bot_id}/start")
 def start_bot(
     bot_id: str,
-    body: Optional[BotStartRequest] = None,
+    body: BotStartRequest,
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
 ) -> Dict[str, Any]:
-    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
-    overrides = body.dict(exclude_none=True, exclude={"request_id"}) if body else {}
+    request_id = str(body.request_id or x_request_id or "").strip() or None
+    overrides = body.model_dump(exclude_none=True, exclude={"request_id"})
     try:
         return bot_service.start_bot(bot_id, request_id=request_id, start_overrides=overrides)
     except KeyError as exc:
@@ -344,13 +346,13 @@ def start_bot(
 @router.post("/{bot_id}/runs/start")
 def start_bot_run_context(
     bot_id: str,
-    body: Optional[BotStartRequest] = None,
+    body: BotStartRequest,
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
 ) -> Dict[str, Any]:
     """Start a run and return a compact run-context payload for CLI workflows."""
 
-    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
-    overrides = body.dict(exclude_none=True, exclude={"request_id"}) if body else {}
+    request_id = str(body.request_id or x_request_id or "").strip() or None
+    overrides = body.model_dump(exclude_none=True, exclude={"request_id"})
     try:
         return bot_service.start_bot_run_context(bot_id, request_id=request_id, start_overrides=overrides)
     except KeyError as exc:

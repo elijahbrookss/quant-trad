@@ -17,13 +17,15 @@ from ..amount_constraints import normalize_qty_with_constraints
 from ..entry_execution import EntryExecutionCoordinator, PendingEntry
 from ..entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
 from ..execution_adapter import ExecutionAdapter
+from ..execution_assumptions import ResolvedExecutionAssumptions, legacy_execution_assumptions
+from ..execution_context import ResolvedExecutionContext, resolve_execution_context
 from ..execution_intent import ExecutionIntent, LimitParams
 from ..execution_model import ExecutionModel
 from ..execution_plan import RuntimeStopAdjustment, compile_runtime_execution_plan
 from ..execution_profile import SeriesExecutionProfile, compile_series_execution_profile
 from ..execution_runtime import DeterministicExecutionModel
 from ..exit_settlement import ExitSettlement, ExitSettlementService
-from ..fees import FeeResolver, FeeSchedule, executed_fee, executed_notional
+from ..fees import FeeResolver, executed_fee, executed_notional
 from ..margin import calculate_max_qty_by_margin
 from ..wallet import WalletLedger, trace_wallet_balance
 from ..wallet_gateway import WalletGateway
@@ -63,6 +65,8 @@ class LadderRiskEngine:
         instrument: Optional[Dict[str, Any]] = None,
         execution_profile: Optional[SeriesExecutionProfile] = None,
         risk_config: Optional[Mapping[str, Any]] = None,
+        execution_assumptions: Optional[ResolvedExecutionAssumptions] = None,
+        execution_context: Optional[ResolvedExecutionContext] = None,
     ):
         provided_template = config or {}
         self.template = normalise_template(provided_template)
@@ -73,6 +77,30 @@ class LadderRiskEngine:
             self.instrument,
             risk_config=self.risk_config,
         )
+        self.execution_assumptions = execution_assumptions or legacy_execution_assumptions()
+        self.execution_context = (
+            execution_context
+            or self.execution_profile.execution_context
+            or resolve_execution_context(
+                self.execution_profile,
+                self.execution_assumptions,
+                instrument_payload=self.instrument,
+                source="legacy_direct_runtime_resolution",
+            )
+        )
+        if self.execution_context.model.assumption_manifest_hash != self.execution_assumptions.manifest_hash:
+            raise ValueError("execution_context_assumption_manifest_mismatch")
+        self.execution_profile = self.execution_profile.bind_execution_context(self.execution_context)
+        if self.execution_assumptions.requires_economic_evidence:
+            schedule = self.execution_context.fee_schedule
+            if not schedule.configured or schedule.source == "default_zero":
+                raise ValueError("economic_execution_fee_schedule_unresolved")
+            if (
+                schedule.maker_rate == 0.0
+                and schedule.taker_rate == 0.0
+                and not schedule.verified_zero
+            ):
+                raise ValueError("economic_execution_zero_fee_schedule_unverified")
         self._runtime_log_context = build_log_context(
             symbol=self.instrument.get("symbol"),
             datasource=self.instrument.get("datasource"),
@@ -138,16 +166,12 @@ class LadderRiskEngine:
         self.orders = self._orders_from_execution_plan()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
         self.quote_currency = str(self.execution_profile.instrument.quote_currency or "USD").upper()
-        self.maker_fee = float(self.execution_profile.fees.maker_fee_rate)
-        self.taker_fee = float(self.execution_profile.fees.taker_fee_rate)
+        self.maker_fee = float(self.execution_context.fee_schedule.maker_rate)
+        self.taker_fee = float(self.execution_context.fee_schedule.taker_rate)
         self.execution_intent_model: ExecutionModel = DeterministicExecutionModel(
-            FeeResolver(
-                FeeSchedule(
-                    maker_rate=float(self.maker_fee or 0.0),
-                    taker_rate=float(self.taker_fee or 0.0),
-                    source=self.execution_profile.fees.source,
-                )
-            )
+            FeeResolver(self.execution_context.fee_schedule),
+            assumptions=self.execution_assumptions,
+            execution_context=self.execution_context,
         )
         self.entry_settlement: EntrySettlement = EntrySettlementService(self)
         self.exit_settlement: ExitSettlement = ExitSettlementService(None)
@@ -687,6 +711,8 @@ class LadderRiskEngine:
             order_type=order_type,
             requested_price=float(candle.close),
             contract_size=float(self.contract_size),
+            time_in_force="gtc",
+            post_only=order_type == "limit_maker",
             limit_params=limit_params,
             metadata={
                 "direction": direction,
@@ -779,6 +805,8 @@ class LadderRiskEngine:
                     order_type=request.order_type,
                     requested_price=request.requested_price,
                     contract_size=float(self.contract_size),
+                    time_in_force="gtc",
+                    post_only=request.order_type == "limit_maker",
                     limit_params=request.limit_params,
                     metadata={"direction": request.direction, "symbol": self.instrument.get("symbol")},
                 ),
@@ -1206,12 +1234,13 @@ class LadderRiskEngine:
             contract_size=self.contract_size,
             maker_fee_rate=self.maker_fee,
             taker_fee_rate=self.taker_fee,
-            fee_source="template_or_instrument",
-            fee_version=None,
+            fee_source=self.execution_profile.fees.source,
+            fee_version=self.execution_profile.fees.version,
             quote_currency=self.quote_currency,
             short_requires_borrow=bool(self.short_requires_borrow),
             instrument=self.instrument if use_wallet_execution else None,
             execution_profile=execution_profile if use_wallet_execution else None,
+            execution_assumptions=self.execution_assumptions,
             signal_id=getattr(self, "last_signal_id", None),
             decision_id=getattr(self, "last_decision_id", None),
             strategy_id=str(self.strategy_id) if getattr(self, "strategy_id", None) else None,

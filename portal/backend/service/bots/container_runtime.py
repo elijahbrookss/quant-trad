@@ -584,6 +584,14 @@ def _load_runtime_bot_snapshot(bot_id: str, run_id: str) -> tuple[Dict[str, Any]
     if bot_snapshot:
         bot = dict(bot_snapshot)
         bot["id"] = str(bot.get("id") or bot_id)
+        for field in (
+            "economic_claim_intent",
+            "execution_assumptions",
+            "resolved_execution_context_bundle",
+        ):
+            if field in config_snapshot:
+                value = config_snapshot.get(field)
+                bot[field] = dict(value) if isinstance(value, Mapping) else value
         return bot, dict(run)
     bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
     if bot is None:

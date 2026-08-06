@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
 import risk as risk_math
 
@@ -20,6 +20,7 @@ from ..execution_order import build_fill_order, execute_fill_order
 from ..execution_plan import RuntimeStopAdjustment
 from ..execution_policy import ExitExecutionPolicy, exit_policy_for, fee_rate_for_role, normalize_liquidity_role
 from ..execution_profile import SeriesExecutionProfile
+from ..execution_assumptions import ResolvedExecutionAssumptions
 from ..exit_settlement import ExitSettlement, ExitSettlementService
 from ..fees import executed_fee, executed_notional
 from ..margin import resolve_instrument_type, InstrumentType
@@ -82,6 +83,7 @@ class LadderPosition:
     short_requires_borrow: bool = False
     instrument: Optional[Dict[str, Any]] = None  # For margin-based validation
     execution_profile: Optional[SeriesExecutionProfile] = None
+    execution_assumptions: Optional[ResolvedExecutionAssumptions] = None
     signal_id: Optional[str] = None
     decision_id: Optional[str] = None
     strategy_id: Optional[str] = None
@@ -149,6 +151,13 @@ class LadderPosition:
             price_source=policy.price_source,
             maker_fee_rate=self.maker_fee_rate,
             taker_fee_rate=self.taker_fee_rate,
+            fee_source=self.fee_source,
+            fee_version=self.fee_version,
+            execution_context=(
+                self.execution_profile.execution_context
+                if self.execution_profile is not None
+                else None
+            ),
             metadata={"trade_id": self.trade_id, "direction": self.direction},
         )
         if self.execution_adapter:
@@ -195,8 +204,16 @@ class LadderPosition:
                 continue
 
             # Check if target was hit based on direction
+            strict_penetration = bool(
+                self.execution_assumptions and self.execution_assumptions.uses_strict_penetration
+            )
             is_filled = (
-                candle.high >= leg.target_price if self.direction == "long"
+                candle.high > leg.target_price
+                if self.direction == "long" and strict_penetration
+                else candle.high >= leg.target_price
+                if self.direction == "long"
+                else candle.low < leg.target_price
+                if strict_penetration
                 else candle.low <= leg.target_price
             )
 
@@ -317,6 +334,7 @@ class LadderPosition:
                     "order_type": policy.order_type,
                     "price_source": policy.price_source,
                     "reason_code": policy.reason_code,
+                    **self._execution_evidence_for_fill(fill_result),
                     "settlement": settlement_payload,
                 }
             )
@@ -519,6 +537,7 @@ class LadderPosition:
                         "order_type": execution_policy.order_type,
                         "price_source": execution_policy.price_source,
                         "reason_code": execution_policy.reason_code,
+                        **self._execution_evidence_for_fill(fill_result),
                         "settlement": settlement_payload,
                     }
                 )
@@ -573,9 +592,16 @@ class LadderPosition:
         for leg in self.legs:
             if leg.status != "open":
                 continue
-            if self.direction == "long" and candle.high >= leg.target_price:
+            strict_penetration = bool(
+                self.execution_assumptions and self.execution_assumptions.uses_strict_penetration
+            )
+            if self.direction == "long" and (
+                candle.high > leg.target_price if strict_penetration else candle.high >= leg.target_price
+            ):
                 return True
-            if self.direction == "short" and candle.low <= leg.target_price:
+            if self.direction == "short" and (
+                candle.low < leg.target_price if strict_penetration else candle.low <= leg.target_price
+            ):
                 return True
         return False
 
@@ -603,9 +629,16 @@ class LadderPosition:
         for leg in self.legs:
             if leg.status != "open":
                 continue
-            if self.direction == "long" and candle.open >= leg.target_price:
+            strict_penetration = bool(
+                self.execution_assumptions and self.execution_assumptions.uses_strict_penetration
+            )
+            if self.direction == "long" and (
+                candle.open > leg.target_price if strict_penetration else candle.open >= leg.target_price
+            ):
                 return True
-            if self.direction == "short" and candle.open <= leg.target_price:
+            if self.direction == "short" and (
+                candle.open < leg.target_price if strict_penetration else candle.open <= leg.target_price
+            ):
                 return True
         return False
 
@@ -820,6 +853,7 @@ class LadderPosition:
                     "close_reason": policy.reason_code,
                     "order_type": policy.order_type,
                     "price_source": policy.price_source,
+                    **self._execution_evidence_for_fill(fill_result),
                     "settlement": settlement_payload,
                 }
             )
@@ -974,6 +1008,28 @@ class LadderPosition:
             "fee_source": str(fee_source or self.fee_source or "template_or_instrument"),
             "fee_version": fee_version if fee_version is not None else self.fee_version,
         }
+
+    @staticmethod
+    def _execution_evidence_for_fill(fill: Optional[FillResult]) -> Dict[str, Any]:
+        if fill is None or not isinstance(fill.metadata, Mapping):
+            return {}
+        metadata = dict(fill.metadata)
+        keys = (
+            "requested_price",
+            "fill_price",
+            "slippage_price",
+            "slippage_bps",
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "passive_fill_policy",
+            "execution_quality_ceiling",
+            "economic_claim_intent",
+            "fee_policy",
+            "full_fill_assumption",
+            "market_slippage_bps",
+            "stop_slippage_bps",
+        )
+        return {key: metadata.get(key) for key in keys if key in metadata}
 
     def _record_pnl(self, pnl: float) -> None:
         self.gross_pnl += pnl

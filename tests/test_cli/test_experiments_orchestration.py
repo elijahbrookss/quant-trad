@@ -5,6 +5,10 @@ from pathlib import Path
 import urllib.parse
 import urllib.request
 
+import pytest
+import yaml
+
+from cli.experiments.contracts import normalize_plan
 from cli.experiments.pass_gates import evaluate_pass_gates
 from cli.experiments.state_store import ExperimentStateStore
 from cli.main import main
@@ -31,7 +35,20 @@ def _plan_text() -> str:
     return """
 schema_version: experiment_plan.v1
 name: range-contraction-fresh-window-validation
+intent: selection
 hypothesis: Candidate should keep enough trades while improving drawdown.
+execution_assumptions:
+  schema_version: execution_assumptions.v1
+  model_version: conservative_bar.v1
+  market_slippage_bps: 5.0
+  stop_slippage_bps: 10.0
+  passive_fill_policy: strict_penetration
+  fee_policy: instrument_resolved
+  full_fill_assumption: true
+  cost_stress_scenarios:
+    - id: moderate
+      additional_slippage_bps: 5.0
+      fee_multiplier: 1.25
 run_policy:
   mode: sequential
   stop_on_first_failure: false
@@ -77,6 +94,14 @@ def test_experiments_validate_plan_prints_step_preview(tmp_path, capsys):
     assert out["plan"]["schema_version"] == "experiment_plan.v1"
     assert [step["type"] for step in out["steps"]].count("RUN_BOT") == 2
     assert out["steps"][-1]["type"] == "NOTIFY"
+
+
+def test_selection_plan_rejects_empty_pass_gates() -> None:
+    raw = yaml.safe_load(_plan_text())
+    raw["pass_gates"] = {}
+
+    with pytest.raises(ValueError, match="selection experiments require non-empty pass_gates"):
+        normalize_plan(raw)
 
 
 def test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates(tmp_path, monkeypatch):
@@ -171,11 +196,18 @@ def test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates(tmp_p
             bot_id = "bot-base" if "bot-base" in path else "bot-candidate"
             variant_id = "baseline" if bot_id == "bot-base" else "candidate"
             body = json.loads(request.data.decode("utf-8"))
-            assert body == {
+            assert {
+                key: body[key]
+                for key in ("request_id", "run_type", "dataset_id", "economic_claim_intent")
+            } == {
                 "request_id": f"exp-1__window_a__{variant_id}",
                 "run_type": "backtest",
                 "dataset_id": f"mds_{bot_id}",
+                "economic_claim_intent": "selection",
             }
+            assert body["execution_assumptions"]["model_version"] == "conservative_bar.v1"
+            assert body["execution_assumptions"]["execution_quality_ceiling"] == "X2"
+            assert len(body["execution_assumptions"]["manifest_hash"]) == 64
             return _Response(json.dumps({"schema_version": "bot_run_start.v1", "run_id": run_id, "status": "starting"}).encode("utf-8"))
         if method == "GET" and path in {"/api/bots/bot-base/runs/run-base/status", "/api/bots/bot-candidate/runs/run-candidate/status"}:
             run_id = path.split("/")[-2]

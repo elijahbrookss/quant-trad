@@ -109,6 +109,7 @@ def _plan() -> dict:
     return {
         "schema_version": "experiment_plan.v1",
         "name": "mcp-smoke-plan",
+        "intent": "exploration",
         "hypothesis": "Candidate should not drift.",
         "windows": [{"id": "w1", "start": "2026-01-01T00:00:00Z", "end": "2026-01-31T23:59:59Z"}],
         "variants": [{"id": "baseline", "bot_id": "bot-1"}, {"id": "candidate", "bot_id": "bot-2"}],
@@ -262,7 +263,10 @@ def test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest(tmp_path):
     with pytest.raises(McpError, match="allow_non_backtest"):
         server.call_tool("start_bot_run", {"bot_id": "bot-1", "run_type": "paper", "confirm": True})
     with pytest.raises(McpError, match="dataset_id is required"):
-        server.call_tool("start_bot_run", {"bot_id": "bot-1", "confirm": True})
+        server.call_tool(
+            "start_bot_run",
+            {"bot_id": "bot-1", "economic_claim_intent": "exploration", "confirm": True},
+        )
 
     payload = server.call_tool(
         "start_bot_run",
@@ -270,6 +274,7 @@ def test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest(tmp_path):
             "bot_id": "bot-1",
             "dataset_id": "mds-1",
             "request_id": "req-1",
+            "economic_claim_intent": "exploration",
             "confirm": True,
         },
     )
@@ -281,6 +286,7 @@ def test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest(tmp_path):
         None,
         {
             "run_type": "backtest",
+            "economic_claim_intent": "exploration",
             "dataset_id": "mds-1",
             "request_id": "req-1",
         },

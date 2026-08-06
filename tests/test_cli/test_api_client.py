@@ -689,12 +689,13 @@ def test_bots_start_supports_observe_only_paper_overrides(tmp_path, monkeypatch)
     assert observed == {
         "method": "POST",
         "path": "/api/bots/bot-1/runs/start",
-        "body": {
-            "request_id": "req-1",
-            "run_type": "paper",
-            "execution_behavior": "observe-only",
-            "duration_seconds": 30.0,
-        },
+            "body": {
+                "request_id": "req-1",
+                "run_type": "paper",
+                "execution_behavior": "observe-only",
+                "duration_seconds": 30.0,
+                "economic_claim_intent": "exploration",
+            },
     }
 
 
@@ -728,6 +729,7 @@ def test_bots_start_supports_opt_in_backtest_profiling(tmp_path, monkeypatch):
         "run_type": "backtest",
         "dataset_id": "mds-1",
         "profile": True,
+        "economic_claim_intent": "exploration",
     }
 
 
@@ -1254,6 +1256,7 @@ def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
             "run_type": "backtest",
             "dataset_id": "mds-1",
             "request_id": "req-1",
+            "economic_claim_intent": "exploration",
         }
         return _Response(
             json.dumps(

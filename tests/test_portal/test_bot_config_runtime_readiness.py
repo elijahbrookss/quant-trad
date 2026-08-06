@@ -92,6 +92,22 @@ def test_runtime_readiness_accepts_spot_as_proxy_derivative_for_backtest(monkeyp
     assert profile["execution_semantics"] == "proxy_derivative"
     assert profile["research_market_role"] == "proxy_underlier"
     assert profile["margin_calc_type"] == "margin"
+    assert profile["resolved_execution_context_hash"]
+    assert profile["instrument_execution_contract_hash"]
+    assert profile["venue_execution_profile_id"] == "canonical_bar_simulation"
+    assert profile["order_policy_conformance"] == {
+        "status": "passed",
+        "required_order_types": ["limit_resting", "market", "stop_market"],
+        "required_time_in_force": ["gtc"],
+        "post_only_order_types": [],
+        "venue_execution_profile_id": "canonical_bar_simulation",
+        "venue_execution_profile_version": "canonical_bar_simulation.v1",
+        "venue_execution_profile_hash": profile["venue_execution_profile_hash"],
+    }
+    bundle = artifacts["resolved_execution_context_bundle"]
+    assert bundle["bundle_hash"]
+    assert len(bundle["contexts"]) == 1
+    assert bundle["contexts"][0]["context_hash"] == profile["resolved_execution_context_hash"]
 
 
 def test_runtime_readiness_blocks_proxy_derivative_outside_backtest(monkeypatch):
@@ -167,3 +183,43 @@ def test_runtime_readiness_accepts_derivatives_with_margin_rates(monkeypatch):
     )
 
     service.validate_runtime_readiness(_bot_payload())
+
+
+def test_runtime_readiness_rejects_strategy_orders_unsupported_by_venue_profile(monkeypatch):
+    service = BotConfigService()
+    strategy = _strategy_with_instrument(
+        {
+            "symbol": "BTC-USD",
+            "instrument_type": "spot",
+            "venue_execution_profile": {
+                "profile_id": "market-only-fixture",
+                "version": "market-only-fixture.v1",
+                "venue_id": "synthetic-market-only",
+                "supported_order_types": ["market"],
+                "supported_time_in_force": ["gtc"],
+                "post_only_supported": False,
+                "post_only_behavior": "reject_would_cross",
+                "liquidity_role_by_order_type": {"market": "taker"},
+                "price_increment_policy": "reject",
+                "quantity_increment_policy": "reject",
+                "max_market_order_notional": None,
+                "market_price_collar_bps": None,
+                "book_data_capability": "bars",
+                "lifecycle_event_mapping": {},
+                "external_order_submission_enabled": False,
+                "source": "test_fixture",
+            },
+        }
+    )
+
+    _patch_strategy_lookup(monkeypatch, strategy)
+    monkeypatch.setattr(
+        "portal.backend.service.market.instrument_service.resolve_instrument",
+        lambda _datasource, _exchange, _symbol: None,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"venue_profile_unsupported_order_types .*limit_resting,stop_market",
+    ):
+        service.prepare_startup_artifacts(_bot_payload(execution_semantics="spot"))

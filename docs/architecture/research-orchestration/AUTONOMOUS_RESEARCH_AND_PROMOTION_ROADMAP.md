@@ -3,7 +3,7 @@ component: autonomous-research-promotion-roadmap
 subsystem: research-orchestration
 layer: roadmap
 doc_type: architecture
-status: proposed
+status: active
 tags:
   - autonomy
   - research
@@ -17,6 +17,7 @@ tags:
 code_paths:
   - src/strategies
   - src/engines/bot_runtime
+  - src/engines/bot_runtime/core/execution_context.py
   - src/data_providers/registry.py
   - cli/experiments
   - cli/main.py
@@ -26,12 +27,14 @@ code_paths:
   - portal/backend/service/strategies
   - docs/architecture/decisions/0048-gate-agent-mutation-and-research-promotion.md
   - docs/architecture/decisions/0049-keep-live-order-submission-closed.md
+  - docs/architecture/decisions/0056-pin-venue-neutral-execution-contexts-per-run.md
 ---
 # Autonomous Research and Promotion Roadmap
 
 ## Status and assessment boundary
 
-This is a proposed cross-boundary roadmap, not implementation truth and not an
+This is the ratified governing cross-boundary roadmap. Later phases remain
+direction rather than implementation truth, and this document is never an
 authorization to submit external orders. It records the repository state
 inspected on 2026-08-05 and defines the evidence and enforcement that must exist
 before permissions expand.
@@ -41,6 +44,23 @@ composition roots, persisted contracts, reports, experiment orchestration, and
 tests. In this document, **production-wired** means reachable through a normal
 runtime, backend, CLI, or report composition path. A type, test fixture, draft,
 or ADR by itself is not production wiring.
+
+### Ratification and implementation record
+
+The roadmap and Phase 0 semantics were human-ratified on 2026-08-05. The
+ratification permanently narrows golden to reproducibility/reconciliation,
+retains separate quality and eligibility dimensions, selects strict passive
+price penetration for X2, keeps scientific authority before generative strategy
+expansion, and keeps L2 work independent until the venue-neutral lifecycle
+boundary exists. It also requires `economic_claim_intent` to be immutable per
+run so exploratory evidence cannot be relabeled after completion.
+
+Phase 1 is implemented by the
+[Phase 1 economic execution contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md).
+The verified inventory below remains the pre-Phase-1 baseline that motivated
+the campaign; the implementation contract records the current production
+behavior and migration rules. Later phases remain proposed and no live-order,
+promotion, or capital authority is opened by this ratification.
 
 Market-data acquisition and coverage are deliberately outside the critical
 path of this roadmap. The starting assumption is that every required market
@@ -88,9 +108,10 @@ This validates the supplied operating conclusion with three corrections:
 2. Paper mode is production-wired against live closed candles, but it delegates
    fills to the backtest adapter. It is bar-based simulated paper execution, not
    production-book shadow execution.
-3. `SeriesExecutionProfile` is a sound instrument-level runtime authority. It
-   is not yet the proposed venue rule/capability profile and should not be made
-   responsible for every venue and calibration concern.
+3. `SeriesExecutionProfile` remains a sound instrument-level compiler and
+   compatibility boundary. Phase 2A now binds it into a separately versioned
+   `ResolvedExecutionContext`; it was not expanded into the venue, fee, model,
+   and calibration monolith the roadmap warned against.
 
 ## Verified current-state inventory
 
@@ -102,23 +123,23 @@ Wiring classifications used below are `production`, `bounded production`,
 | Causal deterministic replay | One walk-forward runtime and causal bar-time checks in `src/engines/bot_runtime/runtime/runtime.py::BotRuntime`, `src/strategies/evaluator.py::evaluate_strategy_bar`, and the canonical platform contracts. | Production | Preserve unchanged; extend every new expression, execution, and calibration input with known-at and prefix-invariance tests. |
 | Frozen datasets | Immutable backtest planning, validation, material hashes, and preparation in `portal/backend/service/market/backtest_dataset_service.py::{derive_backtest_dataset_plan,validate_backtest_dataset,prepare_backtest_dataset}`. | Production | Scientific split assignments and holdout-use identity do not yet exist above the dataset boundary. |
 | Typed strategy decisions | `src/strategies/compiler.py::compile_strategy`, `DecisionRuleSpec`, and `evaluate_strategy_bar` compile and evaluate one signal trigger with typed indicator-output guards and deterministic priority arbitration. | Production | Only long/short entry intent is expressed. There is no general boolean expression graph or position, risk, session, prior-signal, order, and execution fact vocabulary. |
-| Canonical execution intent | `RuntimeExecutionPlan`, `FillOrder`, order types, liquidity roles, and price sources in `src/engines/bot_runtime/core/{execution_plan.py,execution_order.py}`; entry and ATM exit paths consume these semantics. | Production | `FillOrder` is an immediate fill request rather than a durable order lifecycle. TIF, expiry, cancel/replace, rejection, partial residuals, and venue capability validation are absent. |
-| Instrument execution authority | `src/engines/bot_runtime/core/execution_profile.py::SeriesExecutionProfile` compiles instrument, constraint, fee, capability, margin, and risk facts independently from the playback source. | Production | Missing-fee values become `default_zero`; capabilities are coarse booleans. There is no venue-rule version, order/TIF matrix, fee tier/currency/rounding, market protection, lifecycle mapping, book capability, latency, or calibration reference. |
-| Bar execution | `DeterministicExecutionModel`, `BacktestAdapter`, and `PositionManager` provide market/limit/stop/target/fixed-horizon/terminal semantics, adverse gap handling, maker/taker fees, and pessimistic ambiguous-bar arbitration. | Production | Market entry fills at the requested price; maker entry fills on touch; all fills are complete; the adapter reduces every order type to a market fill model. |
-| Slippage | `SpotExecutionModel` and `DerivativesExecutionModel` have a deterministic adverse-BPS hook and emit `slippage_bps`. | Seam, partially used | `series_construction.py::{_attach_execution_adapter,_adapter_for_run_type}` does not pass configured slippage, and `domain/engine.py::build_entry_fill` uses `DeterministicExecutionModel` directly. The report also infers configured BPS from config rather than proving it from fills. |
-| Fees | Maker/taker roles select rates through `execution_policy.py::fee_rate_for_role`; fills, trades, wallet settlement, and reports retain fee evidence. | Production with unsafe default | `execution_profile.py::_execution_fees` and `execution_order.py::build_fill_order` silently coerce missing values to zero. Fee schedule version, tier, currency, rounding, and effective interval are absent. |
+| Canonical execution intent | `RuntimeExecutionPlan` and compatibility `FillOrder` carry order type, TIF, post-only, liquidity role, price source, fee identity, and resolved context through entry and ATM exits. Startup and per-order conformance are production-wired. | Production | `FillOrder` is still an immediate full-fill request, not a durable order lifecycle. Durable acceptance/open/partial/cancel/replace/reject/expiry and residual quantities remain Phase 2B. |
+| Instrument and execution-context authority | `SeriesExecutionProfile` compiles instrument/risk inputs; `execution_context.py` separately resolves immutable instrument, venue, fee, and bar-model contracts and pins their complete hash-validated bundle per run. | Production for X0-X2 bar execution | Production-verified venue schedules and calibration artifacts are absent. Durable lifecycle, latency, and book mechanics remain later phases. |
+| Bar execution | Phase 1 `DeterministicExecutionModel`, spot/derivative models, adapters, and position execution apply pinned market/stop slippage, strict-penetration X2 passive fills, full-fill disclosure, maker/taker fees, adverse gaps, and pessimistic ambiguous-bar arbitration through the resolved context. | Production for X0-X2 | All fills remain complete and bar-based. No observed spread, book depth, queue, latency, residual order, or capacity claim exists. |
+| Slippage | One immutable Phase 1 assumption manifest drives entry and exit adverse-BPS behavior and per-fill evidence; reports validate the matching model/context hashes. | Production for X0-X2 | Slippage is conservative configuration, not venue-calibrated evidence. Spread-, size-, regime-, and latency-sensitive models remain absent. |
+| Fees | The resolved `FeeSchedule` owns maker/taker rates, source, version, profile binding, currency, basis, deterministic rounding, precision, tier, configured/verified-zero status, and hash. Phase 2A admits only non-negative quote-notional fees in the instrument quote currency because canonical wallet/event accounting can settle exactly that subset. | Production for admitted pinned bar schedules | Effective-time/account-tier resolution against authoritative production venues is not yet implemented; non-quote fees, base-quantity fees, and rebates require a new canonical accounting/event contract and fail context resolution today. Missing economic assumptions still fail or downgrade under Phase 1 rules. |
 | Partial fills and resting orders | `ExecutionOutcome.remaining_qty` and some quantity fields anticipate residuals. | Seam | Normal models fill the complete request. Exit processing closes the leg after a fill and does not preserve a residual order/position lifecycle. No resting-order replay is wired. |
 | Book and latency simulation | Provider-neutral market-structure storage exists elsewhere in the repository. No level/book/queue/latency reference is present in the execution runtime or report comparison path. | Not execution-wired | Add capability-bound book replay, arrival time, aggressive walking, partial fills, resting progress, cancel/replace, and deterministic latency. |
 | Paper, shadow, and live | `PaperMarketStreamRunner` is started by `container_runtime.py`; `PaperAdapter` delegates to `BacktestAdapter`; observe-only intake is also implemented. `LiveAdapter` is an injected forwarding seam. | Paper: production. Shadow: absent. Live: closed seam. | Paper does not replay the live book. No local shadow order lifecycle or simulated-versus-realized reconciliation exists. No production venue trading adapter is authorized; ADR 0049 remains controlling. |
 | Canonical accounting | Fill-driven wallet settlement, position state, margin reservation, fee/PnL accounting, and report reconciliation live under `src/engines/bot_runtime/core` and `portal/backend/service/reports`. | Production | New partial fills, funding, liquidation, and venue fees must enter through these owners rather than parallel ledgers. |
-| Research evidence and comparison | `RunResearchDataset`, materialized report comparison, semantic fingerprints, continuity checks, wallet reconciliation, and golden evidence are substantial and production-wired. | Production | `run_research_dataset.py::_finalize_readiness` calls execution clean unless intrabar fallback occurs. `_golden_blocking_reasons` does not block missing fee/slippage assumptions; `contract.py::_research_status` maps golden certification to `research_valid`. Comparisons default to `require_golden=False` and have no minimum execution/scientific class. |
-| Experiment orchestration | Immutable local `plan.json`, append-only local events, run/report/comparison composition, resume state, and metric gates in `cli/experiments::{contracts,runner,pass_gates}.py`. | Bounded production | Plans are local orchestration pointers, not a canonical trial ledger. No protocol intent distinguishes exploration from selection. Empty gates produce `PASSED`; comparison policy defaults `require_golden=False`. |
+| Research evidence and comparison | `RunResearchDataset`, comparisons, semantic fingerprints, continuity, wallet reconciliation, golden reproducibility, Phase 1 X0-X2 assessment, context-bundle validation, cost stress, and separate quality dimensions are production-wired. | Production | Scientific authority remains S0; golden and X class do not confer selection, promotion, or deployment eligibility. Historical runs without context bundles remain explicit legacy evidence. |
+| Experiment orchestration | Immutable local plans/events, explicit immutable claim intent, run/report/comparison composition, resume state, baseline/golden/X2 requirements, and non-empty selection-oriented gates are wired in `cli/experiments`. | Bounded production | Plans remain local orchestration pointers rather than a canonical protocol/trial/search-budget ledger. Holdout and multiple-testing authority remain absent. |
 | Scientific controls | Frozen inputs and deterministic reruns provide an excellent base. Research checks and sweeps retain ranked evidence and can create observations. | Reproducibility production; selection controls absent | No immutable train/validation/final-holdout assignment, purge/embargo, search budget, complete trial accounting, multiple-testing control, uncertainty interval, parameter-neighborhood test, or holdout reuse prevention is wired. “Walk-forward” currently describes runtime chronology, not a statistical validation protocol. |
 | Research memory | Observations, checks, hypotheses, studies, links, async jobs, and run evidence are exposed by `portal/backend/service/research/service.py`. | Production | It is evidence memory, not a promotion authority. `create_research_item` accepts statuses including `promoted`; there is no enforced transition graph or separation of proposer and approver. |
 | Mutation and audit | MCP mutations generally plan first and guarded CLI helpers use apply/confirm. `CliAuditLog` records invocation/API/artifact evidence. ADR 0048 defines the stronger target. | Partial/bounded | Mutation envelopes are not uniform; local audit can be disabled by `cli/main.py --no-audit-log`; actor, policy, request, idempotency, authorization, and durable audit identities are not enforced end to end. |
 | Promotion and deployment | Recommendations, status labels, runtime modes, and a live adapter seam exist. | Proposed/closed | No candidate/promotion state machine, immutable authorization, self-approval prevention, capital policy, evidence-driven demotion, or deployment service exists. External orders remain prohibited by ADR 0049. |
 | Derivative economics | Contract size/tick value, margin calculators, short capability, and funding/expiry presence flags exist; causal funding facts can be stored in the data plane. | Partial production | Runtime performance does not apply funding, borrow/carry, basis, maintenance liquidation, mark-price behavior, settlement, expiry/roll, collateral haircuts, or venue position limits. `MarginRequirement.maintenance_margin` is currently unset. Proxy derivatives therefore remain signal research. |
-| Provider and venue isolation | `src/data_providers/registry.py` separates provider/venue identity and feature auth; `SeriesExecutionProfile` separates source identity from execution semantics. | Production for data/instrument resolution | `VenueConfig` describes provider features, not trading rules. Do not overload it as the execution profile or infer execution credibility from `supportsOrders`. |
+| Provider and venue isolation | The provider registry remains data/identity authority, while `VenueExecutionProfile` independently owns execution rules. Generic execution modules contain no named Coinbase/Kraken branches, and every Phase 2A profile keeps external submission false. | Production for data resolution and X0-X2 simulation rules | No production trading adapter or empirically verified venue profile is authorized. `VenueConfig.supportsOrders` still cannot confer execution authority. |
 
 ## Invariants that remain non-negotiable
 
@@ -340,7 +361,8 @@ must label their claims accordingly.
 | --- | --- |
 | 0. Verified baseline | This inventory, target boundaries, taxonomies, and permission baseline become the reviewed plan. |
 | 1. Economic truth floor | Every economic run uses complete, emitted fee/slippage assumptions and receives an enforceable X0-X2 classification. |
-| 2. Venue-neutral execution contracts | Instrument facts, venue rules, fee schedules, canonical order lifecycle, and execution models become separate pinned contracts. |
+| 2A. Venue-neutral execution context | Instrument facts, venue rules, fee schedules, and bar execution models are separate immutable contracts pinned per run. |
+| 2B. Durable canonical order lifecycle | Requested/open/partial/cancel/replace/reject/expiry state replaces the immediate-fill request as the long-term order contract. |
 | 3. Book and order realism | Aggressive L2 replay, partial/residual lifecycle, resting orders, queue bounds, cancel/replace, and latency raise eligible runs to X4-X5. |
 | 4. Scientific protocol authority | Immutable splits, budgets, trial lineage, leakage controls, robustness gates, and holdout-use policy enable S1-S4 evidence. |
 | 5. Typed strategy landscape | Agents can generate bounded expression/action/intent variants without arbitrary code or venue coupling. |
@@ -351,6 +373,8 @@ must label their claims accordingly.
 | 10. Progressive autonomous promotion | Agents select, promote, demote, and deploy only within explicit evidence, policy, and capital envelopes. |
 
 ## Phase 0 — Baseline ratification
+
+**Implementation status:** Completed by human ratification on 2026-08-05.
 
 - **Objective:** Review and accept or amend this repository-grounded baseline,
   taxonomies, boundaries, and autonomy rules before implementation.
@@ -377,6 +401,10 @@ must label their claims accordingly.
   campaign must refresh its affected current-state evidence.
 
 ## Phase 1 — Mandatory economic assumptions and conservative execution
+
+**Implementation status:** Implemented on 2026-08-05. The normative current
+behavior, evidence rules, limitations, and rollback contract are documented in
+[Phase 1 Economic Execution Contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md).
 
 - **Objective:** Make bar-level economics honest before adding book complexity.
 - **Capabilities added:** A versioned resolved execution-assumption manifest;
@@ -423,7 +451,7 @@ must label their claims accordingly.
 - **Residual risks:** Bar data cannot establish true passive fills, depth, queue,
   or size capacity. X2 claims stay deliberately narrow.
 
-## Phase 2 — Venue-neutral profiles and canonical order lifecycle
+## Phase 2A — Venue-neutral profiles and resolved execution context
 
 - **Objective:** Establish the extension point that makes Coinbase, Kraken, and
   future venues implementations of the same execution contract.
@@ -431,18 +459,19 @@ must label their claims accordingly.
   `ExecutionModelArtifact`, and resolved execution context; order/TIF capability
   validation; price/quantity/notional constraints; post-only, classification,
   rejection, protection, fee currency/rounding, lifecycle mapping, and book-
-  capability contracts; append-only canonical order lifecycle.
-- **Non-goals:** Accurate queue simulation, production trading, calibration, or
-  every venue/order type.
+  capability contracts; complete per-run bundle pinning and fill/report
+  evidence. This subphase is implemented as of 2026-08-05.
+- **Non-goals:** Durable open-order lifecycle, partial fills, accurate queue
+  simulation, production trading, calibration, or every venue/order type.
 - **Dependencies:** Phase 1 quality evidence and existing provider/execution
   identity separation.
 - **Architectural changes:** Keep the data-provider registry, instrument execution
   contract, venue profile, and model/calibration registry separate. The generic
   engine asks typed questions of profiles and contains no venue-name branch.
-- **Migrations:** Adapt `SeriesExecutionProfile` into the instrument portion of
-  `ResolvedExecutionContext`. Introduce `CanonicalOrderRequest` and lifecycle
-  events while temporarily adapting existing `FillOrder` callers. Deprecate
-  `FillOrder` as the long-term name for a pre-fill request.
+- **Migrations:** `SeriesExecutionProfile` now compiles the instrument portion
+  of `ResolvedExecutionContext`. Existing `FillOrder` callers are adapted with
+  TIF, post-only, fee identity, and context evidence; `FillOrder` remains
+  explicitly deprecated as the long-term name for a durable order.
 - **Operator-visible behavior:** Run preparation shows the resolved contract
   bundle and rejects unsupported order/TIF/profile combinations before execution.
   Reports disclose profile/model versions and exact fee schedule.
@@ -451,19 +480,64 @@ must label their claims accordingly.
   cannot publish, approve, or mutate them.
 - **Required tests:** Profile conformance fixtures for at least two deliberately
   different venues; unsupported order/TIF; increments/notional; post-only
-  rejection; maker/taker classification; fee currency/rounding/tier; lifecycle
-  mapping; stable hashes; no generic venue-name condition; provider isolation.
-- **Deterministic acceptance:** Adding a second venue requires a profile and
-  adapters/fixtures, not a generic engine edit. The same canonical order trace
-  plus the same resolved context produces the same lifecycle and accounting.
+  rejection; maker/taker classification; fee currency/basis/rebate admission;
+  rounding/tier; lifecycle mapping; stable hashes; no generic venue-name
+  condition; provider isolation.
+- **Deterministic acceptance:** Met for X0-X2 bar execution: two different
+  synthetic profiles resolve through the same code; startup rejects unsupported
+  policy; identical manifests hash identically; runtime/report evidence matches
+  the pinned bundle; generic modules contain no named venue branch.
 - **Evidence artifacts:** Profile manifest and hash, capability matrix, fee
   schedule, resolved-context manifest, conformance report, and migration map.
 - **Rollout:** Start with synthetic reference profiles, then verified spot venue
   profiles for simulation. Keep external-order capability false.
-- **Rollback:** Pin a previous profile/model bundle; open orders retain their
-  original bundle. A profile cannot be edited in place.
+- **Rollback:** Pin a previous profile/model bundle. A profile cannot be edited
+  in place, and rollback cannot retain a higher unsupported X class.
 - **Residual risks:** A rules profile proves implemented semantics, not empirical
-  fill accuracy. The attained X class remains X2-X3 until book evidence exists.
+  fill accuracy. The attained class remains X0-X2 until spread/book evidence
+  exists. Synthetic fixtures are not production-verified venue profiles.
+  Non-quote fees and rebates remain unsupported until canonical accounting and
+  event schemas are deliberately versioned to settle them.
+
+## Phase 2B — Durable canonical order lifecycle
+
+- **Objective:** Replace the immediate full-fill request as the long-term order
+  abstraction without creating a parallel accounting or venue-specific engine.
+- **Capabilities added:** Immutable canonical order request and attempt identity;
+  requested, validated, accepted, open, partially filled, filled, rejected,
+  expired, canceled, and replaced transitions; residual quantity; idempotent
+  lifecycle events; context binding retained for the order's lifetime.
+- **Non-goals:** L2 matching, queue estimation, latency calibration, external
+  order submission, or an alternate fill/accounting ledger.
+- **Dependencies:** Implemented Phase 2A context and the existing canonical fill,
+  position, wallet, event, and reconciliation owners.
+- **Architectural changes:** Order state becomes append-only runtime truth;
+  fills remain canonical accounting inputs. Venue profiles map lifecycle facts
+  but do not own the generic transition graph.
+- **Migrations:** Introduce the durable request/event types behind the existing
+  `execute_order(FillOrder)` seam. Migrate entry and exit callers incrementally,
+  retaining a deterministic adapter until no immediate-fill caller remains.
+- **Operator-visible behavior:** Reports and diagnostics show accepted/open/
+  residual/canceled/rejected state and exact order/context identity.
+- **Agent permission before/after:** No new external authority. Agents may run
+  allow-listed lifecycle simulations and reject invalid transitions; they still
+  cannot publish profiles, submit orders, promote, or deploy.
+- **Required tests:** Transition table, illegal transitions, duplicate event
+  idempotency, cancel/fill races under deterministic ordering, residual
+  accounting, replacement lineage, replay equality, restart recovery, and
+  compatibility-adapter parity.
+- **Deterministic acceptance:** Replaying the same order/event trace and pinned
+  context produces identical lifecycle, fills, positions, wallet effects, and
+  reports. No partial fill can disappear or settle twice.
+- **Evidence artifacts:** Order request/attempt manifests, append-only lifecycle
+  trace, transition conformance, fill links, replay hash, and migration parity.
+- **Rollout:** First run the lifecycle beside current immediate-fill behavior as
+  comparison evidence, then make it authoritative per order type.
+- **Rollback:** Pin the previous adapter/model and stop admitting new durable
+  orders; preserve existing lifecycle evidence and deterministically drain or
+  cancel in-flight simulated orders under their original contract.
+- **Residual risks:** A correct lifecycle still does not prove book liquidity,
+  queue position, or venue latency. Those begin in Phase 3.
 
 ## Phase 3 — L2 replay, partial fills, resting orders, queue bounds, and latency
 
@@ -833,7 +907,8 @@ one's own certificate.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Current / Phase 0 | Canonical facts, runs, reports, research memory | Hypotheses, plans, recommendations | Research items and approved local experiment plans | Guarded human-approved wrappers only; no direct canonical/live state | Predefined backtest and current bar paper | Materialized reports, labeled exploratory | No agent certificate; existing golden is system reproducibility evidence | None | None |
 | Phase 1 | Plus cost/model evidence and X class | Cost/stress variants | Approved assumption-bound experiment variants | None beyond existing guarded scope | X0-X2 approved plans and stress matrix | Only compatible declared X classes | Request reproducibility/X assessment | None | None |
-| Phase 2 | Plus venue/profile/lifecycle facts | New profile/model versions | Orders bound to allow-listed immutable profiles in simulations | Cannot publish profiles/models | Profile-conformant simulation | Compatible profile/model bundles | Request conformance/X assessment | None | None |
+| Phase 2A | Plus resolved instrument/venue/fee/model manifests | Propose new profile/model versions | Orders bound to allow-listed immutable profiles in X0-X2 simulations | Cannot publish profiles/models or alter pinned bundles | Profile-conformant bar simulation | Compatible profile/model bundles | Request conformance/X assessment | None | None |
+| Phase 2B | Plus durable order/lifecycle facts | Propose bounded lifecycle trials | Create simulated orders only inside approved protocols | Cannot mutate authoritative order state directly | Durable lifecycle simulation | Lifecycle-aware comparison | Request lifecycle conformance/X assessment | None | None |
 | Phase 3 | Plus book, latency, queue, residual evidence | Book/latency scenarios | Approved X3-X5 simulation variants | Cannot change calibrations | L2/resting simulations | Capacity and execution sensitivity | Request X3-X5 assessment | None | None |
 | Phase 4 | Plus protocol, trial, budget, holdout ledger | Immutable protocols from approved templates | Authorized train/validation trials | No protocol edits; append new revision only | Within explicit search budget | Protocol-bound trials | Request S assessment; independent service decides | Auto-reject and nominate only; no deployment stage | None |
 | Phase 5 | Plus typed graph and fact lineage | Bounded strategy/action variants | Immutable allow-listed graphs within protocol ranges | No canonical in-place mutation or new code nodes | Budgeted generated variants | Evidence within family/multiplicity rules | Request X/S certificates | Nominate candidates | None |
@@ -920,24 +995,21 @@ dataset, provenance, provider-isolation, and live-closed boundaries.
 
 ## Architecture decisions requiring human review
 
-1. Approve the X/S taxonomy names, thresholds, and whether legacy `golden` is
-   renamed or retained as an explicitly scoped compatibility field.
-2. Approve the Phase 1 conservative maker rule: penetration requirement versus
-   a configured conservative fill-probability model. Touch-only should not attain
-   X2 without an explicit adverse assumption.
-3. Approve separation of instrument contract, venue execution profile, fee
-   schedule, execution model, and calibration artifact rather than extending one
-   registry into a monolith.
-4. Choose the durable protocol/trial/holdout ledger and the authority allowed to
+The 2026-08-05 ratifications retain golden as a narrow compatibility
+certificate, retain separate X/S dimensions, require strict penetration for
+X2, and approve separate instrument, venue, fee, model, and later calibration
+contracts. Remaining review decisions are:
+
+1. Choose the durable protocol/trial/holdout ledger and the authority allowed to
    unseal final holdout data.
-5. Choose promotion state names, automatic research-stage transitions, actor
+2. Choose promotion state names, automatic research-stage transitions, actor
    separation policy, and which transitions always require a human.
-6. Decide whether read-only CLI commands may retain `--no-audit-log`; mutation
+3. Decide whether read-only CLI commands may retain `--no-audit-log`; mutation
    commands must not.
-7. Before Phase 8, accept a new ADR defining calibration-only external orders,
+4. Before Phase 8, accept a new ADR defining calibration-only external orders,
    credential isolation, maximum loss/notional/count, cancellation, and kill
    behavior. ADR 0049 otherwise remains closed.
-8. Before Phase 10, approve delegated capital tiers, exposure aggregation,
+5. Before Phase 10, approve delegated capital tiers, exposure aggregation,
    rollout dwell periods, demotion/flatten policy, and human-reserved boundaries.
 
 ## Repository uncertainty and refresh points
@@ -948,9 +1020,10 @@ dataset, provenance, provider-isolation, and live-closed boundaries.
   no execution-runtime consumer of L2/order-book state was found. Under this
   roadmap's perfect-data assumption, Phase 3 still must verify the exact replay
   interface and capability contract when implementation begins.
-- Some venue fee metadata can be fetched, but account tier availability depends
-  on credentials and the runtime currently permits zero defaults. Phase 1 must
-  choose the authoritative fee snapshot and effective-time policy.
+- Phase 2A now represents fee currency, rounding, precision, tier, schedule
+  identity, version, source, and hash separately from venue rules. Credential-
+  dependent production account-tier lookup and effective-time venue schedule
+  publication remain unresolved; synthetic conformance is not venue verification.
 - The correct purge/embargo duration depends on each strategy's label/outcome
   horizon. Phase 4 must derive it from typed protocol facts rather than choose a
   universal constant.

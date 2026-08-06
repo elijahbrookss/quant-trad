@@ -490,6 +490,12 @@ def _experiment_plan(
     plan = {
         "schema_version": "experiment_plan.v1",
         "name": _required_text(request, "name"),
+        "intent": str(request.get("intent") or "exploration").strip().lower(),
+        "execution_assumptions": (
+            dict(request.get("execution_assumptions"))
+            if isinstance(request.get("execution_assumptions"), Mapping)
+            else None
+        ),
         "hypothesis": request.get("hypothesis")
         or "Compare solo spot proxy and derivative instruments through bot runtime/report truth.",
         "windows": [dict(window) for window in windows],

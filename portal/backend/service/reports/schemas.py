@@ -92,6 +92,12 @@ class ResearchTrustDTO(BaseModel):
     golden_status: str = "not_available"
     golden_candidate_status: str = "unknown"
     research_status: str = "unknown"
+    reproducibility_status: str = "unknown"
+    execution_quality_class: str = "X0"
+    scientific_quality_class: str = "S0"
+    instrument_economics_class: str = "unknown"
+    promotion_eligibility: str = "ineligible"
+    promotion_blocking_reasons: List[str] = Field(default_factory=list)
     readiness_status: str = "unknown"
     readiness_blockers: List[str] = Field(default_factory=list)
     caveats: List[str] = Field(default_factory=list)

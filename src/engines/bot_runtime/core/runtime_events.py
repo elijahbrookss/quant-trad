@@ -466,6 +466,36 @@ class EntryFilledContext(RuntimeEventContextBase):
     fee_type: Optional[str] = None
     fee_source: Optional[str] = None
     fee_version: Optional[str] = None
+    requested_price: Optional[float] = None
+    fill_price: Optional[float] = None
+    slippage_price: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    execution_model_version: Optional[str] = None
+    execution_assumption_manifest_hash: Optional[str] = None
+    passive_fill_policy: Optional[str] = None
+    execution_quality_ceiling: Optional[str] = None
+    economic_claim_intent: Optional[str] = None
+    fee_policy: Optional[str] = None
+    full_fill_assumption: Optional[bool] = None
+    market_slippage_bps: Optional[float] = None
+    stop_slippage_bps: Optional[float] = None
+    resolved_execution_context_hash: Optional[str] = None
+    instrument_execution_contract_hash: Optional[str] = None
+    venue_execution_profile_hash: Optional[str] = None
+    venue_execution_profile_id: Optional[str] = None
+    venue_execution_profile_version: Optional[str] = None
+    fee_schedule_hash: Optional[str] = None
+    fee_schedule_id: Optional[str] = None
+    fee_schedule_version: Optional[str] = None
+    fee_currency: Optional[str] = None
+    fee_rounding_mode: Optional[str] = None
+    fee_precision: Optional[int] = None
+    fee_tier: Optional[str] = None
+    execution_model_artifact_hash: Optional[str] = None
+    execution_model_artifact_id: Optional[str] = None
+    book_data_capability: Optional[str] = None
+    time_in_force: Optional[str] = None
+    post_only: Optional[bool] = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
     accounting_mode: Optional[str] = None
@@ -499,6 +529,49 @@ class EntryFilledContext(RuntimeEventContextBase):
         object.__setattr__(self, "fee_type", _optional_text(self.fee_type) or "taker")
         object.__setattr__(self, "fee_source", _optional_text(self.fee_source) or "template_or_instrument")
         object.__setattr__(self, "fee_version", _optional_text(self.fee_version))
+        for field_name in (
+            "requested_price",
+            "fill_price",
+            "slippage_price",
+            "slippage_bps",
+            "market_slippage_bps",
+            "stop_slippage_bps",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, float(value))
+        for field_name in (
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "passive_fill_policy",
+            "execution_quality_ceiling",
+            "economic_claim_intent",
+            "fee_policy",
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
+            "book_data_capability",
+            "time_in_force",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        if self.full_fill_assumption is not None and not isinstance(self.full_fill_assumption, bool):
+            raise ValueError("context.full_fill_assumption must be a boolean when provided")
+        if self.post_only is not None and not isinstance(self.post_only, bool):
+            raise ValueError("context.post_only must be a boolean when provided")
+        if self.fee_precision is not None:
+            if isinstance(self.fee_precision, bool):
+                raise ValueError("context.fee_precision must be an integer when provided")
+            object.__setattr__(self, "fee_precision", int(self.fee_precision))
         reservation_id = self.reservation_id
         if reservation_id is not None and not str(reservation_id).strip():
             raise ValueError("context.reservation_id must be non-empty when provided")
@@ -528,6 +601,36 @@ class ExitFilledContext(RuntimeEventContextBase):
     fee_type: Optional[str] = None
     fee_source: Optional[str] = None
     fee_version: Optional[str] = None
+    requested_price: Optional[float] = None
+    fill_price: Optional[float] = None
+    slippage_price: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    execution_model_version: Optional[str] = None
+    execution_assumption_manifest_hash: Optional[str] = None
+    passive_fill_policy: Optional[str] = None
+    execution_quality_ceiling: Optional[str] = None
+    economic_claim_intent: Optional[str] = None
+    fee_policy: Optional[str] = None
+    full_fill_assumption: Optional[bool] = None
+    market_slippage_bps: Optional[float] = None
+    stop_slippage_bps: Optional[float] = None
+    resolved_execution_context_hash: Optional[str] = None
+    instrument_execution_contract_hash: Optional[str] = None
+    venue_execution_profile_hash: Optional[str] = None
+    venue_execution_profile_id: Optional[str] = None
+    venue_execution_profile_version: Optional[str] = None
+    fee_schedule_hash: Optional[str] = None
+    fee_schedule_id: Optional[str] = None
+    fee_schedule_version: Optional[str] = None
+    fee_currency: Optional[str] = None
+    fee_rounding_mode: Optional[str] = None
+    fee_precision: Optional[int] = None
+    fee_tier: Optional[str] = None
+    execution_model_artifact_hash: Optional[str] = None
+    execution_model_artifact_id: Optional[str] = None
+    book_data_capability: Optional[str] = None
+    time_in_force: Optional[str] = None
+    post_only: Optional[bool] = None
     realized_pnl: Optional[float] = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
@@ -566,6 +669,49 @@ class ExitFilledContext(RuntimeEventContextBase):
         object.__setattr__(self, "fee_type", _optional_text(self.fee_type) or "taker")
         object.__setattr__(self, "fee_source", _optional_text(self.fee_source) or "template_or_instrument")
         object.__setattr__(self, "fee_version", _optional_text(self.fee_version))
+        for field_name in (
+            "requested_price",
+            "fill_price",
+            "slippage_price",
+            "slippage_bps",
+            "market_slippage_bps",
+            "stop_slippage_bps",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, float(value))
+        for field_name in (
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "passive_fill_policy",
+            "execution_quality_ceiling",
+            "economic_claim_intent",
+            "fee_policy",
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
+            "book_data_capability",
+            "time_in_force",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        if self.full_fill_assumption is not None and not isinstance(self.full_fill_assumption, bool):
+            raise ValueError("context.full_fill_assumption must be a boolean when provided")
+        if self.post_only is not None and not isinstance(self.post_only, bool):
+            raise ValueError("context.post_only must be a boolean when provided")
+        if self.fee_precision is not None:
+            if isinstance(self.fee_precision, bool):
+                raise ValueError("context.fee_precision must be an integer when provided")
+            object.__setattr__(self, "fee_precision", int(self.fee_precision))
         if self.realized_pnl is not None:
             object.__setattr__(self, "realized_pnl", float(self.realized_pnl))
         if self.event_impact_pnl is not None:
@@ -763,6 +909,51 @@ def _runtime_common_context(data: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _execution_evidence_from_dict(data: Mapping[str, Any]) -> Dict[str, Any]:
+    numeric_fields = (
+        "requested_price",
+        "fill_price",
+        "slippage_price",
+        "slippage_bps",
+        "market_slippage_bps",
+        "stop_slippage_bps",
+    )
+    text_fields = (
+        "execution_model_version",
+        "execution_assumption_manifest_hash",
+        "passive_fill_policy",
+        "execution_quality_ceiling",
+        "economic_claim_intent",
+        "fee_policy",
+        "resolved_execution_context_hash",
+        "instrument_execution_contract_hash",
+        "venue_execution_profile_hash",
+        "venue_execution_profile_id",
+        "venue_execution_profile_version",
+        "fee_schedule_hash",
+        "fee_schedule_id",
+        "fee_schedule_version",
+        "fee_currency",
+        "fee_rounding_mode",
+        "fee_tier",
+        "execution_model_artifact_hash",
+        "execution_model_artifact_id",
+        "book_data_capability",
+        "time_in_force",
+    )
+    result: Dict[str, Any] = {
+        field: float(data[field]) if data.get(field) is not None else None
+        for field in numeric_fields
+    }
+    result.update({field: _optional_text(data.get(field)) for field in text_fields})
+    result["full_fill_assumption"] = data.get("full_fill_assumption")
+    result["post_only"] = data.get("post_only")
+    result["fee_precision"] = (
+        int(data["fee_precision"]) if data.get("fee_precision") is not None else None
+    )
+    return result
+
+
 def _runtime_context_from_dict(
     event_name: RuntimeEventName,
     data: Mapping[str, Any],
@@ -861,6 +1052,7 @@ def _runtime_context_from_dict(
             fee_type=_optional_text(data.get("fee_type")),
             fee_source=_optional_text(data.get("fee_source")),
             fee_version=_optional_text(data.get("fee_version")),
+            **_execution_evidence_from_dict(data),
             base_currency=_optional_text(data.get("base_currency")),
             quote_currency=_optional_text(data.get("quote_currency")),
             accounting_mode=_optional_text(data.get("accounting_mode")),
@@ -890,6 +1082,7 @@ def _runtime_context_from_dict(
             fee_type=_optional_text(data.get("fee_type")),
             fee_source=_optional_text(data.get("fee_source")),
             fee_version=_optional_text(data.get("fee_version")),
+            **_execution_evidence_from_dict(data),
             realized_pnl=(float(data.get("realized_pnl")) if data.get("realized_pnl") is not None else None),
             base_currency=_optional_text(data.get("base_currency")),
             quote_currency=_optional_text(data.get("quote_currency")),

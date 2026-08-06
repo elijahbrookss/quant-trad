@@ -153,6 +153,23 @@ def test_report_not_ready_blocks_without_materialized_artifact_read(monkeypatch:
     assert called["materialized"] == 0
 
 
+def test_minimum_execution_quality_blocks_lower_class_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    reports = {"left": _report("left"), "right": _report("right")}
+    reports["left"]["trust"]["execution_quality_class"] = "X1"
+    reports["right"]["trust"]["execution_quality_class"] = "X2"
+    monkeypatch.setattr(comparison, "report_materialization_status", lambda run_id, **_kwargs: _ready_status(run_id))
+    monkeypatch.setattr(comparison, "materialized_run_report", lambda run_id: reports[run_id])
+
+    result = comparison.compare_materialized_run_reports(
+        "left",
+        "right",
+        minimum_execution_quality_class="X2",
+    )
+
+    assert result.can_compare is False
+    assert result.blocked_reason == "left_execution_quality_below_X2"
+
+
 def test_metric_validity_is_preserved_in_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     reports = {
         "left": _report("left", sharpe=_metric(None, valid=False, reason="zero_return_stddev", unit="ratio")),

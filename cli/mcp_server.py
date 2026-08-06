@@ -710,7 +710,17 @@ class QuantTradMcpServer:
             raise McpError("run_type must be one of backtest, sim_trade, paper, live", code=-32602)
         if run_type in {"paper", "live"} and not _optional_bool(arguments, "allow_non_backtest", False):
             raise McpError("paper/live runs require allow_non_backtest=true", code=-32602)
-        payload: dict[str, Any] = {"run_type": run_type}
+        economic_claim_intent = _required_str(arguments, "economic_claim_intent").lower()
+        if economic_claim_intent not in {"exploration", "economic", "selection", "promotion"}:
+            raise McpError("economic_claim_intent must be exploration, economic, selection, or promotion", code=-32602)
+        payload: dict[str, Any] = {
+            "run_type": run_type,
+            "economic_claim_intent": economic_claim_intent,
+        }
+        if arguments.get("execution_assumptions") is not None:
+            if not isinstance(arguments.get("execution_assumptions"), dict):
+                raise McpError("execution_assumptions must be an object", code=-32602)
+            payload["execution_assumptions"] = dict(arguments["execution_assumptions"])
         if run_type == "backtest":
             payload["dataset_id"] = _required_str(arguments, "dataset_id")
         for key in ("request_id", "execution_behavior", "duration_seconds", "market_data_stream_policy"):
@@ -1243,7 +1253,7 @@ class QuantTradMcpServer:
                 "handler": self._tool_collect_experiment,
             },
             "start_bot_run": {
-                "description": "Start a bot run against explicit admission inputs. Backtests require dataset_id; paper/live require allow_non_backtest=true; all starts require confirm=true.",
+                "description": "Start a bot run against explicit admission inputs. economic_claim_intent is immutable for the run; economic or stronger claims require a versioned execution_assumptions object. Backtests require dataset_id; paper/live require allow_non_backtest=true; all starts require confirm=true.",
                 "inputSchema": _object_schema(
                     {
                         "bot_id": _string_schema(),
@@ -1251,12 +1261,14 @@ class QuantTradMcpServer:
                         "request_id": _string_schema(),
                         "run_type": {"type": "string", "enum": ["backtest", "sim_trade", "paper", "live"], "default": "backtest"},
                         "execution_behavior": {"type": "string", "enum": ["simulated", "observe-only"]},
+                        "economic_claim_intent": {"type": "string", "enum": ["exploration", "economic", "selection", "promotion"]},
+                        "execution_assumptions": _free_object_schema(),
                         "duration_seconds": _number_schema(),
                         "market_data_stream_policy": _free_object_schema(),
                         "allow_non_backtest": _boolean_schema(default=False),
                         "confirm": _boolean_schema(default=False),
                     },
-                    required=["bot_id"],
+                    required=["bot_id", "economic_claim_intent"],
                 ),
                 "handler": self._tool_start_bot_run,
             },

@@ -14,6 +14,7 @@ tags:
 code_paths:
   - src/engines/bot_runtime
   - src/engines/bot_runtime/runtime/components/canonical_facts.py
+  - src/engines/bot_runtime/core/execution_context.py
   - portal/backend/service/bots/bot_watchdog.py
   - portal/backend/service/bots/runner.py
   - portal/backend/service/bots/runtime_control_service.py
@@ -70,11 +71,18 @@ Runtime separates source identity from execution modeling:
   market-data source.
 - `execution_semantics` describes how the bot runtime models orders, shorts,
   wallet effects, and margin for that run.
-- `SeriesExecutionProfile` is the single runtime authority for tick size,
-  contract size, tick value, fees, amount constraints, quote currency,
-  collateral model, and margin calculator.
+- `SeriesExecutionProfile` compiles current instrument, risk, margin, and legacy
+  fee inputs. The immutable run-scoped execution authority is
+  `ResolvedExecutionContext`, which separately binds the instrument contract,
+  venue rule profile, fee schedule, and execution-model artifact.
 - `LadderRiskEngine` consumes those values from the compiled profile, not from
-  bot config, ATM templates, or ad hoc instrument dictionary lookups.
+  bot config, ATM templates, or ad hoc instrument dictionary lookups. Before
+  execution, the profile is bound to and checked against its resolved context.
+- Backend startup pins the complete hashed context bundle in the run snapshot,
+  proves the compiled strategy order/TIF/post-only requirements are supported,
+  and runtime recomputes the context before constructing a series.
+- Provider registries route data and identity; they do not own execution rules.
+  Generic execution code must not branch on a venue name.
 - `proxy_derivative` is a backtest research binding where a spot source remains
   labeled as spot while runtime applies derivative-style execution semantics.
 - Startup readiness and reports must carry both source instrument type and
@@ -97,8 +105,9 @@ Runtime separates source identity from execution modeling:
 
 ATM templates declare position lifecycle intent; runtime executes that intent.
 The ATM boundary accepts only schema-v2 snake-case policy fields and rejects
-unknown or malformed input. Instrument constraints, fees, currencies, and
-margin evidence belong exclusively to `SeriesExecutionProfile`. Runtime
+unknown or malformed input. Instrument constraints, fees, currencies, venue
+rules, and model evidence belong to the resolved execution context and its
+separate component contracts. Runtime
 compiles the normalized template once into a `RuntimeExecutionPlan` before
 constructing execution state. The plan owns
 entry, initial-stop, take-profit, fixed-horizon, breakeven, trailing, and
@@ -153,9 +162,10 @@ eligibility starts with the next candle. A terminal end-of-window liquidation
 may close the position at the same final close because it uses the known close
 rather than replaying an earlier intrabar path.
 
-Execution profiles remain the fee and instrument authority. Templates may
-request order style and exit behavior, but they must not patch missing
-instrument fee, tick, quantity, or margin fields.
+Resolved execution contexts remain the fee, venue-rule, model, and instrument
+authority. Templates may request order style and exit behavior, but they must
+not patch missing instrument fee, tick, quantity, margin, venue, or model
+fields.
 
 Runtime supports only `signal_price` as the immediate entry anchor. Entry timing
 beyond current signal-close submission is not hidden behind a price anchor. A
@@ -165,8 +175,12 @@ executable.
 
 Executable fills use the sole adapter contract, `execute_order(FillOrder)`, so
 side, quantity, price, order type, liquidity role, price source, and fee rate
-are known before the adapter applies the fill. Adapters that do not implement
-the typed order surface fail before a fill can be produced.
+are known before the adapter applies the fill. Phase 2A also carries TIF,
+post-only intent, and the exact resolved context; startup and per-order
+conformance fail before a fill when the venue profile does not support them.
+Adapters that do not implement the typed order surface fail before a fill can
+be produced. `FillOrder` remains an immediate full-fill compatibility adapter;
+durable partial/open order lifecycle is not yet implemented.
 
 The runtime reads entry order semantics only from the immutable compiled plan.
 Unknown liquidity roles, exit-event types, and same-bar conflict policies are
@@ -184,6 +198,10 @@ Until that evidence exists, slippage assumptions must be explicit and bounded.
 They must not be buried inside maker/taker fee logic, stop logic, or report
 summaries. Future slippage models should attach to the execution-policy
 boundary after order type, liquidity role, and fallback behavior are known.
+
+Current X0-X2 bar assumptions and their execution-model artifact are pinned
+inside the resolved context. A valid Phase 2A context does not raise a run above
+the class justified by the Phase 1 model and fill evidence.
 
 ## Diagram Walkthrough: Runtime Hot Path
 
@@ -373,3 +391,5 @@ controls.
 - [ADR 0044: Known-at prefix invariance](../decisions/0044-enforce-known-at-prefix-invariance.md)
 - [ADR 0045: Explicit execution and exit policy](../decisions/0045-require-explicit-execution-and-exit-policy.md)
 - [ADR 0049: Keep live order submission closed](../decisions/0049-keep-live-order-submission-closed.md)
+- [Phase 2A venue-neutral execution context](PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
+- [ADR 0056: Pin venue-neutral execution contexts per run](../decisions/0056-pin-venue-neutral-execution-contexts-per-run.md)

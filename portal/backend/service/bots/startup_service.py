@@ -10,6 +10,7 @@ from typing import Any, Dict, Mapping, Protocol
 
 from core.settings import get_settings
 from engines.bot_runtime.strategy.models import Strategy
+from engines.bot_runtime.core.execution_context import ResolvedExecutionContextBundle
 
 from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
 from ..market.backtest_dataset_service import validate_backtest_dataset
@@ -69,6 +70,9 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "mode",
         "execution_mode",
         "execution_behavior",
+        "economic_claim_intent",
+        "execution_assumptions",
+        "resolved_execution_context_bundle",
         "run_type",
         "playback_speed",
         "backtest_start",
@@ -180,12 +184,26 @@ class BotStartupOrchestrator:
             ctx.strategy_snapshot = strategy
             ctx.wallet_config = dict(artifacts.get("wallet_config") or {})
             ctx.runtime_readiness = dict(artifacts.get("runtime_readiness") or {})
+            raw_context_bundle = artifacts.get("resolved_execution_context_bundle")
+            if raw_context_bundle is not None:
+                if not isinstance(raw_context_bundle, Mapping):
+                    raise TypeError("startup artifacts resolved_execution_context_bundle must be a mapping")
+                context_bundle = ResolvedExecutionContextBundle.from_dict(raw_context_bundle)
+                ctx.bot_record["resolved_execution_context_bundle"] = context_bundle.to_dict()
+            else:
+                context_bundle = None
             symbols = list(ctx.runtime_readiness.get("symbols") or [])
             ctx.runtime_dependency_metadata = {
                 "symbols": symbols,
                 "symbol_count": len(symbols),
                 "worker_count_planned": len(symbols),
                 "profiles": list(ctx.runtime_readiness.get("profiles") or []),
+                "resolved_execution_context_bundle_hash": (
+                    context_bundle.bundle_hash if context_bundle is not None else None
+                ),
+                "resolved_execution_context_count": (
+                    len(context_bundle.contexts) if context_bundle is not None else 0
+                ),
             }
             ctx.bot_record["wallet_config"] = dict(ctx.wallet_config)
 
@@ -385,6 +403,9 @@ class BotStartupOrchestrator:
             start_request_overrides["profile"] = True
         if execution_behavior:
             start_request_overrides["execution_behavior"] = execution_behavior
+        start_request_overrides["economic_claim_intent"] = ctx.bot_record.get("economic_claim_intent")
+        if isinstance(ctx.bot_record.get("execution_assumptions"), Mapping):
+            start_request_overrides["execution_assumptions"] = dict(ctx.bot_record["execution_assumptions"])
         if duration_seconds is not None:
             start_request_overrides["duration_seconds"] = duration_seconds
         if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
@@ -413,6 +434,11 @@ class BotStartupOrchestrator:
                 "config_snapshot": {
                     "execution_mode": execution_mode,
                     "execution_behavior": execution_behavior,
+                    "economic_claim_intent": ctx.bot_record.get("economic_claim_intent"),
+                    "execution_assumptions": dict(ctx.bot_record.get("execution_assumptions") or {}),
+                    "resolved_execution_context_bundle": dict(
+                        ctx.bot_record.get("resolved_execution_context_bundle") or {}
+                    ),
                     "dataset_binding": dict(ctx.dataset_binding),
                     "request_id": ctx.request_id or None,
                     "start_request": {

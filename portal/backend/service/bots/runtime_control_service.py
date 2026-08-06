@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
 
 from core.settings import get_settings
+from engines.bot_runtime.core.execution_assumptions import (
+    normalize_economic_claim_intent,
+    resolve_execution_assumptions,
+)
 
 from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .bot_state_projection import project_bot_state
@@ -68,7 +72,10 @@ def _start_config_projection(bot: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     payload = dict(bot or {})
-    for key, value in dict(overrides or {}).items():
+    supplied = dict(overrides or {})
+    if "economic_claim_intent" not in supplied and not payload.get("economic_claim_intent"):
+        raise ValueError("economic_claim_intent is required for every new run")
+    for key, value in supplied.items():
         if value in (None, ""):
             continue
         if key == "execution_behavior":
@@ -87,8 +94,41 @@ def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] 
             payload["market_data_stream_policy"] = normalize_market_data_stream_policy(
                 value if isinstance(value, Mapping) else {}
             )
+        elif key in {"economic_claim_intent", "execution_assumptions"}:
+            continue
         else:
             payload[key] = value
+    intent = normalize_economic_claim_intent(
+        supplied.get("economic_claim_intent") or payload.get("economic_claim_intent")
+    )
+    raw_assumptions = (
+        supplied.get("execution_assumptions")
+        if isinstance(supplied.get("execution_assumptions"), Mapping)
+        else payload.get("execution_assumptions")
+        if isinstance(payload.get("execution_assumptions"), Mapping)
+        else None
+    )
+    if "execution_assumptions" in supplied and supplied.get("execution_assumptions") is not None and not isinstance(
+        supplied.get("execution_assumptions"), Mapping
+    ):
+        raise ValueError("execution_assumptions must be an object")
+    assumption_source = "run_start_request"
+    supplied_manifest_hash = ""
+    if raw_assumptions:
+        supplied_manifest_hash = str(raw_assumptions.get("manifest_hash") or "").strip()
+        if supplied_manifest_hash:
+            assumption_source = str(raw_assumptions.get("source") or "").strip()
+            if not assumption_source:
+                raise ValueError("resolved execution_assumptions with manifest_hash require source")
+    resolved_assumptions = resolve_execution_assumptions(
+        intent,
+        raw_assumptions,
+        source=assumption_source,
+    )
+    if supplied_manifest_hash and supplied_manifest_hash != resolved_assumptions.manifest_hash:
+        raise ValueError("execution_assumption_manifest_hash_mismatch")
+    payload["economic_claim_intent"] = intent
+    payload["execution_assumptions"] = resolved_assumptions.to_dict()
     if "execution_behavior" not in payload:
         payload["execution_behavior"] = execution_behavior_from_bot(payload)
     if bool(payload.get("profile")) and str(payload.get("run_type") or "").strip().lower() != "backtest":

@@ -1248,8 +1248,12 @@ def _candle_continuity_status(candle_gaps: Mapping[str, Any]) -> str:
 
 
 def _research_status(readiness: Mapping[str, Any]) -> str:
-    if str(readiness.get("golden_candidate_status") or "").strip().lower() == "certified":
-        return "research_valid"
+    reproducible = str(readiness.get("golden_candidate_status") or "").strip().lower() == "certified"
+    execution_class = str(readiness.get("execution_quality_class") or "X0").upper()
+    if reproducible and execution_class in {"X1", "X2", "X3", "X4", "X5", "X6", "X7"}:
+        return "reproducible_economic_evidence"
+    if reproducible:
+        return "reproducible"
     if readiness.get("results_ready") and readiness.get("safe_to_compare"):
         return "research_valid_with_caveats"
     if readiness.get("blocking_reasons") or readiness.get("golden_blocking_reasons"):
@@ -1295,6 +1299,12 @@ def _research_trust(dataset: Mapping[str, Any], events: Sequence[Mapping[str, An
         "golden_status": readiness.get("golden_candidate_status") or "not_available",
         "golden_candidate_status": readiness.get("golden_candidate_status") or "unknown",
         "research_status": _research_status(readiness),
+        "reproducibility_status": readiness.get("reproducibility_status") or "unknown",
+        "execution_quality_class": readiness.get("execution_quality_class") or "X0",
+        "scientific_quality_class": readiness.get("scientific_quality_class") or "S0",
+        "instrument_economics_class": readiness.get("instrument_economics_class") or "unknown",
+        "promotion_eligibility": readiness.get("promotion_eligibility") or "ineligible",
+        "promotion_blocking_reasons": list(readiness.get("promotion_blocking_reasons") or []),
         "readiness_status": readiness.get("results_status") or readiness.get("dataset_status") or "unknown",
         "readiness_blockers": list(readiness.get("blocking_reasons") or []) + list(readiness.get("golden_blocking_reasons") or []),
         "caveats": list(readiness.get("caveats") or []),

@@ -1119,6 +1119,36 @@ class ExecutionFillContext(BotLensSeriesContextBase):
     fee_type: Optional[str] = None
     fee_source: Optional[str] = None
     fee_version: Optional[str] = None
+    requested_price: Optional[float] = None
+    fill_price: Optional[float] = None
+    slippage_price: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    execution_model_version: Optional[str] = None
+    execution_assumption_manifest_hash: Optional[str] = None
+    passive_fill_policy: Optional[str] = None
+    execution_quality_ceiling: Optional[str] = None
+    economic_claim_intent: Optional[str] = None
+    fee_policy: Optional[str] = None
+    full_fill_assumption: Optional[bool] = None
+    market_slippage_bps: Optional[float] = None
+    stop_slippage_bps: Optional[float] = None
+    resolved_execution_context_hash: Optional[str] = None
+    instrument_execution_contract_hash: Optional[str] = None
+    venue_execution_profile_hash: Optional[str] = None
+    venue_execution_profile_id: Optional[str] = None
+    venue_execution_profile_version: Optional[str] = None
+    fee_schedule_hash: Optional[str] = None
+    fee_schedule_id: Optional[str] = None
+    fee_schedule_version: Optional[str] = None
+    fee_currency: Optional[str] = None
+    fee_rounding_mode: Optional[str] = None
+    fee_precision: Optional[int] = None
+    fee_tier: Optional[str] = None
+    execution_model_artifact_hash: Optional[str] = None
+    execution_model_artifact_id: Optional[str] = None
+    book_data_capability: Optional[str] = None
+    time_in_force: Optional[str] = None
+    post_only: Optional[bool] = None
     realized_pnl: Optional[float] = None
     event_impact_pnl: Optional[float] = None
     trade_net_pnl: Optional[float] = None
@@ -1169,7 +1199,18 @@ class ExecutionFillContext(BotLensSeriesContextBase):
                 field_name,
                 _finite_float(getattr(self, field_name), field_name=f"context.{field_name}"),
             )
-        for field_name in ("fee_rate", "realized_pnl", "event_impact_pnl", "trade_net_pnl"):
+        for field_name in (
+            "fee_rate",
+            "realized_pnl",
+            "event_impact_pnl",
+            "trade_net_pnl",
+            "requested_price",
+            "fill_price",
+            "slippage_price",
+            "slippage_bps",
+            "market_slippage_bps",
+            "stop_slippage_bps",
+        ):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(
@@ -1198,6 +1239,38 @@ class ExecutionFillContext(BotLensSeriesContextBase):
         object.__setattr__(self, "fee_type", _optional_text(self.fee_type))
         object.__setattr__(self, "fee_source", _optional_text(self.fee_source))
         object.__setattr__(self, "fee_version", _optional_text(self.fee_version))
+        for field_name in (
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "passive_fill_policy",
+            "execution_quality_ceiling",
+            "economic_claim_intent",
+            "fee_policy",
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
+            "book_data_capability",
+            "time_in_force",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        if self.full_fill_assumption is not None and not isinstance(self.full_fill_assumption, bool):
+            raise ValueError("context.full_fill_assumption must be a boolean when provided")
+        if self.post_only is not None and not isinstance(self.post_only, bool):
+            raise ValueError("context.post_only must be a boolean when provided")
+        if self.fee_precision is not None:
+            if isinstance(self.fee_precision, bool):
+                raise ValueError("context.fee_precision must be an integer when provided")
+            object.__setattr__(self, "fee_precision", int(self.fee_precision))
         required_delta = _mapping_or_none(self.required_delta)
         wallet_delta = _mapping(self.wallet_delta)
         wallet_before = _mapping(self.wallet_before)
@@ -2099,6 +2172,36 @@ _EXECUTION_FILL_CONTEXT_KEYS = _SERIES_CONTEXT_BASE_KEYS | frozenset(
         "fee_type",
         "fee_source",
         "fee_version",
+        "requested_price",
+        "fill_price",
+        "slippage_price",
+        "slippage_bps",
+        "execution_model_version",
+        "execution_assumption_manifest_hash",
+        "passive_fill_policy",
+        "execution_quality_ceiling",
+        "economic_claim_intent",
+        "fee_policy",
+        "full_fill_assumption",
+        "market_slippage_bps",
+        "stop_slippage_bps",
+        "resolved_execution_context_hash",
+        "instrument_execution_contract_hash",
+        "venue_execution_profile_hash",
+        "venue_execution_profile_id",
+        "venue_execution_profile_version",
+        "fee_schedule_hash",
+        "fee_schedule_id",
+        "fee_schedule_version",
+        "fee_currency",
+        "fee_rounding_mode",
+        "fee_precision",
+        "fee_tier",
+        "execution_model_artifact_hash",
+        "execution_model_artifact_id",
+        "book_data_capability",
+        "time_in_force",
+        "post_only",
         "realized_pnl",
         "event_impact_pnl",
         "trade_net_pnl",
@@ -2319,6 +2422,36 @@ def deserialize_botlens_domain_context(
             fee_type=context_payload.get("fee_type"),
             fee_source=context_payload.get("fee_source"),
             fee_version=context_payload.get("fee_version"),
+            requested_price=_optional_float_field(context_payload, "requested_price", field_name="context.requested_price"),
+            fill_price=_optional_float_field(context_payload, "fill_price", field_name="context.fill_price"),
+            slippage_price=_optional_float_field(context_payload, "slippage_price", field_name="context.slippage_price"),
+            slippage_bps=_optional_float_field(context_payload, "slippage_bps", field_name="context.slippage_bps"),
+            execution_model_version=context_payload.get("execution_model_version"),
+            execution_assumption_manifest_hash=context_payload.get("execution_assumption_manifest_hash"),
+            passive_fill_policy=context_payload.get("passive_fill_policy"),
+            execution_quality_ceiling=context_payload.get("execution_quality_ceiling"),
+            economic_claim_intent=context_payload.get("economic_claim_intent"),
+            fee_policy=context_payload.get("fee_policy"),
+            full_fill_assumption=context_payload.get("full_fill_assumption"),
+            market_slippage_bps=_optional_float_field(context_payload, "market_slippage_bps", field_name="context.market_slippage_bps"),
+            stop_slippage_bps=_optional_float_field(context_payload, "stop_slippage_bps", field_name="context.stop_slippage_bps"),
+            resolved_execution_context_hash=context_payload.get("resolved_execution_context_hash"),
+            instrument_execution_contract_hash=context_payload.get("instrument_execution_contract_hash"),
+            venue_execution_profile_hash=context_payload.get("venue_execution_profile_hash"),
+            venue_execution_profile_id=context_payload.get("venue_execution_profile_id"),
+            venue_execution_profile_version=context_payload.get("venue_execution_profile_version"),
+            fee_schedule_hash=context_payload.get("fee_schedule_hash"),
+            fee_schedule_id=context_payload.get("fee_schedule_id"),
+            fee_schedule_version=context_payload.get("fee_schedule_version"),
+            fee_currency=context_payload.get("fee_currency"),
+            fee_rounding_mode=context_payload.get("fee_rounding_mode"),
+            fee_precision=context_payload.get("fee_precision"),
+            fee_tier=context_payload.get("fee_tier"),
+            execution_model_artifact_hash=context_payload.get("execution_model_artifact_hash"),
+            execution_model_artifact_id=context_payload.get("execution_model_artifact_id"),
+            book_data_capability=context_payload.get("book_data_capability"),
+            time_in_force=context_payload.get("time_in_force"),
+            post_only=context_payload.get("post_only"),
             realized_pnl=_optional_float_field(
                 context_payload,
                 "realized_pnl",
@@ -2987,6 +3120,80 @@ def build_botlens_domain_events_from_fact_batch(
                     fee_type=_optional_text(decision_context.get("fee_type")),
                     fee_source=_optional_text(decision_context.get("fee_source")),
                     fee_version=_optional_text(decision_context.get("fee_version")),
+                    requested_price=_optional_float_field(
+                        decision_context,
+                        "requested_price",
+                        field_name="decision.context.requested_price",
+                    ),
+                    fill_price=_optional_float_field(
+                        decision_context,
+                        "fill_price",
+                        field_name="decision.context.fill_price",
+                    ),
+                    slippage_price=_optional_float_field(
+                        decision_context,
+                        "slippage_price",
+                        field_name="decision.context.slippage_price",
+                    ),
+                    slippage_bps=_optional_float_field(
+                        decision_context,
+                        "slippage_bps",
+                        field_name="decision.context.slippage_bps",
+                    ),
+                    execution_model_version=_optional_text(decision_context.get("execution_model_version")),
+                    execution_assumption_manifest_hash=_optional_text(
+                        decision_context.get("execution_assumption_manifest_hash")
+                    ),
+                    passive_fill_policy=_optional_text(decision_context.get("passive_fill_policy")),
+                    execution_quality_ceiling=_optional_text(decision_context.get("execution_quality_ceiling")),
+                    economic_claim_intent=_optional_text(decision_context.get("economic_claim_intent")),
+                    fee_policy=_optional_text(decision_context.get("fee_policy")),
+                    full_fill_assumption=decision_context.get("full_fill_assumption"),
+                    market_slippage_bps=_optional_float_field(
+                        decision_context,
+                        "market_slippage_bps",
+                        field_name="decision.context.market_slippage_bps",
+                    ),
+                    stop_slippage_bps=_optional_float_field(
+                        decision_context,
+                        "stop_slippage_bps",
+                        field_name="decision.context.stop_slippage_bps",
+                    ),
+                    resolved_execution_context_hash=_optional_text(
+                        decision_context.get("resolved_execution_context_hash")
+                    ),
+                    instrument_execution_contract_hash=_optional_text(
+                        decision_context.get("instrument_execution_contract_hash")
+                    ),
+                    venue_execution_profile_hash=_optional_text(
+                        decision_context.get("venue_execution_profile_hash")
+                    ),
+                    venue_execution_profile_id=_optional_text(
+                        decision_context.get("venue_execution_profile_id")
+                    ),
+                    venue_execution_profile_version=_optional_text(
+                        decision_context.get("venue_execution_profile_version")
+                    ),
+                    fee_schedule_hash=_optional_text(decision_context.get("fee_schedule_hash")),
+                    fee_schedule_id=_optional_text(decision_context.get("fee_schedule_id")),
+                    fee_schedule_version=_optional_text(
+                        decision_context.get("fee_schedule_version")
+                    ),
+                    fee_currency=_optional_text(decision_context.get("fee_currency")),
+                    fee_rounding_mode=_optional_text(decision_context.get("fee_rounding_mode")),
+                    fee_precision=decision_context.get("fee_precision"),
+                    fee_tier=_optional_text(decision_context.get("fee_tier")),
+                    execution_model_artifact_hash=_optional_text(
+                        decision_context.get("execution_model_artifact_hash")
+                    ),
+                    execution_model_artifact_id=_optional_text(
+                        decision_context.get("execution_model_artifact_id")
+                    ),
+                    book_data_capability=_optional_text(
+                        decision_context.get("book_data_capability")
+                    ),
+                    time_in_force=_optional_text(decision_context.get("time_in_force")),
+                    post_only=decision_context.get("post_only"),
                     realized_pnl=_optional_float_field(
                         decision_context,
                         "realized_pnl",

@@ -6,6 +6,12 @@ from typing import Any
 
 import pytest
 
+from engines.bot_runtime.core.execution_assumptions import resolve_execution_assumptions
+from engines.bot_runtime.core.execution_context import (
+    build_execution_context_bundle,
+    resolve_execution_context,
+)
+from engines.bot_runtime.core.execution_profile import compile_series_execution_profile
 from portal.backend.service.reports import report_data, run_research_dataset
 
 
@@ -1076,6 +1082,99 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
     assert dataset["execution"]["execution_mode"] == "full"
     assert dataset["execution"]["slippage"]["total_slippage_cost"] == 0.0
     assert "per_fill_slippage_facts_unavailable" in dataset["readiness"]["caveats"]
+
+
+def test_dataset_certifies_x2_only_from_pinned_economic_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = copy.deepcopy(_run())
+    assumptions = resolve_execution_assumptions(
+        "selection",
+        {
+            "schema_version": "execution_assumptions.v1",
+            "model_version": "conservative_bar.v1",
+            "market_slippage_bps": 5.0,
+            "stop_slippage_bps": 10.0,
+            "passive_fill_policy": "strict_penetration",
+            "fee_policy": "instrument_resolved",
+            "full_fill_assumption": True,
+            "cost_stress_scenarios": [
+                {
+                    "id": "moderate",
+                    "additional_slippage_bps": 5.0,
+                    "fee_multiplier": 1.25,
+                }
+            ],
+        },
+        source="run_start_request",
+    ).to_dict()
+    run["config_snapshot"]["economic_claim_intent"] = "selection"
+    run["config_snapshot"]["execution_assumptions"] = assumptions
+    events = _events()
+    events.extend(
+        [
+            _event(
+                14,
+                "ENTRY_FILLED",
+                {
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 100.0,
+                    "fill_price": 100.05,
+                    "slippage_bps": 5.0,
+                    "fee_paid": 0.10,
+                    "fee_rate": 0.001,
+                    "fee_type": "taker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "execution_model_version": assumptions["model_version"],
+                    "execution_assumption_manifest_hash": assumptions["manifest_hash"],
+                    "economic_claim_intent": "selection",
+                    "full_fill_assumption": True,
+                },
+            ),
+            _event(
+                15,
+                "EXIT_FILLED",
+                {
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 110.0,
+                    "fill_price": 110.0,
+                    "slippage_bps": 0.0,
+                    "fee_paid": 0.11,
+                    "fee_rate": 0.001,
+                    "fee_type": "maker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "execution_model_version": assumptions["model_version"],
+                    "execution_assumption_manifest_hash": assumptions["manifest_hash"],
+                    "economic_claim_intent": "selection",
+                    "full_fill_assumption": True,
+                },
+            ),
+        ]
+    )
+
+    dataset = _build(monkeypatch, run=run, events=events)
+
+    assert dataset["execution"]["quality"]["execution_quality_class"] == "X2"
+    assert dataset["execution"]["quality"]["blocking_reasons"] == []
+    assert dataset["execution"]["quality"]["assumption_manifest_hash"] == assumptions["manifest_hash"]
+    assert dataset["execution"]["cost_stress"]["status"] == "available"
+    assert dataset["execution"]["cost_stress"]["scenario_count"] == 1
+    assert len(dataset["execution"]["cost_stress"]["evidence_hash"]) == 64
+    assert dataset["readiness"]["execution_quality_class"] == "X2"
+    assert dataset["readiness"]["scientific_quality_class"] == "S0"
+    assert dataset["readiness"]["promotion_eligibility"] == "ineligible"
+    assert "scientific_quality_below_S3" in dataset["readiness"]["promotion_blocking_reasons"]
+
+    events[-1]["payload"]["context"].pop("execution_assumption_manifest_hash")
+    downgraded = _build(monkeypatch, run=run, events=events)
+    assert downgraded["execution"]["quality"]["execution_quality_class"] == "X0"
+    assert "per_fill_execution_evidence_incomplete" in downgraded["execution"]["quality"]["blocking_reasons"]
     assert dataset["execution"]["intrabar_fallback_count"] == 2
     assert dataset["execution"]["fallback_reason_distribution"] == {
         "ambiguous_1m_candle": 1,
@@ -1083,6 +1182,121 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
     }
     diagnostic_codes = {item["code"] for item in dataset["diagnostics"]["items"]}
     assert "intrabar_fallback_pessimistic" in diagnostic_codes
+
+
+def test_dataset_validates_phase_2a_context_bundle_and_per_fill_component_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = copy.deepcopy(_run())
+    assumptions = resolve_execution_assumptions(
+        "selection",
+        {
+            "model_version": "conservative_bar.v1",
+            "market_slippage_bps": 5.0,
+            "stop_slippage_bps": 10.0,
+            "passive_fill_policy": "strict_penetration",
+            "fee_policy": "instrument_resolved",
+            "full_fill_assumption": True,
+            "cost_stress_scenarios": [
+                {"id": "moderate", "additional_slippage_bps": 5.0, "fee_multiplier": 1.25}
+            ],
+        },
+        source="run_start_request",
+    )
+    instrument = {
+        "id": "btc",
+        "symbol": "BTC",
+        "instrument_type": "spot",
+        "datasource": "fixture",
+        "exchange": "fixture-venue",
+        "tick_size": 0.01,
+        "contract_size": 1.0,
+        "tick_value": 0.01,
+        "base_currency": "BTC",
+        "quote_currency": "USD",
+        "min_order_size": 0.001,
+        "qty_step": 0.001,
+        "min_notional": 1.0,
+        "maker_fee_rate": 0.001,
+        "taker_fee_rate": 0.001,
+        "fee_source": "instrument_contract",
+        "fee_schedule_version": "fee-v1",
+    }
+    profile = compile_series_execution_profile(instrument)
+    context = resolve_execution_context(
+        profile,
+        assumptions,
+        instrument_payload=instrument,
+        source="backend_startup_resolution",
+    )
+    bundle = build_execution_context_bundle([context])
+    run["config_snapshot"]["economic_claim_intent"] = "selection"
+    run["config_snapshot"]["execution_assumptions"] = assumptions.to_dict()
+    run["config_snapshot"]["resolved_execution_context_bundle"] = bundle.to_dict()
+    evidence = {
+        **context.evidence_metadata(),
+        "execution_model_version": assumptions.model_version,
+        "execution_assumption_manifest_hash": assumptions.manifest_hash,
+        "economic_claim_intent": "selection",
+        "full_fill_assumption": True,
+        "time_in_force": "gtc",
+    }
+    events = _events()
+    events.extend(
+        [
+            _event(
+                14,
+                "ENTRY_FILLED",
+                {
+                    **evidence,
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 100.0,
+                    "fill_price": 100.05,
+                    "slippage_bps": 5.0,
+                    "fee_paid": 0.10,
+                    "fee_rate": 0.001,
+                    "fee_type": "taker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "post_only": False,
+                },
+            ),
+            _event(
+                15,
+                "EXIT_FILLED",
+                {
+                    **evidence,
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 110.0,
+                    "fill_price": 110.0,
+                    "slippage_bps": 0.0,
+                    "fee_paid": 0.11,
+                    "fee_rate": 0.001,
+                    "fee_type": "maker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "post_only": False,
+                },
+            ),
+        ]
+    )
+
+    dataset = _build(monkeypatch, run=run, events=events)
+
+    quality = dataset["execution"]["quality"]
+    assert quality["execution_quality_class"] == "X2"
+    assert quality["resolved_execution_context_status"] == "available"
+    assert quality["resolved_execution_context_bundle_hash"] == bundle.bundle_hash
+    assert quality["resolved_execution_context_evidence"]["contexts"][0]["context_hash"] == context.context_hash
+
+    events[-1]["payload"]["context"]["fee_schedule_hash"] = "0" * 64
+    downgraded = _build(monkeypatch, run=run, events=events)
+    assert downgraded["execution"]["quality"]["execution_quality_class"] == "X0"
+    assert "per_fill_execution_context_component_mismatch" in downgraded["execution"]["quality"]["blocking_reasons"]
 
 
 def test_dataset_enriches_trade_entry_risk_excursion_and_fallback_flags(monkeypatch: pytest.MonkeyPatch) -> None:

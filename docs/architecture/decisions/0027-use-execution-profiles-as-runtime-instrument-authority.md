@@ -12,6 +12,7 @@ tags:
   - reporting
 code_paths:
   - src/engines/bot_runtime/core/execution_profile.py
+  - src/engines/bot_runtime/core/execution_context.py
   - src/engines/bot_runtime/core/domain/engine.py
   - src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py
   - portal/backend/service/bots/config_service.py
@@ -41,8 +42,8 @@ contract saying which fields governed execution.
 
 ## Decision
 
-Use `SeriesExecutionProfile` as the single runtime authority for instrument
-execution fields.
+Use `SeriesExecutionProfile` as the runtime compiler and compatibility authority
+for instrument execution fields.
 
 The canonical instrument record owns source identity:
 
@@ -63,6 +64,13 @@ constraints, quote currency, and margin model from the compiled execution
 profile. ATM templates remain strategy/risk templates and must not carry
 instrument execution metadata.
 
+Phase 2A addendum, accepted 2026-08-05: the immutable run-scoped authority is
+now `ResolvedExecutionContext`. `SeriesExecutionProfile` compiles the
+instrument, risk, margin, and legacy fee inputs used to resolve that context;
+it must not expand into a venue, fee-tier, fill-model, and calibration monolith.
+Venue rules, fee schedules, and model evidence have separate versioned and
+hashed contracts, as recorded by ADR 0056.
+
 Bot startup no longer applies a bot-level spot/derivative source gate. It
 resolves each linked canonical instrument, chooses or honors explicit
 `execution_semantics`, compiles a profile, and fails loud if the profile cannot
@@ -82,6 +90,8 @@ manual SQL.
 - Spot proxy backtests remain truthful: source type is spot, execution semantics
   is proxy-derivative, and report caveats can say so.
 - Execution field reads have one home, reducing template and risk-engine drift.
+- Existing profile callers remain compatible, while new venue, fee, and model
+  facts flow through the pinned resolved context.
 - A missing proxy margin rate, proxy contract field, or derivative margin model
   is an admission failure, not an implicit spot fallback.
 - Paper/live support for proxy semantics remains a future execution-adapter
@@ -92,3 +102,4 @@ manual SQL.
 - [Runtime Contract](../../contracts/platform/01_runtime_contract.md)
 - [Execution Runtime Boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [Data Boundary](../data/DATA_BOUNDARY.md)
+- [ADR 0056: Pin venue-neutral execution contexts per run](0056-pin-venue-neutral-execution-contexts-per-run.md)

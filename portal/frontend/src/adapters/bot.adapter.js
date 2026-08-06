@@ -82,7 +82,10 @@ export async function startBot(botId) {
       : `start-${Date.now()}-${Math.random().toString(16).slice(2)}`
   const payload = await request(`/api/bots/${botId}/start`, {
     method: 'POST',
-    body: JSON.stringify({ request_id: requestId }),
+    body: JSON.stringify({
+      request_id: requestId,
+      economic_claim_intent: 'exploration',
+    }),
   })
   return payload?.bot || payload
 }

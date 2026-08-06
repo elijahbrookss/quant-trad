@@ -60,6 +60,7 @@ class _FakeConfigService:
                 "snapshot_interval_ms": 1000,
                 "run_type": "backtest",
                 "dataset_id": "mds-test-1",
+                "economic_claim_intent": "exploration",
             }
         ]
 
@@ -325,6 +326,12 @@ def test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot
 
     assert run["run_type"] == "paper"
     assert run["config_snapshot"]["execution_behavior"] == "observe-only"
+    assert run["config_snapshot"]["economic_claim_intent"] == "exploration"
+    assumptions = run["config_snapshot"]["execution_assumptions"]
+    assert assumptions["economic_claim_intent"] == "exploration"
+    assert assumptions["schema_version"] == "execution_assumptions.v1"
+    assert len(assumptions["manifest_hash"]) == 64
+    assert run["config_snapshot"]["bot"]["execution_assumptions"] == assumptions
     assert run["config_snapshot"]["bot"]["execution_behavior"] == "observe-only"
     assert run["config_snapshot"]["bot"]["market_data_stream_policy"]["heartbeat_stale_seconds"] == 10.0
     assert "status" not in run["config_snapshot"]["bot"]

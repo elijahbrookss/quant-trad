@@ -287,6 +287,8 @@ class EntryExecutionCoordinator:
                 order_type="market",
                 requested_price=float(candle.close),
                 contract_size=float(getattr(pending.intent, "contract_size", 1.0) or 1.0),
+                time_in_force="gtc",
+                post_only=False,
                 limit_params=None,
                 metadata=dict(pending.intent.metadata),
             )

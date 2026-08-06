@@ -117,6 +117,49 @@ def _fill_currency_pair(
     return base_currency, quote_currency
 
 
+_EXECUTION_EVIDENCE_FIELDS = (
+    "requested_price",
+    "fill_price",
+    "slippage_price",
+    "slippage_bps",
+    "execution_model_version",
+    "execution_assumption_manifest_hash",
+    "passive_fill_policy",
+    "execution_quality_ceiling",
+    "economic_claim_intent",
+    "fee_policy",
+    "full_fill_assumption",
+    "market_slippage_bps",
+    "stop_slippage_bps",
+    "resolved_execution_context_hash",
+    "instrument_execution_contract_hash",
+    "venue_execution_profile_hash",
+    "venue_execution_profile_id",
+    "venue_execution_profile_version",
+    "fee_schedule_hash",
+    "fee_schedule_id",
+    "fee_schedule_version",
+    "fee_currency",
+    "fee_rounding_mode",
+    "fee_precision",
+    "fee_tier",
+    "execution_model_artifact_hash",
+    "execution_model_artifact_id",
+    "book_data_capability",
+    "time_in_force",
+    "post_only",
+)
+
+
+def _execution_evidence_fields(source: Mapping[str, Any]) -> Dict[str, Any]:
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
+    return {
+        key: metadata.get(key) if key in metadata else source.get(key)
+        for key in _EXECUTION_EVIDENCE_FIELDS
+        if key in metadata or key in source
+    }
+
+
 class RuntimeEventsMixin:
     def _wallet_initialization_is_container_owned(self) -> bool:
         return str(self.config.get("wallet_initialization_owner") or "").strip().lower() == "container"
@@ -906,6 +949,7 @@ class RuntimeEventsMixin:
             wallet_eval_seq=wallet_fill_metadata.get("wallet_eval_seq"),
             position_commit_seq=wallet_fill_metadata.get("position_commit_seq"),
             reason_code=ReasonCode.EXEC_ENTRY_FILLED if not missing_parent_hint else ReasonCode.RUNTIME_PARENT_MISSING,
+            **_execution_evidence_fields(entry_outcome),
         )
         return self._emit_runtime_event(
             event_name=RuntimeEventName.ENTRY_FILLED,
@@ -1085,6 +1129,7 @@ class RuntimeEventsMixin:
             position_commit_seq=wallet_fill_metadata.get("position_commit_seq"),
             event_subtype=subtype,
             reason_code=exit_reason,
+            **_execution_evidence_fields(event),
         )
         return self._emit_runtime_event(
             event_name=RuntimeEventName.EXIT_FILLED,

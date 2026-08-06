@@ -238,7 +238,21 @@ def evaluate_pass_gates(
     comparison_refs: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
     gate_results: list[dict[str, Any]] = []
-    for gate in dict(plan.get("pass_gates") or {}).get("gates") or []:
+    configured_gates = list(dict(plan.get("pass_gates") or {}).get("gates") or [])
+    if not configured_gates and str(plan.get("intent") or "").lower() in {"selection", "promotion"}:
+        gate_results.append(
+            {
+                "gate_id": "mandatory_non_empty_gate_set",
+                "gate_type": "protocol_guard",
+                "status": "FAILED",
+                "observed": 0,
+                "threshold": 1,
+                "operator": ">=",
+                "reason": "selection_or_promotion_requires_non_empty_pass_gates",
+                "details": None,
+            }
+        )
+    for gate in configured_gates:
         gate_type = str(gate.get("type") or "")
         if gate_type == "candidate_metric_threshold":
             gate_results.extend(_evaluate_candidate_metric_threshold(gate, plan=plan, summaries=summaries))
