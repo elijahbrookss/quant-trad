@@ -265,7 +265,7 @@ def resolve_execution_assumptions(
         if not market_bps or not stop_bps:
             raise ValueError("economic claims require non-zero market_slippage_bps and stop_slippage_bps")
         if not full_fill:
-            raise ValueError("Phase 1 economic claims must disclose full_fill_assumption=true")
+            raise ValueError("economic claims must disclose full_fill_assumption=true")
         if not scenarios:
             raise ValueError("economic claims require at least one deterministic cost_stress_scenario")
         if not any(s.additional_slippage_bps > 0 or s.fee_multiplier > 1 for s in scenarios):

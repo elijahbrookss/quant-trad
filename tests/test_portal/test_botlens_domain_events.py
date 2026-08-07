@@ -308,7 +308,7 @@ def test_order_lifecycle_fact_round_trips_as_canonical_runtime_parent() -> None:
     assert payload["parent_id"] == "botlens:decision_emitted:runtime-decision-1"
 
 
-def test_phase_2b_reference_prefixes_match_runtime_causal_owners() -> None:
+def test_lifecycle_reference_prefixes_match_runtime_causal_owners() -> None:
     assert botlens_domain_events._decision_output_prefix("SIGNAL_EMITTED") == "signal_emitted"
     assert botlens_domain_events._decision_output_prefix("DECISION_ACCEPTED") == "decision_emitted"
     assert botlens_domain_events._decision_output_prefix("ORDER_LIFECYCLE_CHANGED") == "runtime_event"

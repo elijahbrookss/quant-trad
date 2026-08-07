@@ -134,7 +134,7 @@ def _fact_from_row(row: Mapping[str, Any]) -> NormalizedFeatureFact:
 
 
 class PostgresNormalizationRepository:
-    """Append-only owner for Phase 4 specs and normalized facts."""
+    """Append-only owner for normalization specs and normalized facts."""
 
     def register_spec(
         self,

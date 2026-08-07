@@ -322,7 +322,7 @@ class _QueueProgress:
 
 
 class PassiveBookExecutionModel(BookExecutionModel):
-    """X5 deterministic passive bounds layered over the Phase 3A book model."""
+    """X5 deterministic passive bounds layered over causal L2 book replay."""
 
     def __init__(
         self,

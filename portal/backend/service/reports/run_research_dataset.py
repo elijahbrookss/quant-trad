@@ -2395,7 +2395,7 @@ def _execution_quality_evidence(
             for row in context_rows
         ):
             blockers.append("execution_context_assumption_manifest_mismatch")
-        phase_2_required_fill_fields = (
+        required_execution_context_fill_fields = (
             "resolved_execution_context_hash",
             "instrument_execution_contract_hash",
             "venue_execution_profile_hash",
@@ -2414,7 +2414,10 @@ def _execution_quality_evidence(
             "post_only",
         )
         for fill in fill_rows:
-            if any(fill.get(field) is None for field in phase_2_required_fill_fields):
+            if any(
+                fill.get(field) is None
+                for field in required_execution_context_fill_fields
+            ):
                 blockers.append("per_fill_resolved_execution_context_evidence_incomplete")
                 break
             context_row = context_by_hash.get(str(fill.get("resolved_execution_context_hash") or ""))

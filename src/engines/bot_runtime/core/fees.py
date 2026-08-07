@@ -24,7 +24,7 @@ _FEE_BASES = {"quote_notional", "base_quantity"}
 class FeeSchedule:
     """Immutable, versioned fee facts used by execution models.
 
-    The first four fields preserve the pre-Phase-2 constructor. New runtime
+    The first four fields preserve the legacy constructor. Resolved execution
     contexts populate the remaining identity, currency, rounding, tier, and
     provenance fields explicitly and pin ``schedule_hash`` in the run bundle.
     """

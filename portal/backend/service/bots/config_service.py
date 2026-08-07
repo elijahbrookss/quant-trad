@@ -684,7 +684,7 @@ class BotConfigService:
         if raw_book_bundle is not None:
             if run_type != "backtest":
                 raise ValueError(
-                    "execution_book_tape_bundle is admitted only for backtest runs in Phase 3A"
+                    "execution_book_tape_bundle is admitted only for backtest runs using book replay"
                 )
             if not isinstance(raw_book_bundle, Mapping):
                 raise ValueError("execution_book_tape_bundle must be an object")

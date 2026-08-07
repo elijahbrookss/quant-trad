@@ -376,7 +376,7 @@ def test_limit_maker_entry_does_not_fill_from_signal_bar_range():
     assert position.entry_price == 95.0
 
 
-def test_partial_entry_is_retained_but_cannot_be_abandoned_before_phase_3():
+def test_partial_entry_is_retained_but_cannot_be_abandoned_before_completion():
     limit_maker = {
         "anchor_price": "signal_price",
         "offset_type": "ticks",

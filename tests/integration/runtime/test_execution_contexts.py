@@ -518,15 +518,15 @@ def test_fee_schedule_owns_currency_rounding_tier_and_hash() -> None:
     (
         (
             {"fee_currency": "BTC", "calculation_basis": "base_quantity"},
-            "phase_2a_non_quote_fee_currency_unsupported",
+            "execution_context_non_quote_fee_currency_unsupported",
         ),
         (
             {"fee_currency": "USD", "calculation_basis": "base_quantity"},
-            "phase_2a_fee_calculation_basis_unsupported",
+            "execution_context_fee_calculation_basis_unsupported",
         ),
         (
             {"maker_rate": -0.0001},
-            "phase_2a_fee_rebate_unsupported",
+            "execution_context_fee_rebate_unsupported",
         ),
     ),
 )
@@ -543,7 +543,7 @@ def test_context_rejects_fee_schedules_canonical_accounting_cannot_settle(
         _context(instrument)
 
 
-def test_phase_2a_profiles_cannot_enable_external_order_submission() -> None:
+def test_simulation_profiles_cannot_enable_external_order_submission() -> None:
     profile = _venue_profile(
         "synthetic-live",
         order_types=["market"],

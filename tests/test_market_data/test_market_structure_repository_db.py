@@ -237,7 +237,7 @@ def test_continuous_validation_evidence_reports_active_elapsed_time() -> None:
         market_structure_repository.release(claim)
 
 
-def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
+def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -564,7 +564,7 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     ]
     frozen = market_data_repo.freeze_dataset(
         requests,
-        name="phase1-provider-free-db-test",
+        name="provider-free-trade-db-test",
         purpose="test",
         created_by="pytest",
     )
@@ -695,7 +695,7 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         market_structure_repository.heartbeat(claim, lease_seconds=120)
 
 
-def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
+def test_book_archive_validity_checkpoint_and_replay_are_atomic(
     tmp_path: Path,
 ) -> None:
     token = uuid.uuid4().hex
@@ -928,7 +928,7 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
         owner_kind="test",
         owner_id=token,
         active=True,
-        reason="phase2 compaction safety proof",
+        reason="book compaction safety proof",
     )
     assert market_structure_repository.archive_retention_status(
         target_kind="raw_manifest",
@@ -940,7 +940,7 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
         owner_kind="test",
         owner_id=token,
         active=False,
-        reason="phase2 compaction safety proof",
+        reason="book compaction safety proof",
     )
     assert released_pin != active_pin
     assert market_structure_repository.archive_retention_status(

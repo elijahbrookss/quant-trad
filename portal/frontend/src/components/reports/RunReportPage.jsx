@@ -342,7 +342,7 @@ function ReportIdentityHeader({ view, durationSeconds, onBack, onRefresh, onExpo
         <button
           type="button"
           disabled
-          title="Run comparison is planned for Phase 3"
+          title="Run comparison is unavailable in this build"
           className="inline-flex cursor-not-allowed items-center gap-2 rounded-[7px] border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs text-slate-600"
         >
           Compare

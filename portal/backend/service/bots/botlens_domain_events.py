@@ -2141,7 +2141,7 @@ def _decision_reference_prefix(
         )
     if decision_name in {"ENTRY_FILLED", "EXIT_FILLED"}:
         # Historical single-event fact deliveries linked fills directly to the
-        # accepted decision.  Complete Phase 2B batches resolve the actual
+        # accepted decision. Complete lifecycle batches resolve the actual
         # lifecycle parent from ``decision_output_prefixes`` above.
         return BotLensDomainEventName.DECISION_EMITTED.value.lower()
     if decision_name == "RUNTIME_ERROR":

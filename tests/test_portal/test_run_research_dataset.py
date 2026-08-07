@@ -1249,7 +1249,7 @@ def test_dataset_certifies_x2_only_from_pinned_economic_evidence(
     assert "intrabar_fallback_pessimistic" in diagnostic_codes
 
 
-def test_dataset_validates_phase_2a_context_bundle_and_per_fill_component_hashes(
+def test_dataset_validates_execution_context_bundle_and_per_fill_component_hashes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run = copy.deepcopy(_run())

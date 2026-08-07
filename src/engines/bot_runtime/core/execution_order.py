@@ -184,7 +184,7 @@ def _execution_known_at(order: FillOrder, evidence: Dict[str, Any] | None = None
 
 
 def canonical_order_request_for_fill_order(order: FillOrder) -> CanonicalOrderRequest:
-    """Adapt an immediate FillOrder into the immutable Phase 2B request."""
+    """Adapt an immediate FillOrder into an immutable lifecycle request."""
 
     metadata = dict(order.metadata or {})
     context = order.execution_context

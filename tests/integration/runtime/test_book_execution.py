@@ -195,7 +195,7 @@ def _context(*, capability: str = "l2"):
             assumptions,
             source_capability=capability,
         ),
-        source="phase3a-test",
+        source="book-replay-test",
     )
 
 
@@ -280,7 +280,7 @@ def _passive_context(tape: ExecutionBookTape, policy: PassiveQueuePolicy):
             execution_book_tape_hash=tape.tape_hash,
             queue_policy=policy,
         ),
-        source="phase3b-test",
+        source="passive-queue-test",
     )
 
 
@@ -389,7 +389,7 @@ def test_marketable_limit_never_walks_beyond_its_price() -> None:
     assert batch.status == "partially_filled"
 
 
-def test_resting_limit_never_crosses_or_receives_maker_fees_in_phase_3a() -> None:
+def test_resting_limit_never_crosses_or_receives_maker_fees_in_aggressive_replay() -> None:
     order = _order(qty=1.0, price=105.0, order_type="limit_resting", tif="gtc")
     model = BookExecutionModel(execution_context=order.execution_context, tape=_tape())
 

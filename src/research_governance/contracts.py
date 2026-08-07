@@ -1,4 +1,4 @@
-"""Pure Phase 6 offline governance transition policy."""
+"""Pure offline research-governance transition policy."""
 
 from __future__ import annotations
 

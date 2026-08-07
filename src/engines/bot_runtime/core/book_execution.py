@@ -838,8 +838,8 @@ class BookExecutionModel:
     ) -> tuple[str, dict[str, Any]]:
         """Resolve arrival plus disclosed latency evidence.
 
-        Phase 3A models retain their exact zero-latency behavior. Phase 3B
-        subclasses override this seam with a pinned deterministic scenario.
+        Zero-latency models retain their exact behavior. Latency-aware models
+        override this seam with a pinned deterministic scenario.
         """
 
         return self._arrival(metadata), {

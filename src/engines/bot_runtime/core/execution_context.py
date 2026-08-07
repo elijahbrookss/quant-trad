@@ -1,8 +1,8 @@
 """Immutable venue-neutral contracts resolved for deterministic execution.
 
-Phase 2A separates product facts, venue rules, fees, and fill-model evidence.
-The resulting context is pinned per series in the run snapshot. Generic
-execution code consumes this contract and never switches on a venue name.
+Product facts, venue rules, fees, and fill-model evidence remain separate. The
+resulting context is pinned per series in the run snapshot. Generic execution
+code consumes this contract and never switches on a venue name.
 """
 
 from __future__ import annotations
@@ -296,7 +296,7 @@ class VenueExecutionProfile:
         if self.book_data_capability not in _BOOK_CAPABILITIES:
             raise ValueError("venue profile book_data_capability must be bars, l1, l2, or l3")
         if self.external_order_submission_enabled is not False:
-            raise ValueError("Phase 2A venue profiles cannot enable external order submission")
+            raise ValueError("simulation venue profiles cannot enable external order submission")
         expected = _stable_hash(self._material())
         if self.profile_hash and self.profile_hash != expected:
             raise ValueError("venue_execution_profile_hash_mismatch")
@@ -463,11 +463,11 @@ class ResolvedExecutionContext:
         if self.fee_schedule.venue_profile_id != self.venue.profile_id:
             raise ValueError("fee_schedule_venue_profile_mismatch")
         if self.fee_schedule.fee_currency.casefold() != self.instrument.quote_currency.casefold():
-            raise ValueError("phase_2a_non_quote_fee_currency_unsupported")
+            raise ValueError("execution_context_non_quote_fee_currency_unsupported")
         if self.fee_schedule.calculation_basis != "quote_notional":
-            raise ValueError("phase_2a_fee_calculation_basis_unsupported")
+            raise ValueError("execution_context_fee_calculation_basis_unsupported")
         if self.fee_schedule.maker_rate < 0 or self.fee_schedule.taker_rate < 0:
-            raise ValueError("phase_2a_fee_rebate_unsupported")
+            raise ValueError("execution_context_fee_rebate_unsupported")
         capability_rank = {"bars": 0, "l1": 1, "l2": 2, "l3": 3}
         if capability_rank[self.model.input_capability] > capability_rank[self.venue.book_data_capability]:
             raise ValueError("execution_model_input_exceeds_venue_book_capability")

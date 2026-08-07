@@ -350,7 +350,7 @@ def test_funding_rate_round_trip_and_freeze_preserve_causal_observations(
     ]
 
     installed = market_normalization_service.install_builtin_specs(
-        approved_by="phase4-db-test"
+        approved_by="normalization-db-test"
     )
     bps_spec_id = next(
         row["spec_id"] for row in installed if row["feature_name"] == "funding_rate_bps"

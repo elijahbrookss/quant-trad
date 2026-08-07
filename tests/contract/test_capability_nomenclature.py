@@ -7,17 +7,11 @@ import yaml
 
 
 ACTIVE_CAPABILITY_PATHS = (
-    Path("src/research_science"),
-    Path("src/market_data/stream_enrollment.py"),
-    Path("portal/backend/db/market_data_models.py"),
-    Path("portal/backend/controller/market_data.py"),
-    Path("portal/backend/service/market/collector_safety.py"),
-    Path("portal/backend/service/market/collector_supervisor.py"),
-    Path("portal/backend/service/market/continuous_stream_collector.py"),
-    Path("portal/backend/service/market/market_structure_service.py"),
-    Path("portal/backend/service/storage/repos/market_structure.py"),
-    Path("cli/market_structure_proof.py"),
-    Path("config/market_data"),
+    Path("src"),
+    Path("portal/backend"),
+    Path("portal/frontend/src"),
+    Path("cli"),
+    Path("config"),
 )
 
 BANNED_RUNTIME_TERMS = re.compile(
@@ -41,7 +35,8 @@ def _files() -> list[Path]:
             selected.extend(
                 candidate
                 for candidate in path.rglob("*")
-                if candidate.suffix in {".py", ".json", ".yaml", ".yml"}
+                if candidate.suffix
+                in {".py", ".js", ".jsx", ".ts", ".tsx", ".json", ".yaml", ".yml"}
             )
     return sorted(selected)
 
