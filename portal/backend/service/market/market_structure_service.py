@@ -429,7 +429,6 @@ class MarketStructureService:
                             "schema_version": "market.collector_runtime.v2",
                             "mode": "continuous" if enrollment.continuous else "stopped",
                             "stop_at": None,
-                            "updated_at": now.isoformat(),
                             "updated_by": "stream_enrollment_manifest",
                             "reason": "declarative_enrollment",
                         },

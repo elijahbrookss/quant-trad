@@ -48,6 +48,85 @@ class _SafetyRepository:
         return []
 
 
+class _EnrollmentMarketDataRepository:
+    def __init__(self) -> None:
+        self._series_ids: dict[tuple[str, str, int | None, str], int] = {}
+
+    def register_source(self, _identity, *, lineage) -> int:
+        assert lineage["manifest_hash"]
+        return 1
+
+    def register_series(
+        self,
+        *,
+        instrument_id: str,
+        fact_type: str,
+        timeframe_seconds: int | None,
+        contract_version: str,
+    ) -> int:
+        key = (instrument_id, fact_type, timeframe_seconds, contract_version)
+        return self._series_ids.setdefault(key, len(self._series_ids) + 10)
+
+
+class _EnrollmentRepository:
+    def __init__(self) -> None:
+        self.definition_calls: list[dict] = []
+
+    def register_product_definition(self, **kwargs):
+        return kwargs
+
+    def upsert_stream_definition(self, **kwargs):
+        self.definition_calls.append(kwargs)
+        return kwargs
+
+
+def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    products = {
+        "b2deb0a0-f292-408a-876d-3dadd8e3819b": "BIP-20DEC30-CDE",
+        "44226144-fb38-4566-92c4-580734d76d3c": "ETP-20DEC30-CDE",
+        "bead556e-22e2-4ac0-8ee0-0d8c5310e9a0": "SLP-20DEC30-CDE",
+    }
+    market_data_repository = _EnrollmentMarketDataRepository()
+    repository = _EnrollmentRepository()
+    monkeypatch.setattr(
+        market_structure_module,
+        "market_data_repo",
+        market_data_repository,
+    )
+    monkeypatch.setattr(
+        market_structure_module,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "symbol": products[instrument_id],
+            "metadata": {
+                "instrument_fields": {
+                    "tick_size": "0.01",
+                    "qty_step": "0.01",
+                }
+            },
+        },
+    )
+    service = MarketStructureService(repository=repository)
+
+    first = service.apply_stream_enrollment_manifest()
+    second = service.apply_stream_enrollment_manifest()
+
+    assert first["manifest_hash"] == second["manifest_hash"]
+    assert len(repository.definition_calls) == 6
+    assert repository.definition_calls[:3] == repository.definition_calls[3:]
+    for call in repository.definition_calls:
+        runtime = call["config"]["collector_runtime"]
+        assert runtime == {
+            "schema_version": "market.collector_runtime.v2",
+            "mode": "continuous",
+            "stop_at": None,
+            "updated_by": "stream_enrollment_manifest",
+            "reason": "declarative_enrollment",
+        }
+
+
 class _FakeStream:
     def __init__(self, *, stream_session_id: str, **_kwargs) -> None:
         self.session_id = stream_session_id
