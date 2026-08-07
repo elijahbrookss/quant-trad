@@ -14,8 +14,6 @@ from cli.market_structure_proof import (
     _StreamAnalyzer,
     _capacity_summary,
     _normalize_products,
-    _phase1_admission,
-    _phase1_implementation_readiness,
     _proof_implementation,
     _quantity_semantics,
     _replay_proof_archive,
@@ -315,183 +313,6 @@ def test_quantity_semantics_blocks_on_metadata_or_increment_mismatch() -> None:
     }
 
 
-def test_phase1_admission_requires_resnapshot_unit_decision_and_full_duration() -> None:
-    streams = [
-        {
-            "status": "completed",
-            "spec": {"product_id": "BIP-20DEC30-CDE", "channel": "level2"},
-            "analysis": {
-                "counts": {"requested_channel_frames": 1},
-                "first_requested_event_type_by_epoch": {"1": "update"},
-            },
-            "replay": {
-                "ordering_or_checksum_errors": 0,
-                "content_fingerprint_equal": True,
-            },
-        }
-    ]
-    rest = {
-        "products": {
-            "BIP-20DEC30-CDE": {
-                "product": {"status": "confirmed"},
-                "product_book": {"status": "confirmed"},
-                "recent_market_trades": {"status": "confirmed"},
-            }
-        },
-        "cde_public_history": {"status": "unsupported"},
-    }
-
-    admission = _phase1_admission(
-        streams,
-        rest,
-        {
-            "measurement_duration_gate_pass": False,
-            "annual_archive_budget_pass": True,
-        },
-        duration_seconds=86_400,
-    )
-
-    assert admission["status"] == "blocked"
-    assert "24_hour_capacity_capture_required" in admission["reasons"]
-    assert "l2_resnapshot_not_proven:BIP-20DEC30-CDE" in admission["reasons"]
-    assert "futures_quantity_unit_not_proven:BIP-20DEC30-CDE" in admission["reasons"]
-
-
-def test_phase1_admission_requires_complete_bounded_integrity_evidence() -> None:
-    streams = []
-    for product_id in ("BIP-20DEC30-CDE", "BTC-USD"):
-        for channel in ("market_trades", "level2", "ticker"):
-            analysis = {
-                "counts": {
-                    "channel:heartbeats": 2,
-                    "requested_channel_frames": 1,
-                    f"sequence_observed:{channel}": 1,
-                },
-                "first_requested_event_type_by_epoch": {"0": "snapshot"},
-            }
-            replay = {
-                "ordering_or_checksum_errors": 0,
-                "content_fingerprint_equal": True,
-            }
-            if channel == "level2":
-                analysis["book_by_epoch"] = {
-                    "0": {
-                        "checkpoint": {"valid": True},
-                        "update_before_snapshot_count": 0,
-                        "invalid_mutation_count": 0,
-                    }
-                }
-                replay["book_fingerprints_equal"] = True
-            streams.append(
-                {
-                    "status": "completed",
-                    "spec": {"product_id": product_id, "channel": channel},
-                    "analysis": analysis,
-                    "replay": replay,
-                    "raw_file": {"complete": True},
-                    "connection_count": 2,
-                    "deliberate_reconnect_count": 1,
-                }
-            )
-    rest = {
-        "products": {
-            product_id: {
-                "product": {"status": "confirmed"},
-                "product_book": {"status": "confirmed"},
-                "recent_market_trades": {"status": "confirmed"},
-            }
-            for product_id in ("BIP-20DEC30-CDE", "BTC-USD")
-        },
-        "cde_public_history": {"status": "unsupported"},
-    }
-    capacity = {
-        "measurement_duration_gate_pass": True,
-        "annual_archive_budget_pass": True,
-        "full_replay": {"one_day_under_one_hour_gate_pass": True},
-    }
-    quantity_semantics = {
-        "products": {"BIP-20DEC30-CDE": {"status": "confirmed_contracts"}}
-    }
-    trade_side_semantics = {"status": "confirmed_maker_side"}
-
-    admission = _phase1_admission(
-        streams,
-        rest,
-        capacity,
-        duration_seconds=86_400,
-        quantity_semantics=quantity_semantics,
-        trade_side_semantics=trade_side_semantics,
-    )
-
-    assert admission == {
-        "status": "admitted",
-        "reasons": [],
-        "scope": "BIP-20DEC30-CDE/BTC-USD only",
-    }
-
-    implementation_readiness = _phase1_implementation_readiness(
-        streams,
-        rest,
-        {
-            "measurement_duration_gate_pass": False,
-            "annual_archive_budget_pass": None,
-            "full_replay": {"one_day_under_one_hour_gate_pass": False},
-        },
-        duration_seconds=3_600,
-        quantity_semantics=quantity_semantics,
-        trade_side_semantics=trade_side_semantics,
-    )
-    assert implementation_readiness == {
-        "status": "admitted",
-        "reasons": [],
-        "scope": "BIP-20DEC30-CDE/BTC-USD only",
-    }
-
-    too_short = _phase1_implementation_readiness(
-        streams,
-        rest,
-        capacity,
-        duration_seconds=3_599,
-        quantity_semantics=quantity_semantics,
-        trade_side_semantics=trade_side_semantics,
-    )
-    assert too_short["status"] == "blocked"
-    assert "one_hour_provider_capture_required" in too_short["reasons"]
-
-    streams[0]["analysis"]["counts"]["sequence_gap:connection"] = 1
-    blocked = _phase1_admission(
-        streams,
-        rest,
-        capacity,
-        duration_seconds=86_400,
-        quantity_semantics=quantity_semantics,
-        trade_side_semantics=trade_side_semantics,
-    )
-
-    assert blocked["status"] == "blocked"
-    assert (
-        "stream_integrity_failed:BIP-20DEC30-CDE:sequence_gap:connection"
-        in blocked["reasons"]
-    )
-
-    streams[0]["analysis"]["counts"]["sequence_gap:connection"] = 0
-    streams[0]["analysis"]["counts"]["sequence_missing:market_trades"] = 1
-    blocked = _phase1_admission(
-        streams,
-        rest,
-        capacity,
-        duration_seconds=86_400,
-        quantity_semantics=quantity_semantics,
-        trade_side_semantics=trade_side_semantics,
-    )
-
-    assert blocked["status"] == "blocked"
-    assert (
-        "requested_channel_sequence_missing:BIP-20DEC30-CDE:market_trades"
-        in blocked["reasons"]
-    )
-
-
 def test_trade_side_semantics_requires_documented_values_in_captured_schema() -> None:
     streams = [
         {
@@ -600,7 +421,7 @@ def test_cli_exposes_bounded_market_structure_proof_command() -> None:
     assert args.auth_mode == "authenticated"
 
 
-def test_cli_exposes_phase4_normalization_commands() -> None:
+def test_cli_exposes_normalization_commands() -> None:
     install = build_parser().parse_args(
         [
             "data",
