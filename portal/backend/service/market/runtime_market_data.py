@@ -96,7 +96,7 @@ class RuntimeMarketDataResolver:
     @staticmethod
     def _requirement(raw: Mapping[str, Any]) -> MarketDataRequirement:
         return MarketDataRequirement(
-            key=str(raw.get("key") or ""),
+            key=str(raw.get("key") or raw.get("alias") or ""),
             fact_type=str(raw.get("fact_type") or ""),
             contract_version=str(raw.get("contract_version") or ""),
             timeframe_seconds=raw.get("timeframe_seconds"),

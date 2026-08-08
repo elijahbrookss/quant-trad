@@ -295,6 +295,16 @@ def test_frozen_numeric_runtime_is_provider_free_and_causally_selects_latest_kno
     assert selected is visible
     assert selected.fact.value == Decimal("4321.123456789012345678")
     assert second["reference-price-proof"]["reference_price"] is visible
+    planned_requirement = {**requirement, "alias": requirement["key"]}
+    planned_requirement.pop("key")
+    assert resolver.causal_history(
+        consumer_id="reference-price-proof",
+        requirement=planned_requirement,
+        primary_instrument_id="eth-usd",
+        start=decision - timedelta(hours=1),
+        end=decision + timedelta(minutes=1),
+        evaluation_time=decision,
+    ) == (visible,)
     corrected = resolver.resolve(
         requirements_by_consumer={"reference-price-proof": (requirement,)},
         primary_instrument_id="eth-usd",
