@@ -13,8 +13,8 @@ from .study import stable_hash
 
 CHECK_DEFINITION_SCHEMA_VERSION = "research.check_definition.v1"
 CHECK_REQUEST_SCHEMA_VERSION = "research.check_request.v2"
-CHECK_PLAN_SCHEMA_VERSION = "research.check_plan.v1"
-CHECK_EVIDENCE_BINDING_SCHEMA_VERSION = "research.check_evidence_binding.v1"
+CHECK_PLAN_SCHEMA_VERSION = "research.check_plan.v2"
+CHECK_EVIDENCE_BINDING_SCHEMA_VERSION = "research.check_evidence_binding.v2"
 CHECK_RESULT_SCHEMA_VERSION = "research.check_result.v2"
 CHECK_REPLAY_SCHEMA_VERSION = "research.check_replay.v1"
 
@@ -83,7 +83,7 @@ class CheckDefinition:
     def __post_init__(self) -> None:
         if self.schema_version != CHECK_DEFINITION_SCHEMA_VERSION:
             raise ValueError("unsupported Check definition schema")
-        for field in (
+        for field_name in (
             "definition_id",
             "definition_version",
             "evaluator_id",
@@ -93,8 +93,11 @@ class CheckDefinition:
         ):
             object.__setattr__(
                 self,
-                field,
-                _required(getattr(self, field), field=f"check_definition.{field}"),
+                field_name,
+                _required(
+                    getattr(self, field_name),
+                    field=f"check_definition.{field_name}",
+                ),
             )
         object.__setattr__(
             self,
@@ -137,11 +140,14 @@ class CheckRequest:
         if mode not in CHECK_MODES:
             raise ValueError("check_request.mode must be preview or evidence")
         object.__setattr__(self, "mode", mode)
-        for field in ("definition_id", "definition_version", "definition_hash"):
+        for field_name in ("definition_id", "definition_version", "definition_hash"):
             object.__setattr__(
                 self,
-                field,
-                _required(getattr(self, field), field=f"check_request.{field}"),
+                field_name,
+                _required(
+                    getattr(self, field_name),
+                    field=f"check_request.{field_name}",
+                ),
             )
         object.__setattr__(self, "scope", _mapping(self.scope, field="check_request.scope"))
         object.__setattr__(
@@ -217,11 +223,19 @@ class ResolvedCheckPlan:
                 for item in self.indicator_graph
             ),
         )
-        for field in ("evaluation_range", "materialization_range", "warmup", "outcome_tail"):
+        for field_name in (
+            "evaluation_range",
+            "materialization_range",
+            "warmup",
+            "outcome_tail",
+        ):
             object.__setattr__(
                 self,
-                field,
-                _mapping(getattr(self, field), field=f"check_plan.{field}"),
+                field_name,
+                _mapping(
+                    getattr(self, field_name),
+                    field=f"check_plan.{field_name}",
+                ),
             )
         object.__setattr__(
             self,
@@ -262,13 +276,13 @@ class ResolvedCheckPlan:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> ResolvedCheckPlan:
         values = dict(raw)
-        for field in (
+        for field_name in (
             "market_data_requirements",
             "indicator_graph",
             "missing_coverage",
             "quality_evidence",
         ):
-            values[field] = tuple(values.get(field) or ())
+            values[field_name] = tuple(values.get(field_name) or ())
         return cls(**values)
 
 
@@ -293,7 +307,7 @@ class CheckEvidenceBinding:
     def __post_init__(self) -> None:
         if self.schema_version != CHECK_EVIDENCE_BINDING_SCHEMA_VERSION:
             raise ValueError("unsupported Check evidence-binding schema")
-        for field in (
+        for field_name in (
             "definition_hash",
             "request_hash",
             "plan_hash",
@@ -307,8 +321,11 @@ class CheckEvidenceBinding:
         ):
             object.__setattr__(
                 self,
-                field,
-                _required(getattr(self, field), field=f"check_evidence.{field}"),
+                field_name,
+                _required(
+                    getattr(self, field_name),
+                    field=f"check_evidence.{field_name}",
+                ),
             )
         evidence_kind = str(self.evidence_kind or "").strip().lower()
         if evidence_kind not in {"frozen_market_data", "immutable_run_evidence"}:
@@ -359,7 +376,7 @@ class CheckResult:
     def __post_init__(self) -> None:
         if self.schema_version != CHECK_RESULT_SCHEMA_VERSION:
             raise ValueError("unsupported Check result schema")
-        for field in (
+        for field_name in (
             "definition_hash",
             "request_hash",
             "plan_hash",
@@ -369,8 +386,11 @@ class CheckResult:
         ):
             object.__setattr__(
                 self,
-                field,
-                _required(getattr(self, field), field=f"check_result.{field}"),
+                field_name,
+                _required(
+                    getattr(self, field_name),
+                    field=f"check_result.{field_name}",
+                ),
             )
         semantic = _semantic_result(_mapping(self.result, field="check_result.result"))
         object.__setattr__(self, "result", semantic)

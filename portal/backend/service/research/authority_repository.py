@@ -726,6 +726,19 @@ def complete_attempt(
         return attempt.to_dict()
 
 
+def attempt_authority_context(attempt_id: str) -> dict[str, Any]:
+    """Return the private immutable manifest used to bind a runner result."""
+
+    with db.session() as session:
+        attempt = session.get(
+            ResearchAttemptRecord,
+            _required(attempt_id, field="attempt_id"),
+        )
+        if attempt is None:
+            raise KeyError(f"research attempt not found: {attempt_id}")
+        return attempt.to_dict()
+
+
 def freeze_candidate(
     candidate: CandidateSnapshot,
     *,
@@ -1423,8 +1436,46 @@ def internal_holdout_binding(holdout_use_id: str, *, reservation_token: str) -> 
         return manifest.assignment(DatasetRole.HOLDOUT).to_private_dict()
 
 
+def internal_holdout_authority_context(
+    holdout_use_id: str, *, reservation_token: str
+) -> dict[str, Any]:
+    """Return sealed Dataset/candidate identities for the in-process executor."""
+
+    supplied_hash = hashlib.sha256(
+        _required(reservation_token, field="reservation_token").encode("utf-8")
+    ).hexdigest()
+    with db.session() as session:
+        holdout = session.get(ResearchHoldoutUseRecord, holdout_use_id)
+        if holdout is None:
+            raise KeyError(f"holdout use not found: {holdout_use_id}")
+        if holdout.status != "reserved" or not secrets.compare_digest(
+            holdout.reservation_token_hash, supplied_hash
+        ):
+            raise ValueError("holdout_reservation_token_invalid")
+        protocol = session.get(ResearchProtocolRecord, holdout.protocol_id)
+        candidate = session.get(ResearchCandidateRecord, holdout.candidate_id)
+        if protocol is None:
+            raise RuntimeError("holdout_protocol_missing")
+        if candidate is None:
+            raise RuntimeError("holdout_candidate_missing")
+        manifest = ScientificProtocol.from_dict(protocol.private_manifest)
+        candidate_manifest = dict(candidate.manifest or {})
+        return {
+            "holdout_use_id": holdout.id,
+            "candidate_id": candidate.id,
+            "candidate_hash": candidate.candidate_hash,
+            "dataset_binding": manifest.assignment(
+                DatasetRole.HOLDOUT
+            ).to_private_dict(),
+            "trial_inputs": {
+                "strategy_hash": candidate_manifest.get("strategy_artifact_hash"),
+            },
+        }
+
+
 __all__ = [
     "TERMINAL_ATTEMPT_STATUSES",
+    "attempt_authority_context",
     "archive_rejected_family",
     "close_family",
     "complete_attempt",
@@ -1438,6 +1489,7 @@ __all__ = [
     "freeze_candidate",
     "get_protocol",
     "internal_holdout_binding",
+    "internal_holdout_authority_context",
     "protocol_private",
     "record_rejected_proposal",
     "reject_holdout_internal",

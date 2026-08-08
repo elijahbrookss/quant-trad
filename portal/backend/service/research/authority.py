@@ -24,6 +24,7 @@ from strategies.typed_graph import (
 )
 
 from . import authority_repository as repository
+from .result_reference import resolve_canonical_result_reference
 
 RESEARCHER_ROLES = {"researcher", "research_agent"}
 AUTHORITY_ROLES = {"research_authority", "human_research_owner"}
@@ -245,7 +246,29 @@ def register_attempt(payload: Mapping[str, Any]) -> dict[str, Any]:
 def complete_attempt(payload: Mapping[str, Any]) -> dict[str, Any]:
     actor_id, actor_role, request_id = _identity(payload, admitted_roles=RUNNER_ROLES)
     status = _required(payload.get("status"), field="status").lower()
-    evidence = dict(payload.get("result_evidence") or {})
+    attempt_id = _required(payload.get("attempt_id"), field="attempt_id")
+    supplied_evidence = dict(payload.get("result_evidence") or {})
+    if status == "completed" and supplied_evidence:
+        raise ValueError(
+            "attempt_result_evidence_caller_supplied_forbidden: use a typed "
+            "canonical result_reference"
+        )
+    if status == "completed":
+        attempt = repository.attempt_authority_context(attempt_id)
+        manifest = dict(attempt.get("trial_manifest") or {})
+        evidence = resolve_canonical_result_reference(
+            payload.get("result_reference"),
+            expected_dataset_binding=dict(manifest.get("dataset_binding") or {}),
+            expected_trial_inputs=dict(manifest.get("trial_inputs") or {}),
+            authority_binding={
+                "kind": "scientific_attempt",
+                "attempt_id": attempt_id,
+                "trial_manifest_hash": attempt.get("trial_manifest_hash"),
+                "trial_fingerprint": manifest.get("trial_fingerprint"),
+            },
+        )
+    else:
+        evidence = supplied_evidence
     required = (
         {"artifact_hash", "reproducible", "sample_count", "exposure"}
         if status == "completed"
@@ -255,7 +278,7 @@ def complete_attempt(payload: Mapping[str, Any]) -> dict[str, Any]:
     if missing:
         raise ValueError("attempt result evidence is incomplete: " + ",".join(missing))
     return repository.complete_attempt(
-        attempt_id=_required(payload.get("attempt_id"), field="attempt_id"),
+        attempt_id=attempt_id,
         status=status,
         result_evidence=evidence,
         error=str(payload.get("error") or "").strip() or None,
@@ -392,12 +415,27 @@ def execute_holdout_internal(
     *,
     holdout_use_id: str,
     reservation_token: str,
-    result_evidence: Mapping[str, Any],
+    result_reference: Mapping[str, Any],
     executor_actor: str,
     request_id: str,
 ) -> dict[str, Any]:
     """Internal executor seam; deliberately absent from the public controller."""
 
+    context = repository.internal_holdout_authority_context(
+        holdout_use_id,
+        reservation_token=reservation_token,
+    )
+    result_evidence = resolve_canonical_result_reference(
+        result_reference,
+        expected_dataset_binding=dict(context["dataset_binding"]),
+        expected_trial_inputs=dict(context.get("trial_inputs") or {}),
+        authority_binding={
+            "kind": "scientific_holdout",
+            "holdout_use_id": holdout_use_id,
+            "candidate_id": context["candidate_id"],
+            "candidate_hash": context["candidate_hash"],
+        },
+    )
     return repository.execute_holdout_internal(
         holdout_use_id=holdout_use_id,
         reservation_token=reservation_token,
@@ -411,13 +449,28 @@ def reject_holdout_internal(
     *,
     holdout_use_id: str,
     reservation_token: str,
-    result_evidence: Mapping[str, Any],
+    result_reference: Mapping[str, Any],
     reason_codes: Sequence[str],
     executor_actor: str,
     request_id: str,
 ) -> dict[str, Any]:
     """Internal negative-result seam; deliberately absent from the controller."""
 
+    context = repository.internal_holdout_authority_context(
+        holdout_use_id,
+        reservation_token=reservation_token,
+    )
+    result_evidence = resolve_canonical_result_reference(
+        result_reference,
+        expected_dataset_binding=dict(context["dataset_binding"]),
+        expected_trial_inputs=dict(context.get("trial_inputs") or {}),
+        authority_binding={
+            "kind": "scientific_holdout",
+            "holdout_use_id": holdout_use_id,
+            "candidate_id": context["candidate_id"],
+            "candidate_hash": context["candidate_hash"],
+        },
+    )
     return repository.reject_holdout_internal(
         holdout_use_id=holdout_use_id,
         reservation_token=reservation_token,

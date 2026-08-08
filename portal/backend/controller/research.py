@@ -12,6 +12,7 @@ from ..service import research as research_service
 from ..service.research import async_dispatch as research_async_dispatch
 from ..service.research import authority as research_authority
 from ..service.research import governance as research_governance
+from ..service.research import pass_gates as research_pass_gates
 
 
 router = APIRouter()
@@ -56,6 +57,7 @@ class ResearchCheckRunRequest(BaseModel):
     statistics: Dict[str, Any] = Field(default_factory=dict)
     assertions: List[Dict[str, Any]] = Field(default_factory=list)
     gap_policy: Optional[str] = None
+    gap_rewarm_bars: Optional[int] = Field(default=None, ge=0)
     preparation: Dict[str, Any] = Field(default_factory=dict)
     freeze: Optional[bool] = None
     acquire_missing: Optional[bool] = None
@@ -80,6 +82,12 @@ class ResearchCheckSweepRequest(BaseModel):
     outcomes: Dict[str, Any] = Field(default_factory=dict)
     variants: List[Dict[str, Any]]
     ranking: Dict[str, Any]
+
+
+class ExperimentPassGateEvaluationRequest(BaseModel):
+    plan: Dict[str, Any]
+    summaries: List[Dict[str, Any]]
+    comparison_refs: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ResearchAuthorityRequest(BaseModel):
@@ -109,6 +117,7 @@ class ResearchAttemptRequest(ResearchAuthorityRequest):
 class ResearchAttemptCompletionRequest(ResearchAuthorityRequest):
     status: str = Field(pattern="^(completed|failed|abandoned|invalid)$")
     result_evidence: Dict[str, Any] = Field(default_factory=dict)
+    result_reference: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     actual_runtime_seconds: float = Field(default=0, ge=0)
     actual_compute_units: float = Field(default=0, ge=0)
@@ -433,6 +442,18 @@ def compare_research_checks(left_check_id: str, right_check_id: str) -> Dict[str
         return research_service.compare_research_checks(left_check_id, right_check_id)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/comparisons/pass-gates/evaluate")
+def evaluate_experiment_pass_gates(
+    body: ExperimentPassGateEvaluationRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_pass_gates.evaluate_pass_gate_request(
+            _model_payload(body)
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

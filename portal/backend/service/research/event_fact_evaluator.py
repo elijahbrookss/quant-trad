@@ -22,7 +22,6 @@ from research_science import adjusted_p_values
 from research_science.check import (
     GAP_POLICY_CONTINUE_DEGRADED,
     GAP_POLICY_REJECT,
-    GAP_POLICY_RESET_REWARM,
     CheckDefinition,
     CheckRequest,
     ResolvedCheckPlan,
@@ -30,8 +29,8 @@ from research_science.check import (
 
 
 EVENT_FACT_ANALYSIS = "event_fact_analysis"
-EVENT_FACT_EVALUATOR_VERSION = "1"
-EVENT_FACT_RESULT_VERSION = "event_fact_analysis_result.v1"
+EVENT_FACT_EVALUATOR_VERSION = "2"
+EVENT_FACT_RESULT_VERSION = "event_fact_analysis_result.v2"
 
 _BASELINE_OPERATORS = frozenset(
     {
@@ -80,6 +79,15 @@ def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _known_at(value: Any, *, field: str) -> datetime:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(float(value), tz=UTC)
+    raw = str(value or "").strip()
+    if raw and raw.replace(".", "", 1).isdigit():
+        return datetime.fromtimestamp(float(raw), tz=UTC)
+    return _utc(value, field=field)
 
 
 def _mapping(value: Any, *, field: str) -> dict[str, Any]:
@@ -248,9 +256,34 @@ def normalize_event_fact_configuration(
         }
 
     normalized_statistics = dict(statistics or {})
+    supported_statistics_fields = {
+        "features",
+        "folds",
+        "purge_bars",
+        "embargo_bars",
+        "model",
+        "bootstrap",
+        "direct_tests",
+        "feature_bins",
+        "eligibility",
+    }
+    unknown_statistics_fields = sorted(
+        set(normalized_statistics) - supported_statistics_fields
+    )
+    if unknown_statistics_fields:
+        raise ValueError(
+            "event_fact_check_invalid: unsupported statistics fields "
+            f"{unknown_statistics_fields}"
+        )
     features = _mapping(
         normalized_statistics.get("features"), field="statistics.features"
     )
+    unknown_feature_groups = sorted(set(features) - {"baseline", "enriched"})
+    if unknown_feature_groups:
+        raise ValueError(
+            "event_fact_check_invalid: unsupported statistics.features fields "
+            f"{unknown_feature_groups}"
+        )
     baseline = _list(features.get("baseline"), field="features.baseline")
     enriched = _list(features.get("enriched"), field="features.enriched")
     names: set[str] = set()
@@ -666,7 +699,9 @@ def _utc_day_cluster_ci(
 ) -> dict[str, Any]:
     by_day: dict[str, list[float]] = defaultdict(list)
     for row in rows:
-        by_day[str(row["event_time"])[:10]].append(float(row["paired_log_loss_delta"]))
+        by_day[str(row["decision_time"])[:10]].append(
+            float(row["paired_log_loss_delta"])
+        )
     days = sorted(by_day)
     if len(days) < 2:
         return {
@@ -698,7 +733,7 @@ def _fact_features_for_event(
     requirements: Mapping[str, Mapping[str, Any]],
     records_by_alias: Mapping[str, Sequence[Any]],
     decision_time: datetime,
-    entry_close: float,
+    venue_close: float,
     direction: float,
 ) -> tuple[
     dict[str, float | None],
@@ -753,17 +788,20 @@ def _fact_features_for_event(
         elif operator == "age_seconds":
             value = (decision_time - latest.fact.known_at).total_seconds()
         elif operator == "venue_basis_bps":
-            value = ((entry_close / latest_value) - 1.0) * 10000.0
+            value = ((venue_close / latest_value) - 1.0) * 10000.0
         elif operator in {
             "latest_update_direction",
             "latest_update_magnitude_bps",
             "update_agreement",
         }:
-            if previous is not None:
-                retain(previous, role="previous")
-                change = (latest_value / float(previous.fact.value)) - 1.0
-            else:
-                change = 0.0
+            if previous is None:
+                features[name] = None
+                missing_reason = f"fact_predecessor_missing:{alias}"
+                if missing_reason not in exclusions:
+                    exclusions.append(missing_reason)
+                continue
+            retain(previous, role="previous")
+            change = (latest_value / float(previous.fact.value)) - 1.0
             if operator == "latest_update_direction":
                 value = 1.0 if change > 0 else -1.0 if change < 0 else 0.0
             elif operator == "latest_update_magnitude_bps":
@@ -788,16 +826,24 @@ def _fact_features_for_event(
                 value = float(len(window))
             elif operator == "aggregate_abs_change_bps_window":
                 total = 0.0
+                predecessor_missing = False
                 for record in window:
                     index = visible.index(record)
                     if index <= 0:
-                        continue
+                        predecessor_missing = True
+                        break
                     prior = visible[index - 1]
                     retain(prior, role="window_previous")
                     total += abs(
                         (float(record.fact.value) / float(prior.fact.value)) - 1.0
                     ) * 10000.0
-                value = total
+                if predecessor_missing:
+                    value = None
+                    missing_reason = f"fact_predecessor_missing:{alias}"
+                    if missing_reason not in exclusions:
+                        exclusions.append(missing_reason)
+                else:
+                    value = total
             else:  # pragma: no cover - normalization rejects this.
                 raise AssertionError(operator)
         features[name] = value
@@ -828,29 +874,41 @@ class EventFactEvaluator:
             default=0,
         )
         windows: dict[str, int] = {}
+        predecessor_aliases: set[str] = set()
         for row in enriched:
             alias = str(row.get("input_alias") or "")
             windows[alias] = max(
                 int(windows.get(alias) or 0),
                 int(row.get("window_seconds") or 0),
             )
+            if str(row.get("operator") or "") in {
+                "latest_update_direction",
+                "latest_update_magnitude_bps",
+                "update_agreement",
+                "aggregate_abs_change_bps_window",
+            }:
+                predecessor_aliases.add(alias)
         indicator_id = str(request.scope.get("indicator_id") or "").strip()
         if not indicator_id:
             raise ValueError(
                 "check_requirement_plan_invalid: indicator_id is required"
             )
         outcomes = dict(request.parameters.get("outcomes") or {})
+        invalidation = dict(outcomes.get("invalidation") or {})
         return {
             "input_kind": "market_data",
             "indicator_ids": [indicator_id],
             "warmup_floor_bars": 0,
             "feature_lookback_bars": feature_lookback,
             "feature_windows_seconds_by_alias": windows,
+            "feature_predecessor_aliases": sorted(predecessor_aliases),
             "outcome_horizons": list(outcomes.get("horizons") or []),
             "required_outcome_horizons": list(
                 outcomes.get("required_horizons") or outcomes.get("horizons") or []
             ),
             "horizon_kind": str(outcomes.get("horizon_kind") or "bars"),
+            "entry_lag_bars": int(outcomes.get("entry_lag_bars") or 0),
+            "invalidation_max_bars": int(invalidation.get("max_bars") or 0),
             "event_source": "indicator",
             "fact_history_required": bool(enriched),
         }
@@ -950,6 +1008,9 @@ class EventFactEvaluator:
         invalidation_resolution: Counter[str] = Counter()
         entry_lag = int(outcomes.get("entry_lag_bars") or 0)
         step = timedelta(seconds=interval_seconds)
+        evaluation_start = _utc(
+            plan.evaluation_range["start"], field="evaluation_start"
+        )
         evaluation_end = _utc(
             plan.evaluation_range["end_exclusive"], field="evaluation_end"
         )
@@ -958,6 +1019,18 @@ class EventFactEvaluator:
             event_time = _utc(output.get("time"), field="event.time")
             configured_direction = direction_by_key[str(output.get("event_key"))]
             event_payload = dict(output.get("event") or {})
+            event_decision_time = _known_at(
+                event_payload.get("known_at")
+                or output.get("known_at")
+                or candle_by_open.get(event_time, {}).get("known_at")
+                or candle_by_open.get(event_time, {}).get("close_time"),
+                field="event.known_at",
+            )
+            if not (
+                evaluation_start <= event_time < evaluation_end
+                and event_decision_time <= evaluation_end
+            ):
+                continue
             direction_text = str(event_payload.get("direction") or "").strip().lower()
             if direction_text not in {"long", "short"}:
                 raise RuntimeError(
@@ -969,10 +1042,13 @@ class EventFactEvaluator:
                 )
             direction = 1.0 if direction_text == "long" else -1.0
             entry_time = event_time + step * entry_lag
+            event_candle = candle_by_open.get(event_time)
             entry = candle_by_open.get(entry_time)
             row: dict[str, Any] = {
                 "event_time": _iso(event_time),
-                "decision_time": None,
+                "decision_time": _iso(event_decision_time),
+                "entry_time": None,
+                "entry_known_at": None,
                 "event_key": output.get("event_key"),
                 "direction": direction_text,
                 "indicator_id": output.get("indicator_id"),
@@ -988,10 +1064,10 @@ class EventFactEvaluator:
                 for offset in range(0, entry_lag + 1)
                 if event_time + step * offset not in candle_by_open
             ]
-            if entry is None or entry_path_missing:
+            if event_candle is None or entry is None or entry_path_missing:
                 entry_reason = (
                     "entry_bar_missing"
-                    if entry is None
+                    if event_candle is None or entry is None
                     else "gap_before_delayed_entry"
                 )
                 row["eligible"] = False
@@ -1009,13 +1085,20 @@ class EventFactEvaluator:
                 row["fact_references"] = {}
                 event_results.append(row)
                 continue
-            decision_time = _utc(
+            entry_known_at = _utc(
                 entry.get("known_at") or entry.get("close_time"),
                 field="entry.known_at",
             )
-            row["decision_time"] = _iso(decision_time)
+            entry_close_time = _utc(
+                entry.get("close_time") or entry.get("known_at"),
+                field="entry.close_time",
+            )
+            row["entry_time"] = _iso(entry_time)
+            row["entry_known_at"] = _iso(entry_known_at)
             entry_close = float(entry["close"])
+            event_close = float(event_candle["close"])
             row["entry_price"] = entry_close
+            row["event_price"] = event_close
 
             for horizon in outcomes["horizons"]:
                 horizon_value = int(horizon)
@@ -1040,7 +1123,7 @@ class EventFactEvaluator:
                     else:
                         reason = None
                 else:
-                    target_close = decision_time + timedelta(seconds=horizon_value)
+                    target_close = entry_close_time + timedelta(seconds=horizon_value)
                     matches = [
                         candidate
                         for candidate in candles
@@ -1051,7 +1134,25 @@ class EventFactEvaluator:
                         == target_close
                     ]
                     target = matches[0] if len(matches) == 1 else None
-                    reason = None if target is not None else "target_time_unavailable"
+                    if target is None:
+                        reason = "target_time_unavailable"
+                        required_times = []
+                    else:
+                        target_open = _utc(
+                            target.get("open_time") or target.get("time"),
+                            field="target.open_time",
+                        )
+                        required_times = []
+                        cursor = entry_time + step
+                        while cursor <= target_open:
+                            required_times.append(cursor)
+                            cursor += step
+                        missing_times = [
+                            value
+                            for value in required_times
+                            if value not in candle_by_open
+                        ]
+                        reason = "gap_in_horizon" if missing_times else None
                 if reason is not None or target is None:
                     row["outcomes"][str(horizon_value)] = {
                         "status": "unresolved",
@@ -1064,7 +1165,7 @@ class EventFactEvaluator:
                 signed_return = forward_return * direction
                 path_rows = (
                     [candle_by_open[value] for value in required_times]
-                    if outcomes["horizon_kind"] == "bars"
+                    if required_times
                     else [target]
                 )
                 if direction > 0:
@@ -1167,25 +1268,25 @@ class EventFactEvaluator:
                     )
                 elif operator == "direction_signed_return":
                     lookback = int(spec["lookback_bars"])
-                    previous_time = entry_time - step * lookback
+                    previous_time = event_time - step * lookback
                     previous = candle_by_open.get(previous_time)
                     local_times = [
-                        entry_time - step * offset
+                        event_time - step * offset
                         for offset in range(1, lookback + 1)
                     ]
                     value = (
-                        ((entry_close / float(previous["close"])) - 1.0) * direction
+                        ((event_close / float(previous["close"])) - 1.0) * direction
                         if previous is not None
                         and all(item in candle_by_open for item in local_times)
                         else None
                     )
                 elif operator == "atr_fraction":
-                    atr = atr_by_period[int(spec["period"])].get(entry_time)
-                    value = atr / entry_close if atr is not None and entry_close else None
+                    atr = atr_by_period[int(spec["period"])].get(event_time)
+                    value = atr / event_close if atr is not None and event_close else None
                 elif operator == "volume_ratio":
                     lookback = int(spec["lookback_bars"])
                     history = [
-                        candle_by_open.get(entry_time - step * offset)
+                        candle_by_open.get(event_time - step * offset)
                         for offset in range(1, lookback + 1)
                     ]
                     volumes = [
@@ -1195,7 +1296,7 @@ class EventFactEvaluator:
                     ]
                     denominator = fmean(volumes) if len(volumes) == lookback else 0.0
                     value = (
-                        float(entry.get("volume") or 0.0) / denominator
+                        float(event_candle.get("volume") or 0.0) / denominator
                         if denominator > 0.0
                         else None
                     )
@@ -1241,7 +1342,7 @@ class EventFactEvaluator:
         )
         negatives = len(population_rows) - positives
         distinct_days = len(
-            {str(row["event_time"])[:10] for row in population_rows}
+            {str(row["decision_time"])[:10] for row in population_rows}
         )
 
         eligibility = dict(statistics.get("eligibility") or {})
@@ -1269,7 +1370,7 @@ class EventFactEvaluator:
                         fold["validation"]["start"],
                         field="fold.validation.start",
                     )
-                    <= _utc(row["event_time"], field="event_time")
+                    <= _utc(row["decision_time"], field="decision_time")
                     < _utc(
                         fold["validation"]["end"],
                         field="fold.validation.end",
@@ -1294,8 +1395,10 @@ class EventFactEvaluator:
                     specs=enriched_specs,
                     requirements=fact_requirements,
                     records_by_alias=fact_records,
-                    decision_time=_utc(row["decision_time"], field="decision_time"),
-                    entry_close=float(row["entry_price"]),
+                    decision_time=_utc(
+                        row["decision_time"], field="decision_time"
+                    ),
+                    venue_close=float(row["event_price"]),
                     direction=1.0 if row["direction"] == "long" else -1.0,
                 )
                 row["features"].update(features)
@@ -1324,6 +1427,26 @@ class EventFactEvaluator:
         complete_rows = [
             row for row in event_results if row["analysis_eligible"]
         ]
+        if enriched_specs and not eligibility_reasons:
+            complete_positives = sum(
+                1
+                for row in complete_rows
+                if bool(row["outcomes"][primary_key]["positive"])
+            )
+            complete_negatives = len(complete_rows) - complete_positives
+            complete_days = len(
+                {str(row["decision_time"])[:10] for row in complete_rows}
+            )
+            if len(complete_rows) < int(eligibility.get("min_samples") or 0):
+                eligibility_reasons.append("minimum_complete_sample_count_not_met")
+            if min(complete_positives, complete_negatives) < int(
+                eligibility.get("min_class_count") or 0
+            ):
+                eligibility_reasons.append("minimum_complete_class_count_not_met")
+            if complete_days < int(
+                eligibility.get("min_distinct_utc_days") or 0
+            ):
+                eligibility_reasons.append("minimum_complete_distinct_days_not_met")
         baseline_names = [str(row["name"]) for row in baseline_specs]
         enriched_feature_names = [str(row["name"]) for row in enriched_specs]
         distributions = {
@@ -1384,9 +1507,12 @@ class EventFactEvaluator:
                     row
                     for row in complete_rows
                     if train_start
-                    <= _utc(row["event_time"], field="event_time")
+                    <= _utc(row["decision_time"], field="decision_time")
                     < effective_train_end
-                    and _utc(row["event_time"], field="event_time")
+                    and _utc(
+                        row.get("entry_time") or row["event_time"],
+                        field="entry_time",
+                    )
                     + timedelta(seconds=primary_horizon_seconds)
                     <= effective_validation_start
                 ]
@@ -1394,7 +1520,7 @@ class EventFactEvaluator:
                     row
                     for row in complete_rows
                     if effective_validation_start
-                    <= _utc(row["event_time"], field="event_time")
+                    <= _utc(row["decision_time"], field="decision_time")
                     < validation_end
                 ]
                 fold_result: dict[str, Any] = {
@@ -1459,22 +1585,37 @@ class EventFactEvaluator:
                     )
                     baseline_loss = _log_loss(y_validation, baseline_probability)
                     enriched_loss = _log_loss(y_validation, enriched_probability)
+                    baseline_brier = float(
+                        np.mean((baseline_probability - y_validation) ** 2)
+                    )
+                    enriched_brier = float(
+                        np.mean((enriched_probability - y_validation) ** 2)
+                    )
+                    baseline_auc = _auc(y_validation, baseline_probability)
+                    enriched_auc = _auc(y_validation, enriched_probability)
                     fold_result.update(
                         {
                             "status": "valid",
                             "baseline": {
                                 "log_loss": baseline_loss,
-                                "brier": float(np.mean((baseline_probability - y_validation) ** 2)),
-                                "roc_auc": _auc(y_validation, baseline_probability),
+                                "brier": baseline_brier,
+                                "roc_auc": baseline_auc,
                                 "fit": baseline_fit,
                             },
                             "enriched": {
                                 "log_loss": enriched_loss,
-                                "brier": float(np.mean((enriched_probability - y_validation) ** 2)),
-                                "roc_auc": _auc(y_validation, enriched_probability),
+                                "brier": enriched_brier,
+                                "roc_auc": enriched_auc,
                                 "fit": enriched_fit,
                             },
                             "delta_log_loss": baseline_loss - enriched_loss,
+                            "delta_brier": baseline_brier - enriched_brier,
+                            "delta_roc_auc": (
+                                enriched_auc - baseline_auc
+                                if baseline_auc is not None
+                                and enriched_auc is not None
+                                else None
+                            ),
                         }
                     )
                     for index, source_row in enumerate(validation_rows):
@@ -1484,6 +1625,7 @@ class EventFactEvaluator:
                         paired_rows.append(
                             {
                                 "event_time": source_row["event_time"],
+                                "decision_time": source_row["decision_time"],
                                 "actual": actual,
                                 "baseline_probability": baseline_p,
                                 "enriched_probability": enriched_p,
@@ -1501,7 +1643,7 @@ class EventFactEvaluator:
             valid_folds = [row for row in fold_results if row["status"] == "valid"]
             if len(valid_folds) < int(eligibility.get("min_valid_folds") or 0):
                 eligibility_reasons.append("minimum_valid_folds_not_met")
-            if paired_rows:
+            if paired_rows and not eligibility_reasons:
                 y_all = np.asarray([row["actual"] for row in paired_rows], dtype=float)
                 baseline_all = np.asarray(
                     [row["baseline_probability"] for row in paired_rows], dtype=float
@@ -1510,6 +1652,14 @@ class EventFactEvaluator:
                     [row["enriched_probability"] for row in paired_rows], dtype=float
                 )
                 bootstrap = dict(statistics.get("bootstrap") or {})
+                aggregate_baseline_brier = float(
+                    np.mean((baseline_all - y_all) ** 2)
+                )
+                aggregate_enriched_brier = float(
+                    np.mean((enriched_all - y_all) ** 2)
+                )
+                aggregate_baseline_auc = _auc(y_all, baseline_all)
+                aggregate_enriched_auc = _auc(y_all, enriched_all)
                 statistical_result["model"] = {
                     "implementation": dict(model),
                     "baseline_features": baseline_names,
@@ -1524,16 +1674,25 @@ class EventFactEvaluator:
                     "oos_count": len(paired_rows),
                     "baseline": {
                         "log_loss": _log_loss(y_all, baseline_all),
-                        "brier": float(np.mean((baseline_all - y_all) ** 2)),
-                        "roc_auc": _auc(y_all, baseline_all),
+                        "brier": aggregate_baseline_brier,
+                        "roc_auc": aggregate_baseline_auc,
                     },
                     "enriched": {
                         "log_loss": _log_loss(y_all, enriched_all),
-                        "brier": float(np.mean((enriched_all - y_all) ** 2)),
-                        "roc_auc": _auc(y_all, enriched_all),
+                        "brier": aggregate_enriched_brier,
+                        "roc_auc": aggregate_enriched_auc,
                     },
                     "delta_log_loss": fmean(
                         [row["paired_log_loss_delta"] for row in paired_rows]
+                    ),
+                    "delta_brier": (
+                        aggregate_baseline_brier - aggregate_enriched_brier
+                    ),
+                    "delta_roc_auc": (
+                        aggregate_enriched_auc - aggregate_baseline_auc
+                        if aggregate_baseline_auc is not None
+                        and aggregate_enriched_auc is not None
+                        else None
                     ),
                     "bootstrap": (
                         _utc_day_cluster_ci(
@@ -1551,7 +1710,7 @@ class EventFactEvaluator:
                 }
 
         bin_config = dict(statistics.get("feature_bins") or {})
-        if bin_config and complete_rows:
+        if bin_config and complete_rows and not eligibility_reasons:
             for spec in enriched_specs:
                 name = str(spec["name"])
                 values = np.asarray(
@@ -1609,7 +1768,7 @@ class EventFactEvaluator:
                 )
 
         direct_config = dict(statistics.get("direct_tests") or {})
-        if direct_config and complete_rows:
+        if direct_config and complete_rows and not eligibility_reasons:
             y = np.asarray(
                 [
                     (
@@ -1768,6 +1927,7 @@ class EventFactEvaluator:
                         "rows": [
                             {
                                 "event_time": row["event_time"],
+                                "decision_time": row["decision_time"],
                                 "features": row["features"],
                                 "primary_outcome": row["outcomes"].get(primary_key),
                                 "eligible": row["eligible"],
@@ -1783,8 +1943,13 @@ class EventFactEvaluator:
                     }
                 ),
                 "statistics_hash": semantic_hash(statistical_result),
-                "gap_transition_hash": semantic_hash(
-                    {"gap_transitions": gap_transitions}
+                "indicator_gap_semantics_hash": semantic_hash(
+                    {
+                        "schema_version": "check_gap_transition_material.v1",
+                        "policy": plan.gap_policy,
+                        "gap_transitions": gap_transitions,
+                        "rejection": gap_rejection,
+                    }
                 ),
             },
             "data_quality": dict(inputs.get("data_quality") or {}),

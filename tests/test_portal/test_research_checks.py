@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import nullcontext
 from typing import Any
 
@@ -2175,6 +2174,44 @@ def test_research_job_routes_delegate_to_async_dispatch(monkeypatch: pytest.Monk
     assert observed["dispatch"]["check_family"] == "candidate_lifecycle"
     assert observed["status"] == "job-1"
     assert observed["result"] == "job-1"
+
+
+def test_research_pass_gate_route_delegates_to_owned_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+
+    def fake_evaluate(payload):
+        observed["payload"] = payload
+        return {
+            "schema_version": "pass_gate_result.v2",
+            "status": "PASSED",
+            "gates": [],
+        }
+
+    monkeypatch.setattr(
+        research_controller.research_pass_gates,
+        "evaluate_pass_gate_request",
+        fake_evaluate,
+    )
+    response = TestClient(app).post(
+        "/api/research/comparisons/pass-gates/evaluate",
+        json={
+            "plan": {"intent": "exploration", "pass_gates": {"gates": []}},
+            "summaries": [
+                {
+                    "window_id": "w1",
+                    "variant_id": "candidate",
+                    "summary": {"metrics": {"trade_count": 3}},
+                }
+            ],
+            "comparison_refs": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PASSED"
+    assert observed["payload"]["summaries"][0]["variant_id"] == "candidate"
 
 
 def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.MonkeyPatch) -> None:

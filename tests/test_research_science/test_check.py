@@ -5,7 +5,10 @@ from dataclasses import replace
 import pytest
 
 from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
-from market_data.frozen import build_frozen_market_data_read_binding
+from market_data.frozen import (
+    build_frozen_market_data_read_binding,
+    frozen_subject_snapshot_hash,
+)
 from research_science.check import (
     CHECK_DEFINITION_SCHEMA_VERSION,
     CHECK_EVIDENCE_BINDING_SCHEMA_VERSION,
@@ -110,7 +113,15 @@ def _frozen_binding() -> dict:
         dataset_id="mds_" + "a" * 32,
         dataset_hash=dataset_hash,
         max_commit_seq=10,
-        subjects=({"instrument_id": "instrument-1"},),
+        subjects=(
+            {
+                "instrument_id": "instrument-1",
+                "snapshot_hash": frozen_subject_snapshot_hash(
+                    {"id": "instrument-1", "symbol": "TEST"}
+                ),
+                "snapshot": {"id": "instrument-1", "symbol": "TEST"},
+            },
+        ),
         series=(
             {
                 "alias": "primary",
@@ -226,6 +237,26 @@ def test_evidence_and_result_hashes_bind_all_semantic_inputs() -> None:
     assert changed.result_hash != result.result_hash
     assert verify_check_replay(result, same)["matches"] is True
     assert verify_check_replay(result, changed)["matches"] is False
+
+    changed_quality = replace(
+        evidence,
+        quality_hash="changed-quality",
+        input_hash="",
+        evidence_hash="",
+    )
+    changed_input = replace(
+        evidence,
+        fact_input_hash="changed-fact-input",
+        input_hash="",
+        evidence_hash="",
+    )
+    changed_configuration = _plan(
+        request,
+        execution={"evaluator_id": "event_fact", "configuration_version": "2"},
+    )
+    assert changed_quality.evidence_hash != evidence.evidence_hash
+    assert changed_input.evidence_hash != evidence.evidence_hash
+    assert changed_configuration.plan_hash != plan.plan_hash
 
 
 def test_assertions_have_no_verdict_when_absent_and_never_silently_pass_missing() -> None:

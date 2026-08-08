@@ -201,6 +201,40 @@ def test_event_fact_check_uses_indicator_events_causal_facts_and_exact_outcomes(
     assert result["event_ownership"] == "indicator"
 
 
+def test_event_fact_check_excludes_event_not_known_by_evaluation_end() -> None:
+    inputs = _inputs()
+    inputs["indicator_evidence"]["outputs"][1]["event"]["known_at"] = (
+        "2026-01-01T04:00:00.000001Z"
+    )
+
+    result = EventFactEvaluator().evaluate(
+        plan=_plan(gap_policy="continue_degraded"), inputs=inputs
+    )
+
+    assert result["candidate_count"] == 1
+    assert [row["event_time"] for row in result["events"]] == [
+        "2026-01-01T01:00:00.000000Z"
+    ]
+
+
+def test_delayed_entry_does_not_leak_post_decision_fact_into_features() -> None:
+    inputs = _inputs()
+    inputs["outcomes"]["entry_lag_bars"] = 1
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    inputs["fact_records_by_alias"]["reference_price"].append(
+        _record(4, value="999", known_at=start + timedelta(hours=2, minutes=30))
+    )
+
+    result = EventFactEvaluator().evaluate(
+        plan=_plan(gap_policy="continue_degraded"), inputs=inputs
+    )
+
+    first = result["events"][0]
+    assert first["decision_time"] == "2026-01-01T02:00:00.000000Z"
+    assert first["entry_known_at"] == "2026-01-01T03:00:00.000000Z"
+    assert first["features"]["reference_value"] == 101.0
+
+
 def test_event_fact_check_preserves_unresolved_horizon_reason() -> None:
     inputs = _inputs()
     inputs["indicator_evidence"]["candles"] = [

@@ -1,9 +1,47 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from portal.backend.service.research.planning import plan_research_check
+from portal.backend.service.research.planning import _coverage_for_requirement
 from portal.backend.service.research.registry import normalize_check_request
+from market_data.frozen import semantic_hash
+
+
+def _iso(value) -> str:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _coverage_row(*, start, end, source_key: str = "source-a") -> dict:
+    material = {
+        "schema_version": "market.fact_acquisition_coverage.v1",
+        "series_id": 2,
+        "source_id": 1,
+        "binding_id": "binding-1",
+        "manifest_hash": "a" * 64,
+        "interface_version": "test.v1",
+        "confirmation_depth": 12,
+        "range_start": _iso(start),
+        "range_end": _iso(end),
+        "source_positions": {"start": "1", "end": "2", "head": "2"},
+        "status": "complete",
+        "evidence": {"response_count": 0},
+    }
+    return {
+        **material,
+        "identity_key": semantic_hash(material),
+        "source_identity_key": source_key,
+        "source_position_start": "1",
+        "source_position_end": "2",
+        "source_position_head": "2",
+        "created_at": "2026-02-01T00:00:00.000000Z",
+    }
 
 
 class _Store:
@@ -14,7 +52,8 @@ class _Store:
         assert instrument_id == "instrument-1"
         return [
             {
-                "series_id": 1,
+                "id": 1,
+                "series_id": None,
                 "instrument_id": instrument_id,
                 "fact_type": "candle.ohlcv",
                 "contract_version": "candle.ohlcv.v1",
@@ -22,7 +61,8 @@ class _Store:
                 "dimensions": {},
             },
             {
-                "series_id": 2,
+                "id": 2,
+                "series_id": None,
                 "instrument_id": instrument_id,
                 "fact_type": "market.reference_price",
                 "contract_version": "market.reference_price.v1",
@@ -31,7 +71,7 @@ class _Store:
             },
         ]
 
-    def read_series_records(self, **_kwargs):
+    def read_series_records(self, **kwargs):
         source = SimpleNamespace(
             identity_key="source-a",
             provider="provider-a",
@@ -39,7 +79,26 @@ class _Store:
             source_kind="test",
             adapter_version="test.v1",
         )
-        return [SimpleNamespace(source_identity_key="source-a", source=source)]
+        if int(kwargs["series_id"]) == 1:
+            cursor = kwargs["start"]
+            records = []
+            while cursor < kwargs["end"]:
+                records.append(
+                    SimpleNamespace(
+                        source_identity_key="source-a",
+                        source=source,
+                        fact=SimpleNamespace(open_time=cursor),
+                    )
+                )
+                cursor += timedelta(minutes=30)
+            return records
+        return [
+            SimpleNamespace(
+                source_identity_key="source-a",
+                source=source,
+                fact=SimpleNamespace(effective_at=kwargs["start"]),
+            )
+        ]
 
     def list_gap_evidence(self, **kwargs):
         if kwargs["series_id"] == 1:
@@ -48,9 +107,13 @@ class _Store:
                     "classification": "provider_missing_data",
                     "start": "2026-01-10T00:00:00Z",
                     "end": "2026-01-10T00:30:00Z",
+                    "source_identity_key": "source-a",
                 }
             ]
         return []
+
+    def list_source_acquisition_coverage(self, **kwargs):
+        return [_coverage_row(start=kwargs["start"], end=kwargs["end"])]
 
 
 def _indicator_plan(*_args, **_kwargs):
@@ -106,7 +169,7 @@ def test_check_plan_exposes_transitive_inputs_warmup_staleness_sources_and_quali
         {
             "mode": "evidence",
             "title": "Indicator evidence",
-            "check_family": "indicator_forward_outcome",
+            "check_family": "signal_audit",
             "dataset_id": "mds_" + "a" * 32,
             "scope": {
                 "indicator_id": "indicator-1",
@@ -115,7 +178,15 @@ def test_check_plan_exposes_transitive_inputs_warmup_staleness_sources_and_quali
                 "start": "2026-01-01T00:00:00Z",
                 "end": "2026-02-01T00:00:00Z",
             },
-            "detector": {"type": "record_match", "output_name": "breakout"},
+            "detector": {
+                "type": "signal_audit",
+                "source_output": "state",
+                "source_field": "state_key",
+                "from": "inside",
+                "to": "outside",
+                "signal_output": "breakout",
+                "event_key": "breakout",
+            },
             "outcomes": {"forward_bars": [2, 6, 12]},
             "gap_policy": "reset_rewarm",
         },
@@ -140,6 +211,8 @@ def test_check_plan_exposes_transitive_inputs_warmup_staleness_sources_and_quali
         "bars": 12,
         "seconds": 21600,
         "horizon_kind": "bars",
+        "entry_lag_bars": 0,
+        "invalidation_max_bars": 0,
     }
     transitive = next(
         row
@@ -178,3 +251,106 @@ def test_evidence_requires_explicit_gap_policy() -> None:
             },
             mode="evidence",
         )
+
+
+def test_sparse_numeric_fact_does_not_prove_full_source_coverage() -> None:
+    store = _Store()
+    required_start = datetime(2026, 1, 1, tzinfo=UTC)
+    required_end = datetime(2026, 2, 1, tzinfo=UTC)
+
+    def incomplete_coverage(**_kwargs):
+        return [
+            _coverage_row(
+                start=required_start,
+                end=required_start + timedelta(days=1),
+            )
+        ]
+
+    store.list_source_acquisition_coverage = incomplete_coverage
+    missing, _quality = _coverage_for_requirement(
+        {
+            "alias": "reference",
+            "instrument_id": "instrument-1",
+            "fact_type": "market.reference_price",
+            "contract_version": "market.reference_price.v1",
+            "timeframe_seconds": None,
+            "dimensions": {"quote_currency": "USD"},
+            "alignment": "latest_known",
+            "required_start": _iso(required_start),
+            "required_end": _iso(required_end),
+            "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-a",
+            },
+        },
+        store=store,
+        as_of_commit_seq=77,
+    )
+
+    assert any(row["reason"] == "source_acquisition_coverage_missing" for row in missing)
+
+
+def test_complete_acquisition_manifest_can_prove_zero_event_numeric_range() -> None:
+    class EmptyNumericStore(_Store):
+        def read_series_records(self, **kwargs):
+            if int(kwargs["series_id"]) == 2:
+                return []
+            return super().read_series_records(**kwargs)
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 2, 1, tzinfo=UTC)
+    missing, quality = _coverage_for_requirement(
+        {
+            "alias": "reference",
+            "instrument_id": "instrument-1",
+            "fact_type": "market.reference_price",
+            "contract_version": "market.reference_price.v1",
+            "timeframe_seconds": None,
+            "dimensions": {"quote_currency": "USD"},
+            "alignment": "latest_known",
+            "required_start": _iso(start),
+            "required_end": _iso(end),
+            "source_policy": {
+                "mode": "exact",
+                "source_identity_key": "source-a",
+            },
+        },
+        store=EmptyNumericStore(),
+        as_of_commit_seq=77,
+    )
+
+    assert missing == []
+    assert quality[0]["classification"] == "source_acquisition_coverage"
+
+
+def test_requirement_planning_enforces_exact_series_identity() -> None:
+    missing, quality = _coverage_for_requirement(
+        {
+            "alias": "reference",
+            "instrument_id": "instrument-1",
+            "fact_type": "market.reference_price",
+            "contract_version": "market.reference_price.v1",
+            "timeframe_seconds": None,
+            "dimensions": {"quote_currency": "USD"},
+            "alignment": "latest_known",
+            "required_start": "2026-01-01T00:00:00Z",
+            "required_end": "2026-02-01T00:00:00Z",
+            "source_policy": {
+                "mode": "exact",
+                "series_id": 999,
+                "source_identity_key": "source-a",
+            },
+        },
+        store=_Store(),
+        as_of_commit_seq=77,
+    )
+
+    assert quality == []
+    assert missing == [
+        {
+            "alias": "reference",
+            "reason": "source_series_binding_unresolved",
+            "requested_series_id": 999,
+            "candidate_series_ids": [2],
+        }
+    ]

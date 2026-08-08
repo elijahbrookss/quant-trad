@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from engines.indicator_engine.contracts import IndicatorGapRejectedError
 from market_data.frozen import semantic_hash
 from market_data.frozen import normalize_frozen_market_data_read_binding
 from research_science.check import (
@@ -22,6 +21,7 @@ from research_science.check import (
     ScalarAssertionSpec,
     evaluate_scalar_assertions,
 )
+from engines.indicator_engine.contracts import IndicatorGapRejectedError
 
 from portal.backend.service.indicators.indicator_service.runtime_validation import (
     collect_runtime_output_evidence_for_instance,
@@ -36,7 +36,6 @@ from portal.backend.service.reports import contract as reports_contract
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
 from . import checks
-from .event_fact_evaluator import EVENT_FACT_ANALYSIS
 from .registry import CHECK_REGISTRY
 
 
@@ -127,7 +126,14 @@ def _filter_indicator_evidence(
         "outputs": [
             dict(row)
             for row in evidence.get("outputs") or []
-            if start <= str(row.get("time") or "") < end
+            if start
+            <= str(
+                row.get("known_at")
+                if str(row.get("output_type") or "") in {"signal", "lifecycle"}
+                else row.get("time")
+                or ""
+            )
+            < end
         ],
         "evaluation_range": dict(plan.evaluation_range),
     }
@@ -151,7 +157,13 @@ def _load_market_inputs(
     )
     instrument_id = str(primary_requirement["instrument_id"])
     candles = candle_service.fetch_ohlcv_by_instrument(
-        instrument_id, start, end, timeframe
+        instrument_id,
+        start,
+        end,
+        timeframe,
+        frozen_alias=(
+            "primary_bars" if resolver.dataset_binding is not None else None
+        ),
     )
     data_quality = _quality(
         plan,
@@ -170,16 +182,19 @@ def _load_market_inputs(
             (resolver.dataset_binding or {}).get("recorded_gaps")
             or plan.quality_evidence
         )
-        candle_aliases = {
-            str(row.get("alias") or "")
-            for row in plan.market_data_requirements
-            if str(row.get("fact_type") or "") == "candle.ohlcv"
-        }
         candle_gaps = [
             dict(row)
             for row in bound_gaps
-            if str(row.get("alias") or "") in candle_aliases
+            if str(row.get("alias") or "") == "primary_bars"
         ]
+        subject_snapshot = next(
+            (
+                dict(row.get("snapshot") or {})
+                for row in (resolver.dataset_binding or {}).get("subjects") or []
+                if str(row.get("instrument_id") or "") == instrument_id
+            ),
+            None,
+        )
         try:
             evidence = collect_runtime_output_evidence_for_instance(
                 indicator_id,
@@ -190,6 +205,7 @@ def _load_market_inputs(
                 datasource=scope.get("datasource"),
                 exchange=scope.get("exchange"),
                 instrument_id=instrument_id,
+                instrument_snapshot=subject_snapshot,
                 indicator_param_overrides=scope.get("indicator_param_overrides"),
                 candle_frame=candles,
                 market_data_resolver=resolver,
@@ -197,30 +213,45 @@ def _load_market_inputs(
                     plan
                 ),
                 gap_policy=plan.gap_policy,
-                gap_rewarm_bars=int(plan.warmup.get("bars") or 0),
+                gap_rewarm_bars=int(
+                    request.parameters.get("gap_rewarm_bars") or 0
+                ),
                 recorded_gap_evidence=candle_gaps,
+                require_recorded_discontinuities=(
+                    resolver.dataset_binding is not None
+                ),
                 expected_indicator_graph=plan.indicator_graph,
                 indicator_plan_start=str(plan.evaluation_range["start"]),
                 indicator_plan_end=str(plan.materialization_range["end_exclusive"]),
             )
         except IndicatorGapRejectedError as exc:
-            inputs["indicator_gap_rejection"] = {
+            rejection = {
                 "indicator_id": exc.indicator_id,
+                "policy": plan.gap_policy,
                 "gap": dict(exc.gap),
-                "policy": "reject",
-                "action": "rejected",
+                "reason": "indicator_rejected_recorded_gap",
             }
-            evidence = {
+            inputs["indicator_gap_rejection"] = rejection
+            inputs["indicator_evidence"] = {
                 "schema_version": "indicator_output_evidence.v1",
+                "runtime_path": "typed_indicator_engine.v1",
                 "indicator_graph": [dict(row) for row in plan.indicator_graph],
                 "indicator_graph_hash": semantic_hash(
-                    {"indicators": list(plan.indicator_graph)}
+                    {"indicators": [dict(row) for row in plan.indicator_graph]}
                 ),
-                "candles": [],
                 "outputs": [],
+                "candles": [],
                 "gap_transitions": [],
+                "continuity_discontinuities": [dict(exc.gap)],
+                "window": {
+                    "start": start,
+                    "end": end,
+                },
             }
-        inputs["indicator_evidence"] = _filter_indicator_evidence(evidence, plan)
+        else:
+            inputs["indicator_evidence"] = _filter_indicator_evidence(
+                evidence, plan
+            )
     if bool(plan.execution.get("fact_history_required", False)):
         requirements = {
             str(row["alias"]): dict(row)

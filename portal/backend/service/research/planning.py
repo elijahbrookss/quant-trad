@@ -12,7 +12,12 @@ from market_data.contracts import (
     CANDLE_FACT_VERSION,
     MarketDataRequirement,
 )
+from market_data.acquisition_coverage import (
+    missing_complete_coverage,
+    normalize_acquisition_coverage,
+)
 from market_data.fact_registry import get_fact_contract
+from market_data.gaps import recorded_gaps_cover_interval
 from market_data.requirements import (
     InstrumentResolutionContext,
     MarketDataPlanResolver,
@@ -84,7 +89,11 @@ def _positive_ints(value: Any) -> list[int]:
     return result
 
 
-def _scope_instrument(scope: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+def _scope_instrument(
+    scope: Mapping[str, Any],
+    *,
+    instrument_loader: Callable[[str], Mapping[str, Any]],
+) -> tuple[str, dict[str, Any]]:
     instrument_id = str(scope.get("instrument_id") or "").strip()
     if not instrument_id:
         symbol = str(scope.get("symbol") or "").strip()
@@ -95,7 +104,7 @@ def _scope_instrument(scope: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         instrument_id = instrument_service.require_instrument_id(
             scope.get("datasource"), scope.get("exchange"), symbol
         )
-    return instrument_id, dict(instrument_service.get_instrument_record(instrument_id))
+    return instrument_id, dict(instrument_loader(instrument_id))
 
 
 def _requirement_from_payload(raw: Mapping[str, Any]) -> MarketDataRequirement:
@@ -117,6 +126,77 @@ def _requirement_from_payload(raw: Mapping[str, Any]) -> MarketDataRequirement:
     return MarketDataRequirement(**values)
 
 
+def _listed_series(row: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    raw_id = normalized.get("series_id") or normalized.get("id")
+    if raw_id in (None, ""):
+        raise ValueError(
+            "check_requirement_plan_invalid: listed series has no identity"
+        )
+    normalized["series_id"] = int(raw_id)
+    return normalized
+
+
+def _requested_source_keys(policy: Mapping[str, Any]) -> tuple[str, ...]:
+    mode = str(policy.get("mode") or "current").strip().lower()
+    if mode == "exact":
+        key = str(policy.get("source_identity_key") or "").strip()
+        return (key,) if key else ()
+    if mode == "allowlist":
+        return tuple(
+            sorted(
+                {
+                    str(value).strip()
+                    for value in policy.get("source_identity_keys") or []
+                    if str(value).strip()
+                }
+            )
+        )
+    return ()
+
+
+def _record_time(record: Any) -> datetime:
+    fact = record.fact
+    value = (
+        getattr(fact, "open_time", None)
+        or getattr(fact, "sample_time", None)
+        or getattr(fact, "effective_at", None)
+    )
+    return _utc(value, field="record.time")
+
+
+def _unrecorded_interval_gaps(
+    *,
+    records: Sequence[Any],
+    start: datetime,
+    end: datetime,
+    timeframe_seconds: int,
+    recorded_gaps: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    observed = {_record_time(record) for record in records}
+    step = timedelta(seconds=int(timeframe_seconds))
+    cursor = start
+    missing: list[dict[str, Any]] = []
+    while cursor < end:
+        if cursor not in observed:
+            gap_end = min(cursor + step, end)
+            recorded = recorded_gaps_cover_interval(
+                start=cursor,
+                end=gap_end,
+                evidence=recorded_gaps,
+            )
+            if not recorded:
+                missing.append(
+                    {
+                        "start": _iso(cursor),
+                        "end": _iso(gap_end),
+                        "reason": "source_bound_interval_unrecorded",
+                    }
+                )
+        cursor += step
+    return missing
+
+
 def _coverage_for_requirement(
     requirement: Mapping[str, Any],
     *,
@@ -124,9 +204,8 @@ def _coverage_for_requirement(
     as_of_commit_seq: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     candidates = []
-    dimensions = get_fact_contract(str(requirement["fact_type"])).normalize_dimensions(
-        requirement.get("dimensions")
-    )
+    fact_contract = get_fact_contract(str(requirement["fact_type"]))
+    dimensions = fact_contract.normalize_dimensions(requirement.get("dimensions"))
     for row in store.list_series(instrument_id=str(requirement["instrument_id"])):
         if (
             str(row.get("fact_type") or "").strip().lower()
@@ -141,7 +220,7 @@ def _coverage_for_requirement(
             == requirement.get("timeframe_seconds")
             and dict(row.get("dimensions") or {}) == dimensions
         ):
-            candidates.append(dict(row))
+            candidates.append(_listed_series(row))
     missing: list[dict[str, Any]] = []
     quality: list[dict[str, Any]] = []
     if not candidates:
@@ -154,23 +233,67 @@ def _coverage_for_requirement(
             }
         )
         return missing, quality
-    records_by_series: dict[int, list[Any]] = {}
     source_policy = dict(requirement.get("source_policy") or {})
+    requested_series_id = source_policy.get("series_id")
+    if requested_series_id not in (None, ""):
+        semantic_candidate_ids = sorted(
+            int(row["series_id"]) for row in candidates
+        )
+        candidates = [
+            row
+            for row in candidates
+            if int(row["series_id"]) == int(requested_series_id)
+        ]
+        if not candidates:
+            missing.append(
+                {
+                    "alias": requirement["alias"],
+                    "reason": "source_series_binding_unresolved",
+                    "requested_series_id": int(requested_series_id),
+                    "candidate_series_ids": semantic_candidate_ids,
+                }
+            )
+            return missing, quality
+    records_by_series: dict[int, list[Any]] = {}
     policy_mode = str(source_policy.get("mode") or "current").strip().lower()
     source_resolved_candidates: list[dict[str, Any]] = []
+    resolved_source_keys_by_series: dict[int, tuple[str, ...]] = {}
     for candidate in candidates:
+        requested_source_keys = _requested_source_keys(source_policy)
         records = list(
             store.read_series_records(
                 series_id=int(candidate["series_id"]),
                 start=_utc(requirement["required_start"], field="required_start"),
                 end=_utc(requirement["required_end"], field="required_end"),
                 as_of_commit_seq=as_of_commit_seq,
+                source_identity_keys=requested_source_keys,
             )
         )
-        records_by_series[int(candidate["series_id"])] = records
-        if policy_mode == "current" or matching_source_identity_keys(
-            records, source_policy
-        ):
+        if policy_mode == "current":
+            selected_source_keys: tuple[str, ...] = ()
+        elif policy_mode == "exact" and requested_source_keys:
+            selected_source_keys = requested_source_keys
+        else:
+            selected_source_keys = tuple(
+                matching_source_identity_keys(records, source_policy)
+            )
+        if policy_mode == "current" or selected_source_keys:
+            if selected_source_keys:
+                records = list(
+                    store.read_series_records(
+                        series_id=int(candidate["series_id"]),
+                        start=_utc(
+                            requirement["required_start"], field="required_start"
+                        ),
+                        end=_utc(requirement["required_end"], field="required_end"),
+                        as_of_commit_seq=as_of_commit_seq,
+                        source_identity_keys=selected_source_keys,
+                    )
+                )
+            records_by_series[int(candidate["series_id"])] = records
+            resolved_source_keys_by_series[int(candidate["series_id"])] = (
+                selected_source_keys
+            )
             source_resolved_candidates.append(candidate)
     if not source_resolved_candidates:
         missing.append(
@@ -197,7 +320,78 @@ def _coverage_for_requirement(
         return missing, quality
     candidate = source_resolved_candidates[0]
     records = records_by_series[int(candidate["series_id"])]
-    if not records:
+    recorded_quality = list(
+        store.list_gap_evidence(
+            series_id=int(candidate["series_id"]),
+            start=_utc(requirement["required_start"], field="required_start"),
+            end=_utc(requirement["required_end"], field="required_end"),
+            as_of_commit_seq=as_of_commit_seq,
+            include_source_identity=True,
+        )
+    )
+    resolved_source_keys = set(
+        resolved_source_keys_by_series.get(int(candidate["series_id"]), ())
+    )
+    if policy_mode in {"exact", "allowlist"}:
+        recorded_quality = [
+            row
+            for row in recorded_quality
+            if str(row.get("source_identity_key") or "").strip()
+            in resolved_source_keys
+        ]
+    acquisition_coverage_proves_range = False
+    if fact_contract.uses_exact_numeric_storage and policy_mode in {
+        "exact",
+        "allowlist",
+    }:
+        coverage_reader = getattr(store, "list_source_acquisition_coverage", None)
+        if not callable(coverage_reader):
+            missing.append(
+                {
+                    "alias": requirement["alias"],
+                    "series_id": int(candidate["series_id"]),
+                    "reason": "acquisition_coverage_reader_unavailable",
+                }
+            )
+        else:
+            coverage = normalize_acquisition_coverage(
+                coverage_reader(
+                    series_id=int(candidate["series_id"]),
+                    source_identity_keys=tuple(sorted(resolved_source_keys)),
+                    start=_utc(requirement["required_start"], field="required_start"),
+                    end=_utc(requirement["required_end"], field="required_end"),
+                )
+            )
+            uncovered_ranges = missing_complete_coverage(
+                start=requirement["required_start"],
+                end=requirement["required_end"],
+                source_identity_keys=tuple(sorted(resolved_source_keys)),
+                coverage=coverage,
+            )
+            acquisition_coverage_proves_range = bool(resolved_source_keys) and not (
+                uncovered_ranges
+            )
+            for uncovered in uncovered_ranges:
+                missing.append(
+                    {
+                        "alias": requirement["alias"],
+                        "series_id": int(candidate["series_id"]),
+                        "reason": "source_acquisition_coverage_missing",
+                        **uncovered,
+                    }
+                )
+            quality.extend(
+                {
+                    "alias": requirement["alias"],
+                    "series_id": int(candidate["series_id"]),
+                    "classification": "source_acquisition_coverage",
+                    "start": row["range_start"],
+                    "end": row["range_end"],
+                    "coverage": row,
+                }
+                for row in coverage
+            )
+    if not records and not acquisition_coverage_proves_range:
         missing.append(
             {
                 "alias": requirement["alias"],
@@ -205,18 +399,31 @@ def _coverage_for_requirement(
                 "series_id": int(candidate["series_id"]),
             }
         )
+    elif records and (
+        str(requirement.get("alignment") or "") == "exact_interval"
+        and requirement.get("timeframe_seconds") is not None
+    ):
+        for gap in _unrecorded_interval_gaps(
+            records=records,
+            start=_utc(requirement["required_start"], field="required_start"),
+            end=_utc(requirement["required_end"], field="required_end"),
+            timeframe_seconds=int(requirement["timeframe_seconds"]),
+            recorded_gaps=recorded_quality,
+        ):
+            missing.append(
+                {
+                    "alias": requirement["alias"],
+                    "series_id": int(candidate["series_id"]),
+                    **gap,
+                }
+            )
     quality.extend(
         {
             "alias": requirement["alias"],
             "series_id": int(candidate["series_id"]),
             **dict(row),
         }
-        for row in store.list_gap_evidence(
-            series_id=int(candidate["series_id"]),
-            start=_utc(requirement["required_start"], field="required_start"),
-            end=_utc(requirement["required_end"], field="required_end"),
-            as_of_commit_seq=as_of_commit_seq,
-        )
+        for row in recorded_quality
     )
     return missing, quality
 
@@ -227,12 +434,14 @@ def plan_research_check(
     *,
     store: MarketDataStore = market_data_repo,
     indicator_planner: Callable[..., Mapping[str, Any]] = plan_runtime_requirements_for_indicators,
+    instrument_loader: Callable[[str], Mapping[str, Any]] | None = None,
     inspect_coverage: bool = True,
     require_durable_sources: bool = False,
 ) -> ResolvedCheckPlan:
     """Resolve explicit and transitive Check inputs without acquiring providers."""
 
     scope = dict(request.scope)
+    instrument_loader = instrument_loader or instrument_service.get_instrument_record
     evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
     declaration = dict(
         evaluator.declare_requirements(definition=definition, request=request)
@@ -259,7 +468,9 @@ def plan_research_check(
             execution=declaration,
         )
 
-    instrument_id, _instrument = _scope_instrument(scope)
+    instrument_id, _instrument = _scope_instrument(
+        scope, instrument_loader=instrument_loader
+    )
     timeframe = str(scope.get("timeframe") or scope.get("interval") or "").strip()
     timeframe_seconds = _timeframe_seconds(timeframe)
     evaluation_start = _utc(scope.get("start"), field="scope.start")
@@ -275,6 +486,16 @@ def plan_research_check(
         max(horizons, default=0) * timeframe_seconds
         if horizon_kind == "bars"
         else max(horizons, default=0)
+    )
+    entry_lag_bars = int(declaration.get("entry_lag_bars") or 0)
+    invalidation_max_bars = int(declaration.get("invalidation_max_bars") or 0)
+    if entry_lag_bars < 0 or invalidation_max_bars < 0:
+        raise ValueError(
+            "check_requirement_plan_invalid: outcome tail bars must be nonnegative"
+        )
+    outcome_tail_seconds = entry_lag_bars * timeframe_seconds + max(
+        outcome_tail_seconds,
+        invalidation_max_bars * timeframe_seconds,
     )
     configured_warmup = int(scope.get("warmup_bars") or 0)
     feature_lookback = int(declaration.get("feature_lookback_bars") or 0)
@@ -345,6 +566,10 @@ def plan_research_check(
     feature_windows = dict(
         declaration.get("feature_windows_seconds_by_alias") or {}
     )
+    feature_predecessor_aliases = {
+        str(value)
+        for value in declaration.get("feature_predecessor_aliases") or []
+    }
     for raw in request.parameters.get("inputs") or []:
         requirement = _requirement_from_payload(raw)
         explicit_instrument = str(raw.get("instrument_id") or "").strip()
@@ -391,6 +616,8 @@ def plan_research_check(
             * int(requirement.timeframe_seconds or timeframe_seconds),
             feature_window_seconds,
         )
+        if requirement.key in feature_predecessor_aliases:
+            lookback_seconds += max(lookback_seconds, timeframe_seconds)
         requirements.append(
             {
                 **resolved_series.to_dict(),
@@ -495,9 +722,16 @@ def plan_research_check(
             "required_horizons": list(
                 declaration.get("required_outcome_horizons") or horizons
             ),
-            "bars": max(horizons, default=0) if horizon_kind == "bars" else None,
+            "bars": (
+                entry_lag_bars
+                + max(max(horizons, default=0), invalidation_max_bars)
+                if horizon_kind == "bars"
+                else None
+            ),
             "seconds": outcome_tail_seconds,
             "horizon_kind": horizon_kind,
+            "entry_lag_bars": entry_lag_bars,
+            "invalidation_max_bars": invalidation_max_bars,
         },
         gap_policy=request.parameters["gap_policy"],
         execution=declaration,
@@ -506,4 +740,57 @@ def plan_research_check(
     )
 
 
-__all__ = ["plan_research_check"]
+def rederive_research_check_plan_from_pinned_inputs(
+    definition: CheckDefinition,
+    request: CheckRequest,
+    persisted_plan: ResolvedCheckPlan,
+    *,
+    subject_snapshots: Mapping[str, Mapping[str, Any]],
+) -> ResolvedCheckPlan:
+    """Rebuild plan semantics without consulting mutable Indicator/instrument rows."""
+
+    graph_rows = [dict(row) for row in persisted_plan.indicator_graph]
+    preloaded_metas: dict[str, dict[str, Any]] = {}
+    for row in graph_rows:
+        indicator_id = str(row.get("indicator_id") or "").strip()
+        if not indicator_id or indicator_id in preloaded_metas:
+            raise ValueError(
+                "check_evidence_payload_invalid: pinned Indicator graph identities are invalid"
+            )
+        preloaded_metas[indicator_id] = {
+            "id": indicator_id,
+            "type": str(row.get("indicator_type") or ""),
+            "params": dict(row.get("params") or {}),
+            "dependencies": list(row.get("dependencies") or []),
+            "enabled": True,
+            "runtime_supported": True,
+        }
+
+    def pinned_indicator_planner(indicator_ids, **kwargs):
+        return plan_runtime_requirements_for_indicators(
+            indicator_ids,
+            **kwargs,
+            preloaded_metas=preloaded_metas,
+        )
+
+    def pinned_instrument_loader(instrument_id: str) -> Mapping[str, Any]:
+        snapshot = subject_snapshots.get(str(instrument_id))
+        if snapshot is None:
+            raise ValueError(
+                "check_evidence_payload_invalid: plan subject is absent from frozen binding"
+            )
+        return dict(snapshot)
+
+    return plan_research_check(
+        definition,
+        request,
+        indicator_planner=pinned_indicator_planner,
+        instrument_loader=pinned_instrument_loader,
+        inspect_coverage=False,
+    )
+
+
+__all__ = [
+    "plan_research_check",
+    "rederive_research_check_plan_from_pinned_inputs",
+]

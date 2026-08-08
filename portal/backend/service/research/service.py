@@ -34,7 +34,7 @@ from portal.backend.service.market import candle_service, instrument_service
 from portal.backend.service.market.frozen_dataset_service import (
     prepare_frozen_dataset_from_requirements,
 )
-from portal.backend.service.provenance import source_revision
+from portal.backend.service.provenance import evidence_source_revision, source_revision
 from portal.backend.service.reports import contract as reports_contract
 from portal.backend.service.storage.repos import lifecycle as lifecycle_repo
 from portal.backend.service.storage.repos import runs as runs_repo
@@ -62,11 +62,18 @@ from .checks import (
 )
 from .metrics import build_leaderboard, extract_numeric_metrics
 from .execution import execute_check_evidence, execute_check_preview
-from .planning import plan_research_check
+from .planning import (
+    plan_research_check,
+    rederive_research_check_plan_from_pinned_inputs,
+)
 from .registry import (
     CHECK_REGISTRY,
+    DURABLE_EVIDENCE_CHECK_FAMILIES,
+    PREVIEW_ONLY_CHECK_FAMILIES,
     normalize_check_preparation_request,
     normalize_check_request,
+    pin_check_definition_to_plan,
+    reconstruct_pinned_check_definition,
 )
 
 
@@ -146,6 +153,11 @@ class ResearchEvaluationCache:
 
 def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
     kind = _normalize_choice(payload.get("kind"), "kind", RESEARCH_ITEM_KINDS)
+    if kind == "research_check":
+        raise ValueError(
+            "research_check_creation_reserved: invoke the registered Check preview "
+            "or evidence operation"
+        )
     status = str(payload.get("status") or "draft").strip()
     if status not in RESEARCH_ITEM_STATUSES:
         raise ValueError(f"unsupported research item status: {status}")
@@ -221,6 +233,26 @@ def _validate_research_check_evidence_payload(
         raise ValueError("check_evidence_payload_invalid: definition/request disagreement")
     if plan.request_hash != request.request_hash:
         raise ValueError("check_evidence_payload_invalid: request/plan disagreement")
+    material_parameters = {
+        key: definition.material_rules.get(key)
+        for key in (
+            "detector",
+            "outcomes",
+            "statistics",
+            "assertions",
+            "inputs",
+            "gap_policy",
+            "gap_rewarm_bars",
+        )
+    }
+    if dict(request.parameters) != material_parameters:
+        raise ValueError(
+            "check_evidence_payload_invalid: request parameters differ from material definition"
+        )
+    if plan.gap_policy != str(request.parameters.get("gap_policy") or ""):
+        raise ValueError(
+            "check_evidence_payload_invalid: request/plan gap policy disagreement"
+        )
     if (
         evidence.definition_hash != definition.definition_hash
         or evidence.request_hash != request.request_hash
@@ -259,18 +291,206 @@ def _validate_research_check_evidence_payload(
             raise ValueError(
                 "check_evidence_payload_invalid: definition is not registered"
             )
-    CHECK_REGISTRY.resolve_evaluator(definition)
+    evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
+    declared_execution = dict(
+        evaluator.declare_requirements(definition=definition, request=request)
+    )
+    if dict(plan.execution) != declared_execution:
+        raise ValueError(
+            "check_evidence_payload_invalid: evaluator execution declaration disagrees "
+            "with plan"
+        )
+    input_kind = str(declared_execution.get("input_kind") or "").strip()
+    expected_evidence_kind = {
+        "market_data": "frozen_market_data",
+        "immutable_run_evidence": "immutable_run_evidence",
+    }.get(input_kind)
+    if expected_evidence_kind is None or evidence.evidence_kind != expected_evidence_kind:
+        raise ValueError(
+            "check_evidence_payload_invalid: evaluator input kind disagrees with "
+            f"evidence binding input_kind={input_kind or '<missing>'}"
+        )
+    reconstructed_definition = reconstruct_pinned_check_definition(request, plan)
+    if reconstructed_definition.to_dict() != definition.to_dict():
+        raise ValueError(
+            "check_evidence_payload_invalid: definition is not the canonical request/graph definition"
+        )
+    expected_graph_hash = semantic_hash(
+        {"indicators": [dict(row) for row in plan.indicator_graph]}
+    )
+    if evidence.indicator_graph_hash != expected_graph_hash:
+        raise ValueError(
+            "check_evidence_payload_invalid: Indicator graph hash disagrees with plan"
+        )
     if evidence.evidence_kind == "frozen_market_data":
         if str(request.dataset_id or "") != str(evidence.input_binding.get("dataset_id") or ""):
             raise ValueError("check_evidence_payload_invalid: Dataset binding disagrees")
-    elif dict(request.immutable_run_evidence or {}) != dict(evidence.input_binding):
-        raise ValueError("check_evidence_payload_invalid: immutable run binding disagrees")
+        expected_quality_hash = semantic_hash(
+            dict(evidence.input_binding.get("quality") or {})
+        )
+        expected_gaps_hash = semantic_hash(
+            {
+                "recorded_gaps": list(
+                    evidence.input_binding.get("recorded_gaps") or []
+                )
+            }
+        )
+        if evidence.quality_hash != expected_quality_hash:
+            raise ValueError(
+                "check_evidence_payload_invalid: quality hash disagrees with binding"
+            )
+        if evidence.gaps_hash != expected_gaps_hash:
+            raise ValueError(
+                "check_evidence_payload_invalid: gaps hash disagrees with binding"
+            )
+        subject_snapshots = {
+            str(row["instrument_id"]): dict(row.get("snapshot") or {})
+            for row in evidence.input_binding.get("subjects") or []
+        }
+        rederived_plan = rederive_research_check_plan_from_pinned_inputs(
+            definition,
+            request,
+            plan,
+            subject_snapshots=subject_snapshots,
+        )
+        for field in (
+            "market_data_requirements",
+            "indicator_graph",
+            "evaluation_range",
+            "warmup",
+            "outcome_tail",
+            "gap_policy",
+            "execution",
+        ):
+            if getattr(rederived_plan, field) != getattr(plan, field):
+                raise ValueError(
+                    "check_evidence_payload_invalid: request/plan semantic "
+                    f"disagreement field={field}"
+                )
+        expected_materialization = dict(rederived_plan.materialization_range)
+        actual_materialization = dict(plan.materialization_range)
+        expected_materialization.pop("as_of_commit_seq", None)
+        actual_watermark = actual_materialization.pop("as_of_commit_seq", None)
+        if expected_materialization != actual_materialization:
+            raise ValueError(
+                "check_evidence_payload_invalid: request/plan materialization range disagreement"
+            )
+        if int(actual_watermark or 0) != int(evidence.input_binding["max_commit_seq"]):
+            raise ValueError(
+                "check_evidence_payload_invalid: plan/Dataset watermark disagreement"
+            )
+        if plan.missing_coverage:
+            raise ValueError(
+                "check_evidence_payload_invalid: durable plan contains missing coverage"
+            )
+        if list(plan.quality_evidence) != list(
+            evidence.input_binding.get("recorded_gaps") or []
+        ):
+            raise ValueError(
+                "check_evidence_payload_invalid: plan/Dataset quality evidence disagreement"
+            )
+        _validate_plan_binding_alignment(plan, evidence.input_binding)
+    else:
+        if dict(request.immutable_run_evidence or {}) != dict(evidence.input_binding):
+            raise ValueError(
+                "check_evidence_payload_invalid: immutable run binding disagrees"
+            )
+        rederived_plan = rederive_research_check_plan_from_pinned_inputs(
+            definition,
+            request,
+            plan,
+            subject_snapshots={},
+        )
+        for field in (
+            "market_data_requirements",
+            "indicator_graph",
+            "evaluation_range",
+            "materialization_range",
+            "warmup",
+            "outcome_tail",
+            "gap_policy",
+            "execution",
+        ):
+            if getattr(rederived_plan, field) != getattr(plan, field):
+                raise ValueError(
+                    "check_evidence_payload_invalid: immutable run request/plan "
+                    f"disagreement field={field}"
+                )
     semantic_result = dict(result.result)
     if semantic_result.get("promotion_authority") is not False:
         raise ValueError("check_evidence_payload_invalid: Check cannot grant promotion authority")
     if semantic_result.get("execution_authority") is not False:
         raise ValueError("check_evidence_payload_invalid: Check cannot grant execution authority")
     return definition, request, plan, evidence, result
+
+
+def _validate_plan_binding_alignment(
+    plan: ResolvedCheckPlan,
+    binding: Mapping[str, Any],
+) -> None:
+    requirements = {
+        str(row.get("alias") or ""): dict(row)
+        for row in plan.market_data_requirements
+    }
+    bound_series = {
+        str(row.get("alias") or ""): dict(row)
+        for row in binding.get("series") or []
+    }
+    if not requirements or set(bound_series) != set(requirements):
+        raise ValueError(
+            "check_evidence_payload_invalid: Dataset binding aliases differ from plan"
+        )
+    for alias, requirement in requirements.items():
+        series = bound_series[alias]
+        if dict(series.get("requirement") or {}) != requirement:
+            raise ValueError(
+                "check_evidence_payload_invalid: Dataset binding requirement "
+                f"disagrees alias={alias}"
+            )
+        for field in (
+            "instrument_id",
+            "fact_type",
+            "contract_version",
+            "timeframe_seconds",
+        ):
+            if series.get(field) != requirement.get(field):
+                raise ValueError(
+                    "check_evidence_payload_invalid: Dataset binding semantic "
+                    f"identity disagrees alias={alias} field={field}"
+                )
+        source_policy = dict(requirement.get("source_policy") or {})
+        source_binding = dict(series.get("source_binding") or {})
+        mode = str(source_policy.get("mode") or "").strip().lower()
+        resolved_keys = [
+            str(value)
+            for value in source_binding.get("resolved_source_identity_keys") or []
+        ]
+        if str(source_binding.get("mode") or "") != mode or not resolved_keys:
+            raise ValueError(
+                "check_evidence_payload_invalid: Dataset source binding is unresolved "
+                f"alias={alias}"
+            )
+        if mode == "exact" and source_policy.get("source_identity_key"):
+            if resolved_keys != [str(source_policy["source_identity_key"])]:
+                raise ValueError(
+                    "check_evidence_payload_invalid: exact source binding disagrees "
+                    f"alias={alias}"
+                )
+        if mode == "allowlist" and not set(resolved_keys).issubset(
+            {str(value) for value in source_policy.get("source_identity_keys") or []}
+        ):
+            raise ValueError(
+                "check_evidence_payload_invalid: allowlisted source binding disagrees "
+                f"alias={alias}"
+            )
+
+
+def _definition_evidence_classification(definition: CheckDefinition) -> str:
+    if definition.definition_id in PREVIEW_ONLY_CHECK_FAMILIES:
+        return "frozen_replayable_unqualified"
+    if definition.definition_id in {SIGNAL_AUDIT, CANDIDATE_LIFECYCLE}:
+        return "frozen_replayable_diagnostic"
+    return "frozen_replayable"
 
 
 def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -284,8 +504,46 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
         else ""
     )
     if schema_version == "research_check_payload.v2":
+        raw_plan = payload.get("plan") if isinstance(payload, Mapping) else None
+        raw_evidence = (
+            payload.get("evidence") if isinstance(payload, Mapping) else None
+        )
+        if (
+            isinstance(raw_plan, Mapping)
+            and str(raw_plan.get("schema_version") or "")
+            == "research.check_plan.v1"
+        ) or (
+            isinstance(raw_evidence, Mapping)
+            and str(raw_evidence.get("schema_version") or "")
+            == "research.check_evidence_binding.v1"
+        ):
+            projected["evidence_classification"] = "legacy_frozen_unverifiable"
+            projected["replayable"] = False
+            projected["observation_eligible"] = False
+            projected["evidence_integrity_error"] = (
+                "historical frozen Check predates the complete execution-input hash contract"
+            )
+            return projected
+        raw_definition = (
+            payload.get("definition") if isinstance(payload, Mapping) else None
+        )
+        material_rules = (
+            raw_definition.get("material_rules")
+            if isinstance(raw_definition, Mapping)
+            else None
+        )
+        if not isinstance(material_rules, Mapping) or not str(
+            material_rules.get("resolved_indicator_graph_hash") or ""
+        ).strip():
+            projected["evidence_classification"] = "legacy_frozen_unverifiable"
+            projected["replayable"] = False
+            projected["observation_eligible"] = False
+            projected["evidence_integrity_error"] = (
+                "historical frozen Check predates definition-pinned Indicator graph semantics"
+            )
+            return projected
         try:
-            _definition, _request, _plan, _evidence, result = (
+            definition, _request, _plan, _evidence, result = (
                 _validate_research_check_evidence_payload(payload)
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -294,10 +552,14 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
             projected["observation_eligible"] = False
             projected["evidence_integrity_error"] = str(exc)
         else:
-            projected["evidence_classification"] = "frozen_replayable"
+            projected["evidence_classification"] = (
+                _definition_evidence_classification(definition)
+            )
             projected["replayable"] = True
             projected["observation_eligible"] = (
                 str(result.result.get("status") or "") == "completed"
+                and definition.definition_id
+                in DURABLE_EVIDENCE_CHECK_FAMILIES
             )
     else:
         projected["evidence_classification"] = "legacy_unpinned"
@@ -626,6 +888,9 @@ def get_research_check_requirements(payload: Mapping[str, Any]) -> dict[str, Any
         inspect_coverage=request.mode == CHECK_MODE_PREVIEW,
         require_durable_sources=planning_only,
     )
+    definition, request, plan = pin_check_definition_to_plan(
+        definition, request, plan
+    )
     return {
         "schema_version": "research_check_requirements.v1",
         "mode": mode,
@@ -669,6 +934,27 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
         inspect_coverage=True,
         require_durable_sources=True,
     )
+    definition, planning_request, plan = pin_check_definition_to_plan(
+        definition, planning_request, plan
+    )
+    if plan.missing_coverage:
+        return {
+            "schema_version": "research_check_preparation.v2",
+            "status": "acquisition_required",
+            "provider_call_performed": False,
+            "acquisition_performed": False,
+            "acquisition_authorized": False,
+            "missing_coverage": [dict(row) for row in plan.missing_coverage],
+            "plan": plan.to_dict(),
+            "dataset": None,
+            "binding": None,
+            "evidence_request": None,
+            "message": (
+                "Requirement planning found source-bound coverage without durable "
+                "gap evidence. Use an explicitly authorized acquisition primitive "
+                "and repeat preparation."
+            ),
+        }
     prepared = prepare_frozen_dataset_from_requirements(
         requirements=plan.market_data_requirements,
         freeze=freeze,
@@ -700,7 +986,7 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
             ),
         }
     response: dict[str, Any] = {
-        "schema_version": "research_check_preparation.v1",
+        "schema_version": "research_check_preparation.v2",
         "status": prepared["status"],
         "definition": definition.to_dict(),
         "planning_request": planning_request.to_dict(),
@@ -729,14 +1015,23 @@ def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any
         evidence_request,
         inspect_coverage=False,
     )
+    evidence_definition, evidence_request, evidence_plan = (
+        pin_check_definition_to_plan(
+            evidence_definition,
+            evidence_request,
+            evidence_plan,
+        )
+    )
     return {
         **response,
+        "next_request": evidence_payload,
         "evidence_request": evidence_request.to_dict(),
         "evidence_plan": evidence_plan.to_dict(),
         "next_operation": {
             "operation": "research_check_evidence",
             "dataset_id": dataset["dataset_id"],
             "request_hash": evidence_request.request_hash,
+            "request_field": "next_request",
         },
     }
 
@@ -757,6 +1052,9 @@ def evaluate_research_check(
         request_payload, mode=CHECK_MODE_PREVIEW
     )
     plan = plan_research_check(definition, request, inspect_coverage=True)
+    definition, request, plan = pin_check_definition_to_plan(
+        definition, request, plan
+    )
     return execute_check_preview(
         definition, request, plan, run_evidence=run_evidence
     )
@@ -786,6 +1084,9 @@ def build_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
     )
     definition, request = normalize_check_request(request_payload, mode=mode)
     plan = plan_research_check(definition, request, inspect_coverage=False)
+    definition, request, plan = pin_check_definition_to_plan(
+        definition, request, plan
+    )
     bound_plan, evidence, result = execute_check_evidence(
         definition, request, plan, run_evidence=run_evidence
     )
@@ -928,22 +1229,32 @@ def persist_research_check_evidence(
 
     if request.mode != CHECK_MODE_EVIDENCE:
         raise ValueError("check_evidence_persistence_requires_evidence_mode")
+    if definition.definition_id not in DURABLE_EVIDENCE_CHECK_FAMILIES:
+        raise ValueError(
+            "check_evidence_family_preview_only: this evaluator cannot create new "
+            f"durable evidence family={definition.definition_id}"
+        )
     normalized_evidence = CheckEvidenceBinding.from_dict(evidence)
     normalized_result = CheckResult.from_dict(result)
+    result_payload = dict(normalized_result.result)
+    status = "tested" if result_payload.get("status") == "completed" else "blocked"
+    evidence_classification = _definition_evidence_classification(definition)
+    observation_eligible = (
+        status == "tested"
+        and definition.definition_id in DURABLE_EVIDENCE_CHECK_FAMILIES
+    )
     envelope = {
         "schema_version": "research_check_payload.v2",
-        "evidence_classification": "frozen_replayable",
+        "evidence_classification": evidence_classification,
         "definition": definition.to_dict(),
         "request": request.to_dict(),
         "plan": plan.to_dict(),
         "evidence": normalized_evidence.to_dict(),
         "result": normalized_result.to_dict(),
         "replayable": True,
-        "observation_eligible": False,
+        "observation_eligible": observation_eligible,
     }
     _validate_research_check_evidence_payload(envelope)
-    result_payload = dict(normalized_result.result)
-    status = "tested" if result_payload.get("status") == "completed" else "blocked"
     scope = dict(request.scope)
     check_id = str(uuid.uuid4())
     create_args = {"session": session} if session is not None else {}
@@ -961,7 +1272,7 @@ def persist_research_check_evidence(
         window_start=scope.get("start"),
         window_end=scope.get("end"),
         tags=sorted(set(["research-check", "frozen-evidence", *_tags(payload.get("tags"))])),
-        payload={**envelope, "observation_eligible": status == "tested"},
+        payload=envelope,
         source_revision=normalized_evidence.code_revision,
         **create_args,
     )
@@ -994,16 +1305,18 @@ def persist_research_check_evidence(
             **create_args,
         )
     ]
+    projected_item = _project_evidence_classification(item)
     return {
         "schema_version": "research_check_run.v2",
         "mode": CHECK_MODE_EVIDENCE,
         "status": result_payload.get("status"),
-        "check": item,
+        "check": projected_item,
         "links": links,
         "result": normalized_result.to_dict(),
         "evidence": normalized_evidence.to_dict(),
+        "evidence_classification": evidence_classification,
         "replayable": True,
-        "observation_eligible": status == "tested",
+        "observation_eligible": observation_eligible,
     }
 
 
@@ -1108,7 +1421,19 @@ def replay_research_check(check_id: str) -> dict[str, Any]:
         _validate_research_check_evidence_payload(payload)
     )
     original_evidence = original_evidence_contract.to_dict()
-    current_revision = _source_revision()
+    try:
+        current_revision = _evidence_source_revision()
+    except RuntimeError as exc:
+        return {
+            "schema_version": "research_check_replay.v1",
+            "check_id": item.get("id"),
+            "status": "source_revision_unavailable",
+            "matches": False,
+            "provider_call_performed": False,
+            "original_source_revision": original_evidence.get("code_revision"),
+            "current_source_revision": None,
+            "reasons": [str(exc)],
+        }
     if str(original_evidence.get("code_revision") or "") != current_revision:
         return {
             "schema_version": "research_check_replay.v1",
@@ -1951,3 +2276,7 @@ def _optional(value: Any) -> str | None:
 
 def _source_revision() -> str:
     return source_revision()
+
+
+def _evidence_source_revision() -> str:
+    return evidence_source_revision()
