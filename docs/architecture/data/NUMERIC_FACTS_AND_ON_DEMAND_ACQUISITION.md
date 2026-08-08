@@ -182,10 +182,15 @@ partial batch rather than certifying future/unconfirmed coverage.
    and confirmed-head block/hash.
 2. Read proxy decimals, description, version, current phase, and aggregator;
    quarantine any configured metadata mismatch before log acquisition.
-3. Resolve the proxy's phase aggregators. A phase that cannot be resolved
+3. Binary-search block timestamps for the requested half-open time range and
+   reject a scan exceeding `max_blocks`. Block zero is accepted as the
+   legitimate genesis lower bound when its timestamp is zero; other source
+   timestamps remain strictly positive.
+4. Read the proxy phase at both bounded block endpoints and scan only the
+   inclusive phase range active within the request. If archive state calls are
+   unavailable, emit a warning and fall back to all configured phases so
+   completeness is not weakened. A required phase that cannot be resolved
    becomes explicit gap evidence.
-4. Binary-search block timestamps for the requested half-open time range and
-   reject a scan exceeding `max_blocks`.
 5. Page `AnswerUpdated` logs by both the manifest's `max_log_span` and the
    operation's request/log budgets.
 6. Rebuild the proxy round ID from phase and local round, call `getRoundData`,
@@ -213,8 +218,11 @@ A current read persists its fact and any gap evidence but never writes reusable
 historical coverage. Only a full historical batch scans every resolved phase
 and can certify an interval for the missing-range cache.
 
-Transient JSON-RPC errors retry only within `max_retries`; each attempt consumes
-the request budget. No retry widens a block or log range.
+HTTP JSON-RPC requests are uniformly paced at a 0.5-second minimum interval by
+default. Deployments may set `CHAINLINK_RPC_MIN_INTERVAL_SECONDS` to a
+nonnegative numeric override appropriate for the reviewed endpoint. Transient
+JSON-RPC errors retry only within `max_retries`, with bounded exponential delay;
+each attempt consumes the request budget. No retry widens a block or log range.
 
 ## Authorization, Budgets, And Coverage Cache
 

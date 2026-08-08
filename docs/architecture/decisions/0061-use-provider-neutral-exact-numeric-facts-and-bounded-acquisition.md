@@ -90,10 +90,14 @@ deleted.
 
 Acquisition is an explicit, bounded operation. Network authorization defaults
 to denied and requires an actor and reason. Every call has positive request,
-log, and block budgets plus bounded retries. Historical requests consult durable
-coverage first; a matching complete interval, including a proven zero-event
-interval, is reused without constructing a provider. Partial or failed scans
-retain gap and coverage evidence but never claim complete cache coverage.
+log, and block budgets plus bounded retries. HTTP JSON-RPC calls have a uniform
+minimum interval (0.5 seconds by default, deployment-overridable with
+`CHAINLINK_RPC_MIN_INTERVAL_SECONDS`), and transient retries use bounded
+exponential delay while still consuming the request budget. Historical
+requests consult durable coverage first; a matching complete interval,
+including a proven zero-event interval, is reused without constructing a
+provider. Partial or failed scans retain gap and coverage evidence but never
+claim complete cache coverage.
 
 Coverage identity includes the canonical series and source, binding ID,
 manifest hash, the binding source's `adapter_version` as interface identity,
@@ -109,7 +113,8 @@ The first adapter is `chainlink_aggregator_v3.v1`. It is public and read-only:
 no wallet, signer, transaction, websocket subscription, or LINK balance is
 required. It validates chain, proxy metadata, decimals, description, optional
 version, declared history lower bound, archive block access, confirmation head,
-phase aggregators, bounded `AnswerUpdated` log pages, `getRoundData`,
+the proxy phase at both bounded range endpoints, required phase aggregators,
+bounded `AnswerUpdated` log pages, `getRoundData`,
 latest-round reconciliation, and a gap-based current-staleness policy. EVM block
 time is source publication time; AggregatorV3 `updatedAt` is fact effective time;
 the configured confirmation block determines known-at. Block, transaction, log,
@@ -241,9 +246,10 @@ objects.
   reference manifests, data-driven feed deployments, and strict manifest
   validation.
 - `tests/test_data_providers/test_chainlink_provider.py` covers phase-aware
-  bounded history, exact reserve values, distinct publication/confirmation
-  clocks, current-round reconciliation, metadata quarantine, retries, and
-  explicit partial capability gaps.
+  bounded history, archive phase-range selection, uniform RPC pacing, exact
+  reserve values, distinct publication/confirmation clocks, current-round
+  reconciliation, metadata quarantine, retries, and explicit partial
+  capability gaps.
 - `tests/test_portal/test_database_bootstrap.py` proves fresh startup requires
   the explicit numeric migration, validates migrated objects, and continues to
   create unrelated model-owned objects.

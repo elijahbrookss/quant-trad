@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -57,17 +58,40 @@ class JsonRpcTransport(Protocol):
 
 
 class HttpJsonRpcTransport:
-    """One-request JSON-RPC transport; retry policy belongs to the adapter budget."""
+    """Paced one-request JSON-RPC transport; retry policy belongs to the budget."""
 
-    def __init__(self, endpoint: str, *, timeout_seconds: float = 20.0) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        timeout_seconds: float = 20.0,
+        min_request_interval_seconds: float = 0.5,
+    ) -> None:
         endpoint = str(endpoint or "").strip()
         if not endpoint.startswith(("http://", "https://")):
             raise ValueError("chainlink_rpc_invalid: endpoint must be HTTP(S)")
         self._endpoint = endpoint
         self._timeout_seconds = float(timeout_seconds)
+        self._min_request_interval_seconds = float(
+            min_request_interval_seconds
+        )
+        if self._min_request_interval_seconds < 0:
+            raise ValueError(
+                "chainlink_rpc_invalid: min request interval must be nonnegative"
+            )
+        self._last_request_started_at: float | None = None
         self._request_id = 0
 
     def call(self, method: str, params: Sequence[Any]) -> Any:
+        now = time.monotonic()
+        if self._last_request_started_at is not None:
+            remaining = (
+                self._min_request_interval_seconds
+                - (now - self._last_request_started_at)
+            )
+            if remaining > 0:
+                time.sleep(remaining)
+        self._last_request_started_at = time.monotonic()
         self._request_id += 1
         try:
             response = requests.post(
@@ -261,15 +285,18 @@ class _Budget:
                 last_error = exc
                 if attempt >= self.budget.max_retries:
                     raise
+                retry_delay_seconds = min(8.0, 0.5 * (2**attempt))
                 logger.warning(
                     "chainlink_rpc_retry | binding_id=%s method=%s "
-                    "attempt=%s max_retries=%s error=%s",
+                    "attempt=%s max_retries=%s retry_delay_seconds=%s error=%s",
                     self.binding_id,
                     method,
                     attempt + 1,
                     self.budget.max_retries,
+                    retry_delay_seconds,
                     exc,
                 )
+                time.sleep(retry_delay_seconds)
         assert last_error is not None
         raise last_error
 
@@ -433,7 +460,10 @@ class ChainlinkAggregatorV3Provider:
         return result
 
     def _block_time(self, tracker: _Budget, block_number: int) -> datetime:
-        return _datetime_from_epoch(_hex_int(self._block(tracker, block_number)["timestamp"]))
+        timestamp = _hex_int(self._block(tracker, block_number)["timestamp"])
+        if int(block_number) == 0 and timestamp == 0:
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+        return _datetime_from_epoch(timestamp)
 
     def _confirmed_context(
         self,
@@ -524,10 +554,11 @@ class ChainlinkAggregatorV3Provider:
         config: _ChainlinkConfig,
         phase_id: int,
         current_aggregator: str,
+        required_phase_ids: Sequence[int],
     ) -> tuple[dict[int, str], tuple[dict[str, Any], ...]]:
         phases: dict[int, str] = {}
         failures: list[dict[str, Any]] = []
-        for phase in range(1, int(phase_id) + 1):
+        for phase in sorted({int(item) for item in required_phase_ids}):
             try:
                 result = self._eth_call(
                     tracker,
@@ -810,12 +841,6 @@ class ChainlinkAggregatorV3Provider:
             str(capabilities["confirmed_head_time"])
         ).astimezone(timezone.utc)
         metadata = self._feed_metadata(tracker, config)
-        phases, phase_failures = self._phase_aggregators(
-            tracker,
-            config,
-            int(metadata["phase_id"]),
-            str(metadata["aggregator"]),
-        )
         start_block = (
             confirmed_head
             if start > confirmed_head_time
@@ -841,6 +866,64 @@ class ChainlinkAggregatorV3Provider:
                 "chainlink_budget_exceeded: "
                 f"binding={binding.id} blocks={end_block - start_block + 1}"
             )
+        current_phase_id = int(metadata["phase_id"])
+        try:
+            start_phase_id = _uint_word(
+                self._eth_call(
+                    tracker,
+                    address=config.proxy_address,
+                    data=_PHASE_ID,
+                    block=hex(start_block),
+                )
+            )
+            end_phase_id = _uint_word(
+                self._eth_call(
+                    tracker,
+                    address=config.proxy_address,
+                    data=_PHASE_ID,
+                    block=hex(end_block),
+                )
+            )
+            if not (
+                0 < start_phase_id <= end_phase_id <= current_phase_id
+            ):
+                raise ChainlinkProviderError(
+                    "chainlink_archive_phase_invalid: "
+                    f"start_phase={start_phase_id} end_phase={end_phase_id} "
+                    f"current_phase={current_phase_id}"
+                )
+            required_phase_ids = tuple(
+                range(start_phase_id, end_phase_id + 1)
+            )
+            phase_selection: dict[str, Any] = {
+                "method": "proxy_phase_at_bounded_blocks",
+                "start_phase_id": start_phase_id,
+                "end_phase_id": end_phase_id,
+                "required_phase_ids": list(required_phase_ids),
+            }
+        except ChainlinkProviderError as exc:
+            required_phase_ids = tuple(range(1, current_phase_id + 1))
+            phase_selection = {
+                "method": "all_phases_fallback",
+                "required_phase_ids": list(required_phase_ids),
+                "archive_phase_error": str(exc),
+            }
+            logger.warning(
+                "chainlink_archive_phase_fallback | binding_id=%s "
+                "start_block=%s end_block=%s current_phase_id=%s error=%s",
+                binding.id,
+                start_block,
+                end_block,
+                current_phase_id,
+                exc,
+            )
+        phases, phase_failures = self._phase_aggregators(
+            tracker,
+            config,
+            current_phase_id,
+            str(metadata["aggregator"]),
+            required_phase_ids,
+        )
         request = {
             "mode": "historical",
             "start": start.isoformat(),
@@ -848,6 +931,7 @@ class ChainlinkAggregatorV3Provider:
             "start_block": start_block,
             "end_block": end_block,
             "confirmed_head_block": confirmed_head,
+            "phase_selection": phase_selection,
         }
         observations: dict[str, ProviderNumericObservation] = {}
         gaps: list[ProviderNumericGap] = []
@@ -911,18 +995,38 @@ class ChainlinkAggregatorV3Provider:
                         log=raw_log,
                     )
                 except ChainlinkProviderError as exc:
-                    block_number = _hex_int(raw_log.get("blockNumber") or "0x0")
-                    gap_start = self._block_time(tracker, block_number)
+                    block_number: int | None = None
+                    gap_start = start
+                    gap_location_error: str | None = None
+                    try:
+                        block_number = _hex_int(
+                            raw_log.get("blockNumber") or "0x0"
+                        )
+                        gap_start = self._block_time(tracker, block_number)
+                    except ChainlinkProviderError as location_exc:
+                        gap_location_error = str(location_exc)
+                        try:
+                            gap_start = _datetime_from_epoch(
+                                _uint_word(str(raw_log.get("data") or ""), 0)
+                            )
+                        except ChainlinkProviderError as event_time_exc:
+                            gap_location_error = (
+                                f"{gap_location_error}; "
+                                f"event_time_error={event_time_exc}"
+                            )
+                    evidence: dict[str, Any] = {
+                        "phase_id": phase_id,
+                        "block_number": block_number,
+                        "error": str(exc),
+                    }
+                    if gap_location_error is not None:
+                        evidence["gap_location_error"] = gap_location_error
                     gaps.append(
                         ProviderNumericGap(
                             classification="chainlink_round_unresolved",
                             start=gap_start,
                             end=gap_start + timedelta(microseconds=1),
-                            evidence={
-                                "phase_id": phase_id,
-                                "block_number": block_number,
-                                "error": str(exc),
-                            },
+                            evidence=evidence,
                         )
                     )
                     continue

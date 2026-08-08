@@ -135,7 +135,19 @@ class _FixtureRpc:
             if selector == chainlink._VERSION:
                 return _uint_result(self.version)
             if selector == chainlink._PHASE_ID:
-                return _uint_result(self.phase_id)
+                if len(params) < 2 or str(params[1]).lower() == "latest":
+                    return _uint_result(self.phase_id)
+                block_number = int(str(params[1]), 16)
+                active_phase = 1
+                for phase in range(2, self.phase_id + 1):
+                    activation_blocks = [
+                        item.block_number
+                        for item in self.rounds.values()
+                        if item.phase_id == phase
+                    ]
+                    if activation_blocks and block_number >= min(activation_blocks):
+                        active_phase = phase
+                return _uint_result(active_phase)
             if selector == chainlink._AGGREGATOR:
                 return _address_result(self.aggregators[self.phase_id])
             if selector == chainlink._PHASE_AGGREGATORS:
@@ -148,6 +160,38 @@ class _FixtureRpc:
                 return _round_result(self.rounds[self.latest_round_id])
             raise AssertionError(f"unexpected eth_call selector: {selector}")
         raise AssertionError(f"unexpected RPC method: {method}")
+
+
+def test_http_transport_applies_uniform_minimum_request_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Response:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    clock = iter((10.0, 10.0, 10.1, 10.5))
+    sleeps: list[float] = []
+    monkeypatch.setattr(chainlink.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(chainlink.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        chainlink.requests,
+        "post",
+        lambda *_args, **_kwargs: _Response(),
+    )
+    transport = chainlink.HttpJsonRpcTransport(
+        "https://rpc.example.invalid",
+        min_request_interval_seconds=0.5,
+    )
+
+    assert transport.call("eth_chainId", []) == "0x1"
+    assert transport.call("eth_chainId", []) == "0x1"
+
+    assert sleeps == pytest.approx([0.4])
 
 
 def test_history_is_phase_aware_exact_and_pages_bounded_log_ranges() -> None:
@@ -204,6 +248,38 @@ def test_history_is_phase_aware_exact_and_pages_bounded_log_ranges() -> None:
         assert ranges[0][0] == 90
         assert ranges[-1][1] == 110
         assert all(left_end + 1 == right_start for (_, left_end), (right_start, _) in zip(ranges, ranges[1:]))
+
+
+def test_history_scans_only_phases_active_within_bounded_blocks() -> None:
+    binding = _binding("eth-usd", phase_id=2, max_log_span=3)
+    rounds = (
+        _Round(phase_id=1, local_round_id=4, answer=180_000_000_000, block_number=94),
+        _Round(phase_id=2, local_round_id=7, answer=191_428_523_541, block_number=106),
+    )
+    rpc = _rpc(binding, phase_id=2, rounds=rounds)
+    provider = chainlink.ChainlinkAggregatorV3Provider(
+        rpc, endpoint_ref=_ENDPOINT_REF
+    )
+
+    batch = provider.fetch_history(
+        binding,
+        start=_block_time(107),
+        end=_block_time(110),
+        budget=_budget(),
+    )
+
+    assert batch.status == "complete"
+    log_calls = _log_calls(rpc)
+    assert log_calls
+    assert {
+        str(call["address"]).lower() for call in log_calls
+    } == {rpc.aggregators[2]}
+    assert batch.request["phase_selection"] == {
+        "method": "proxy_phase_at_bounded_blocks",
+        "start_phase_id": 2,
+        "end_phase_id": 2,
+        "required_phase_ids": [2],
+    }
 
 
 def test_exact_large_reserve_value_and_verified_proxy_round_reconcile() -> None:

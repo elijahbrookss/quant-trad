@@ -119,8 +119,23 @@ class NumericFactAcquisitionService:
                 f"binding={binding.id} endpoint_ref={binding.endpoint_ref}"
             )
         if binding.adapter == CHAINLINK_ADAPTER_ID:
+            pacing_raw = str(
+                os.environ.get(
+                    "CHAINLINK_RPC_MIN_INTERVAL_SECONDS", "0.5"
+                )
+            ).strip()
+            try:
+                pacing_seconds = float(pacing_raw)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "numeric_fact_provider_config_invalid: "
+                    "CHAINLINK_RPC_MIN_INTERVAL_SECONDS must be numeric"
+                ) from exc
             return ChainlinkAggregatorV3Provider(
-                HttpJsonRpcTransport(endpoint),
+                HttpJsonRpcTransport(
+                    endpoint,
+                    min_request_interval_seconds=pacing_seconds,
+                ),
                 endpoint_ref=binding.endpoint_ref,
             )
         raise ValueError(

@@ -99,6 +99,17 @@ export CHAINLINK_ETHEREUM_RPC_URL='<reviewed Ethereum JSON-RPC endpoint>'
 Do not commit or log the endpoint if its URL embeds a provider token. Durable
 provenance records the environment-variable name, not the resolved URL.
 
+HTTP RPC calls use a conservative 0.5-second minimum interval. A reviewed
+deployment may override it without changing the manifest or coverage identity:
+
+```bash
+export CHAINLINK_RPC_MIN_INTERVAL_SECONDS='0.5'
+```
+
+The override must be a nonnegative number. Retries retain the operation's
+`max_retries` and `max_requests` bounds and add bounded exponential delay; they
+never widen a block or log range.
+
 The endpoint must support `eth_chainId`, `eth_blockNumber`, historical
 `eth_getBlockByNumber`, `eth_call`, and bounded `eth_getLogs`. Historical scans
 need archive access at the configured deployment lower bound and requested
@@ -148,8 +159,10 @@ observation exceeds `quality_policy.max_staleness_seconds`, the adapter emits a
 
 ## 5. Acquire A Historical Window
 
-Historical mode resolves proxy phases and scans every applicable phase
-aggregator within the requested block window:
+Historical mode reads the proxy phase at both bounded block endpoints, resolves
+the inclusive active phase range, and scans every applicable phase aggregator
+within the requested block window. If historical proxy-state reads are denied,
+the adapter warns and safely falls back to scanning all configured phases:
 
 ```bash
 qt data acquire-numeric-facts \

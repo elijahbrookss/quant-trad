@@ -28,6 +28,7 @@ class _EdgeFixtureRpc(_FixtureRpc):
         unavailable_round_ids: set[int] | None = None,
         round_overrides: dict[int, _Round] | None = None,
         log_block_hash_override: str | None = None,
+        zero_timestamp_blocks: set[int] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -35,6 +36,7 @@ class _EdgeFixtureRpc(_FixtureRpc):
         self.unavailable_round_ids = set(unavailable_round_ids or set())
         self.round_overrides = dict(round_overrides or {})
         self.log_block_hash_override = log_block_hash_override
+        self.zero_timestamp_blocks = set(zero_timestamp_blocks or set())
 
     def call(self, method: str, params: Sequence[Any]) -> Any:
         if method == "eth_call":
@@ -62,6 +64,11 @@ class _EdgeFixtureRpc(_FixtureRpc):
                 {**item, "blockHash": self.log_block_hash_override}
                 for item in result
             ]
+        if method == "eth_getBlockByNumber":
+            block_number = int(str(params[0]), 16)
+            if block_number in self.zero_timestamp_blocks:
+                result = super().call(method, params)
+                return {**result, "timestamp": "0x0"}
         return super().call(method, params)
 
 
@@ -74,6 +81,7 @@ def _edge_rpc(
     unavailable_round_ids: set[int] | None = None,
     round_overrides: dict[int, _Round] | None = None,
     log_block_hash_override: str | None = None,
+    zero_timestamp_blocks: set[int] | None = None,
 ) -> _EdgeFixtureRpc:
     missing = set(missing_phases or set())
     aggregators = {
@@ -92,6 +100,7 @@ def _edge_rpc(
         unavailable_round_ids=unavailable_round_ids,
         round_overrides=round_overrides,
         log_block_hash_override=log_block_hash_override,
+        zero_timestamp_blocks=zero_timestamp_blocks,
     )
 
 
@@ -195,6 +204,40 @@ def test_history_rejects_start_before_manifest_history_without_rpc() -> None:
     assert rpc.calls == []
 
 
+def test_history_accepts_genesis_as_open_deployment_boundary() -> None:
+    binding = _binding("eth-usd", phase_id=1, max_log_span=20)
+    binding = replace(
+        binding,
+        config={
+            **dict(binding.config),
+            "deployment_block": 0,
+            "history_start": "1970-01-01T00:00:00+00:00",
+        },
+    )
+    round_ = _Round(1, 1, 191_428_523_541, 105)
+    rpc = _edge_rpc(
+        binding,
+        phase_id=1,
+        rounds=(round_,),
+        zero_timestamp_blocks={0},
+    )
+    provider = chainlink.ChainlinkAggregatorV3Provider(
+        rpc, endpoint_ref=_ENDPOINT_REF
+    )
+
+    batch = provider.fetch_history(
+        binding,
+        start=_block_time(100),
+        end=_block_time(110),
+        budget=_budget(),
+    )
+
+    assert batch.status == "complete"
+    assert [item.provenance["proxy_round_id"] for item in batch.observations] == [
+        round_.proxy_round_id
+    ]
+
+
 def test_provider_rejects_lossy_numeric_config_coercion_without_rpc() -> None:
     binding = _binding("eth-usd", phase_id=1)
     binding = replace(
@@ -260,6 +303,37 @@ def test_unresolvable_round_is_an_explicit_gap_without_synthesized_observation(
         if round_failure == "missing"
         else "chainlink_round_reconciliation_failed"
     ) in batch.gaps[0].evidence["error"]
+
+
+def test_unresolvable_round_preserves_gap_when_block_time_is_invalid() -> None:
+    binding = _binding("eth-usd", phase_id=1, max_log_span=20)
+    round_ = _Round(1, 1, 191_428_523_541, 105)
+    rpc = _edge_rpc(
+        binding,
+        phase_id=1,
+        rounds=(round_,),
+        unavailable_round_ids={round_.proxy_round_id},
+        zero_timestamp_blocks={round_.block_number},
+    )
+    provider = chainlink.ChainlinkAggregatorV3Provider(
+        rpc, endpoint_ref=_ENDPOINT_REF
+    )
+
+    batch = provider.fetch_history(
+        binding,
+        start=_block_time(100),
+        end=_block_time(110),
+        budget=_budget(),
+    )
+
+    assert batch.status == "partial"
+    assert batch.observations == ()
+    assert [gap.classification for gap in batch.gaps] == [
+        "chainlink_round_unresolved"
+    ]
+    assert int(batch.gaps[0].start.timestamp()) == round_.updated_at
+    assert batch.gaps[0].evidence["block_number"] == round_.block_number
+    assert "timestamp=0" in batch.gaps[0].evidence["gap_location_error"]
 
 
 def test_log_block_hash_mismatch_is_an_explicit_gap() -> None:
