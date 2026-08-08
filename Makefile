@@ -28,6 +28,8 @@ export COMPOSE_BAKE
 
 SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null)
 export SOURCE_REVISION
+SOURCE_TREE_HASH ?= $(shell $(VENV_PYTHON) scripts/provenance/source_tree_hash.py --git-revision $(SOURCE_REVISION) 2>/dev/null)
+export SOURCE_TREE_HASH
 
 BOTS_COMPOSE_FILE ?= docker/docker-compose.bots.yml
 BOTS_COMPOSE_CMD  ?= docker compose -f $(BOTS_COMPOSE_FILE)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,33 @@ REPORT_DATASET_SCHEMA_VERSION = "run_research_dataset.v1"
 REPORT_MATERIALIZATION_SCHEMA_VERSION = "run_report_materialization_status.v1"
 REPORT_INPUT_FINGERPRINT_SCHEMA_VERSION = "report_input_fingerprint.v1"
 REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION = "portal_report_materialization_storage.v2"
+
+
+def _verified_image_source_revision(repo_root: Path, configured: str) -> str:
+    configured_tree_hash = str(os.getenv("SOURCE_TREE_HASH") or "").strip()
+    attestation_path = repo_root / ".qt-source-attestation.json"
+    try:
+        attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(
+            "check_evidence_source_attestation_unavailable: image has no valid "
+            "build-time source attestation"
+        ) from exc
+    if (
+        str(attestation.get("schema_version") or "")
+        != "qt_source_attestation.v1"
+        or not configured_tree_hash
+        or str(attestation.get("source_revision") or "") != configured
+        or str(attestation.get("source_tree_hash") or "") != configured_tree_hash
+        or str(os.getenv("QT_IMAGE_SOURCE_REVISION") or "") != configured
+        or str(os.getenv("QT_IMAGE_SOURCE_TREE_HASH") or "")
+        != configured_tree_hash
+    ):
+        raise RuntimeError(
+            "check_evidence_source_attestation_mismatch: runtime provenance "
+            "does not match the verified image source material"
+        )
+    return configured
 
 
 @lru_cache(maxsize=1)
@@ -51,12 +79,19 @@ def evidence_source_revision() -> str:
     """Return an immutable revision, rejecting dirty local evidence execution."""
 
     configured = str(os.getenv("SOURCE_REVISION") or "").strip()
-    if configured:
-        return configured
-
-    revision = source_revision()
     repo_root = Path(__file__).resolve().parents[3]
+    git_metadata_available = (repo_root / ".git").exists()
+    if configured and not git_metadata_available:
+        return _verified_image_source_revision(repo_root, configured)
+
     try:
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         result = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=repo_root,
@@ -68,10 +103,20 @@ def evidence_source_revision() -> str:
         raise RuntimeError(
             "check_evidence_source_revision_unavailable: cannot verify a clean checkout"
         ) from exc
+    revision = head.stdout.strip()
+    if not revision:
+        raise RuntimeError(
+            "check_evidence_source_revision_unavailable: checkout HEAD is empty"
+        )
     if result.stdout.strip():
         raise RuntimeError(
             "check_evidence_dirty_source_forbidden: commit all producing code and "
             "configuration before durable evidence execution"
+        )
+    if configured and configured != revision:
+        raise RuntimeError(
+            "check_evidence_source_revision_mismatch: SOURCE_REVISION does not "
+            "match the clean checkout HEAD"
         )
     return revision
 
