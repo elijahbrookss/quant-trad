@@ -6,7 +6,9 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from engines.indicator_engine.contracts import IndicatorGapRejectedError
 from market_data.frozen import semantic_hash
+from market_data.frozen import normalize_frozen_market_data_read_binding
 from research_science.check import (
     CHECK_EVIDENCE_BINDING_SCHEMA_VERSION,
     CHECK_MODE_EVIDENCE,
@@ -29,7 +31,7 @@ from portal.backend.service.market.frozen_dataset_service import (
     resolve_frozen_dataset_read_binding,
 )
 from portal.backend.service.market.runtime_market_data import RuntimeMarketDataResolver
-from portal.backend.service.provenance import source_revision
+from portal.backend.service.provenance import evidence_source_revision, source_revision
 from portal.backend.service.reports import contract as reports_contract
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
@@ -162,33 +164,64 @@ def _load_market_inputs(
         "statistics": dict(request.parameters.get("statistics") or {}),
         "data_quality": data_quality,
     }
-    if definition.definition_id in {
-        checks.INDICATOR_FORWARD_OUTCOME,
-        checks.SIGNAL_AUDIT,
-        checks.CANDIDATE_LIFECYCLE,
-        EVENT_FACT_ANALYSIS,
-    }:
+    if plan.indicator_graph:
         indicator_id = str(scope.get("indicator_id") or "")
-        evidence = collect_runtime_output_evidence_for_instance(
-            indicator_id,
-            start,
-            end,
-            timeframe,
-            symbol=scope.get("symbol"),
-            datasource=scope.get("datasource"),
-            exchange=scope.get("exchange"),
-            instrument_id=instrument_id,
-            indicator_param_overrides=scope.get("indicator_param_overrides"),
-            candle_frame=candles,
-            market_data_resolver=resolver,
-            market_data_requirements_by_consumer=_indicator_requirements_by_consumer(
-                plan
-            ),
-            gap_policy=plan.gap_policy,
-            gap_rewarm_bars=int(plan.warmup.get("bars") or 0),
+        bound_gaps = list(
+            (resolver.dataset_binding or {}).get("recorded_gaps")
+            or plan.quality_evidence
         )
+        candle_aliases = {
+            str(row.get("alias") or "")
+            for row in plan.market_data_requirements
+            if str(row.get("fact_type") or "") == "candle.ohlcv"
+        }
+        candle_gaps = [
+            dict(row)
+            for row in bound_gaps
+            if str(row.get("alias") or "") in candle_aliases
+        ]
+        try:
+            evidence = collect_runtime_output_evidence_for_instance(
+                indicator_id,
+                start,
+                end,
+                timeframe,
+                symbol=scope.get("symbol"),
+                datasource=scope.get("datasource"),
+                exchange=scope.get("exchange"),
+                instrument_id=instrument_id,
+                indicator_param_overrides=scope.get("indicator_param_overrides"),
+                candle_frame=candles,
+                market_data_resolver=resolver,
+                market_data_requirements_by_consumer=_indicator_requirements_by_consumer(
+                    plan
+                ),
+                gap_policy=plan.gap_policy,
+                gap_rewarm_bars=int(plan.warmup.get("bars") or 0),
+                recorded_gap_evidence=candle_gaps,
+                expected_indicator_graph=plan.indicator_graph,
+                indicator_plan_start=str(plan.evaluation_range["start"]),
+                indicator_plan_end=str(plan.materialization_range["end_exclusive"]),
+            )
+        except IndicatorGapRejectedError as exc:
+            inputs["indicator_gap_rejection"] = {
+                "indicator_id": exc.indicator_id,
+                "gap": dict(exc.gap),
+                "policy": "reject",
+                "action": "rejected",
+            }
+            evidence = {
+                "schema_version": "indicator_output_evidence.v1",
+                "indicator_graph": [dict(row) for row in plan.indicator_graph],
+                "indicator_graph_hash": semantic_hash(
+                    {"indicators": list(plan.indicator_graph)}
+                ),
+                "candles": [],
+                "outputs": [],
+                "gap_transitions": [],
+            }
         inputs["indicator_evidence"] = _filter_indicator_evidence(evidence, plan)
-    if definition.definition_id == EVENT_FACT_ANALYSIS:
+    if bool(plan.execution.get("fact_history_required", False)):
         requirements = {
             str(row["alias"]): dict(row)
             for row in plan.market_data_requirements
@@ -224,6 +257,83 @@ def _evaluate(
         **assertion_result,
         "promotion_authority": False,
         "execution_authority": False,
+    }
+
+
+def _numeric_record_material(record: Any) -> dict[str, Any]:
+    source = getattr(record, "source", None)
+    fact = getattr(record, "fact", None)
+    if fact is None:
+        raise RuntimeError("check_evidence_input_invalid: numeric fact record is malformed")
+    return {
+        "series_id": int(getattr(record, "series_id")),
+        "revision": int(getattr(record, "revision")),
+        "market_commit_seq": int(getattr(record, "market_commit_seq")),
+        "ingestion_run_id": str(getattr(record, "ingestion_run_id")),
+        "source_identity_key": str(getattr(record, "source_identity_key")),
+        "source": {
+            "provider": str(getattr(source, "provider", "")),
+            "venue": str(getattr(source, "venue", "")),
+            "source_kind": str(getattr(source, "source_kind", "")),
+            "adapter_version": str(getattr(source, "adapter_version", "")),
+        },
+        "provenance": dict(getattr(record, "provenance", {}) or {}),
+        "fact": dict(fact.to_dict()),
+    }
+
+
+def _execution_input_hashes(
+    plan: ResolvedCheckPlan,
+    inputs: Mapping[str, Any],
+) -> dict[str, str]:
+    indicator = dict(inputs.get("indicator_evidence") or {})
+    indicator_graph = list(indicator.get("indicator_graph") or plan.indicator_graph)
+    indicator_graph_hash = str(indicator.get("indicator_graph_hash") or "").strip()
+    if not indicator_graph_hash:
+        indicator_graph_hash = semantic_hash({"indicators": indicator_graph})
+    indicator_output_hash = semantic_hash(
+        {
+            "schema_version": "check_indicator_output_material.v1",
+            "runtime_path": indicator.get("runtime_path"),
+            "indicator_graph_hash": indicator_graph_hash,
+            "window": dict(indicator.get("window") or {}),
+            "output_types": dict(indicator.get("output_types") or {}),
+            "ready_counts": dict(indicator.get("ready_counts") or {}),
+            "not_ready_counts": dict(indicator.get("not_ready_counts") or {}),
+            "outputs": list(indicator.get("outputs") or []),
+        }
+    )
+    histories = {
+        str(alias): [
+            _numeric_record_material(record) for record in records
+        ]
+        for alias, records in sorted(
+            dict(inputs.get("fact_records_by_alias") or {}).items()
+        )
+    }
+    fact_input_hash = semantic_hash(
+        {
+            "schema_version": "check_fact_input_material.v1",
+            "requirements": dict(inputs.get("fact_requirements_by_alias") or {}),
+            "histories": histories,
+        }
+    )
+    gap_transition_hash = semantic_hash(
+        {
+            "schema_version": "check_gap_transition_material.v1",
+            "policy": plan.gap_policy,
+            "transitions": list(indicator.get("gap_transitions") or []),
+            "discontinuities": list(
+                indicator.get("continuity_discontinuities") or []
+            ),
+            "rejection": inputs.get("indicator_gap_rejection"),
+        }
+    )
+    return {
+        "indicator_graph_hash": indicator_graph_hash,
+        "indicator_output_hash": indicator_output_hash,
+        "fact_input_hash": fact_input_hash,
+        "gap_transition_hash": gap_transition_hash,
     }
 
 
@@ -362,6 +472,7 @@ def execute_check_evidence(
     plan: ResolvedCheckPlan,
     *,
     run_evidence: Mapping[str, Any] | None = None,
+    expected_input_binding: Mapping[str, Any] | None = None,
 ) -> tuple[ResolvedCheckPlan, CheckEvidenceBinding, CheckResult]:
     """Execute provider-free against a server-resolved frozen Dataset binding."""
 
@@ -375,14 +486,48 @@ def execute_check_evidence(
         resolved_run_evidence, binding = _verified_run_evidence(
             request, run_evidence
         )
+        if expected_input_binding is not None and dict(expected_input_binding) != binding:
+            raise ValueError(
+                "check_replay_input_binding_mismatch: immutable run binding changed"
+            )
     else:
         if not request.dataset_id:
             raise ValueError("check_evidence_dataset_required")
+        expected_binding = (
+            normalize_frozen_market_data_read_binding(expected_input_binding)
+            if expected_input_binding is not None
+            else None
+        )
+        if expected_binding is not None and str(expected_binding["dataset_id"]) != str(
+            request.dataset_id
+        ):
+            raise ValueError(
+                "check_replay_input_binding_mismatch: request Dataset differs"
+            )
+        subject_snapshots = {
+            str(row["instrument_id"]): dict(row.get("snapshot") or {})
+            for row in (expected_binding or {}).get("subjects") or []
+        }
         binding = resolve_frozen_dataset_read_binding(
             dataset_id=request.dataset_id,
             requirements=plan.market_data_requirements,
             store=market_data_repo,
+            instrument_loader=(
+                lambda instrument_id: subject_snapshots[str(instrument_id)]
+                if str(instrument_id) in subject_snapshots
+                else (_ for _ in ()).throw(
+                    ValueError(
+                        "check_replay_input_binding_mismatch: persisted subject is missing"
+                    )
+                )
+            )
+            if expected_binding is not None
+            else None,
         )
+        if expected_binding is not None and binding != expected_binding:
+            raise ValueError(
+                "check_replay_input_binding_mismatch: frozen input binding changed"
+            )
     bound_plan_payload = plan.to_dict()
     bound_plan_payload.pop("plan_hash", None)
     bound_plan_payload["materialization_range"] = dict(
@@ -397,7 +542,7 @@ def execute_check_evidence(
         binding.get("recorded_gaps") or []
     )
     bound_plan = ResolvedCheckPlan.from_dict(bound_plan_payload)
-    revision = source_revision()
+    revision = evidence_source_revision()
     if is_run_check:
         inputs = {
             "run_evidence": resolved_run_evidence,
@@ -419,7 +564,7 @@ def execute_check_evidence(
                 definition, request, bound_plan, resolver=resolver
             )
             result_payload = _evaluate(definition, request, bound_plan, inputs)
-    indicator_graph = list(bound_plan.indicator_graph)
+    input_hashes = _execution_input_hashes(bound_plan, inputs)
     run_quality = (
         dict(resolved_run_evidence.get("readiness") or {})
         if is_run_check
@@ -440,7 +585,10 @@ def execute_check_evidence(
             "immutable_run_evidence" if is_run_check else "frozen_market_data"
         ),
         input_binding=binding,
-        indicator_graph_hash=semantic_hash({"indicator_graph": indicator_graph}),
+        indicator_graph_hash=input_hashes["indicator_graph_hash"],
+        indicator_output_hash=input_hashes["indicator_output_hash"],
+        fact_input_hash=input_hashes["fact_input_hash"],
+        gap_transition_hash=input_hashes["gap_transition_hash"],
         quality_hash=semantic_hash(run_quality),
         gaps_hash=semantic_hash(run_gaps),
     )

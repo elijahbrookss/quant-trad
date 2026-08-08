@@ -30,29 +30,12 @@ from portal.backend.service.indicators.indicator_service import (
     plan_runtime_requirements_for_indicators,
 )
 from portal.backend.service.market import instrument_service
+from portal.backend.service.market.frozen_dataset_service import (
+    matching_source_identity_keys,
+)
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
-from . import checks
-from .registry import EVENT_FACT_ANALYSIS
-
-
-_MARKET_CHECK_FAMILIES = frozenset(
-    {
-        checks.RAW_FORWARD_OUTCOME,
-        checks.INDICATOR_FORWARD_OUTCOME,
-        checks.SIGNAL_AUDIT,
-        checks.CANDIDATE_LIFECYCLE,
-        EVENT_FACT_ANALYSIS,
-    }
-)
-_INDICATOR_CHECK_FAMILIES = frozenset(
-    {
-        checks.INDICATOR_FORWARD_OUTCOME,
-        checks.SIGNAL_AUDIT,
-        checks.CANDIDATE_LIFECYCLE,
-        EVENT_FACT_ANALYSIS,
-    }
-)
+from .registry import CHECK_REGISTRY
 
 
 def _utc(value: Any, *, field: str) -> datetime:
@@ -171,22 +154,49 @@ def _coverage_for_requirement(
             }
         )
         return missing, quality
-    if len(candidates) > 1:
+    records_by_series: dict[int, list[Any]] = {}
+    source_policy = dict(requirement.get("source_policy") or {})
+    policy_mode = str(source_policy.get("mode") or "current").strip().lower()
+    source_resolved_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        records = list(
+            store.read_series_records(
+                series_id=int(candidate["series_id"]),
+                start=_utc(requirement["required_start"], field="required_start"),
+                end=_utc(requirement["required_end"], field="required_end"),
+                as_of_commit_seq=as_of_commit_seq,
+            )
+        )
+        records_by_series[int(candidate["series_id"])] = records
+        if policy_mode == "current" or matching_source_identity_keys(
+            records, source_policy
+        ):
+            source_resolved_candidates.append(candidate)
+    if not source_resolved_candidates:
+        missing.append(
+            {
+                "alias": requirement["alias"],
+                "reason": "source_binding_unresolved",
+                "candidate_series_ids": sorted(
+                    int(row["series_id"]) for row in candidates
+                ),
+                "source_policy": source_policy,
+            }
+        )
+        return missing, quality
+    if len(source_resolved_candidates) > 1:
         missing.append(
             {
                 "alias": requirement["alias"],
                 "reason": "series_resolution_ambiguous",
-                "series_ids": sorted(int(row["series_id"]) for row in candidates),
+                "series_ids": sorted(
+                    int(row["series_id"]) for row in source_resolved_candidates
+                ),
             }
         )
         return missing, quality
-    candidate = candidates[0]
-    records = store.read_series_records(
-        series_id=int(candidate["series_id"]),
-        start=_utc(requirement["required_start"], field="required_start"),
-        end=_utc(requirement["required_end"], field="required_end"),
-        as_of_commit_seq=as_of_commit_seq,
-    )
+    candidate = source_resolved_candidates[0]
+    records = records_by_series[int(candidate["series_id"])]
     if not records:
         missing.append(
             {
@@ -196,7 +206,11 @@ def _coverage_for_requirement(
             }
         )
     quality.extend(
-        dict(row)
+        {
+            "alias": requirement["alias"],
+            "series_id": int(candidate["series_id"]),
+            **dict(row),
+        }
         for row in store.list_gap_evidence(
             series_id=int(candidate["series_id"]),
             start=_utc(requirement["required_start"], field="required_start"),
@@ -214,12 +228,19 @@ def plan_research_check(
     store: MarketDataStore = market_data_repo,
     indicator_planner: Callable[..., Mapping[str, Any]] = plan_runtime_requirements_for_indicators,
     inspect_coverage: bool = True,
+    require_durable_sources: bool = False,
 ) -> ResolvedCheckPlan:
     """Resolve explicit and transitive Check inputs without acquiring providers."""
 
     scope = dict(request.scope)
-    family = definition.definition_id
-    if family not in _MARKET_CHECK_FAMILIES:
+    evaluator = CHECK_REGISTRY.resolve_evaluator(definition)
+    declaration = dict(
+        evaluator.declare_requirements(definition=definition, request=request)
+    )
+    durable_sources = request.mode == CHECK_MODE_EVIDENCE or bool(
+        require_durable_sources
+    )
+    if str(declaration.get("input_kind") or "") == "immutable_run_evidence":
         run_window = dict(scope.get("window") or {})
         start = _utc(
             scope.get("start") or run_window.get("start"), field="scope.start"
@@ -235,6 +256,7 @@ def plan_research_check(
             warmup={"bars": 0, "seconds": 0},
             outcome_tail={"bars": 0, "seconds": 0, "horizon_kind": "none"},
             gap_policy=request.parameters["gap_policy"],
+            execution=declaration,
         )
 
     instrument_id, _instrument = _scope_instrument(scope)
@@ -245,11 +267,8 @@ def plan_research_check(
     if evaluation_end <= evaluation_start:
         raise ValueError("check_requirement_plan_invalid: end must be after start")
 
-    outcomes = dict(request.parameters.get("outcomes") or {})
-    horizons = _positive_ints(
-        outcomes.get("forward_bars") or outcomes.get("horizons") or []
-    )
-    horizon_kind = str(outcomes.get("horizon_kind") or "bars").strip().lower()
+    horizons = _positive_ints(declaration.get("outcome_horizons") or [])
+    horizon_kind = str(declaration.get("horizon_kind") or "bars").strip().lower()
     if horizon_kind not in {"bars", "elapsed_time"}:
         raise ValueError("check outcome horizon_kind must be bars or elapsed_time")
     outcome_tail_seconds = (
@@ -258,33 +277,19 @@ def plan_research_check(
         else max(horizons, default=0)
     )
     configured_warmup = int(scope.get("warmup_bars") or 0)
-    statistics = dict(request.parameters.get("statistics") or {})
-    feature_config = dict(statistics.get("features") or {})
-    baseline_features = [
-        dict(row) for row in feature_config.get("baseline") or []
-    ]
-    enriched_features = [
-        dict(row) for row in feature_config.get("enriched") or []
-    ]
-    feature_lookback = max(
-        [
-            int(scope.get("feature_lookback_bars") or 0),
-            *(
-                int(row.get("lookback_bars") or row.get("period") or 0)
-                for row in baseline_features
-            ),
-        ]
+    feature_lookback = int(declaration.get("feature_lookback_bars") or 0)
+    warmup_bars = max(
+        int(declaration.get("warmup_floor_bars") or 0),
+        configured_warmup,
+        feature_lookback,
     )
-    warmup_bars = max(14, configured_warmup, feature_lookback)
 
-    indicator_ids: list[str] = []
-    indicator_id = str(scope.get("indicator_id") or "").strip()
-    if family in _INDICATOR_CHECK_FAMILIES:
-        if not indicator_id:
-            raise ValueError(
-                "check_requirement_plan_invalid: indicator_id is required"
-            )
-        indicator_ids.append(indicator_id)
+    indicator_ids = [
+        str(value)
+        for value in declaration.get("indicator_ids") or []
+        if str(value).strip()
+    ]
+    indicator_id = indicator_ids[0] if indicator_ids else ""
     override_map = (
         {indicator_id: dict(scope.get("indicator_param_overrides") or {})}
         if indicator_id and scope.get("indicator_param_overrides") is not None
@@ -320,7 +325,7 @@ def plan_research_check(
             "frame_missing_policy": "indicator_owned",
             "source_policy": {
                 "mode": (
-                    "exact" if request.mode == CHECK_MODE_EVIDENCE else "current"
+                    "exact" if durable_sources else "current"
                 )
             },
             "required_start": _iso(materialization_start),
@@ -328,18 +333,57 @@ def plan_research_check(
         }
     ]
 
+    raw_bindings = scope.get("market_data_bindings")
+    binding_config = dict(raw_bindings) if isinstance(raw_bindings, Mapping) else {}
+    shared_resolution_context = InstrumentResolutionContext(
+        primary_instrument_ids=(instrument_id,),
+        underlying_by_primary=dict(
+            binding_config.get("underlying_by_primary") or {}
+        ),
+        benchmarks=dict(binding_config.get("benchmarks") or {}),
+    )
+    feature_windows = dict(
+        declaration.get("feature_windows_seconds_by_alias") or {}
+    )
     for raw in request.parameters.get("inputs") or []:
         requirement = _requirement_from_payload(raw)
-        explicit_instrument = str(raw.get("instrument_id") or instrument_id).strip()
-        feature_window_seconds = max(
-            (
-                int(feature.get("window_seconds") or 0)
-                for feature in enriched_features
-                if str(feature.get("input_alias") or "")
-                == str(requirement.key)
-            ),
-            default=0,
+        explicit_instrument = str(raw.get("instrument_id") or "").strip()
+        role = requirement.instrument_role.value
+        if explicit_instrument and role == "primary":
+            resolution_context = InstrumentResolutionContext(
+                primary_instrument_ids=(explicit_instrument,),
+                underlying_by_primary={},
+                benchmarks={},
+            )
+        elif explicit_instrument and role == "underlying":
+            resolution_context = InstrumentResolutionContext(
+                primary_instrument_ids=(instrument_id,),
+                underlying_by_primary={instrument_id: explicit_instrument},
+                benchmarks={},
+            )
+        elif explicit_instrument and role == "benchmark":
+            benchmark_key = str(requirement.instrument_ref or "").strip()
+            if not benchmark_key:
+                raise ValueError(
+                    "check_requirement_plan_invalid: explicit benchmark input requires instrument_ref"
+                )
+            resolution_context = InstrumentResolutionContext(
+                primary_instrument_ids=(instrument_id,),
+                underlying_by_primary={},
+                benchmarks={benchmark_key: explicit_instrument},
+            )
+        else:
+            resolution_context = shared_resolution_context
+        resolved_explicit = MarketDataPlanResolver().resolve(
+            [("check", (requirement,))],
+            instruments=resolution_context,
         )
+        if len(resolved_explicit.series) != 1:
+            raise RuntimeError(
+                "check_requirement_plan_invalid: explicit input did not resolve one semantic series"
+            )
+        resolved_series = resolved_explicit.series[0]
+        feature_window_seconds = int(feature_windows.get(requirement.key) or 0)
         lookback_seconds = max(
             int(requirement.lookback_seconds or 0),
             int(requirement.max_staleness_seconds or 0),
@@ -349,10 +393,10 @@ def plan_research_check(
         )
         requirements.append(
             {
-                **requirement.to_dict(),
+                **resolved_series.to_dict(),
                 "alias": requirement.key,
                 "consumer_id": "check",
-                "instrument_id": explicit_instrument,
+                "instrument_id": resolved_series.instrument_id,
                 "series_required": bool(raw.get("series_required", True)),
                 "frame_missing_policy": str(
                     raw.get("frame_missing_policy") or "exclude_and_count"
@@ -365,8 +409,6 @@ def plan_research_check(
             }
         )
 
-    raw_bindings = scope.get("market_data_bindings")
-    binding_config = dict(raw_bindings) if isinstance(raw_bindings, Mapping) else {}
     declarations: list[tuple[str, tuple[MarketDataRequirement, ...]]] = []
     indicator_required_start: dict[tuple[str, str], str] = {}
     for raw in indicator_plan.get("requirements") or []:
@@ -379,13 +421,7 @@ def plan_research_check(
     if declarations:
         resolved = MarketDataPlanResolver().resolve(
             declarations,
-            instruments=InstrumentResolutionContext(
-                primary_instrument_ids=(instrument_id,),
-                underlying_by_primary=dict(
-                    binding_config.get("underlying_by_primary") or {}
-                ),
-                benchmarks=dict(binding_config.get("benchmarks") or {}),
-            ),
+            instruments=shared_resolution_context,
         )
         for series in resolved.series:
             for binding in series.bindings:
@@ -406,7 +442,7 @@ def plan_research_check(
                         "source_policy": {
                             "mode": (
                                 "exact"
-                                if request.mode == CHECK_MODE_EVIDENCE
+                                if durable_sources
                                 else "current"
                             )
                         },
@@ -456,11 +492,15 @@ def plan_research_check(
         },
         outcome_tail={
             "horizons": horizons,
+            "required_horizons": list(
+                declaration.get("required_outcome_horizons") or horizons
+            ),
             "bars": max(horizons, default=0) if horizon_kind == "bars" else None,
             "seconds": outcome_tail_seconds,
             "horizon_kind": horizon_kind,
         },
         gap_policy=request.parameters["gap_policy"],
+        execution=declaration,
         missing_coverage=tuple(missing),
         quality_evidence=tuple(quality),
     )

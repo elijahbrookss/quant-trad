@@ -131,6 +131,7 @@ def evaluate_raw_event_check(
     detector: Mapping[str, Any],
     outcomes: Mapping[str, Any] | None = None,
     data_quality: Mapping[str, Any] | None = None,
+    evaluation_range: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate a known-at raw OHLCV detector and forward analytical outcomes."""
 
@@ -145,9 +146,10 @@ def evaluate_raw_event_check(
     min_edge_pct = float(outcome_spec.get("min_edge_pct") or 0.0)
     max_examples = int(outcome_spec.get("max_examples") or 250)
 
+    eligible_indexes = _evaluation_frame_indexes(frame, evaluation_range)
     event_indexes = [
         idx
-        for idx in range(len(frame))
+        for idx in eligible_indexes
         if _evaluate_detector(dict(detector or {}), frame, idx)
     ]
     event_outcomes = [
@@ -156,7 +158,7 @@ def evaluate_raw_event_check(
     ]
     baseline_outcomes = [
         _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction, entry_lag_bars=entry_lag_bars)
-        for idx in range(len(frame))
+        for idx in eligible_indexes
     ]
 
     summary = _summarize_outcomes(
@@ -184,7 +186,7 @@ def evaluate_raw_event_check(
         "check_family": RAW_FORWARD_OUTCOME,
         "status": "completed",
         "sample_count": len(event_indexes),
-        "eligible_bars": len(frame),
+        "eligible_bars": len(eligible_indexes),
         "detector": dict(detector or {}),
         "outcomes": {
             "direction": direction,
@@ -366,6 +368,7 @@ def evaluate_indicator_forward_outcome(
     detector: Mapping[str, Any],
     outcomes: Mapping[str, Any] | None = None,
     data_quality: Mapping[str, Any] | None = None,
+    evaluation_range: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     _validate_indicator_detector(detector)
     frame = _normalize_candles(pd.DataFrame(list(evidence.get("candles") or [])))
@@ -414,9 +417,10 @@ def evaluate_indicator_forward_outcome(
                 }
             )
 
+    eligible_indexes = _evaluation_frame_indexes(frame, evaluation_range)
     baseline_outcomes = [
         _event_outcome(frame, idx, forward_bars=forward_bars, direction=direction, entry_lag_bars=entry_lag_bars)
-        for idx in range(len(frame))
+        for idx in eligible_indexes
     ]
     summary = _summarize_outcomes(
         event_outcomes,
@@ -431,7 +435,7 @@ def evaluate_indicator_forward_outcome(
         "status": "completed",
         "sample_count": len(event_outcomes),
         "eligible_events": len(_records(evidence.get("outputs"))),
-        "eligible_bars": len(frame),
+        "eligible_bars": len(eligible_indexes),
         "detector": dict(detector or {}),
         "outcomes": {
             "direction": direction,
@@ -647,6 +651,20 @@ def _normalize_candles(candles: pd.DataFrame) -> pd.DataFrame:
         frame[field] = pd.to_numeric(frame[field], errors="coerce")
     frame = frame.dropna(subset=required).sort_values("time").reset_index(drop=True)
     return frame
+
+
+def _evaluation_frame_indexes(
+    frame: pd.DataFrame, evaluation_range: Mapping[str, Any] | None
+) -> list[int]:
+    if not evaluation_range:
+        return list(range(len(frame)))
+    start = pd.to_datetime(evaluation_range.get("start"), utc=True)
+    end = pd.to_datetime(evaluation_range.get("end_exclusive"), utc=True)
+    return [
+        index
+        for index, value in enumerate(frame["time"])
+        if start <= value < end
+    ]
 
 
 def _forward_bars(outcome_spec: Mapping[str, Any]) -> list[int]:

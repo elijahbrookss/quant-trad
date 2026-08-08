@@ -49,6 +49,7 @@ def plan_runtime_requirements_for_indicators(
     start: str,
     end: str,
     param_overrides_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+    preloaded_metas: Mapping[str, Mapping[str, Any]] | None = None,
     ctx: IndicatorServiceContext = _context,
 ) -> dict[str, Any]:
     """Resolve exact direct/transitive manifests and their typed market inputs."""
@@ -77,7 +78,12 @@ def plan_runtime_requirements_for_indicators(
         raise ValueError("indicator_requirement_plan_invalid: end must be after start")
     interval_seconds = _seconds(timeframe)
     overrides = dict(param_overrides_by_id or {})
-    metas = collect_runtime_indicator_metas(roots, ctx=ctx)
+    if preloaded_metas is None:
+        metas = collect_runtime_indicator_metas(roots, ctx=ctx)
+    else:
+        metas = collect_runtime_indicator_metas(
+            roots, ctx=ctx, preloaded_metas=preloaded_metas
+        )
     indicator_rows: list[dict[str, Any]] = []
     requirements: list[dict[str, Any]] = []
     warmup_bars = 0

@@ -42,14 +42,32 @@ class ResearchLinkRequest(BaseModel):
 
 
 class ResearchCheckRunRequest(BaseModel):
-    title: str
+    title: Optional[str] = None
     body: Optional[str] = None
     observation_id: Optional[str] = None
     observation: Optional[Dict[str, Any]] = None
     check_family: Optional[str] = None
+    mode: Optional[str] = None
+    dataset_id: Optional[str] = None
     scope: Dict[str, Any]
     detector: Dict[str, Any]
     outcomes: Dict[str, Any] = Field(default_factory=dict)
+    inputs: List[Dict[str, Any]] = Field(default_factory=list)
+    statistics: Dict[str, Any] = Field(default_factory=dict)
+    assertions: List[Dict[str, Any]] = Field(default_factory=list)
+    gap_policy: Optional[str] = None
+    preparation: Dict[str, Any] = Field(default_factory=dict)
+    freeze: Optional[bool] = None
+    acquire_missing: Optional[bool] = None
+    dataset_name: Optional[str] = None
+    created_by: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+
+
+class ResearchObservationFromCheckRequest(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    status: str = "active"
     tags: List[str] = Field(default_factory=list)
 
 
@@ -327,6 +345,34 @@ def run_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.post("/checks/requirements")
+def get_research_check_requirements(
+    body: ResearchCheckRunRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_service.get_research_check_requirements(
+            _model_payload(body)
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/prepare")
+def prepare_research_check_evidence(
+    body: ResearchCheckRunRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_service.prepare_research_check_evidence(
+            _model_payload(body)
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/checks/evaluate")
 def evaluate_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
     try:
@@ -385,6 +431,31 @@ def get_research_job_result(job_id: str) -> Dict[str, Any]:
 def compare_research_checks(left_check_id: str, right_check_id: str) -> Dict[str, Any]:
     try:
         return research_service.compare_research_checks(left_check_id, right_check_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/{check_id}/replay")
+def replay_research_check(check_id: str) -> Dict[str, Any]:
+    try:
+        return research_service.replay_research_check(check_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/{check_id}/observations", status_code=201)
+def create_observation_from_check(
+    check_id: str,
+    body: ResearchObservationFromCheckRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_service.create_observation_from_check_evidence(
+            check_id, _model_payload(body)
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

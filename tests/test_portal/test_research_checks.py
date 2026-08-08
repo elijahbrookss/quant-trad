@@ -255,7 +255,7 @@ def test_research_check_service_fails_loud_for_invalid_detector_before_blocked_d
     )
 
     with pytest.raises(ValueError, match="unsupported raw detector field"):
-        service.run_research_check(
+        service.evaluate_research_check(
             {
                 "title": "ETH bad field",
                 "scope": {
@@ -481,8 +481,12 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
         "maintain_job_heartbeat",
         lambda claimed: nullcontext(),
     )
-    def fake_run(request, *, session):
+    def fake_build(request):
         observed["request"] = request
+        return {"schema_version": "research_check_evidence_build.v1"}
+
+    def fake_persist(built, *, session):
+        observed["built"] = built
         observed["session"] = session
         return {"schema_version": "research_check_run.v2", "status": "completed"}
 
@@ -492,8 +496,13 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
 
     monkeypatch.setattr(
         research_worker.research_service,
-        "run_research_check",
-        fake_run,
+        "build_research_check_evidence",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        research_worker.research_service,
+        "persist_built_research_check_evidence",
+        fake_persist,
     )
     monkeypatch.setattr(
         research_worker,
@@ -506,6 +515,7 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
     assert result["status"] == "completed"
     assert observed == {
         "request": {"title": "ATR check"},
+        "built": {"schema_version": "research_check_evidence_build.v1"},
         "session": "owned-session",
         "claim": job,
     }
@@ -709,7 +719,7 @@ def test_report_backed_research_check_rejects_mismatched_detector_before_persist
     monkeypatch.setattr(service.repository, "create_item", lambda **kwargs: created.append(kwargs) or kwargs)
 
     with pytest.raises(ValueError, match="unsupported run check detector type for run_signal_summary"):
-        service.run_research_check(
+        service.evaluate_research_check(
             {
                 "title": "Mismatched detector",
                 "check_family": "run_signal_summary",
@@ -886,7 +896,7 @@ def test_report_backed_research_check_fails_loud_for_unsupported_detector(monkey
     )
 
     with pytest.raises(ValueError, match="unsupported run check detector type"):
-        service.run_research_check(
+        service.evaluate_research_check(
             {
                 "title": "Bad run signal check",
                 "check_family": "run_signal_summary",

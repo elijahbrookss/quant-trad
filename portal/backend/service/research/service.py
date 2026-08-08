@@ -15,6 +15,7 @@ from research_science.check import (
     CHECK_MODE_EVIDENCE,
     CHECK_MODE_PREVIEW,
     CheckDefinition,
+    CheckEvidenceBinding,
     CheckRequest,
     CheckResult,
     ResolvedCheckPlan,
@@ -30,6 +31,9 @@ from portal.backend.service.indicators.indicator_service.runtime_validation impo
     collect_runtime_output_evidence_for_instance,
 )
 from portal.backend.service.market import candle_service, instrument_service
+from portal.backend.service.market.frozen_dataset_service import (
+    prepare_frozen_dataset_from_requirements,
+)
 from portal.backend.service.provenance import source_revision
 from portal.backend.service.reports import contract as reports_contract
 from portal.backend.service.storage.repos import lifecycle as lifecycle_repo
@@ -59,7 +63,11 @@ from .checks import (
 from .metrics import build_leaderboard, extract_numeric_metrics
 from .execution import execute_check_evidence, execute_check_preview
 from .planning import plan_research_check
-from .registry import normalize_check_request
+from .registry import (
+    CHECK_REGISTRY,
+    normalize_check_preparation_request,
+    normalize_check_request,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -187,6 +195,84 @@ def list_research_items(
     ]
 
 
+def _validate_research_check_evidence_payload(
+    payload: Mapping[str, Any],
+) -> tuple[
+    CheckDefinition,
+    CheckRequest,
+    ResolvedCheckPlan,
+    CheckEvidenceBinding,
+    CheckResult,
+]:
+    if str(payload.get("schema_version") or "") != "research_check_payload.v2":
+        raise ValueError("check_evidence_payload_invalid: unsupported payload schema")
+    definition = CheckDefinition.from_dict(payload["definition"])
+    request = CheckRequest.from_dict(payload["request"])
+    plan = ResolvedCheckPlan.from_dict(payload["plan"])
+    evidence = CheckEvidenceBinding.from_dict(payload["evidence"])
+    result = CheckResult.from_dict(payload["result"])
+    if request.mode != CHECK_MODE_EVIDENCE:
+        raise ValueError("check_evidence_payload_invalid: request is not evidence mode")
+    if (
+        request.definition_id != definition.definition_id
+        or request.definition_version != definition.definition_version
+        or request.definition_hash != definition.definition_hash
+    ):
+        raise ValueError("check_evidence_payload_invalid: definition/request disagreement")
+    if plan.request_hash != request.request_hash:
+        raise ValueError("check_evidence_payload_invalid: request/plan disagreement")
+    if (
+        evidence.definition_hash != definition.definition_hash
+        or evidence.request_hash != request.request_hash
+        or evidence.plan_hash != plan.plan_hash
+    ):
+        raise ValueError("check_evidence_payload_invalid: plan/evidence disagreement")
+    if (
+        result.definition_hash != definition.definition_hash
+        or result.request_hash != request.request_hash
+        or result.plan_hash != plan.plan_hash
+        or result.evidence_hash != evidence.evidence_hash
+        or result.evaluator_id != definition.evaluator_id
+        or result.evaluator_version != definition.evaluator_version
+    ):
+        raise ValueError("check_evidence_payload_invalid: evidence/result disagreement")
+    registered = definition.material_rules.get("registered_definition")
+    if isinstance(registered, Mapping):
+        base = CHECK_REGISTRY.resolve_definition(
+            str(registered.get("definition_id") or ""),
+            str(registered.get("definition_version") or ""),
+        )
+        if (
+            base.definition_id != definition.definition_id
+            or base.definition_hash != str(registered.get("definition_hash") or "")
+            or base.evaluator_id != definition.evaluator_id
+            or base.evaluator_version != definition.evaluator_version
+        ):
+            raise ValueError(
+                "check_evidence_payload_invalid: registered definition lineage disagrees"
+            )
+    else:
+        base = CHECK_REGISTRY.resolve_definition(
+            definition.definition_id, definition.definition_version
+        )
+        if base.definition_hash != definition.definition_hash:
+            raise ValueError(
+                "check_evidence_payload_invalid: definition is not registered"
+            )
+    CHECK_REGISTRY.resolve_evaluator(definition)
+    if evidence.evidence_kind == "frozen_market_data":
+        if str(request.dataset_id or "") != str(evidence.input_binding.get("dataset_id") or ""):
+            raise ValueError("check_evidence_payload_invalid: Dataset binding disagrees")
+    elif dict(request.immutable_run_evidence or {}) != dict(evidence.input_binding):
+        raise ValueError("check_evidence_payload_invalid: immutable run binding disagrees")
+    semantic_result = dict(result.result)
+    if semantic_result.get("promotion_authority") is not False:
+        raise ValueError("check_evidence_payload_invalid: Check cannot grant promotion authority")
+    if semantic_result.get("execution_authority") is not False:
+        raise ValueError("check_evidence_payload_invalid: Check cannot grant execution authority")
+    return definition, request, plan, evidence, result
+
+
 def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
     projected = dict(item)
     if str(projected.get("kind") or "") != "research_check":
@@ -198,13 +284,21 @@ def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
         else ""
     )
     if schema_version == "research_check_payload.v2":
-        projected["evidence_classification"] = str(
-            payload.get("evidence_classification") or "frozen_replayable"
-        )
-        projected["replayable"] = bool(payload.get("replayable", True))
-        projected["observation_eligible"] = bool(
-            payload.get("observation_eligible", False)
-        )
+        try:
+            _definition, _request, _plan, _evidence, result = (
+                _validate_research_check_evidence_payload(payload)
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            projected["evidence_classification"] = "invalid_v2"
+            projected["replayable"] = False
+            projected["observation_eligible"] = False
+            projected["evidence_integrity_error"] = str(exc)
+        else:
+            projected["evidence_classification"] = "frozen_replayable"
+            projected["replayable"] = True
+            projected["observation_eligible"] = (
+                str(result.result.get("status") or "") == "completed"
+            )
     else:
         projected["evidence_classification"] = "legacy_unpinned"
         projected["replayable"] = False
@@ -511,23 +605,139 @@ def _evaluate_legacy_research_check(
 
 
 def get_research_check_requirements(payload: Mapping[str, Any]) -> dict[str, Any]:
-    request_payload, _run_evidence = _prepare_check_request_payload(
-        payload, mode=str(payload.get("mode") or CHECK_MODE_PREVIEW)
+    mode = str(payload.get("mode") or CHECK_MODE_PREVIEW).strip().lower()
+    family = str(payload.get("check_family") or SUPPORTED_CHECK_FAMILY).strip()
+    planning_only = (
+        mode == CHECK_MODE_EVIDENCE
+        and not payload.get("dataset_id")
+        and family not in {RUN_SIGNAL_SUMMARY, RUN_DECISION_TRADE_COMPARISON}
     )
-    definition, request = normalize_check_request(request_payload)
+    if planning_only:
+        request_payload = dict(payload)
+        definition, request = normalize_check_preparation_request(request_payload)
+    else:
+        request_payload, _run_evidence = _prepare_check_request_payload(
+            payload, mode=mode
+        )
+        definition, request = normalize_check_request(request_payload)
     plan = plan_research_check(
         definition,
         request,
         inspect_coverage=request.mode == CHECK_MODE_PREVIEW,
+        require_durable_sources=planning_only,
     )
     return {
         "schema_version": "research_check_requirements.v1",
-        "mode": request.mode,
+        "mode": mode,
+        "planning_only": planning_only,
         "definition": definition.to_dict(),
         "request": request.to_dict(),
         "plan": plan.to_dict(),
         "provider_call_performed": False,
         "preparation_authorized": False,
+    }
+
+
+def prepare_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve a durable Check plan and optionally freeze its exact inputs."""
+
+    request_payload = dict(payload or {})
+    family = str(
+        request_payload.get("check_family") or SUPPORTED_CHECK_FAMILY
+    ).strip()
+    if family in {RUN_SIGNAL_SUMMARY, RUN_DECISION_TRADE_COMPARISON}:
+        raise ValueError(
+            "check_preparation_invalid: run-backed Checks already bind immutable run evidence"
+        )
+    if request_payload.get("dataset_id") not in (None, ""):
+        raise ValueError(
+            "check_preparation_invalid: preparation creates the Dataset; omit dataset_id"
+        )
+    preparation = _mapping_or_empty(request_payload.get("preparation"))
+    freeze = bool(preparation.get("freeze", request_payload.get("freeze", False)))
+    acquire_missing = bool(
+        preparation.get(
+            "acquire_missing", request_payload.get("acquire_missing", False)
+        )
+    )
+    definition, planning_request = normalize_check_preparation_request(
+        request_payload
+    )
+    plan = plan_research_check(
+        definition,
+        planning_request,
+        inspect_coverage=True,
+        require_durable_sources=True,
+    )
+    prepared = prepare_frozen_dataset_from_requirements(
+        requirements=plan.market_data_requirements,
+        freeze=freeze,
+        name=_optional(
+            preparation.get("name") or request_payload.get("dataset_name")
+        ),
+        purpose=str(preparation.get("purpose") or "research"),
+        created_by=_optional(
+            preparation.get("created_by") or request_payload.get("created_by")
+        ),
+        metadata={
+            **_mapping_or_empty(preparation.get("metadata")),
+            "check_definition_id": definition.definition_id,
+            "check_definition_version": definition.definition_version,
+            "check_definition_hash": definition.definition_hash,
+            "planning_request_hash": planning_request.request_hash,
+            "planning_plan_hash": plan.plan_hash,
+        },
+    )
+    if acquire_missing and prepared["unresolved_requirements"]:
+        prepared = {
+            **prepared,
+            "status": "acquisition_required",
+            "acquisition_authorized": False,
+            "message": (
+                "Preparation never infers provider acquisition. Use the existing "
+                "authorized data acquisition primitive for each unresolved requirement, "
+                "then repeat preparation."
+            ),
+        }
+    response: dict[str, Any] = {
+        "schema_version": "research_check_preparation.v1",
+        "status": prepared["status"],
+        "definition": definition.to_dict(),
+        "planning_request": planning_request.to_dict(),
+        "plan": plan.to_dict(),
+        "preparation": prepared,
+        "provider_call_performed": False,
+        "check_executed": False,
+        "observation_created": False,
+    }
+    dataset = prepared.get("dataset")
+    if not isinstance(dataset, Mapping):
+        return response
+    evidence_payload = {
+        **request_payload,
+        "mode": CHECK_MODE_EVIDENCE,
+        "dataset_id": str(dataset["dataset_id"]),
+    }
+    evidence_payload.pop("preparation", None)
+    evidence_payload.pop("freeze", None)
+    evidence_payload.pop("acquire_missing", None)
+    evidence_definition, evidence_request = normalize_check_request(
+        evidence_payload, mode=CHECK_MODE_EVIDENCE
+    )
+    evidence_plan = plan_research_check(
+        evidence_definition,
+        evidence_request,
+        inspect_coverage=False,
+    )
+    return {
+        **response,
+        "evidence_request": evidence_request.to_dict(),
+        "evidence_plan": evidence_plan.to_dict(),
+        "next_operation": {
+            "operation": "research_check_evidence",
+            "dataset_id": dataset["dataset_id"],
+            "request_hash": evidence_request.request_hash,
+        },
     }
 
 
@@ -557,39 +767,58 @@ def run_research_check(
     *,
     session: Session | None = None,
 ) -> dict[str, Any]:
-    """Run preview by default or persist explicit frozen evidence."""
+    """Persist explicit frozen evidence; preview has its own evaluate operation."""
 
-    mode = str(payload.get("mode") or CHECK_MODE_PREVIEW).strip().lower()
+    built = build_research_check_evidence(payload)
+    return persist_built_research_check_evidence(built, session=session)
+
+
+def build_research_check_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Compute one evidence envelope without holding a persistence transaction."""
+
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode != CHECK_MODE_EVIDENCE:
+        raise ValueError(
+            "check_evidence_mode_required: use the Check preview operation for ephemeral evaluation"
+        )
     request_payload, run_evidence = _prepare_check_request_payload(
         payload, mode=mode
     )
     definition, request = normalize_check_request(request_payload, mode=mode)
-    if mode == CHECK_MODE_PREVIEW:
-        plan = plan_research_check(definition, request, inspect_coverage=True)
-        preview = execute_check_preview(
-            definition, request, plan, run_evidence=run_evidence
-        )
-        return {
-            **preview,
-            "compatibility": {
-                "route": "/api/research/checks/run",
-                "status": "deprecated_for_preview",
-                "replacement": "/api/research/checks/evaluate",
-                "message": (
-                    "Unqualified Check runs are now ephemeral previews; set mode=evidence "
-                    "and provide dataset_id for durable evidence."
-                ),
-            },
-        }
     plan = plan_research_check(definition, request, inspect_coverage=False)
     bound_plan, evidence, result = execute_check_evidence(
         definition, request, plan, run_evidence=run_evidence
     )
+    return {
+        "schema_version": "research_check_evidence_build.v1",
+        "payload": request_payload,
+        "definition": definition.to_dict(),
+        "request": request.to_dict(),
+        "plan": bound_plan.to_dict(),
+        "evidence": evidence.to_dict(),
+        "result": result.to_dict(),
+    }
+
+
+def persist_built_research_check_evidence(
+    built: Mapping[str, Any],
+    *,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Persist a precomputed, internally verified evidence envelope."""
+
+    if str(built.get("schema_version") or "") != "research_check_evidence_build.v1":
+        raise ValueError("check_evidence_build_invalid: unsupported schema")
+    definition = CheckDefinition.from_dict(built["definition"])
+    request = CheckRequest.from_dict(built["request"])
+    plan = ResolvedCheckPlan.from_dict(built["plan"])
+    evidence = CheckEvidenceBinding.from_dict(built["evidence"])
+    result = CheckResult.from_dict(built["result"])
     return persist_research_check_evidence(
-        request_payload,
+        dict(built.get("payload") or {}),
         definition=definition,
         request=request,
-        plan=bound_plan,
+        plan=plan,
         evidence=evidence.to_dict(),
         result=result.to_dict(),
         session=session,
@@ -699,7 +928,20 @@ def persist_research_check_evidence(
 
     if request.mode != CHECK_MODE_EVIDENCE:
         raise ValueError("check_evidence_persistence_requires_evidence_mode")
+    normalized_evidence = CheckEvidenceBinding.from_dict(evidence)
     normalized_result = CheckResult.from_dict(result)
+    envelope = {
+        "schema_version": "research_check_payload.v2",
+        "evidence_classification": "frozen_replayable",
+        "definition": definition.to_dict(),
+        "request": request.to_dict(),
+        "plan": plan.to_dict(),
+        "evidence": normalized_evidence.to_dict(),
+        "result": normalized_result.to_dict(),
+        "replayable": True,
+        "observation_eligible": False,
+    }
+    _validate_research_check_evidence_payload(envelope)
     result_payload = dict(normalized_result.result)
     status = "tested" if result_payload.get("status") == "completed" else "blocked"
     scope = dict(request.scope)
@@ -719,28 +961,18 @@ def persist_research_check_evidence(
         window_start=scope.get("start"),
         window_end=scope.get("end"),
         tags=sorted(set(["research-check", "frozen-evidence", *_tags(payload.get("tags"))])),
-        payload={
-            "schema_version": "research_check_payload.v2",
-            "evidence_classification": "frozen_replayable",
-            "definition": definition.to_dict(),
-            "request": request.to_dict(),
-            "plan": plan.to_dict(),
-            "evidence": dict(evidence),
-            "result": normalized_result.to_dict(),
-            "replayable": True,
-            "observation_eligible": status == "tested",
-        },
-        source_revision=str(evidence.get("code_revision") or _source_revision()),
+        payload={**envelope, "observation_eligible": status == "tested"},
+        source_revision=normalized_evidence.code_revision,
         **create_args,
     )
     target_type = (
         "run"
-        if str(evidence.get("evidence_kind") or "")
+        if normalized_evidence.evidence_kind
         == "immutable_run_evidence"
         else "market_dataset"
     )
     target_id = (
-        str(evidence.get("input_binding", {}).get("run_id") or "")
+        str(normalized_evidence.input_binding.get("run_id") or "")
         if target_type == "run"
         else str(request.dataset_id)
     )
@@ -751,10 +983,10 @@ def persist_research_check_evidence(
             target_id=target_id,
             relation="uses_evidence",
             metadata={
-                "dataset_hash": evidence.get("input_binding", {}).get(
+                "dataset_hash": normalized_evidence.input_binding.get(
                     "dataset_hash"
                 ),
-                "binding_hash": evidence.get("input_binding", {}).get(
+                "binding_hash": normalized_evidence.input_binding.get(
                     "binding_hash"
                 ),
                 "result_hash": normalized_result.result_hash,
@@ -769,7 +1001,7 @@ def persist_research_check_evidence(
         "check": item,
         "links": links,
         "result": normalized_result.to_dict(),
-        "evidence": dict(evidence),
+        "evidence": normalized_evidence.to_dict(),
         "replayable": True,
         "observation_eligible": status == "tested",
     }
@@ -796,9 +1028,10 @@ def create_observation_from_check_evidence(
             "observation_evidence_invalid: Check is not durable replayable evidence"
         )
     check_payload = dict(check.get("payload") or {})
-    result = CheckResult.from_dict(check_payload["result"])
-    evidence = dict(check_payload["evidence"])
-    request = CheckRequest.from_dict(check_payload["request"])
+    _definition, request, _plan, evidence_contract, result = (
+        _validate_research_check_evidence_payload(check_payload)
+    )
+    evidence = evidence_contract.to_dict()
     observation_title = str(
         payload.get("title") or f"Observation from Check: {check.get('title')}"
     ).strip()
@@ -871,11 +1104,10 @@ def replay_research_check(check_id: str) -> dict[str, Any]:
             "reasons": ["legacy Check has no immutable input binding"],
         }
     payload = dict(item.get("payload") or {})
-    definition = CheckDefinition.from_dict(payload["definition"])
-    request = CheckRequest.from_dict(payload["request"])
-    original_plan = ResolvedCheckPlan.from_dict(payload["plan"])
-    original_result = CheckResult.from_dict(payload["result"])
-    original_evidence = dict(payload["evidence"])
+    definition, request, original_plan, original_evidence_contract, original_result = (
+        _validate_research_check_evidence_payload(payload)
+    )
+    original_evidence = original_evidence_contract.to_dict()
     current_revision = _source_revision()
     if str(original_evidence.get("code_revision") or "") != current_revision:
         return {
@@ -889,7 +1121,10 @@ def replay_research_check(check_id: str) -> dict[str, Any]:
             "reasons": ["exact producing code revision is not running"],
         }
     replayed_plan, replayed_evidence, replayed_result = execute_check_evidence(
-        definition, request, original_plan
+        definition,
+        request,
+        original_plan,
+        expected_input_binding=original_evidence_contract.input_binding,
     )
     verification = verify_check_replay(original_result, replayed_result)
     evidence_matches = (
@@ -1547,6 +1782,8 @@ def _run_evidence_summary(run_id: str, *, include_dataset_context: bool = False)
 def _check_result(item: Mapping[str, Any]) -> dict[str, Any]:
     payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else {}
     result = payload.get("result") if isinstance(payload.get("result"), Mapping) else {}
+    if isinstance(result.get("result"), Mapping):
+        result = result["result"]
     return dict(result)
 
 

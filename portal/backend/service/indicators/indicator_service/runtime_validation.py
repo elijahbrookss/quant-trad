@@ -12,6 +12,7 @@ from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
+from market_data.frozen import semantic_hash
 
 from ...market import candle_service, instrument_service
 from .context import IndicatorServiceContext, _context
@@ -28,6 +29,35 @@ RUNTIME_VALIDATION_PATH = "typed_indicator_engine.v1"
 
 def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _matching_recorded_gaps(
+    gap: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    start = _utc(gap["start"])
+    end = _utc(gap["end"])
+    matches: list[dict[str, Any]] = []
+    for raw in evidence:
+        if raw.get("start") is None or raw.get("end") is None:
+            continue
+        recorded_start = _utc(raw["start"])
+        recorded_end = _utc(raw["end"])
+        if recorded_start < end and recorded_end > start:
+            matches.append(dict(raw))
+    return matches
 
 
 def _build_runtime_candles(df: Any) -> list[Candle]:
@@ -448,6 +478,10 @@ def collect_runtime_output_evidence_for_instance(
     | None = None,
     gap_policy: str | None = None,
     gap_rewarm_bars: int = 0,
+    recorded_gap_evidence: Sequence[Mapping[str, Any]] | None = None,
+    expected_indicator_graph: Sequence[Mapping[str, Any]] | None = None,
+    indicator_plan_start: str | None = None,
+    indicator_plan_end: str | None = None,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     """Collect per-bar declared output evidence from the canonical runtime path."""
@@ -481,7 +515,7 @@ def collect_runtime_output_evidence_for_instance(
         instrument_id=resolved_instrument_id,
     )
 
-    _, indicators = build_runtime_indicator_graph(
+    metas, indicators = build_runtime_indicator_graph(
         [inst_id],
         execution_context=execution_context,
         ctx=ctx,
@@ -489,6 +523,33 @@ def collect_runtime_output_evidence_for_instance(
         source_frame_cache=source_frame_cache,
         source_frame_cache_stats=source_frame_cache_stats,
     )
+    actual_indicator_graph: list[dict[str, Any]] = []
+    if expected_indicator_graph is not None:
+        from .requirements import plan_runtime_requirements_for_indicators
+
+        actual_plan = plan_runtime_requirements_for_indicators(
+            [inst_id],
+            timeframe=interval,
+            start=str(indicator_plan_start or start),
+            end=str(indicator_plan_end or end),
+            param_overrides_by_id=(
+                {inst_id: dict(indicator_param_overrides or {})}
+                if indicator_param_overrides is not None
+                else {}
+            ),
+            preloaded_metas=metas,
+            ctx=ctx,
+        )
+        actual_indicator_graph = [
+            dict(row) for row in actual_plan.get("indicators") or []
+        ]
+        expected_graph = [dict(row) for row in expected_indicator_graph]
+        if semantic_hash({"indicators": actual_indicator_graph}) != semantic_hash(
+            {"indicators": expected_graph}
+        ):
+            raise RuntimeError(
+                "indicator_evidence_graph_substitution: actual runtime graph differs from planned graph"
+            )
     diagnostics = collect_runtime_indicator_diagnostics(indicators)
     frame = candle_frame
     if frame is None:
@@ -519,6 +580,7 @@ def collect_runtime_output_evidence_for_instance(
     ready_counts: Counter[str] = Counter()
     not_ready_counts: Counter[str] = Counter()
     gap_transitions: list[dict[str, Any]] = []
+    discontinuities: list[dict[str, Any]] = []
 
     interval_seconds = int(interval_to_timedelta(interval).total_seconds())
     previous_candle_time: datetime | None = None
@@ -540,7 +602,28 @@ def collect_runtime_output_evidence_for_instance(
                     ),
                     "timeframe_seconds": interval_seconds,
                 }
-                if gap_policy is not None:
+                matching_evidence = (
+                    _matching_recorded_gaps(gap, recorded_gap_evidence)
+                    if recorded_gap_evidence is not None
+                    else []
+                )
+                is_declared_gap = (
+                    bool(matching_evidence)
+                    if recorded_gap_evidence is not None
+                    else True
+                )
+                discontinuities.append(
+                    {
+                        **gap,
+                        "classification": (
+                            "recorded_data_gap"
+                            if is_declared_gap
+                            else "expected_or_unclassified_discontinuity"
+                        ),
+                        "recorded_evidence": matching_evidence,
+                    }
+                )
+                if gap_policy is not None and is_declared_gap:
                     actions = engine.handle_gap(
                         policy=gap_policy,
                         gap=gap,
@@ -679,6 +762,11 @@ def collect_runtime_output_evidence_for_instance(
         "not_ready_counts": dict(sorted(not_ready_counts.items())),
         "gap_policy": gap_policy,
         "gap_transitions": gap_transitions,
+        "continuity_discontinuities": discontinuities,
+        "indicator_graph": actual_indicator_graph,
+        "indicator_graph_hash": semantic_hash(
+            {"indicators": actual_indicator_graph}
+        ),
         "candles": candle_rows,
         "outputs": output_rows,
         "diagnostics": {

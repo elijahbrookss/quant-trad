@@ -7,7 +7,12 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from engines.bot_runtime.core.domain import Candle
-from engines.indicator_engine.contracts import Indicator, RuntimeOverlay, RuntimeOutput
+from engines.indicator_engine.contracts import (
+    Indicator,
+    IndicatorGapRejectedError,
+    RuntimeOverlay,
+    RuntimeOutput,
+)
 from indicators.manifest import build_runtime_spec
 from overlays.registry import register_overlay_type
 from overlays.schema import build_overlay
@@ -142,9 +147,9 @@ class TypedMarketProfileIndicator(Indicator):
     ) -> Mapping[str, Any]:
         normalized = str(policy or "").strip().lower()
         if normalized == "reject":
-            raise RuntimeError(
-                "market_profile_gap_rejected: "
-                f"indicator_id={self._indicator_id} gap={dict(gap)}"
+            raise IndicatorGapRejectedError(
+                indicator_id=self._indicator_id,
+                gap=gap,
             )
         if normalized == "continue_degraded":
             return {

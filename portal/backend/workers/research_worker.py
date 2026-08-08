@@ -77,13 +77,13 @@ def execute_claimed_research_job(job: ClaimedJob) -> Dict[str, Any]:
         if job.job_type != JOB_TYPE_RESEARCH_CHECK_RUN:
             result = process_research_job(job.job_type, job.payload)
         else:
-            result = None
+            result = research_service.build_research_check_evidence(request)
 
     if job.job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
         return complete_job_with_owned_effect(
             job,
-            lambda session: research_service.run_research_check(
-                request, session=session
+            lambda session: research_service.persist_built_research_check_evidence(
+                result, session=session
             ),
         )
 

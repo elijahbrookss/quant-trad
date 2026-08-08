@@ -20,35 +20,34 @@ from research_science.check import (
 )
 
 from portal.backend.service.research import service
+from portal.backend.service.research.registry import normalize_check_request
 
 
 def _contracts():
-    definition = CheckDefinition(
-        schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
-        definition_id="raw_forward_outcome",
-        definition_version="2",
-        evaluator_id="raw_forward_outcome",
-        evaluator_version="2",
-        request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
-        result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
-        material_rules={"gap_policy": "reject"},
-    )
     dataset_hash = "a" * 64
     dataset_id = "mds_" + dataset_hash[:32]
-    request = CheckRequest(
-        schema_version=CHECK_REQUEST_SCHEMA_VERSION,
-        mode=CHECK_MODE_EVIDENCE,
-        definition_id=definition.definition_id,
-        definition_version=definition.definition_version,
-        definition_hash=definition.definition_hash,
-        scope={
+    definition, request = normalize_check_request(
+        {
+            "mode": CHECK_MODE_EVIDENCE,
+            "title": "Frozen evidence",
+            "check_family": "raw_forward_outcome",
+            "dataset_id": dataset_id,
+            "scope": {
             "instrument_id": "instrument-1",
             "timeframe": "1h",
             "start": "2026-01-01T00:00:00Z",
             "end": "2026-01-02T00:00:00Z",
+            },
+            "detector": {
+                "type": "raw_condition",
+                "field": "close",
+                "operator": "gt",
+                "value": 1,
+            },
+            "outcomes": {"forward_bars": [1]},
+            "gap_policy": "reject",
         },
-        parameters={"gap_policy": "reject"},
-        dataset_id=dataset_id,
+        mode=CHECK_MODE_EVIDENCE,
     )
     plan = ResolvedCheckPlan(
         schema_version=CHECK_PLAN_SCHEMA_VERSION,
@@ -112,6 +111,9 @@ def _contracts():
         evidence_kind="frozen_market_data",
         input_binding=binding,
         indicator_graph_hash=semantic_hash({"indicator_graph": []}),
+        indicator_output_hash=semantic_hash({"indicator_outputs": []}),
+        fact_input_hash=semantic_hash({"fact_inputs": {}}),
+        gap_transition_hash=semantic_hash({"gap_transitions": []}),
         quality_hash=semantic_hash(binding["quality"]),
         gaps_hash=semantic_hash({"recorded_gaps": []}),
     )
@@ -136,7 +138,7 @@ def _contracts():
     return definition, request, plan, evidence, result
 
 
-def test_unqualified_run_is_preview_and_cannot_persist_or_create_observation(
+def test_unqualified_run_rejects_and_preview_cannot_persist_or_create_observation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -166,27 +168,28 @@ def test_unqualified_run_is_preview_and_cannot_persist_or_create_observation(
         ),
     )
 
-    result = service.run_research_check(
-        {
-            "title": "Preview",
-            "scope": {
-                "instrument_id": "instrument-1",
-                "timeframe": "1h",
-                "start": "2026-01-01T00:00:00Z",
-                "end": "2026-01-02T00:00:00Z",
-            },
-            "detector": {
-                "type": "raw_condition",
-                "field": "close",
-                "operator": "gt",
-                "value": 1,
-            },
-        }
-    )
+    payload = {
+        "title": "Preview",
+        "scope": {
+            "instrument_id": "instrument-1",
+            "timeframe": "1h",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-02T00:00:00Z",
+        },
+        "detector": {
+            "type": "raw_condition",
+            "field": "close",
+            "operator": "gt",
+            "value": 1,
+        },
+    }
+    with pytest.raises(ValueError, match="check_evidence_mode_required"):
+        service.run_research_check(payload)
+
+    result = service.evaluate_research_check(payload)
 
     assert result["schema_version"] == "research_check_preview.v2"
     assert result["provenance"]["observation_eligible"] is False
-    assert result["compatibility"]["status"] == "deprecated_for_preview"
 
 
 def test_evidence_execution_rejects_missing_dataset() -> None:

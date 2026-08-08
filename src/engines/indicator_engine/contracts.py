@@ -14,6 +14,18 @@ from .signal_output import assert_signal_output_event
 OutputType = Literal["signal", "context", "metric", "lifecycle"]
 
 
+class IndicatorGapRejectedError(RuntimeError):
+    """Raised by an Indicator when its explicit policy rejects a source gap."""
+
+    def __init__(self, *, indicator_id: str, gap: Mapping[str, Any]) -> None:
+        self.indicator_id = str(indicator_id)
+        self.gap = dict(gap)
+        super().__init__(
+            "indicator_gap_rejected: "
+            f"indicator_id={self.indicator_id} gap={self.gap}"
+        )
+
+
 @dataclass(frozen=True)
 class OutputRef:
     indicator_id: str
@@ -203,9 +215,9 @@ class Indicator(ABC):
 
         normalized = str(policy or "").strip().lower()
         if normalized == "reject":
-            raise RuntimeError(
-                "indicator_gap_rejected: "
-                f"indicator_id={self.runtime_spec.instance_id} gap={dict(gap)}"
+            raise IndicatorGapRejectedError(
+                indicator_id=self.runtime_spec.instance_id,
+                gap=gap,
             )
         if normalized == "continue_degraded":
             return {
@@ -604,6 +616,7 @@ __all__ = [
     "DetailDefinition",
     "EngineFrame",
     "Indicator",
+    "IndicatorGapRejectedError",
     "IndicatorGuardMetric",
     "IndicatorGuardWarning",
     "IndicatorRuntimeSpec",

@@ -146,6 +146,7 @@ def _inputs():
             "event_key": "balance_breakout_long",
             "event": {
                 "key": "balance_breakout_long",
+                "direction": "long",
                 "metadata": {"distance_from_reference_pct": 0.01},
             },
         },
@@ -158,6 +159,7 @@ def _inputs():
             "event_key": "balance_breakout_short",
             "event": {
                 "key": "balance_breakout_short",
+                "direction": "short",
                 "metadata": {"distance_from_reference_pct": 0.02},
             },
         },
@@ -231,18 +233,33 @@ def test_event_fact_check_preserves_unresolved_horizon_reason() -> None:
 def test_event_fact_check_gap_policies_are_explicit(
     policy: str, status: str, action: str
 ) -> None:
+    inputs = _inputs()
+    if policy == "reject":
+        inputs["indicator_gap_rejection"] = {
+            "policy": "reject",
+            "gap_start": "2026-01-01T02:00:00Z",
+            "gap_end": "2026-01-01T03:00:00Z",
+        }
+    else:
+        inputs["indicator_evidence"]["gap_transitions"] = [
+            {
+                "gap_start": "2026-01-01T02:00:00Z",
+                "gap_end": "2026-01-01T03:00:00Z",
+                "actions": [
+                    {
+                        "indicator_id": "profile-1",
+                        "action": (
+                            "reset_and_rewarm"
+                            if policy == "reset_rewarm"
+                            else "continued_degraded"
+                        ),
+                    }
+                ],
+            }
+        ]
     result = EventFactEvaluator().evaluate(
-        plan=_plan(
-            gap_policy=policy,
-            gaps=(
-                {
-                    "classification": "provider_missing_data",
-                    "start": "2026-01-01T02:00:00Z",
-                    "end": "2026-01-01T03:00:00Z",
-                },
-            ),
-        ),
-        inputs=_inputs(),
+        plan=_plan(gap_policy=policy),
+        inputs=inputs,
     )
 
     assert result["status"] == status
@@ -254,6 +271,16 @@ def test_event_fact_check_rejects_non_indicator_signal_rows() -> None:
     inputs["indicator_evidence"]["outputs"][0]["output_type"] = "metric"
 
     with pytest.raises(RuntimeError, match="event_ownership_invalid"):
+        EventFactEvaluator().evaluate(
+            plan=_plan(gap_policy="continue_degraded"), inputs=inputs
+        )
+
+
+def test_event_fact_check_rejects_direction_substitution() -> None:
+    inputs = _inputs()
+    inputs["indicator_evidence"]["outputs"][0]["event"]["direction"] = "short"
+
+    with pytest.raises(RuntimeError, match="event_direction_mismatch"):
         EventFactEvaluator().evaluate(
             plan=_plan(gap_policy="continue_degraded"), inputs=inputs
         )

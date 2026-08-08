@@ -188,6 +188,10 @@ def dispatch_research_job(*, job_type: str, request: Mapping[str, Any]) -> dict[
 
 
 def dispatch_research_check_run(request: Mapping[str, Any]) -> dict[str, Any]:
+    if str(request.get("mode") or "").strip().lower() != "evidence":
+        raise ValueError(
+            "check_evidence_mode_required: async Check run accepts durable evidence only"
+        )
     return dispatch_research_job(job_type=JOB_TYPE_RESEARCH_CHECK_RUN, request=request)
 
 

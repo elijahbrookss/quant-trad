@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from portal.backend.service.research.planning import plan_research_check
 from portal.backend.service.research.registry import normalize_check_request
 
@@ -30,7 +32,14 @@ class _Store:
         ]
 
     def read_series_records(self, **_kwargs):
-        return [object()]
+        source = SimpleNamespace(
+            identity_key="source-a",
+            provider="provider-a",
+            venue="venue-a",
+            source_kind="test",
+            adapter_version="test.v1",
+        )
+        return [SimpleNamespace(source_identity_key="source-a", source=source)]
 
     def list_gap_evidence(self, **kwargs):
         if kwargs["series_id"] == 1:
@@ -127,6 +136,7 @@ def test_check_plan_exposes_transitive_inputs_warmup_staleness_sources_and_quali
     }
     assert plan.outcome_tail == {
         "horizons": [2, 6, 12],
+        "required_horizons": [2, 6, 12],
         "bars": 12,
         "seconds": 21600,
         "horizon_kind": "bars",

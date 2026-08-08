@@ -146,6 +146,9 @@ def _evidence(definition: CheckDefinition, request: CheckRequest, plan: Resolved
         evidence_kind="frozen_market_data",
         input_binding=_frozen_binding(),
         indicator_graph_hash="indicator-graph",
+        indicator_output_hash="indicator-output",
+        fact_input_hash="fact-input",
+        gap_transition_hash="gap-transitions",
         quality_hash="quality",
         gaps_hash="gaps",
     )

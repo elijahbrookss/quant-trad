@@ -47,6 +47,35 @@ def source_revision() -> str:
     return revision
 
 
+def evidence_source_revision() -> str:
+    """Return an immutable revision, rejecting dirty local evidence execution."""
+
+    configured = str(os.getenv("SOURCE_REVISION") or "").strip()
+    if configured:
+        return configured
+
+    revision = source_revision()
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "check_evidence_source_revision_unavailable: cannot verify a clean checkout"
+        ) from exc
+    if result.stdout.strip():
+        raise RuntimeError(
+            "check_evidence_dirty_source_forbidden: commit all producing code and "
+            "configuration before durable evidence execution"
+        )
+    return revision
+
+
 __all__ = [
     "REPORT_CONTRACT_VERSION",
     "REPORT_DATASET_SCHEMA_VERSION",
@@ -54,6 +83,7 @@ __all__ = [
     "REPORT_MATERIALIZATION_SCHEMA_VERSION",
     "REPORT_MATERIALIZATION_STORAGE_SCHEMA_VERSION",
     "REPORT_SCHEMA_VERSION",
+    "evidence_source_revision",
     "RUNTIME_CONTRACT_VERSION",
     "RUNTIME_STORAGE_SCHEMA_VERSION",
     "source_revision",

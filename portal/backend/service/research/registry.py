@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from market_data.frozen import semantic_hash
 from research_science.check import (
     CHECK_DEFINITION_SCHEMA_VERSION,
     CHECK_MODE_EVIDENCE,
@@ -42,6 +43,53 @@ class _LegacyEvaluator:
     evaluator_id: str
     version: str = "2"
 
+    def declare_requirements(
+        self,
+        *,
+        definition: CheckDefinition,
+        request: CheckRequest,
+    ) -> Mapping[str, Any]:
+        del definition
+        outcomes = dict(request.parameters.get("outcomes") or {})
+        raw_horizons = outcomes.get("forward_bars") or outcomes.get("horizons") or []
+        horizons = sorted({int(value) for value in raw_horizons})
+        if self.evaluator_id in {
+            checks.RUN_SIGNAL_SUMMARY,
+            checks.RUN_DECISION_TRADE_COMPARISON,
+        }:
+            return {
+                "input_kind": "immutable_run_evidence",
+                "indicator_ids": [],
+                "warmup_floor_bars": 0,
+                "feature_lookback_bars": 0,
+                "feature_windows_seconds_by_alias": {},
+                "outcome_horizons": [],
+                "required_outcome_horizons": [],
+                "horizon_kind": "none",
+            }
+        indicator_ids = []
+        if self.evaluator_id in {
+            checks.INDICATOR_FORWARD_OUTCOME,
+            checks.SIGNAL_AUDIT,
+            checks.CANDIDATE_LIFECYCLE,
+        }:
+            indicator_id = str(request.scope.get("indicator_id") or "").strip()
+            if not indicator_id:
+                raise ValueError(
+                    "check_requirement_plan_invalid: indicator_id is required"
+                )
+            indicator_ids.append(indicator_id)
+        return {
+            "input_kind": "market_data",
+            "indicator_ids": indicator_ids,
+            "warmup_floor_bars": 14,
+            "feature_lookback_bars": 0,
+            "feature_windows_seconds_by_alias": {},
+            "outcome_horizons": horizons,
+            "required_outcome_horizons": horizons,
+            "horizon_kind": str(outcomes.get("horizon_kind") or "bars"),
+        }
+
     def evaluate(
         self,
         *,
@@ -57,6 +105,7 @@ class _LegacyEvaluator:
                 detector=detector,
                 outcomes=outcomes,
                 data_quality=data_quality,
+                evaluation_range=plan.evaluation_range,
             )
         if self.evaluator_id == checks.INDICATOR_FORWARD_OUTCOME:
             return checks.evaluate_indicator_forward_outcome(
@@ -64,6 +113,7 @@ class _LegacyEvaluator:
                 detector=detector,
                 outcomes=outcomes,
                 data_quality=data_quality,
+                evaluation_range=plan.evaluation_range,
             )
         if self.evaluator_id == checks.SIGNAL_AUDIT:
             return checks.evaluate_signal_audit(
@@ -239,6 +289,10 @@ def normalize_fact_inputs(value: Any, *, mode: str) -> list[dict[str, Any]]:
             raise ValueError(
                 "check_evidence_unconstrained_source_forbidden: use exact or allowlist"
             )
+        if mode == CHECK_MODE_EVIDENCE and raw.get("series_required") is False:
+            raise ValueError(
+                "check_evidence_optional_series_unsupported: v1 evidence inputs must bind a series"
+            )
         normalized_policy = {**source_policy, "mode": policy_mode}
         if policy_mode == "allowlist":
             allowed = sorted(
@@ -292,6 +346,11 @@ def materialize_check_definition(
         raise ValueError("check_evidence_gap_policy_required")
     material_rules = {
         **dict(base.material_rules),
+        "registered_definition": {
+            "definition_id": base.definition_id,
+            "definition_version": base.definition_version,
+            "definition_hash": base.definition_hash,
+        },
         "inputs": inputs,
         "indicator": {
             key: scope[key]
@@ -306,10 +365,13 @@ def materialize_check_definition(
             payload.get("gap_policy") or GAP_POLICY_CONTINUE_DEGRADED
         ).strip().lower(),
     }
+    configured_version = (
+        f"{base.definition_version}+{semantic_hash(material_rules)[:16]}"
+    )
     return CheckDefinition(
         schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
         definition_id=base.definition_id,
-        definition_version=base.definition_version,
+        definition_version=configured_version,
         evaluator_id=base.evaluator_id,
         evaluator_version=base.evaluator_version,
         request_schema_version=base.request_schema_version,
@@ -351,12 +413,44 @@ def normalize_check_request(
     )
 
 
+def normalize_check_preparation_request(
+    payload: Mapping[str, Any],
+) -> tuple[CheckDefinition, CheckRequest]:
+    """Normalize a pre-freeze plan using durable-evidence validation rules.
+
+    A Dataset does not exist yet, so the returned request is deliberately
+    non-executing preview mode. Its definition and source policies are still
+    the exact ones required by durable evidence. Preparation returns a real
+    evidence request after it freezes the Dataset.
+    """
+
+    definition = materialize_check_definition(payload, mode=CHECK_MODE_EVIDENCE)
+    parameters = {
+        "detector": dict(definition.material_rules["detector"]),
+        "outcomes": dict(definition.material_rules["outcomes"]),
+        "statistics": dict(definition.material_rules["statistics"]),
+        "assertions": list(definition.material_rules["assertions"]),
+        "inputs": list(definition.material_rules["inputs"]),
+        "gap_policy": definition.material_rules["gap_policy"],
+    }
+    return definition, CheckRequest(
+        schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+        mode=CHECK_MODE_PREVIEW,
+        definition_id=definition.definition_id,
+        definition_version=definition.definition_version,
+        definition_hash=definition.definition_hash,
+        scope=_mapping(payload.get("scope"), field="scope"),
+        parameters=parameters,
+    )
+
+
 __all__ = [
     "CHECK_REGISTRY",
     "EVENT_FACT_ANALYSIS",
     "LEGACY_CHECK_FAMILIES",
     "REGISTERED_CHECK_FAMILIES",
     "materialize_check_definition",
+    "normalize_check_preparation_request",
     "normalize_check_request",
     "normalize_fact_inputs",
 ]

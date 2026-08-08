@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from market_data.frozen import normalize_frozen_market_data_read_binding
@@ -188,6 +188,7 @@ class ResolvedCheckPlan:
     warmup: Mapping[str, Any]
     outcome_tail: Mapping[str, Any]
     gap_policy: str
+    execution: Mapping[str, Any] = field(default_factory=dict)
     missing_coverage: tuple[Mapping[str, Any], ...] = ()
     quality_evidence: tuple[Mapping[str, Any], ...] = ()
     plan_hash: str = ""
@@ -222,6 +223,11 @@ class ResolvedCheckPlan:
                 field,
                 _mapping(getattr(self, field), field=f"check_plan.{field}"),
             )
+        object.__setattr__(
+            self,
+            "execution",
+            _mapping(self.execution, field="check_plan.execution"),
+        )
         gap_policy = str(self.gap_policy or "").strip().lower()
         if gap_policy not in GAP_POLICIES:
             raise ValueError("check_plan.gap_policy is invalid")
@@ -276,6 +282,9 @@ class CheckEvidenceBinding:
     evidence_kind: str
     input_binding: Mapping[str, Any]
     indicator_graph_hash: str
+    indicator_output_hash: str
+    fact_input_hash: str
+    gap_transition_hash: str
     quality_hash: str
     gaps_hash: str
     input_hash: str = ""
@@ -290,6 +299,9 @@ class CheckEvidenceBinding:
             "plan_hash",
             "code_revision",
             "indicator_graph_hash",
+            "indicator_output_hash",
+            "fact_input_hash",
+            "gap_transition_hash",
             "quality_hash",
             "gaps_hash",
         ):
@@ -381,6 +393,14 @@ class CheckResult:
 class CheckEvaluator(Protocol):
     evaluator_id: str
     version: str
+
+    def declare_requirements(
+        self,
+        *,
+        definition: CheckDefinition,
+        request: CheckRequest,
+    ) -> Mapping[str, Any]:
+        ...
 
     def evaluate(self, *, plan: ResolvedCheckPlan, inputs: Mapping[str, Any]) -> Mapping[str, Any]:
         ...

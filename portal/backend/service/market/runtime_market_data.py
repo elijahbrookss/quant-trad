@@ -178,6 +178,10 @@ class RuntimeMarketDataResolver:
             requirement=requirement,
             evaluation_time=evaluation_time,
         )
+        if get_fact_contract(requirement.fact_type).uses_exact_numeric_storage:
+            records = causal_numeric_fact_records(
+                records, evaluation_time=evaluation_time
+            )
         series_id = int(series["series_id"])
         if requirement.alignment is MarketDataAlignment.EXACT_INTERVAL:
             timeframe = int(requirement.timeframe_seconds or 0)
@@ -299,9 +303,14 @@ class RuntimeMarketDataResolver:
                         as_of_commit_seq=int(series["max_commit_seq"]),
                     )
                 )
-            records: Sequence[Any] = causal_numeric_fact_records(
-                self._frozen_numeric_revisions[series_id],
-                evaluation_time=evaluation_time,
+            # Preserve every frozen revision through the caller's upper causal
+            # bound. A Check may contain many event decision times; collapsing
+            # revisions here at the final materialization time would let a
+            # later correction or tombstone rewrite earlier event knowledge.
+            records: Sequence[Any] = tuple(
+                record
+                for record in self._frozen_numeric_revisions[series_id]
+                if record.fact.known_at <= evaluation_time
             )
         else:
             if series_id not in self._frozen_records:
@@ -379,15 +388,12 @@ class RuntimeMarketDataResolver:
             )
             contract = get_fact_contract(declared.fact_type)
             if contract.uses_exact_numeric_storage:
-                revisions = self.store.read_numeric_fact_revisions(
+                records = tuple(self.store.read_numeric_fact_revisions(
                     series_id=series_id,
                     start=lower,
                     end=upper,
                     as_of_commit_seq=self.as_of_commit_seq,
-                )
-                records = causal_numeric_fact_records(
-                    revisions, evaluation_time=decision
-                )
+                ))
             else:
                 records = tuple(
                     self.store.read_series_records(

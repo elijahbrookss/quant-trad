@@ -13,16 +13,18 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
-from scipy.stats import pointbiserialr
+from scipy.stats import pearsonr, pointbiserialr
 
 from data_providers.utils.ohlcv import compute_tr_atr
-from market_data.contracts import NumericFactRecord
 from market_data.frozen import semantic_hash
+from market_data.requirements import causal_numeric_fact_records
 from research_science import adjusted_p_values
 from research_science.check import (
     GAP_POLICY_CONTINUE_DEGRADED,
     GAP_POLICY_REJECT,
     GAP_POLICY_RESET_REWARM,
+    CheckDefinition,
+    CheckRequest,
     ResolvedCheckPlan,
 )
 
@@ -195,8 +197,24 @@ def normalize_event_fact_configuration(
         raise ValueError(
             "event_fact_check_invalid: primary horizon must be declared"
         )
+    raw_required_horizons = normalized_outcomes.get("required_horizons") or horizons
+    if not isinstance(raw_required_horizons, list):
+        raise ValueError(
+            "event_fact_check_invalid: outcomes.required_horizons must be a list"
+        )
+    required_horizons = sorted(
+        {
+            _positive_int(value, field="outcomes.required_horizons")
+            for value in raw_required_horizons
+        }
+    )
+    if not required_horizons or not set(required_horizons).issubset(horizons):
+        raise ValueError(
+            "event_fact_check_invalid: required horizons must be declared horizons"
+        )
     normalized_outcomes = {
         "horizons": horizons,
+        "required_horizons": required_horizons,
         "horizon_kind": horizon_kind,
         "primary_horizon": primary_horizon,
         "entry_lag_bars": int(normalized_outcomes.get("entry_lag_bars") or 0),
@@ -206,6 +224,28 @@ def normalize_event_fact_configuration(
         raise ValueError(
             "event_fact_check_invalid: entry_lag_bars must be nonnegative"
         )
+    invalidation = _mapping(
+        outcomes.get("invalidation"), field="outcomes.invalidation"
+    )
+    if invalidation:
+        if str(invalidation.get("type") or "").strip() != "close_crosses_event_reference":
+            raise ValueError(
+                "event_fact_check_invalid: only close_crosses_event_reference invalidation is registered"
+            )
+        reference_path = str(invalidation.get("reference_path") or "").strip()
+        if not reference_path.startswith("metadata."):
+            raise ValueError(
+                "event_fact_check_invalid: invalidation reference_path must start metadata."
+            )
+        normalized_outcomes["invalidation"] = {
+            "type": "close_crosses_event_reference",
+            "version": "directional_close_cross.v1",
+            "reference_path": reference_path,
+            "max_bars": _positive_int(
+                invalidation.get("max_bars"),
+                field="outcomes.invalidation.max_bars",
+            ),
+        }
 
     normalized_statistics = dict(statistics or {})
     features = _mapping(
@@ -308,6 +348,7 @@ def normalize_event_fact_configuration(
                 model.get("max_iterations", 1000),
                 field="statistics.model.max_iterations",
             ),
+            "seed": int(model.get("seed", 0)),
             "standardization": "train_fold_mean_population_std.v1",
         }
         if normalized_model["c"] <= 0 or normalized_model["tolerance"] <= 0:
@@ -364,30 +405,97 @@ def normalize_event_fact_configuration(
     )
     normalized_direct_tests = {}
     if direct_tests:
-        if str(direct_tests.get("method") or "point_biserial").strip() != "point_biserial":
+        direct_method = str(
+            direct_tests.get("method") or "point_biserial"
+        ).strip().lower()
+        if direct_method not in {"point_biserial", "pearson"}:
             raise ValueError(
-                "event_fact_check_invalid: only point_biserial direct tests are registered"
+                "event_fact_check_invalid: direct test method is not registered"
             )
         if str(direct_tests.get("multiplicity") or "holm").strip() != "holm":
             raise ValueError(
                 "event_fact_check_invalid: only Holm multiplicity is registered"
             )
         normalized_direct_tests = {
-            "method": "point_biserial",
-            "version": "scipy_pointbiserialr.v1",
+            "method": direct_method,
+            "version": (
+                "scipy_pointbiserialr.v1"
+                if direct_method == "point_biserial"
+                else "scipy_pearsonr.v1"
+            ),
             "multiplicity": "holm",
+            "target": str(
+                direct_tests.get("target")
+                or (
+                    "primary_binary"
+                    if direct_method == "point_biserial"
+                    else "primary_signed_return"
+                )
+            ).strip().lower(),
         }
+        if normalized_direct_tests["target"] not in {
+            "primary_binary",
+            "primary_signed_return",
+        }:
+            raise ValueError(
+                "event_fact_check_invalid: direct test target is not registered"
+            )
+        expected_target = (
+            "primary_binary"
+            if direct_method == "point_biserial"
+            else "primary_signed_return"
+        )
+        if normalized_direct_tests["target"] != expected_target:
+            raise ValueError(
+                "event_fact_check_invalid: direct test method and target disagree"
+            )
+    feature_bins = _mapping(
+        normalized_statistics.get("feature_bins"),
+        field="statistics.feature_bins",
+    )
+    normalized_feature_bins = {}
+    if feature_bins:
+        if str(feature_bins.get("method") or "pooled_quantiles").strip() != "pooled_quantiles":
+            raise ValueError(
+                "event_fact_check_invalid: only pooled_quantiles feature bins are registered"
+            )
+        raw_quantiles = feature_bins.get("quantiles") or [0.25, 0.5, 0.75]
+        if not isinstance(raw_quantiles, list):
+            raise ValueError(
+                "event_fact_check_invalid: feature bin quantiles must be a list"
+            )
+        quantiles = sorted(
+            {_finite(value, field="statistics.feature_bins.quantiles") for value in raw_quantiles}
+        )
+        if not quantiles or any(value <= 0.0 or value >= 1.0 for value in quantiles):
+            raise ValueError(
+                "event_fact_check_invalid: feature bin quantiles must be between zero and one"
+            )
+        normalized_feature_bins = {
+            "method": "pooled_quantiles",
+            "version": "pooled_quantiles_ties_collapsed.v1",
+            "quantiles": quantiles,
+            "target": "primary_binary",
+            "feature_scope": "enriched",
+        }
+    purge_bars = int(normalized_statistics.get("purge_bars") or 0)
+    embargo_bars = int(normalized_statistics.get("embargo_bars") or 0)
+    if purge_bars < 0 or embargo_bars < 0:
+        raise ValueError(
+            "event_fact_check_invalid: purge_bars and embargo_bars must be nonnegative"
+        )
     return (
         normalized_detector,
         normalized_outcomes,
         {
             "features": {"baseline": baseline, "enriched": enriched},
             "folds": normalized_folds,
-            "purge_bars": int(normalized_statistics.get("purge_bars") or 0),
-            "embargo_bars": int(normalized_statistics.get("embargo_bars") or 0),
+            "purge_bars": purge_bars,
+            "embargo_bars": embargo_bars,
             "model": normalized_model,
             "bootstrap": normalized_bootstrap,
             "direct_tests": normalized_direct_tests,
+            "feature_bins": normalized_feature_bins,
             "eligibility": normalized_eligibility,
         },
     )
@@ -418,11 +526,27 @@ def _fact_material(record: Any) -> dict[str, Any]:
     }
 
 
-def _record_key(record: Any) -> tuple[Any, ...]:
+def _alignment_key(record: Any) -> tuple[Any, ...]:
+    """Match the frozen binding's deterministic latest-known selection rule."""
+
     return (
         record.fact.known_at,
+        int(record.market_commit_seq),
+        str(record.source_identity_key),
         record.fact.effective_at,
         str(record.fact.source_event_key),
+        int(record.revision),
+        int(record.series_id),
+    )
+
+
+def _selected_record_key(alias: str, record: Any) -> tuple[Any, ...]:
+    return (
+        str(alias),
+        int(record.series_id),
+        str(record.source_identity_key),
+        str(record.fact.source_event_key),
+        int(record.revision),
         int(record.market_commit_seq),
     )
 
@@ -568,10 +692,168 @@ def _utc_day_cluster_ci(
     }
 
 
+def _fact_features_for_event(
+    *,
+    specs: Sequence[Mapping[str, Any]],
+    requirements: Mapping[str, Mapping[str, Any]],
+    records_by_alias: Mapping[str, Sequence[Any]],
+    decision_time: datetime,
+    entry_close: float,
+    direction: float,
+) -> tuple[
+    dict[str, float | None],
+    dict[str, list[dict[str, Any]]],
+    list[str],
+    dict[tuple[Any, ...], dict[str, Any]],
+]:
+    features: dict[str, float | None] = {}
+    references: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    exclusions: list[str] = []
+    selected: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for spec in specs:
+        name = str(spec["name"])
+        alias = str(spec["input_alias"])
+        requirement = requirements.get(alias)
+        records = tuple(records_by_alias.get(alias) or ())
+        if requirement is None:
+            raise RuntimeError(f"event_fact_input_missing: alias={alias}")
+        visible = list(
+            causal_numeric_fact_records(records, evaluation_time=decision_time)
+        )
+        visible.sort(key=_alignment_key)
+        latest = visible[-1] if visible else None
+        max_staleness = int(requirement.get("max_staleness_seconds") or 0)
+        reason = None
+        if latest is None:
+            reason = f"fact_missing:{alias}"
+        elif max_staleness and (
+            decision_time - latest.fact.known_at
+        ) > timedelta(seconds=max_staleness):
+            reason = f"fact_stale:{alias}"
+        if reason:
+            features[name] = None
+            if reason not in exclusions:
+                exclusions.append(reason)
+            continue
+        assert latest is not None
+        latest_index = visible.index(latest)
+        previous = visible[latest_index - 1] if latest_index > 0 else None
+
+        def retain(record: Any, *, role: str) -> None:
+            material = {"alias": alias, "role": role, **_fact_material(record)}
+            selected[_selected_record_key(alias, record)] = material
+            if material not in references[alias]:
+                references[alias].append(material)
+
+        retain(latest, role="latest")
+        operator = str(spec["operator"])
+        latest_value = float(latest.fact.value)
+        if operator == "latest_value":
+            value = latest_value
+        elif operator == "age_seconds":
+            value = (decision_time - latest.fact.known_at).total_seconds()
+        elif operator == "venue_basis_bps":
+            value = ((entry_close / latest_value) - 1.0) * 10000.0
+        elif operator in {
+            "latest_update_direction",
+            "latest_update_magnitude_bps",
+            "update_agreement",
+        }:
+            if previous is not None:
+                retain(previous, role="previous")
+                change = (latest_value / float(previous.fact.value)) - 1.0
+            else:
+                change = 0.0
+            if operator == "latest_update_direction":
+                value = 1.0 if change > 0 else -1.0 if change < 0 else 0.0
+            elif operator == "latest_update_magnitude_bps":
+                value = abs(change) * 10000.0
+            else:
+                update_direction = (
+                    1.0 if change > 0 else -1.0 if change < 0 else 0.0
+                )
+                value = 1.0 if update_direction == direction else 0.0
+        else:
+            window_start = decision_time - timedelta(
+                seconds=int(spec["window_seconds"])
+            )
+            window = [
+                record
+                for record in visible
+                if window_start < record.fact.known_at <= decision_time
+            ]
+            for record in window:
+                retain(record, role="window")
+            if operator == "update_count_window":
+                value = float(len(window))
+            elif operator == "aggregate_abs_change_bps_window":
+                total = 0.0
+                for record in window:
+                    index = visible.index(record)
+                    if index <= 0:
+                        continue
+                    prior = visible[index - 1]
+                    retain(prior, role="window_previous")
+                    total += abs(
+                        (float(record.fact.value) / float(prior.fact.value)) - 1.0
+                    ) * 10000.0
+                value = total
+            else:  # pragma: no cover - normalization rejects this.
+                raise AssertionError(operator)
+        features[name] = value
+    return features, dict(references), exclusions, selected
+
+
 @dataclass(frozen=True)
 class EventFactEvaluator:
     evaluator_id: str = EVENT_FACT_ANALYSIS
     version: str = EVENT_FACT_EVALUATOR_VERSION
+
+    def declare_requirements(
+        self,
+        *,
+        definition: CheckDefinition,
+        request: CheckRequest,
+    ) -> Mapping[str, Any]:
+        del definition
+        statistics = dict(request.parameters.get("statistics") or {})
+        features = dict(statistics.get("features") or {})
+        baseline = [dict(row) for row in features.get("baseline") or []]
+        enriched = [dict(row) for row in features.get("enriched") or []]
+        feature_lookback = max(
+            (
+                int(row.get("lookback_bars") or row.get("period") or 0)
+                for row in baseline
+            ),
+            default=0,
+        )
+        windows: dict[str, int] = {}
+        for row in enriched:
+            alias = str(row.get("input_alias") or "")
+            windows[alias] = max(
+                int(windows.get(alias) or 0),
+                int(row.get("window_seconds") or 0),
+            )
+        indicator_id = str(request.scope.get("indicator_id") or "").strip()
+        if not indicator_id:
+            raise ValueError(
+                "check_requirement_plan_invalid: indicator_id is required"
+            )
+        outcomes = dict(request.parameters.get("outcomes") or {})
+        return {
+            "input_kind": "market_data",
+            "indicator_ids": [indicator_id],
+            "warmup_floor_bars": 0,
+            "feature_lookback_bars": feature_lookback,
+            "feature_windows_seconds_by_alias": windows,
+            "outcome_horizons": list(outcomes.get("horizons") or []),
+            "required_outcome_horizons": list(
+                outcomes.get("required_horizons") or outcomes.get("horizons") or []
+            ),
+            "horizon_kind": str(outcomes.get("horizon_kind") or "bars"),
+            "event_source": "indicator",
+            "fact_history_required": bool(enriched),
+        }
 
     def evaluate(
         self,
@@ -591,8 +873,12 @@ class EventFactEvaluator:
             str(alias): dict(raw)
             for alias, raw in dict(inputs.get("fact_requirements_by_alias") or {}).items()
         }
-        gap_count = len(plan.quality_evidence)
-        if gap_count and plan.gap_policy == GAP_POLICY_REJECT:
+        gap_transitions = [
+            dict(row) for row in indicator_evidence.get("gap_transitions") or []
+        ]
+        gap_rejection = inputs.get("indicator_gap_rejection")
+        gap_count = len(gap_transitions) + (1 if gap_rejection else 0)
+        if gap_rejection:
             return {
                 "schema_version": EVENT_FACT_RESULT_VERSION,
                 "check_family": EVENT_FACT_ANALYSIS,
@@ -602,6 +888,7 @@ class EventFactEvaluator:
                     "policy": GAP_POLICY_REJECT,
                     "recorded_gap_count": gap_count,
                     "indicator_action": "rejected_before_event_emission",
+                    "rejection": dict(gap_rejection),
                 },
                 "sample_count": 0,
                 "events": [],
@@ -660,6 +947,7 @@ class EventFactEvaluator:
         horizon_resolution: dict[int, Counter[str]] = {
             int(horizon): Counter() for horizon in outcomes["horizons"]
         }
+        invalidation_resolution: Counter[str] = Counter()
         entry_lag = int(outcomes.get("entry_lag_bars") or 0)
         step = timedelta(seconds=interval_seconds)
         evaluation_end = _utc(
@@ -668,7 +956,17 @@ class EventFactEvaluator:
 
         for output in event_rows:
             event_time = _utc(output.get("time"), field="event.time")
-            direction_text = direction_by_key[str(output.get("event_key"))]
+            configured_direction = direction_by_key[str(output.get("event_key"))]
+            event_payload = dict(output.get("event") or {})
+            direction_text = str(event_payload.get("direction") or "").strip().lower()
+            if direction_text not in {"long", "short"}:
+                raise RuntimeError(
+                    "event_fact_event_direction_missing: Indicator event must own long/short direction"
+                )
+            if direction_text != configured_direction:
+                raise RuntimeError(
+                    "event_fact_event_direction_mismatch: configured direction cannot relabel Indicator evidence"
+                )
             direction = 1.0 if direction_text == "long" else -1.0
             entry_time = event_time + step * entry_lag
             entry = candle_by_open.get(entry_time)
@@ -685,17 +983,30 @@ class EventFactEvaluator:
                 "eligible": True,
                 "exclusion_reasons": [],
             }
-            if entry is None:
+            entry_path_missing = [
+                event_time + step * offset
+                for offset in range(0, entry_lag + 1)
+                if event_time + step * offset not in candle_by_open
+            ]
+            if entry is None or entry_path_missing:
+                entry_reason = (
+                    "entry_bar_missing"
+                    if entry is None
+                    else "gap_before_delayed_entry"
+                )
                 row["eligible"] = False
-                row["exclusion_reasons"].append("entry_bar_missing")
-                exclusion_counts["entry_bar_missing"] += 1
+                row["exclusion_reasons"].append(entry_reason)
+                exclusion_counts[entry_reason] += 1
                 for horizon in outcomes["horizons"]:
                     row["outcomes"][str(horizon)] = {
                         "status": "unresolved",
-                        "reason": "entry_bar_missing",
+                        "reason": entry_reason,
                         "horizon_kind": outcomes["horizon_kind"],
                     }
-                    horizon_resolution[int(horizon)]["unresolved:entry_bar_missing"] += 1
+                    horizon_resolution[int(horizon)][f"unresolved:{entry_reason}"] += 1
+                row["population_eligible"] = False
+                row["analysis_eligible"] = False
+                row["fact_references"] = {}
                 event_results.append(row)
                 continue
             decision_time = _utc(
@@ -751,6 +1062,29 @@ class EventFactEvaluator:
                     continue
                 forward_return = (float(target["close"]) / entry_close) - 1.0
                 signed_return = forward_return * direction
+                path_rows = (
+                    [candle_by_open[value] for value in required_times]
+                    if outcomes["horizon_kind"] == "bars"
+                    else [target]
+                )
+                if direction > 0:
+                    favorable = (
+                        max(float(value["high"]) for value in path_rows)
+                        / entry_close
+                    ) - 1.0
+                    adverse = (
+                        min(float(value["low"]) for value in path_rows)
+                        / entry_close
+                    ) - 1.0
+                else:
+                    favorable = 1.0 - (
+                        min(float(value["low"]) for value in path_rows)
+                        / entry_close
+                    )
+                    adverse = 1.0 - (
+                        max(float(value["high"]) for value in path_rows)
+                        / entry_close
+                    )
                 row["outcomes"][str(horizon_value)] = {
                     "status": "resolved",
                     "reason": None,
@@ -758,9 +1092,65 @@ class EventFactEvaluator:
                     "target_time": str(target.get("open_time") or target.get("time")),
                     "forward_return": forward_return,
                     "direction_signed_forward_return": signed_return,
+                    "maximum_favorable_excursion": favorable,
+                    "maximum_adverse_excursion": adverse,
                     "positive": signed_return > 0.0,
                 }
                 horizon_resolution[horizon_value]["resolved"] += 1
+
+            invalidation = dict(outcomes.get("invalidation") or {})
+            if invalidation:
+                reference = _path(event_payload, str(invalidation["reference_path"]))
+                if reference is None:
+                    row["invalidation"] = {
+                        "status": "unresolved",
+                        "reason": "event_reference_missing",
+                        "invalidated": None,
+                        "time_to_invalidation_bars": None,
+                    }
+                    invalidation_resolution["unresolved:event_reference_missing"] += 1
+                else:
+                    reference_value = float(reference)
+                    max_bars = int(invalidation["max_bars"])
+                    path = [
+                        candle_by_open.get(entry_time + step * offset)
+                        for offset in range(1, max_bars + 1)
+                    ]
+                    if any(candidate is None for candidate in path):
+                        row["invalidation"] = {
+                            "status": "unresolved",
+                            "reason": "gap_in_invalidation_window",
+                            "invalidated": None,
+                            "time_to_invalidation_bars": None,
+                            "reference_price": reference_value,
+                        }
+                        invalidation_resolution[
+                            "unresolved:gap_in_invalidation_window"
+                        ] += 1
+                    else:
+                        first = next(
+                            (
+                                offset
+                                for offset, candidate in enumerate(path, start=1)
+                                if (
+                                    float(candidate["close"]) <= reference_value
+                                    if direction > 0
+                                    else float(candidate["close"]) >= reference_value
+                                )
+                            ),
+                            None,
+                        )
+                        row["invalidation"] = {
+                            "status": "resolved",
+                            "reason": None,
+                            "invalidated": first is not None,
+                            "time_to_invalidation_bars": first,
+                            "reference_price": reference_value,
+                            "max_bars": max_bars,
+                        }
+                        invalidation_resolution[
+                            "resolved:invalidated" if first is not None else "resolved:not_invalidated"
+                        ] += 1
 
             for spec in baseline_specs:
                 name = str(spec["name"])
@@ -813,126 +1203,51 @@ class EventFactEvaluator:
                     raise AssertionError(operator)
                 row["features"][name] = value
 
-            for spec in enriched_specs:
-                name = str(spec["name"])
-                alias = str(spec["input_alias"])
-                requirement = fact_requirements.get(alias)
-                records = list(fact_records.get(alias) or ())
-                if requirement is None:
-                    raise RuntimeError(
-                        f"event_fact_input_missing: alias={alias}"
-                    )
-                visible = [
-                    record for record in records if record.fact.known_at <= decision_time
-                ]
-                visible.sort(key=_record_key)
-                latest = visible[-1] if visible else None
-                max_staleness = int(requirement.get("max_staleness_seconds") or 0)
-                fact_reason = None
-                if latest is None:
-                    fact_reason = f"fact_missing:{alias}"
-                elif max_staleness and (
-                    decision_time - latest.fact.known_at
-                ) > timedelta(seconds=max_staleness):
-                    fact_reason = f"fact_stale:{alias}"
-                if fact_reason:
-                    row["features"][name] = None
-                    if fact_reason not in row["exclusion_reasons"]:
-                        row["exclusion_reasons"].append(fact_reason)
-                        exclusion_counts[fact_reason] += 1
-                    row["eligible"] = False
-                    continue
-                assert latest is not None
-                latest_index = visible.index(latest)
-                previous = visible[latest_index - 1] if latest_index > 0 else None
-                selected_fact_material[_record_key(latest)] = _fact_material(latest)
-                operator = str(spec["operator"])
-                latest_value = float(latest.fact.value)
-                if operator == "latest_value":
-                    value = latest_value
-                elif operator == "age_seconds":
-                    value = (decision_time - latest.fact.known_at).total_seconds()
-                elif operator == "venue_basis_bps":
-                    value = ((entry_close / latest_value) - 1.0) * 10000.0
-                elif operator in {
-                    "latest_update_direction",
-                    "latest_update_magnitude_bps",
-                    "update_agreement",
-                }:
-                    if previous is not None:
-                        selected_fact_material[_record_key(previous)] = _fact_material(previous)
-                        change = (latest_value / float(previous.fact.value)) - 1.0
-                    else:
-                        change = 0.0
-                    if operator == "latest_update_direction":
-                        value = 1.0 if change > 0 else -1.0 if change < 0 else 0.0
-                    elif operator == "latest_update_magnitude_bps":
-                        value = abs(change) * 10000.0
-                    else:
-                        update_direction = 1.0 if change > 0 else -1.0 if change < 0 else 0.0
-                        value = 1.0 if update_direction == direction else 0.0
-                else:
-                    window_start = decision_time - timedelta(
-                        seconds=int(spec["window_seconds"])
-                    )
-                    window = [
-                        record
-                        for record in visible
-                        if window_start < record.fact.known_at <= decision_time
-                    ]
-                    for record in window:
-                        selected_fact_material[_record_key(record)] = _fact_material(record)
-                    if operator == "update_count_window":
-                        value = float(len(window))
-                    elif operator == "aggregate_abs_change_bps_window":
-                        total = 0.0
-                        for record in window:
-                            index = visible.index(record)
-                            if index <= 0:
-                                continue
-                            prior = visible[index - 1]
-                            selected_fact_material[_record_key(prior)] = _fact_material(prior)
-                            total += abs(
-                                (float(record.fact.value) / float(prior.fact.value)) - 1.0
-                            ) * 10000.0
-                        value = total
-                    else:  # pragma: no cover
-                        raise AssertionError(operator)
-                row["features"][name] = value
-
-            primary = row["outcomes"].get(str(outcomes["primary_horizon"])) or {}
-            if primary.get("status") != "resolved":
-                reason = f"primary_outcome_unresolved:{primary.get('reason')}"
+            unresolved_required = [
+                int(horizon)
+                for horizon in outcomes["required_horizons"]
+                if (row["outcomes"].get(str(horizon)) or {}).get("status")
+                != "resolved"
+            ]
+            for horizon in unresolved_required:
+                outcome = row["outcomes"].get(str(horizon)) or {}
+                reason = (
+                    f"required_outcome_unresolved:{horizon}:{outcome.get('reason')}"
+                )
                 row["eligible"] = False
                 row["exclusion_reasons"].append(reason)
                 exclusion_counts[reason] += 1
-            if any(value is None for value in row["features"].values()):
+            if any(
+                row["features"].get(str(spec["name"])) is None
+                for spec in baseline_specs
+            ):
                 row["eligible"] = False
-                if "feature_incomplete" not in row["exclusion_reasons"]:
-                    row["exclusion_reasons"].append("feature_incomplete")
-                    exclusion_counts["feature_incomplete"] += 1
+                if "baseline_feature_incomplete" not in row["exclusion_reasons"]:
+                    row["exclusion_reasons"].append("baseline_feature_incomplete")
+                    exclusion_counts["baseline_feature_incomplete"] += 1
+            row["population_eligible"] = bool(row["eligible"])
+            row["analysis_eligible"] = False
+            row["fact_references"] = {}
             event_results.append(row)
 
-        complete_rows = [row for row in event_results if row["eligible"]]
+        population_rows = [
+            row for row in event_results if row["population_eligible"]
+        ]
         primary_key = str(outcomes["primary_horizon"])
         positives = sum(
             1
-            for row in complete_rows
+            for row in population_rows
             if bool(row["outcomes"][primary_key]["positive"])
         )
-        negatives = len(complete_rows) - positives
-        distinct_days = len({str(row["event_time"])[:10] for row in complete_rows})
-        feature_names = [str(row["name"]) for row in [*baseline_specs, *enriched_specs]]
-        distributions = {
-            name: _distribution(
-                [float(row["features"][name]) for row in complete_rows]
-            )
-            for name in feature_names
-        }
+        negatives = len(population_rows) - positives
+        distinct_days = len(
+            {str(row["event_time"])[:10] for row in population_rows}
+        )
 
         eligibility = dict(statistics.get("eligibility") or {})
+        folds = list(statistics.get("folds") or [])
         eligibility_reasons: list[str] = []
-        if len(complete_rows) < int(eligibility.get("min_samples") or 0):
+        if len(population_rows) < int(eligibility.get("min_samples") or 0):
             eligibility_reasons.append("minimum_sample_count_not_met")
         if min(positives, negatives) < int(
             eligibility.get("min_class_count") or 0
@@ -941,20 +1256,105 @@ class EventFactEvaluator:
         if distinct_days < int(eligibility.get("min_distinct_utc_days") or 0):
             eligibility_reasons.append("minimum_distinct_utc_days_not_met")
 
+        minimum_validation = int(
+            eligibility.get("min_validation_samples_per_fold") or 0
+        )
+        population_fold_counts = [
+            {
+                "id": fold["id"],
+                "validation_count": sum(
+                    1
+                    for row in population_rows
+                    if _utc(
+                        fold["validation"]["start"],
+                        field="fold.validation.start",
+                    )
+                    <= _utc(row["event_time"], field="event_time")
+                    < _utc(
+                        fold["validation"]["end"],
+                        field="fold.validation.end",
+                    )
+                ),
+            }
+            for fold in folds
+        ]
+        population_valid_fold_count = sum(
+            1
+            for row in population_fold_counts
+            if int(row["validation_count"]) >= minimum_validation
+        )
+        if population_valid_fold_count < int(
+            eligibility.get("min_valid_folds") or 0
+        ):
+            eligibility_reasons.append("minimum_population_folds_not_met")
+
+        if not eligibility_reasons:
+            for row in population_rows:
+                features, references, reasons, selected = _fact_features_for_event(
+                    specs=enriched_specs,
+                    requirements=fact_requirements,
+                    records_by_alias=fact_records,
+                    decision_time=_utc(row["decision_time"], field="decision_time"),
+                    entry_close=float(row["entry_price"]),
+                    direction=1.0 if row["direction"] == "long" else -1.0,
+                )
+                row["features"].update(features)
+                row["fact_references"] = references
+                selected_fact_material.update(selected)
+                for reason in reasons:
+                    if reason not in row["exclusion_reasons"]:
+                        row["exclusion_reasons"].append(reason)
+                        exclusion_counts[reason] += 1
+                if reasons or any(
+                    row["features"].get(str(spec["name"])) is None
+                    for spec in enriched_specs
+                ):
+                    row["eligible"] = False
+                    row["analysis_eligible"] = False
+                    if "fact_feature_incomplete" not in row["exclusion_reasons"]:
+                        row["exclusion_reasons"].append("fact_feature_incomplete")
+                        exclusion_counts["fact_feature_incomplete"] += 1
+                else:
+                    row["analysis_eligible"] = True
+        else:
+            for row in event_results:
+                row["eligible"] = False
+                row["analysis_eligible"] = False
+
+        complete_rows = [
+            row for row in event_results if row["analysis_eligible"]
+        ]
+        baseline_names = [str(row["name"]) for row in baseline_specs]
+        enriched_feature_names = [str(row["name"]) for row in enriched_specs]
+        distributions = {
+            name: _distribution(
+                [float(row["features"][name]) for row in population_rows]
+            )
+            for name in baseline_names
+        }
+        if not eligibility_reasons:
+            distributions.update(
+                {
+                    name: _distribution(
+                        [float(row["features"][name]) for row in complete_rows]
+                    )
+                    for name in enriched_feature_names
+                }
+            )
+
         statistical_result: dict[str, Any] = {
             "feature_distributions": distributions,
+            "feature_bins": [],
             "model": None,
             "direct_tests": [],
         }
         model = dict(statistics.get("model") or {})
-        folds = list(statistics.get("folds") or [])
         fold_results: list[dict[str, Any]] = []
         paired_rows: list[dict[str, Any]] = []
         if model and not eligibility_reasons:
-            baseline_names = [str(row["name"]) for row in baseline_specs]
             enriched_names = [
                 *baseline_names,
-                *(str(row["name"]) for row in enriched_specs),
+                *enriched_feature_names,
             ]
             primary_horizon_seconds = (
                 int(outcomes["primary_horizon"]) * interval_seconds
@@ -970,18 +1370,30 @@ class EventFactEvaluator:
                 validation_end = _utc(
                     fold["validation"]["end"], field="fold.validation.end"
                 )
+                purge_bars = int(statistics.get("purge_bars") or 0)
+                embargo_bars = int(statistics.get("embargo_bars") or 0)
+                effective_train_end = min(
+                    train_end,
+                    validation_start - timedelta(seconds=purge_bars * interval_seconds),
+                )
+                effective_validation_start = max(
+                    validation_start,
+                    train_end + timedelta(seconds=embargo_bars * interval_seconds),
+                )
                 train_rows = [
                     row
                     for row in complete_rows
-                    if train_start <= _utc(row["event_time"], field="event_time") < train_end
+                    if train_start
+                    <= _utc(row["event_time"], field="event_time")
+                    < effective_train_end
                     and _utc(row["event_time"], field="event_time")
                     + timedelta(seconds=primary_horizon_seconds)
-                    < validation_start
+                    <= effective_validation_start
                 ]
                 validation_rows = [
                     row
                     for row in complete_rows
-                    if validation_start
+                    if effective_validation_start
                     <= _utc(row["event_time"], field="event_time")
                     < validation_end
                 ]
@@ -991,10 +1403,13 @@ class EventFactEvaluator:
                     "validation_count": len(validation_rows),
                     "status": "invalid",
                     "reason": None,
+                    "purge_bars": purge_bars,
+                    "embargo_bars": embargo_bars,
+                    "effective_train_end": _iso(effective_train_end),
+                    "effective_validation_start": _iso(
+                        effective_validation_start
+                    ),
                 }
-                minimum_validation = int(
-                    eligibility.get("min_validation_samples_per_fold") or 0
-                )
                 train_labels = {
                     bool(row["outcomes"][primary_key]["positive"])
                     for row in train_rows
@@ -1101,6 +1516,11 @@ class EventFactEvaluator:
                     "enriched_features": enriched_names,
                     "folds": fold_results,
                     "valid_fold_count": len(valid_folds),
+                    "positive_delta_fold_count": sum(
+                        1
+                        for row in valid_folds
+                        if float(row.get("delta_log_loss") or 0.0) > 0.0
+                    ),
                     "oos_count": len(paired_rows),
                     "baseline": {
                         "log_loss": _log_loss(y_all, baseline_all),
@@ -1130,11 +1550,77 @@ class EventFactEvaluator:
                     ),
                 }
 
+        bin_config = dict(statistics.get("feature_bins") or {})
+        if bin_config and complete_rows:
+            for spec in enriched_specs:
+                name = str(spec["name"])
+                values = np.asarray(
+                    [float(row["features"][name]) for row in complete_rows],
+                    dtype=float,
+                )
+                edges = sorted(
+                    {
+                        float(value)
+                        for value in np.quantile(
+                            values,
+                            list(bin_config["quantiles"]),
+                            method="linear",
+                        ).tolist()
+                    }
+                )
+                bins: list[dict[str, Any]] = []
+                for index in range(len(edges) + 1):
+                    members = [
+                        row
+                        for row in complete_rows
+                        if int(
+                            np.searchsorted(
+                                np.asarray(edges, dtype=float),
+                                float(row["features"][name]),
+                                side="right",
+                            )
+                        )
+                        == index
+                    ]
+                    positives_in_bin = sum(
+                        1
+                        for row in members
+                        if bool(row["outcomes"][primary_key]["positive"])
+                    )
+                    bins.append(
+                        {
+                            "index": index,
+                            "lower_inclusive": edges[index - 1] if index else None,
+                            "upper_exclusive": edges[index] if index < len(edges) else None,
+                            "count": len(members),
+                            "positive_count": positives_in_bin,
+                            "success_rate": (
+                                positives_in_bin / len(members) if members else None
+                            ),
+                        }
+                    )
+                statistical_result["feature_bins"].append(
+                    {
+                        "feature": name,
+                        "method": dict(bin_config),
+                        "collapsed_edges": edges,
+                        "bins": bins,
+                    }
+                )
+
         direct_config = dict(statistics.get("direct_tests") or {})
         if direct_config and complete_rows:
             y = np.asarray(
                 [
-                    1.0 if row["outcomes"][primary_key]["positive"] else 0.0
+                    (
+                        1.0 if row["outcomes"][primary_key]["positive"] else 0.0
+                    )
+                    if direct_config["target"] == "primary_binary"
+                    else float(
+                        row["outcomes"][primary_key][
+                            "direction_signed_forward_return"
+                        ]
+                    )
                     for row in complete_rows
                 ],
                 dtype=float,
@@ -1149,7 +1635,11 @@ class EventFactEvaluator:
                 if len(set(values.tolist())) < 2 or len(set(y.tolist())) < 2:
                     effect, p_value = 0.0, 1.0
                 else:
-                    result = pointbiserialr(y, values)
+                    result = (
+                        pointbiserialr(y, values)
+                        if direct_config["method"] == "point_biserial"
+                        else pearsonr(y, values)
+                    )
                     effect = float(result.statistic)
                     p_value = float(result.pvalue)
                 raw_tests.append(
@@ -1159,7 +1649,7 @@ class EventFactEvaluator:
                 [row["p_value"] for row in raw_tests], method="holm"
             )
             statistical_result["direct_tests"] = [
-                {**row, "adjusted_p_value": adjusted[index]}
+                    {**row, "adjusted_p_value": adjusted[index]}
                 for index, row in enumerate(raw_tests)
             ]
 
@@ -1181,16 +1671,47 @@ class EventFactEvaluator:
             }
             for horizon, counts in sorted(horizon_resolution.items())
         }
+        invalidation_summary = {
+            "configured": bool(outcomes.get("invalidation")),
+            "resolved_count": sum(
+                count
+                for reason, count in invalidation_resolution.items()
+                if reason.startswith("resolved:")
+            ),
+            "unresolved_count": sum(
+                count
+                for reason, count in invalidation_resolution.items()
+                if reason.startswith("unresolved:")
+            ),
+            "invalidated_count": invalidation_resolution.get(
+                "resolved:invalidated", 0
+            ),
+            "not_invalidated_count": invalidation_resolution.get(
+                "resolved:not_invalidated", 0
+            ),
+            "unresolved_reasons": {
+                reason.split(":", 1)[1]: count
+                for reason, count in sorted(invalidation_resolution.items())
+                if reason.startswith("unresolved:")
+            },
+        }
         analysis_status = (
             "insufficient_evidence" if eligibility_reasons else "completed"
         )
+        transition_actions = [
+            str(action.get("action") or "")
+            for transition in gap_transitions
+            for action in transition.get("actions") or []
+            if isinstance(action, Mapping)
+        ]
         return {
             "schema_version": EVENT_FACT_RESULT_VERSION,
             "check_family": EVENT_FACT_ANALYSIS,
             "status": "completed",
             "analysis_status": analysis_status,
             "event_ownership": "indicator",
-            "sample_count": len(complete_rows),
+            "sample_count": len(population_rows),
+            "analysis_sample_count": len(complete_rows),
             "candidate_count": len(event_results),
             "direction_counts": dict(
                 sorted(Counter(row["direction"] for row in event_results).items())
@@ -1205,22 +1726,29 @@ class EventFactEvaluator:
                 "criteria": eligibility,
                 "reasons": eligibility_reasons,
                 "exclusions": dict(sorted(exclusion_counts.items())),
+                "population_count": len(population_rows),
+                "analysis_complete_case_count": len(complete_rows),
+                "population_folds": population_fold_counts,
+                "population_valid_fold_count": population_valid_fold_count,
+                "enriched_features_evaluated": not bool(eligibility_reasons),
             },
             "gap_decision": {
                 "policy": plan.gap_policy,
                 "recorded_gap_count": gap_count,
                 "indicator_action": (
                     "reset_and_rewarm"
-                    if plan.gap_policy == GAP_POLICY_RESET_REWARM
+                    if "reset_and_rewarm" in transition_actions
                     else "continued_with_degraded_status"
-                    if gap_count and plan.gap_policy == GAP_POLICY_CONTINUE_DEGRADED
+                    if "continued_degraded" in transition_actions
                     else "no_gap_action_required"
                 ),
                 "degraded": bool(
                     gap_count and plan.gap_policy == GAP_POLICY_CONTINUE_DEGRADED
                 ),
+                "transitions": gap_transitions,
             },
             "outcome_resolution": outcome_resolution,
+            "invalidation_resolution": invalidation_summary,
             "statistics": statistical_result,
             "events": event_results,
             "hashes": {
@@ -1255,6 +1783,9 @@ class EventFactEvaluator:
                     }
                 ),
                 "statistics_hash": semantic_hash(statistical_result),
+                "gap_transition_hash": semantic_hash(
+                    {"gap_transitions": gap_transitions}
+                ),
             },
             "data_quality": dict(inputs.get("data_quality") or {}),
             "caveats": (
