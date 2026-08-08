@@ -148,6 +148,45 @@ def test_content_identical_freeze_reuses_exact_persisted_manifest(
     assert repeated.series == first.series
 
 
+def test_freeze_persists_source_bound_quality_evidence_array(
+    canonical_series: dict[str, int | str],
+) -> None:
+    series_id = int(canonical_series["series_id"])
+    source_id = int(canonical_series["source_id"])
+    _ingest(
+        canonical_series,
+        [_fact(0), _fact(2)],
+        source_revision="fixture-gap-v1",
+    )
+    evidence_hash = market_data_repo.record_gap_evidence(
+        series_id=series_id,
+        source_id=source_id,
+        start=_BASE + timedelta(hours=1),
+        end=_BASE + timedelta(hours=2),
+        classification="provider_missing_data",
+        expected_count=1,
+        observed_count=0,
+        evidence={
+            "schema_version": "market_gap_evidence.v1",
+            "source_id": source_id,
+            "reason_code": "fixture_gap",
+        },
+    )
+
+    frozen = market_data_repo.freeze_dataset([_request(series_id)])
+    persisted = market_data_repo.get_dataset(frozen.dataset_id)
+    quality = persisted.series[0]["quality_evidence"]
+
+    assert isinstance(quality, list)
+    assert quality == frozen.series[0]["quality_evidence"]
+    assert any(row["evidence_hash"] == evidence_hash for row in quality)
+    assert all(
+        row["source_identity_key"]
+        == canonical_series["source_identity_key"]
+        for row in quality
+    )
+
+
 def test_frozen_dataset_cannot_observe_post_freeze_correction(
     canonical_series: dict[str, int | str],
 ) -> None:

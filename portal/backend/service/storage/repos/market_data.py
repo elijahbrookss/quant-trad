@@ -64,6 +64,17 @@ def _json_text(value: Mapping[str, Any] | None) -> str:
     return json.dumps(dict(value or {}), sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _json_mapping_array_text(
+    value: Sequence[Mapping[str, Any]] | None,
+) -> str:
+    return json.dumps(
+        [dict(item) for item in value or ()],
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
 def _stable_hash(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(_json_text(value).encode("utf-8")).hexdigest()
 
@@ -3568,7 +3579,9 @@ class PostgresMarketDataRepository:
                         "dataset_id": dataset_id,
                         "source_summary": _json_text(entry["source_summary"]),
                         "quality_summary": _json_text(entry["quality_summary"]),
-                        "quality_evidence": _json_text(entry["quality_evidence"]),
+                        "quality_evidence": _json_mapping_array_text(
+                            entry["quality_evidence"]
+                        ),
                     },
                 )
             for manifest_id, archive_ref in sorted(archive_refs.items()):
