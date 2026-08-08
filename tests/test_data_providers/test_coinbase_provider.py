@@ -429,7 +429,9 @@ def test_fetch_from_api_normalizes_inclusive_page_end_to_half_open_range(monkeyp
 
     assert frame["timestamp"].tolist() == [
         pd.Timestamp("2024-01-01T00:00:00Z"),
+        pd.Timestamp("2024-01-01T00:01:00Z"),
         pd.Timestamp("2024-01-01T00:02:00Z"),
+        pd.Timestamp("2024-01-01T00:03:00Z"),
         pd.Timestamp("2024-01-01T00:04:00Z"),
     ]
     assert bool((frame["timestamp"] < pd.Timestamp(end)).all())

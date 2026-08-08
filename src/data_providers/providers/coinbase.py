@@ -902,7 +902,11 @@ class CoinbaseProvider(BaseDataProvider):
         if end_ts <= start_ts:
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-        chunk_seconds = interval_seconds * self.MAX_CANDLES_PER_REQUEST
+        # Coinbase treats both request bounds as candle candidates. Keep each
+        # page within the provider limit before normalizing it to QT's half-open
+        # range; otherwise a 300-interval page can contain 301 timestamps and
+        # the provider may drop the earliest candle.
+        chunk_seconds = interval_seconds * max(self.MAX_CANDLES_PER_REQUEST - 1, 1)
         rows: List[Dict[str, Any]] = []
 
         window_start = start_ts
