@@ -52,6 +52,20 @@
       "eth_call",
       "eth_getLogs"
     ],
+    "rpc_probe_gaps": [
+      "ethereum-rpc.publicnode.com: 403 on eth_getLogs",
+      "ethereum.publicnode.com: 403 on eth_getLogs",
+      "eth.llamarpc.com: 521 on eth_chainId",
+      "rpc.flashbots.net: 403 on eth_call",
+      "eth.drpc.org: 400 on eth_getLogs",
+      "1rpc.io/eth: 429 on eth_call",
+      "eth-mainnet.public.blastapi.io: 400 on eth_getLogs",
+      "eth.merkle.io: 429 during historical block resolution",
+      "rpc.eth.gateway.fm: 503",
+      "public BlockPI endpoint: 521",
+      "Alchemy demo endpoint: 429",
+      "rpc.payload.de: DNS resolution failure"
+    ],
     "confirmation_depth": 12,
     "coverage_start": "2026-06-30T18:00:00Z",
     "coverage_end_exclusive": "2026-08-01T06:00:00Z",
@@ -69,6 +83,12 @@
       "requests": 0,
       "logs": 0,
       "blocks": 0
+    },
+    "zero_event_coverage_proof": {
+      "start": "2026-06-30T18:00:00Z",
+      "end_exclusive": "2026-06-30T18:10:00Z",
+      "fact_rows": 0,
+      "complete_covering_intervals": 1
     },
     "superseded_attempt_evidence": {
       "numeric_provider_acquisition_failed": 1,

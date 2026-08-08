@@ -85,6 +85,13 @@ required `eth_chainId`, `eth_blockNumber`, historical
 round-resolution calls. No wallet, signer, transaction, private key, paid
 account, or credential-bearing URL was used.
 
+Rejected public probes remain qualification evidence rather than being hidden:
+PublicNode returned 403 for logs, Llama returned 521 for chain ID, Flashbots
+returned 403 for calls, dRPC and Blast returned 400 for logs, 1RPC and Merkle
+rate-limited required calls, Gateway.fm returned 503, BlockPI returned 521, the
+Alchemy demo endpoint returned 429, and rpc.payload.de did not resolve. None was
+substituted with a fixture or described as accepted.
+
 The checked-in ETH/USD reference manifest remains disabled. A disposable local
 copy alone was enabled and bound to canonical ETH instrument
 `d238523a-9bee-4366-bc43-b797311fbdf0`.
@@ -98,6 +105,10 @@ omitted returned the full interval under `cached_ranges` and used zero RPC
 requests, zero logs, and zero blocks. The earlier current read inserted one
 newer observation outside the frozen range and did not certify historical
 coverage.
+
+The live interval from 2026-06-30 18:00Z through 18:10Z contains zero fact
+rows, yet one immutable complete coverage interval spans it. This proves that a
+covered no-event range is reusable evidence rather than an inferred omission.
 
 Three canonical rows were independently checked against direct RPC calls:
 
