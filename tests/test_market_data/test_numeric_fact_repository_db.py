@@ -23,7 +23,7 @@ from market_data.contracts import (
 )
 from portal.backend.db import InstrumentRecord, db
 from portal.backend.service.market.backtest_dataset_service import (
-    _validate_dataset_series,
+    validate_frozen_dataset_series,
 )
 from portal.backend.service.storage.repos.market_data import market_data_repo
 
@@ -415,7 +415,7 @@ def test_verified_numeric_facts_share_commit_clock_and_freeze_provider_free(
             for item in corrected_freeze.series
             if int(item["series_id"]) == series_id
         )
-        validated, _quality, admitted_revisions = _validate_dataset_series(
+        validated, _quality, admitted_revisions = validate_frozen_dataset_series(
             store=market_data_repo,
             entry={**dict(entry), "dataset_id": corrected_freeze.dataset_id},
         )
