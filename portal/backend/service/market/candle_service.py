@@ -8,11 +8,14 @@ import pandas as pd
 from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
 from data_providers.utils.ohlcv import compute_tr_atr, interval_to_timedelta
 from indicators.config import DataContext
-from market_data.backtest import (
-    bound_instrument_for_id,
-    bound_instrument_for_symbol,
-    bound_series_for_request,
-    normalize_backtest_dataset_binding,
+from market_data.backtest import normalize_backtest_dataset_binding
+from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
+from market_data.frozen import (
+    FROZEN_MARKET_DATA_READ_BINDING_VERSION,
+    bound_frozen_series_for_request,
+    bound_frozen_subject_for_id,
+    bound_frozen_subject_for_symbol,
+    normalize_frozen_market_data_read_binding,
 )
 
 from . import instrument_service
@@ -27,10 +30,24 @@ class MarketDataReadScope:
     dataset_binding: Mapping[str, Any]
 
     def __post_init__(self) -> None:
+        if (
+            str(self.dataset_binding.get("schema_version") or "").strip()
+            == FROZEN_MARKET_DATA_READ_BINDING_VERSION
+        ):
+            normalized = normalize_frozen_market_data_read_binding(
+                self.dataset_binding
+            )
+        else:
+            normalized_backtest = normalize_backtest_dataset_binding(
+                self.dataset_binding
+            )
+            normalized = dict(
+                normalized_backtest["frozen_market_data_read_binding"]
+            )
         object.__setattr__(
             self,
             "dataset_binding",
-            normalize_backtest_dataset_binding(self.dataset_binding),
+            normalized,
         )
 
     @property
@@ -98,7 +115,7 @@ def fetch_ohlcv(
             datasource, exchange, symbol
         )
     else:
-        instrument = bound_instrument_for_symbol(
+        instrument = bound_frozen_subject_for_symbol(
             scope.dataset_binding,
             datasource=datasource,
             exchange=exchange,
@@ -129,16 +146,18 @@ def fetch_ohlcv_by_instrument(
             interval=interval,
         )
     else:
-        instrument = bound_instrument_for_id(
+        instrument = bound_frozen_subject_for_id(
             scope.dataset_binding, instrument_id
         )
         timeframe_seconds = int(interval_to_timedelta(interval).total_seconds())
-        entry = bound_series_for_request(
+        entry = bound_frozen_series_for_request(
             scope.dataset_binding,
             instrument_id=instrument_id,
             timeframe_seconds=timeframe_seconds,
             start=start,
             end=end,
+            fact_type=CANDLE_FACT_TYPE,
+            contract_version=CANDLE_FACT_VERSION,
         )
         frame = canonical_candle_feed.read_dataset_series(
             dataset_id=scope.dataset_id,

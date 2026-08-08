@@ -33,6 +33,15 @@ from .requirements import (
     ResolvedMarketDataPlan,
     UnavailableMarketData,
 )
+from .frozen import (
+    CAUSAL_KNOWN_AT_SEMANTICS_VERSION,
+    FROZEN_MARKET_DATA_READ_BINDING_VERSION,
+    bound_frozen_series_for_request,
+    bound_frozen_subject_for_id,
+    bound_frozen_subject_for_symbol,
+    build_frozen_market_data_read_binding,
+    normalize_frozen_market_data_read_binding,
+)
 from .book_archive import (
     BOOK_CHECKPOINT_COMPRESSION,
     BOOK_CHECKPOINT_FORMAT,
@@ -173,6 +182,13 @@ __all__ = [
     "MarketDataPlanResolver",
     "ResolvedMarketDataPlan",
     "UnavailableMarketData",
+    "CAUSAL_KNOWN_AT_SEMANTICS_VERSION",
+    "FROZEN_MARKET_DATA_READ_BINDING_VERSION",
+    "bound_frozen_series_for_request",
+    "bound_frozen_subject_for_id",
+    "bound_frozen_subject_for_symbol",
+    "build_frozen_market_data_read_binding",
+    "normalize_frozen_market_data_read_binding",
     "BOOK_CHECKPOINT_COMPRESSION",
     "BOOK_CHECKPOINT_FORMAT",
     "BOOK_CHECKPOINT_SCHEMA_VERSION",

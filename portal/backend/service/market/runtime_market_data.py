@@ -17,6 +17,10 @@ from market_data.contracts import (
     record_effective_time,
 )
 from market_data.fact_registry import get_fact_contract
+from market_data.frozen import (
+    FROZEN_MARKET_DATA_READ_BINDING_VERSION,
+    normalize_frozen_market_data_read_binding,
+)
 from market_data.requirements import (
     UnavailableMarketData,
     causal_numeric_fact_records,
@@ -39,11 +43,22 @@ class RuntimeMarketDataResolver:
         instrument_bindings: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.store = store
-        self.dataset_binding = (
-            normalize_backtest_dataset_binding(dataset_binding)
-            if dataset_binding is not None
-            else None
-        )
+        if dataset_binding is None:
+            self.dataset_binding = None
+        elif (
+            str(dataset_binding.get("schema_version") or "").strip()
+            == FROZEN_MARKET_DATA_READ_BINDING_VERSION
+        ):
+            self.dataset_binding = normalize_frozen_market_data_read_binding(
+                dataset_binding
+            )
+        else:
+            normalized_backtest = normalize_backtest_dataset_binding(dataset_binding)
+            self.dataset_binding = dict(
+                normalized_backtest.get(
+                    "frozen_market_data_read_binding", normalized_backtest
+                )
+            )
         bindings = dict(instrument_bindings or {})
         self.underlying_by_primary = dict(
             bindings.get("underlying_by_primary")
