@@ -142,6 +142,24 @@ Every family evidence view reports maximum, used/reserved, and remaining budget
 for attempts, runtime, compute, and validation feedback, plus terminal-status
 and rejected-proposal counts.
 
+Attempt completion never trusts a caller-authored evidence projection. The
+authority resolves a typed canonical result reference and binds it to the
+attempt's registered Dataset and trial inputs:
+
+- a Check reference must be completed, observation-eligible frozen evidence,
+  match all stored hashes, and pass an exact deterministic replay at the clean
+  producing revision;
+- a Backtest reference must be a terminal safe-to-compare `backtest`, match the
+  exact Strategy and Dataset material, and have a distinct replay run with the
+  same semantic fingerprint and runtime contract;
+- paper/live runs, legacy mutable Checks, blocked Checks, unattached caller
+  claims, and identity mismatches fail closed.
+
+The server-owned evidence adapter and its typed evidence hash are part of the
+reference. Holdout completion and rejection use the same canonical reference
+boundary. Check pass/fail still does not confer protocol qualification or
+certification; the protocol evaluates its own pinned scientific contract.
+
 ## Walk-forward and leakage controls
 
 The initial S2 boundary uses chronological folds and a context-only warm-up.

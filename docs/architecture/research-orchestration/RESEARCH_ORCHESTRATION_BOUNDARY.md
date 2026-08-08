@@ -53,6 +53,12 @@ deployment. They do not require allocator, researcher, certifier, governance,
 or auditor microservices. Stronger identity/custody services are future seams,
 not a prerequisite for honest controlled-workflow claims.
 
+[Check Evidence Boundary](CHECK_EVIDENCE_BOUNDARY.md) defines the canonical
+preview, frozen evidence, replay, Observation, and trail workflow. It replaces
+objective-specific calculations with versioned QT-owned evaluators;
+"campaign" remains an external objective description, not QT domain
+nomenclature.
+
 The autonomous research workflow cannot choose provider data, resolve a sealed
 holdout through public operations, disable durable audit, mutate a frozen
 candidate, self-authorize a transition, or progress to shadow, paper, live,
@@ -111,6 +117,9 @@ The boundary may:
   through the research API.
 - dispatch long-running research checks and sweeps through shared async jobs,
   then read status/result contracts by job id.
+- sequence Check requirement planning, explicit preparation, Dataset freeze,
+  provider-free execution, replay, Observation creation, and trail inspection
+  through shared application operations.
 
 The boundary must not:
 
@@ -124,6 +133,30 @@ The boundary must not:
 - treat MCP resources as cached truth or introduce MCP-only workflow semantics.
 - treat research-memory items or check outputs as runtime, report, or execution
   truth.
+- calculate indicators, features, event populations, causal fact joins,
+  outcomes, folds, statistics, assertions, pass gates, or evidence hashes.
+- trust caller-supplied scientific evidence projections instead of resolving
+  and replaying canonical Check or Backtest references.
+
+## Canonical Research Journey
+
+```text
+objective
+  -> Check requirements
+  -> explicit preparation (optional acquisition authority)
+  -> preview OR Dataset freeze
+  -> provider-free Indicator + Check
+  -> durable result
+  -> replay
+  -> evidence-backed Observation
+  -> evidence trail/report projection
+```
+
+Preview is ephemeral mutable-store feedback and cannot create durable evidence.
+Evidence requires a frozen Dataset. Backtest remains a separate path requiring
+an exact versioned Strategy. Check statistics and assertions have no promotion,
+certification, paper, or live authority; Scientific Protocol owns advanced
+validation and certification.
 
 ## Local Log Partitioning
 
@@ -248,8 +281,10 @@ for:
 - instrument listing, detail inspection, and runtime profile compilation through
   `qt instruments ...`,
 - direct candle coverage inspection through `qt data coverage`,
-- research-memory item/link capture and lightweight historical checks through
-  `qt research ...`; the check surface is intentionally compact:
+- the primary Check workflow through `qt research check requirements`,
+  `preview`, `prepare`, `run`, and `replay`, plus evidence-backed Observation
+  creation and `qt research trail`,
+- compatibility/diagnostic checks through `qt research ...`:
   `qt research check raw`, `qt research check indicator`,
   `qt research check audit`, `qt research check lifecycle`,
   `qt research check signal`, `qt research check decision`, and
@@ -265,7 +300,8 @@ for:
   summary,
 - `experiments start-bot`, `experiments status`, and `experiments collect` for
   long-running resumable research work,
-- `experiments run-bot` as a one-shot wrapper over the same start/collect flow.
+- deprecated `experiments run-bot` as a compatibility wrapper with a structured
+  replacement message; primary workflows use start/collect or a plan.
 - `experiments validate-plan`, `run-plan`, `resume`, `watch`, `events`, and
   `doctor` for sequential, file-backed experiment suites.
 - `experiments summarize` for compact suite-level read models over local

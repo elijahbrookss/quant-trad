@@ -87,3 +87,4 @@ respect.
 | [0059](0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md) | Use in-app scientific authority and an offline certification ceiling | Accepted |
 | [0060](0060-use-capability-native-research-and-collection-contracts.md) | Use capability-native research and collection contracts | Accepted |
 | [0061](0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md) | Use provider-neutral exact numeric facts and bounded acquisition | Accepted |
+| [0062](0062-use-frozen-bindings-for-durable-check-evidence.md) | Use frozen bindings for durable Check evidence | Accepted |

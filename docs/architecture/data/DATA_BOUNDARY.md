@@ -39,6 +39,8 @@ code_paths:
   - scripts/db/manual_migration_market_data_v2_hard_cutover.sql
   - scripts/db/manual_migration_market_fact_commit_clock_v1.sql
   - scripts/db/manual_migration_numeric_fact_store_v1.sql
+  - scripts/db/manual_migration_gap_source_identity_v1.sql
+  - scripts/db/manual_migration_dataset_quality_evidence_v1.sql
   - docs/architecture/data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md
   - docs/architecture/data/diagrams/data-boundary-flow.mmd
   - docs/architecture/data/diagrams/candle-continuity-flow.mmd
@@ -127,6 +129,10 @@ is a separate operation and uses the same shared provider credential record.
 6. Backtest preparation resolves transitive requirements, validates coverage,
    and freezes an immutable dataset. Startup admits that dataset against exact
    strategy, indicator, execution-policy, instrument, warmup, and run identity.
+7. Check preview reads a commit/watermark-pinned current-store view. Durable
+   Check evidence resolves and freezes a Dataset first, then reads it through a
+   Strategy-independent `FrozenMarketDataReadBinding` with provider access
+   disabled.
 
 ## Implemented Source Facts
 
@@ -282,17 +288,23 @@ provider-free.
 
 ## Consumer Requirements And Instrument Roles
 
-Indicators and checks declare fact type, contract version, key, required fields,
-alignment, staleness, gap policy, and one instrument role:
+Indicators and checks declare provider-neutral fact type, contract version,
+alias/key, required fields, alignment, staleness, gap policy, and one instrument
+role:
 
 - `primary`: the traded canonical instrument;
 - `underlying`: the canonical underlying ID mapped for that primary;
 - `benchmark`: a named alias mapped to one canonical ID;
 - `explicit`: one declared canonical instrument ID.
 
-Consumers do not declare provider, endpoint, table, schedule, or fallback.
-Underlying and benchmark relationships come from immutable run configuration;
-symbol parsing is not a valid relationship resolver.
+Semantic requirements do not embed a provider, endpoint, table, or schedule.
+Durable Check inputs separately declare an `exact` source identity or a bounded
+`allowlist` that resolves deterministically; unconstrained provider selection is
+invalid for evidence. The resolved Dataset pins series IDs and exact source
+identity keys. This permits two aliases of the same semantic fact to compare
+sources without changing fact meaning. Underlying and benchmark relationships
+come from immutable run configuration; symbol parsing is not a valid
+relationship resolver.
 
 ## Dataset Identity, Provenance, And Quality
 
@@ -301,10 +313,20 @@ hashes for typed-fact material, acquisition provenance, and quality evidence.
 Its stable ID excludes unrelated global commit movement. Corrections append a
 revision; reads pinned to commit `N` cannot observe a later revision.
 
-Gap evidence is immutable, range-based, and conservative. It records expected
-and observed counts, classification, detection watermark, and structured
-provider or ingestion evidence. Closures, warmup, confidence, and caveats do not
-mutate values or synthesize rows.
+**A Dataset freezes QT's known reality, including gaps. Consumers make explicit
+and reproducible readiness decisions.** Freeze does not certify that an
+Indicator, Check, Strategy, or Backtest can operate. Each Dataset series stores
+the exact quality material used at freeze, not a later mutable gap-catalog
+projection. Historical Dataset series whose quality material was not pinned
+remain readable but cannot be upgraded to current replayable evidence.
+
+Gap evidence is immutable, range-based, source-bound when lineage exists, and
+conservative. It records expected and observed counts, classification,
+detection watermark, exact source identity, and structured provider or
+ingestion evidence. Closures, warmup, confidence, and caveats do not mutate
+values or synthesize rows. Data records a gap; Indicator owns reset/re-warm or
+degraded state transition, Check owns analytical eligibility/outcome
+resolution, and Strategy runtime owns execution continuity.
 
 Backtest OI inputs are frozen far enough back to cover indicator warmup plus the
 declared latest-known staleness window. Every warmup and decision bar resolves
@@ -349,6 +371,9 @@ replacing source provenance and quality.
 - Paper runtime cannot observe a closed candle before canonical persistence.
 - One backtest uses one frozen dataset and one recorded commit scope across
   nested reads.
+- A durable Check uses one frozen binding and cannot access provider transport.
+- Dataset freeze preserves gaps but does not make a global consumer-readiness
+  decision.
 - Exact material, provenance, and quality remain distinct and inspectable.
 - Required stale or unavailable inputs fail; optional gaps are explicit.
 - Instrument relationships are canonical IDs, never symbol guesses.

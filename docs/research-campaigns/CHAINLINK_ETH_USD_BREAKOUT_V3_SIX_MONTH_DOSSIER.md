@@ -1,5 +1,10 @@
 # Chainlink ETH/USD Breakout V3 Six-Month Campaign Dossier
 
+> Historical limitation notice: the 119-candidate population was calculated
+> before an admitted six-month Dataset existed and is not current replayable
+> Check evidence. The original blocked result is preserved. See
+> [Chainlink Historical Research Boundary Notice](CHAINLINK_RESEARCH_BOUNDARY_LIMITATIONS.md).
+
 ## Outcome
 
 ```text
