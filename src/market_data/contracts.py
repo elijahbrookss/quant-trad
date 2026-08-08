@@ -1497,6 +1497,32 @@ def build_dataset_identity_hash(series: Iterable[Mapping[str, Any]]) -> str:
     )
 
 
+def dataset_series_identity_payload(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the stable v1 Dataset-series identity fields.
+
+    Full quality evidence is pinned beside the manifest. Its material identity
+    is represented by ``quality_hash`` so historical v1 Dataset hashes remain
+    reconstructable after the evidence array became directly persisted.
+    """
+
+    return {
+        "series_id": int(entry["series_id"]),
+        "range_start": _canonical_time(
+            _utc_datetime(entry["range_start"], field="range_start")
+        ),
+        "range_end": _canonical_time(
+            _utc_datetime(entry["range_end"], field="range_end")
+        ),
+        "max_commit_seq": int(entry["max_commit_seq"]),
+        "row_count": int(entry["row_count"]),
+        "material_hash": str(entry["material_hash"]),
+        "provenance_hash": str(entry["provenance_hash"]),
+        "source_summary": dict(entry.get("source_summary") or {}),
+        "quality_hash": str(entry["quality_hash"]),
+        "quality_summary": dict(entry.get("quality_summary") or {}),
+    }
+
+
 def build_quality_hash(evidence: Iterable[Mapping[str, Any]]) -> str:
     """Hash quality evidence separately from exact candle material."""
 
@@ -1543,6 +1569,7 @@ __all__ = [
     "SourceIdentity",
     "build_candle_material_hash",
     "build_dataset_identity_hash",
+    "dataset_series_identity_payload",
     "build_funding_rate_material_hash",
     "build_open_interest_material_hash",
     "build_numeric_fact_material_hash",

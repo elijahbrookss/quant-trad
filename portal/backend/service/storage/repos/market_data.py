@@ -33,6 +33,7 @@ from market_data.contracts import (
     SourceIdentity,
     build_candle_material_hash,
     build_dataset_identity_hash,
+    dataset_series_identity_payload,
     build_funding_rate_material_hash,
     build_open_interest_material_hash,
     build_numeric_fact_material_hash,
@@ -3528,7 +3529,10 @@ class PostgresMarketDataRepository:
                 reference["source_dataset_fingerprints"] = source_fingerprints
                 reference["input_count"] = source_row_count
             _verify_local_archive_objects(archive_refs)
-            dataset_hash = build_dataset_identity_hash(manifest_series)
+            dataset_hash = build_dataset_identity_hash(
+                dataset_series_identity_payload(entry)
+                for entry in manifest_series
+            )
             dataset_id = f"mds_{dataset_hash[:32]}"
             inserted_dataset_id = session.execute(
                 text(

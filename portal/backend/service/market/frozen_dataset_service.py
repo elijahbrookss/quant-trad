@@ -10,6 +10,7 @@ from market_data.contracts import (
     DATASET_IDENTITY_HASH_VERSION,
     DatasetSeriesRequest,
     build_dataset_identity_hash,
+    dataset_series_identity_payload,
 )
 from market_data.acquisition_coverage import (
     missing_complete_coverage,
@@ -26,9 +27,12 @@ from market_data.store import MarketDataStore
 from ..storage.repos.market_data import market_data_repo
 from . import instrument_service
 from .backtest_dataset_service import (
-    dataset_manifest_hash_payload,
     validate_frozen_dataset_series,
 )
+
+
+# Preserve the former module-level projection name while core owns semantics.
+dataset_manifest_hash_payload = dataset_series_identity_payload
 
 
 def _utc(value: Any, *, field: str) -> datetime:
@@ -443,7 +447,7 @@ def resolve_frozen_dataset_read_binding(
     if dataset.dataset_id != f"mds_{dataset.dataset_hash[:32]}":
         raise RuntimeError("frozen_dataset_binding_invalid: Dataset identity disagreement")
     reconstructed_hash = build_dataset_identity_hash(
-        [dataset_manifest_hash_payload(row) for row in dataset.series]
+        [dataset_series_identity_payload(row) for row in dataset.series]
     )
     if reconstructed_hash != dataset.dataset_hash:
         raise RuntimeError("frozen_dataset_binding_invalid: Dataset manifest hash disagreement")

@@ -40,6 +40,7 @@ from market_data.contracts import (
     TypedFeatureRecord,
     build_candle_material_hash,
     build_dataset_identity_hash,
+    dataset_series_identity_payload,
     build_numeric_fact_material_hash,
     build_open_interest_material_hash,
     build_provenance_hash,
@@ -847,18 +848,9 @@ def derive_backtest_dataset_plan(
 
 
 def dataset_manifest_hash_payload(entry: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "series_id": int(entry["series_id"]),
-        "range_start": iso_utc(entry["range_start"], field="range_start"),
-        "range_end": iso_utc(entry["range_end"], field="range_end"),
-        "max_commit_seq": int(entry["max_commit_seq"]),
-        "row_count": int(entry["row_count"]),
-        "material_hash": str(entry["material_hash"]),
-        "provenance_hash": str(entry["provenance_hash"]),
-        "source_summary": dict(entry.get("source_summary") or {}),
-        "quality_hash": str(entry["quality_hash"]),
-        "quality_summary": dict(entry.get("quality_summary") or {}),
-    }
+    """Compatibility alias for the core Dataset identity projection."""
+
+    return dataset_series_identity_payload(entry)
 
 
 def _gap_is_disclosed(
