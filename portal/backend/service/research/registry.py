@@ -211,6 +211,8 @@ def materialize_check_definition(
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
     assertions = _list_of_mappings(payload.get("assertions"), field="assertions")
+    if mode == CHECK_MODE_EVIDENCE and not str(payload.get("gap_policy") or "").strip():
+        raise ValueError("check_evidence_gap_policy_required")
     material_rules = {
         **dict(base.material_rules),
         "inputs": inputs,
