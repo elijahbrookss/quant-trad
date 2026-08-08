@@ -11,10 +11,13 @@ tags:
   - ledger
   - leasing
   - postgres
+  - exact-numeric
+  - explicit-migration
 code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
+  - portal/backend/service/market/numeric_fact_acquisition.py
   - portal/backend/service/provenance.py
   - portal/backend/service/storage
   - portal/backend/service/storage/repos/market_data.py
@@ -38,6 +41,7 @@ code_paths:
   - scripts/db/manual_migration_versioning_hard_cutover.sql
   - scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql
   - scripts/db/manual_migration_async_job_fencing_v1.sql
+  - scripts/db/manual_migration_numeric_fact_store_v1.sql
   - scripts/db/manual_add_operator_read_path_indexes_v1.sql
 ---
 # Persistence Boundary
@@ -88,10 +92,10 @@ builder source revision, and report storage provenance.
 ## Schema Bootstrap Contract
 
 Fresh database bootstrap is a first-class persistence responsibility. Backend
-startup creates the current model-declared schemas, tables, and indexes from
-`portal/backend/db/models.py` using the single `PG_DSN`; a new desktop or clean
-Docker volume must not require operators to replay historical manual migration
-files.
+startup creates the existing model-owned schemas, tables, and indexes from
+`portal/backend/db/models.py` using the single `PG_DSN`. Other than the scoped
+numeric-fact addition below, a new desktop or clean Docker volume does not
+require operators to replay historical manual migration files.
 
 Bootstrap may create missing schemas, tables, and model-declared indexes. It
 must not use blanket `IF NOT EXISTS` DDL as the schema contract. Existing tables
@@ -99,21 +103,38 @@ are inspected against the current column contract; missing columns fail loud
 with the table and column names so the operator can rebuild the database or
 intentionally run an out-of-band migration.
 
+Provider-neutral exact numeric storage is the explicit exception.
+`market.numeric_fact_versions` and
+`market.fact_acquisition_coverage`, plus the dimensions addition to an
+existing `market.series`, are owned by
+`scripts/db/manual_migration_numeric_fact_store_v1.sql`. Startup excludes the
+two numeric tables and their indexes from generic creation or repair. It
+validates table and dimensions-column presence, the numeric-fact unbounded
+numeric type and canonical event-revision primary key, required numeric-fact
+checks/indexes, required coverage indexes, and both immutable triggers. The
+migration also owns the dimensions-object constraint, coverage keys/checks,
+and commit-clock defaults; startup does not currently re-derive every one of
+those definitions. Validated missing or drifted objects fail with the exact
+migration path. Generic startup behavior for every pre-existing schema object
+is unchanged.
+
 Required operational indexes are part of the current schema contract. If they
 are still absent after bootstrap attempts to create model-declared indexes,
 startup fails. Historical SQL files under `scripts/db/` are repair/reference
-artifacts for old local databases, not normal fresh-start instructions.
+artifacts for old local databases, not normal fresh-start instructions; the
+named numeric migration is an intentional additive exception.
 
 Market-data persistence is model-declared in
 `portal/backend/db/market_data_models.py` under schema `market`. It owns
 source and typed-series identity, ingestion operations, append-only candle
-revisions, gap evidence, and frozen dataset manifests. Fresh bootstrap creates
-that schema, converts candle revisions to a TimescaleDB hypertable, and installs
-immutability triggers. Startup fails if active legacy tables remain in `public`;
-the explicit v2 hard-cutover migration verifies and archives them instead of
-supporting dual readers or writers. Provider credential helpers do not create
-their own table; `portal_provider_credential_refs` remains owned by portal ORM
-metadata.
+and exact-numeric revisions, gap/acquisition evidence, and frozen dataset
+manifests. Fresh bootstrap continues to create model-owned market objects other
+than the explicit numeric tables, converts eligible revisions to TimescaleDB
+hypertables, and installs their existing immutability triggers. Startup fails if
+active legacy tables remain in `public`; the explicit v2 hard-cutover migration
+verifies and archives them instead of supporting dual readers or writers.
+Provider credential helpers do not create their own table;
+`portal_provider_credential_refs` remains owned by portal ORM metadata.
 
 Normalization specifications are immutable evidence. Catalog reads recompute
 the full material hash and require the current 31-hex identity. A retired
@@ -160,8 +181,10 @@ Active schema surfaces are justified by role:
   `portal_bot_run_event_seq_allocators`, `portal_bot_trades`,
   `portal_bot_trade_events`, `portal_bot_run_leases`, strategy/bot/instrument
   config tables, plus `market.sources`, `market.series`,
-  `market.ingestion_runs`, `market.candle_versions`, `market.gap_evidence`,
-  `market.datasets`, and `market.dataset_series`.
+  `market.ingestion_runs`, `market.candle_versions`,
+  `market.numeric_fact_versions`, `market.gap_evidence`,
+  `market.fact_acquisition_coverage`, `market.datasets`, and
+  `market.dataset_series`.
 - Keep as definition only: `portal_bots`. Runtime state belongs to
   `portal_bot_runs`, canonical lifecycle events, run leases, and report
   materialization tables. Fleet cards and API responses may project those rows
@@ -388,6 +411,9 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 ## Failure And Recovery
 
 - Required persistence for audit trails fails loud.
+- Missing or drifted explicit-migration numeric objects fail with
+  `scripts/db/manual_migration_numeric_fact_store_v1.sql`; startup never
+  creates or repairs them.
 - Missing required columns fail with actionable errors.
 - Missing model-declared indexes are created during bootstrap.
 - Missing required indexes after bootstrap fail with actionable errors.
@@ -399,7 +425,8 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - Durable truth is append-friendly and replayable.
 - Runtime events preserve known-at context.
 - Storage does not perform hidden execution reconstruction.
-- Fresh schemas come from current clean definitions.
+- Fresh schemas come from current clean definitions, with the explicitly named
+  numeric-fact migration applied before startup admits those new objects.
 - Existing schema drift fails loud instead of being patched with hidden runtime backfills.
 
 ## Related Docs
@@ -408,6 +435,9 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - [Identity and correlation boundary](../identity/IDENTITY_AND_CORRELATION_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
+- [Numeric Facts And On-Demand Acquisition](../data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md)
+- [ADR 0061: Provider-Neutral Exact Numeric Facts](../decisions/0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md)
+- [Chainlink Numeric Facts Operator Guide](../../guides/chainlink-numeric-facts.md)
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
 - [ADR 0042: Runtime event ledger as lifecycle truth](../decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md)
 - [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
