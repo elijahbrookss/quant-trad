@@ -1,10 +1,12 @@
 {
   "artifact_kind": "research_study_protocol",
-  "campaign_id": "chainlink_eth_usd_breakout_v1",
+  "campaign_id": "chainlink_eth_usd_breakout_v2",
   "claim_scope": "exploration",
   "external_trading_authority": false,
-  "locked_at": "2026-08-08T03:00:45.292707Z",
-  "locked_source_revision": "872edf8b6acd7542381a1aa48949098635b10b65",
+  "locked_at": "2026-08-08T03:08:00.000000Z",
+  "locked_source_revision": "2be379deec3f24015b63a989a2e6acfce59157a2",
+  "supersedes_protocol_sha256": "992f3b5d8e90762c8c37c5e92b6ba92b02393d00542174530d21830cb0a25bb7",
+  "supersession_reason": "The persisted Market Profile v1 manifest fixes its runtime input to 30m. The v1 study artifact incorrectly declared 15m and is invalid input evidence. No Chainlink value or feature/outcome relationship had been inspected when this correction was locked.",
   "primary_question": "At the time of a breakout decision, does causally known Chainlink ETH/USD reference-price state improve the ability to distinguish successful breakouts from failed breakouts beyond existing venue-price, return, volatility, and breakout-structure information?",
   "primary_null": "After controlling for existing venue and breakout information, causally available Chainlink ETH/USD features provide no meaningful incremental association with breakout outcomes.",
   "population": {
@@ -12,13 +14,14 @@
     "exchange": "COINBASE_DIRECT",
     "instrument_id": "d238523a-9bee-4366-bc43-b797311fbdf0",
     "symbol": "ETH-USD",
-    "timeframe": "15m",
+    "timeframe": "30m",
     "candle_warmup_start": "2026-01-01T00:00:00Z",
     "study_start": "2026-07-01T00:00:00Z",
     "study_end_exclusive": "2026-08-01T00:00:00Z",
     "outcome_tail_end_exclusive": "2026-08-01T06:00:00Z",
-    "selection_rationale": "No canonical ETH breakout report, observation, hypothesis, study, or candle series existed. The accepted raw Market Profile balance_breakout definition is applied without Chainlink inspection. The most recent complete calendar month is selected before RPC qualification; 15-minute bars balance event count with a bounded one-month Chainlink acquisition.",
+    "selection_rationale": "No canonical ETH breakout report, research-memory result, or candle series existed. The accepted raw Market Profile balance_breakout definition and its fixed 30-minute runtime input are applied without Chainlink inspection. The most recent complete calendar month was selected before RPC qualification and was not chosen from outcome correlations.",
     "breakout_definition": {
+      "indicator_id": "5303a281-b129-452a-a16f-814a3244a309",
       "indicator_type": "market_profile",
       "indicator_version": "v1",
       "output": "balance_breakout",
@@ -70,44 +73,44 @@
   },
   "controls": [
     "direction_signed_venue_return_1_bar",
-    "direction_signed_venue_return_4_bars",
-    "direction_signed_venue_return_12_bars",
+    "direction_signed_venue_return_2_bars",
+    "direction_signed_venue_return_6_bars",
     "atr_14_pct",
     "breakout_distance_from_reference_bps",
     "breakout_direction",
-    "volume_ratio_96_bars"
+    "volume_ratio_48_bars"
   ],
   "outcomes": {
     "entry_lag_bars": 0,
-    "forward_bars": [4, 12, 24],
-    "primary_horizon_bars": 12,
-    "primary_binary_outcome": "direction_signed_forward_return_pct_at_12_bars > 0",
+    "forward_bars": [2, 6, 12],
+    "primary_horizon_bars": 6,
+    "primary_binary_outcome": "direction_signed_forward_return_pct_at_6_bars > 0",
     "continuous": [
       "direction_signed_forward_return_pct",
       "max_favorable_excursion_pct",
       "max_adverse_excursion_pct"
     ],
-    "invalidation": "first close within 24 bars that returns through the event VAH for long or VAL for short",
+    "invalidation": "first close within 12 bars that returns through the event VAH for long or VAL for short",
     "time_to_invalidation_unit": "bars"
   },
   "eligibility": {
     "include": [
       "raw balance_breakout event known at a study-window bar close",
-      "complete 24-bar forward outcome window",
+      "complete 12-bar forward outcome window",
       "complete baseline control history"
     ],
     "chainlink_primary_complete_case": "latest causally known value exists and age_seconds <= 21600",
     "missing_data_policy": "Never future-fill. Baseline-versus-enriched comparison uses the same Chainlink-primary-complete events; missing and stale events remain counted and reported.",
     "cluster_policy": "Retain all eligible raw breakouts but perform uncertainty resampling by UTC calendar-day blocks and report per-day concentration.",
-    "minimum_eligible_events": 60,
-    "minimum_events_per_outcome_class": 20,
-    "minimum_distinct_utc_days": 15,
-    "minimum_validation_events_per_fold": 10
+    "minimum_eligible_events": 30,
+    "minimum_events_per_outcome_class": 10,
+    "minimum_distinct_utc_days": 12,
+    "minimum_validation_events_per_fold": 5
   },
   "temporal_evaluation": {
     "method": "three expanding calendar-time folds",
-    "purge_bars": 24,
-    "embargo_bars": 24,
+    "purge_bars": 12,
+    "embargo_bars": 12,
     "folds": [
       {
         "train_start": "2026-07-01T00:00:00Z",
@@ -137,7 +140,7 @@
       "paired delta_brier_score",
       "paired delta_roc_auc when both classes are present",
       "success rates by predeclared feature bins",
-      "direct effect sizes for 12-bar signed forward return"
+      "direct effect sizes for 6-bar signed forward return"
     ],
     "uncertainty": "paired UTC-day block bootstrap with 2000 replicates, 95% percentile intervals, seed 20260807",
     "multiple_comparison_method": "Holm adjustment across the eight predeclared direct Chainlink feature tests",
