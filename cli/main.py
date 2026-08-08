@@ -21,6 +21,7 @@ from .experiments.runner import ExperimentRunner
 from .experiments.state_store import ExperimentStateStore, find_experiment_dir
 from .experiments.summarize import summarize_experiment, write_experiment_summary
 from .logs import DEFAULT_LOKI_URL, LokiClient, doctor_log_payload, query_log_payload, run_log_payload
+from .research_operations import ResearchOperations
 from .setup import setup_doctor_payload, setup_env_payload
 
 
@@ -1936,11 +1937,102 @@ def _research_check_request_base(args: argparse.Namespace, *, title: str, check_
 
 
 def _post_research_check(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    operations = ResearchOperations(_client(args))
+    mode = str(payload.get("mode") or "preview").strip().lower()
     if getattr(args, "dispatch", False):
-        result = _client(args).request_json("POST", "/api/research/jobs/checks/run", payload=payload)
+        if mode != "evidence":
+            raise ValueError(
+                "legacy typed Check dispatch is deprecated for preview; use "
+                "'qt research check run --request-json ... --dispatch' with an immutable input"
+            )
+        result = operations.dispatch_evidence(
+            payload, dataset_id=payload.get("dataset_id")
+        )
         _print_research_job_dispatch(result)
         return 0
-    _print_json(_client(args).request_json("POST", "/api/research/checks/run", payload=payload))
+    if mode == "evidence":
+        result = operations.run_evidence(
+            payload, dataset_id=payload.get("dataset_id")
+        )
+    else:
+        result = operations.preview(payload)
+    _print_json(result)
+    return 0
+
+
+def _canonical_research_request(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _read_json_object_arg(args.request_json, label="--request-json")
+    if not payload:
+        raise ValueError("--request-json is required")
+    return payload
+
+
+def _cmd_research_check_requirements(args: argparse.Namespace) -> int:
+    _print_json(
+        ResearchOperations(_client(args)).requirements(
+            _canonical_research_request(args)
+        )
+    )
+    return 0
+
+
+def _cmd_research_check_preview(args: argparse.Namespace) -> int:
+    _print_json(
+        ResearchOperations(_client(args)).preview(
+            _canonical_research_request(args)
+        )
+    )
+    return 0
+
+
+def _cmd_research_check_prepare(args: argparse.Namespace) -> int:
+    _print_json(
+        ResearchOperations(_client(args)).prepare(
+            _canonical_research_request(args),
+            freeze=bool(args.freeze),
+            created_by=args.created_by,
+            dataset_name=args.dataset_name,
+        )
+    )
+    return 0
+
+
+def _cmd_research_check_run(args: argparse.Namespace) -> int:
+    operations = ResearchOperations(_client(args))
+    request = _canonical_research_request(args)
+    if args.dispatch:
+        result = operations.dispatch_evidence(
+            request, dataset_id=args.dataset_id
+        )
+        _print_research_job_dispatch(result)
+    else:
+        _print_json(
+            operations.run_evidence(request, dataset_id=args.dataset_id)
+        )
+    return 0
+
+
+def _cmd_research_check_replay(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).replay(args.check_id))
+    return 0
+
+
+def _cmd_research_observe_from_check(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(
+        args.request_json, label="--request-json"
+    )
+    for field in ("title", "body", "status"):
+        value = getattr(args, field, None)
+        if value is not None:
+            payload[field] = value
+    tags = list(getattr(args, "tag", None) or [])
+    if tags:
+        payload["tags"] = tags
+    _print_json(
+        ResearchOperations(_client(args)).create_observation(
+            args.check_id, payload
+        )
+    )
     return 0
 
 
@@ -2276,7 +2368,7 @@ def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = Tru
 
 
 def _cmd_research_job_status(args: argparse.Namespace) -> int:
-    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}")
+    payload = ResearchOperations(_client(args)).job_status(args.job_id)
     if getattr(args, "json", False):
         _print_json(payload)
     else:
@@ -2285,7 +2377,7 @@ def _cmd_research_job_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_research_job_result(args: argparse.Namespace) -> int:
-    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}/result")
+    payload = ResearchOperations(_client(args)).job_result(args.job_id)
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
     output_format = str(getattr(args, "format", "auto") or "auto")
     result_schema = str(result.get("schema_version") or "")
@@ -2350,7 +2442,7 @@ def _format_metric_value(value: Any) -> str:
 
 
 def _cmd_research_trail(args: argparse.Namespace) -> int:
-    _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}/trail"))
+    _print_json(ResearchOperations(_client(args)).trail(args.item_id))
     return 0
 
 
@@ -2950,12 +3042,10 @@ def _cmd_experiments_status(args: argparse.Namespace) -> int:
 
 def _cmd_experiments_watch(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + float(args.watch_timeout)
-    last_state: dict[str, Any] | None = None
     while True:
         state = _load_experiment_suite_state(args, args.ref)
         if state is None:
             raise ValueError(f"experiment suite state not found for {args.ref!r}")
-        last_state = state
         if args.print_each:
             _print_json(state)
         status = str(state.get("status") or "")
@@ -3007,18 +3097,38 @@ def _cmd_experiments_collect(args: argparse.Namespace) -> int:
 
 
 def _cmd_experiments_run_bot(args: argparse.Namespace) -> int:
+    compatibility = {
+        "status": "deprecated_alias",
+        "replacement": [
+            "qt experiments start-bot BOT_ID --dataset-id DATASET_ID",
+            "qt experiments collect REF --wait",
+        ],
+        "removal": "after the compatibility window",
+    }
+    if args.export and not args.wait:
+        _print_json({
+            "schema_version": "qt_cli_deprecation.v1",
+            "compatibility": compatibility,
+            "error": "--export requires --wait so the report is terminal before export",
+        })
+        return 2
+    if args.print_each:
+        _print_json(
+            {
+                "schema_version": "qt_cli_deprecation.v1",
+                "command": "qt experiments run-bot",
+                "compatibility": compatibility,
+            }
+        )
     client = _client(args)
     record = _start_experiment(args, client)
-    if args.export and not args.wait:
-        _print_json({**record, "error": "--export requires --wait so the report is terminal before export"})
-        return 2
     if args.wait:
         wait_code, result = _collect_experiment(args, client, record)
         if not args.print_each:
-            _print_json(result)
+            _print_json({**result, "compatibility": compatibility})
         return wait_code
     if not args.print_each:
-        _print_json(record)
+        _print_json({**record, "compatibility": compatibility})
     return 0
 
 
@@ -4014,6 +4124,22 @@ def build_parser() -> argparse.ArgumentParser:
     research_observe_create.add_argument("--tag", action="append", default=[])
     research_observe_create.add_argument("--payload", help="Observation payload JSON object path, inline object, or '-'.")
     research_observe_create.set_defaults(func=_cmd_research_observe_create)
+    research_observe_from_check = research_observe_sub.add_parser(
+        "from-check",
+        help="Create an evidence-bearing Observation from a durable Check result.",
+    )
+    research_observe_from_check.add_argument("check_id")
+    research_observe_from_check.add_argument(
+        "--request-json",
+        help="Observation metadata JSON object path, inline object, or '-'.",
+    )
+    research_observe_from_check.add_argument("--title")
+    research_observe_from_check.add_argument("--body")
+    research_observe_from_check.add_argument("--status")
+    research_observe_from_check.add_argument("--tag", action="append", default=[])
+    research_observe_from_check.set_defaults(
+        func=_cmd_research_observe_from_check
+    )
 
     research_links = research_sub.add_parser("links", help="Research memory link commands.")
     research_links_sub = research_links.add_subparsers(dest="research_links_command", required=True)
@@ -4042,7 +4168,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_jobs_result.set_defaults(func=_cmd_research_job_result)
 
     def add_research_check_base_args(command: argparse.ArgumentParser) -> None:
-        command.add_argument("--request-json", help="research_check_request.v1 JSON object path, inline object, or '-'.")
+        command.add_argument("--request-json", help="Check operation JSON object path, inline object, or '-'.")
         command.add_argument("--title")
         command.add_argument("--body")
         command.add_argument("--observation-id")
@@ -4068,8 +4194,63 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--direction", choices=["long", "short"])
         command.add_argument("--min-edge-pct", type=float)
 
-    research_check = research_sub.add_parser("check", help="Run and persist lightweight analytical checks.")
+    research_check = research_sub.add_parser(
+        "check", help="Plan, preview, execute, and replay canonical analytical Checks."
+    )
     research_check_sub = research_check.add_subparsers(dest="research_check_command", required=True)
+    research_check_requirements = research_check_sub.add_parser(
+        "requirements",
+        help="Resolve direct and transitive Check requirements without acquisition.",
+    )
+    research_check_requirements.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_requirements.set_defaults(
+        func=_cmd_research_check_requirements
+    )
+
+    research_check_preview = research_check_sub.add_parser(
+        "preview",
+        help="Run an ephemeral watermark-pinned Check preview.",
+    )
+    research_check_preview.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_preview.set_defaults(func=_cmd_research_check_preview)
+
+    research_check_prepare = research_check_sub.add_parser(
+        "prepare",
+        help="Resolve evidence requirements and optionally freeze known facts and gaps.",
+    )
+    research_check_prepare.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_prepare.add_argument(
+        "--freeze", action="store_true", help="Create or reuse the immutable Dataset after resolution."
+    )
+    research_check_prepare.add_argument("--created-by")
+    research_check_prepare.add_argument("--dataset-name")
+    research_check_prepare.set_defaults(func=_cmd_research_check_prepare)
+
+    research_check_run = research_check_sub.add_parser(
+        "run",
+        help="Persist provider-free Check evidence against an immutable input.",
+    )
+    research_check_run.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_run.add_argument("--dataset-id")
+    research_check_run.add_argument(
+        "--dispatch", action="store_true", help="Queue evidence execution and return the research job id."
+    )
+    research_check_run.set_defaults(func=_cmd_research_check_run)
+
+    research_check_replay = research_check_sub.add_parser(
+        "replay", help="Replay durable Check evidence through the canonical execution path."
+    )
+    research_check_replay.add_argument("check_id")
+    research_check_replay.set_defaults(func=_cmd_research_check_replay)
+
     research_check_raw = research_check_sub.add_parser("raw", help="Check raw OHLCV conditions against forward outcomes.")
     add_research_check_base_args(research_check_raw)
     add_research_window_args(research_check_raw)
@@ -4470,8 +4651,19 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--no-golden", action="store_true")
     collect.add_argument("--require-golden", action="store_true")
     collect.set_defaults(func=_cmd_experiments_collect)
-    run_bot = experiments_sub.add_parser("run-bot", help="Start a bot run, optionally wait, and export the report.")
+    run_bot = experiments_sub.add_parser(
+        "run-bot",
+        help="Deprecated alias for start-bot followed by collect.",
+    )
     run_bot.add_argument("bot_id")
+    run_bot.add_argument(
+        "--dataset-id", required=True, help="Prepared immutable dataset identity."
+    )
+    run_bot.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable opt-in cProfile and process peak-RSS evidence for this backtest run.",
+    )
     run_bot.add_argument("--request-id")
     run_bot.add_argument("--baseline-run-id")
     run_bot.add_argument("--wait", action="store_true")

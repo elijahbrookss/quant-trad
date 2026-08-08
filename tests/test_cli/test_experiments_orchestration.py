@@ -246,6 +246,21 @@ def test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates(tmp_p
             return _Response(
                 b'{"schema_version":"run_report_comparison_summary.v1","left_run_id":"run-base","right_run_id":"run-candidate","comparison_status":"ready"}'
             )
+        if method == "POST" and path == "/api/research/comparisons/pass-gates/evaluate":
+            body = json.loads(request.data.decode("utf-8"))
+            summaries = {
+                (row["window_id"], row["variant_id"]): row["summary"]
+                for row in body["summaries"]
+            }
+            return _Response(
+                json.dumps(
+                    evaluate_pass_gates(
+                        plan=body["plan"],
+                        summaries=summaries,
+                        comparison_refs=body["comparison_refs"],
+                    )
+                ).encode("utf-8")
+            )
         raise AssertionError(f"unexpected API call: {method} {request.full_url}")
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -272,6 +287,7 @@ def test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates(tmp_p
     assert pass_result["status"] == "PASSED"
     assert event_path.exists()
     assert any(path.endswith("/api/reports/compare/summary") for _method, path in calls)
+    assert ("POST", "/api/research/comparisons/pass-gates/evaluate") in calls
     assert list((state_path.parent / "artifacts" / "reports").glob("**/*.zip"))
 
     events_code = main(["--log-root", str(tmp_path), "experiments", "events", "exp-1", "--tail", "2"])

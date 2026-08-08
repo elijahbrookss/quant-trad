@@ -7,11 +7,11 @@ from typing import Any
 
 from cli.api import ApiClient, ApiError, filename_from_content_disposition
 from cli.audit import safe_path_part, utc_now
+from cli.research_operations import ResearchOperations
 
 from .contracts import COMPARISON_REF_SCHEMA, TERMINAL_RUN_STATUSES, json_safe
 from .event_log import ExperimentEventLog
 from .notifications import notify_terminal_state
-from .pass_gates import evaluate_pass_gates
 from .state_store import ExperimentStateStore, experiment_id_for_name, find_experiment_dir
 
 
@@ -504,7 +504,22 @@ class ExperimentRunner:
             path = ref.get("path") if isinstance(ref, dict) else None
             if path and Path(path).exists():
                 summaries[key] = json.loads(Path(path).read_text(encoding="utf-8"))
-        result = evaluate_pass_gates(plan=plan, summaries=summaries, comparison_refs=list(state.get("comparison_refs") or []))
+        result = ResearchOperations(self.client).evaluate_pass_gates(
+            {
+                "plan": plan,
+                "summaries": [
+                    {
+                        "window_id": window_id,
+                        "variant_id": variant_id,
+                        "summary": summary,
+                    }
+                    for (window_id, variant_id), summary in sorted(
+                        summaries.items()
+                    )
+                ],
+                "comparison_refs": list(state.get("comparison_refs") or []),
+            }
+        )
         path = store.artifacts_dir / "summaries" / "pass_gate_result.json"
         _write_json(path, result)
         state["pass_gate_result_ref"] = str(path)

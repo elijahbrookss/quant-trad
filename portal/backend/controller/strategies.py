@@ -235,6 +235,18 @@ class StrategyCreateRequest(BaseModel):
     risk_config: Optional[Dict[str, Any]] = None
 
 
+class StrategyCloneRequest(BaseModel):
+    """Bounded clone request; source rules and variants remain service-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    instrument_slots: List[InstrumentSlotIn]
+    description: Optional[str] = None
+    datasource: Optional[str] = None
+    exchange: Optional[str] = None
+
+
 class StrategyUpdateRequest(BaseModel):
     """Payload for updating a strategy."""
 
@@ -467,6 +479,46 @@ def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
         return _build_strategy_definition(record)
     except Exception as exc:  # noqa: BLE001
         logger.exception("strategy_create_failed")
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/{strategy_id}/clone", status_code=201)
+def clone_strategy(
+    strategy_id: str, body: StrategyCloneRequest
+) -> Dict[str, Any]:
+    """Clone one Strategy through the Strategy application boundary."""
+
+    try:
+        payload = body.model_dump()
+        resolved_slots: list[dict[str, Any]] = []
+        for raw in payload.get("instrument_slots") or []:
+            slot_payload = _slot_payload(raw)
+            instrument = _resolve_slot_instrument(payload, slot_payload)
+            if instrument is not None:
+                metadata = dict(slot_payload.get("metadata") or {})
+                metadata["instrument_id"] = instrument.get("id")
+                metadata.setdefault("datasource", instrument.get("datasource"))
+                metadata.setdefault("exchange", instrument.get("exchange"))
+                slot_payload["metadata"] = metadata
+            resolved_slots.append(slot_payload)
+        if not resolved_slots:
+            raise ValueError("strategy clone requires at least one instrument slot")
+        cloned = strategy_service.clone_strategy(
+            strategy_id,
+            name=payload["name"],
+            symbols=resolved_slots,
+            description=payload.get("description"),
+            datasource=payload.get("datasource"),
+            exchange=payload.get("exchange"),
+        )
+        return {
+            **cloned,
+            "strategy": _build_strategy_definition(cloned["strategy"]),
+        }
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("strategy_clone_failed")
         raise HTTPException(400, str(exc)) from exc
 
 
