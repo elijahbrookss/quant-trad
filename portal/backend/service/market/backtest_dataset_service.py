@@ -35,7 +35,6 @@ from market_data.contracts import (
     OPEN_INTEREST_FACT_TYPE,
     OPEN_INTEREST_FACT_VERSION,
     FUNDING_RATE_FACT_TYPE,
-    FUNDING_RATE_FACT_VERSION,
     DatasetSeriesRequest,
     MarketDataRequirement,
     TypedFeatureRecord,
@@ -63,7 +62,7 @@ from market_data.requirements import (
     causal_numeric_fact_records,
     latest_known_record,
 )
-from market_data.store import FrozenDataset, MarketDataStore
+from market_data.store import MarketDataStore
 from strategies.compiler import compile_strategy
 
 from ..indicators.dependency_bindings import normalize_dependency_bindings
@@ -925,12 +924,16 @@ def validate_frozen_dataset_series(
             "backtest_dataset_snapshot_disagreement: "
             f"series_id={series_id} manifest_rows={entry['row_count']} loaded_rows={len(records)}"
         )
-    quality = store.list_gap_evidence(
-        series_id=series_id,
-        start=range_start,
-        end=range_end,
-        as_of_commit_seq=int(entry["max_commit_seq"]),
-    )
+    raw_quality = entry.get("quality_evidence")
+    if isinstance(raw_quality, list):
+        quality = [dict(row) for row in raw_quality]
+    elif build_quality_hash([]) == str(entry["quality_hash"]):
+        quality = []
+    else:
+        raise RuntimeError(
+            "backtest_dataset_quality_unpinned: Dataset predates exact quality "
+            f"materialization series_id={series_id}"
+        )
     if not records:
         raise RuntimeError(
             f"backtest_dataset_incomplete: series_id={series_id} contains no facts"

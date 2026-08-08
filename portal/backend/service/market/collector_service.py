@@ -349,6 +349,7 @@ class MarketDataCollectorService:
             return
         self.store.record_gap_evidence(
             series_id=claim.series_id,
+            source_id=claim.source_id,
             start=claim.missed_start,
             end=claim.scheduled_for,
             classification="collection_schedule_missed",
@@ -482,6 +483,7 @@ class MarketDataCollectorService:
             if exhausted:
                 self.store.record_gap_evidence(
                     series_id=claim.series_id,
+                    source_id=claim.source_id,
                     start=claim.scheduled_for,
                     end=claim.scheduled_for
                     + timedelta(seconds=claim.poll_interval_seconds),

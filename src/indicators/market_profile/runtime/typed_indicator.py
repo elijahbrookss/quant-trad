@@ -156,6 +156,7 @@ class TypedMarketProfileIndicator(Indicator):
                 "indicator_id": self._indicator_id,
                 "policy": normalized,
                 "action": "continued_degraded",
+                "gap_classification": str(gap.get("classification") or "unknown"),
                 "next_bar_time": next_bar_time.isoformat(),
             }
         if normalized != "reset_rewarm":
@@ -177,6 +178,7 @@ class TypedMarketProfileIndicator(Indicator):
             "indicator_id": self._indicator_id,
             "policy": normalized,
             "action": "reset_and_rewarm",
+            "gap_classification": str(gap.get("classification") or "unknown"),
             "rewarm_bars": self._gap_rewarm_remaining,
             "next_bar_time": next_bar_time.isoformat(),
         }

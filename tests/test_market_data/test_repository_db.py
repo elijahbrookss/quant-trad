@@ -74,13 +74,14 @@ def canonical_series() -> dict[str, int | str]:
             )
         )
 
+    source_identity = SourceIdentity(
+        provider="TEST",
+        venue="ISOLATED",
+        source_kind="fixture",
+        adapter_version=f"dataset-db-test.{token}",
+    )
     source_id = market_data_repo.register_source(
-        SourceIdentity(
-            provider="TEST",
-            venue="ISOLATED",
-            source_kind="fixture",
-            adapter_version=f"dataset-db-test.{token}",
-        ),
+        source_identity,
         lineage={"fixture": "tests/test_market_data/test_repository_db.py"},
     )
     series_id = market_data_repo.register_series(
@@ -92,6 +93,7 @@ def canonical_series() -> dict[str, int | str]:
     return {
         "instrument_id": instrument_id,
         "source_id": source_id,
+        "source_identity_key": source_identity.identity_key,
         "series_id": series_id,
     }
 
@@ -185,6 +187,57 @@ def test_frozen_dataset_cannot_observe_post_freeze_correction(
             series_id=series_id,
             start=_BASE - timedelta(hours=1),
         )
+
+
+def test_frozen_source_binding_filters_before_latest_revision_selection(
+    canonical_series: dict[str, int | str],
+) -> None:
+    series_id = int(canonical_series["series_id"])
+    first_source_id = int(canonical_series["source_id"])
+    first_source_identity_key = str(canonical_series["source_identity_key"])
+    original = _fact(0, close=101.0)
+    market_data_repo.ingest_candles(
+        series_id=series_id,
+        source_id=first_source_id,
+        facts=[original],
+        request={"fixture": "source-filter-before-revision"},
+        source_revision="source-a-v1",
+    )
+    second_source_id = market_data_repo.register_source(
+        SourceIdentity(
+            provider="TEST_B",
+            venue="ISOLATED",
+            source_kind="fixture",
+            adapter_version=f"source-filter.{uuid.uuid4().hex}",
+        ),
+        lineage={"fixture": "source-filter-before-revision"},
+    )
+    market_data_repo.ingest_candles(
+        series_id=series_id,
+        source_id=second_source_id,
+        facts=[_fact(0, close=202.0)],
+        request={"fixture": "source-filter-before-revision"},
+        source_revision="source-b-v2",
+    )
+    frozen = market_data_repo.freeze_dataset(
+        [
+            DatasetSeriesRequest(
+                series_id=series_id,
+                start=_BASE,
+                end=_BASE + timedelta(hours=1),
+            )
+        ]
+    )
+
+    replay = market_data_repo.read_dataset_series(
+        dataset_id=frozen.dataset_id,
+        series_id=series_id,
+        source_identity_keys=(first_source_identity_key,),
+    )
+
+    assert len(replay) == 1
+    assert replay[0].source_identity_key == first_source_identity_key
+    assert replay[0].fact.close == Decimal("101.0")
 
 
 def test_mixed_fact_freeze_uses_one_commit_clock_and_preserves_oi_revision(

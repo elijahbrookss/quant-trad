@@ -75,7 +75,15 @@ class FakeStore:
         ]
 
     def read_dataset_series(self, **kwargs):
-        return list(self.records)
+        allowed = {
+            str(value)
+            for value in kwargs.get("source_identity_keys") or ()
+        }
+        return [
+            record
+            for record in self.records
+            if not allowed or record.source_identity_key in allowed
+        ]
 
     def record_gap_evidence(self, **kwargs):
         self.gaps.append(kwargs)
@@ -147,6 +155,38 @@ def test_canonical_read_never_calls_provider_and_returns_source_facts_only(monke
     assert frame.attrs["market_data_series_id"] == 7
     assert frame.iloc[0]["provenance"] == {"legacy": True}
     assert frame.attrs["market_data_provenance"]["row_count"] == 1
+
+
+def test_frozen_candle_read_enforces_resolved_source_binding() -> None:
+    store = FakeStore()
+    allowed = store.source
+    other = SourceIdentity(
+        "OTHER", "OTHER_VENUE", "historical_api", "adapter.v1"
+    )
+    store.records = [
+        CandleRecord(
+            series_id=7,
+            revision=1,
+            market_commit_seq=index + 1,
+            ingestion_run_id="ingest-1",
+            source_identity_key=source.identity_key,
+            source=source,
+            provenance={},
+            fact=_fact(),
+        )
+        for index, source in enumerate((allowed, other))
+    ]
+
+    frame = feed_service.CanonicalCandleFeed(store).read_dataset_series(
+        dataset_id="mds-1",
+        series_id=7,
+        instrument=_instrument(),
+        interval="1m",
+        source_identity_keys=(allowed.identity_key,),
+    )
+
+    assert len(frame) == 1
+    assert frame.iloc[0]["source_identity_key"] == allowed.identity_key
 
 
 def test_historical_acquisition_is_explicit_and_persists_closed_facts(monkeypatch) -> None:

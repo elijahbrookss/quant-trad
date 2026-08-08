@@ -8,6 +8,7 @@ from market_data.frozen import (
     FROZEN_MARKET_DATA_READ_BINDING_VERSION,
     bound_frozen_series_for_request,
     build_frozen_market_data_read_binding,
+    frozen_subject_snapshot_hash,
     normalize_frozen_market_data_read_binding,
 )
 
@@ -50,7 +51,14 @@ def _binding(**changes) -> dict:
         "subjects": [
             {
                 "instrument_id": "instrument-1",
-                "snapshot_hash": "subject-hash",
+                "snapshot_hash": frozen_subject_snapshot_hash(
+                    {
+                        "id": "instrument-1",
+                        "symbol": "ETH-USD",
+                        "datasource": "provider-a",
+                        "exchange": "venue-a",
+                    }
+                ),
                 "snapshot": {
                     "id": "instrument-1",
                     "symbol": "ETH-USD",
@@ -132,4 +140,26 @@ def test_frozen_binding_rejects_provider_transport_and_hash_substitution() -> No
     with pytest.raises(ValueError, match="binding hash disagreement"):
         normalize_frozen_market_data_read_binding(
             {**binding, "quality": {"status": "changed"}}
+        )
+
+
+def test_frozen_binding_requires_exact_hashed_subject_coverage() -> None:
+    binding = _binding()
+
+    with pytest.raises(ValueError, match="snapshot hash disagreement"):
+        build_frozen_market_data_read_binding(
+            dataset_id=binding["dataset_id"],
+            dataset_hash=binding["dataset_hash"],
+            max_commit_seq=binding["max_commit_seq"],
+            series=binding["series"],
+            subjects=[{**binding["subjects"][0], "snapshot_hash": "substituted"}],
+        )
+
+    with pytest.raises(ValueError, match="exactly cover resolved series"):
+        build_frozen_market_data_read_binding(
+            dataset_id=binding["dataset_id"],
+            dataset_hash=binding["dataset_hash"],
+            max_commit_seq=binding["max_commit_seq"],
+            series=binding["series"],
+            subjects=[],
         )

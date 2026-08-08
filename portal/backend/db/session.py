@@ -77,6 +77,12 @@ _NUMERIC_FACT_REQUIRED_INDEXES = frozenset(
 _NUMERIC_COVERAGE_REQUIRED_INDEXES = frozenset(
     {"ix_market_fact_acquisition_coverage_lookup"}
 )
+_COLUMN_MIGRATION_GUIDANCE = {
+    ("market", "gap_evidence", "source_id"):
+        "scripts/db/manual_migration_gap_source_identity_v1.sql",
+    ("market", "dataset_series", "quality_evidence"):
+        "scripts/db/manual_migration_dataset_quality_evidence_v1.sql",
+}
 _NUMERIC_FACT_REQUIRED_CONSTRAINTS = frozenset(
     {
         "ck_market_numeric_fact_revision_positive",
@@ -645,6 +651,24 @@ class Database:
                 table.name,
                 ",".join(missing),
             )
+            migrations = sorted(
+                {
+                    migration
+                    for column in missing
+                    if (
+                        migration := _COLUMN_MIGRATION_GUIDANCE.get(
+                            (schema_name, table.name, column)
+                        )
+                    )
+                }
+            )
+            if migrations:
+                raise RuntimeError(
+                    f"Table '{schema_name + '.' if schema_name else ''}{table.name}' "
+                    f"is missing columns: {', '.join(missing)}. Run "
+                    f"{', then '.join(migrations)} with writers stopped before "
+                    "starting this code."
+                )
             raise RuntimeError(
                 f"Table '{schema_name + '.' if schema_name else ''}{table.name}' is missing columns: {', '.join(missing)}. "
                 "Drop the table or rebuild the database to ensure a clean schema."

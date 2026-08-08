@@ -165,6 +165,8 @@ def fetch_ohlcv_by_instrument(
     start: str,
     end: str,
     interval: str,
+    *,
+    frozen_alias: str | None = None,
 ) -> pd.DataFrame:
     """Read one canonical instrument series without provider/API fallback."""
 
@@ -198,6 +200,7 @@ def fetch_ohlcv_by_instrument(
             end=end,
             fact_type=CANDLE_FACT_TYPE,
             contract_version=CANDLE_FACT_VERSION,
+            alias=frozen_alias,
         )
         frame = canonical_candle_feed.read_dataset_series(
             dataset_id=scope.dataset_id,
@@ -207,6 +210,12 @@ def fetch_ohlcv_by_instrument(
             start=start,
             end=end,
             quality=list(entry.get("quality_evidence") or []),
+            source_identity_keys=list(
+                (entry.get("source_binding") or {}).get(
+                    "resolved_source_identity_keys"
+                )
+                or []
+            ),
         )
     enriched = _with_runtime_candle_features(frame)
     if isinstance(scope, MarketDataReadScope):
@@ -388,6 +397,7 @@ def fetch_ohlcv_for_context(
     *,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
+    frozen_alias: str | None = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV through the canonical candle service using an indicator/runtime data context."""
 
@@ -397,6 +407,7 @@ def fetch_ohlcv_for_context(
             str(ctx.start),
             str(ctx.end),
             str(ctx.interval),
+            frozen_alias=frozen_alias,
         )
     return fetch_ohlcv(
         str(ctx.symbol),

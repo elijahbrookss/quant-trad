@@ -39,10 +39,11 @@ def test_runtime_indicator_source_fetch_uses_canonical_candle_service(monkeypatc
     source_frame = SimpleNamespace(empty=False, rows=12)
     captured = {}
 
-    def fake_fetch(ctx, *, datasource=None, exchange=None):
+    def fake_fetch(ctx, *, datasource=None, exchange=None, frozen_alias=None):
         captured["ctx"] = ctx
         captured["datasource"] = datasource
         captured["exchange"] = exchange
+        captured["frozen_alias"] = frozen_alias
         return source_frame
 
     def fake_builder(**kwargs):
@@ -78,6 +79,7 @@ def test_runtime_indicator_source_fetch_uses_canonical_candle_service(monkeypatc
     assert captured["ctx"].interval == "30m"
     assert captured["datasource"] == "COINBASE"
     assert captured["exchange"] == "coinbase_direct"
+    assert captured["frozen_alias"] == "indicator:indicator-1:primary_bars"
     assert captured["builder_kwargs"]["source_facts"] == {
         "source_rows": 12,
         "timeframe": "1h",
@@ -91,9 +93,9 @@ def test_runtime_indicator_source_fetch_uses_explicit_source_frame_cache(monkeyp
     cache = {}
     stats = {}
 
-    def fake_fetch(ctx, *, datasource=None, exchange=None):
+    def fake_fetch(ctx, *, datasource=None, exchange=None, frozen_alias=None):
         nonlocal fetch_count
-        _ = ctx, datasource, exchange
+        _ = ctx, datasource, exchange, frozen_alias
         fetch_count += 1
         return source_frame
 

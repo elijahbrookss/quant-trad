@@ -45,6 +45,8 @@ def validate_dependency_bindings(
     bindings: Any,
     ctx: Any,
     indicator_id: Optional[str] = None,
+    preloaded_metas: Mapping[str, Mapping[str, Any]] | None = None,
+    require_preloaded_metas: bool = False,
 ) -> List[Dict[str, str]]:
     expected = list(manifest.dependencies)
     normalized = normalize_dependency_bindings(bindings)
@@ -78,10 +80,14 @@ def validate_dependency_bindings(
             raise ValueError(
                 f"{manifest.type} indicator cannot depend on itself: {target_indicator_id}"
             )
-        record = ctx.repository.get(target_indicator_id)
+        record = dict((preloaded_metas or {}).get(target_indicator_id) or {})
+        if not record and not require_preloaded_metas:
+            record = ctx.repository.get(target_indicator_id)
         if not record:
             raise ValueError(
-                f"{manifest.type} indicator dependency not found: {target_indicator_id}"
+                f"{manifest.type} indicator dependency not found in "
+                f"{'pinned graph' if require_preloaded_metas else 'repository'}: "
+                f"{target_indicator_id}"
             )
         target_type = str(record.get("type") or "").strip()
         if target_type != str(dependency.indicator_type or "").strip():

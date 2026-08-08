@@ -224,6 +224,7 @@ class Indicator(ABC):
                 "indicator_id": self.runtime_spec.instance_id,
                 "policy": normalized,
                 "action": "continued_degraded",
+                "gap_classification": str(gap.get("classification") or "unknown"),
                 "next_bar_time": next_bar_time.isoformat(),
             }
         if normalized == "reset_rewarm":
@@ -511,22 +512,32 @@ def _validate_lifecycle_output(output_name: str, value: Mapping[str, Any]) -> No
                 "indicator_output_invalid: lifecycle event keys invalid "
                 f"output={output_name} index={index} keys={unexpected}"
             )
-        for field in required_text:
-            _require_lifecycle_text(event.get(field), output_name=output_name, index=index, field=field)
-        for field in optional_text:
-            value_for_field = event.get(field)
+        for field_name in required_text:
+            _require_lifecycle_text(
+                event.get(field_name),
+                output_name=output_name,
+                index=index,
+                field=field_name,
+            )
+        for field_name in optional_text:
+            value_for_field = event.get(field_name)
             if value_for_field is not None:
-                _require_lifecycle_text(value_for_field, output_name=output_name, index=index, field=field)
+                _require_lifecycle_text(
+                    value_for_field,
+                    output_name=output_name,
+                    index=index,
+                    field=field_name,
+                )
         if event.get("known_at") is None or str(event.get("known_at")).strip() == "":
             raise RuntimeError(
                 f"indicator_output_invalid: lifecycle known_at required output={output_name} index={index}"
             )
-        for field in ("reference", "metrics", "thresholds"):
-            value_for_field = event.get(field)
+        for field_name in ("reference", "metrics", "thresholds"):
+            value_for_field = event.get(field_name)
             if value_for_field is not None and not isinstance(value_for_field, Mapping):
                 raise RuntimeError(
                     "indicator_output_invalid: lifecycle field must be mapping "
-                    f"output={output_name} index={index} field={field}"
+                    f"output={output_name} index={index} field={field_name}"
                 )
 
 

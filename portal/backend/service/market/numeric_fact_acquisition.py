@@ -400,6 +400,7 @@ class NumericFactAcquisitionService:
                 gap_end = gap.start + timedelta(microseconds=1)
             self.store.record_gap_evidence(
                 series_id=series_id,
+                source_id=source_id,
                 start=gap.start,
                 end=gap_end,
                 classification=gap.classification,
@@ -563,6 +564,7 @@ class NumericFactAcquisitionService:
                 }
                 self.store.record_gap_evidence(
                     series_id=series_id,
+                    source_id=source_id,
                     start=range_start,
                     end=range_end,
                     classification="numeric_provider_acquisition_failed",

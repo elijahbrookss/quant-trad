@@ -330,7 +330,6 @@ class TypedCandleStatsIndicator(Indicator):
         body = abs(float(bar.close) - float(bar.open))
         upper_wick = max(float(bar.high) - max(float(bar.open), float(bar.close)), 0.0)
         lower_wick = max(min(float(bar.open), float(bar.close)) - float(bar.low), 0.0)
-        recent_atr_short = list(self._atr_short_history[-self._atr_z_window:])
         recent_closes = [
             float(item.close)
             for item in self._bars[-(self._directional_efficiency_window + 1):]
@@ -388,7 +387,7 @@ class TypedCandleStatsIndicator(Indicator):
             {
                 "key": "atr_expansion_long",
                 "direction": "long",
-                "known_at": int(bar.time.timestamp()),
+                "known_at": int((bar.known_at or bar.end_time).timestamp()),
                 "metadata": {
                     "signal_style": "threshold_cross",
                     "trigger_price": float(bar.close),

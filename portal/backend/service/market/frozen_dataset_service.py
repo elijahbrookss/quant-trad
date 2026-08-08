@@ -11,9 +11,14 @@ from market_data.contracts import (
     DatasetSeriesRequest,
     build_dataset_identity_hash,
 )
+from market_data.acquisition_coverage import (
+    missing_complete_coverage,
+    normalize_acquisition_coverage,
+)
 from market_data.fact_registry import get_fact_contract
 from market_data.frozen import (
     build_frozen_market_data_read_binding,
+    frozen_subject_snapshot_hash,
     semantic_hash,
 )
 from market_data.store import MarketDataStore
@@ -74,6 +79,19 @@ def _series_matches(entry: Mapping[str, Any], requirement: Mapping[str, Any]) ->
         )
         and dict(entry.get("dimensions") or {}) == dimensions
     )
+
+
+def _listed_series(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize repository and test-double series identity projections."""
+
+    normalized = dict(entry)
+    raw_id = normalized.get("series_id") or normalized.get("id")
+    if raw_id in (None, ""):
+        raise ValueError(
+            "frozen_dataset_preparation_invalid: listed series has no identity"
+        )
+    normalized["series_id"] = int(raw_id)
+    return normalized
 
 
 def _source_matches(details: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
@@ -142,6 +160,24 @@ def matching_source_identity_keys(
     raise ValueError(
         "frozen_dataset_preparation_invalid: source policy must be exact or allowlist"
     )
+
+
+def _requested_source_identity_keys(policy: Mapping[str, Any]) -> tuple[str, ...]:
+    mode = str(policy.get("mode") or "").strip().lower()
+    if mode == "exact":
+        key = str(policy.get("source_identity_key") or "").strip()
+        return (key,) if key else ()
+    if mode == "allowlist":
+        return tuple(
+            sorted(
+                {
+                    str(value).strip()
+                    for value in policy.get("source_identity_keys") or []
+                    if str(value).strip()
+                }
+            )
+        )
+    return ()
 
 
 def project_frozen_dataset(dataset: Any) -> dict[str, Any]:
@@ -262,7 +298,7 @@ def prepare_frozen_dataset_from_requirements(
         end = _utc(requirement.get("required_end"), field=f"{alias}.required_end")
         policy = dict(requirement.get("source_policy") or {})
         candidates = [
-            dict(row)
+            _listed_series(row)
             for row in store.list_series(
                 instrument_id=str(requirement.get("instrument_id") or "")
             )
@@ -277,18 +313,31 @@ def prepare_frozen_dataset_from_requirements(
             ]
         matches: list[dict[str, Any]] = []
         for candidate in candidates:
+            requested_source_keys = _requested_source_identity_keys(policy)
             records = list(
                 store.read_series_records(
                     series_id=int(candidate["series_id"]),
                     start=start,
                     end=end,
                     as_of_commit_seq=watermark,
+                    source_identity_keys=requested_source_keys,
                 )
             )
             if not records:
                 continue
             source_keys = matching_source_identity_keys(records, policy)
             if source_keys:
+                source_bound_records = list(
+                    store.read_series_records(
+                        series_id=int(candidate["series_id"]),
+                        start=start,
+                        end=end,
+                        as_of_commit_seq=watermark,
+                        source_identity_keys=tuple(source_keys),
+                    )
+                )
+                if not source_bound_records:
+                    continue
                 matches.append(
                     {
                         "series_id": int(candidate["series_id"]),
@@ -296,7 +345,7 @@ def prepare_frozen_dataset_from_requirements(
                         "required_start": _iso(start),
                         "required_end": _iso(end),
                         "resolved_source_identity_keys": source_keys,
-                        "record_count_at_watermark": len(records),
+                        "record_count_at_watermark": len(source_bound_records),
                     }
                 )
         if len(matches) != 1:
@@ -447,17 +496,63 @@ def resolve_frozen_dataset_read_binding(
                 allow_any_recorded_gap=True,
             )
             verified_by_series[series_id] = verified
+        pinned_quality = [
+            dict(row)
+            for row in verified_by_series[series_id].get("quality_evidence") or []
+        ]
+        alias_quality = [
+            row
+            for row in pinned_quality
+            if row.get("start") is not None
+            and row.get("end") is not None
+            and _utc(row["end"], field="quality.end") > required_start
+            and _utc(row["start"], field="quality.start") < required_end
+        ]
+        allowed_gap_sources = {
+            str(value)
+            for value in source_binding["resolved_source_identity_keys"]
+        }
+        alias_quality = [
+            row
+            for row in alias_quality
+            if str(row.get("source_identity_key") or "").strip()
+            in allowed_gap_sources
+        ]
+        acquisition_coverage: list[dict[str, Any]] = []
+        fact_contract = get_fact_contract(str(entry["fact_type"]))
+        if fact_contract.uses_exact_numeric_storage:
+            acquisition_coverage = normalize_acquisition_coverage(
+                store.list_source_acquisition_coverage(
+                    series_id=series_id,
+                    source_identity_keys=tuple(sorted(allowed_gap_sources)),
+                    start=required_start,
+                    end=required_end,
+                    created_at_lte=getattr(dataset, "created_at", None),
+                )
+            )
+            uncovered = missing_complete_coverage(
+                start=required_start,
+                end=required_end,
+                source_identity_keys=tuple(sorted(allowed_gap_sources)),
+                coverage=acquisition_coverage,
+            )
+            if uncovered:
+                raise ValueError(
+                    "frozen_dataset_acquisition_coverage_missing: "
+                    f"alias={alias} ranges={uncovered}"
+                )
         selected = {
             **verified_by_series[series_id],
             "alias": alias,
             "source_binding": source_binding,
             "requirement": requirement,
+            "quality_evidence": pinned_quality,
+            "recorded_gaps": alias_quality,
+            "acquisition_coverage": acquisition_coverage,
         }
         selected_series.append(selected)
         instrument_ids.add(str(entry["instrument_id"]))
-        for quality in selected.get("quality_evidence") or []:
-            if quality.get("start") is None or quality.get("end") is None:
-                continue
+        for quality in selected.get("recorded_gaps") or []:
             recorded_gaps.append(
                 {
                     "alias": alias,
@@ -472,13 +567,7 @@ def resolve_frozen_dataset_read_binding(
         subjects.append(
             {
                 "instrument_id": instrument_id,
-                "snapshot_hash": semantic_hash(
-                    {
-                        key: value
-                        for key, value in snapshot.items()
-                        if key not in {"created_at", "updated_at"}
-                    }
-                ),
+                "snapshot_hash": frozen_subject_snapshot_hash(snapshot),
                 "snapshot": snapshot,
             }
         )
@@ -490,6 +579,10 @@ def resolve_frozen_dataset_read_binding(
                 "series_id": int(row["series_id"]),
                 "quality_hash": row["quality_hash"],
                 "quality_summary": dict(row.get("quality_summary") or {}),
+                "acquisition_coverage_hashes": [
+                    str(coverage["identity_key"])
+                    for coverage in row.get("acquisition_coverage") or []
+                ],
             }
             for row in selected_series
         ],

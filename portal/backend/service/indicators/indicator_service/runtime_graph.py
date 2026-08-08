@@ -78,6 +78,7 @@ def _runtime_data_request_cache_key(
     *,
     datasource: Optional[str],
     exchange: Optional[str],
+    frozen_alias: Optional[str] = None,
 ) -> tuple[str, ...]:
     return (
         str(getattr(data_request, "instrument_id", "") or ""),
@@ -87,6 +88,7 @@ def _runtime_data_request_cache_key(
         str(getattr(data_request, "interval", "") or ""),
         str(datasource or ""),
         str(exchange or ""),
+        str(frozen_alias or ""),
     )
 
 
@@ -141,6 +143,7 @@ def build_runtime_indicator_instance(
                 data_request,
                 datasource=datasource_text,
                 exchange=exchange_text,
+                frozen_alias=f"indicator:{indicator_id}:primary_bars",
             )
             if source_frame_cache is not None and cache_key in source_frame_cache:
                 if source_frame_cache_stats is not None:
@@ -157,6 +160,7 @@ def build_runtime_indicator_instance(
                     data_request,
                     datasource=datasource_text,
                     exchange=exchange_text,
+                    frozen_alias=f"indicator:{indicator_id}:primary_bars",
                 )
                 if source_frame_cache is not None:
                     source_frame_cache[cache_key] = source_frame
@@ -224,6 +228,7 @@ def collect_runtime_indicator_metas(
     *,
     ctx: IndicatorServiceContext = _context,
     preloaded_metas: Mapping[str, Mapping[str, Any]] | None = None,
+    require_preloaded_metas: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     resolved: Dict[str, Dict[str, Any]] = {}
     visiting: set[str] = set()
@@ -244,10 +249,16 @@ def collect_runtime_indicator_metas(
                 f"indicator_runtime_graph_invalid: dependency cycle at indicator_id={normalized_id}"
             )
         visiting.add(normalized_id)
-        meta = dict(
-            available.get(normalized_id)
-            or build_meta_from_record(load_indicator_record(normalized_id, ctx=ctx), ctx=ctx)
-        )
+        meta = dict(available.get(normalized_id) or {})
+        if not meta and not require_preloaded_metas:
+            meta = build_meta_from_record(
+                load_indicator_record(normalized_id, ctx=ctx), ctx=ctx
+            )
+        if not meta:
+            raise RuntimeError(
+                "indicator_runtime_graph_invalid: Indicator missing from pinned graph "
+                f"indicator_id={normalized_id}"
+            )
         if not bool(meta.get("runtime_supported")):
             raise RuntimeError(f"Indicator is not runtime-supported: {normalized_id}")
         indicator_type = str(meta.get("type") or "").strip()
@@ -257,6 +268,8 @@ def collect_runtime_indicator_metas(
             bindings=meta.get("dependencies"),
             ctx=ctx,
             indicator_id=normalized_id,
+            preloaded_metas=available,
+            require_preloaded_metas=require_preloaded_metas,
         )
         meta["dependencies"] = resolved_dependencies
         for dependency in resolved_dependencies:
@@ -275,6 +288,7 @@ def build_runtime_indicator_graph(
     execution_context: IndicatorExecutionContext,
     ctx: IndicatorServiceContext = _context,
     preloaded_metas: Mapping[str, Mapping[str, Any]] | None = None,
+    require_preloaded_metas: bool = False,
     source_frame_cache: MutableMapping[tuple[str, ...], Any] | None = None,
     source_frame_cache_stats: MutableMapping[str, int] | None = None,
 ) -> tuple[Dict[str, Dict[str, Any]], list[Any]]:
@@ -282,6 +296,7 @@ def build_runtime_indicator_graph(
         indicator_ids,
         ctx=ctx,
         preloaded_metas=preloaded_metas,
+        require_preloaded_metas=require_preloaded_metas,
     )
     indicators = [
         build_runtime_indicator_instance(

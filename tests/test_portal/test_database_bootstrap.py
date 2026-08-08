@@ -389,6 +389,45 @@ def test_bootstrap_fails_loud_on_existing_column_drift_before_index_repair(monke
     assert created_indexes == []
 
 
+@pytest.mark.parametrize(
+    ("table", "column", "migration"),
+    [
+        (
+            "gap_evidence",
+            "source_id",
+            "scripts/db/manual_migration_gap_source_identity_v1.sql",
+        ),
+        (
+            "dataset_series",
+            "quality_evidence",
+            "scripts/db/manual_migration_dataset_quality_evidence_v1.sql",
+        ),
+    ],
+)
+def test_bootstrap_names_preserving_market_data_column_migration(
+    monkeypatch,
+    table: str,
+    column: str,
+    migration: str,
+) -> None:
+    inspector = _Inspector(
+        schemas={"public", "market", "observability_events", "observability_metrics"},
+        tables=[_table_key(candidate) for candidate in Base.metadata.sorted_tables],
+        missing_columns={("market", table): {column}},
+    )
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        database._bootstrap_schema_contract()
+
+    message = str(exc_info.value)
+    assert migration in message
+    assert "writers stopped" in message
+    assert not any(
+        isinstance(statement, CreateIndex) for statement in connection.executed
+    )
+
+
 def test_bootstrap_fails_loud_when_async_fencing_constraint_is_missing(
     monkeypatch,
 ) -> None:

@@ -89,6 +89,18 @@ def semantic_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def frozen_subject_snapshot_hash(snapshot: Mapping[str, Any]) -> str:
+    """Hash immutable subject material carried by a frozen read binding."""
+
+    return semantic_hash(
+        {
+            key: value
+            for key, value in snapshot.items()
+            if key not in {"created_at", "updated_at"}
+        }
+    )
+
+
 def _normalized_source_binding(raw: Mapping[str, Any], *, series_id: int) -> dict[str, Any]:
     supplied = raw.get("source_binding")
     if supplied is not None and not isinstance(supplied, Mapping):
@@ -317,11 +329,41 @@ def normalize_frozen_market_data_read_binding(
             )
         seen_subjects.add(instrument_id)
         subject["instrument_id"] = instrument_id
+        snapshot = subject.get("snapshot")
+        if not isinstance(snapshot, Mapping):
+            raise ValueError(
+                "frozen_market_data_read_binding_invalid: subject snapshot is required"
+            )
+        snapshot_instrument_id = str(
+            snapshot.get("instrument_id") or snapshot.get("id") or ""
+        ).strip()
+        if snapshot_instrument_id != instrument_id:
+            raise ValueError(
+                "frozen_market_data_read_binding_invalid: subject snapshot identity differs"
+            )
+        supplied_snapshot_hash = str(subject.get("snapshot_hash") or "").strip()
+        subject_schema_version = str(subject.get("schema_version") or "").strip()
+        calculated_snapshot_hash = (
+            semantic_hash(
+                {
+                    "schema_version": subject_schema_version,
+                    "instrument_id": instrument_id,
+                    "snapshot": dict(snapshot),
+                }
+            )
+            if subject_schema_version
+            else frozen_subject_snapshot_hash(snapshot)
+        )
+        if supplied_snapshot_hash != calculated_snapshot_hash:
+            raise ValueError(
+                "frozen_market_data_read_binding_invalid: subject snapshot hash disagreement"
+            )
+        subject["snapshot_hash"] = calculated_snapshot_hash
         subjects.append(subject)
     series_instrument_ids = {str(row["instrument_id"]) for row in series}
-    if seen_subjects and not seen_subjects.issubset(series_instrument_ids):
+    if seen_subjects != series_instrument_ids:
         raise ValueError(
-            "frozen_market_data_read_binding_invalid: subjects are missing resolved series"
+            "frozen_market_data_read_binding_invalid: subjects must exactly cover resolved series"
         )
     normalized = {
         **dict(payload),
@@ -498,6 +540,7 @@ __all__ = [
     "bound_frozen_subject_for_symbol",
     "bound_frozen_series_for_request",
     "build_frozen_market_data_read_binding",
+    "frozen_subject_snapshot_hash",
     "normalize_frozen_market_data_read_binding",
     "semantic_hash",
 ]

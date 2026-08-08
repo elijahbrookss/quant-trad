@@ -71,7 +71,7 @@ class RuntimeMarketDataResolver:
             if isinstance(bindings.get("benchmarks"), Mapping)
             else {}
         )
-        self._frozen_records: dict[int, tuple[Any, ...]] = {}
+        self._frozen_records: dict[tuple[int, tuple[str, ...]], tuple[Any, ...]] = {}
         self._frozen_numeric_revisions: dict[int, tuple[Any, ...]] = {}
         self.as_of_commit_seq = (
             int(as_of_commit_seq) if as_of_commit_seq is not None else None
@@ -115,6 +115,43 @@ class RuntimeMarketDataResolver:
             required_fields=tuple(raw.get("required_fields") or ()),
             lookback_bars=raw.get("lookback_bars"),
             lookback_seconds=raw.get("lookback_seconds"),
+        )
+
+    @staticmethod
+    def _preview_source_identity_keys(raw: Mapping[str, Any]) -> tuple[str, ...]:
+        policy = raw.get("source_policy")
+        if policy in (None, ""):
+            return ()
+        if not isinstance(policy, Mapping):
+            raise ValueError("runtime_market_data_invalid: source_policy must be an object")
+        mode = str(policy.get("mode") or "current").strip().lower()
+        if mode == "current":
+            return ()
+        if mode == "exact":
+            key = str(policy.get("source_identity_key") or "").strip()
+            if not key:
+                raise ValueError(
+                    "runtime_market_data_invalid: exact preview source requires "
+                    "source_identity_key"
+                )
+            return (key,)
+        if mode == "allowlist":
+            keys = tuple(
+                sorted(
+                    {
+                        str(value).strip()
+                        for value in policy.get("source_identity_keys") or []
+                        if str(value).strip()
+                    }
+                )
+            )
+            if not keys:
+                raise ValueError(
+                    "runtime_market_data_invalid: preview source allowlist is empty"
+                )
+            return keys
+        raise ValueError(
+            f"runtime_market_data_invalid: unsupported preview source policy {mode}"
         )
 
     @staticmethod
@@ -293,6 +330,17 @@ class RuntimeMarketDataResolver:
     ) -> tuple[Any, ...]:
         series_id = int(series["series_id"])
         contract = get_fact_contract(requirement.fact_type)
+        source_binding = series.get("source_binding")
+        allowed_sources = {
+            str(value)
+            for value in (
+                source_binding.get("resolved_source_identity_keys")
+                if isinstance(source_binding, Mapping)
+                else []
+            )
+            or []
+            if str(value).strip()
+        }
         if contract.uses_exact_numeric_storage:
             if series_id not in self._frozen_numeric_revisions:
                 self._frozen_numeric_revisions[series_id] = tuple(
@@ -313,27 +361,23 @@ class RuntimeMarketDataResolver:
                 if record.fact.known_at <= evaluation_time
             )
         else:
-            if series_id not in self._frozen_records:
-                self._frozen_records[series_id] = tuple(
+            frozen_key = (series_id, tuple(sorted(allowed_sources)))
+            if frozen_key not in self._frozen_records:
+                self._frozen_records[frozen_key] = tuple(
                     self.store.read_dataset_series(
                         dataset_id=str(self.dataset_binding["dataset_id"]),
                         series_id=series_id,
+                        source_identity_keys=tuple(sorted(allowed_sources)),
                     )
                 )
-            records = self._frozen_records[series_id]
-        source_binding = series.get("source_binding")
-        if isinstance(source_binding, Mapping):
-            allowed_sources = {
-                str(value)
-                for value in source_binding.get("resolved_source_identity_keys") or []
-            }
-            if allowed_sources:
-                records = tuple(
-                    record
-                    for record in records
-                    if str(getattr(record, "source_identity_key", ""))
-                    in allowed_sources
-                )
+            records = self._frozen_records[frozen_key]
+        if allowed_sources:
+            records = tuple(
+                record
+                for record in records
+                if str(getattr(record, "source_identity_key", ""))
+                in allowed_sources
+            )
         return tuple(records)
 
     def causal_history(
@@ -354,6 +398,7 @@ class RuntimeMarketDataResolver:
         """
 
         declared = self._requirement(requirement)
+        preview_source_keys = self._preview_source_identity_keys(requirement)
         lower = self._utc(start)
         upper = self._utc(end)
         decision = self._utc(evaluation_time)
@@ -402,6 +447,7 @@ class RuntimeMarketDataResolver:
                         end=upper,
                         as_of_commit_seq=self.as_of_commit_seq,
                         known_at_lte=decision,
+                        source_identity_keys=preview_source_keys,
                     )
                 )
         else:
@@ -413,6 +459,11 @@ class RuntimeMarketDataResolver:
             for record in records
             if lower <= record_effective_time(record) < upper
             and record.fact.known_at <= decision
+            and (
+                not preview_source_keys
+                or str(getattr(record, "source_identity_key", ""))
+                in preview_source_keys
+            )
         )
 
     def _mutable_pinned_series(
@@ -422,6 +473,7 @@ class RuntimeMarketDataResolver:
         requirement: MarketDataRequirement,
         primary_instrument_id: str,
         evaluation_time: datetime,
+        source_identity_keys: Sequence[str] = (),
     ) -> Any:
         if self.as_of_commit_seq is None:
             raise RuntimeError("runtime_market_data_invalid: preview watermark is required")
@@ -481,7 +533,15 @@ class RuntimeMarketDataResolver:
                 end=evaluation_time + timedelta(microseconds=1),
                 as_of_commit_seq=self.as_of_commit_seq,
                 known_at_lte=evaluation_time,
+                source_identity_keys=source_identity_keys,
             )
+        if source_identity_keys:
+            records = [
+                record
+                for record in records
+                if str(getattr(record, "source_identity_key", ""))
+                in source_identity_keys
+            ]
         if requirement.alignment is MarketDataAlignment.EXACT_INTERVAL:
             interval_start = evaluation_time - timedelta(
                 seconds=int(requirement.timeframe_seconds or 0)
@@ -558,6 +618,7 @@ class RuntimeMarketDataResolver:
             values: dict[str, Any] = {}
             for raw in declarations:
                 requirement = self._requirement(raw)
+                preview_source_keys = self._preview_source_identity_keys(raw)
                 if requirement.fact_type == CANDLE_FACT_TYPE:
                     continue
                 if self.dataset_binding is not None:
@@ -574,6 +635,7 @@ class RuntimeMarketDataResolver:
                         requirement=requirement,
                         primary_instrument_id=primary_id,
                         evaluation_time=decision_time,
+                        source_identity_keys=preview_source_keys,
                     )
                     continue
                 if requirement.fact_type not in {

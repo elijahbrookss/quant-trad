@@ -42,6 +42,7 @@ class FrozenDataset:
     name: Optional[str] = None
     purpose: str = "research"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    created_at: Optional[datetime] = field(default=None, compare=False)
     reused_existing: bool = field(default=False, compare=False)
 
 
@@ -108,6 +109,7 @@ class MarketDataStore(Protocol):
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[CandleRecord]:
         ...
 
@@ -208,6 +210,7 @@ class MarketDataStore(Protocol):
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[MarketDataRecord]:
         ...
 
@@ -216,6 +219,17 @@ class MarketDataStore(Protocol):
         ...
 
     def list_gap_evidence(self, **kwargs: Any) -> list[Mapping[str, Any]]:
+        ...
+
+    def list_source_acquisition_coverage(
+        self,
+        *,
+        series_id: int,
+        source_identity_keys: Sequence[str],
+        start: datetime,
+        end: datetime,
+        created_at_lte: Optional[datetime] = None,
+    ) -> list[Mapping[str, Any]]:
         ...
 
     def freeze_dataset(
@@ -237,6 +251,8 @@ class MarketDataStore(Protocol):
         known_at_lte: Optional[datetime] = None,
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+        causal_at_interval_close: bool = False,
     ) -> list[MarketDataRecord]:
         ...
 

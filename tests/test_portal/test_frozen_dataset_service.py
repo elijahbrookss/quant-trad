@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from market_data.contracts import build_dataset_identity_hash
+from market_data.frozen import semantic_hash
 from market_data.store import FrozenDataset
 from portal.backend.service.market import frozen_dataset_service
 
@@ -53,6 +56,50 @@ class _Store:
         assert dataset_id == self.dataset.dataset_id
         return self.dataset
 
+    def list_gap_evidence(self, **_kwargs):
+        return [
+            {
+                "classification": "provider_missing_data",
+                "start": "2026-01-10T00:00:00Z",
+                "end": "2026-01-10T01:00:00Z",
+                "source_identity_key": "source-a",
+            }
+        ]
+
+    def list_source_acquisition_coverage(self, **kwargs):
+        rows = []
+        for index, source_key in enumerate(kwargs["source_identity_keys"], start=1):
+            material = {
+                "schema_version": "market.fact_acquisition_coverage.v1",
+                "series_id": int(kwargs["series_id"]),
+                "source_id": index,
+                "binding_id": f"binding-{index}",
+                "manifest_hash": "a" * 64,
+                "interface_version": "test.v1",
+                "confirmation_depth": 12,
+                "range_start": "2026-01-01T00:00:00.000000Z",
+                "range_end": "2026-02-01T00:00:00.000000Z",
+                "source_positions": {
+                    "start": "1",
+                    "end": "2",
+                    "head": "2",
+                },
+                "status": "complete",
+                "evidence": {"response_count": 0},
+            }
+            rows.append(
+                {
+                    **material,
+                    "identity_key": semantic_hash(material),
+                    "source_identity_key": source_key,
+                    "source_position_start": "1",
+                    "source_position_end": "2",
+                    "source_position_head": "2",
+                    "created_at": "2026-02-01T00:00:00.000000Z",
+                }
+            )
+        return rows
+
 
 def _requirement(alias: str, source: str | None) -> dict:
     policy = {"mode": "exact"}
@@ -85,6 +132,7 @@ def test_frozen_dataset_can_bind_same_fact_under_two_exact_provider_aliases(
                         "classification": "provider_missing_data",
                         "start": "2026-01-10T00:00:00Z",
                         "end": "2026-01-10T01:00:00Z",
+                        "source_identity_key": "source-a",
                     }
                 ],
             },
@@ -139,3 +187,47 @@ def test_exact_policy_rejects_ambiguous_provider_binding(monkeypatch) -> None:
             store=store,
             instrument_loader=lambda instrument_id: {"id": instrument_id},
         )
+
+
+def test_preparation_accepts_repository_series_id_projection() -> None:
+    source = SimpleNamespace(
+        identity_key="source-a",
+        provider="provider-a",
+        venue="venue",
+        source_kind="test",
+        adapter_version="test.v1",
+    )
+
+    class PreparationStore:
+        def current_commit_seq(self):
+            return 77
+
+        def list_series(self, *, instrument_id=None):
+            return [
+                {
+                    "id": 9,
+                    "series_id": None,
+                    "identity_key": "series-9",
+                    "instrument_id": instrument_id,
+                    "fact_type": "market.reference_price",
+                    "contract_version": "market.reference_price.v1",
+                    "timeframe_seconds": None,
+                    "dimensions": {"quote_currency": "USD"},
+                }
+            ]
+
+        def read_series_records(self, **_kwargs):
+            return [
+                SimpleNamespace(
+                    source_identity_key="source-a", source=source
+                )
+            ]
+
+    prepared = frozen_dataset_service.prepare_frozen_dataset_from_requirements(
+        requirements=(_requirement("reference", "source-a"),),
+        freeze=False,
+        store=PreparationStore(),
+    )
+
+    assert prepared["status"] == "ready_to_freeze"
+    assert prepared["resolved_requirements"][0]["series_id"] == 9

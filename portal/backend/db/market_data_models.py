@@ -671,6 +671,7 @@ class MarketGapEvidenceRecord(Base):
             name="uq_market_gap_evidence",
         ),
         Index("ix_market_gap_evidence_series_window", "series_id", "start_time", "end_time"),
+        Index("ix_market_gap_evidence_source_window", "source_id", "start_time", "end_time"),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
@@ -679,6 +680,11 @@ class MarketGapEvidenceRecord(Base):
         BigInteger,
         ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    source_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.sources.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     ingestion_run_id = Column(
         String(64),
@@ -817,6 +823,7 @@ class MarketDatasetSeriesRecord(Base):
     source_summary = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     quality_hash = Column(String(64), nullable=False)
     quality_summary = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    quality_evidence = Column(JSONB, nullable=True)
 
 
 class MarketProductDefinitionVersionRecord(Base):

@@ -82,7 +82,10 @@ def plan_runtime_requirements_for_indicators(
         metas = collect_runtime_indicator_metas(roots, ctx=ctx)
     else:
         metas = collect_runtime_indicator_metas(
-            roots, ctx=ctx, preloaded_metas=preloaded_metas
+            roots,
+            ctx=ctx,
+            preloaded_metas=preloaded_metas,
+            require_preloaded_metas=True,
         )
     indicator_rows: list[dict[str, Any]] = []
     requirements: list[dict[str, Any]] = []

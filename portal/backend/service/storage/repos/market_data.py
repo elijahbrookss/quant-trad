@@ -46,8 +46,6 @@ from market_data.store import FrozenDataset, IngestionOutcome
 from market_data.structure import (
     MARKET_TRADE_FACT_TYPE,
     TRADE_FLOW_FACT_TYPE,
-    MarketTradeRecord,
-    TradeFlowAggregateRecord,
     build_market_trade_material_hash,
     build_trade_flow_material_hash,
 )
@@ -772,7 +770,8 @@ class PostgresMarketDataRepository:
             dataset = session.execute(
                 text(
                     """
-                    SELECT id, dataset_hash, max_commit_seq, name, purpose, metadata
+                    SELECT id, dataset_hash, max_commit_seq, name, purpose, metadata,
+                           created_at
                     FROM market.datasets
                     WHERE id = :dataset_id
                     """
@@ -789,6 +788,7 @@ class PostgresMarketDataRepository:
                            dataset_series.row_count, dataset_series.material_hash,
                            dataset_series.provenance_hash, dataset_series.source_summary,
                            dataset_series.quality_hash, dataset_series.quality_summary,
+                           dataset_series.quality_evidence,
                            series.identity_key, series.instrument_id, series.fact_type,
                            series.timeframe_seconds, series.contract_version,
                            series.dimensions
@@ -850,6 +850,7 @@ class PostgresMarketDataRepository:
                 "archive_refs": [dict(row) for row in archive_rows],
                 "normalization_refs": [dict(row) for row in normalization_rows],
             },
+            created_at=dataset.get("created_at"),
         )
 
     def register_source(
@@ -2126,12 +2127,14 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int],
         known_at_lte: Optional[datetime],
+        source_identity_keys: Sequence[str] = (),
+        causal_at_interval_close: bool = False,
     ) -> list[CandleRecord]:
         request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
         predicates = [
-            "series_id = :series_id",
-            "candle_open_time >= :start",
-            "candle_open_time < :end",
+            "versions.series_id = :series_id",
+            "versions.candle_open_time >= :start",
+            "versions.candle_open_time < :end",
         ]
         params: dict[str, Any] = {
             "series_id": request.series_id,
@@ -2139,31 +2142,40 @@ class PostgresMarketDataRepository:
             "end": request.end,
         }
         if as_of_commit_seq is not None:
-            predicates.append("market_commit_seq <= :as_of_commit_seq")
+            predicates.append("versions.market_commit_seq <= :as_of_commit_seq")
             params["as_of_commit_seq"] = int(as_of_commit_seq)
         if known_at_lte is not None:
-            predicates.append("known_at <= :known_at_lte")
+            predicates.append("versions.known_at <= :known_at_lte")
             params["known_at_lte"] = known_at_lte
+        if causal_at_interval_close:
+            predicates.append("versions.known_at <= versions.candle_close_time")
+        allowed_sources = sorted(
+            {str(value).strip() for value in source_identity_keys if str(value).strip()}
+        )
+        if allowed_sources:
+            predicates.append("sources.identity_key = ANY(:source_identity_keys)")
+            params["source_identity_keys"] = allowed_sources
         rows = session.execute(
             text(
                 f"""
                 WITH visible AS (
-                    SELECT DISTINCT ON (candle_open_time) *
-                    FROM market.candle_versions
+                    SELECT DISTINCT ON (versions.candle_open_time)
+                           versions.*,
+                           sources.identity_key AS source_identity_key,
+                           sources.provider AS source_provider,
+                           sources.venue AS source_venue,
+                           sources.source_kind,
+                           sources.adapter_version AS source_adapter_version
+                    FROM market.candle_versions AS versions
+                    JOIN market.ingestion_runs AS runs
+                      ON runs.id = versions.ingestion_run_id
+                    JOIN market.sources AS sources
+                      ON sources.id = runs.source_id
                     WHERE {' AND '.join(predicates)}
-                    ORDER BY candle_open_time, revision DESC
+                    ORDER BY versions.candle_open_time, versions.revision DESC
                 )
-                SELECT visible.*,
-                       sources.identity_key AS source_identity_key,
-                       sources.provider AS source_provider,
-                       sources.venue AS source_venue,
-                       sources.source_kind,
-                       sources.adapter_version AS source_adapter_version
+                SELECT visible.*
                 FROM visible
-                JOIN market.ingestion_runs AS runs
-                  ON runs.id = visible.ingestion_run_id
-                JOIN market.sources AS sources
-                  ON sources.id = runs.source_id
                 ORDER BY visible.candle_open_time
                 """
             ),
@@ -2179,6 +2191,7 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[CandleRecord]:
         with db.session() as session:
             return self._read_candles_with_session(
@@ -2188,6 +2201,7 @@ class PostgresMarketDataRepository:
                 end=end,
                 as_of_commit_seq=as_of_commit_seq,
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
 
     @staticmethod
@@ -2199,12 +2213,13 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int],
         known_at_lte: Optional[datetime],
+        source_identity_keys: Sequence[str] = (),
     ) -> list[OpenInterestRecord]:
         request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
         predicates = [
-            "series_id = :series_id",
-            "sample_time >= :start",
-            "sample_time < :end",
+            "versions.series_id = :series_id",
+            "versions.sample_time >= :start",
+            "versions.sample_time < :end",
         ]
         params: dict[str, Any] = {
             "series_id": request.series_id,
@@ -2212,31 +2227,38 @@ class PostgresMarketDataRepository:
             "end": request.end,
         }
         if as_of_commit_seq is not None:
-            predicates.append("market_commit_seq <= :as_of_commit_seq")
+            predicates.append("versions.market_commit_seq <= :as_of_commit_seq")
             params["as_of_commit_seq"] = int(as_of_commit_seq)
         if known_at_lte is not None:
-            predicates.append("known_at <= :known_at_lte")
+            predicates.append("versions.known_at <= :known_at_lte")
             params["known_at_lte"] = known_at_lte
+        allowed_sources = sorted(
+            {str(value).strip() for value in source_identity_keys if str(value).strip()}
+        )
+        if allowed_sources:
+            predicates.append("sources.identity_key = ANY(:source_identity_keys)")
+            params["source_identity_keys"] = allowed_sources
         rows = session.execute(
             text(
                 f"""
                 WITH visible AS (
-                    SELECT DISTINCT ON (sample_time) *
-                    FROM market.open_interest_versions
+                    SELECT DISTINCT ON (versions.sample_time)
+                           versions.*,
+                           sources.identity_key AS source_identity_key,
+                           sources.provider AS source_provider,
+                           sources.venue AS source_venue,
+                           sources.source_kind,
+                           sources.adapter_version AS source_adapter_version
+                    FROM market.open_interest_versions AS versions
+                    JOIN market.ingestion_runs AS runs
+                      ON runs.id = versions.ingestion_run_id
+                    JOIN market.sources AS sources
+                      ON sources.id = runs.source_id
                     WHERE {' AND '.join(predicates)}
-                    ORDER BY sample_time, revision DESC
+                    ORDER BY versions.sample_time, versions.revision DESC
                 )
-                SELECT visible.*,
-                       sources.identity_key AS source_identity_key,
-                       sources.provider AS source_provider,
-                       sources.venue AS source_venue,
-                       sources.source_kind,
-                       sources.adapter_version AS source_adapter_version
+                SELECT visible.*
                 FROM visible
-                JOIN market.ingestion_runs AS runs
-                  ON runs.id = visible.ingestion_run_id
-                JOIN market.sources AS sources
-                  ON sources.id = runs.source_id
                 ORDER BY visible.sample_time
                 """
             ),
@@ -2252,6 +2274,7 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[OpenInterestRecord]:
         with db.session() as session:
             return self._read_open_interest_with_session(
@@ -2261,6 +2284,7 @@ class PostgresMarketDataRepository:
                 end=end,
                 as_of_commit_seq=as_of_commit_seq,
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
 
     @staticmethod
@@ -2272,12 +2296,13 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int],
         known_at_lte: Optional[datetime],
+        source_identity_keys: Sequence[str] = (),
     ) -> list[FundingRateRecord]:
         request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
         predicates = [
-            "series_id = :series_id",
-            "sample_time >= :start",
-            "sample_time < :end",
+            "versions.series_id = :series_id",
+            "versions.sample_time >= :start",
+            "versions.sample_time < :end",
         ]
         params: dict[str, Any] = {
             "series_id": request.series_id,
@@ -2285,31 +2310,38 @@ class PostgresMarketDataRepository:
             "end": request.end,
         }
         if as_of_commit_seq is not None:
-            predicates.append("market_commit_seq <= :as_of_commit_seq")
+            predicates.append("versions.market_commit_seq <= :as_of_commit_seq")
             params["as_of_commit_seq"] = int(as_of_commit_seq)
         if known_at_lte is not None:
-            predicates.append("known_at <= :known_at_lte")
+            predicates.append("versions.known_at <= :known_at_lte")
             params["known_at_lte"] = known_at_lte
+        allowed_sources = sorted(
+            {str(value).strip() for value in source_identity_keys if str(value).strip()}
+        )
+        if allowed_sources:
+            predicates.append("sources.identity_key = ANY(:source_identity_keys)")
+            params["source_identity_keys"] = allowed_sources
         rows = session.execute(
             text(
                 f"""
                 WITH visible AS (
-                    SELECT DISTINCT ON (sample_time) *
-                    FROM market.funding_rate_versions
+                    SELECT DISTINCT ON (versions.sample_time)
+                           versions.*,
+                           sources.identity_key AS source_identity_key,
+                           sources.provider AS source_provider,
+                           sources.venue AS source_venue,
+                           sources.source_kind,
+                           sources.adapter_version AS source_adapter_version
+                    FROM market.funding_rate_versions AS versions
+                    JOIN market.ingestion_runs AS runs
+                      ON runs.id = versions.ingestion_run_id
+                    JOIN market.sources AS sources
+                      ON sources.id = runs.source_id
                     WHERE {' AND '.join(predicates)}
-                    ORDER BY sample_time, revision DESC
+                    ORDER BY versions.sample_time, versions.revision DESC
                 )
-                SELECT visible.*,
-                       sources.identity_key AS source_identity_key,
-                       sources.provider AS source_provider,
-                       sources.venue AS source_venue,
-                       sources.source_kind,
-                       sources.adapter_version AS source_adapter_version
+                SELECT visible.*
                 FROM visible
-                JOIN market.ingestion_runs AS runs
-                  ON runs.id = visible.ingestion_run_id
-                JOIN market.sources AS sources
-                  ON sources.id = runs.source_id
                 ORDER BY visible.sample_time
                 """
             ),
@@ -2325,6 +2357,7 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[FundingRateRecord]:
         with db.session() as session:
             return self._read_funding_rates_with_session(
@@ -2334,6 +2367,7 @@ class PostgresMarketDataRepository:
                 end=end,
                 as_of_commit_seq=as_of_commit_seq,
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
 
     @staticmethod
@@ -2347,32 +2381,58 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime],
         latest_only: bool,
         include_invalidated: bool,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[NumericFactRecord]:
         request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
-        causal_predicates = ["series_id = :series_id"]
+        causal_predicates = ["versions.series_id = :series_id"]
         params: dict[str, Any] = {
             "series_id": request.series_id,
             "start": request.start,
             "end": request.end,
         }
         if as_of_commit_seq is not None:
-            causal_predicates.append("market_commit_seq <= :as_of_commit_seq")
+            causal_predicates.append("versions.market_commit_seq <= :as_of_commit_seq")
             params["as_of_commit_seq"] = int(as_of_commit_seq)
         if known_at_lte is not None:
-            causal_predicates.append("known_at <= :known_at_lte")
+            causal_predicates.append("versions.known_at <= :known_at_lte")
             params["known_at_lte"] = known_at_lte
+        allowed_sources = sorted(
+            {str(value).strip() for value in source_identity_keys if str(value).strip()}
+        )
+        if allowed_sources:
+            causal_predicates.append("sources.identity_key = ANY(:source_identity_keys)")
+            params["source_identity_keys"] = allowed_sources
         state_predicate = "" if include_invalidated else "AND visible.state = 'active'"
         if latest_only:
             visible_sql = f"""
-                SELECT DISTINCT ON (source_event_key) *
-                FROM market.numeric_fact_versions
+                SELECT DISTINCT ON (versions.source_event_key)
+                       versions.*,
+                       sources.identity_key AS source_identity_key,
+                       sources.provider AS source_provider,
+                       sources.venue AS source_venue,
+                       sources.source_kind,
+                       sources.adapter_version AS source_adapter_version
+                FROM market.numeric_fact_versions AS versions
+                JOIN market.ingestion_runs AS runs
+                  ON runs.id = versions.ingestion_run_id
+                JOIN market.sources AS sources
+                  ON sources.id = runs.source_id
                 WHERE {' AND '.join(causal_predicates)}
-                ORDER BY source_event_key, revision DESC
+                ORDER BY versions.source_event_key, versions.revision DESC
             """
         else:
             visible_sql = f"""
-                SELECT *
-                FROM market.numeric_fact_versions
+                SELECT versions.*,
+                       sources.identity_key AS source_identity_key,
+                       sources.provider AS source_provider,
+                       sources.venue AS source_venue,
+                       sources.source_kind,
+                       sources.adapter_version AS source_adapter_version
+                FROM market.numeric_fact_versions AS versions
+                JOIN market.ingestion_runs AS runs
+                  ON runs.id = versions.ingestion_run_id
+                JOIN market.sources AS sources
+                  ON sources.id = runs.source_id
                 WHERE {' AND '.join(causal_predicates)}
             """
         rows = session.execute(
@@ -2381,17 +2441,8 @@ class PostgresMarketDataRepository:
                 WITH visible AS (
                     {visible_sql}
                 )
-                SELECT visible.*,
-                       sources.identity_key AS source_identity_key,
-                       sources.provider AS source_provider,
-                       sources.venue AS source_venue,
-                       sources.source_kind,
-                       sources.adapter_version AS source_adapter_version
+                SELECT visible.*
                 FROM visible
-                JOIN market.ingestion_runs AS runs
-                  ON runs.id = visible.ingestion_run_id
-                JOIN market.sources AS sources
-                  ON sources.id = runs.source_id
                 WHERE visible.effective_at >= :start
                   AND visible.effective_at < :end
                   {state_predicate}
@@ -2411,6 +2462,7 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[NumericFactRecord]:
         with db.session() as session:
             return self._read_numeric_facts_with_session(
@@ -2422,6 +2474,7 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
                 latest_only=True,
                 include_invalidated=False,
+                source_identity_keys=source_identity_keys,
             )
 
     def read_numeric_fact_revisions(
@@ -2457,6 +2510,7 @@ class PostgresMarketDataRepository:
         expected_count: int,
         observed_count: int,
         evidence: Mapping[str, Any],
+        source_id: Optional[int] = None,
         ingestion_run_id: Optional[str] = None,
         detected_as_of_commit_seq: Optional[int] = None,
     ) -> str:
@@ -2464,17 +2518,55 @@ class PostgresMarketDataRepository:
         classification = str(classification or "").strip().lower()
         if not classification:
             raise ValueError("market_gap_evidence_invalid: classification is required")
-        payload = {
-            "series_id": request.series_id,
-            "start": _iso(request.start),
-            "end": _iso(request.end),
-            "classification": classification,
-            "expected_count": int(expected_count),
-            "observed_count": int(observed_count),
-            "evidence": dict(evidence),
-        }
-        evidence_hash = build_quality_hash([payload])
         with db.session() as session:
+            resolved_source_id = int(source_id) if source_id is not None else None
+            if resolved_source_id is not None and resolved_source_id <= 0:
+                raise ValueError("market_gap_evidence_invalid: source_id must be positive")
+            if ingestion_run_id:
+                run_source_id = session.execute(
+                    text("SELECT source_id FROM market.ingestion_runs WHERE id = :run_id"),
+                    {"run_id": ingestion_run_id},
+                ).scalar_one_or_none()
+                if run_source_id is None:
+                    raise ValueError(
+                        "market_gap_evidence_invalid: ingestion run does not exist"
+                    )
+                if (
+                    resolved_source_id is not None
+                    and resolved_source_id != int(run_source_id)
+                ):
+                    raise ValueError(
+                        "market_gap_evidence_invalid: source differs from ingestion run"
+                    )
+                resolved_source_id = int(run_source_id)
+            if resolved_source_id is not None:
+                source_exists = session.execute(
+                    text("SELECT 1 FROM market.sources WHERE id = :source_id"),
+                    {"source_id": resolved_source_id},
+                ).scalar_one_or_none()
+                if source_exists is None:
+                    raise ValueError(
+                        "market_gap_evidence_invalid: source does not exist"
+                    )
+            evidence_source_id = (evidence or {}).get("source_id")
+            if (
+                evidence_source_id not in (None, "")
+                and resolved_source_id != int(evidence_source_id)
+            ):
+                raise ValueError(
+                    "market_gap_evidence_invalid: evidence source identity disagrees"
+                )
+            payload = {
+                "series_id": request.series_id,
+                "source_id": resolved_source_id,
+                "start": _iso(request.start),
+                "end": _iso(request.end),
+                "classification": classification,
+                "expected_count": int(expected_count),
+                "observed_count": int(observed_count),
+                "evidence": dict(evidence),
+            }
+            evidence_hash = build_quality_hash([payload])
             watermark = detected_as_of_commit_seq
             if watermark is None:
                 watermark = self._current_commit_seq_with_session(session)
@@ -2482,11 +2574,11 @@ class PostgresMarketDataRepository:
                 text(
                     """
                     INSERT INTO market.gap_evidence (
-                        series_id, ingestion_run_id, start_time, end_time,
+                        series_id, source_id, ingestion_run_id, start_time, end_time,
                         classification, expected_count, observed_count,
                         detected_as_of_commit_seq, evidence_hash, evidence
                     ) VALUES (
-                        :series_id, :ingestion_run_id, :start_time, :end_time,
+                        :series_id, :source_id, :ingestion_run_id, :start_time, :end_time,
                         :classification, :expected_count, :observed_count,
                         :watermark, :evidence_hash, CAST(:evidence AS jsonb)
                     )
@@ -2497,6 +2589,7 @@ class PostgresMarketDataRepository:
                 ),
                 {
                     "series_id": request.series_id,
+                    "source_id": resolved_source_id,
                     "ingestion_run_id": ingestion_run_id,
                     "start_time": request.start,
                     "end_time": request.end,
@@ -2519,20 +2612,32 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: int,
         known_at_lte: Optional[datetime] = None,
+        include_source_identity: bool = False,
     ) -> list[dict[str, Any]]:
         rows = session.execute(
             text(
                 """
-                SELECT start_time, end_time, classification, expected_count,
-                       observed_count, detected_as_of_commit_seq, evidence_hash, evidence,
-                       created_at
-                FROM market.gap_evidence
-                WHERE series_id = :series_id
-                  AND end_time > :start
-                  AND start_time < :end
-                  AND detected_as_of_commit_seq <= :watermark
-                  AND (:known_at_lte IS NULL OR created_at <= :known_at_lte)
-                ORDER BY start_time, end_time, evidence_hash
+                SELECT gaps.start_time, gaps.end_time, gaps.classification,
+                       gaps.expected_count, gaps.observed_count,
+                       gaps.detected_as_of_commit_seq, gaps.evidence_hash,
+                       gaps.evidence, gaps.created_at, gaps.ingestion_run_id,
+                       gaps.source_id AS recorded_source_id,
+                       sources.identity_key AS source_identity_key,
+                       sources.provider AS source_provider,
+                       sources.venue AS source_venue,
+                       sources.source_kind,
+                       sources.adapter_version AS source_adapter_version
+                FROM market.gap_evidence AS gaps
+                LEFT JOIN market.ingestion_runs AS runs
+                  ON runs.id = gaps.ingestion_run_id
+                LEFT JOIN market.sources AS sources
+                  ON sources.id = COALESCE(gaps.source_id, runs.source_id)
+                WHERE gaps.series_id = :series_id
+                  AND gaps.end_time > :start
+                  AND gaps.start_time < :end
+                  AND gaps.detected_as_of_commit_seq <= :watermark
+                  AND (:known_at_lte IS NULL OR gaps.created_at <= :known_at_lte)
+                ORDER BY gaps.start_time, gaps.end_time, gaps.evidence_hash
                 """
             ),
             {
@@ -2543,7 +2648,7 @@ class PostgresMarketDataRepository:
                 "known_at_lte": known_at_lte,
             },
         ).mappings().all()
-        return [
+        projected = [
             {
                 "start": _iso(row["start_time"]),
                 "end": _iso(row["end_time"]),
@@ -2557,6 +2662,22 @@ class PostgresMarketDataRepository:
             }
             for row in rows
         ]
+        if include_source_identity:
+            for item, row in zip(projected, rows):
+                item["ingestion_run_id"] = row.get("ingestion_run_id")
+                item["source_id"] = row.get("recorded_source_id")
+                item["source_identity_key"] = row.get("source_identity_key")
+                item["source"] = (
+                    {
+                        "provider": row.get("source_provider"),
+                        "venue": row.get("source_venue"),
+                        "source_kind": row.get("source_kind"),
+                        "adapter_version": row.get("source_adapter_version"),
+                    }
+                    if row.get("source_identity_key")
+                    else None
+                )
+        return projected
 
     def list_gap_evidence(
         self,
@@ -2566,6 +2687,7 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        include_source_identity: bool = False,
     ) -> list[dict[str, Any]]:
         request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
         with db.session() as session:
@@ -2579,6 +2701,7 @@ class PostgresMarketDataRepository:
                 end=request.end,
                 as_of_commit_seq=int(watermark),
                 known_at_lte=known_at_lte,
+                include_source_identity=include_source_identity,
             )
 
     def record_acquisition_coverage(
@@ -2728,6 +2851,67 @@ class PostgresMarketDataRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def list_source_acquisition_coverage(
+        self,
+        *,
+        series_id: int,
+        source_identity_keys: Sequence[str],
+        start: datetime,
+        end: datetime,
+        created_at_lte: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        keys = sorted(
+            {str(value).strip() for value in source_identity_keys if str(value).strip()}
+        )
+        if not keys:
+            raise ValueError(
+                "market_acquisition_coverage_invalid: source identities are required"
+            )
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT coverage.identity_key, coverage.series_id,
+                           coverage.source_id, sources.identity_key AS source_identity_key,
+                           sources.provider, sources.venue, sources.source_kind,
+                           sources.adapter_version, coverage.binding_id,
+                           coverage.manifest_hash, coverage.interface_version,
+                           coverage.confirmation_depth, coverage.range_start,
+                           coverage.range_end, coverage.source_position_start,
+                           coverage.source_position_end, coverage.source_position_head,
+                           coverage.status, coverage.ingestion_run_id,
+                           coverage.evidence, coverage.created_at
+                    FROM market.fact_acquisition_coverage AS coverage
+                    JOIN market.sources AS sources ON sources.id = coverage.source_id
+                    WHERE coverage.series_id = :series_id
+                      AND sources.identity_key = ANY(CAST(:source_keys AS varchar[]))
+                      AND coverage.range_end > :start
+                      AND coverage.range_start < :end
+                      AND (:created_at_lte IS NULL OR coverage.created_at <= :created_at_lte)
+                    ORDER BY coverage.range_start, coverage.range_end,
+                             coverage.identity_key
+                    """
+                ),
+                {
+                    "series_id": request.series_id,
+                    "source_keys": keys,
+                    "start": request.start,
+                    "end": request.end,
+                    "created_at_lte": created_at_lte,
+                },
+            ).mappings().all()
+        return [
+            {
+                **dict(row),
+                "range_start": _iso(row["range_start"]),
+                "range_end": _iso(row["range_end"]),
+                "created_at": _iso(row["created_at"]),
+                "evidence": dict(row.get("evidence") or {}),
+            }
+            for row in rows
+        ]
+
     def missing_acquisition_ranges(
         self,
         *,
@@ -2787,6 +2971,7 @@ class PostgresMarketDataRepository:
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[MarketDataRecord]:
         """Read any registered typed fact without consulting a provider."""
 
@@ -2811,6 +2996,7 @@ class PostgresMarketDataRepository:
                     end=end,
                     as_of_commit_seq=as_of_commit_seq,
                     known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
                 )
             )
         if fact_type == CANDLE_FACT_TYPE:
@@ -2821,6 +3007,7 @@ class PostgresMarketDataRepository:
                     end=end,
                     as_of_commit_seq=as_of_commit_seq,
                     known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
                 )
             )
         if fact_type == OPEN_INTEREST_FACT_TYPE:
@@ -2831,6 +3018,7 @@ class PostgresMarketDataRepository:
                     end=end,
                     as_of_commit_seq=as_of_commit_seq,
                     known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
                 )
             )
         if fact_type == FUNDING_RATE_FACT_TYPE:
@@ -2841,7 +3029,13 @@ class PostgresMarketDataRepository:
                     end=end,
                     as_of_commit_seq=as_of_commit_seq,
                     known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
                 )
+            )
+        if source_identity_keys:
+            raise ValueError(
+                "market_data_source_binding_unsupported: exact source filtering "
+                f"is not implemented for fact_type={fact_type}"
             )
         if fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE}:
             from .market_structure import market_structure_repository
@@ -2993,6 +3187,7 @@ class PostgresMarketDataRepository:
                     start=item.start,
                     end=item.end,
                     as_of_commit_seq=watermark,
+                    include_source_identity=True,
                 )
                 if fact_type == MARKET_TRADE_FACT_TYPE:
                     raw_record_ids = sorted(
@@ -3221,6 +3416,7 @@ class PostgresMarketDataRepository:
                             "evidence_count": len(quality),
                             "classifications": dict(sorted(classifications.items())),
                         },
+                        "quality_evidence": [dict(row) for row in quality],
                     }
                 )
                 if fact_type.startswith("market.normalized."):
@@ -3355,12 +3551,14 @@ class PostgresMarketDataRepository:
                         INSERT INTO market.dataset_series (
                             dataset_id, series_id, range_start, range_end,
                             max_commit_seq, row_count, material_hash,
-                            provenance_hash, source_summary, quality_hash, quality_summary
+                            provenance_hash, source_summary, quality_hash,
+                            quality_summary, quality_evidence
                         ) VALUES (
                             :dataset_id, :series_id, :range_start, :range_end,
                             :max_commit_seq, :row_count, :material_hash,
                             :provenance_hash, CAST(:source_summary AS jsonb),
-                            :quality_hash, CAST(:quality_summary AS jsonb)
+                            :quality_hash, CAST(:quality_summary AS jsonb),
+                            CAST(:quality_evidence AS jsonb)
                         )
                         ON CONFLICT DO NOTHING
                         """
@@ -3370,6 +3568,7 @@ class PostgresMarketDataRepository:
                         "dataset_id": dataset_id,
                         "source_summary": _json_text(entry["source_summary"]),
                         "quality_summary": _json_text(entry["quality_summary"]),
+                        "quality_evidence": _json_text(entry["quality_evidence"]),
                     },
                 )
             for manifest_id, archive_ref in sorted(archive_refs.items()):
@@ -3444,6 +3643,8 @@ class PostgresMarketDataRepository:
         known_at_lte: Optional[datetime] = None,
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+        causal_at_interval_close: bool = False,
     ) -> list[MarketDataRecord]:
         with db.session() as session:
             entry = session.execute(
@@ -3485,6 +3686,43 @@ class PostgresMarketDataRepository:
                     known_at_lte=known_at_lte,
                     latest_only=False,
                     include_invalidated=True,
+                    source_identity_keys=source_identity_keys,
+                )
+            if str(entry["fact_type"]) == CANDLE_FACT_TYPE:
+                return self._read_candles_with_session(
+                    session,
+                    series_id=int(series_id),
+                    start=requested.start,
+                    end=requested.end,
+                    as_of_commit_seq=int(entry["max_commit_seq"]),
+                    known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
+                    causal_at_interval_close=causal_at_interval_close,
+                )
+            if str(entry["fact_type"]) == OPEN_INTEREST_FACT_TYPE:
+                return self._read_open_interest_with_session(
+                    session,
+                    series_id=int(series_id),
+                    start=requested.start,
+                    end=requested.end,
+                    as_of_commit_seq=int(entry["max_commit_seq"]),
+                    known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
+                )
+            if str(entry["fact_type"]) == FUNDING_RATE_FACT_TYPE:
+                return self._read_funding_rates_with_session(
+                    session,
+                    series_id=int(series_id),
+                    start=requested.start,
+                    end=requested.end,
+                    as_of_commit_seq=int(entry["max_commit_seq"]),
+                    known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
+                )
+            if source_identity_keys:
+                raise ValueError(
+                    "market_dataset_source_binding_unsupported: exact source filtering "
+                    f"is not implemented for fact_type={entry['fact_type']}"
                 )
             return self.read_series_records(
                 series_id=int(series_id),

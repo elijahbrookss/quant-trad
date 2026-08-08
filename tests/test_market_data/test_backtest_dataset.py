@@ -168,6 +168,7 @@ def _dataset(
                 for name in sorted({row["classification"] for row in quality})
             },
         },
+        "quality_evidence": quality,
         **identity,
     }
     hashed_entry = {
@@ -309,6 +310,55 @@ def test_admission_rejects_undisclosed_gap_but_preserves_disclosed_closure() -> 
     binding = _validate(_Store(records, quality=evidence))
     assert binding["quality"]["status"] == "ready_with_caveats"
     assert binding["quality"]["classifications"] == {"provider_closure": 1}
+
+
+def test_admission_uses_only_quality_evidence_pinned_at_freeze() -> None:
+    records = _records()
+    store = _Store(records)
+
+    # A gap discovered after Dataset creation must not rewrite the Dataset's
+    # quality material or alter replay admission.
+    store.quality.append(
+        {
+            "start": MATERIALIZATION_START,
+            "end": MATERIALIZATION_START + timedelta(hours=1),
+            "classification": "provider_missing_data",
+            "expected_count": 1,
+            "observed_count": 0,
+            "evidence_hash": "late-gap",
+        }
+    )
+
+    binding = _validate(store)
+
+    assert binding["quality"]["status"] == "ready"
+    assert binding["quality"]["evidence_count"] == 0
+
+
+def test_historical_nonempty_quality_without_exact_material_is_not_replayable() -> None:
+    evidence = [
+        {
+            "start": MATERIALIZATION_START,
+            "end": MATERIALIZATION_START + timedelta(hours=1),
+            "classification": "provider_closure",
+            "expected_count": 1,
+            "observed_count": 0,
+            "evidence_hash": "historical-gap",
+        }
+    ]
+    store = _Store(_records(skip=0), quality=evidence)
+    historical = dict(store.dataset.series[0])
+    historical.pop("quality_evidence")
+    store.dataset = FrozenDataset(
+        dataset_id=store.dataset.dataset_id,
+        dataset_hash=store.dataset.dataset_hash,
+        max_commit_seq=store.dataset.max_commit_seq,
+        series=(historical,),
+        purpose="backtest",
+    )
+
+    with pytest.raises(RuntimeError, match="quality_unpinned"):
+        _validate(store)
 
 
 def test_binding_forbids_range_expansion_and_series_substitution() -> None:
