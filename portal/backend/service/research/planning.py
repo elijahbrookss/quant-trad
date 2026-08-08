@@ -258,7 +258,23 @@ def plan_research_check(
         else max(horizons, default=0)
     )
     configured_warmup = int(scope.get("warmup_bars") or 0)
-    feature_lookback = int(scope.get("feature_lookback_bars") or 0)
+    statistics = dict(request.parameters.get("statistics") or {})
+    feature_config = dict(statistics.get("features") or {})
+    baseline_features = [
+        dict(row) for row in feature_config.get("baseline") or []
+    ]
+    enriched_features = [
+        dict(row) for row in feature_config.get("enriched") or []
+    ]
+    feature_lookback = max(
+        [
+            int(scope.get("feature_lookback_bars") or 0),
+            *(
+                int(row.get("lookback_bars") or row.get("period") or 0)
+                for row in baseline_features
+            ),
+        ]
+    )
     warmup_bars = max(14, configured_warmup, feature_lookback)
 
     indicator_ids: list[str] = []
@@ -315,11 +331,21 @@ def plan_research_check(
     for raw in request.parameters.get("inputs") or []:
         requirement = _requirement_from_payload(raw)
         explicit_instrument = str(raw.get("instrument_id") or instrument_id).strip()
+        feature_window_seconds = max(
+            (
+                int(feature.get("window_seconds") or 0)
+                for feature in enriched_features
+                if str(feature.get("input_alias") or "")
+                == str(requirement.key)
+            ),
+            default=0,
+        )
         lookback_seconds = max(
             int(requirement.lookback_seconds or 0),
             int(requirement.max_staleness_seconds or 0),
             int(requirement.lookback_bars or 0)
             * int(requirement.timeframe_seconds or timeframe_seconds),
+            feature_window_seconds,
         )
         requirements.append(
             {
@@ -333,7 +359,7 @@ def plan_research_check(
                 ),
                 "source_policy": dict(raw.get("source_policy") or {}),
                 "required_start": _iso(
-                    materialization_start - timedelta(seconds=lookback_seconds)
+                    evaluation_start - timedelta(seconds=lookback_seconds)
                 ),
                 "required_end": _iso(materialization_end),
             }

@@ -191,6 +191,39 @@ class Indicator(ABC):
             )
         return inputs[normalized]
 
+    def handle_gap(
+        self,
+        *,
+        policy: str,
+        gap: Mapping[str, Any],
+        next_bar_time: datetime,
+        rewarm_bars: int,
+    ) -> Mapping[str, Any]:
+        """Own this Indicator's state transition across a declared source gap."""
+
+        normalized = str(policy or "").strip().lower()
+        if normalized == "reject":
+            raise RuntimeError(
+                "indicator_gap_rejected: "
+                f"indicator_id={self.runtime_spec.instance_id} gap={dict(gap)}"
+            )
+        if normalized == "continue_degraded":
+            return {
+                "indicator_id": self.runtime_spec.instance_id,
+                "policy": normalized,
+                "action": "continued_degraded",
+                "next_bar_time": next_bar_time.isoformat(),
+            }
+        if normalized == "reset_rewarm":
+            raise RuntimeError(
+                "indicator_gap_policy_unsupported: "
+                f"indicator_id={self.runtime_spec.instance_id} policy={normalized}"
+            )
+        raise RuntimeError(
+            "indicator_gap_policy_invalid: "
+            f"indicator_id={self.runtime_spec.instance_id} policy={normalized}"
+        )
+
     @abstractmethod
     def apply_bar(
         self,

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence
 
 from core.events import serialize_value
+from data_providers.utils.ohlcv import interval_to_timedelta
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
@@ -440,6 +441,13 @@ def collect_runtime_output_evidence_for_instance(
     candle_frame: Any = None,
     source_frame_cache: MutableMapping[tuple[str, ...], Any] | None = None,
     source_frame_cache_stats: MutableMapping[str, int] | None = None,
+    market_data_resolver: Any = None,
+    market_data_requirements_by_consumer: Mapping[
+        str, Sequence[Mapping[str, Any]]
+    ]
+    | None = None,
+    gap_policy: str | None = None,
+    gap_rewarm_bars: int = 0,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     """Collect per-bar declared output evidence from the canonical runtime path."""
@@ -510,13 +518,49 @@ def collect_runtime_output_evidence_for_instance(
     candle_rows: list[dict[str, Any]] = []
     ready_counts: Counter[str] = Counter()
     not_ready_counts: Counter[str] = Counter()
+    gap_transitions: list[dict[str, Any]] = []
 
+    interval_seconds = int(interval_to_timedelta(interval).total_seconds())
+    previous_candle_time: datetime | None = None
     for bar_index, candle in enumerate(candles):
+        if previous_candle_time is not None:
+            expected_time = previous_candle_time + timedelta(
+                seconds=interval_seconds
+            )
+            if candle.time != expected_time:
+                gap = {
+                    "start": _iso_utc(expected_time),
+                    "end": _iso_utc(candle.time),
+                    "missing_bars": max(
+                        0,
+                        int(
+                            (candle.time - expected_time).total_seconds()
+                            // interval_seconds
+                        ),
+                    ),
+                    "timeframe_seconds": interval_seconds,
+                }
+                if gap_policy is not None:
+                    actions = engine.handle_gap(
+                        policy=gap_policy,
+                        gap=gap,
+                        next_bar_time=candle.time,
+                        rewarm_bars=gap_rewarm_bars,
+                    )
+                    gap_transitions.append(
+                        {**gap, "actions": [dict(row) for row in actions]}
+                    )
         candle_time = _iso_utc(candle.time)
+        candle_close_time = _iso_utc(
+            candle.time + timedelta(seconds=interval_seconds)
+        )
         candle_rows.append(
             {
                 "bar_index": bar_index,
                 "time": candle_time,
+                "open_time": candle_time,
+                "close_time": candle_close_time,
+                "known_at": candle_close_time,
                 "open": float(candle.open),
                 "high": float(candle.high),
                 "low": float(candle.low),
@@ -524,12 +568,27 @@ def collect_runtime_output_evidence_for_instance(
                 "volume": float(candle.volume or 0.0),
             }
         )
-        engine_frame = engine.step(
-            bar=candle,
-            bar_time=candle.time,
-            include_overlays=False,
-            include_details=False,
+        market_data_inputs = (
+            market_data_resolver.resolve(
+                requirements_by_consumer=dict(
+                    market_data_requirements_by_consumer or {}
+                ),
+                primary_instrument_id=resolved_instrument_id,
+                evaluation_time=candle.time,
+            )
+            if market_data_resolver is not None
+            else None
         )
+        step_args = {
+            "bar": candle,
+            "bar_time": candle.time,
+            "include_overlays": False,
+            "include_details": False,
+        }
+        if market_data_inputs is not None:
+            step_args["market_data_inputs"] = market_data_inputs
+        engine_frame = engine.step(**step_args)
+        previous_candle_time = candle.time
         frame_outputs = getattr(engine_frame, "outputs", {}) or {}
         missing_keys = sorted(set(output_types) - set(frame_outputs))
         if missing_keys:
@@ -618,6 +677,8 @@ def collect_runtime_output_evidence_for_instance(
         "output_types": output_types,
         "ready_counts": dict(sorted(ready_counts.items())),
         "not_ready_counts": dict(sorted(not_ready_counts.items())),
+        "gap_policy": gap_policy,
+        "gap_transitions": gap_transitions,
         "candles": candle_rows,
         "outputs": output_rows,
         "diagnostics": {

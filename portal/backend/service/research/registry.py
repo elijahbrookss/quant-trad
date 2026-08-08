@@ -19,9 +19,13 @@ from research_science.check import (
 )
 
 from . import checks
+from .event_fact_evaluator import (
+    EVENT_FACT_ANALYSIS,
+    EventFactEvaluator,
+    normalize_event_fact_configuration,
+)
 
 
-EVENT_FACT_ANALYSIS = "event_fact_analysis"
 LEGACY_CHECK_FAMILIES = (
     checks.RAW_FORWARD_OUTCOME,
     checks.INDICATOR_FORWARD_OUTCOME,
@@ -76,6 +80,25 @@ class _LegacyEvaluator:
                 data_quality=data_quality,
             )
         if self.evaluator_id == checks.RUN_SIGNAL_SUMMARY:
+            readiness = dict(inputs["run_evidence"].get("readiness") or {})
+            if not bool(readiness.get("safe_to_compare", False)):
+                return checks.blocked_check_result(
+                    reason=str(
+                        readiness.get("dataset_status")
+                        or readiness.get("reason")
+                        or "run research evidence is not comparison-ready"
+                    ),
+                    detector=detector,
+                    outcomes=outcomes,
+                    data_quality={
+                        **data_quality,
+                        "status": "blocked",
+                        "readiness_status": readiness.get("dataset_status")
+                        or readiness.get("reason"),
+                        "caveats": list(readiness.get("caveats") or []),
+                    },
+                    check_family=self.evaluator_id,
+                )
             return checks.evaluate_run_signal_summary(
                 inputs["run_evidence"],
                 detector=detector,
@@ -83,6 +106,25 @@ class _LegacyEvaluator:
                 data_quality=data_quality,
             )
         if self.evaluator_id == checks.RUN_DECISION_TRADE_COMPARISON:
+            readiness = dict(inputs["run_evidence"].get("readiness") or {})
+            if not bool(readiness.get("safe_to_compare", False)):
+                return checks.blocked_check_result(
+                    reason=str(
+                        readiness.get("dataset_status")
+                        or readiness.get("reason")
+                        or "run research evidence is not comparison-ready"
+                    ),
+                    detector=detector,
+                    outcomes=outcomes,
+                    data_quality={
+                        **data_quality,
+                        "status": "blocked",
+                        "readiness_status": readiness.get("dataset_status")
+                        or readiness.get("reason"),
+                        "caveats": list(readiness.get("caveats") or []),
+                    },
+                    check_family=self.evaluator_id,
+                )
             return checks.evaluate_run_decision_trade_comparison(
                 inputs["run_evidence"],
                 detector=detector,
@@ -127,6 +169,30 @@ def _register_legacy_families() -> None:
 
 
 _register_legacy_families()
+
+
+def _register_event_fact_family() -> None:
+    evaluator = EventFactEvaluator()
+    CHECK_REGISTRY.register_evaluator(evaluator)
+    CHECK_REGISTRY.register_definition(
+        CheckDefinition(
+            schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+            definition_id=EVENT_FACT_ANALYSIS,
+            definition_version="2",
+            evaluator_id=evaluator.evaluator_id,
+            evaluator_version=evaluator.version,
+            request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+            result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            material_rules={
+                "family": EVENT_FACT_ANALYSIS,
+                "event_ownership": "indicator",
+                "operator_model": "registered_event_fact_operators.v1",
+            },
+        )
+    )
+
+
+_register_event_fact_family()
 
 
 def _mapping(value: Any, *, field: str) -> dict[str, Any]:
@@ -207,9 +273,20 @@ def materialize_check_definition(
     family = str(payload.get("check_family") or checks.SUPPORTED_CHECK_FAMILY).strip()
     base = CHECK_REGISTRY.resolve_definition(family, "2")
     detector = _mapping(payload.get("detector"), field="detector")
-    checks.validate_check_detector(check_family=family, detector=detector)
+    outcomes = _mapping(payload.get("outcomes"), field="outcomes")
+    statistics = _mapping(payload.get("statistics"), field="statistics")
+    if family == EVENT_FACT_ANALYSIS:
+        detector, outcomes, statistics = normalize_event_fact_configuration(
+            detector=detector,
+            outcomes=outcomes,
+            statistics=statistics,
+        )
+    else:
+        checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
+    if family == EVENT_FACT_ANALYSIS and not inputs:
+        raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
     assertions = _list_of_mappings(payload.get("assertions"), field="assertions")
     if mode == CHECK_MODE_EVIDENCE and not str(payload.get("gap_policy") or "").strip():
         raise ValueError("check_evidence_gap_policy_required")
@@ -222,8 +299,8 @@ def materialize_check_definition(
             if key in scope
         },
         "detector": detector,
-        "outcomes": _mapping(payload.get("outcomes"), field="outcomes"),
-        "statistics": _mapping(payload.get("statistics"), field="statistics"),
+        "outcomes": outcomes,
+        "statistics": statistics,
         "assertions": assertions,
         "gap_policy": str(
             payload.get("gap_policy") or GAP_POLICY_CONTINUE_DEGRADED

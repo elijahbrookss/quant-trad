@@ -74,21 +74,16 @@ def execute_claimed_research_job(job: ClaimedJob) -> Dict[str, Any]:
         raise ValueError("research async job payload requires request object")
 
     with maintain_job_heartbeat(job):
-        if job.job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
-            evaluation = research_service.evaluate_research_check(request)
-            result = None
-        else:
-            evaluation = None
+        if job.job_type != JOB_TYPE_RESEARCH_CHECK_RUN:
             result = process_research_job(job.job_type, job.payload)
+        else:
+            result = None
 
     if job.job_type == JOB_TYPE_RESEARCH_CHECK_RUN:
-        assert evaluation is not None
         return complete_job_with_owned_effect(
             job,
-            lambda session: research_service.persist_research_check(
-                request,
-                evaluation=evaluation,
-                session=session,
+            lambda session: research_service.run_research_check(
+                request, session=session
             ),
         )
 

@@ -44,6 +44,13 @@ def _candles() -> pd.DataFrame:
     )
 
 
+def _run_legacy_check(payload: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the retained v1 reader/persistence compatibility seam directly."""
+
+    evaluation = service._evaluate_legacy_research_check(payload)
+    return service.persist_research_check(payload, evaluation=evaluation)
+
+
 def test_raw_event_check_summarizes_forward_outcomes() -> None:
     payload = checks.evaluate_raw_event_check(
         _candles(),
@@ -181,7 +188,7 @@ def test_research_check_service_creates_observation_check_and_link(monkeypatch: 
     )
     monkeypatch.setattr(service.candle_service, "fetch_ohlcv_by_instrument", lambda *args: _candles())
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "ETH contraction follow-through",
             "scope": {
@@ -467,10 +474,6 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
         claim_token="token-1",
         claim_generation=1,
     )
-    evaluation = {
-        "schema_version": "research_check_evaluation.v1",
-        "check_family": "indicator_forward_outcome",
-    }
     observed: dict[str, Any] = {}
 
     monkeypatch.setattr(
@@ -478,17 +481,10 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
         "maintain_job_heartbeat",
         lambda claimed: nullcontext(),
     )
-    monkeypatch.setattr(
-        research_worker.research_service,
-        "evaluate_research_check",
-        lambda request: evaluation,
-    )
-
-    def fake_persist(request, *, evaluation, session):
+    def fake_run(request, *, session):
         observed["request"] = request
-        observed["evaluation"] = evaluation
         observed["session"] = session
-        return {"schema_version": "research_check_run.v1", "status": "completed"}
+        return {"schema_version": "research_check_run.v2", "status": "completed"}
 
     def fake_complete(claimed, effect):
         observed["claim"] = claimed
@@ -496,8 +492,8 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
 
     monkeypatch.setattr(
         research_worker.research_service,
-        "persist_research_check",
-        fake_persist,
+        "run_research_check",
+        fake_run,
     )
     monkeypatch.setattr(
         research_worker,
@@ -510,7 +506,6 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
     assert result["status"] == "completed"
     assert observed == {
         "request": {"title": "ATR check"},
-        "evaluation": evaluation,
         "session": "owned-session",
         "claim": job,
     }
@@ -779,7 +774,7 @@ def test_report_backed_research_check_links_observation_and_run(monkeypatch: pyt
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Run signal check",
             "check_family": "run_signal_summary",
@@ -848,7 +843,7 @@ def test_report_backed_research_check_blocks_on_report_readiness(monkeypatch: py
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Failed run signal check",
             "check_family": "run_signal_summary",
@@ -1561,7 +1556,7 @@ def test_indicator_research_check_uses_persisted_indicator_evidence(monkeypatch:
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Indicator range follow-through",
             "check_family": "indicator_forward_outcome",
@@ -1672,7 +1667,7 @@ def test_signal_audit_research_check_uses_persisted_indicator_evidence(monkeypat
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Signal audit",
             "check_family": "signal_audit",
@@ -1790,7 +1785,7 @@ def test_candidate_lifecycle_research_check_uses_persisted_indicator_evidence(mo
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Lifecycle audit",
             "check_family": "candidate_lifecycle",

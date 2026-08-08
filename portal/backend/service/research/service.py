@@ -11,6 +11,15 @@ from time import perf_counter
 from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
+from research_science.check import (
+    CHECK_MODE_EVIDENCE,
+    CHECK_MODE_PREVIEW,
+    CheckDefinition,
+    CheckRequest,
+    CheckResult,
+    ResolvedCheckPlan,
+    verify_check_replay,
+)
 
 from portal.backend.service.bots.startup_lifecycle import (
     is_active_run_state,
@@ -25,6 +34,7 @@ from portal.backend.service.provenance import source_revision
 from portal.backend.service.reports import contract as reports_contract
 from portal.backend.service.storage.repos import lifecycle as lifecycle_repo
 from portal.backend.service.storage.repos import runs as runs_repo
+from market_data.frozen import semantic_hash
 
 from . import repository
 from .checks import (
@@ -47,6 +57,9 @@ from .checks import (
     validate_check_detector,
 )
 from .metrics import build_leaderboard, extract_numeric_metrics
+from .execution import execute_check_evidence, execute_check_preview
+from .planning import plan_research_check
+from .registry import normalize_check_request
 
 
 logger = logging.getLogger(__name__)
@@ -147,7 +160,7 @@ def create_research_item(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def get_research_item(item_id: str) -> dict[str, Any]:
-    return repository.get_item(item_id)
+    return _project_evidence_classification(repository.get_item(item_id))
 
 
 def list_research_items(
@@ -162,13 +175,41 @@ def list_research_items(
         _normalize_choice(kind, "kind", RESEARCH_ITEM_KINDS)
     if status and status not in RESEARCH_ITEM_STATUSES:
         raise ValueError(f"unsupported research item status: {status}")
-    return repository.list_items(
-        kind=kind,
-        status=status,
-        symbol=symbol,
-        timeframe=timeframe,
-        limit=limit,
+    return [
+        _project_evidence_classification(item)
+        for item in repository.list_items(
+            kind=kind,
+            status=status,
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=limit,
+        )
+    ]
+
+
+def _project_evidence_classification(item: Mapping[str, Any]) -> dict[str, Any]:
+    projected = dict(item)
+    if str(projected.get("kind") or "") != "research_check":
+        return projected
+    payload = projected.get("payload")
+    schema_version = (
+        str(payload.get("schema_version") or "")
+        if isinstance(payload, Mapping)
+        else ""
     )
+    if schema_version == "research_check_payload.v2":
+        projected["evidence_classification"] = str(
+            payload.get("evidence_classification") or "frozen_replayable"
+        )
+        projected["replayable"] = bool(payload.get("replayable", True))
+        projected["observation_eligible"] = bool(
+            payload.get("observation_eligible", False)
+        )
+    else:
+        projected["evidence_classification"] = "legacy_unpinned"
+        projected["replayable"] = False
+        projected["observation_eligible"] = False
+    return projected
 
 
 def get_research_activity(
@@ -251,7 +292,7 @@ def list_research_links(item_id: str, *, include_inbound: bool = True) -> list[d
 
 
 def get_research_trail(item_id: str) -> dict[str, Any]:
-    item = repository.get_item(item_id)
+    item = _project_evidence_classification(repository.get_item(item_id))
     links: list[dict[str, Any]] = []
     related_items: list[dict[str, Any]] = []
     runs: list[dict[str, Any]] = []
@@ -275,7 +316,9 @@ def get_research_trail(item_id: str) -> dict[str, Any]:
         normalized = str(related_id or "").strip()
         if not normalized or normalized == item_id or normalized in seen_items:
             return
-        related_items.append(repository.get_item(normalized))
+        related_items.append(
+            _project_evidence_classification(repository.get_item(normalized))
+        )
         seen_items.add(normalized)
 
     def collect_link(link: Mapping[str, Any]) -> None:
@@ -432,7 +475,7 @@ def compare_research_checks(left_check_id: str, right_check_id: str) -> dict[str
     }
 
 
-def evaluate_research_check(
+def _evaluate_legacy_research_check(
     payload: Mapping[str, Any],
     *,
     cache: ResearchEvaluationCache | None = None,
@@ -467,12 +510,89 @@ def evaluate_research_check(
     }
 
 
-def run_research_check(payload: Mapping[str, Any]) -> dict[str, Any]:
-    request = dict(payload or {})
-    evaluation = evaluate_research_check(request)
-    return persist_research_check(
+def get_research_check_requirements(payload: Mapping[str, Any]) -> dict[str, Any]:
+    request_payload, _run_evidence = _prepare_check_request_payload(
+        payload, mode=str(payload.get("mode") or CHECK_MODE_PREVIEW)
+    )
+    definition, request = normalize_check_request(request_payload)
+    plan = plan_research_check(
+        definition,
         request,
-        evaluation=evaluation,
+        inspect_coverage=request.mode == CHECK_MODE_PREVIEW,
+    )
+    return {
+        "schema_version": "research_check_requirements.v1",
+        "mode": request.mode,
+        "definition": definition.to_dict(),
+        "request": request.to_dict(),
+        "plan": plan.to_dict(),
+        "provider_call_performed": False,
+        "preparation_authorized": False,
+    }
+
+
+def evaluate_research_check(
+    payload: Mapping[str, Any],
+    *,
+    cache: ResearchEvaluationCache | None = None,
+) -> dict[str, Any]:
+    """Run a watermark-pinned ephemeral preview; never persist evidence."""
+
+    _ = cache
+    request_payload, run_evidence = _prepare_check_request_payload(
+        {**dict(payload or {}), "mode": CHECK_MODE_PREVIEW},
+        mode=CHECK_MODE_PREVIEW,
+    )
+    definition, request = normalize_check_request(
+        request_payload, mode=CHECK_MODE_PREVIEW
+    )
+    plan = plan_research_check(definition, request, inspect_coverage=True)
+    return execute_check_preview(
+        definition, request, plan, run_evidence=run_evidence
+    )
+
+
+def run_research_check(
+    payload: Mapping[str, Any],
+    *,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Run preview by default or persist explicit frozen evidence."""
+
+    mode = str(payload.get("mode") or CHECK_MODE_PREVIEW).strip().lower()
+    request_payload, run_evidence = _prepare_check_request_payload(
+        payload, mode=mode
+    )
+    definition, request = normalize_check_request(request_payload, mode=mode)
+    if mode == CHECK_MODE_PREVIEW:
+        plan = plan_research_check(definition, request, inspect_coverage=True)
+        preview = execute_check_preview(
+            definition, request, plan, run_evidence=run_evidence
+        )
+        return {
+            **preview,
+            "compatibility": {
+                "route": "/api/research/checks/run",
+                "status": "deprecated_for_preview",
+                "replacement": "/api/research/checks/evaluate",
+                "message": (
+                    "Unqualified Check runs are now ephemeral previews; set mode=evidence "
+                    "and provide dataset_id for durable evidence."
+                ),
+            },
+        }
+    plan = plan_research_check(definition, request, inspect_coverage=False)
+    bound_plan, evidence, result = execute_check_evidence(
+        definition, request, plan, run_evidence=run_evidence
+    )
+    return persist_research_check_evidence(
+        request_payload,
+        definition=definition,
+        request=request,
+        plan=bound_plan,
+        evidence=evidence.to_dict(),
+        result=result.to_dict(),
+        session=session,
     )
 
 
@@ -565,6 +685,308 @@ def persist_research_check(
     }
 
 
+def persist_research_check_evidence(
+    payload: Mapping[str, Any],
+    *,
+    definition: CheckDefinition,
+    request: CheckRequest,
+    plan: ResolvedCheckPlan,
+    evidence: Mapping[str, Any],
+    result: Mapping[str, Any],
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Persist one replayable v2 Check without auto-creating an Observation."""
+
+    if request.mode != CHECK_MODE_EVIDENCE:
+        raise ValueError("check_evidence_persistence_requires_evidence_mode")
+    normalized_result = CheckResult.from_dict(result)
+    result_payload = dict(normalized_result.result)
+    status = "tested" if result_payload.get("status") == "completed" else "blocked"
+    scope = dict(request.scope)
+    check_id = str(uuid.uuid4())
+    create_args = {"session": session} if session is not None else {}
+    item = repository.create_item(
+        item_id=check_id,
+        kind="research_check",
+        status=status,
+        title=str(payload.get("title") or definition.definition_id).strip(),
+        body=_optional(payload.get("body")),
+        instrument_id=_optional(scope.get("instrument_id")),
+        symbol=_optional(scope.get("symbol")),
+        timeframe=_optional(scope.get("timeframe") or scope.get("interval")),
+        datasource=_optional(scope.get("datasource")),
+        exchange=_optional(scope.get("exchange")),
+        window_start=scope.get("start"),
+        window_end=scope.get("end"),
+        tags=sorted(set(["research-check", "frozen-evidence", *_tags(payload.get("tags"))])),
+        payload={
+            "schema_version": "research_check_payload.v2",
+            "evidence_classification": "frozen_replayable",
+            "definition": definition.to_dict(),
+            "request": request.to_dict(),
+            "plan": plan.to_dict(),
+            "evidence": dict(evidence),
+            "result": normalized_result.to_dict(),
+            "replayable": True,
+            "observation_eligible": status == "tested",
+        },
+        source_revision=str(evidence.get("code_revision") or _source_revision()),
+        **create_args,
+    )
+    target_type = (
+        "run"
+        if str(evidence.get("evidence_kind") or "")
+        == "immutable_run_evidence"
+        else "market_dataset"
+    )
+    target_id = (
+        str(evidence.get("input_binding", {}).get("run_id") or "")
+        if target_type == "run"
+        else str(request.dataset_id)
+    )
+    links = [
+        repository.create_link(
+            source_item_id=item["id"],
+            target_type=target_type,
+            target_id=target_id,
+            relation="uses_evidence",
+            metadata={
+                "dataset_hash": evidence.get("input_binding", {}).get(
+                    "dataset_hash"
+                ),
+                "binding_hash": evidence.get("input_binding", {}).get(
+                    "binding_hash"
+                ),
+                "result_hash": normalized_result.result_hash,
+            },
+            **create_args,
+        )
+    ]
+    return {
+        "schema_version": "research_check_run.v2",
+        "mode": CHECK_MODE_EVIDENCE,
+        "status": result_payload.get("status"),
+        "check": item,
+        "links": links,
+        "result": normalized_result.to_dict(),
+        "evidence": dict(evidence),
+        "replayable": True,
+        "observation_eligible": status == "tested",
+    }
+
+
+def create_observation_from_check_evidence(
+    check_id: str,
+    payload: Mapping[str, Any],
+    *,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    """Create an Observation only from completed, frozen, replayable Check evidence."""
+
+    check = _project_evidence_classification(
+        repository.get_item(
+            str(check_id or "").strip(),
+            **({"session": session} if session is not None else {}),
+        )
+    )
+    if check.get("kind") != "research_check":
+        raise ValueError("observation_evidence_invalid: item is not a Check")
+    if not check.get("replayable") or not check.get("observation_eligible"):
+        raise ValueError(
+            "observation_evidence_invalid: Check is not durable replayable evidence"
+        )
+    check_payload = dict(check.get("payload") or {})
+    result = CheckResult.from_dict(check_payload["result"])
+    evidence = dict(check_payload["evidence"])
+    request = CheckRequest.from_dict(check_payload["request"])
+    observation_title = str(
+        payload.get("title") or f"Observation from Check: {check.get('title')}"
+    ).strip()
+    create_args = {"session": session} if session is not None else {}
+    observation = repository.create_item(
+        kind="observation",
+        status=str(payload.get("status") or "active"),
+        title=observation_title,
+        body=_optional(payload.get("body")),
+        instrument_id=_optional(request.scope.get("instrument_id")),
+        symbol=_optional(request.scope.get("symbol")),
+        timeframe=_optional(
+            request.scope.get("timeframe") or request.scope.get("interval")
+        ),
+        datasource=_optional(request.scope.get("datasource")),
+        exchange=_optional(request.scope.get("exchange")),
+        window_start=request.scope.get("start"),
+        window_end=request.scope.get("end"),
+        tags=sorted(
+            set(["evidence-backed", *_tags(payload.get("tags"))])
+        ),
+        payload={
+            "schema_version": "research_observation_payload.v2",
+            "created_from": "research_check_evidence",
+            "check_id": check["id"],
+            "result_hash": result.result_hash,
+            "evidence_hash": result.evidence_hash,
+            "input_hash": evidence.get("input_hash"),
+            "scope": dict(request.scope),
+        },
+        source_revision=str(evidence.get("code_revision") or _source_revision()),
+        **create_args,
+    )
+    link = repository.create_link(
+        source_item_id=check["id"],
+        target_type="research_item",
+        target_id=observation["id"],
+        relation="supports",
+        metadata={
+            "target_kind": "observation",
+            "result_hash": result.result_hash,
+            "evidence_hash": result.evidence_hash,
+        },
+        **create_args,
+    )
+    return {
+        "schema_version": "research_observation_from_check.v1",
+        "check_id": check["id"],
+        "observation": observation,
+        "link": link,
+    }
+
+
+def replay_research_check(check_id: str) -> dict[str, Any]:
+    """Replay v2 evidence through the same provider-free canonical execution path."""
+
+    item = _project_evidence_classification(
+        repository.get_item(str(check_id or "").strip())
+    )
+    if item.get("kind") != "research_check":
+        raise ValueError("check_replay_invalid: item is not a Check")
+    if not item.get("replayable"):
+        return {
+            "schema_version": "research_check_replay.v1",
+            "check_id": item.get("id"),
+            "status": "not_replayable",
+            "evidence_classification": item.get("evidence_classification"),
+            "matches": False,
+            "provider_call_performed": False,
+            "reasons": ["legacy Check has no immutable input binding"],
+        }
+    payload = dict(item.get("payload") or {})
+    definition = CheckDefinition.from_dict(payload["definition"])
+    request = CheckRequest.from_dict(payload["request"])
+    original_plan = ResolvedCheckPlan.from_dict(payload["plan"])
+    original_result = CheckResult.from_dict(payload["result"])
+    original_evidence = dict(payload["evidence"])
+    current_revision = _source_revision()
+    if str(original_evidence.get("code_revision") or "") != current_revision:
+        return {
+            "schema_version": "research_check_replay.v1",
+            "check_id": item.get("id"),
+            "status": "source_revision_unavailable",
+            "matches": False,
+            "provider_call_performed": False,
+            "original_source_revision": original_evidence.get("code_revision"),
+            "current_source_revision": current_revision,
+            "reasons": ["exact producing code revision is not running"],
+        }
+    replayed_plan, replayed_evidence, replayed_result = execute_check_evidence(
+        definition, request, original_plan
+    )
+    verification = verify_check_replay(original_result, replayed_result)
+    evidence_matches = (
+        replayed_plan.plan_hash == original_plan.plan_hash
+        and replayed_evidence.evidence_hash
+        == str(original_evidence.get("evidence_hash") or "")
+    )
+    return {
+        **verification,
+        "check_id": item.get("id"),
+        "status": "matched" if verification["matches"] and evidence_matches else "mismatch",
+        "matches": bool(verification["matches"] and evidence_matches),
+        "original_evidence_hash": original_evidence.get("evidence_hash"),
+        "replayed_evidence_hash": replayed_evidence.evidence_hash,
+        "original_plan_hash": original_plan.plan_hash,
+        "replayed_plan_hash": replayed_plan.plan_hash,
+    }
+
+
+def _immutable_run_binding(dataset: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = dict(dataset.get("metadata") or {})
+    readiness = dict(dataset.get("readiness") or {})
+    semantic_fingerprint = str(
+        metadata.get("report_semantic_fingerprint") or ""
+    ).strip()
+    if not semantic_fingerprint:
+        # Historical test fixtures and older terminal reports can lack the
+        # explicit field. Their complete canonical projection is still pinned
+        # for this request; current production reports always expose it.
+        semantic_fingerprint = semantic_hash(
+            {
+                key: value
+                for key, value in dict(dataset).items()
+                if key not in {"narrative_summary", "performance"}
+            }
+        )
+    run_id = str(metadata.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError("check_run_evidence_invalid: metadata.run_id is required")
+    return {
+        "schema_version": "immutable_run_research_binding.v1",
+        "run_id": run_id,
+        "report_schema_version": str(dataset.get("schema_version") or ""),
+        "report_semantic_fingerprint": semantic_fingerprint,
+        "dataset_id": metadata.get("dataset_id"),
+        "dataset_hash": metadata.get("dataset_hash"),
+        "strategy_id": metadata.get("strategy_id"),
+        "strategy_hash": metadata.get("strategy_hash"),
+        "readiness": {
+            "dataset_status": readiness.get("dataset_status"),
+            "results_status": readiness.get("results_status"),
+            "safe_to_compare": bool(readiness.get("safe_to_compare", False)),
+        },
+        "provider_access": False,
+    }
+
+
+def _prepare_check_request_payload(
+    payload: Mapping[str, Any], *, mode: str
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    request = dict(payload or {})
+    family = str(
+        request.get("check_family") or SUPPORTED_CHECK_FAMILY
+    ).strip()
+    if family not in {RUN_SIGNAL_SUMMARY, RUN_DECISION_TRADE_COMPARISON}:
+        return request, None
+    validate_check_detector(
+        check_family=family,
+        detector=_mapping(request.get("detector"), "detector"),
+    )
+    if request.get("dataset_id") not in (None, ""):
+        raise ValueError(
+            "check_run_evidence_invalid: run-backed Checks do not accept a market Dataset"
+        )
+    if request.get("immutable_run_evidence") not in (None, ""):
+        raise ValueError(
+            "check_run_evidence_invalid: immutable run evidence is resolved by QT"
+        )
+    scope = _normalize_report_scope(
+        _mapping(request.get("scope"), "scope")
+    )
+    dataset = dict(
+        reports_contract.get_run_research_dataset(scope["run_id"])
+    )
+    scope = _merge_scope_context(scope, _report_scope_context(dataset))
+    binding = _immutable_run_binding(dataset)
+    return (
+        {
+            **request,
+            "mode": str(mode or CHECK_MODE_PREVIEW).strip().lower(),
+            "scope": scope,
+            "immutable_run_evidence": binding,
+        },
+        dataset,
+    )
+
+
 def sweep_research_checks(payload: Mapping[str, Any]) -> dict[str, Any]:
     request = dict(payload or {})
     check_family = str(request.get("check_family") or "").strip()
@@ -595,7 +1017,7 @@ def sweep_research_checks(payload: Mapping[str, Any]) -> dict[str, Any]:
             if variant["param_overrides"]:
                 variant_scope["indicator_param_overrides"] = dict(variant["param_overrides"])
             started_at = perf_counter()
-            evaluation = evaluate_research_check(
+            evaluation = _evaluate_legacy_research_check(
                 {
                     "title": f"{title}: {variant['id']} @ {scope_id}",
                     "check_family": check_family,

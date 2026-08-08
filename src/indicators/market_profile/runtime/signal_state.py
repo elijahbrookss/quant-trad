@@ -190,6 +190,11 @@ class BreakoutRetestStateMachine:
         )
         self._sequence: BreakoutSequence | None = None
 
+    def clear_sequence(self) -> None:
+        """Discard transition candidates while preserving warmed ATR state."""
+
+        self._sequence = None
+
     def step(self, state: MarketProfileBarState) -> dict[str, list[dict[str, Any]]]:
         events = {
             "confirmed_balance_breakout": [],

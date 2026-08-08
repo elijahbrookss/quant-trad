@@ -98,44 +98,83 @@ class TypedMarketProfileIndicator(Indicator):
         self._current_overlay_summary: dict[str, Any] = {}
         self._overlay_ready = False
         self._outputs: dict[str, RuntimeOutput] = build_not_ready_outputs(datetime.min)
+        self._signal_state_params = {
+            "breakout_confirm_bars": params.get(
+                "breakout_confirm_bars", DEFAULT_BREAKOUT_CONFIRM_BARS
+            ),
+            "reclaim_max_bars": params.get(
+                "reclaim_max_bars", DEFAULT_RECLAIM_MAX_BARS
+            ),
+            "retest_min_acceptance_bars": params.get(
+                "retest_min_acceptance_bars", DEFAULT_RETEST_MIN_ACCEPTANCE_BARS
+            ),
+            "retest_min_excursion_atr": params.get(
+                "retest_min_excursion_atr", DEFAULT_RETEST_MIN_EXCURSION_ATR
+            ),
+            "retest_max_bars": params.get(
+                "retest_max_bars", DEFAULT_RETEST_MAX_BARS
+            ),
+            "retest_atr_period": params.get(
+                "retest_atr_period", DEFAULT_RETEST_ATR_PERIOD
+            ),
+            "retest_touch_tolerance_atr": params.get(
+                "retest_touch_tolerance_atr", DEFAULT_RETEST_TOUCH_TOLERANCE_ATR
+            ),
+            "retest_max_penetration_atr": params.get(
+                "retest_max_penetration_atr", DEFAULT_RETEST_MAX_PENETRATION_ATR
+            ),
+            "retest_hold_confirm_bars": params.get(
+                "retest_hold_confirm_bars", DEFAULT_RETEST_HOLD_CONFIRM_BARS
+            ),
+        }
         self._signal_state = BreakoutRetestStateMachine(
-            breakout_confirm_bars=params.get(
-                "breakout_confirm_bars",
-                DEFAULT_BREAKOUT_CONFIRM_BARS,
-            ),
-            reclaim_max_bars=params.get(
-                "reclaim_max_bars",
-                DEFAULT_RECLAIM_MAX_BARS,
-            ),
-            retest_min_acceptance_bars=params.get(
-                "retest_min_acceptance_bars",
-                DEFAULT_RETEST_MIN_ACCEPTANCE_BARS,
-            ),
-            retest_min_excursion_atr=params.get(
-                "retest_min_excursion_atr",
-                DEFAULT_RETEST_MIN_EXCURSION_ATR,
-            ),
-            retest_max_bars=params.get(
-                "retest_max_bars",
-                DEFAULT_RETEST_MAX_BARS,
-            ),
-            retest_atr_period=params.get(
-                "retest_atr_period",
-                DEFAULT_RETEST_ATR_PERIOD,
-            ),
-            retest_touch_tolerance_atr=params.get(
-                "retest_touch_tolerance_atr",
-                DEFAULT_RETEST_TOUCH_TOLERANCE_ATR,
-            ),
-            retest_max_penetration_atr=params.get(
-                "retest_max_penetration_atr",
-                DEFAULT_RETEST_MAX_PENETRATION_ATR,
-            ),
-            retest_hold_confirm_bars=params.get(
-                "retest_hold_confirm_bars",
-                DEFAULT_RETEST_HOLD_CONFIRM_BARS,
-            ),
+            **self._signal_state_params,
         )
+        self._gap_rewarm_remaining = 0
+
+    def handle_gap(
+        self,
+        *,
+        policy: str,
+        gap: Mapping[str, Any],
+        next_bar_time: datetime,
+        rewarm_bars: int,
+    ) -> Mapping[str, Any]:
+        normalized = str(policy or "").strip().lower()
+        if normalized == "reject":
+            raise RuntimeError(
+                "market_profile_gap_rejected: "
+                f"indicator_id={self._indicator_id} gap={dict(gap)}"
+            )
+        if normalized == "continue_degraded":
+            return {
+                "indicator_id": self._indicator_id,
+                "policy": normalized,
+                "action": "continued_degraded",
+                "next_bar_time": next_bar_time.isoformat(),
+            }
+        if normalized != "reset_rewarm":
+            raise RuntimeError(
+                "market_profile_gap_policy_invalid: "
+                f"indicator_id={self._indicator_id} policy={normalized}"
+            )
+        self._previous_profile_key = None
+        self._previous_location = None
+        self._signal_state = BreakoutRetestStateMachine(
+            **self._signal_state_params
+        )
+        self._gap_rewarm_remaining = max(
+            int(rewarm_bars or 0),
+            int(self._signal_state_params["retest_atr_period"]),
+        )
+        self._reset_outputs(next_bar_time)
+        return {
+            "indicator_id": self._indicator_id,
+            "policy": normalized,
+            "action": "reset_and_rewarm",
+            "rewarm_bars": self._gap_rewarm_remaining,
+            "next_bar_time": next_bar_time.isoformat(),
+        }
 
     def apply_bar(self, bar: Any, inputs: Mapping[Any, RuntimeOutput]) -> None:
         if not isinstance(bar, Candle):
@@ -175,6 +214,12 @@ class TypedMarketProfileIndicator(Indicator):
         }
         self._overlay_ready = True
         additional_signal_events = self._signal_state.step(bar_state)
+        if self._gap_rewarm_remaining > 0:
+            self._gap_rewarm_remaining -= 1
+            if self._gap_rewarm_remaining == 0:
+                self._signal_state.clear_sequence()
+            self._outputs = build_not_ready_outputs(bar.time)
+            return
         self._outputs = build_market_profile_outputs(
             bar_state,
             additional_signal_events=additional_signal_events,

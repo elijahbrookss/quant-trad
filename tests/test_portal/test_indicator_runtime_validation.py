@@ -249,6 +249,107 @@ def test_runtime_output_evidence_applies_explicit_param_overrides(monkeypatch) -
     assert payload["indicator"]["param_overrides"] == {"warmup_bars": 2}
 
 
+def test_runtime_output_evidence_injects_declared_market_inputs_per_bar(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime_validation,
+        "load_indicator_record",
+        lambda inst_id, ctx=None: {"id": inst_id},
+    )
+    monkeypatch.setattr(
+        runtime_validation,
+        "build_meta_from_record",
+        lambda record, ctx=None: {
+            "id": record["id"],
+            "type": "candle_stats",
+            "name": "Candle Stats",
+            "params": {},
+            "dependencies": [],
+            "runtime_supported": True,
+        },
+    )
+    monkeypatch.setattr(
+        runtime_validation.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "ES",
+            "datasource": "ALPACA",
+            "exchange": "cme",
+        },
+    )
+    monkeypatch.setattr(
+        runtime_validation,
+        "build_runtime_indicator_graph",
+        lambda *args, **kwargs: ({}, [_indicator_stub()]),
+    )
+    monkeypatch.setattr(
+        runtime_validation.candle_service,
+        "fetch_ohlcv_by_instrument",
+        lambda *args, **kwargs: _frame(),
+    )
+
+    class _Resolver:
+        calls = []
+
+        def resolve(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"indicator-1": {"reference_price": {"value": 100}}}
+
+    observed = []
+
+    class _FakeEngine:
+        output_types = {"indicator-1.candle_stats": "metric"}
+
+        def __init__(self, indicators):
+            _ = indicators
+
+        def step(self, *, bar, bar_time, include_overlays, include_details, market_data_inputs):
+            _ = bar, include_overlays, include_details
+            observed.append(market_data_inputs)
+            return SimpleNamespace(
+                outputs={
+                    "indicator-1.candle_stats": RuntimeOutput(
+                        bar_time=bar_time,
+                        ready=True,
+                        value={"range_pct": 0.02},
+                    )
+                },
+                guard_metrics=(),
+                guard_warnings=(),
+            )
+
+    monkeypatch.setattr(runtime_validation, "IndicatorExecutionEngine", _FakeEngine)
+    resolver = _Resolver()
+    declarations = {
+        "indicator-1": (
+            {
+                "key": "reference_price",
+                "fact_type": "market.reference_price",
+            },
+        )
+    }
+
+    payload = runtime_validation.collect_runtime_output_evidence_for_instance(
+        "indicator-1",
+        "2026-02-01T00:00:00Z",
+        "2026-02-01T02:00:00Z",
+        "1h",
+        instrument_id="instrument-1",
+        market_data_resolver=resolver,
+        market_data_requirements_by_consumer=declarations,
+    )
+
+    assert len(resolver.calls) == 2
+    assert observed == [
+        {"indicator-1": {"reference_price": {"value": 100}}},
+        {"indicator-1": {"reference_price": {"value": 100}}},
+    ]
+    assert payload["candles"][0]["close_time"] == "2026-02-01T01:00:00Z"
+    assert payload["candles"][0]["known_at"] == "2026-02-01T01:00:00Z"
+
+
 def test_runtime_validation_reports_readiness_assertion_failures(monkeypatch) -> None:
     monkeypatch.setattr(runtime_validation, "load_indicator_record", lambda inst_id, ctx=None: {"id": inst_id})
     monkeypatch.setattr(

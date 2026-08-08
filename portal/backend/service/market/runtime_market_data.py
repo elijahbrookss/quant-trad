@@ -41,6 +41,7 @@ class RuntimeMarketDataResolver:
         store: MarketDataStore = market_data_repo,
         dataset_binding: Optional[Mapping[str, Any]] = None,
         instrument_bindings: Optional[Mapping[str, Any]] = None,
+        as_of_commit_seq: int | None = None,
     ) -> None:
         self.store = store
         if dataset_binding is None:
@@ -72,6 +73,11 @@ class RuntimeMarketDataResolver:
         )
         self._frozen_records: dict[int, tuple[Any, ...]] = {}
         self._frozen_numeric_revisions: dict[int, tuple[Any, ...]] = {}
+        self.as_of_commit_seq = (
+            int(as_of_commit_seq) if as_of_commit_seq is not None else None
+        )
+        if self.as_of_commit_seq is not None and self.as_of_commit_seq < 0:
+            raise ValueError("runtime_market_data_invalid: watermark is negative")
         self._latest_service = MarketDataCollectorService(store=store)
 
     @staticmethod
@@ -142,19 +148,11 @@ class RuntimeMarketDataResolver:
         evaluation_time: datetime,
     ) -> Any:
         assert self.dataset_binding is not None
-        matches: list[Mapping[str, Any]] = []
-        for series in self.dataset_binding["series"]:
-            for binding in series.get("bindings") or []:
-                raw_input = binding.get("input")
-                if not isinstance(raw_input, Mapping):
-                    continue
-                bound_primary = str(binding.get("primary_instrument_id") or "").strip()
-                if (
-                    str(binding.get("consumer_id") or "") == consumer_id
-                    and str(raw_input.get("key") or "") == requirement.key
-                    and (not bound_primary or bound_primary == primary_instrument_id)
-                ):
-                    matches.append(series)
+        matches = self._matching_frozen_series(
+            consumer_id=consumer_id,
+            requirement=requirement,
+            primary_instrument_id=primary_instrument_id,
+        )
         if len(matches) != 1:
             return self._unavailable(
                 requirement,
@@ -175,31 +173,12 @@ class RuntimeMarketDataResolver:
                 "market_data_frozen_contract_disagreement: "
                 f"consumer_id={consumer_id} key={requirement.key}"
             )
+        records = self._frozen_history_records(
+            series=series,
+            requirement=requirement,
+            evaluation_time=evaluation_time,
+        )
         series_id = int(series["series_id"])
-        contract = get_fact_contract(requirement.fact_type)
-        if contract.uses_exact_numeric_storage:
-            if series_id not in self._frozen_numeric_revisions:
-                self._frozen_numeric_revisions[series_id] = tuple(
-                    self.store.read_numeric_fact_revisions(
-                        series_id=series_id,
-                        start=self._utc(series["range_start"]),
-                        end=self._utc(series["range_end"]),
-                        as_of_commit_seq=int(series["max_commit_seq"]),
-                    )
-                )
-            records = causal_numeric_fact_records(
-                self._frozen_numeric_revisions[series_id],
-                evaluation_time=evaluation_time,
-            )
-        else:
-            if series_id not in self._frozen_records:
-                self._frozen_records[series_id] = tuple(
-                    self.store.read_dataset_series(
-                        dataset_id=str(self.dataset_binding["dataset_id"]),
-                        series_id=series_id,
-                    )
-                )
-            records = self._frozen_records[series_id]
         if requirement.alignment is MarketDataAlignment.EXACT_INTERVAL:
             timeframe = int(requirement.timeframe_seconds or 0)
             interval_start = evaluation_time - timedelta(seconds=timeframe)
@@ -266,6 +245,279 @@ class RuntimeMarketDataResolver:
                 )
         return selected
 
+    def _matching_frozen_series(
+        self,
+        *,
+        consumer_id: str,
+        requirement: MarketDataRequirement,
+        primary_instrument_id: str,
+    ) -> list[Mapping[str, Any]]:
+        assert self.dataset_binding is not None
+        matches: list[Mapping[str, Any]] = []
+        for series in self.dataset_binding["series"]:
+            bound_requirement = series.get("requirement")
+            if isinstance(bound_requirement, Mapping):
+                if (
+                    str(bound_requirement.get("consumer_id") or "") == consumer_id
+                    and str(bound_requirement.get("alias") or "")
+                    in {
+                        requirement.key,
+                        f"indicator:{consumer_id}:{requirement.key}",
+                    }
+                ):
+                    matches.append(series)
+                    continue
+            for binding in series.get("bindings") or []:
+                raw_input = binding.get("input")
+                if not isinstance(raw_input, Mapping):
+                    continue
+                bound_primary = str(binding.get("primary_instrument_id") or "").strip()
+                if (
+                    str(binding.get("consumer_id") or "") == consumer_id
+                    and str(raw_input.get("key") or "") == requirement.key
+                    and (not bound_primary or bound_primary == primary_instrument_id)
+                ):
+                    matches.append(series)
+        return matches
+
+    def _frozen_history_records(
+        self,
+        *,
+        series: Mapping[str, Any],
+        requirement: MarketDataRequirement,
+        evaluation_time: datetime,
+    ) -> tuple[Any, ...]:
+        series_id = int(series["series_id"])
+        contract = get_fact_contract(requirement.fact_type)
+        if contract.uses_exact_numeric_storage:
+            if series_id not in self._frozen_numeric_revisions:
+                self._frozen_numeric_revisions[series_id] = tuple(
+                    self.store.read_numeric_fact_revisions(
+                        series_id=series_id,
+                        start=self._utc(series["range_start"]),
+                        end=self._utc(series["range_end"]),
+                        as_of_commit_seq=int(series["max_commit_seq"]),
+                    )
+                )
+            records: Sequence[Any] = causal_numeric_fact_records(
+                self._frozen_numeric_revisions[series_id],
+                evaluation_time=evaluation_time,
+            )
+        else:
+            if series_id not in self._frozen_records:
+                self._frozen_records[series_id] = tuple(
+                    self.store.read_dataset_series(
+                        dataset_id=str(self.dataset_binding["dataset_id"]),
+                        series_id=series_id,
+                    )
+                )
+            records = self._frozen_records[series_id]
+        source_binding = series.get("source_binding")
+        if isinstance(source_binding, Mapping):
+            allowed_sources = {
+                str(value)
+                for value in source_binding.get("resolved_source_identity_keys") or []
+            }
+            if allowed_sources:
+                records = tuple(
+                    record
+                    for record in records
+                    if str(getattr(record, "source_identity_key", ""))
+                    in allowed_sources
+                )
+        return tuple(records)
+
+    def causal_history(
+        self,
+        *,
+        consumer_id: str,
+        requirement: Mapping[str, Any],
+        primary_instrument_id: str,
+        start: datetime,
+        end: datetime,
+        evaluation_time: datetime,
+    ) -> tuple[Any, ...]:
+        """Return one declared, source-constrained causal fact history.
+
+        The method is intentionally read-only and provider-free.  It is the
+        reusable boundary for Check-owned window features; callers never read
+        repository revisions or frozen binding internals directly.
+        """
+
+        declared = self._requirement(requirement)
+        lower = self._utc(start)
+        upper = self._utc(end)
+        decision = self._utc(evaluation_time)
+        if upper <= lower or decision < lower:
+            raise ValueError("runtime_market_data_history_invalid: invalid time range")
+        if self.dataset_binding is not None:
+            matches = self._matching_frozen_series(
+                consumer_id=str(consumer_id or "").strip(),
+                requirement=declared,
+                primary_instrument_id=str(primary_instrument_id or "").strip(),
+            )
+            if len(matches) != 1:
+                raise RuntimeError(
+                    "runtime_market_data_history_invalid: frozen binding did not resolve one series "
+                    f"consumer_id={consumer_id} key={declared.key} matches={len(matches)}"
+                )
+            records = self._frozen_history_records(
+                series=matches[0],
+                requirement=declared,
+                evaluation_time=decision,
+            )
+        elif self.as_of_commit_seq is not None:
+            instrument_id = self._instrument_id(
+                declared, primary_instrument_id=primary_instrument_id
+            )
+            series_id = self.store.resolve_series_id(
+                instrument_id=instrument_id,
+                fact_type=declared.fact_type,
+                timeframe_seconds=declared.timeframe_seconds,
+                contract_version=str(declared.contract_version),
+                dimensions=dict(declared.dimensions),
+            )
+            contract = get_fact_contract(declared.fact_type)
+            if contract.uses_exact_numeric_storage:
+                revisions = self.store.read_numeric_fact_revisions(
+                    series_id=series_id,
+                    start=lower,
+                    end=upper,
+                    as_of_commit_seq=self.as_of_commit_seq,
+                )
+                records = causal_numeric_fact_records(
+                    revisions, evaluation_time=decision
+                )
+            else:
+                records = tuple(
+                    self.store.read_series_records(
+                        series_id=series_id,
+                        start=lower,
+                        end=upper,
+                        as_of_commit_seq=self.as_of_commit_seq,
+                        known_at_lte=decision,
+                    )
+                )
+        else:
+            raise RuntimeError(
+                "runtime_market_data_history_invalid: frozen binding or preview watermark required"
+            )
+        return tuple(
+            record
+            for record in records
+            if lower <= record_effective_time(record) < upper
+            and record.fact.known_at <= decision
+        )
+
+    def _mutable_pinned_series(
+        self,
+        *,
+        consumer_id: str,
+        requirement: MarketDataRequirement,
+        primary_instrument_id: str,
+        evaluation_time: datetime,
+    ) -> Any:
+        if self.as_of_commit_seq is None:
+            raise RuntimeError("runtime_market_data_invalid: preview watermark is required")
+        instrument_id = self._instrument_id(
+            requirement, primary_instrument_id=primary_instrument_id
+        )
+        if not instrument_id:
+            return self._unavailable(
+                requirement,
+                evaluation_time=evaluation_time,
+                reason="instrument_role_unresolved",
+                details={
+                    "instrument_role": requirement.instrument_role.value,
+                    "instrument_ref": requirement.instrument_ref,
+                },
+                consumer_id=consumer_id,
+            )
+        try:
+            series_id = self.store.resolve_series_id(
+                instrument_id=instrument_id,
+                fact_type=requirement.fact_type,
+                timeframe_seconds=requirement.timeframe_seconds,
+                contract_version=str(requirement.contract_version),
+                dimensions=dict(requirement.dimensions),
+            )
+        except ValueError as exc:
+            return self._unavailable(
+                requirement,
+                evaluation_time=evaluation_time,
+                reason="series_missing",
+                details={"instrument_id": instrument_id, "error": str(exc)},
+                consumer_id=consumer_id,
+            )
+        history_seconds = max(
+            int(requirement.max_staleness_seconds or 0),
+            int(requirement.lookback_seconds or 0),
+            int(requirement.lookback_bars or 0)
+            * int(requirement.timeframe_seconds or 0),
+            int(requirement.timeframe_seconds or 0),
+        )
+        start = evaluation_time - timedelta(seconds=max(history_seconds, 1))
+        contract = get_fact_contract(requirement.fact_type)
+        if contract.uses_exact_numeric_storage:
+            revisions = self.store.read_numeric_fact_revisions(
+                series_id=series_id,
+                start=start,
+                end=evaluation_time + timedelta(microseconds=1),
+                as_of_commit_seq=self.as_of_commit_seq,
+            )
+            records = causal_numeric_fact_records(
+                revisions, evaluation_time=evaluation_time
+            )
+        else:
+            records = self.store.read_series_records(
+                series_id=series_id,
+                start=start,
+                end=evaluation_time + timedelta(microseconds=1),
+                as_of_commit_seq=self.as_of_commit_seq,
+                known_at_lte=evaluation_time,
+            )
+        if requirement.alignment is MarketDataAlignment.EXACT_INTERVAL:
+            interval_start = evaluation_time - timedelta(
+                seconds=int(requirement.timeframe_seconds or 0)
+            )
+            visible = [
+                record
+                for record in records
+                if record_effective_time(record) == interval_start
+                and record.fact.known_at <= evaluation_time
+            ]
+            selected: Any = (
+                max(
+                    visible,
+                    key=lambda record: (
+                        record.fact.known_at,
+                        int(record.market_commit_seq),
+                    ),
+                )
+                if visible
+                else UnavailableMarketData(
+                    key=requirement.key,
+                    reason="exact_interval_unavailable",
+                    evaluation_time=evaluation_time,
+                    details={"series_id": series_id},
+                )
+            )
+        else:
+            selected = latest_known_record(
+                records,
+                evaluation_time=evaluation_time,
+                max_staleness_seconds=int(requirement.max_staleness_seconds or 0),
+            )
+        if isinstance(selected, UnavailableMarketData):
+            return self._unavailable(
+                requirement,
+                evaluation_time=evaluation_time,
+                reason=selected.reason,
+                details={**dict(selected.details), "series_id": series_id},
+                consumer_id=consumer_id,
+            )
+        return selected
+
     def _instrument_id(
         self, requirement: MarketDataRequirement, *, primary_instrument_id: str
     ) -> str:
@@ -304,6 +556,14 @@ class RuntimeMarketDataResolver:
                     continue
                 if self.dataset_binding is not None:
                     values[requirement.key] = self._frozen_series(
+                        consumer_id=consumer_id,
+                        requirement=requirement,
+                        primary_instrument_id=primary_id,
+                        evaluation_time=decision_time,
+                    )
+                    continue
+                if self.as_of_commit_seq is not None:
+                    values[requirement.key] = self._mutable_pinned_series(
                         consumer_id=consumer_id,
                         requirement=requirement,
                         primary_instrument_id=primary_id,
