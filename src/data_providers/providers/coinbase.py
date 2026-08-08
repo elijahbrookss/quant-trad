@@ -923,10 +923,22 @@ class CoinbaseProvider(BaseDataProvider):
                 start_value = candle_payload.get("start")
                 if start_value is None:
                     continue
+                candle_start = int(start_value)
+                if candle_start < window_start or candle_start > window_end:
+                    raise CoinbaseAPIError(
+                        "Coinbase candle response escaped requested bounds "
+                        f"| product_id={symbol} candle_start={candle_start} "
+                        f"window_start={window_start} window_end={window_end}"
+                    )
+                # Coinbase may include the candle that opens exactly on the
+                # request end. QT candle acquisition is half-open [start, end),
+                # so normalize that boundary overlap at the provider boundary.
+                if candle_start == window_end:
+                    continue
                 rows.append(
                     {
                         "timestamp": pd.to_datetime(
-                            int(start_value), unit="s", utc=True
+                            candle_start, unit="s", utc=True
                         ),
                         "open": float(candle_payload.get("open"))
                         if candle_payload.get("open") is not None
