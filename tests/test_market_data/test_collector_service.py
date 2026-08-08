@@ -285,6 +285,7 @@ def test_exhausted_collection_failure_records_explicit_quality_gap() -> None:
     assert store.gaps == [
         {
             "series_id": 22,
+            "source_id": 11,
             "start": SCHEDULED,
             "end": SCHEDULED + timedelta(seconds=60),
             "classification": "collection_failed",

@@ -405,17 +405,28 @@ def _reserved_fixture_holdout(suffix: str) -> tuple[dict, dict, str]:
 
 def test_rejected_holdout_is_consumed_and_remains_sealed(
     authority_transaction,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     suffix = uuid4().hex
     family, holdout, token = _reserved_fixture_holdout(suffix)
+    canonical_evidence = {
+        "artifact_hash": "7" * 64,
+        "sample_count": 5,
+        "trade_count": 1,
+        "canonical_result_reference": {
+            "kind": "backtest",
+            "result_id": f"run-{suffix}",
+        },
+    }
+    monkeypatch.setattr(
+        authority,
+        "resolve_canonical_result_reference",
+        lambda *_args, **_kwargs: canonical_evidence,
+    )
     rejected = authority.reject_holdout_internal(
         holdout_use_id=holdout["id"],
         reservation_token=token,
-        result_evidence={
-            "artifact_hash": "7" * 64,
-            "sample_count": 5,
-            "trade_count": 1,
-        },
+        result_reference={"kind": "backtest", "result_id": f"run-{suffix}"},
         reason_codes=("sample_count_below_minimum", "trade_count_below_minimum"),
         executor_actor="runner:sealed-holdout",
         request_id=f"request-holdout-reject-{suffix}",
