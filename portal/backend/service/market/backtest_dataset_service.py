@@ -12,6 +12,10 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from data_providers.numeric_facts import (
+    NumericAcquisitionBudget,
+    load_numeric_fact_manifest,
+)
 from data_providers.utils.ohlcv import interval_to_timedelta
 from indicators.registry import get_indicator_manifest
 from market_data.backtest import (
@@ -37,6 +41,7 @@ from market_data.contracts import (
     TypedFeatureRecord,
     build_candle_material_hash,
     build_dataset_identity_hash,
+    build_numeric_fact_material_hash,
     build_open_interest_material_hash,
     build_provenance_hash,
     build_funding_rate_material_hash,
@@ -54,6 +59,9 @@ from market_data.structure import (
 from market_data.requirements import (
     InstrumentResolutionContext,
     MarketDataPlanResolver,
+    UnavailableMarketData,
+    causal_numeric_fact_records,
+    latest_known_record,
 )
 from market_data.store import FrozenDataset, MarketDataStore
 from strategies.compiler import compile_strategy
@@ -66,6 +74,11 @@ from ..indicators.indicator_service import (
 from . import instrument_service
 from .candle_service import preflight_candle_coverage_by_instrument
 from .feed_service import HistoricalCandleIngestor, historical_candle_ingestor
+from .numeric_fact_acquisition import (
+    NumericAcquisitionAuthorization,
+    NumericFactAcquisitionService,
+    numeric_fact_acquisition_service,
+)
 from ..storage.repos.market_data import market_data_repo
 
 
@@ -485,6 +498,11 @@ def _indicator_requirements(
                             else str(item.instrument_role)
                         ),
                         "instrument_ref": item.instrument_ref,
+                        **(
+                            {"dimensions": dict(item.dimensions)}
+                            if item.dimensions
+                            else {}
+                        ),
                         "alignment": (
                             item.alignment.value
                             if hasattr(item.alignment, "value")
@@ -546,7 +564,10 @@ def derive_backtest_dataset_plan(
     )
     base_warmup_start = start - timedelta(seconds=strategy_seconds * warmup_bars)
 
-    merged: dict[tuple[str, str, str, int | None], dict[str, Any]] = {}
+    merged: dict[
+        tuple[str, str, str, int | None, tuple[tuple[str, str], ...]],
+        dict[str, Any],
+    ] = {}
     instruments: list[dict[str, Any]] = []
     instrument_cache: dict[str, dict[str, Any]] = {}
     primary_instrument_ids: list[str] = []
@@ -575,6 +596,7 @@ def derive_backtest_dataset_plan(
         contract_version: str,
         timeframe: str | None,
         timeframe_seconds: int | None,
+        dimensions: Mapping[str, Any],
         required_start: datetime,
         role: str,
         indicator_id: str | None,
@@ -585,11 +607,16 @@ def derive_backtest_dataset_plan(
         bindings: list[dict[str, Any]],
     ) -> None:
         instrument = load_data_instrument(instrument_id)
+        normalized_dimensions = get_fact_contract(fact_type).normalize_dimensions(
+            dimensions
+        )
+        dimension_key = tuple(sorted(normalized_dimensions.items()))
         key = (
             instrument_id,
             fact_type,
             contract_version,
             timeframe_seconds,
+            dimension_key,
         )
         existing = merged.get(key)
         if existing is None:
@@ -612,6 +639,8 @@ def derive_backtest_dataset_plan(
                 "indicator_ids": [],
                 "bindings": [],
             }
+            if normalized_dimensions:
+                existing["dimensions"] = normalized_dimensions
             merged[key] = existing
         else:
             existing["required"] = bool(existing["required"] or required)
@@ -643,6 +672,7 @@ def derive_backtest_dataset_plan(
             contract_version=CANDLE_FACT_VERSION,
             timeframe=strategy_timeframe,
             timeframe_seconds=strategy_seconds,
+            dimensions={},
             required_start=base_warmup_start,
             role="strategy_primary_bars",
             indicator_id=None,
@@ -718,6 +748,7 @@ def derive_backtest_dataset_plan(
                 contract_version=resolved.contract_version,
                 timeframe=timeframe,
                 timeframe_seconds=resolved.timeframe_seconds,
+                dimensions=resolved.dimensions,
                 required_start=required_start,
                 role="indicator_input",
                 indicator_id=indicator_ids[0] if len(indicator_ids) == 1 else None,
@@ -734,6 +765,7 @@ def derive_backtest_dataset_plan(
                         resolved.fact_type,
                         resolved.contract_version,
                         resolved.timeframe_seconds,
+                        tuple(sorted(dict(resolved.dimensions).items())),
                     )
                 ]["indicator_ids"]:
                     merged[
@@ -742,6 +774,7 @@ def derive_backtest_dataset_plan(
                             resolved.fact_type,
                             resolved.contract_version,
                             resolved.timeframe_seconds,
+                            tuple(sorted(dict(resolved.dimensions).items())),
                         )
                     ]["indicator_ids"].append(indicator_id)
 
@@ -1073,6 +1106,9 @@ def _validate_dataset_series(
         "timeframe_seconds": timeframe_seconds,
         "contract_version": str(entry["contract_version"]),
     }
+    dimensions = dict(entry.get("dimensions") or {})
+    if dimensions:
+        series_identity["dimensions"] = dimensions
     if fact_type == CANDLE_FACT_TYPE:
         material_hash = build_candle_material_hash(
             series_identity=series_identity,
@@ -1085,6 +1121,11 @@ def _validate_dataset_series(
         )
     elif fact_type == FUNDING_RATE_FACT_TYPE:
         material_hash = build_funding_rate_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
+    elif contract.uses_exact_numeric_storage:
+        material_hash = build_numeric_fact_material_hash(
             series_identity=series_identity,
             records=records,
         )
@@ -1185,6 +1226,7 @@ def validate_backtest_dataset(
                 if row.get("timeframe_seconds") is not None
                 else None
             ),
+            tuple(sorted(dict(row.get("dimensions") or {}).items())),
         ): row
         for row in plan["series"]
     }
@@ -1198,6 +1240,7 @@ def validate_backtest_dataset(
                 if row.get("timeframe_seconds") is not None
                 else None
             ),
+            tuple(sorted(dict(row.get("dimensions") or {}).items())),
         ): row
         for row in dataset.series
     }
@@ -1220,6 +1263,7 @@ def validate_backtest_dataset(
             "fact_type": key[1],
             "contract_version": key[2],
             "timeframe_seconds": key[3],
+            **({"dimensions": dict(key[4])} if key[4] else {}),
             "required": False,
             "classification": "optional_series_not_frozen",
             "reason": "optional_series_not_frozen",
@@ -1366,6 +1410,8 @@ def validate_backtest_dataset(
         verified["max_staleness_seconds"] = requirement.get(
             "max_staleness_seconds"
         )
+        if requirement.get("dimensions"):
+            verified["dimensions"] = dict(requirement["dimensions"])
         if (
             str(requirement.get("alignment") or "") == "exact_interval"
             and key[1] != CANDLE_FACT_TYPE
@@ -1606,18 +1652,36 @@ def _generic_fact_coverage(
         if requirement.get("timeframe_seconds") is not None
         else None
     )
+    contract = get_fact_contract(fact_type)
+    revision_records: Sequence[Any] = ()
     try:
         series_id = store.resolve_series_id(
             instrument_id=str(requirement["instrument_id"]),
             fact_type=fact_type,
             timeframe_seconds=timeframe_seconds,
             contract_version=str(requirement["contract_version"]),
+            dimensions=dict(requirement.get("dimensions") or {}),
         )
-        records = store.read_series_records(
-            series_id=series_id,
-            start=_utc(requirement["range_start"], field="range_start"),
-            end=_utc(requirement["range_end"], field="range_end"),
-        )
+        range_start = _utc(requirement["range_start"], field="range_start")
+        range_end = _utc(requirement["range_end"], field="range_end")
+        if contract.uses_exact_numeric_storage:
+            revision_records = store.read_numeric_fact_revisions(
+                series_id=series_id,
+                start=range_start,
+                end=range_end,
+            )
+            records = list(
+                causal_numeric_fact_records(
+                    revision_records,
+                    evaluation_time=decision_end,
+                )
+            )
+        else:
+            records = store.read_series_records(
+                series_id=series_id,
+                start=range_start,
+                end=range_end,
+            )
     except ValueError:
         series_id = None
         records = []
@@ -1657,27 +1721,41 @@ def _generic_fact_coverage(
             raise ValueError(
                 "backtest_dataset_invalid: latest-known fact requires max staleness"
             )
-        ordered = sorted(
-            records,
-            key=lambda record: (
-                record.fact.known_at,
-                int(record.market_commit_seq),
-            ),
-        )
-        cursor = 0
-        latest = None
         point = decision_start
-        while point < decision_end:
-            while cursor < len(ordered) and ordered[cursor].fact.known_at <= point:
-                latest = ordered[cursor]
-                cursor += 1
-            if (
-                latest is None
-                or point - latest.fact.known_at > timedelta(seconds=max_staleness)
-                or not _record_has_usable_quality(latest)
-            ):
-                missing_points.append(point)
-            point += timedelta(seconds=decision_step)
+        if contract.uses_exact_numeric_storage:
+            while point < decision_end:
+                selected = latest_known_record(
+                    causal_numeric_fact_records(
+                        revision_records,
+                        evaluation_time=point,
+                    ),
+                    evaluation_time=point,
+                    max_staleness_seconds=max_staleness,
+                )
+                if isinstance(selected, UnavailableMarketData):
+                    missing_points.append(point)
+                point += timedelta(seconds=decision_step)
+        else:
+            ordered = sorted(
+                records,
+                key=lambda record: (
+                    record.fact.known_at,
+                    int(record.market_commit_seq),
+                ),
+            )
+            cursor = 0
+            latest = None
+            while point < decision_end:
+                while cursor < len(ordered) and ordered[cursor].fact.known_at <= point:
+                    latest = ordered[cursor]
+                    cursor += 1
+                if (
+                    latest is None
+                    or point - latest.fact.known_at > timedelta(seconds=max_staleness)
+                    or not _record_has_usable_quality(latest)
+                ):
+                    missing_points.append(point)
+                point += timedelta(seconds=decision_step)
         coverage_step = decision_step
         decision_count = int(
             (decision_end - decision_start).total_seconds() // decision_step
@@ -1819,6 +1897,108 @@ def _coverage_for_plan(
     return rows
 
 
+def _numeric_acquisition_context(
+    raw: Mapping[str, Any] | None,
+) -> tuple[
+    dict[
+        tuple[str, str, str, tuple[tuple[str, str], ...]],
+        tuple[str, str],
+    ],
+    NumericAcquisitionAuthorization,
+    NumericAcquisitionBudget,
+]:
+    """Validate explicit pre-freeze numeric acquisition authority and bindings."""
+
+    if not isinstance(raw, Mapping):
+        raise RuntimeError(
+            "backtest_dataset_numeric_acquisition_required: missing explicit "
+            "numeric_acquisition configuration"
+        )
+    allowed = {"bindings", "authorization", "budget"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ValueError(
+            "backtest_dataset_numeric_acquisition_invalid: unexpected fields="
+            + ",".join(unexpected)
+        )
+    raw_authorization = raw.get("authorization")
+    raw_budget = raw.get("budget")
+    raw_bindings = raw.get("bindings")
+    if not isinstance(raw_authorization, Mapping):
+        raise ValueError(
+            "backtest_dataset_numeric_acquisition_invalid: authorization is required"
+        )
+    if not isinstance(raw_budget, Mapping):
+        raise ValueError(
+            "backtest_dataset_numeric_acquisition_invalid: budget is required"
+        )
+    if not isinstance(raw_bindings, Sequence) or isinstance(
+        raw_bindings, (str, bytes)
+    ) or not raw_bindings:
+        raise ValueError(
+            "backtest_dataset_numeric_acquisition_invalid: bindings are required"
+        )
+    if set(raw_authorization) != {"network_allowed", "actor", "reason"}:
+        raise ValueError(
+            "backtest_dataset_numeric_acquisition_invalid: authorization fields "
+            "must be network_allowed, actor, and reason"
+        )
+    if not isinstance(raw_authorization["network_allowed"], bool):
+        raise ValueError(
+            "backtest_dataset_numeric_acquisition_invalid: network_allowed must "
+            "be boolean"
+        )
+    required_budget = {"max_requests", "max_logs", "max_blocks"}
+    if not required_budget.issubset(raw_budget) or set(raw_budget) - (
+        required_budget | {"max_retries"}
+    ):
+        raise ValueError(
+            "backtest_dataset_numeric_acquisition_invalid: budget fields must be "
+            "max_requests, max_logs, max_blocks, and optional max_retries"
+        )
+    authorization = NumericAcquisitionAuthorization(
+        network_allowed=raw_authorization["network_allowed"],
+        actor=str(raw_authorization.get("actor") or "").strip(),
+        reason=str(raw_authorization.get("reason") or "").strip(),
+    )
+    budget = NumericAcquisitionBudget(
+        max_requests=int(raw_budget.get("max_requests") or 0),
+        max_logs=int(raw_budget.get("max_logs") or 0),
+        max_blocks=int(raw_budget.get("max_blocks") or 0),
+        max_retries=int(raw_budget.get("max_retries", 2)),
+    )
+    indexed: dict[
+        tuple[str, str, str, tuple[tuple[str, str], ...]],
+        tuple[str, str],
+    ] = {}
+    for item in raw_bindings:
+        if not isinstance(item, Mapping) or set(item) != {
+            "manifest_path",
+            "binding_id",
+        }:
+            raise ValueError(
+                "backtest_dataset_numeric_acquisition_invalid: each binding must "
+                "declare only manifest_path and binding_id"
+            )
+        manifest_path = str(item.get("manifest_path") or "").strip()
+        binding_id = str(item.get("binding_id") or "").strip()
+        manifest = load_numeric_fact_manifest(manifest_path)
+        binding = manifest.binding(binding_id, require_enabled=True)
+        key = (
+            binding.instrument_id,
+            binding.fact_type,
+            binding.contract_version,
+            tuple(sorted(dict(binding.dimensions).items())),
+        )
+        if key in indexed:
+            raise ValueError(
+                "backtest_dataset_numeric_acquisition_invalid: duplicate binding "
+                f"for instrument={key[0]} fact_type={key[1]} dimensions={dict(key[3])}"
+            )
+        indexed[key] = (manifest_path, binding_id)
+    return indexed, authorization, budget
+
+
 def prepare_backtest_dataset(
     *,
     bot: Mapping[str, Any],
@@ -1827,12 +2007,14 @@ def prepare_backtest_dataset(
     evaluation_end: Any,
     acquire_missing: bool,
     created_by: str | None = None,
+    numeric_acquisition: Mapping[str, Any] | None = None,
     store: MarketDataStore = market_data_repo,
     ingestor: HistoricalCandleIngestor = historical_candle_ingestor,
     coverage_loader: Callable[[str, str, str, str], Mapping[str, Any]] = preflight_candle_coverage_by_instrument,
     indicator_meta_loader: Callable[..., Mapping[str, Any]] = get_instance_meta,
     indicator_input_plan_loader: Callable[..., Mapping[str, Any]] = runtime_input_plan_for_instance,
     instrument_loader: Callable[[str], Mapping[str, Any]] = instrument_service.get_instrument_record,
+    numeric_acquirer: NumericFactAcquisitionService = numeric_fact_acquisition_service,
 ) -> dict[str, Any]:
     """Prepare missing facts explicitly, freeze them, then admit the result."""
 
@@ -1899,37 +2081,151 @@ def prepare_backtest_dataset(
         )
 
     acquisitions: list[dict[str, Any]] = []
+    incomplete_acquisitions: list[dict[str, Any]] = []
+    numeric_context: tuple[
+        dict[
+            tuple[str, str, str, tuple[tuple[str, str], ...]],
+            tuple[str, str],
+        ],
+        NumericAcquisitionAuthorization,
+        NumericAcquisitionBudget,
+    ] | None = None
+    numeric_series_requested: set[
+        tuple[str, str, str, tuple[tuple[str, str], ...]]
+    ] = set()
+    numeric_budget_remaining: list[int] | None = None
     phase = _phase_start()
     for row, gap in missing:
-        if str(row["fact_type"]) != CANDLE_FACT_TYPE:
+        fact_type = str(row["fact_type"])
+        if fact_type == CANDLE_FACT_TYPE:
+            instrument = dict(prepared_instrument_loader(str(row["instrument_id"])))
+            result = ingestor.ingest_by_instrument(
+                instrument,
+                start=gap["start"],
+                end=gap["end"],
+                interval=str(row["timeframe"]),
+            )
+            acquisitions.append(
+                {
+                    "instrument_id": row["instrument_id"],
+                    "fact_type": fact_type,
+                    "timeframe": row["timeframe"],
+                    "start": iso_utc(gap["start"], field="gap.start"),
+                    "end_exclusive": iso_utc(gap["end"], field="gap.end"),
+                    "source_id": result.source_id,
+                    "series_id": result.series_id,
+                    "ingestion_run_id": result.outcome.ingestion_run_id,
+                    "requested_count": result.outcome.requested_count,
+                    "inserted_count": result.outcome.inserted_count,
+                    "corrected_count": result.outcome.corrected_count,
+                    "invalidated_count": 0,
+                    "noop_count": result.outcome.noop_count,
+                    "gap_evidence_count": result.gap_evidence_count,
+                    "complete": True,
+                }
+            )
+            continue
+        contract = get_fact_contract(fact_type)
+        if not contract.uses_exact_numeric_storage:
             raise RuntimeError(
                 "backtest_dataset_acquisition_unsupported: historical acquisition "
                 f"is unavailable for fact_type={row['fact_type']}; allow the collector "
                 "to accumulate venue observations before freezing this range"
             )
-        instrument = dict(prepared_instrument_loader(str(row["instrument_id"])))
-        result = ingestor.ingest_by_instrument(
-            instrument,
-            start=gap["start"],
-            end=gap["end"],
-            interval=str(row["timeframe"]),
+        if numeric_context is None:
+            numeric_context = _numeric_acquisition_context(numeric_acquisition)
+            numeric_budget_remaining = [
+                numeric_context[2].max_requests,
+                numeric_context[2].max_logs,
+                numeric_context[2].max_blocks,
+            ]
+        binding_index, authorization, budget = numeric_context
+        binding_key = (
+            str(row["instrument_id"]),
+            fact_type,
+            str(row["contract_version"]),
+            tuple(sorted(dict(row.get("dimensions") or {}).items())),
         )
-        acquisitions.append(
-            {
-                "instrument_id": row["instrument_id"],
-                "timeframe": row["timeframe"],
-                "start": iso_utc(gap["start"], field="gap.start"),
-                "end_exclusive": iso_utc(gap["end"], field="gap.end"),
-                "source_id": result.source_id,
-                "series_id": result.series_id,
-                "ingestion_run_id": result.outcome.ingestion_run_id,
-                "requested_count": result.outcome.requested_count,
-                "inserted_count": result.outcome.inserted_count,
-                "corrected_count": result.outcome.corrected_count,
-                "noop_count": result.outcome.noop_count,
-                "gap_evidence_count": result.gap_evidence_count,
-            }
+        binding_ref = binding_index.get(binding_key)
+        if binding_ref is None:
+            raise RuntimeError(
+                "backtest_dataset_numeric_binding_missing: "
+                f"instrument_id={binding_key[0]} fact_type={binding_key[1]} "
+                f"dimensions={dict(binding_key[3])}"
+            )
+        if binding_key in numeric_series_requested:
+            continue
+        numeric_series_requested.add(binding_key)
+        acquisition_start = _utc(row["range_start"], field="range_start")
+        acquisition_end = _utc(row["range_end"], field="range_end")
+        assert numeric_budget_remaining is not None
+        if any(value <= 0 for value in numeric_budget_remaining):
+            raise RuntimeError(
+                "backtest_dataset_numeric_budget_exhausted: no budget remains "
+                f"before instrument_id={binding_key[0]} fact_type={binding_key[1]}"
+            )
+        call_budget = NumericAcquisitionBudget(
+            max_requests=numeric_budget_remaining[0],
+            max_logs=numeric_budget_remaining[1],
+            max_blocks=numeric_budget_remaining[2],
+            max_retries=budget.max_retries,
         )
+        numeric_result = numeric_acquirer.acquire_history(
+            manifest_path=binding_ref[0],
+            binding_id=binding_ref[1],
+            start=acquisition_start,
+            end=acquisition_end,
+            authorization=authorization,
+            budget=call_budget,
+            repair=False,
+        )
+        used_budget = [
+            numeric_result.requests_used,
+            numeric_result.logs_used,
+            numeric_result.blocks_scanned,
+        ]
+        if any(
+            used > available
+            for used, available in zip(used_budget, numeric_budget_remaining)
+        ):
+            raise RuntimeError(
+                "backtest_dataset_numeric_budget_disagreement: "
+                f"used={used_budget} available={numeric_budget_remaining}"
+            )
+        numeric_budget_remaining = [
+            available - used
+            for used, available in zip(numeric_budget_remaining, used_budget)
+        ]
+        acquisition = {
+            "instrument_id": row["instrument_id"],
+            "fact_type": fact_type,
+            "contract_version": row["contract_version"],
+            "dimensions": dict(row.get("dimensions") or {}),
+            "start": iso_utc(acquisition_start),
+            "end_exclusive": iso_utc(acquisition_end),
+            "manifest_id": numeric_result.manifest_id,
+            "binding_id": numeric_result.binding_id,
+            "source_id": numeric_result.source_id,
+            "series_id": numeric_result.series_id,
+            "requested_count": (
+                numeric_result.inserted_count
+                + numeric_result.corrected_count
+                + numeric_result.noop_count
+            ),
+            "inserted_count": numeric_result.inserted_count,
+            "corrected_count": numeric_result.corrected_count,
+            "invalidated_count": numeric_result.invalidated_count,
+            "noop_count": numeric_result.noop_count,
+            "gap_evidence_count": numeric_result.gap_count,
+            "requests_used": numeric_result.requests_used,
+            "logs_used": numeric_result.logs_used,
+            "blocks_scanned": numeric_result.blocks_scanned,
+            "complete": numeric_result.complete,
+            "cached": not numeric_result.acquired_ranges,
+        }
+        acquisitions.append(acquisition)
+        if not numeric_result.complete:
+            incomplete_acquisitions.append(acquisition)
     _phase_finish(
         timings,
         "provider_acquisition",
@@ -1939,6 +2235,12 @@ def prepare_backtest_dataset(
         rows_inserted=sum(int(row["inserted_count"]) for row in acquisitions),
         rows_corrected=sum(int(row["corrected_count"]) for row in acquisitions),
     )
+
+    if incomplete_acquisitions:
+        raise RuntimeError(
+            "backtest_dataset_preparation_incomplete: numeric acquisition returned "
+            f"partial coverage acquisitions={incomplete_acquisitions}"
+        )
 
     phase = _phase_start()
     coverage_after = _coverage_for_plan(
@@ -1975,6 +2277,7 @@ def prepare_backtest_dataset(
             str(item["fact_type"]),
             str(item["contract_version"]),
             item.get("timeframe_seconds"),
+            tuple(sorted(dict(item.get("dimensions") or {}).items())),
         ): dict(item.get("coverage") or {})
         for item in coverage_after
     }
@@ -1985,6 +2288,7 @@ def prepare_backtest_dataset(
                 str(row["fact_type"]),
                 str(row["contract_version"]),
                 row.get("timeframe_seconds"),
+                tuple(sorted(dict(row.get("dimensions") or {}).items())),
             )
         ]
         if not bool(row.get("required", True)) and int(
@@ -2009,6 +2313,7 @@ def prepare_backtest_dataset(
                     else None
                 ),
                 contract_version=str(row["contract_version"]),
+                dimensions=dict(row.get("dimensions") or {}),
             )
         except ValueError as exc:
             if bool(row.get("required", True)):

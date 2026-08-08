@@ -14,6 +14,8 @@ from .contracts import (
     FundingRateFact,
     FundingRateRecord,
     MarketDataRecord,
+    NumericFact,
+    NumericFactRecord,
     OpenInterestFact,
     OpenInterestRecord,
     SourceIdentity,
@@ -70,6 +72,7 @@ class MarketDataStore(Protocol):
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
         ...
 
@@ -80,6 +83,7 @@ class MarketDataStore(Protocol):
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
         ...
 
@@ -157,6 +161,43 @@ class MarketDataStore(Protocol):
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
     ) -> list[FundingRateRecord]:
+        ...
+
+    def ingest_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[NumericFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        provenance_by_event: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+    ) -> IngestionOutcome:
+        ...
+
+    def read_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
+        ...
+
+    def read_numeric_fact_revisions(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
         ...
 
     def read_series_records(

@@ -1242,6 +1242,37 @@ def _cmd_data_ingest_candles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_acquire_numeric_facts(args: argparse.Namespace) -> int:
+    """Explicitly authorize one bounded manifest-driven numeric acquisition."""
+
+    if args.mode == "historical" and (not args.start or not args.end):
+        raise ValueError("--start and --end are required for historical mode")
+    if args.mode == "current" and (args.start or args.end or args.repair):
+        raise ValueError("current mode forbids --start, --end, and --repair")
+    payload = {
+        "manifest_path": args.manifest_path,
+        "binding_id": args.binding_id,
+        "mode": args.mode,
+        "start": args.start,
+        "end": args.end,
+        "allow_network": bool(args.allow_network),
+        "requested_by": args.requested_by,
+        "reason": args.reason,
+        "max_requests": args.max_requests,
+        "max_logs": args.max_logs,
+        "max_blocks": args.max_blocks,
+        "max_retries": args.max_retries,
+        "repair": bool(args.repair),
+    }
+    result = _client(args).request_json(
+        "POST",
+        "/api/market-data/numeric-facts/acquire",
+        payload=payload,
+    )
+    _print_json(result)
+    return 0 if bool(dict(result.get("result") or {}).get("complete")) else 1
+
+
 def _cmd_data_series(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -1257,12 +1288,23 @@ def _cmd_data_series(args: argparse.Namespace) -> int:
 def _cmd_data_prepare_backtest_dataset(args: argparse.Namespace) -> int:
     """Prepare and freeze source facts without starting execution."""
 
+    numeric_acquisition = _read_json_object_arg(
+        args.numeric_acquisition_json,
+        label="--numeric-acquisition-json",
+    )
+    if numeric_acquisition and not args.acquire_missing:
+        raise ValueError(
+            "--numeric-acquisition-json requires --acquire-missing; "
+            "dataset preparation never contacts providers implicitly"
+        )
     payload = {
         "evaluation_start": args.start,
         "evaluation_end": args.end,
         "acquire_missing": bool(args.acquire_missing),
         "created_by": args.created_by,
     }
+    if numeric_acquisition:
+        payload["numeric_acquisition"] = numeric_acquisition
     _print_json(
         _client(args).request_json(
             "POST",
@@ -3472,6 +3514,29 @@ def build_parser() -> argparse.ArgumentParser:
     data_ingest.add_argument("--timeframe", required=True)
     data_ingest.add_argument("--source-revision")
     data_ingest.set_defaults(func=_cmd_data_ingest_candles)
+    data_numeric = data_sub.add_parser(
+        "acquire-numeric-facts",
+        help=(
+            "Explicitly acquire one bounded manifest-driven numeric fact range; "
+            "no network access occurs without --allow-network."
+        ),
+    )
+    data_numeric.add_argument("--manifest-path", required=True)
+    data_numeric.add_argument("--binding-id", required=True)
+    data_numeric.add_argument(
+        "--mode", choices=["current", "historical"], required=True
+    )
+    data_numeric.add_argument("--start")
+    data_numeric.add_argument("--end")
+    data_numeric.add_argument("--allow-network", action="store_true")
+    data_numeric.add_argument("--requested-by", required=True)
+    data_numeric.add_argument("--reason", required=True)
+    data_numeric.add_argument("--max-requests", type=int, required=True)
+    data_numeric.add_argument("--max-logs", type=int, required=True)
+    data_numeric.add_argument("--max-blocks", type=int, required=True)
+    data_numeric.add_argument("--max-retries", type=int, default=2)
+    data_numeric.add_argument("--repair", action="store_true")
+    data_numeric.set_defaults(func=_cmd_data_acquire_numeric_facts)
     data_series = data_sub.add_parser(
         "series", help="Inspect canonical logical market-data series."
     )
@@ -3485,6 +3550,14 @@ def build_parser() -> argparse.ArgumentParser:
     data_prepare.add_argument("--start", required=True)
     data_prepare.add_argument("--end", required=True)
     data_prepare.add_argument("--acquire-missing", action="store_true")
+    data_prepare.add_argument(
+        "--numeric-acquisition-json",
+        help=(
+            "Path, inline object, or '-' containing explicit numeric source "
+            "bindings, network authorization, and request budget. Requires "
+            "--acquire-missing."
+        ),
+    )
     data_prepare.add_argument("--created-by")
     data_prepare.set_defaults(func=_cmd_data_prepare_backtest_dataset)
 

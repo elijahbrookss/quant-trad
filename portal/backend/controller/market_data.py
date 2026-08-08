@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -15,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from core.settings import get_settings
+from data_providers.numeric_facts import NumericAcquisitionBudget
 from market_data.contracts import (
     FUNDING_RATE_FACT_TYPE,
     OPEN_INTEREST_FACT_TYPE,
@@ -27,6 +29,10 @@ from market_data.requirements import UnavailableMarketData
 from ..service.market.collector_service import market_data_collector
 from ..service.market.market_storage_lifecycle import market_storage_lifecycle_service
 from ..service.market.market_structure_service import market_structure_service
+from ..service.market.numeric_fact_acquisition import (
+    NumericAcquisitionAuthorization,
+    numeric_fact_acquisition_service,
+)
 from ..service.storage.repos.market_lifecycle import (
     MarketStorageLifecycleBusyError,
     market_storage_lifecycle_repository,
@@ -204,6 +210,76 @@ class CollectorToggleRequest(BaseModel):
 
 class MarketNormalizationSpecInstallRequest(BaseModel):
     approved_by: str
+
+
+class NumericFactAcquisitionRequest(BaseModel):
+    manifest_path: str
+    binding_id: str
+    mode: str
+    start: Optional[str] = None
+    end: Optional[str] = None
+    allow_network: bool = False
+    requested_by: str
+    reason: str
+    max_requests: int
+    max_logs: int
+    max_blocks: int
+    max_retries: int = 2
+    repair: bool = False
+
+
+@router.post("/numeric-facts/acquire")
+def acquire_numeric_facts(req: NumericFactAcquisitionRequest) -> dict[str, Any]:
+    """Run only an explicitly authorized bounded provider acquisition."""
+
+    try:
+        authorization = NumericAcquisitionAuthorization(
+            network_allowed=bool(req.allow_network),
+            actor=req.requested_by,
+            reason=req.reason,
+        )
+        budget = NumericAcquisitionBudget(
+            max_requests=req.max_requests,
+            max_logs=req.max_logs,
+            max_blocks=req.max_blocks,
+            max_retries=req.max_retries,
+        )
+        mode = str(req.mode or "").strip().lower()
+        if mode == "current":
+            if req.start is not None or req.end is not None or req.repair:
+                raise ValueError(
+                    "numeric_fact_acquisition_invalid: current mode forbids range/repair"
+                )
+            result = numeric_fact_acquisition_service.acquire_current(
+                manifest_path=req.manifest_path,
+                binding_id=req.binding_id,
+                authorization=authorization,
+                budget=budget,
+            )
+        elif mode == "historical":
+            if req.start is None or req.end is None:
+                raise ValueError(
+                    "numeric_fact_acquisition_invalid: historical mode requires start/end"
+                )
+            result = numeric_fact_acquisition_service.acquire_history(
+                manifest_path=req.manifest_path,
+                binding_id=req.binding_id,
+                start=_time(req.start),
+                end=_time(req.end),
+                authorization=authorization,
+                budget=budget,
+                repair=bool(req.repair),
+            )
+        else:
+            raise ValueError(
+                "numeric_fact_acquisition_invalid: mode must be current or historical"
+            )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "schema_version": "market.numeric_fact_acquisition_response.v1",
+        "result": asdict(result),
+    }
 
 
 class MarketNormalizationMaterializeRequest(BaseModel):

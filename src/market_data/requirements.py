@@ -20,6 +20,8 @@ from .contracts import (
     MarketDataAlignment,
     MarketDataRecord,
     MarketDataRequirement,
+    NumericFactRecord,
+    NumericFactState,
     OpenInterestRecord,
 )
 
@@ -130,12 +132,15 @@ class ResolvedMarketDataRequirement:
         object.__setattr__(self, "primary_instrument_id", primary_id)
 
     @property
-    def series_key(self) -> tuple[str, str, str, Optional[int]]:
+    def series_key(
+        self,
+    ) -> tuple[str, str, str, Optional[int], tuple[tuple[str, str], ...]]:
         return (
             self.instrument_id,
             self.requirement.fact_type,
             str(self.requirement.contract_version),
             self.requirement.timeframe_seconds,
+            tuple(sorted(dict(self.requirement.dimensions).items())),
         )
 
     @property
@@ -161,6 +166,7 @@ class ResolvedMarketDataSeries:
     fact_type: str
     contract_version: str
     timeframe_seconds: Optional[int]
+    dimensions: Mapping[str, str]
     bindings: tuple[ResolvedMarketDataRequirement, ...]
     required: bool
     allow_gaps: bool
@@ -171,7 +177,7 @@ class ResolvedMarketDataSeries:
     lookback_seconds: Optional[int]
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "instrument_id": self.instrument_id,
             "fact_type": self.fact_type,
             "contract_version": self.contract_version,
@@ -185,6 +191,9 @@ class ResolvedMarketDataSeries:
             "lookback_seconds": self.lookback_seconds,
             "bindings": [binding.to_dict() for binding in self.bindings],
         }
+        if self.dimensions:
+            payload["dimensions"] = dict(self.dimensions)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -297,7 +306,13 @@ class MarketDataPlanResolver:
                     resolved.append(binding)
 
         grouped: dict[
-            tuple[str, str, str, Optional[int]],
+            tuple[
+                str,
+                str,
+                str,
+                Optional[int],
+                tuple[tuple[str, str], ...],
+            ],
             list[ResolvedMarketDataRequirement],
         ] = defaultdict(list)
         for binding in resolved:
@@ -310,6 +325,7 @@ class MarketDataPlanResolver:
                 value[1],
                 value[2],
                 value[3] if value[3] is not None else -1,
+                value[4],
             ),
         ):
             bindings = sorted(grouped[key], key=lambda item: item.binding_key)
@@ -339,6 +355,7 @@ class MarketDataPlanResolver:
                     fact_type=key[1],
                     contract_version=key[2],
                     timeframe_seconds=key[3],
+                    dimensions=dict(key[4]),
                     bindings=tuple(bindings),
                     required=any(item.requirement.required for item in bindings),
                     allow_gaps=all(item.requirement.allow_gaps for item in bindings),
@@ -424,6 +441,41 @@ def latest_known_record(
             },
         )
     return latest
+
+
+def causal_numeric_fact_records(
+    records: Iterable[NumericFactRecord],
+    *,
+    evaluation_time: Any,
+) -> tuple[NumericFactRecord, ...]:
+    """Return the active revision of each source event known by one decision time."""
+
+    evaluation = _utc(evaluation_time, field="evaluation_time")
+    latest_by_event: dict[str, NumericFactRecord] = {}
+    for record in records:
+        if record.fact.known_at > evaluation:
+            continue
+        event_key = record.fact.source_event_key
+        current = latest_by_event.get(event_key)
+        if current is None or (
+            int(record.revision), int(record.market_commit_seq)
+        ) > (
+            int(current.revision), int(current.market_commit_seq)
+        ):
+            latest_by_event[event_key] = record
+    return tuple(
+        sorted(
+            (
+                record
+                for record in latest_by_event.values()
+                if record.fact.state is NumericFactState.ACTIVE
+            ),
+            key=lambda record: (
+                record.fact.effective_at,
+                record.fact.source_event_key,
+            ),
+        )
+    )
 
 
 class BoundMarketDataContext:
@@ -517,5 +569,6 @@ __all__ = [
     "ResolvedMarketDataRequirement",
     "ResolvedMarketDataSeries",
     "UnavailableMarketData",
+    "causal_numeric_fact_records",
     "latest_known_record",
 ]

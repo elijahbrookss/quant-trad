@@ -25,6 +25,8 @@ from market_data.contracts import (
     FundingRateFact,
     FundingRateRecord,
     MarketDataRecord,
+    NumericFact,
+    NumericFactRecord,
     TypedFeatureRecord,
     OpenInterestFact,
     OpenInterestRecord,
@@ -33,6 +35,7 @@ from market_data.contracts import (
     build_dataset_identity_hash,
     build_funding_rate_material_hash,
     build_open_interest_material_hash,
+    build_numeric_fact_material_hash,
     build_provenance_hash,
     build_quality_hash,
     build_typed_feature_material_hash,
@@ -56,6 +59,7 @@ from .market_lifecycle import market_storage_lifecycle_repository
 
 
 _SERIES_IDENTITY_VERSION = "market_series.v1"
+_DIMENSIONAL_SERIES_IDENTITY_VERSION = "market_series.v2"
 
 
 def _json_text(value: Mapping[str, Any] | None) -> str:
@@ -185,6 +189,50 @@ def _row_to_funding_rate_record(row: Mapping[str, Any]) -> FundingRateRecord:
     )
 
 
+def _row_to_numeric_fact_record(row: Mapping[str, Any]) -> NumericFactRecord:
+    fact = NumericFact(
+        fact_type=row["fact_type"],
+        contract_version=row["contract_version"],
+        value=row["numeric_value"],
+        raw_value=row["raw_value"],
+        unit=row["unit"],
+        dimensions=dict(row.get("dimensions") or {}),
+        effective_at=row["effective_at"],
+        effective_at_method=row["effective_at_method"],
+        source_published_at=row.get("source_published_at"),
+        received_at=row.get("received_at"),
+        accepted_at=row["accepted_at"],
+        known_at=row["known_at"],
+        known_at_method=row["known_at_method"],
+        source_event_key=row["source_event_key"],
+        source_event_group_key=row.get("source_event_group_key"),
+        source_event_component_key=row.get("source_event_component_key"),
+        state=row["state"],
+        source_event_material_hash=row["source_event_material_hash"],
+    )
+    if fact.row_hash != str(row.get("row_hash") or ""):
+        raise RuntimeError(
+            "market_data_corrupt: numeric fact row hash mismatch "
+            f"series_id={row.get('series_id')} "
+            f"source_event_key={fact.source_event_key}"
+        )
+    return NumericFactRecord(
+        series_id=int(row["series_id"]),
+        revision=int(row["revision"]),
+        market_commit_seq=int(row["market_commit_seq"]),
+        ingestion_run_id=str(row["ingestion_run_id"]),
+        source_identity_key=str(row["source_identity_key"]),
+        source=SourceIdentity(
+            provider=str(row["source_provider"]),
+            venue=str(row["source_venue"]),
+            source_kind=str(row["source_kind"]),
+            adapter_version=str(row["source_adapter_version"]),
+        ),
+        provenance=dict(row.get("provenance") or {}),
+        fact=fact,
+    )
+
+
 def _build_material_hash(
     *,
     fact_type: str,
@@ -203,6 +251,11 @@ def _build_material_hash(
         )
     if fact_type == FUNDING_RATE_FACT_TYPE:
         return build_funding_rate_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
+    if get_fact_contract(fact_type).uses_exact_numeric_storage:
+        return build_numeric_fact_material_hash(
             series_identity=series_identity,
             records=records,
         )
@@ -321,6 +374,8 @@ def _collect_typed_archive_refs(
                 "market_dataset_provenance_incomplete: source series is missing"
             )
         fact_type = str(fact_type)
+        if get_fact_contract(fact_type).uses_exact_numeric_storage:
+            continue
         if fact_type in {
             CANDLE_FACT_TYPE,
             OPEN_INTEREST_FACT_TYPE,
@@ -520,6 +575,7 @@ class PostgresMarketDataRepository:
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.candle_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.open_interest_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.funding_rate_versions), 0),
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.numeric_fact_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.market_trade_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_aggregate_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.bbo_feature_versions), 0),
@@ -553,16 +609,18 @@ class PostgresMarketDataRepository:
                     f"""
                     SELECT series.id, series.identity_key, series.instrument_id,
                            series.fact_type, series.timeframe_seconds,
-                           series.contract_version,
+                           series.contract_version, series.dimensions,
                            COALESCE(candles.version_count, 0)
                              + COALESCE(open_interest.version_count, 0)
                              + COALESCE(funding.version_count, 0)
+                             + COALESCE(numeric_facts.version_count, 0)
                              + COALESCE(trades.version_count, 0)
                              + COALESCE(trade_flow.version_count, 0)
                              + COALESCE(typed_features.version_count, 0) AS version_count,
                            COALESCE(candles.fact_count, 0)
                              + COALESCE(open_interest.fact_count, 0)
                              + COALESCE(funding.fact_count, 0)
+                             + COALESCE(numeric_facts.fact_count, 0)
                              + COALESCE(trades.fact_count, 0)
                              + COALESCE(trade_flow.fact_count, 0)
                              + COALESCE(typed_features.fact_count, 0) AS fact_count,
@@ -570,16 +628,19 @@ class PostgresMarketDataRepository:
                            COALESCE(open_interest.fact_count, 0)
                              + COALESCE(funding.fact_count, 0) AS observation_count,
                            COALESCE(funding.fact_count, 0) AS funding_rate_count,
+                           COALESCE(numeric_facts.fact_count, 0) AS numeric_fact_count,
                            COALESCE(trades.fact_count, 0) AS trade_count,
                            COALESCE(trade_flow.fact_count, 0) AS trade_flow_count,
                            COALESCE(typed_features.fact_count, 0) AS feature_count,
                            COALESCE(candles.first_fact_time, open_interest.first_fact_time,
                                     funding.first_fact_time, trades.first_fact_time,
+                                    numeric_facts.first_fact_time,
                                     trade_flow.first_fact_time,
                                     typed_features.first_fact_time)
                              AS first_fact_time,
                            COALESCE(candles.last_fact_time, open_interest.last_fact_time,
                                     funding.last_fact_time, trades.last_fact_time,
+                                    numeric_facts.last_fact_time,
                                     trade_flow.last_fact_time,
                                     typed_features.last_fact_time)
                              AS last_fact_time,
@@ -587,6 +648,7 @@ class PostgresMarketDataRepository:
                              COALESCE(candles.max_commit_seq, 0),
                              COALESCE(open_interest.max_commit_seq, 0),
                              COALESCE(funding.max_commit_seq, 0),
+                             COALESCE(numeric_facts.max_commit_seq, 0),
                              COALESCE(trades.max_commit_seq, 0),
                              COALESCE(trade_flow.max_commit_seq, 0),
                              COALESCE(typed_features.max_commit_seq, 0)
@@ -619,6 +681,15 @@ class PostgresMarketDataRepository:
                         FROM market.funding_rate_versions
                         WHERE series_id = series.id
                     ) AS funding ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS version_count,
+                               count(DISTINCT source_event_key) AS fact_count,
+                               min(effective_at) AS first_fact_time,
+                               max(effective_at) AS last_fact_time,
+                               max(market_commit_seq) AS max_commit_seq
+                        FROM market.numeric_fact_versions
+                        WHERE series_id = series.id
+                    ) AS numeric_facts ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT count(*) AS version_count,
                                count(DISTINCT (source_id, provider_product_id,
@@ -719,7 +790,8 @@ class PostgresMarketDataRepository:
                            dataset_series.provenance_hash, dataset_series.source_summary,
                            dataset_series.quality_hash, dataset_series.quality_summary,
                            series.identity_key, series.instrument_id, series.fact_type,
-                           series.timeframe_seconds, series.contract_version
+                           series.timeframe_seconds, series.contract_version,
+                           series.dimensions
                     FROM market.dataset_series AS dataset_series
                     JOIN market.series AS series ON series.id = dataset_series.series_id
                     WHERE dataset_id = :dataset_id
@@ -843,6 +915,7 @@ class PostgresMarketDataRepository:
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
         instrument_id = str(instrument_id or "").strip()
         fact_type = str(fact_type or "").strip().lower()
@@ -852,26 +925,30 @@ class PostgresMarketDataRepository:
             raise ValueError("market_data_series_invalid: complete series identity is required")
         contract = get_fact_contract(fact_type)
         contract.validate(contract_version=contract_version, timeframe_seconds=timeframe)
+        normalized_dimensions = contract.normalize_dimensions(dimensions)
 
-        identity_key = _stable_hash(
-            {
-                "schema_version": _SERIES_IDENTITY_VERSION,
-                "instrument_id": instrument_id,
-                "fact_type": fact_type,
-                "timeframe_seconds": timeframe,
-                "contract_version": contract_version,
-            }
-        )
+        identity_payload: dict[str, Any] = {
+            "schema_version": _SERIES_IDENTITY_VERSION,
+            "instrument_id": instrument_id,
+            "fact_type": fact_type,
+            "timeframe_seconds": timeframe,
+            "contract_version": contract_version,
+        }
+        if normalized_dimensions:
+            identity_payload["schema_version"] = _DIMENSIONAL_SERIES_IDENTITY_VERSION
+            identity_payload["dimensions"] = normalized_dimensions
+        identity_key = _stable_hash(identity_payload)
         with db.session() as session:
             session.execute(
                 text(
                     """
                     INSERT INTO market.series (
                         identity_key, instrument_id, fact_type,
-                        timeframe_seconds, contract_version
+                        timeframe_seconds, contract_version, dimensions
                     ) VALUES (
                         :identity_key, :instrument_id, :fact_type,
-                        :timeframe_seconds, :contract_version
+                        :timeframe_seconds, :contract_version,
+                        CAST(:dimensions AS jsonb)
                     )
                     ON CONFLICT (identity_key) DO NOTHING
                     """
@@ -882,13 +959,14 @@ class PostgresMarketDataRepository:
                     "fact_type": fact_type,
                     "timeframe_seconds": timeframe,
                     "contract_version": contract_version,
+                    "dimensions": _json_text(normalized_dimensions),
                 },
             )
             row = session.execute(
                 text(
                     """
                     SELECT id, instrument_id, fact_type,
-                           timeframe_seconds, contract_version
+                           timeframe_seconds, contract_version, dimensions
                     FROM market.series
                     WHERE identity_key = :identity_key
                     """
@@ -900,8 +978,15 @@ class PostgresMarketDataRepository:
             str(row["fact_type"]),
             row.get("timeframe_seconds"),
             str(row["contract_version"]),
+            dict(row.get("dimensions") or {}),
         )
-        expected = (instrument_id, fact_type, timeframe, contract_version)
+        expected = (
+            instrument_id,
+            fact_type,
+            timeframe,
+            contract_version,
+            normalized_dimensions,
+        )
         if actual != expected:
             raise RuntimeError(
                 "market_data_series_conflict: identity hash resolved to different series"
@@ -915,9 +1000,19 @@ class PostgresMarketDataRepository:
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
         """Resolve one canonical logical series or fail without provider fallback."""
 
+        fact_type = str(fact_type or "").strip().lower()
+        contract_version = str(contract_version or "").strip()
+        timeframe = int(timeframe_seconds) if timeframe_seconds is not None else None
+        contract = get_fact_contract(fact_type)
+        contract.validate(
+            contract_version=contract_version,
+            timeframe_seconds=timeframe,
+        )
+        normalized_dimensions = contract.normalize_dimensions(dimensions)
         with db.session() as session:
             rows = session.execute(
                 text(
@@ -928,16 +1023,16 @@ class PostgresMarketDataRepository:
                       AND fact_type = :fact_type
                       AND timeframe_seconds IS NOT DISTINCT FROM :timeframe_seconds
                       AND contract_version = :contract_version
+                      AND dimensions = CAST(:dimensions AS jsonb)
                     ORDER BY id
                     """
                 ),
                 {
                     "instrument_id": str(instrument_id or "").strip(),
-                    "fact_type": str(fact_type or "").strip().lower(),
-                    "timeframe_seconds": (
-                        int(timeframe_seconds) if timeframe_seconds is not None else None
-                    ),
-                    "contract_version": str(contract_version or "").strip(),
+                    "fact_type": fact_type,
+                    "timeframe_seconds": timeframe,
+                    "contract_version": contract_version,
+                    "dimensions": _json_text(normalized_dimensions),
                 },
             ).scalars().all()
         if not rows:
@@ -1155,6 +1250,229 @@ class PostgresMarketDataRepository:
         except Exception as exc:
             self._fail_ingestion_run(run_id, exc)
             raise
+
+    def ingest_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[NumericFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        provenance_by_event: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+    ) -> IngestionOutcome:
+        """Append exact numeric revisions without knowing provider table names."""
+
+        series_id = int(series_id)
+        source_id = int(source_id)
+        rows = sorted(
+            list(facts),
+            key=lambda item: (item.effective_at, item.source_event_key),
+        )
+        if series_id <= 0 or source_id <= 0:
+            raise ValueError(
+                "market_data_ingest_invalid: series_id and source_id must be positive"
+            )
+        if not rows:
+            raise ValueError(
+                "market_data_ingest_invalid: at least one numeric fact is required"
+            )
+        event_keys = [fact.source_event_key for fact in rows]
+        if len(event_keys) != len(set(event_keys)):
+            raise ValueError(
+                "market_data_ingest_invalid: duplicate numeric source_event_key"
+            )
+        run_id = str(ingestion_run_id or uuid.uuid4().hex).strip()
+        if not run_id or len(run_id) > 64:
+            raise ValueError("market_data_ingest_invalid: ingestion_run_id is invalid")
+
+        series = self._get_series(series_id)
+        contract = get_fact_contract(str(series["fact_type"]))
+        if not contract.uses_exact_numeric_storage:
+            raise ValueError(
+                f"market_data_ingest_invalid: series_id={series_id} is not exact numeric"
+            )
+        series_dimensions = contract.normalize_dimensions(series.get("dimensions"))
+        for fact in rows:
+            if (
+                fact.fact_type != str(series["fact_type"])
+                or fact.contract_version != str(series["contract_version"])
+                or dict(fact.dimensions) != series_dimensions
+            ):
+                raise ValueError(
+                    "market_data_ingest_invalid: numeric fact disagrees with series "
+                    f"series_id={series_id} source_event_key={fact.source_event_key}"
+                )
+
+        self._start_ingestion_run(
+            run_id=run_id,
+            source_id=source_id,
+            request=request,
+            source_revision=source_revision,
+            requested_start=rows[0].effective_at,
+            requested_end=rows[-1].effective_at,
+            requested_count=len(rows),
+        )
+        try:
+            return self._ingest_numeric_fact_rows(
+                run_id=run_id,
+                series_id=series_id,
+                rows=rows,
+                provenance=dict(provenance or {}),
+                provenance_by_event={
+                    str(key): dict(value)
+                    for key, value in dict(provenance_by_event or {}).items()
+                },
+                allow_corrections=bool(allow_corrections),
+            )
+        except Exception as exc:
+            self._fail_ingestion_run(run_id, exc)
+            raise
+
+    def _ingest_numeric_fact_rows(
+        self,
+        *,
+        run_id: str,
+        series_id: int,
+        rows: Sequence[NumericFact],
+        provenance: Mapping[str, Any],
+        provenance_by_event: Mapping[str, Mapping[str, Any]],
+        allow_corrections: bool,
+    ) -> IngestionOutcome:
+        inserted_count = 0
+        corrected_count = 0
+        noop_count = 0
+        max_commit_seq = 0
+        with db.session() as session:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:series_id)"),
+                {"series_id": series_id},
+            )
+            for fact in rows:
+                latest = session.execute(
+                    text(
+                        """
+                        SELECT revision, row_hash
+                        FROM market.numeric_fact_versions
+                        WHERE series_id = :series_id
+                          AND source_event_key = :source_event_key
+                        ORDER BY revision DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "series_id": series_id,
+                        "source_event_key": fact.source_event_key,
+                    },
+                ).mappings().first()
+                if latest is not None and str(latest["row_hash"]) == fact.row_hash:
+                    noop_count += 1
+                    continue
+                if latest is not None and not allow_corrections:
+                    raise RuntimeError(
+                        "market_data_correction_rejected: "
+                        f"series_id={series_id} "
+                        f"source_event_key={fact.source_event_key}"
+                    )
+                revision = 1 if latest is None else int(latest["revision"]) + 1
+                row_provenance = {
+                    **dict(provenance),
+                    **dict(provenance_by_event.get(fact.source_event_key) or {}),
+                }
+                commit_seq = int(
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO market.numeric_fact_versions (
+                                series_id, source_event_key, revision,
+                                ingestion_run_id, fact_type, contract_version,
+                                numeric_value, raw_value, unit, dimensions,
+                                effective_at, effective_at_method,
+                                source_published_at, received_at, accepted_at,
+                                known_at, known_at_method,
+                                source_event_group_key,
+                                source_event_component_key, state,
+                                source_event_material_hash,
+                                provenance, row_hash
+                            ) VALUES (
+                                :series_id, :source_event_key, :revision,
+                                :ingestion_run_id, :fact_type, :contract_version,
+                                CAST(:numeric_value AS numeric), :raw_value, :unit,
+                                CAST(:dimensions AS jsonb),
+                                :effective_at, :effective_at_method,
+                                :source_published_at, :received_at, :accepted_at,
+                                :known_at, :known_at_method,
+                                :source_event_group_key,
+                                :source_event_component_key, :state,
+                                :source_event_material_hash,
+                                CAST(:provenance AS jsonb), :row_hash
+                            )
+                            RETURNING market_commit_seq
+                            """
+                        ),
+                        {
+                            "series_id": series_id,
+                            "source_event_key": fact.source_event_key,
+                            "revision": revision,
+                            "ingestion_run_id": run_id,
+                            "fact_type": fact.fact_type,
+                            "contract_version": fact.contract_version,
+                            "numeric_value": str(fact.value),
+                            "raw_value": fact.raw_value,
+                            "unit": fact.unit,
+                            "dimensions": _json_text(fact.dimensions),
+                            "effective_at": fact.effective_at,
+                            "effective_at_method": fact.effective_at_method,
+                            "source_published_at": fact.source_published_at,
+                            "received_at": fact.received_at,
+                            "accepted_at": fact.accepted_at,
+                            "known_at": fact.known_at,
+                            "known_at_method": fact.known_at_method,
+                            "source_event_group_key": fact.source_event_group_key,
+                            "source_event_component_key": fact.source_event_component_key,
+                            "state": fact.state.value,
+                            "source_event_material_hash": fact.source_event_material_hash,
+                            "provenance": _json_text(row_provenance),
+                            "row_hash": fact.row_hash,
+                        },
+                    ).scalar_one()
+                )
+                max_commit_seq = max(max_commit_seq, commit_seq)
+                if latest is None:
+                    inserted_count += 1
+                else:
+                    corrected_count += 1
+            if max_commit_seq == 0:
+                max_commit_seq = self._current_commit_seq_with_session(session)
+            session.execute(
+                text(
+                    """
+                    UPDATE market.ingestion_runs
+                    SET status = 'completed', finished_at = now(),
+                        inserted_count = :inserted_count,
+                        corrected_count = :corrected_count,
+                        noop_count = :noop_count
+                    WHERE id = :run_id AND status = 'running'
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "inserted_count": inserted_count,
+                    "corrected_count": corrected_count,
+                    "noop_count": noop_count,
+                },
+            )
+        return IngestionOutcome(
+            ingestion_run_id=run_id,
+            requested_count=len(rows),
+            inserted_count=inserted_count,
+            corrected_count=corrected_count,
+            noop_count=noop_count,
+            max_commit_seq=max_commit_seq,
+        )
 
     def _start_ingestion_run(
         self,
@@ -1788,7 +2106,7 @@ class PostgresMarketDataRepository:
                 text(
                     """
                     SELECT id, identity_key, instrument_id, fact_type,
-                           timeframe_seconds, contract_version
+                           timeframe_seconds, contract_version, dimensions
                     FROM market.series
                     WHERE id = :series_id
                     """
@@ -2018,6 +2336,117 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
             )
 
+    @staticmethod
+    def _read_numeric_facts_with_session(
+        session,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int],
+        known_at_lte: Optional[datetime],
+        latest_only: bool,
+        include_invalidated: bool,
+    ) -> list[NumericFactRecord]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        causal_predicates = ["series_id = :series_id"]
+        params: dict[str, Any] = {
+            "series_id": request.series_id,
+            "start": request.start,
+            "end": request.end,
+        }
+        if as_of_commit_seq is not None:
+            causal_predicates.append("market_commit_seq <= :as_of_commit_seq")
+            params["as_of_commit_seq"] = int(as_of_commit_seq)
+        if known_at_lte is not None:
+            causal_predicates.append("known_at <= :known_at_lte")
+            params["known_at_lte"] = known_at_lte
+        state_predicate = "" if include_invalidated else "AND visible.state = 'active'"
+        if latest_only:
+            visible_sql = f"""
+                SELECT DISTINCT ON (source_event_key) *
+                FROM market.numeric_fact_versions
+                WHERE {' AND '.join(causal_predicates)}
+                ORDER BY source_event_key, revision DESC
+            """
+        else:
+            visible_sql = f"""
+                SELECT *
+                FROM market.numeric_fact_versions
+                WHERE {' AND '.join(causal_predicates)}
+            """
+        rows = session.execute(
+            text(
+                f"""
+                WITH visible AS (
+                    {visible_sql}
+                )
+                SELECT visible.*,
+                       sources.identity_key AS source_identity_key,
+                       sources.provider AS source_provider,
+                       sources.venue AS source_venue,
+                       sources.source_kind,
+                       sources.adapter_version AS source_adapter_version
+                FROM visible
+                JOIN market.ingestion_runs AS runs
+                  ON runs.id = visible.ingestion_run_id
+                JOIN market.sources AS sources
+                  ON sources.id = runs.source_id
+                WHERE visible.effective_at >= :start
+                  AND visible.effective_at < :end
+                  {state_predicate}
+                ORDER BY visible.effective_at, visible.source_event_key,
+                         visible.revision
+                """
+            ),
+            params,
+        ).mappings().all()
+        return [_row_to_numeric_fact_record(row) for row in rows]
+
+    def read_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
+        with db.session() as session:
+            return self._read_numeric_facts_with_session(
+                session,
+                series_id=series_id,
+                start=start,
+                end=end,
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+                latest_only=True,
+                include_invalidated=False,
+            )
+
+    def read_numeric_fact_revisions(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
+        """Return retained active and invalidated revisions for audit/reorg repair."""
+
+        with db.session() as session:
+            return self._read_numeric_facts_with_session(
+                session,
+                series_id=series_id,
+                start=start,
+                end=end,
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+                latest_only=False,
+                include_invalidated=True,
+            )
+
     def record_gap_evidence(
         self,
         *,
@@ -2152,6 +2581,203 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
             )
 
+    def record_acquisition_coverage(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        binding_id: str,
+        manifest_hash: str,
+        interface_version: str,
+        confirmation_depth: int,
+        start: datetime,
+        end: datetime,
+        source_position_start: str,
+        source_position_end: str,
+        source_position_head: Optional[str],
+        status: str,
+        evidence: Mapping[str, Any],
+        ingestion_run_id: Optional[str] = None,
+    ) -> str:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        binding_id = str(binding_id or "").strip()
+        manifest_hash = str(manifest_hash or "").strip().lower()
+        interface_version = str(interface_version or "").strip()
+        status = str(status or "").strip().lower()
+        if not binding_id or not interface_version or len(manifest_hash) != 64:
+            raise ValueError("market_acquisition_coverage_invalid: binding identity")
+        if status not in {"complete", "partial", "failed"}:
+            raise ValueError("market_acquisition_coverage_invalid: status")
+        if int(source_id) <= 0 or int(confirmation_depth) < 0:
+            raise ValueError("market_acquisition_coverage_invalid: source/finality")
+        positions = {
+            "start": str(source_position_start or "").strip(),
+            "end": str(source_position_end or "").strip(),
+            "head": str(source_position_head or "").strip() or None,
+        }
+        if not positions["start"] or not positions["end"]:
+            raise ValueError("market_acquisition_coverage_invalid: source positions")
+        identity_key = _stable_hash(
+            {
+                "schema_version": "market.fact_acquisition_coverage.v1",
+                "series_id": request.series_id,
+                "source_id": int(source_id),
+                "binding_id": binding_id,
+                "manifest_hash": manifest_hash,
+                "interface_version": interface_version,
+                "confirmation_depth": int(confirmation_depth),
+                "range_start": _iso(request.start),
+                "range_end": _iso(request.end),
+                "source_positions": positions,
+                "status": status,
+                "evidence": dict(evidence),
+            }
+        )
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.fact_acquisition_coverage (
+                        identity_key, series_id, source_id, binding_id,
+                        manifest_hash, interface_version, confirmation_depth,
+                        range_start, range_end, source_position_start,
+                        source_position_end, source_position_head, status,
+                        ingestion_run_id, evidence
+                    ) VALUES (
+                        :identity_key, :series_id, :source_id, :binding_id,
+                        :manifest_hash, :interface_version, :confirmation_depth,
+                        :range_start, :range_end, :source_position_start,
+                        :source_position_end, :source_position_head, :status,
+                        :ingestion_run_id, CAST(:evidence AS jsonb)
+                    )
+                    ON CONFLICT (identity_key) DO NOTHING
+                    """
+                ),
+                {
+                    "identity_key": identity_key,
+                    "series_id": request.series_id,
+                    "source_id": int(source_id),
+                    "binding_id": binding_id,
+                    "manifest_hash": manifest_hash,
+                    "interface_version": interface_version,
+                    "confirmation_depth": int(confirmation_depth),
+                    "range_start": request.start,
+                    "range_end": request.end,
+                    "source_position_start": positions["start"],
+                    "source_position_end": positions["end"],
+                    "source_position_head": positions["head"],
+                    "status": status,
+                    "ingestion_run_id": ingestion_run_id,
+                    "evidence": _json_text(evidence),
+                },
+            )
+        return identity_key
+
+    def list_acquisition_coverage(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        binding_id: str,
+        manifest_hash: str,
+        interface_version: str,
+        confirmation_depth: int,
+        start: datetime,
+        end: datetime,
+        status: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        predicates = [
+            "series_id = :series_id",
+            "source_id = :source_id",
+            "binding_id = :binding_id",
+            "manifest_hash = :manifest_hash",
+            "interface_version = :interface_version",
+            "confirmation_depth = :confirmation_depth",
+            "range_end > :start",
+            "range_start < :end",
+        ]
+        params: dict[str, Any] = {
+            "series_id": request.series_id,
+            "source_id": int(source_id),
+            "binding_id": str(binding_id or "").strip(),
+            "manifest_hash": str(manifest_hash or "").strip().lower(),
+            "interface_version": str(interface_version or "").strip(),
+            "confirmation_depth": int(confirmation_depth),
+            "start": request.start,
+            "end": request.end,
+        }
+        if status is not None:
+            predicates.append("status = :status")
+            params["status"] = str(status).strip().lower()
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT identity_key, series_id, source_id, binding_id,
+                           manifest_hash, interface_version, confirmation_depth,
+                           range_start, range_end, source_position_start,
+                           source_position_end, source_position_head, status,
+                           ingestion_run_id, evidence, created_at
+                    FROM market.fact_acquisition_coverage
+                    WHERE {' AND '.join(predicates)}
+                    ORDER BY range_start, range_end, identity_key
+                    """
+                ),
+                params,
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def missing_acquisition_ranges(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        binding_id: str,
+        manifest_hash: str,
+        interface_version: str,
+        confirmation_depth: int,
+        start: datetime,
+        end: datetime,
+    ) -> list[tuple[datetime, datetime]]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        coverage = self.list_acquisition_coverage(
+            series_id=request.series_id,
+            source_id=source_id,
+            binding_id=binding_id,
+            manifest_hash=manifest_hash,
+            interface_version=interface_version,
+            confirmation_depth=confirmation_depth,
+            start=request.start,
+            end=request.end,
+            status="complete",
+        )
+        covered = sorted(
+            (
+                max(request.start, row["range_start"]),
+                min(request.end, row["range_end"]),
+            )
+            for row in coverage
+            if row["range_end"] > request.start and row["range_start"] < request.end
+        )
+        merged: list[tuple[datetime, datetime]] = []
+        for range_start, range_end in covered:
+            if range_end <= range_start:
+                continue
+            if not merged or range_start > merged[-1][1]:
+                merged.append((range_start, range_end))
+            else:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], range_end))
+        missing: list[tuple[datetime, datetime]] = []
+        cursor = request.start
+        for range_start, range_end in merged:
+            if range_start > cursor:
+                missing.append((cursor, range_start))
+            cursor = max(cursor, range_end)
+        if cursor < request.end:
+            missing.append((cursor, request.end))
+        return missing
+
 
     def read_series_records(
         self,
@@ -2177,6 +2803,16 @@ class PostgresMarketDataRepository:
         if identity is None:
             raise ValueError(f"market_data_series_unknown: series_id={series_id}")
         fact_type = str(identity["fact_type"])
+        if get_fact_contract(fact_type).uses_exact_numeric_storage:
+            return list(
+                self.read_numeric_facts(
+                    series_id=int(series_id),
+                    start=start,
+                    end=end,
+                    as_of_commit_seq=as_of_commit_seq,
+                    known_at_lte=known_at_lte,
+                )
+            )
         if fact_type == CANDLE_FACT_TYPE:
             return list(
                 self.read_candles(
@@ -2304,7 +2940,7 @@ class PostgresMarketDataRepository:
                     text(
                         """
                         SELECT identity_key, instrument_id, fact_type,
-                               timeframe_seconds, contract_version
+                               timeframe_seconds, contract_version, dimensions
                         FROM market.series
                         WHERE id = :series_id
                         """
@@ -2321,13 +2957,27 @@ class PostgresMarketDataRepository:
                     raise RuntimeError(
                         f"market_dataset_unsupported_fact: series_id={item.series_id} fact_type={fact_type}"
                     )
-                records: list[MarketDataRecord] = self.read_series_records(
-                    series_id=item.series_id,
-                    start=item.start,
-                    end=item.end,
-                    as_of_commit_seq=watermark,
-                    known_at_lte=None,
-                )
+                if contract.uses_exact_numeric_storage:
+                    records = list(
+                        self._read_numeric_facts_with_session(
+                            session,
+                            series_id=item.series_id,
+                            start=item.start,
+                            end=item.end,
+                            as_of_commit_seq=watermark,
+                            known_at_lte=None,
+                            latest_only=False,
+                            include_invalidated=True,
+                        )
+                    )
+                else:
+                    records = self.read_series_records(
+                        series_id=item.series_id,
+                        start=item.start,
+                        end=item.end,
+                        as_of_commit_seq=watermark,
+                        known_at_lte=None,
+                    )
                 if not records:
                     raise RuntimeError(
                         "market_dataset_incomplete: no facts for "
@@ -2335,6 +2985,8 @@ class PostgresMarketDataRepository:
                         f"end={_iso(item.end)}"
                     )
                 series_identity = dict(identity)
+                if not dict(series_identity.get("dimensions") or {}):
+                    series_identity.pop("dimensions", None)
                 quality = self._gap_evidence_with_session(
                     session,
                     series_id=item.series_id,
@@ -2822,6 +3474,17 @@ class PostgresMarketDataRepository:
                 raise ValueError(
                     "market_dataset_range_expansion_forbidden: requested range is outside "
                     f"dataset_id={dataset_id} series_id={series_id} frozen bounds"
+                )
+            if get_fact_contract(str(entry["fact_type"])).uses_exact_numeric_storage:
+                return self._read_numeric_facts_with_session(
+                    session,
+                    series_id=int(series_id),
+                    start=requested.start,
+                    end=requested.end,
+                    as_of_commit_seq=int(entry["max_commit_seq"]),
+                    known_at_lte=known_at_lte,
+                    latest_only=False,
+                    include_invalidated=True,
                 )
             return self.read_series_records(
                 series_id=int(series_id),

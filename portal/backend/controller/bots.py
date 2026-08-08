@@ -161,6 +161,7 @@ class BotBacktestDatasetPrepareRequest(BaseModel):
     evaluation_end: str
     acquire_missing: bool = False
     created_by: Optional[str] = None
+    numeric_acquisition: Optional[Dict[str, Any]] = None
 
 
 class BotResponse(BotBase):
@@ -397,13 +398,15 @@ def prepare_bot_backtest_dataset(
     """Prepare and freeze historical material without starting execution."""
 
     try:
-        return bot_service.prepare_backtest_dataset(
-            bot_id,
-            evaluation_start=body.evaluation_start,
-            evaluation_end=body.evaluation_end,
-            acquire_missing=body.acquire_missing,
-            created_by=body.created_by,
-        )
+        prepare_kwargs: Dict[str, Any] = {
+            "evaluation_start": body.evaluation_start,
+            "evaluation_end": body.evaluation_end,
+            "acquire_missing": body.acquire_missing,
+            "created_by": body.created_by,
+        }
+        if body.numeric_acquisition is not None:
+            prepare_kwargs["numeric_acquisition"] = body.numeric_acquisition
+        return bot_service.prepare_backtest_dataset(bot_id, **prepare_kwargs)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:

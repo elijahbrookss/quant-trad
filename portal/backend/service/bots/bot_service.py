@@ -659,6 +659,7 @@ def prepare_backtest_dataset(
     evaluation_end: str,
     acquire_missing: bool,
     created_by: str | None = None,
+    numeric_acquisition: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Resolve strategy requirements and freeze data without starting a run."""
 
@@ -677,6 +678,7 @@ def prepare_backtest_dataset(
         evaluation_end=evaluation_end,
         acquire_missing=bool(acquire_missing),
         created_by=created_by,
+        numeric_acquisition=numeric_acquisition,
     )
 
 

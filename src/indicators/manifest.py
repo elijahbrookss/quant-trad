@@ -113,6 +113,7 @@ class IndicatorMarketInput:
     contract_version: str = CANDLE_FACT_VERSION
     instrument_role: InstrumentRole | str = InstrumentRole.PRIMARY
     instrument_ref: str | None = None
+    dimensions: Mapping[str, Any] = field(default_factory=dict)
     alignment: MarketDataAlignment | str | None = None
     max_staleness_seconds: int | None = None
     required: bool = True
@@ -142,6 +143,7 @@ class IndicatorMarketInput:
             timeframe_seconds=timeframe_seconds,
             instrument_role=self.instrument_role,
             instrument_ref=self.instrument_ref,
+            dimensions=self.dimensions,
             alignment=self.alignment,
             max_staleness_seconds=self.max_staleness_seconds,
             required=self.required,
@@ -495,6 +497,11 @@ def serialize_indicator_manifest(manifest: IndicatorManifest) -> dict[str, Any]:
                     else str(spec.instrument_role)
                 ),
                 "instrument_ref": spec.instrument_ref,
+                **(
+                    {"dimensions": dict(spec.dimensions)}
+                    if spec.dimensions
+                    else {}
+                ),
                 "alignment": (
                     spec.alignment.value
                     if isinstance(spec.alignment, MarketDataAlignment)

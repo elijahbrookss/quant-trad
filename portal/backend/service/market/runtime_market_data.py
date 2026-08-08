@@ -16,7 +16,12 @@ from market_data.contracts import (
     TypedFeatureRecord,
     record_effective_time,
 )
-from market_data.requirements import UnavailableMarketData, latest_known_record
+from market_data.fact_registry import get_fact_contract
+from market_data.requirements import (
+    UnavailableMarketData,
+    causal_numeric_fact_records,
+    latest_known_record,
+)
 from market_data.store import MarketDataStore
 
 from ..storage.repos.market_data import market_data_repo
@@ -51,7 +56,21 @@ class RuntimeMarketDataResolver:
             else {}
         )
         self._frozen_records: dict[int, tuple[Any, ...]] = {}
+        self._frozen_numeric_revisions: dict[int, tuple[Any, ...]] = {}
         self._latest_service = MarketDataCollectorService(store=store)
+
+    @staticmethod
+    def _utc(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            raw = str(value or "").strip()
+            if raw.endswith("Z"):
+                raw = f"{raw[:-1]}+00:00"
+            parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
 
     @staticmethod
     def _requirement(raw: Mapping[str, Any]) -> MarketDataRequirement:
@@ -62,6 +81,11 @@ class RuntimeMarketDataResolver:
             timeframe_seconds=raw.get("timeframe_seconds"),
             instrument_role=str(raw.get("instrument_role") or "primary"),
             instrument_ref=raw.get("instrument_ref"),
+            dimensions=(
+                dict(raw.get("dimensions") or {})
+                if isinstance(raw.get("dimensions"), Mapping)
+                else {}
+            ),
             alignment=raw.get("alignment"),
             max_staleness_seconds=raw.get("max_staleness_seconds"),
             required=bool(raw.get("required", True)),
@@ -129,20 +153,38 @@ class RuntimeMarketDataResolver:
             str(series.get("fact_type") or "") != requirement.fact_type
             or str(series.get("contract_version") or "")
             != requirement.contract_version
+            or dict(series.get("dimensions") or {})
+            != dict(requirement.dimensions)
         ):
             raise RuntimeError(
                 "market_data_frozen_contract_disagreement: "
                 f"consumer_id={consumer_id} key={requirement.key}"
             )
         series_id = int(series["series_id"])
-        if series_id not in self._frozen_records:
-            self._frozen_records[series_id] = tuple(
-                self.store.read_dataset_series(
-                    dataset_id=str(self.dataset_binding["dataset_id"]),
-                    series_id=series_id,
+        contract = get_fact_contract(requirement.fact_type)
+        if contract.uses_exact_numeric_storage:
+            if series_id not in self._frozen_numeric_revisions:
+                self._frozen_numeric_revisions[series_id] = tuple(
+                    self.store.read_numeric_fact_revisions(
+                        series_id=series_id,
+                        start=self._utc(series["range_start"]),
+                        end=self._utc(series["range_end"]),
+                        as_of_commit_seq=int(series["max_commit_seq"]),
+                    )
                 )
+            records = causal_numeric_fact_records(
+                self._frozen_numeric_revisions[series_id],
+                evaluation_time=evaluation_time,
             )
-        records = self._frozen_records[series_id]
+        else:
+            if series_id not in self._frozen_records:
+                self._frozen_records[series_id] = tuple(
+                    self.store.read_dataset_series(
+                        dataset_id=str(self.dataset_binding["dataset_id"]),
+                        series_id=series_id,
+                    )
+                )
+            records = self._frozen_records[series_id]
         if requirement.alignment is MarketDataAlignment.EXACT_INTERVAL:
             timeframe = int(requirement.timeframe_seconds or 0)
             interval_start = evaluation_time - timedelta(seconds=timeframe)
