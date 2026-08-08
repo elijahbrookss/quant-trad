@@ -847,7 +847,7 @@ def derive_backtest_dataset_plan(
     }
 
 
-def _manifest_hash_payload(entry: Mapping[str, Any]) -> dict[str, Any]:
+def dataset_manifest_hash_payload(entry: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "series_id": int(entry["series_id"]),
         "range_start": iso_utc(entry["range_start"], field="range_start"),
@@ -866,10 +866,15 @@ def _gap_is_disclosed(
     start: datetime,
     end: datetime,
     quality: Sequence[Mapping[str, Any]],
+    *,
+    allow_any_classification: bool = False,
 ) -> bool:
     for row in quality:
         classification = str(row.get("classification") or "").strip().lower()
-        if classification not in _ALLOWED_DISCLOSED_GAP_CLASSIFICATIONS:
+        if (
+            not allow_any_classification
+            and classification not in _ALLOWED_DISCLOSED_GAP_CLASSIFICATIONS
+        ):
             continue
         evidence_start = _utc(row.get("start"), field="gap.start")
         evidence_end = _utc(row.get("end"), field="gap.end")
@@ -878,10 +883,11 @@ def _gap_is_disclosed(
     return False
 
 
-def _validate_dataset_series(
+def validate_frozen_dataset_series(
     *,
     store: MarketDataStore,
     entry: Mapping[str, Any],
+    allow_any_recorded_gap: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[Any]]:
     series_id = int(entry["series_id"])
     range_start = _utc(entry["range_start"], field="range_start")
@@ -940,7 +946,12 @@ def _validate_dataset_series(
                     f"backtest_dataset_malformed: duplicate or unordered candle series_id={series_id}"
                 )
             if fact.open_time > expected:
-                if not _gap_is_disclosed(expected, fact.open_time, quality):
+                if not _gap_is_disclosed(
+                    expected,
+                    fact.open_time,
+                    quality,
+                    allow_any_classification=allow_any_recorded_gap,
+                ):
                     raise RuntimeError(
                         "backtest_dataset_unacceptable_gap: "
                         f"series_id={series_id} start={iso_utc(expected)} end={iso_utc(fact.open_time)}"
@@ -969,7 +980,12 @@ def _validate_dataset_series(
                 )
             expected = fact.close_time
         if expected < range_end:
-            if not _gap_is_disclosed(expected, range_end, quality):
+            if not _gap_is_disclosed(
+                expected,
+                range_end,
+                quality,
+                allow_any_classification=allow_any_recorded_gap,
+            ):
                 raise RuntimeError(
                     "backtest_dataset_unacceptable_gap: "
                     f"series_id={series_id} start={iso_utc(expected)} end={iso_utc(range_end)}"
@@ -1301,7 +1317,9 @@ def validate_backtest_dataset(
                 "backtest_dataset_range_mismatch: "
                 f"instrument={key[0]} fact_type={key[1]} timeframe_seconds={key[3]}"
             )
-        verified, quality, records = _validate_dataset_series(store=store, entry=entry)
+        verified, quality, records = validate_frozen_dataset_series(
+            store=store, entry=entry
+        )
         if key[1].startswith("market.normalized."):
             references = normalization_refs_by_output.get(int(entry["series_id"]), [])
             if len(references) != 1:
@@ -1561,7 +1579,7 @@ def validate_backtest_dataset(
         admitted.append(verified)
         all_quality.extend(quality)
 
-    manifest_payload = [_manifest_hash_payload(row) for row in admitted]
+    manifest_payload = [dataset_manifest_hash_payload(row) for row in admitted]
     reconstructed_hash = build_dataset_identity_hash(manifest_payload)
     if reconstructed_hash != dataset.dataset_hash:
         raise RuntimeError(
