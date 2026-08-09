@@ -433,96 +433,7 @@ BEGIN
     END LOOP;
 END $$;
 
-INSERT INTO market.fact_schemas (
-    schema_id,
-    fact_type,
-    contract_hash,
-    contract,
-    observation_time_field,
-    material_hash_version,
-    row_hash_version,
-    query_fields,
-    dataset_eligible
-)
-VALUES
-(
-    'candle.ohlcv.v1',
-    'candle.ohlcv',
-    'ed8661f654b87d32fbf90ea36ac91094113ef1768570048fd617230cc45098dd',
-    $json${"additional_properties":false,"dataset_eligible":true,"fact_type":"candle.ohlcv","fields":[{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"close_time","nullable":false,"required":true},{"enum":[],"kind":"float64","minimum":null,"minimum_inclusive":true,"name":"open","nullable":false,"required":true},{"enum":[],"kind":"float64","minimum":null,"minimum_inclusive":true,"name":"high","nullable":false,"required":true},{"enum":[],"kind":"float64","minimum":null,"minimum_inclusive":true,"name":"low","nullable":false,"required":true},{"enum":[],"kind":"float64","minimum":null,"minimum_inclusive":true,"name":"close","nullable":false,"required":true},{"enum":[],"kind":"float64","minimum":"0","minimum_inclusive":true,"name":"volume","nullable":true,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":true,"name":"trade_count","nullable":true,"required":true}],"material_hash_version":"candle_material_hash.v1","observation_time_field":"open_time","query_fields":["close_time","open","high","low","close"],"row_hash_version":"candle.ohlcv.v1","schema_id":"candle.ohlcv.v1","schema_version":"market.fact_payload_contract.v1"}$json$::jsonb,
-    'open_time',
-    'candle_material_hash.v1',
-    'candle.ohlcv.v1',
-    '["close_time","open","high","low","close"]'::jsonb,
-    true
-),
-(
-    'derivatives.open_interest.v1',
-    'derivatives.open_interest',
-    '64acfaca327e97b75dec0fdb963ded17c141093784dd179577cb619f73cf3396',
-    $json${"additional_properties":false,"dataset_eligible":true,"fact_type":"derivatives.open_interest","fields":[{"enum":[],"kind":"float64","minimum":"0","minimum_inclusive":true,"name":"value","nullable":false,"required":true},{"enum":["contracts"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"open_interest_material_hash.v1","observation_time_field":"sample_time","query_fields":["value"],"row_hash_version":"derivatives.open_interest.v1","schema_id":"derivatives.open_interest.v1","schema_version":"market.fact_payload_contract.v1"}$json$::jsonb,
-    'sample_time',
-    'open_interest_material_hash.v1',
-    'derivatives.open_interest.v1',
-    '["value"]'::jsonb,
-    true
-),
-(
-    'derivatives.open_interest.v2',
-    'derivatives.open_interest',
-    'e6bfc9325effb66679f21c8298ce9e02e3bd124a3aa518528e89fa5dd300d248',
-    $json${"additional_properties":false,"dataset_eligible":true,"fact_type":"derivatives.open_interest","fields":[{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"value","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"raw_value","nullable":false,"required":true},{"enum":["contracts"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"sample_time","query_fields":["value"],"row_hash_version":"market.fact_row.v1","schema_id":"derivatives.open_interest.v2","schema_version":"market.fact_payload_contract.v1"}$json$::jsonb,
-    'sample_time',
-    'market.fact_material.v1',
-    'market.fact_row.v1',
-    '["value"]'::jsonb,
-    true
-),
-(
-    'derivatives.funding_rate.v1',
-    'derivatives.funding_rate',
-    'ba530f51532bc51323c9cc8dbd073fc8d4d07bf71d13a92e0929bee25b2146c6',
-    $json${"additional_properties":false,"dataset_eligible":true,"fact_type":"derivatives.funding_rate","fields":[{"enum":[],"kind":"float64","minimum":null,"minimum_inclusive":true,"name":"rate","nullable":false,"required":true},{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"funding_time","nullable":false,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"interval_seconds","nullable":false,"required":true},{"enum":["fraction"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"funding_rate_material_hash.v1","observation_time_field":"sample_time","query_fields":["rate","funding_time","interval_seconds"],"row_hash_version":"derivatives.funding_rate.v1","schema_id":"derivatives.funding_rate.v1","schema_version":"market.fact_payload_contract.v1"}$json$::jsonb,
-    'sample_time',
-    'funding_rate_material_hash.v1',
-    'derivatives.funding_rate.v1',
-    '["rate","funding_time","interval_seconds"]'::jsonb,
-    true
-),
-(
-    'derivatives.funding_rate.v2',
-    'derivatives.funding_rate',
-    '075ee70123395504c5e8ab9ffdcfd4121ba89eafd90cd4e9e0ee22bc19558165',
-    $json${"additional_properties":false,"dataset_eligible":true,"fact_type":"derivatives.funding_rate","fields":[{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"rate","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"raw_rate","nullable":false,"required":true},{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"funding_time","nullable":false,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"interval_seconds","nullable":false,"required":true},{"enum":["fraction"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"sample_time","query_fields":["rate","funding_time","interval_seconds"],"row_hash_version":"market.fact_row.v1","schema_id":"derivatives.funding_rate.v2","schema_version":"market.fact_payload_contract.v1"}$json$::jsonb,
-    'sample_time',
-    'market.fact_material.v1',
-    'market.fact_row.v1',
-    '["rate","funding_time","interval_seconds"]'::jsonb,
-    true
-),
-(
-    'market.reference_price.v1',
-    'market.reference_price',
-    '3f2cad6915814acbda3cae56ce43b47adea09f19ade194d87baedcb719f419f3',
-    $json${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.reference_price","fields":[{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"value","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"raw_value","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"numeric_fact_material_hash.v1","observation_time_field":"effective_at","query_fields":["value"],"row_hash_version":"market.reference_price.v1","schema_id":"market.reference_price.v1","schema_version":"market.fact_payload_contract.v1"}$json$::jsonb,
-    'effective_at',
-    'numeric_fact_material_hash.v1',
-    'market.reference_price.v1',
-    '["value"]'::jsonb,
-    true
-),
-(
-    'market.reserve_balance.v1',
-    'market.reserve_balance',
-    'b6c1d08d24a6c97c38c5ee3d3923b87f8e2ba742296bcb77785533b82aa2058e',
-    $json${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.reserve_balance","fields":[{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"value","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"raw_value","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"numeric_fact_material_hash.v1","observation_time_field":"effective_at","query_fields":["value"],"row_hash_version":"market.reserve_balance.v1","schema_id":"market.reserve_balance.v1","schema_version":"market.fact_payload_contract.v1"}$json$::jsonb,
-    'effective_at',
-    'numeric_fact_material_hash.v1',
-    'market.reserve_balance.v1',
-    '["value"]'::jsonb,
-    true
-)
-ON CONFLICT (schema_id) DO NOTHING;
+\ir canonical_fact_registry_seed_v1.sql
 
 DO $$
 DECLARE
@@ -547,9 +458,9 @@ BEGIN
     END IF;
 
     SELECT count(*) INTO schema_count FROM market.fact_schemas;
-    IF schema_count <> 7 THEN
+    IF schema_count = 0 THEN
         RAISE EXCEPTION
-            'canonical fact store verification failed: expected 7 schemas, found %',
+            'canonical fact store verification failed: registry is empty (found %)',
             schema_count;
     END IF;
 

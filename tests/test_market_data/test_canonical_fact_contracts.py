@@ -87,6 +87,57 @@ def test_payload_schema_is_strict_versioned_and_hash_addressed() -> None:
         )
 
 
+def test_trade_and_trade_flow_payloads_are_provider_neutral_and_strict() -> None:
+    trade = get_fact_payload_schema("market.trade.v1")
+    normalized_trade = trade.normalize_payload(
+        {
+            "price": Decimal("118000.00"),
+            "reported_quantity": Decimal("3"),
+            "reported_quantity_unit": "contracts",
+            "contract_quantity": Decimal("3"),
+            "base_quantity": Decimal("0.03"),
+            "quote_notional": Decimal("3540"),
+            "base_currency": "BTC",
+            "quote_currency": "USD",
+            "maker_side": "SELL",
+            "aggressor_side": "BUY",
+        }
+    )
+    assert normalized_trade["base_quantity"] == "0.03"
+    assert "provider" not in normalized_trade
+    assert "provider_trade_id" not in normalized_trade
+
+    flow = get_fact_payload_schema("market.trade_flow.v1")
+    normalized_flow = flow.normalize_payload(
+        {
+            "bucket_end": _BASE + timedelta(seconds=1),
+            "trade_count": 2,
+            "maker_buy_count": 1,
+            "maker_sell_count": 1,
+            "aggressor_buy_count": 1,
+            "aggressor_sell_count": 1,
+            "contract_volume": None,
+            "base_volume": Decimal("0.02"),
+            "quote_notional": Decimal("2360"),
+            "maker_buy_base_volume": Decimal("0.01"),
+            "maker_sell_base_volume": Decimal("0.01"),
+            "aggressor_buy_base_volume": Decimal("0.01"),
+            "aggressor_sell_base_volume": Decimal("0.01"),
+            "cvd_delta": Decimal("0"),
+            "cvd_unit": "base",
+            "open_price": Decimal("118000"),
+            "high_price": Decimal("118100"),
+            "low_price": Decimal("118000"),
+            "close_price": Decimal("118100"),
+        }
+    )
+    assert normalized_flow["bucket_end"] == "2026-08-09T12:00:01.000000Z"
+    assert normalized_flow["cvd_delta"] == "0"
+
+    with pytest.raises(ValueError, match="unexpected=provider_product_id"):
+        trade.normalize_payload({**normalized_trade, "provider_product_id": "BTC-PERP"})
+
+
 def test_exact_decimal_payload_rejects_binary_float_and_is_canonical() -> None:
     fact = _funding_fact()
 
