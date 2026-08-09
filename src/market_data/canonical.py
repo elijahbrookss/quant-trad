@@ -251,8 +251,124 @@ class CanonicalFact:
             }
         )
 
+    def _schema_owned_material_hash(self) -> str | None:
+        """Reproduce retained structured-v1 material identities."""
+
+        if self.payload_schema_id == "market.trade.v1":
+            evidence = self.provenance.get("_qt_trade_evidence")
+            if not isinstance(evidence, Mapping):
+                return None
+            required = (
+                "provider_product_id",
+                "provider_trade_id",
+                "aggressor_transform_version",
+                "product_definition_version_id",
+            )
+            if any(name not in evidence for name in required):
+                return None
+            return _hash(
+                {
+                    "schema_version": "market.trade_material_hash.v1",
+                    "provider_product_id": evidence["provider_product_id"],
+                    "provider_trade_id": evidence["provider_trade_id"],
+                    "price": self.payload["price"],
+                    "provider_size": self.payload["reported_quantity"],
+                    "provider_size_unit": self.payload["reported_quantity_unit"],
+                    "maker_side": self.payload["maker_side"],
+                    "aggressor_side": self.payload["aggressor_side"],
+                    "aggressor_transform_version": evidence[
+                        "aggressor_transform_version"
+                    ],
+                    "contract_quantity": self.payload["contract_quantity"],
+                    "base_quantity": self.payload["base_quantity"],
+                    "quote_notional": self.payload["quote_notional"],
+                    "base_currency": self.payload["base_currency"],
+                    "quote_currency": self.payload["quote_currency"],
+                    "product_definition_version_id": evidence[
+                        "product_definition_version_id"
+                    ],
+                    "provider_event_time": _time(self.observation_time),
+                }
+            )
+        if self.payload_schema_id == "market.trade_flow.v1":
+            evidence = self.provenance.get("_qt_trade_flow_evidence")
+            quality = self.quality.get("_qt_trade_flow_quality")
+            if not isinstance(evidence, Mapping) or not isinstance(quality, Mapping):
+                return None
+            required_evidence = (
+                "interval_seconds",
+                "first_trade_id",
+                "last_trade_id",
+                "first_receive_ordinal",
+                "last_receive_ordinal",
+                "coverage_interval_id",
+                "coverage_revision",
+                "input_fingerprint",
+            )
+            required_quality = (
+                "aggregate_complete",
+                "archive_complete",
+                "canonicalization_complete",
+                "late_trade_count",
+            )
+            if any(name not in evidence for name in required_evidence) or any(
+                name not in quality for name in required_quality
+            ):
+                return None
+            return _hash(
+                {
+                    "schema_version": "market.trade_flow_material_hash.v1",
+                    "interval_seconds": evidence["interval_seconds"],
+                    "bucket_start": _time(self.observation_time),
+                    "bucket_end": self.payload["bucket_end"],
+                    "trade_count": self.payload["trade_count"],
+                    "maker_buy_count": self.payload["maker_buy_count"],
+                    "maker_sell_count": self.payload["maker_sell_count"],
+                    "aggressor_buy_count": self.payload["aggressor_buy_count"],
+                    "aggressor_sell_count": self.payload["aggressor_sell_count"],
+                    "contract_volume": self.payload["contract_volume"],
+                    "base_volume": self.payload["base_volume"],
+                    "quote_notional": self.payload["quote_notional"],
+                    "maker_buy_base_volume": self.payload[
+                        "maker_buy_base_volume"
+                    ],
+                    "maker_sell_base_volume": self.payload[
+                        "maker_sell_base_volume"
+                    ],
+                    "aggressor_buy_base_volume": self.payload[
+                        "aggressor_buy_base_volume"
+                    ],
+                    "aggressor_sell_base_volume": self.payload[
+                        "aggressor_sell_base_volume"
+                    ],
+                    "cvd_delta": self.payload["cvd_delta"],
+                    "cvd_unit": self.payload["cvd_unit"],
+                    "open_price": self.payload["open_price"],
+                    "high_price": self.payload["high_price"],
+                    "low_price": self.payload["low_price"],
+                    "close_price": self.payload["close_price"],
+                    "first_trade_id": evidence["first_trade_id"],
+                    "last_trade_id": evidence["last_trade_id"],
+                    "first_receive_ordinal": evidence["first_receive_ordinal"],
+                    "last_receive_ordinal": evidence["last_receive_ordinal"],
+                    "coverage_interval_id": evidence["coverage_interval_id"],
+                    "coverage_revision": evidence["coverage_revision"],
+                    "aggregate_complete": quality["aggregate_complete"],
+                    "archive_complete": quality["archive_complete"],
+                    "canonicalization_complete": quality[
+                        "canonicalization_complete"
+                    ],
+                    "late_trade_count": quality["late_trade_count"],
+                    "input_fingerprint": evidence["input_fingerprint"],
+                }
+            )
+        return None
+
     @property
     def material_hash(self) -> str:
+        schema_owned = self._schema_owned_material_hash()
+        if schema_owned is not None:
+            return schema_owned
         schema = get_fact_payload_schema(self.payload_schema_id)
         return _hash(
             {
@@ -384,6 +500,41 @@ class CanonicalFact:
                     "source_event_component_key": self.external_event_component_key,
                     "source_event_material_hash": str(source_material_hash),
                     "state": self.state.value,
+                }
+            )
+        if self.payload_schema_id == "market.trade.v1":
+            evidence = self.provenance.get("_qt_trade_evidence")
+            if not isinstance(evidence, Mapping):
+                return None
+            required = (
+                "delivery_kind",
+                "provider_message_time",
+                "provider_sequence_num",
+                "connection_epoch",
+                "receive_ordinal",
+                "event_ordinal",
+                "trade_ordinal",
+                "raw_record_id",
+                "coverage_interval_id",
+            )
+            if any(name not in evidence for name in required):
+                return None
+            return _hash(
+                {
+                    "schema_version": "market.trade.v1",
+                    "material_hash": self.material_hash,
+                    "delivery_kind": evidence["delivery_kind"],
+                    "provider_message_time": evidence["provider_message_time"],
+                    "received_at": _time(self.received_at),
+                    "accepted_at": _time(self.accepted_at),
+                    "known_at": _time(self.known_at),
+                    "provider_sequence_num": evidence["provider_sequence_num"],
+                    "connection_epoch": evidence["connection_epoch"],
+                    "receive_ordinal": evidence["receive_ordinal"],
+                    "event_ordinal": evidence["event_ordinal"],
+                    "trade_ordinal": evidence["trade_ordinal"],
+                    "raw_record_id": evidence["raw_record_id"],
+                    "coverage_interval_id": evidence["coverage_interval_id"],
                 }
             )
         return None

@@ -27,6 +27,7 @@ from market_data.contracts import (
     OpenInterestFact,
     SourceIdentity,
 )
+from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
 
 
 _ADVISORY_LOCK_ID = 9_021_011
@@ -44,7 +45,7 @@ class MigrationFamily:
 @dataclass(frozen=True)
 class MigrationRow:
     values: Mapping[str, Any]
-    source_row_hash: str
+    source_row_hash: str | None
 
 
 def _source(row: Mapping[str, Any]) -> SourceIdentity:
@@ -78,18 +79,28 @@ def _migration_provenance(
 
 
 def _canonical_values(
-    *, row: Mapping[str, Any], fact: CanonicalFact, source_row_hash: str
+    *,
+    row: Mapping[str, Any],
+    fact: CanonicalFact,
+    source_row_hash: str | None = None,
+    source_material_hash: str | None = None,
 ) -> MigrationRow:
-    if fact.row_hash != source_row_hash:
+    if source_row_hash is not None and fact.row_hash != source_row_hash:
         raise RuntimeError(
             "canonical_fact_migration_schema_hash_mismatch: "
             f"schema_id={fact.payload_schema_id} series_id={row['series_id']}"
         )
+    if source_material_hash is not None and fact.material_hash != source_material_hash:
+        raise RuntimeError(
+            "canonical_fact_migration_material_hash_mismatch: "
+            f"schema_id={fact.payload_schema_id} series_id={row['series_id']}"
+        )
+    canonical_row_hash = source_row_hash or fact.row_hash
     version_id = build_fact_version_id(
         series_id=int(row["series_id"]),
         observation_key=fact.observation_key,
         revision=int(row["revision"]),
-        row_hash=source_row_hash,
+        row_hash=canonical_row_hash,
     )
     return MigrationRow(
         source_row_hash=source_row_hash,
@@ -100,7 +111,11 @@ def _canonical_values(
             "revision": int(row["revision"]),
             "market_commit_seq": int(row["market_commit_seq"]),
             "source_id": int(row["source_id"]),
-            "ingestion_run_id": str(row["ingestion_run_id"]),
+            "ingestion_run_id": (
+                str(row["ingestion_run_id"])
+                if row.get("ingestion_run_id") is not None
+                else None
+            ),
             "fact_type": fact.fact_type,
             "payload_schema_id": fact.payload_schema_id,
             "payload_contract_hash": fact.payload_contract_hash,
@@ -126,7 +141,7 @@ def _canonical_values(
             "quality": json.dumps(dict(fact.quality), sort_keys=True),
             "quality_hash": fact.quality_hash,
             # Historical v1 schemas own their original row-hash algorithms.
-            "row_hash": source_row_hash,
+            "row_hash": canonical_row_hash,
         },
     )
 
@@ -336,6 +351,233 @@ def _numeric(row: Mapping[str, Any]) -> MigrationRow:
     )
 
 
+def _trade(row: Mapping[str, Any]) -> MigrationRow:
+    legacy = MarketTradeFact(
+        provider_product_id=row["provider_product_id"],
+        provider_trade_id=row["provider_trade_id"],
+        delivery_kind=row["delivery_kind"],
+        price=row["price"],
+        provider_size=row["provider_size"],
+        provider_size_unit=row["provider_size_unit"],
+        maker_side=row["maker_side"],
+        aggressor_side=row["aggressor_side"],
+        aggressor_transform_version=row["aggressor_transform_version"],
+        contract_quantity=row["contract_quantity"],
+        base_quantity=row["base_quantity"],
+        quote_notional=row["quote_notional"],
+        base_currency=row["base_currency"],
+        quote_currency=row["quote_currency"],
+        product_definition_version_id=row["product_definition_version_id"],
+        provider_event_time=row["provider_event_time"],
+        provider_message_time=row["provider_message_time"],
+        received_at=row["received_at"],
+        accepted_at=row["accepted_at"],
+        known_at=row["known_at"],
+        provider_sequence_num=row["provider_sequence_num"],
+        connection_epoch=row["connection_epoch"],
+        receive_ordinal=row["receive_ordinal"],
+        event_ordinal=row["event_ordinal"],
+        trade_ordinal=row["trade_ordinal"],
+        raw_record_id=row["raw_record_id"],
+        coverage_interval_id=row["coverage_interval_id"],
+    )
+    if legacy.material_hash != str(row["material_hash"]):
+        raise RuntimeError(
+            "canonical_fact_migration_source_hash_mismatch: "
+            f"family=trade kind=material series_id={row['series_id']} "
+            f"provider_trade_id={legacy.provider_trade_id}"
+        )
+    if legacy.row_hash != str(row["row_hash"]):
+        raise RuntimeError(
+            "canonical_fact_migration_source_hash_mismatch: "
+            f"family=trade kind=row series_id={row['series_id']} "
+            f"provider_trade_id={legacy.provider_trade_id}"
+        )
+    provenance = _migration_provenance(
+        row,
+        source_table="market.market_trade_versions",
+        extra={
+            "legacy_version_id": str(row["id"]),
+            "legacy_provenance_hash": str(row["provenance_hash"]),
+        },
+    )
+    provenance["_qt_trade_evidence"] = {
+        "provider_product_id": legacy.provider_product_id,
+        "provider_trade_id": legacy.provider_trade_id,
+        "delivery_kind": legacy.delivery_kind.value,
+        "aggressor_transform_version": legacy.aggressor_transform_version,
+        "product_definition_version_id": legacy.product_definition_version_id,
+        "provider_message_time": legacy.provider_message_time,
+        "provider_sequence_num": legacy.provider_sequence_num,
+        "connection_epoch": legacy.connection_epoch,
+        "receive_ordinal": legacy.receive_ordinal,
+        "event_ordinal": legacy.event_ordinal,
+        "trade_ordinal": legacy.trade_ordinal,
+        "raw_record_id": legacy.raw_record_id,
+        "coverage_interval_id": legacy.coverage_interval_id,
+    }
+    canonical = CanonicalFact(
+        fact_type="market.trade",
+        payload_schema_id="market.trade.v1",
+        observation_key=(
+            f"{legacy.provider_product_id}:{legacy.provider_trade_id}"
+        ),
+        observation_time=legacy.provider_event_time,
+        observation_time_method="provider_event_time",
+        source_published_at=legacy.provider_message_time,
+        received_at=legacy.received_at,
+        accepted_at=legacy.accepted_at,
+        known_at=legacy.known_at,
+        known_at_method="platform_acceptance",
+        source=_source(row),
+        transformation_id="migration.market_trade_versions.v1",
+        external_event_key=legacy.provider_trade_id,
+        external_event_group_key=legacy.provider_product_id,
+        payload={
+            "price": legacy.price,
+            "reported_quantity": legacy.provider_size,
+            "reported_quantity_unit": legacy.provider_size_unit.value,
+            "contract_quantity": legacy.contract_quantity,
+            "base_quantity": legacy.base_quantity,
+            "quote_notional": legacy.quote_notional,
+            "base_currency": legacy.base_currency,
+            "quote_currency": legacy.quote_currency,
+            "maker_side": legacy.maker_side.value,
+            "aggressor_side": (
+                legacy.aggressor_side.value if legacy.aggressor_side else None
+            ),
+        },
+        provenance=provenance,
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(
+        row=row,
+        fact=canonical,
+        source_row_hash=legacy.row_hash,
+        source_material_hash=legacy.material_hash,
+    )
+
+
+def _trade_flow(row: Mapping[str, Any]) -> MigrationRow:
+    if int(row["source_match_count"]) != 1:
+        raise RuntimeError(
+            "canonical_fact_migration_derived_source_ambiguous: "
+            f"family=trade_flow series_id={row['series_id']} "
+            f"source_match_count={row['source_match_count']}"
+        )
+    legacy = TradeFlowAggregateFact(
+        interval_seconds=row["interval_seconds"],
+        bucket_start=row["bucket_start"],
+        bucket_end=row["bucket_end"],
+        trade_count=row["trade_count"],
+        maker_buy_count=row["maker_buy_count"],
+        maker_sell_count=row["maker_sell_count"],
+        aggressor_buy_count=row["aggressor_buy_count"],
+        aggressor_sell_count=row["aggressor_sell_count"],
+        contract_volume=row["contract_volume"],
+        base_volume=row["base_volume"],
+        quote_notional=row["quote_notional"],
+        maker_buy_base_volume=row["maker_buy_base_volume"],
+        maker_sell_base_volume=row["maker_sell_base_volume"],
+        aggressor_buy_base_volume=row["aggressor_buy_base_volume"],
+        aggressor_sell_base_volume=row["aggressor_sell_base_volume"],
+        cvd_delta=row["cvd_delta"],
+        cvd_unit=row["cvd_unit"],
+        open_price=row["open_price"],
+        high_price=row["high_price"],
+        low_price=row["low_price"],
+        close_price=row["close_price"],
+        first_trade_id=row["first_trade_id"],
+        last_trade_id=row["last_trade_id"],
+        first_receive_ordinal=row["first_receive_ordinal"],
+        last_receive_ordinal=row["last_receive_ordinal"],
+        coverage_interval_id=row["coverage_interval_id"],
+        coverage_revision=row["coverage_revision"],
+        aggregate_complete=row["aggregate_complete"],
+        archive_complete=row["archive_complete"],
+        canonicalization_complete=row["canonicalization_complete"],
+        late_trade_count=row["late_trade_count"],
+        known_at=row["known_at"],
+        input_fingerprint=row["input_fingerprint"],
+    )
+    if legacy.material_hash != str(row["material_hash"]):
+        raise RuntimeError(
+            "canonical_fact_migration_source_hash_mismatch: "
+            f"family=trade_flow series_id={row['series_id']} "
+            f"bucket_start={legacy.bucket_start.isoformat()}"
+        )
+    quality = dict(row["quality"] or {})
+    if "_qt_trade_flow_quality" in quality:
+        raise RuntimeError(
+            "canonical_fact_migration_reserved_quality_key: "
+            f"series_id={row['series_id']} bucket_start={legacy.bucket_start.isoformat()}"
+        )
+    quality["_qt_trade_flow_quality"] = {
+        "aggregate_complete": legacy.aggregate_complete,
+        "archive_complete": legacy.archive_complete,
+        "canonicalization_complete": legacy.canonicalization_complete,
+        "late_trade_count": legacy.late_trade_count,
+    }
+    provenance = _migration_provenance(
+        row,
+        source_table="market.trade_flow_aggregate_versions",
+        extra={
+            "legacy_version_id": str(row["id"]),
+            "legacy_provenance_hash": str(row["provenance_hash"]),
+        },
+    )
+    provenance["_qt_trade_flow_evidence"] = {
+        "interval_seconds": legacy.interval_seconds,
+        "first_trade_id": legacy.first_trade_id,
+        "last_trade_id": legacy.last_trade_id,
+        "first_receive_ordinal": legacy.first_receive_ordinal,
+        "last_receive_ordinal": legacy.last_receive_ordinal,
+        "coverage_interval_id": legacy.coverage_interval_id,
+        "coverage_revision": legacy.coverage_revision,
+        "input_fingerprint": legacy.input_fingerprint,
+    }
+    canonical = CanonicalFact(
+        fact_type="market.trade_flow",
+        payload_schema_id="market.trade_flow.v1",
+        observation_key=legacy.bucket_start.isoformat(),
+        observation_time=legacy.bucket_start,
+        observation_time_method="bucket_start",
+        accepted_at=legacy.known_at,
+        known_at=legacy.known_at,
+        known_at_method="derived_materialization",
+        source=_source(row),
+        transformation_id=str(row["aggregation_version"]),
+        payload={
+            "bucket_end": legacy.bucket_end,
+            "trade_count": legacy.trade_count,
+            "maker_buy_count": legacy.maker_buy_count,
+            "maker_sell_count": legacy.maker_sell_count,
+            "aggressor_buy_count": legacy.aggressor_buy_count,
+            "aggressor_sell_count": legacy.aggressor_sell_count,
+            "contract_volume": legacy.contract_volume,
+            "base_volume": legacy.base_volume,
+            "quote_notional": legacy.quote_notional,
+            "maker_buy_base_volume": legacy.maker_buy_base_volume,
+            "maker_sell_base_volume": legacy.maker_sell_base_volume,
+            "aggressor_buy_base_volume": legacy.aggressor_buy_base_volume,
+            "aggressor_sell_base_volume": legacy.aggressor_sell_base_volume,
+            "cvd_delta": legacy.cvd_delta,
+            "cvd_unit": legacy.cvd_unit,
+            "open_price": legacy.open_price,
+            "high_price": legacy.high_price,
+            "low_price": legacy.low_price,
+            "close_price": legacy.close_price,
+        },
+        provenance=provenance,
+        quality=quality,
+    )
+    return _canonical_values(
+        row=row,
+        fact=canonical,
+        source_material_hash=legacy.material_hash,
+    )
+
+
 _SOURCE_JOIN = """
     JOIN market.ingestion_runs AS ingestion
       ON ingestion.id = fact.ingestion_run_id
@@ -344,6 +586,13 @@ _SOURCE_JOIN = """
 """
 _SOURCE_COLUMNS = """
     ingestion.source_id,
+    source.identity_key AS source_identity_key,
+    source.provider AS source_provider,
+    source.venue AS source_venue,
+    source.source_kind,
+    source.adapter_version AS source_adapter_version
+"""
+_SOURCE_IDENTITY_COLUMNS = """
     source.identity_key AS source_identity_key,
     source.provider AS source_provider,
     source.venue AS source_venue,
@@ -379,6 +628,34 @@ _FAMILIES = (
         f"SELECT fact.*, {_SOURCE_COLUMNS} FROM market.numeric_fact_versions AS fact "
         f"{_SOURCE_JOIN} ORDER BY fact.series_id, fact.source_event_key, fact.revision",
         _numeric,
+    ),
+    MigrationFamily(
+        "trade",
+        "market.market_trade_versions",
+        f"SELECT fact.*, {_SOURCE_IDENTITY_COLUMNS}, NULL::text AS ingestion_run_id "
+        "FROM market.market_trade_versions AS fact "
+        "JOIN market.sources AS source ON source.id = fact.source_id "
+        "ORDER BY fact.series_id, fact.provider_event_time, fact.revision",
+        _trade,
+    ),
+    MigrationFamily(
+        "trade_flow",
+        "market.trade_flow_aggregate_versions",
+        f"SELECT fact.*, origin.source_id, {_SOURCE_IDENTITY_COLUMNS}, "
+        "origin.source_match_count, NULL::text AS ingestion_run_id "
+        "FROM market.trade_flow_aggregate_versions AS fact "
+        "JOIN market.series AS flow_series ON flow_series.id = fact.series_id "
+        "JOIN LATERAL ("
+        "    SELECT min(trade.source_id) AS source_id, "
+        "           count(DISTINCT trade.source_id) AS source_match_count "
+        "    FROM market.series AS trade_series "
+        "    JOIN market.market_trade_versions AS trade "
+        "      ON trade.series_id = trade_series.id "
+        "    WHERE trade_series.instrument_id = flow_series.instrument_id"
+        ") AS origin ON origin.source_id IS NOT NULL "
+        "JOIN market.sources AS source ON source.id = origin.source_id "
+        "ORDER BY fact.series_id, fact.bucket_start, fact.revision",
+        _trade_flow,
     ),
 )
 
@@ -499,13 +776,29 @@ def _migrate_family(conn, family: MigrationFamily, *, execute: bool) -> dict[str
         raise RuntimeError(
             f"canonical_fact_migration_duplicate_ids: family={family.name}"
         )
+    inserted_count = 0
     if execute:
-        for offset in range(0, len(migrated), _BATCH_SIZE):
+        existing_ids = set(
+            conn.execute(
+                text(
+                    "SELECT id FROM market.fact_versions "
+                    "WHERE id = ANY(CAST(:ids AS varchar[]))"
+                ),
+                {"ids": ids},
+            ).scalars()
+        )
+        pending = [
+            item
+            for item in migrated
+            if str(item.values["id"]) not in existing_ids
+        ]
+        inserted_count = len(pending)
+        for offset in range(0, len(pending), _BATCH_SIZE):
             conn.execute(
                 _INSERT,
                 [
                     dict(item.values)
-                    for item in migrated[offset : offset + _BATCH_SIZE]
+                    for item in pending[offset : offset + _BATCH_SIZE]
                 ],
             )
         stored = {
@@ -545,6 +838,7 @@ def _migrate_family(conn, family: MigrationFamily, *, execute: bool) -> dict[str
         "source_table": family.source_table,
         "source_rows": source_count,
         "validated_rows": len(migrated),
+        "inserted_rows": inserted_count,
         "written": bool(execute),
     }
 

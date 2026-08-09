@@ -13,6 +13,7 @@ from market_data.contracts import (
     OpenInterestFact,
     SourceIdentity,
 )
+from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
 
 
 _MIGRATION = runpy.run_path(
@@ -226,3 +227,123 @@ def test_numeric_migration_preserves_exact_value_and_source_material() -> None:
     migration = provenance["_qt_migration"]
     assert migration["source_event_material_hash"] == source_material_hash
     assert migration["series_dimensions"] == {"quote_currency": "USD"}
+
+
+def test_trade_migration_preserves_atomic_payload_and_v1_hashes() -> None:
+    row = _envelope()
+    row["id"] = "mtv_fixture"
+    row["ingestion_run_id"] = None
+    row["provenance_hash"] = "b" * 64
+    row["quality"] = {"gap": False}
+    fact = MarketTradeFact(
+        provider_product_id="BTC-PERP-INTX",
+        provider_trade_id="trade-42",
+        delivery_kind="update",
+        price=Decimal("118000"),
+        provider_size=Decimal("3"),
+        provider_size_unit="contracts",
+        maker_side="SELL",
+        aggressor_side="BUY",
+        aggressor_transform_version="coinbase_maker_to_aggressor.v1",
+        contract_quantity=Decimal("3"),
+        base_quantity=Decimal("0.03"),
+        quote_notional=Decimal("3540"),
+        base_currency="BTC",
+        quote_currency="USD",
+        product_definition_version_id="pdv_fixture",
+        provider_event_time=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+        provider_message_time=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+        received_at=row["received_at"],
+        accepted_at=row["accepted_at"],
+        known_at=row["known_at"],
+        provider_sequence_num=101,
+        connection_epoch=2,
+        receive_ordinal=5,
+        event_ordinal=0,
+        trade_ordinal=0,
+        raw_record_id="raw_fixture",
+        coverage_interval_id="coverage_fixture",
+    )
+    row.update(fact.__dict__)
+    row["material_hash"] = fact.material_hash
+    row["row_hash"] = fact.row_hash
+
+    result = _MIGRATION["_trade"](row)
+
+    _assert_preserved(result, fact.row_hash, "market.trade.v1")
+    assert result.values["material_hash"] == fact.material_hash
+    payload = json.loads(str(result.values["payload"]))
+    assert payload["base_quantity"] == "0.03"
+    assert payload["aggressor_side"] == "BUY"
+    assert "provider_product_id" not in payload
+    provenance = json.loads(str(result.values["provenance"]))
+    assert provenance["_qt_trade_evidence"]["provider_trade_id"] == "trade-42"
+    assert provenance["_qt_migration"]["legacy_version_id"] == "mtv_fixture"
+
+
+def test_trade_flow_migration_preserves_material_and_quality_semantics() -> None:
+    row = _envelope()
+    row.update(
+        {
+            "id": "tfav_fixture",
+            "source_match_count": 1,
+            "aggregation_version": "market.trade_flow.v1",
+            "provenance_hash": "c" * 64,
+            "quality": {"source_gap": False},
+            "ingestion_run_id": None,
+        }
+    )
+    fact = TradeFlowAggregateFact(
+        interval_seconds=1,
+        bucket_start=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+        bucket_end=datetime(2026, 8, 9, 12, 0, 1, tzinfo=_UTC),
+        trade_count=2,
+        maker_buy_count=1,
+        maker_sell_count=1,
+        aggressor_buy_count=1,
+        aggressor_sell_count=1,
+        contract_volume=Decimal("2"),
+        base_volume=Decimal("0.02"),
+        quote_notional=Decimal("2361"),
+        maker_buy_base_volume=Decimal("0.01"),
+        maker_sell_base_volume=Decimal("0.01"),
+        aggressor_buy_base_volume=Decimal("0.01"),
+        aggressor_sell_base_volume=Decimal("0.01"),
+        cvd_delta=Decimal("0"),
+        cvd_unit="base",
+        open_price=Decimal("118000"),
+        high_price=Decimal("118100"),
+        low_price=Decimal("118000"),
+        close_price=Decimal("118100"),
+        first_trade_id="trade-41",
+        last_trade_id="trade-42",
+        first_receive_ordinal=4,
+        last_receive_ordinal=5,
+        coverage_interval_id="coverage_fixture",
+        coverage_revision=1,
+        aggregate_complete=True,
+        archive_complete=True,
+        canonicalization_complete=True,
+        late_trade_count=0,
+        known_at=datetime(2026, 8, 9, 12, 0, 2, tzinfo=_UTC),
+        input_fingerprint="d" * 64,
+    )
+    row.update(fact.__dict__)
+    row["material_hash"] = fact.material_hash
+
+    result = _MIGRATION["_trade_flow"](row)
+
+    assert result.source_row_hash is None
+    assert result.values["payload_schema_id"] == "market.trade_flow.v1"
+    assert result.values["material_hash"] == fact.material_hash
+    assert result.values["ingestion_run_id"] is None
+    payload = json.loads(str(result.values["payload"]))
+    assert payload["trade_count"] == 2
+    assert payload["base_volume"] == "0.02"
+    quality = json.loads(str(result.values["quality"]))
+    assert quality["_qt_trade_flow_quality"] == {
+        "aggregate_complete": True,
+        "archive_complete": True,
+        "canonicalization_complete": True,
+        "late_trade_count": 0,
+    }
