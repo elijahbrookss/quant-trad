@@ -45,8 +45,7 @@ from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
     OrderingAssurance,
-    PHASE1_COINBASE_TRADE_CONTRACTS,
-    ProductTradeContract,
+    ProductContract,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
     aggregate_trade_bucket,
@@ -114,7 +113,131 @@ def _btc_l2_frames() -> list[str]:
     raise AssertionError("BTC Level 2 snapshot/update fixtures missing")
 
 
-def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
+def test_collector_safety_halt_is_persistent_idempotent_and_acknowledged() -> None:
+    token = uuid.uuid4().hex
+    request_id = f"safety-halt-{token}"
+    halted = market_structure_repository.record_safety_event(
+        request_id=request_id,
+        scope_type="fleet",
+        scope_id=f"fleet-{token}",
+        event_type="halted",
+        severity="operator",
+        actor_id="test",
+        reason="database safety latch proof",
+        policy_hash="a" * 64,
+        evidence={"token": token},
+    )
+    replayed = market_structure_repository.record_safety_event(
+        request_id=request_id,
+        scope_type="fleet",
+        scope_id=f"fleet-{token}",
+        event_type="halted",
+        severity="operator",
+        actor_id="test",
+        reason="database safety latch proof",
+        policy_hash="a" * 64,
+        evidence={"token": token},
+    )
+
+    assert halted["id"] == replayed["id"]
+    assert market_structure_repository.active_safety_halts(
+        fleet_id=f"fleet-{token}"
+    )
+
+    market_structure_repository.record_safety_event(
+        request_id=f"safety-ack-{token}",
+        scope_type="fleet",
+        scope_id=f"fleet-{token}",
+        event_type="acknowledged",
+        severity="operator",
+        actor_id="test",
+        reason="condition cleared",
+        policy_hash="a" * 64,
+        evidence={"halt_event_id": halted["id"]},
+    )
+
+    assert not market_structure_repository.active_safety_halts(
+        fleet_id=f"fleet-{token}"
+    )
+
+
+def test_continuous_validation_evidence_reports_active_elapsed_time() -> None:
+    token = uuid.uuid4().hex
+    instrument_id = f"ms-evidence-{token[:20]}"
+    with db.session() as session:
+        session.add(
+            InstrumentRecord(
+                id=instrument_id,
+                datasource="COINBASE",
+                exchange="COINBASE_DIRECT",
+                symbol=f"EVIDENCE-{token[:8].upper()}",
+                instrument_type="spot",
+                can_short=False,
+                short_requires_borrow=False,
+                has_funding=False,
+                extra_metadata={},
+            )
+        )
+    source_id = market_data_repo.register_source(
+        SourceIdentity(
+            provider="COINBASE",
+            venue="COINBASE_DIRECT",
+            source_kind="stream",
+            adapter_version=f"continuous-evidence-db-test.{token}",
+        )
+    )
+    series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type="market.trade",
+        timeframe_seconds=None,
+        contract_version="market.trade.v1",
+    )
+    definition_id = f"msevidence_{token}"
+    market_structure_repository.upsert_stream_definition(
+        definition_id=definition_id,
+        source_id=source_id,
+        series_id=series_id,
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        provider_product_id="BTC-USD",
+        channels=("market_trades", "heartbeats"),
+        auth_mode="public",
+        contract_version="market.trade.v1",
+        max_spool_bytes=1024**3,
+        max_segment_bytes=128 * 1024**2,
+        config={},
+    )
+    claim = market_structure_repository.claim_stream(
+        definition_id=definition_id,
+        owner_id="continuous-evidence-db-test",
+        lease_seconds=120,
+        bounded=True,
+    )
+    try:
+        market_structure_repository.append_session_event(
+            claim,
+            event_ordinal=0,
+            connection_epoch=0,
+            event_type="connected",
+            occurred_at=datetime.now(UTC) - timedelta(seconds=65),
+        )
+        evidence = market_structure_repository.continuous_validation_evidence(
+            definition_id=definition_id,
+            session_id=claim.session_id,
+        )
+        assert evidence["session_active"] is True
+        assert 60 <= evidence["duration_seconds"] < 120
+        assert "validation_session_still_active" in evidence["blockers"]
+        assert (
+            "graceful_terminal_event_missing_or_duplicated"
+            not in evidence["blockers"]
+        )
+        assert "coverage_interval_still_open" not in evidence["blockers"]
+    finally:
+        market_structure_repository.release(claim)
+
+
+def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -161,13 +284,12 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         timeframe_seconds=1,
         contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
     )
-    base_contract = PHASE1_COINBASE_TRADE_CONTRACTS["BTC-USD"]
     product_definition_id = f"coinbase.BTC-USD.db-test.{token}"
-    contract = ProductTradeContract(
-        provider_product_id=base_contract.provider_product_id,
-        provider_size_unit=base_contract.provider_size_unit,
-        base_currency=base_contract.base_currency,
-        quote_currency=base_contract.quote_currency,
+    contract = ProductContract(
+        provider_product_id="BTC-USD",
+        provider_size_unit="base",
+        base_currency="BTC",
+        quote_currency="USD",
         product_definition_version_id=product_definition_id,
     )
     market_structure_repository.register_product_definition(
@@ -323,6 +445,17 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         opening_session_event_id=opening_event_id,
         closing_session_event_id=closing_event_id,
     )
+    frozen_coverage = market_structure_repository.get_coverage_version(
+        interval_id=coverage.interval_id,
+        revision=coverage.revision,
+    )
+    assert frozen_coverage == coverage
+    assert frozen_coverage.material_hash == coverage.material_hash
+    with pytest.raises(ValueError, match="market_stream_coverage_unknown"):
+        market_structure_repository.get_coverage_version(
+            interval_id=coverage.interval_id,
+            revision=coverage.revision + 1,
+        )
     aggregate = aggregate_trade_bucket(
         [fact],
         interval_seconds=1,
@@ -431,7 +564,7 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
     ]
     frozen = market_data_repo.freeze_dataset(
         requests,
-        name="phase1-provider-free-db-test",
+        name="provider-free-trade-db-test",
         purpose="test",
         created_by="pytest",
     )
@@ -562,7 +695,7 @@ def test_phase1_archive_trade_coverage_and_aggregate_are_fenced_and_idempotent(
         market_structure_repository.heartbeat(claim, lease_seconds=120)
 
 
-def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
+def test_book_archive_validity_checkpoint_and_replay_are_atomic(
     tmp_path: Path,
 ) -> None:
     token = uuid.uuid4().hex
@@ -795,7 +928,7 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
         owner_kind="test",
         owner_id=token,
         active=True,
-        reason="phase2 compaction safety proof",
+        reason="book compaction safety proof",
     )
     assert market_structure_repository.archive_retention_status(
         target_kind="raw_manifest",
@@ -807,7 +940,7 @@ def test_phase2_book_archive_validity_checkpoint_and_replay_are_atomic(
         owner_kind="test",
         owner_id=token,
         active=False,
-        reason="phase2 compaction safety proof",
+        reason="book compaction safety proof",
     )
     assert released_pin != active_pin
     assert market_structure_repository.archive_retention_status(

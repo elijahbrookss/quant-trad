@@ -1182,6 +1182,8 @@ class SharedWalletGateway(BaseWalletGateway):
         self._local_lock = threading.RLock()
         self._wallet_state = proxy.get("wallet_state")
         self._wallet_event_seq = proxy.get("wallet_event_seq")
+        self._wallet_events_cache: list[RuntimeEvent | Mapping[str, Any]] | None = None
+        self._wallet_events_cache_seq: int | None = None
         if self._wallet_event_seq is not None:
             try:
                 self._last_seen_seq = int(self._wallet_event_seq.get())
@@ -1201,8 +1203,36 @@ class SharedWalletGateway(BaseWalletGateway):
         self._lock.release()
         self._local_lock.release()
 
+    def _wallet_event_counter_value(self) -> int | None:
+        counter = self._wallet_event_seq
+        if counter is None:
+            return None
+        try:
+            return int(counter.get())
+        except Exception:
+            return int(getattr(counter, "value", 0))
+
     def _iter_runtime_events(self) -> Iterable[RuntimeEvent | Mapping[str, Any]]:
-        return list(self._wallet_events)
+        current_seq = self._wallet_event_counter_value()
+        if (
+            current_seq is not None
+            and self._wallet_events_cache is not None
+            and self._wallet_events_cache_seq == current_seq
+        ):
+            return tuple(self._wallet_events_cache)
+
+        # ListProxy iteration performs one IPC round trip per item. A slice is
+        # transferred by the manager in a single call, which keeps the
+        # canonical ledger event-sourced without rescanning it remotely for
+        # every wallet evaluation.
+        try:
+            snapshot = list(self._wallet_events[:])
+        except TypeError:
+            snapshot = list(self._wallet_events)
+        if current_seq is not None:
+            self._wallet_events_cache = snapshot
+            self._wallet_events_cache_seq = current_seq
+        return tuple(snapshot)
 
     def _current_committed_state(
         self,
@@ -1210,8 +1240,18 @@ class SharedWalletGateway(BaseWalletGateway):
         events_with_seq: Optional[Iterable[tuple[int, RuntimeEvent | Mapping[str, Any]]]] = None,
     ) -> WalletState:
         if self._wallet_state is not None:
-            return self._wallet_state_from_snapshot(dict(self._wallet_state))
+            try:
+                snapshot = self._wallet_state.copy()
+            except AttributeError:
+                snapshot = dict(self._wallet_state)
+            return self._wallet_state_from_snapshot(dict(snapshot))
         return super()._current_committed_state(events_with_seq=events_with_seq)
+
+    def project(self) -> WalletState:
+        if self._wallet_state is None:
+            return super().project()
+        with self:
+            return self._current_committed_state()
 
     def _store_committed_state(self, state: WalletState) -> None:
         if self._wallet_state is None:
@@ -1236,10 +1276,27 @@ class SharedWalletGateway(BaseWalletGateway):
         return current + 1
 
     def _append_wallet_event(self, event: Mapping[str, Any]) -> None:
-        self._wallet_events.append(dict(event or {}))
+        payload = dict(event or {})
+        self._wallet_events.append(payload)
+        current_seq = self._wallet_event_counter_value()
+        if (
+            current_seq is not None
+            and self._wallet_events_cache is not None
+            and self._wallet_events_cache_seq is not None
+            and current_seq == self._wallet_events_cache_seq + 1
+        ):
+            self._wallet_events_cache.append(payload)
+            self._wallet_events_cache_seq = current_seq
+            return
+        self._wallet_events_cache = None
+        self._wallet_events_cache_seq = None
 
     def _reservation_items(self) -> Iterable[Tuple[str, Mapping[str, Any]]]:
-        return list(dict(self._reservations).items())
+        try:
+            snapshot = self._reservations.copy()
+        except AttributeError:
+            snapshot = dict(self._reservations)
+        return list(dict(snapshot).items())
 
     def _reservation_get(self, reservation_id: str) -> Optional[Mapping[str, Any]]:
         payload = self._reservations.get(str(reservation_id))

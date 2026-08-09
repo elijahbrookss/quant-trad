@@ -14,6 +14,8 @@ from .contracts import (
     FundingRateFact,
     FundingRateRecord,
     MarketDataRecord,
+    NumericFact,
+    NumericFactRecord,
     OpenInterestFact,
     OpenInterestRecord,
     SourceIdentity,
@@ -40,6 +42,7 @@ class FrozenDataset:
     name: Optional[str] = None
     purpose: str = "research"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    created_at: Optional[datetime] = field(default=None, compare=False)
     reused_existing: bool = field(default=False, compare=False)
 
 
@@ -70,6 +73,7 @@ class MarketDataStore(Protocol):
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
         ...
 
@@ -80,6 +84,7 @@ class MarketDataStore(Protocol):
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
         ...
 
@@ -104,6 +109,7 @@ class MarketDataStore(Protocol):
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[CandleRecord]:
         ...
 
@@ -159,6 +165,43 @@ class MarketDataStore(Protocol):
     ) -> list[FundingRateRecord]:
         ...
 
+    def ingest_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[NumericFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        provenance_by_event: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+    ) -> IngestionOutcome:
+        ...
+
+    def read_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
+        ...
+
+    def read_numeric_fact_revisions(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
+        ...
+
     def read_series_records(
         self,
         *,
@@ -167,6 +210,7 @@ class MarketDataStore(Protocol):
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[MarketDataRecord]:
         ...
 
@@ -175,6 +219,17 @@ class MarketDataStore(Protocol):
         ...
 
     def list_gap_evidence(self, **kwargs: Any) -> list[Mapping[str, Any]]:
+        ...
+
+    def list_source_acquisition_coverage(
+        self,
+        *,
+        series_id: int,
+        source_identity_keys: Sequence[str],
+        start: datetime,
+        end: datetime,
+        created_at_lte: Optional[datetime] = None,
+    ) -> list[Mapping[str, Any]]:
         ...
 
     def freeze_dataset(
@@ -196,6 +251,8 @@ class MarketDataStore(Protocol):
         known_at_lte: Optional[datetime] = None,
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+        causal_at_interval_close: bool = False,
     ) -> list[MarketDataRecord]:
         ...
 

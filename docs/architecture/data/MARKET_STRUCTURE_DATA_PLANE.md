@@ -35,13 +35,16 @@ code_paths:
 
 ## Status And Campaign Boundary
 
-This phased design is implemented through Phase 4: provider proof, bounded
+This phased design is implemented through Phase 4: provider proof,
 futures/spot trades, Level 2 archive/reconstruction, typed market-state
-features, causal normalization, and frozen typed datasets. No phase or document
+features, causal normalization, and frozen typed datasets. A generic supervised
+continuous runtime and the Coinbase trade adapter are implemented for bounded
+validation and admitted indefinite collection; the current Level 2 path remains
+bounded until its own adapter is registered. No phase or document by itself
 authorizes production collector enrollment, cloud resources, strategy changes,
-live trading, or frontend work. The 24-hour capacity proof and explicit budget
-approval remain post-Phase-4 gates and are mandatory before production
-enrollment.
+live trading, or frontend work. The 24-hour canonical evidence and explicit
+authoritative resource budget remain post-Phase-4 gates and are mandatory
+before production enrollment.
 
 The allowed live provider boundary is Coinbase Advanced Trade REST and
 WebSocket using the existing provider credential boundary. Public channels may
@@ -848,19 +851,26 @@ is preferable to incomplete data labeled complete.
 | Material | Hot PostgreSQL | Object/archive | Frozen behavior |
 |---|---|---|---|
 | session/quality/manifests/product/mappings | indefinite | raw refs as below | included by fingerprint/reference |
-| raw trades | canonical rows 180d | 400d default | referenced partitions copied/pinned for dataset lifetime |
-| raw L2 snapshots/mutations | typed rows 7d | 90d initial default | selected raw partitions copied/pinned only when a dataset requires raw replay |
-| book checkpoints | metadata indefinite; projection current | 90d or matching source L2 retention | referenced checkpoint copied/pinned |
-| BBO/depth/trade aggregates/basis | 400d | compact typed Parquet after hot expiry when approved | exact rows/objects frozen for dataset lifetime |
-| normalized operational features | 400d | optional compact typed archive | exact spec + values frozen |
-| frozen dataset objects/manifests | manifest indefinite | retained until explicit dataset retirement | never removed by ordinary compaction |
+| raw trades | compressed canonical chunks; 180d default expiry | verified raw Parquet/ZSTD; 400d default | overlapping typed chunks and referenced raw manifests pinned for dataset lifetime |
+| raw L2 snapshots/mutations | compressed parent/child chunk groups; 7d default expiry | verified raw Parquet/ZSTD; 90d default | overlapping typed chunks and declared raw replay manifests pinned |
+| book checkpoints | metadata indefinite; projection current | 90d default | explicit retention pins block ordinary expiration |
+| BBO/depth/trade aggregates/basis | compressed hot rows; 400d default expiry | no typed cold archive yet; source raw evidence remains independent | overlapping typed chunks pinned for dataset lifetime |
+| normalized operational features | compressed hot rows; 400d default expiry | no typed cold archive yet | exact specs plus overlapping typed chunks pinned |
+| frozen dataset manifests | logical manifest and commit watermark indefinite | referenced raw/checkpoint objects retained until dataset retirement | never removed by ordinary compaction/retention |
 | temporary replay output/cache | none/campaign schema only | local block cache <= 7d | never referenced by a dataset |
 
-Retention deletion is an explicit job over acknowledged, unpinned objects and
-expired typed partitions. It writes deletion evidence. A manifest remains and
-reports `object_retention_state=expired`; a missing expired object cannot appear
-replayable. No frozen dataset result may depend on an object eligible for normal
-retention deletion.
+The implemented lifecycle plans before it mutates, is execution-disabled by
+default, and processes only bounded sets of acknowledged objects or complete
+Timescale chunks. It writes append-only evidence for planned, completed,
+skipped, and failed work. A manifest remains and reports
+`object_retention_state=expired`; a missing expired object cannot appear
+replayable. No frozen dataset result may depend on an object or typed chunk
+eligible for ordinary retention deletion.
+
+Only raw provider evidence and book checkpoints currently use Parquet cold
+storage. Typed derived facts do not yet have a cold Parquet tier; their bounded
+hot expiry must remain disabled or conservatively sized wherever later
+rehydration is a requirement.
 
 ### Storage Budget And Measurement
 
@@ -1214,7 +1224,9 @@ research question.
 ### Post-Phase 4 Production Admission Gate
 
 This gate is required before any market-structure collector is production
-enrolled. It is not part of the Phase 1–4 implementation sequence.
+enrolled. It is not a 24-hour runtime cap: validation and admitted production
+use the same rotating acquisition path, while production has no stop deadline.
+See [Continuous Collector Runtime](CONTINUOUS_COLLECTOR_RUNTIME.md).
 
 - run a continuous 24-hour BIP/BTC capture on the implemented durable spool,
   object archive, canonical trade/L2, checkpoint, and feature paths;
@@ -1222,10 +1234,13 @@ enrolled. It is not part of the Phase 1–4 implementation sequence.
   one hour, reconnect/resnapshot, gap propagation, and no silent quality loss;
 - measure actual raw/typed compression, hot-table/index amplification, object
   upload latency, maximum local backlog, checkpoint cost, and derived growth;
+- derive proof status from canonical session/archive/mapping/coverage evidence;
+  a caller-supplied completion Boolean is not admission evidence;
 - set the configured outage spool at no less than the approved 3x observed-p99
   requirement and prove bounded degradation thresholds;
-- obtain explicit operator monthly/annual byte and cost budget approval in an
-  immutable admission artifact referencing the report checksum;
+- obtain explicit operator monthly/annual byte and cost budget approval against
+  an authoritative physical-host or cloud-volume observation. Docker
+  Desktop/WSL guest free space is never sufficient;
 - only then enroll BIP/BTC, followed by separately budgeted ETP/ETH and SLP/SOL.
 
 ### Phase 5: Observation Studies And Existing-Strategy Filters

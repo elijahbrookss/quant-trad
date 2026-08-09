@@ -1,0 +1,174 @@
+{
+  "schema_version": "chainlink_breakout_campaign_result.v1",
+  "campaign_id": "chainlink_eth_usd_breakout_v2",
+  "recorded_at": "2026-08-08T05:03:34.541697Z",
+  "status": {
+    "overall": "CHAINLINK_BREAKOUT_CAMPAIGN_PARTIAL",
+    "operational_acquisition": "CHAINLINK_LIVE_ACQUISITION_ACCEPTED",
+    "frozen_replay": "CHAINLINK_FROZEN_REPLAY_ACCEPTED",
+    "research": "INSUFFICIENT_EVIDENCE"
+  },
+  "population": {
+    "instrument_id": "d238523a-9bee-4366-bc43-b797311fbdf0",
+    "symbol": "ETH-USD",
+    "datasource": "COINBASE",
+    "exchange": "COINBASE_DIRECT",
+    "timeframe": "30m",
+    "definition": "market_profile.balance_breakout.v1",
+    "indicator_id": "5303a281-b129-452a-a16f-814a3244a309",
+    "study_start": "2026-07-01T00:00:00Z",
+    "study_end_exclusive": "2026-08-01T00:00:00Z",
+    "outcome_tail_end_exclusive": "2026-08-01T06:00:00Z",
+    "eligible_events": 24,
+    "long_events": 16,
+    "short_events": 8,
+    "positive_6bar": 12,
+    "nonpositive_6bar": 12,
+    "distinct_utc_days": 10,
+    "validation_fold_events": [0, 0, 3]
+  },
+  "protocol": {
+    "study_id": "ec17e7b6-bcce-496a-ba7e-bc07c3d154ec",
+    "hypothesis_id": "38a599fe-60f2-452f-a602-91d1efa555fc",
+    "artifact": "chainlink_eth_usd_breakout_v2_protocol.json",
+    "sha256": "02fd160967491ed0472ccdfd63f4627a2e54ac6ca4cd376ec93def2a915de3d4",
+    "minimum_events": 30,
+    "minimum_events_per_outcome_class": 10,
+    "minimum_distinct_utc_days": 12,
+    "minimum_validation_events_per_fold": 5,
+    "holdout_opened": false
+  },
+  "live_acquisition": {
+    "endpoint": "https://rpc.mevblocker.io",
+    "endpoint_class": "public read-only Ethereum JSON-RPC",
+    "chain_id": 1,
+    "proxy": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
+    "phase_id": 7,
+    "aggregator": "0x7d4e742018fb52e48b08be73d041c18b21de6fb5",
+    "methods": [
+      "eth_chainId",
+      "eth_blockNumber",
+      "eth_getBlockByNumber",
+      "eth_call",
+      "eth_getLogs"
+    ],
+    "rpc_probe_gaps": [
+      "ethereum-rpc.publicnode.com: 403 on eth_getLogs",
+      "ethereum.publicnode.com: 403 on eth_getLogs",
+      "eth.llamarpc.com: 521 on eth_chainId",
+      "rpc.flashbots.net: 403 on eth_call",
+      "eth.drpc.org: 400 on eth_getLogs",
+      "1rpc.io/eth: 429 on eth_call",
+      "eth-mainnet.public.blastapi.io: 400 on eth_getLogs",
+      "eth.merkle.io: 429 during historical block resolution",
+      "rpc.eth.gateway.fm: 503",
+      "public BlockPI endpoint: 521",
+      "Alchemy demo endpoint: 429",
+      "rpc.payload.de: DNS resolution failure"
+    ],
+    "confirmation_depth": 12,
+    "coverage_start": "2026-06-30T18:00:00Z",
+    "coverage_end_exclusive": "2026-08-01T06:00:00Z",
+    "series_id": 369,
+    "source_id": 100,
+    "canonical_rows": 1037,
+    "complete": true,
+    "final_coverage_gaps": 0,
+    "composed_cache_proof": {
+      "cached_range": [
+        "2026-06-30T18:00:00Z",
+        "2026-08-01T06:00:00Z"
+      ],
+      "network_allowed": false,
+      "requests": 0,
+      "logs": 0,
+      "blocks": 0
+    },
+    "zero_event_coverage_proof": {
+      "start": "2026-06-30T18:00:00Z",
+      "end_exclusive": "2026-06-30T18:10:00Z",
+      "fact_rows": 0,
+      "complete_covering_intervals": 1
+    },
+    "superseded_attempt_evidence": {
+      "numeric_provider_acquisition_failed": 1,
+      "chainlink_log_range_unavailable": 7,
+      "chainlink_round_unresolved": 32,
+      "retained_in_frozen_quality_hash": true
+    },
+    "verified_samples": [
+      {
+        "label": "early",
+        "proxy_round_id": 129127208515966892388,
+        "raw_value": "158523220000",
+        "value": "1585.23220000",
+        "effective_at": "2026-07-01T02:39:23Z",
+        "block_number": 25434733,
+        "confirmation_block": 25434745,
+        "known_at": "2026-07-01T02:41:47Z"
+      },
+      {
+        "label": "middle",
+        "proxy_round_id": 129127208515966892888,
+        "raw_value": "188213000000",
+        "value": "1882.13000000",
+        "effective_at": "2026-07-15T12:03:11Z",
+        "block_number": 25537931,
+        "confirmation_block": 25537943,
+        "known_at": "2026-07-15T12:05:35Z"
+      },
+      {
+        "label": "late",
+        "proxy_round_id": 129127208515966893403,
+        "raw_value": "186582907154",
+        "value": "1865.82907154",
+        "effective_at": "2026-07-31T20:33:23Z",
+        "block_number": 25655259,
+        "confirmation_block": 25655271,
+        "known_at": "2026-07-31T20:35:47Z"
+      }
+    ]
+  },
+  "dataset": {
+    "dataset_id": "mds_af5fc5210c398cadb2cfb5e34b08f565",
+    "dataset_hash": "af5fc5210c398cadb2cfb5e34b08f56542b77f101c3d14043496d0737ad2b559",
+    "max_commit_seq": 262185,
+    "candle_series_id": 364,
+    "candle_rows": 10176,
+    "candle_material_hash": "906607a7735538a876abca7b763d2b5ec184a8370ba2921c7f3074a0cc25344d",
+    "candle_provenance_hash": "1945b408fc9e4f2b12149c48145b78cf524ae7f623b7969ba5ef7f7cd9706aa3",
+    "numeric_series_id": 369,
+    "numeric_rows": 1037,
+    "numeric_material_hash": "c64a6165b3b84e6d87dbed42ab0a82a02a56cffa657fcae1da71ecc27155675b",
+    "numeric_provenance_hash": "769919cf79d6221b4ff1505b48833cd6a483d0fd8ae0a1460f8d570119b88c36",
+    "numeric_quality_hash": "cc71e0135609188635c82d7599a3ac8419985c0f5ae893397a863837e3a881ce"
+  },
+  "replay": {
+    "provider_endpoint_configured": false,
+    "provider_call_guard": "active",
+    "repetitions": 2,
+    "event_rows": 24,
+    "feature_rows": 24,
+    "missing_chainlink_events": 0,
+    "stale_chainlink_events_6h": 0,
+    "selected_numeric_fact_rows_hash": "b53eecc9e7b5f4cf7dcfcd7201411e5560c1d82d74e9465070f230cdd373dd13",
+    "feature_matrix_hash": "ba46b3b905c2b23c45d1ea90fd4c005b56e33ef6ec8e9e7672f33195a866a3a7",
+    "research_output_hash": "65a43371c18761c7518ac0cd800cef8e1b38ae550cbb91b1a062b7ba9fac3fd3",
+    "required_equalities_passed": true
+  },
+  "research": {
+    "classification": "INSUFFICIENT_EVIDENCE",
+    "minimum_floor_failures": [
+      "eligible_events 24 < 30",
+      "distinct_utc_days 10 < 12",
+      "validation_fold_events [0,0,3] < 5 per fold"
+    ],
+    "baseline_model": "not_run_predeclared_sample_floor_failed",
+    "chainlink_enriched_model": "not_run_predeclared_sample_floor_failed",
+    "chainlink_outcome_relationship_inspected": false,
+    "multiple_comparison_adjustment": "not_applicable_no_tests_run",
+    "uncertainty": "not_estimated_minimum_sample_and_temporal-fold_rules_failed",
+    "temporal_stability": "not_estimable_validation_folds_have_0_0_3_events",
+    "canonical_outcome_observation_id": "2ddbab5a-04e1-4903-b9ca-76ffe2c15231"
+  }
+}

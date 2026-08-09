@@ -1,4 +1,4 @@
-"""Causal Phase 4 normalization and deterministic materialization service."""
+"""Causal normalization and deterministic materialization service."""
 
 from __future__ import annotations
 

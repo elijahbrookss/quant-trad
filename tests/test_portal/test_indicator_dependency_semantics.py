@@ -58,6 +58,27 @@ def test_dependency_bindings_require_explicit_matching_instance() -> None:
             indicator_id="regime-1",
         )
 
+
+def test_pinned_dependency_binding_never_falls_back_to_repository() -> None:
+    manifest = get_indicator_manifest("regime")
+    ctx = _ctx_with_records({"cs-1": {"id": "cs-1", "type": "candle_stats"}})
+
+    with pytest.raises(ValueError, match="not found in pinned graph"):
+        validate_dependency_bindings(
+            manifest=manifest,
+            bindings=[
+                {
+                    "indicator_id": "cs-1",
+                    "indicator_type": "candle_stats",
+                    "output_name": "candle_stats",
+                }
+            ],
+            ctx=ctx,
+            indicator_id="regime-1",
+            preloaded_metas={},
+            require_preloaded_metas=True,
+        )
+
 def test_indicator_storage_round_trips_dependencies_outside_public_params() -> None:
     stored = merge_indicator_payload(
         {"days_back": 180},

@@ -73,7 +73,7 @@ def _state(
         series_id=series_id,
         validity_interval_id=validity_interval_id,
         source_position=_position(ordinal),
-        product_definition_version_id="coinbase.BIP-20DEC30-CDE.phase0.v1",
+        product_definition_version_id="coinbase.BIP-20DEC30-CDE.provider-proof.v1",
         provider_size_unit=ProviderSizeUnit.CONTRACTS,
         effective_at=effective,
         known_at=effective + timedelta(milliseconds=5),
@@ -85,7 +85,7 @@ def _state(
 
 def _contract() -> MarketStateValuationContract:
     return MarketStateValuationContract(
-        product_definition_version_id="coinbase.BIP-20DEC30-CDE.phase0.v1",
+        product_definition_version_id="coinbase.BIP-20DEC30-CDE.provider-proof.v1",
         provider_size_unit=ProviderSizeUnit.CONTRACTS,
         base_currency="BTC",
         quote_currency="USD",
@@ -121,7 +121,7 @@ def _trade(
         quote_notional=Decimal(price) * base,
         base_currency="BTC",
         quote_currency="USD",
-        product_definition_version_id="coinbase.BIP-20DEC30-CDE.phase0.v1",
+        product_definition_version_id="coinbase.BIP-20DEC30-CDE.provider-proof.v1",
         provider_event_time=event_time,
         provider_message_time=event_time,
         received_at=event_time + timedelta(milliseconds=1),

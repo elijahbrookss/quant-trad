@@ -50,6 +50,7 @@ from market_data.structure import (
     MarketSide,
     MarketTradeFact,
     MarketTradeRecord,
+    ProductContract,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
     TradeDeliveryKind,
@@ -58,6 +59,8 @@ from market_data.structure import (
 )
 
 from ._shared import db
+
+from .market_lifecycle import market_storage_lifecycle_repository
 
 
 class MarketStructureOwnershipError(RuntimeError):
@@ -395,7 +398,7 @@ def _book_position_from_material(value: Mapping[str, Any]) -> BookSourcePosition
         event_ordinal=int(value["event_ordinal"]),
     )
 class PostgresMarketStructureRepository:
-    """One transactional authority for Phase 1 stream facts and projections."""
+    """One transactional authority for stream facts and projections."""
 
     def upsert_stream_definition(
         self,
@@ -411,8 +414,7 @@ class PostgresMarketStructureRepository:
         contract_version: str,
         max_spool_bytes: int,
         max_segment_bytes: int,
-        enabled: bool = False,
-        production_admitted: bool = False,
+        enabled: Optional[bool] = None,
         config: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         normalized_channels = tuple(
@@ -443,12 +445,12 @@ class PostgresMarketStructureRepository:
             "contract_version": str(contract_version),
         }
         identity_key = _stable_hash(identity)
+        insert_enabled = bool(enabled) if enabled is not None else False
         material = {
             "auth_mode": normalized_auth,
             "max_spool_bytes": spool_bytes,
             "max_segment_bytes": segment_bytes,
-            "enabled": bool(enabled),
-            "production_admitted": bool(production_admitted),
+            "enabled": insert_enabled,
             "config": dict(config or {}),
         }
         with db.session() as session:
@@ -469,12 +471,12 @@ class PostgresMarketStructureRepository:
                         INSERT INTO market.stream_definitions (
                             id, identity_key, source_id, series_id, provider, venue,
                             provider_product_id, channels, auth_mode, contract_version,
-                            enabled, production_admitted, max_spool_bytes,
+                            enabled, max_spool_bytes,
                             max_segment_bytes, generation, config
                         ) VALUES (
                             :id, :identity_key, :source_id, :series_id, :provider,
                             :venue, :product_id, CAST(:channels AS jsonb), :auth_mode,
-                            :contract_version, :enabled, :production_admitted,
+                            :contract_version, :enabled,
                             :max_spool_bytes, :max_segment_bytes, 1, CAST(:config AS jsonb)
                         )
                         """
@@ -490,20 +492,34 @@ class PostgresMarketStructureRepository:
                         "channels": _json(list(normalized_channels)),
                         "auth_mode": normalized_auth,
                         "contract_version": str(contract_version),
-                        "enabled": bool(enabled),
-                        "production_admitted": bool(production_admitted),
+                        "enabled": insert_enabled,
                         "max_spool_bytes": spool_bytes,
                         "max_segment_bytes": segment_bytes,
                         "config": _json(config),
                     },
                 )
             else:
+                next_config = dict(config or {})
+                existing_config = dict(existing["config"] or {})
+                for operational_key in ("collector_runtime",):
+                    if (
+                        operational_key in existing_config
+                        and operational_key not in next_config
+                    ):
+                        next_config[operational_key] = existing_config[operational_key]
+                next_enabled = (
+                    bool(existing["enabled"]) if enabled is None else bool(enabled)
+                )
+                material = {
+                    **material,
+                    "enabled": next_enabled,
+                    "config": next_config,
+                }
                 existing_material = {
                     "auth_mode": existing["auth_mode"],
                     "max_spool_bytes": int(existing["max_spool_bytes"]),
                     "max_segment_bytes": int(existing["max_segment_bytes"]),
                     "enabled": bool(existing["enabled"]),
-                    "production_admitted": bool(existing["production_admitted"]),
                     "config": dict(existing["config"] or {}),
                 }
                 generation = int(existing["generation"]) + (existing_material != material)
@@ -512,7 +528,6 @@ class PostgresMarketStructureRepository:
                         """
                         UPDATE market.stream_definitions
                         SET auth_mode = :auth_mode, enabled = :enabled,
-                            production_admitted = :production_admitted,
                             max_spool_bytes = :max_spool_bytes,
                             max_segment_bytes = :max_segment_bytes,
                             generation = :generation, config = CAST(:config AS jsonb),
@@ -523,12 +538,11 @@ class PostgresMarketStructureRepository:
                     {
                         "id": str(existing["id"]),
                         "auth_mode": normalized_auth,
-                        "enabled": bool(enabled),
-                        "production_admitted": bool(production_admitted),
+                        "enabled": next_enabled,
                         "max_spool_bytes": spool_bytes,
                         "max_segment_bytes": segment_bytes,
                         "generation": generation,
-                        "config": _json(config),
+                        "config": _json(next_config),
                     },
                 )
             row = session.execute(
@@ -545,10 +559,13 @@ class PostgresMarketStructureRepository:
             rows = session.execute(
                 text(
                     f"""
-                    SELECT definitions.*, leases.owner_id, leases.lease_generation,
+                    SELECT definitions.*, series.instrument_id,
+                           series.fact_type AS series_fact_type,
+                           leases.owner_id, leases.lease_generation,
                            leases.heartbeat_at, leases.expires_at,
                            CASE WHEN leases.expires_at > now() THEN true ELSE false END AS lease_current
                     FROM market.stream_definitions AS definitions
+                    JOIN market.series AS series ON series.id = definitions.series_id
                     LEFT JOIN market.stream_lease_state AS leases
                       ON leases.definition_id = definitions.id
                     {predicate}
@@ -559,21 +576,290 @@ class PostgresMarketStructureRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
-    def claim_stream(
+    def record_safety_event(
+        self,
+        *,
+        request_id: str,
+        scope_type: str,
+        scope_id: str,
+        event_type: str,
+        severity: str,
+        actor_id: str,
+        reason: str,
+        policy_hash: str,
+        evidence: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Append idempotent safety evidence and update the persistent latch."""
+
+        request = str(request_id or "").strip()
+        scope = str(scope_type or "").strip().lower()
+        scoped_id = str(scope_id or "").strip()
+        event = str(event_type or "").strip().lower()
+        level = str(severity or "").strip().lower()
+        actor = str(actor_id or "").strip()
+        explanation = str(reason or "").strip()
+        policy = str(policy_hash or "").strip()
+        if not all((request, scoped_id, actor, explanation, policy)):
+            raise ValueError("collector_safety_event_invalid: required field is empty")
+        if scope not in {"global", "fleet", "stream"}:
+            raise ValueError("collector_safety_event_invalid: unsupported scope")
+        if event not in {"warning", "halted", "acknowledged"}:
+            raise ValueError("collector_safety_event_invalid: unsupported event type")
+        if level not in {"warning", "critical", "operator"}:
+            raise ValueError("collector_safety_event_invalid: unsupported severity")
+        occurred_at = datetime.now(UTC)
+        evidence_payload = dict(evidence or {})
+        evidence_hash = _stable_hash(evidence_payload)
+        event_id = _version_id(
+            "cse",
+            {
+                "schema_version": "market.collector_safety_event.v1",
+                "request_id": request,
+                "scope_type": scope,
+                "scope_id": scoped_id,
+                "event_type": event,
+                "severity": level,
+                "actor_id": actor,
+                "reason": explanation,
+                "policy_hash": policy,
+                "evidence_hash": evidence_hash,
+            },
+        )
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO market.collector_safety_events (
+                        id, request_id, scope_type, scope_id, event_type,
+                        severity, occurred_at, actor_id, reason, policy_hash,
+                        evidence_hash, evidence
+                    ) VALUES (
+                        :id, :request_id, :scope_type, :scope_id, :event_type,
+                        :severity, :occurred_at, :actor_id, :reason, :policy_hash,
+                        :evidence_hash, CAST(:evidence AS jsonb)
+                    ) ON CONFLICT (request_id) DO NOTHING
+                    """
+                ),
+                {
+                    "id": event_id,
+                    "request_id": request,
+                    "scope_type": scope,
+                    "scope_id": scoped_id,
+                    "event_type": event,
+                    "severity": level,
+                    "occurred_at": occurred_at,
+                    "actor_id": actor,
+                    "reason": explanation,
+                    "policy_hash": policy,
+                    "evidence_hash": evidence_hash,
+                    "evidence": _json(evidence_payload),
+                },
+            )
+            stored = session.execute(
+                text(
+                    """
+                    SELECT * FROM market.collector_safety_events
+                    WHERE request_id = :request_id
+                    """
+                ),
+                {"request_id": request},
+            ).mappings().one()
+            stored_identity = {
+                "scope_type": str(stored["scope_type"]),
+                "scope_id": str(stored["scope_id"]),
+                "event_type": str(stored["event_type"]),
+                "severity": str(stored["severity"]),
+                "actor_id": str(stored["actor_id"]),
+                "reason": str(stored["reason"]),
+                "policy_hash": str(stored["policy_hash"]),
+                "evidence_hash": str(stored["evidence_hash"]),
+            }
+            requested_identity = {
+                "scope_type": scope,
+                "scope_id": scoped_id,
+                "event_type": event,
+                "severity": level,
+                "actor_id": actor,
+                "reason": explanation,
+                "policy_hash": policy,
+                "evidence_hash": evidence_hash,
+            }
+            if stored_identity != requested_identity:
+                raise ValueError("collector_safety_request_conflict")
+            if event in {"halted", "acknowledged"}:
+                active = event == "halted"
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.collector_safety_state (
+                            scope_type, scope_id, active, halt_event_id,
+                            acknowledged_event_id, reason, updated_at
+                        ) VALUES (
+                            :scope_type, :scope_id, :active, :halt_event_id,
+                            :acknowledged_event_id, :reason, :updated_at
+                        ) ON CONFLICT (scope_type, scope_id) DO UPDATE
+                        SET active = EXCLUDED.active,
+                            halt_event_id = CASE
+                                WHEN EXCLUDED.active THEN EXCLUDED.halt_event_id
+                                ELSE market.collector_safety_state.halt_event_id
+                            END,
+                            acknowledged_event_id = CASE
+                                WHEN EXCLUDED.active THEN NULL
+                                ELSE EXCLUDED.acknowledged_event_id
+                            END,
+                            reason = EXCLUDED.reason,
+                            updated_at = EXCLUDED.updated_at
+                        """
+                    ),
+                    {
+                        "scope_type": scope,
+                        "scope_id": scoped_id,
+                        "active": active,
+                        "halt_event_id": str(stored["id"]) if active else None,
+                        "acknowledged_event_id": (
+                            None if active else str(stored["id"])
+                        ),
+                        "reason": explanation,
+                        "updated_at": occurred_at,
+                    },
+                )
+            result = session.execute(
+                text(
+                    """
+                    SELECT events.*, states.active
+                    FROM market.collector_safety_events AS events
+                    LEFT JOIN market.collector_safety_state AS states
+                      ON states.scope_type = events.scope_type
+                     AND states.scope_id = events.scope_id
+                    WHERE events.request_id = :request_id
+                    """
+                ),
+                {"request_id": request},
+            ).mappings().one()
+        return dict(result)
+
+    def active_safety_halts(
+        self,
+        *,
+        fleet_id: Optional[str] = None,
+        definition_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        scopes: list[tuple[str, str]] = [("global", "*")]
+        if fleet_id:
+            scopes.append(("fleet", str(fleet_id)))
+        if definition_id:
+            scopes.append(("stream", str(definition_id)))
+        clauses = " OR ".join(
+            f"(scope_type = :scope_type_{index} AND scope_id = :scope_id_{index})"
+            for index in range(len(scopes))
+        )
+        params: dict[str, Any] = {}
+        for index, (scope, scoped_id) in enumerate(scopes):
+            params[f"scope_type_{index}"] = scope
+            params[f"scope_id_{index}"] = scoped_id
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT * FROM market.collector_safety_state
+                    WHERE active AND ({clauses})
+                    ORDER BY scope_type, scope_id
+                    """
+                ),
+                params,
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def list_safety_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT events.*, states.active
+                    FROM market.collector_safety_events AS events
+                    LEFT JOIN market.collector_safety_state AS states
+                      ON states.scope_type = events.scope_type
+                     AND states.scope_id = events.scope_id
+                    ORDER BY events.occurred_at DESC, events.id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": max(1, min(int(limit), 1000))},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def stream_storage_growth(self, *, definition_id: str) -> dict[str, Any]:
+        """Derive recent canonical archive growth without operator estimates."""
+
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT COALESCE(sum(byte_count), 0)::bigint AS byte_count,
+                           min(acknowledged_at) AS first_at,
+                           max(acknowledged_at) AS last_at,
+                           now() AS observed_at
+                    FROM market.raw_archive_manifests
+                    WHERE definition_id = :definition_id
+                      AND acknowledged_at >= now() - interval '24 hours'
+                    """
+                ),
+                {"definition_id": str(definition_id)},
+            ).mappings().one()
+        byte_count = int(row["byte_count"])
+        first_at = row["first_at"]
+        observed_at = row["observed_at"]
+        window_seconds = (
+            max((_utc(observed_at) - _utc(first_at)).total_seconds(), 1.0)
+            if first_at is not None
+            else 0.0
+        )
+        bytes_per_hour = (
+            byte_count * 3600.0 / window_seconds if window_seconds > 0 else 0.0
+        )
+        return {
+            "schema_version": "market.stream_storage_growth.v1",
+            "definition_id": str(definition_id),
+            "byte_count": byte_count,
+            "window_seconds": window_seconds,
+            "bytes_per_hour": bytes_per_hour,
+            "first_at": first_at,
+            "last_at": row["last_at"],
+            "observed_at": observed_at,
+        }
+
+    def configure_continuous_runtime(
         self,
         *,
         definition_id: str,
-        owner_id: str,
-        lease_seconds: float,
-        bounded: bool,
-    ) -> StreamClaim:
-        owner = str(owner_id or "").strip()
-        ttl = float(lease_seconds)
-        if not owner or ttl <= 0:
-            raise ValueError("market_stream_claim_invalid: owner and positive lease required")
-        token = secrets.token_urlsafe(32)
-        token_hash = _token_hash(token)
-        session_id = f"mss_{uuid.uuid4().hex}"
+        enabled: bool,
+        mode: str,
+        requested_by: str,
+        policy: Mapping[str, Any],
+        stop_at: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        """Configure worker-owned stream execution."""
+
+        normalized_mode = str(mode or "").strip().lower()
+        if normalized_mode not in {
+            "validation",
+            "continuous",
+            "stopped",
+            "safety_halted",
+        }:
+            raise ValueError("market_stream_runtime_invalid: unsupported mode")
+        requester = str(requested_by or "").strip()
+        if not requester:
+            raise ValueError("market_stream_runtime_invalid: requested_by is required")
+        stop_time = _utc(stop_at) if stop_at is not None else None
+        if normalized_mode == "validation" and stop_time is None:
+            raise ValueError(
+                "market_stream_runtime_invalid: validation mode requires stop_at"
+            )
+        if normalized_mode != "validation" and stop_time is not None:
+            raise ValueError(
+                "market_stream_runtime_invalid: stop_at is validation-only"
+            )
         with db.session() as session:
             definition = session.execute(
                 text(
@@ -589,13 +875,89 @@ class PostgresMarketStructureRepository:
                 raise ValueError(
                     f"market_stream_definition_unknown: definition_id={definition_id}"
                 )
-            if not bounded and (
-                not bool(definition["enabled"])
-                or not bool(definition["production_admitted"])
-            ):
+            config = dict(definition["config"] or {})
+            config["collector_runtime"] = {
+                "schema_version": "market.continuous_collector_runtime.v1",
+                "mode": normalized_mode,
+                "requested_by": requester,
+                "requested_at": datetime.now(UTC).isoformat(),
+                "stop_at": stop_time.isoformat() if stop_time is not None else None,
+                "policy": dict(policy),
+            }
+            row = session.execute(
+                text(
+                    """
+                    UPDATE market.stream_definitions
+                    SET enabled = :enabled,
+                        config = CAST(:config AS jsonb), updated_at = now()
+                    WHERE id = :definition_id
+                    RETURNING *
+                    """
+                ),
+                {
+                    "definition_id": str(definition_id),
+                    "enabled": bool(enabled),
+                    "config": _json(config),
+                },
+            ).mappings().one()
+        return dict(row)
+
+    def claim_stream(
+        self,
+        *,
+        definition_id: str,
+        owner_id: str,
+        lease_seconds: float,
+        bounded: bool,
+        resume_session_id: Optional[str] = None,
+    ) -> StreamClaim:
+        owner = str(owner_id or "").strip()
+        ttl = float(lease_seconds)
+        if not owner or ttl <= 0:
+            raise ValueError("market_stream_claim_invalid: owner and positive lease required")
+        token = secrets.token_urlsafe(32)
+        token_hash = _token_hash(token)
+        requested_session_id = str(resume_session_id or "").strip() or None
+        session_id = requested_session_id or f"mss_{uuid.uuid4().hex}"
+        with db.session() as session:
+            definition = session.execute(
+                text(
+                    """
+                    SELECT * FROM market.stream_definitions
+                    WHERE id = :definition_id
+                    FOR UPDATE
+                    """
+                ),
+                {"definition_id": str(definition_id)},
+            ).mappings().first()
+            if definition is None:
                 raise ValueError(
-                    "market_stream_production_not_admitted: enabled and post-Phase-4 capacity admission are required"
+                    f"market_stream_definition_unknown: definition_id={definition_id}"
                 )
+            if not bounded and not bool(definition["enabled"]):
+                raise ValueError(
+                    "market_stream_not_enabled: continuous collection requires an enabled definition"
+                )
+            if requested_session_id is not None:
+                resumable = session.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM market.stream_session_events
+                        WHERE definition_id = :definition_id
+                          AND session_id = :session_id
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "definition_id": str(definition_id),
+                        "session_id": requested_session_id,
+                    },
+                ).first()
+                if resumable is None:
+                    raise ValueError(
+                        "market_stream_resume_invalid: session does not belong to definition"
+                    )
             prior = session.execute(
                 text(
                     """
@@ -662,6 +1024,27 @@ class PostgresMarketStructureRepository:
             lease_expires_at=expires_at,
             session_id=session_id,
         )
+
+    def next_session_event_ordinal(self, claim: StreamClaim) -> int:
+        """Return the next append-only event ordinal for a claimed session."""
+
+        with db.session() as session:
+            self._require_fence(session, claim)
+            value = session.execute(
+                text(
+                    """
+                    SELECT COALESCE(max(event_ordinal), -1) + 1
+                    FROM market.stream_session_events
+                    WHERE definition_id = :definition_id
+                      AND session_id = :session_id
+                    """
+                ),
+                {
+                    "definition_id": claim.definition_id,
+                    "session_id": claim.session_id,
+                },
+            ).scalar_one()
+        return int(value)
 
     @staticmethod
     def _require_fence(session, claim: StreamClaim) -> Mapping[str, Any]:
@@ -883,6 +1266,39 @@ class PostgresMarketStructureRepository:
             )
         return definition_version_id
 
+    def get_product_contract(self, definition_version_id: str) -> ProductContract:
+        """Resolve the immutable provider translation contract by exact version."""
+
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT id, provider_product_id, provider_size_unit,
+                           base_currency, quote_currency, contract_size
+                    FROM market.product_definition_versions
+                    WHERE id = :id
+                    """
+                ),
+                {"id": str(definition_version_id)},
+            ).mappings().first()
+        if row is None:
+            raise ValueError(
+                "market_product_contract_unknown: "
+                f"definition_version_id={definition_version_id}"
+            )
+        return ProductContract(
+            provider_product_id=str(row["provider_product_id"]),
+            provider_size_unit=str(row["provider_size_unit"]),
+            base_currency=str(row["base_currency"]),
+            quote_currency=str(row["quote_currency"]),
+            product_definition_version_id=str(row["id"]),
+            contract_size=(
+                Decimal(str(row["contract_size"]))
+                if row["contract_size"] is not None
+                else None
+            ),
+        )
+
     def register_instrument_mapping(
         self,
         *,
@@ -944,6 +1360,7 @@ class PostgresMarketStructureRepository:
         records: Sequence[RawStreamRecord],
         uploaded_at: Optional[datetime] = None,
         compaction_source_manifest_ids: Sequence[str] = (),
+        _lifecycle_compaction: bool = False,
     ) -> ArchiveCommitResult:
         if not records or encoded.record_count != len(records):
             raise ValueError("market_archive_commit_invalid: record count mismatch")
@@ -952,6 +1369,10 @@ class PostgresMarketStructureRepository:
         source_manifest_ids = tuple(
             dict.fromkeys(str(value) for value in compaction_source_manifest_ids)
         )
+        if _lifecycle_compaction and not source_manifest_ids:
+            raise ValueError(
+                "market_archive_compaction_commit_invalid: lifecycle source set required"
+            )
         if source_manifest_ids and len(source_manifest_ids) < 2:
             raise ValueError(
                 "market_archive_compaction_commit_invalid: at least two source manifests required"
@@ -981,7 +1402,15 @@ class PostgresMarketStructureRepository:
         for record in records:
             grouped[record.observed_channel].append(record)
         with db.session() as session:
-            self._require_fence(session, claim)
+            if _lifecycle_compaction:
+                session.execute(
+                    text(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"
+                    ),
+                    {"scope": f"market-archive-compaction:{claim.definition_id}"},
+                )
+            else:
+                self._require_fence(session, claim)
             ordered_sources: list[Mapping[str, Any]] = []
             if source_manifest_ids:
                 ordered_sources = list(
@@ -1249,6 +1678,58 @@ class PostgresMarketStructureRepository:
             mapped_record_count=len(records),
         )
 
+    def commit_compacted_archive(
+        self,
+        *,
+        definition_id: str,
+        encoded: EncodedRawArchive,
+        acknowledgement: ArchiveObjectAcknowledgement,
+        records: Sequence[RawStreamRecord],
+        source_manifest_ids: Sequence[str],
+    ) -> ArchiveCommitResult:
+        """Commit verified replacement lineage without taking the live stream lease."""
+
+        definitions = self.list_stream_definitions(definition_id=definition_id)
+        if len(definitions) != 1:
+            raise ValueError(
+                "market_archive_compaction_commit_invalid: "
+                f"definition_id={definition_id} is unavailable"
+            )
+        if not records:
+            raise ValueError(
+                "market_archive_compaction_commit_invalid: replacement is empty"
+            )
+        definition = definitions[0]
+        now = datetime.now(UTC)
+        scope = StreamClaim(
+            definition_id=str(definition["id"]),
+            definition_generation=int(definition["generation"]),
+            source_id=int(definition["source_id"]),
+            series_id=int(definition["series_id"]),
+            provider=str(definition["provider"]),
+            venue=str(definition["venue"]),
+            provider_product_id=str(definition["provider_product_id"]),
+            channels=tuple(definition["channels"]),
+            auth_mode=str(definition["auth_mode"]),
+            contract_version=str(definition["contract_version"]),
+            max_spool_bytes=int(definition["max_spool_bytes"]),
+            max_segment_bytes=int(definition["max_segment_bytes"]),
+            config=dict(definition.get("config") or {}),
+            owner_id="market-storage-lifecycle",
+            lease_token="not-a-stream-lease",
+            lease_generation=0,
+            lease_expires_at=now,
+            session_id=records[0].session_id,
+        )
+        return self.commit_archive(
+            scope,
+            encoded=encoded,
+            acknowledgement=acknowledgement,
+            records=records,
+            compaction_source_manifest_ids=source_manifest_ids,
+            _lifecycle_compaction=True,
+        )
+
     def append_coverage_version(
         self,
         claim: StreamClaim,
@@ -1345,6 +1826,121 @@ class PostgresMarketStructureRepository:
             if stored["material_hash"] != coverage.material_hash:
                 raise RuntimeError("market_stream_coverage_conflict")
         return str(stored["id"])
+
+    def get_coverage_version(
+        self,
+        *,
+        interval_id: str,
+        revision: int,
+    ) -> TradeCoverageIntervalVersion:
+        """Read one exact immutable coverage revision for frozen replay binding."""
+
+        normalized_id = str(interval_id or "").strip()
+        normalized_revision = int(revision)
+        if not normalized_id or normalized_revision <= 0:
+            raise ValueError("market_stream_coverage_invalid: exact identity is required")
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM market.stream_coverage_interval_versions
+                    WHERE interval_id = :interval_id
+                      AND revision = :revision
+                    """
+                ),
+                {
+                    "interval_id": normalized_id,
+                    "revision": normalized_revision,
+                },
+            ).mappings().first()
+        if row is None:
+            raise ValueError(
+                "market_stream_coverage_unknown: "
+                f"interval_id={normalized_id} revision={normalized_revision}"
+            )
+        return _coverage_version(row)
+
+    def close_open_session_coverages(
+        self,
+        claim: StreamClaim,
+        *,
+        closing_session_event_id: str,
+        reason: str,
+    ) -> int:
+        """Conservatively close coverage left open by an interrupted worker.
+
+        Recovery never extends the proven interval across collector downtime.  It
+        closes each latest open revision at its last already-canonicalized event;
+        a later connection must establish a new coverage interval.
+        """
+
+        with db.session() as session:
+            self._require_fence(session, claim)
+            rows = session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (interval_id) *
+                    FROM market.stream_coverage_interval_versions
+                    WHERE definition_id = :definition_id
+                      AND session_id = :session_id
+                    ORDER BY interval_id, revision DESC
+                    """
+                ),
+                {
+                    "definition_id": claim.definition_id,
+                    "session_id": claim.session_id,
+                },
+            ).mappings().all()
+        closed = 0
+        for row in rows:
+            if str(row["status"]) != "open_valid":
+                continue
+            coverage = TradeCoverageIntervalVersion(
+                interval_id=str(row["interval_id"]),
+                revision=int(row["revision"]) + 1,
+                definition_id=str(row["definition_id"]),
+                session_id=str(row["session_id"]),
+                connection_epoch=int(row["connection_epoch"]),
+                provider_product_id=str(row["provider_product_id"]),
+                channel=str(row["channel"]),
+                status="closed_valid",
+                ordering_assurance=str(row["ordering_assurance"]),
+                archive_status=str(row["archive_status"]),
+                opening_raw_record_id=str(row["opening_raw_record_id"]),
+                opening_receive_ordinal=int(row["opening_receive_ordinal"]),
+                opening_effective_at=_utc(row["opening_effective_at"]),
+                last_raw_record_id=str(row["last_raw_record_id"]),
+                last_receive_ordinal=int(row["last_receive_ordinal"]),
+                last_effective_at=_utc(row["last_effective_at"]),
+                closing_raw_record_id=str(row["last_raw_record_id"]),
+                closing_receive_ordinal=int(row["last_receive_ordinal"]),
+                closing_effective_at=_utc(row["last_effective_at"]),
+                canonicalization_watermark_ordinal=int(
+                    row["canonicalization_watermark_ordinal"]
+                ),
+                archive_complete_through_ordinal=int(
+                    row["archive_complete_through_ordinal"]
+                ),
+                known_at=datetime.now(UTC),
+                first_provider_sequence_num=row["first_provider_sequence_num"],
+                last_provider_sequence_num=row["last_provider_sequence_num"],
+                gap_quality_event_ids=tuple(row["gap_quality_event_ids"] or ()),
+                opening_evidence=dict(row["opening_evidence"] or {}),
+                closing_evidence={
+                    "reason": str(reason),
+                    "collector_restart_recovery": True,
+                    "closed_at_last_proven_event": True,
+                },
+            )
+            self.append_coverage_version(
+                claim,
+                coverage=coverage,
+                opening_session_event_id=str(row["opening_session_event_id"]),
+                closing_session_event_id=str(closing_session_event_id),
+            )
+            closed += 1
+        return closed
 
     def record_quality_event(
         self,
@@ -2567,13 +3163,268 @@ class PostgresMarketStructureRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def continuous_validation_evidence(
+        self, *, definition_id: str, session_id: str
+    ) -> dict[str, Any]:
+        """Derive admission evidence from canonical session/archive state."""
+
+        with db.session() as session:
+            lifecycle = session.execute(
+                text(
+                    """
+                    SELECT
+                        min(occurred_at) FILTER (
+                            WHERE event_type IN ('connected', 'reconnected')
+                        ) AS started_at,
+                        max(occurred_at) FILTER (
+                            WHERE event_type = 'continuous_capture_stopped'
+                        ) AS stopped_at,
+                        count(*) FILTER (
+                            WHERE event_type = 'continuous_capture_stopped'
+                        ) AS stopped_count,
+                        count(*) FILTER (
+                            WHERE event_type IN ('failed', 'interrupted')
+                        ) AS failure_count,
+                        count(*) FILTER (
+                            WHERE event_type = 'provider_disconnected'
+                        ) AS disconnect_count,
+                        count(*) FILTER (
+                            WHERE event_type = 'reconnected'
+                        ) AS reconnect_count,
+                        count(*) FILTER (
+                            WHERE event_type = 'segment_canonicalized'
+                        ) AS canonicalized_segment_count,
+                        count(*) FILTER (
+                            WHERE event_type = 'collector_restart_recovery_completed'
+                        ) AS recovery_count
+                    FROM market.stream_session_events
+                    WHERE definition_id = :definition_id
+                      AND session_id = :session_id
+                    """
+                ),
+                {
+                    "definition_id": str(definition_id),
+                    "session_id": str(session_id),
+                },
+            ).mappings().one()
+            archive = session.execute(
+                text(
+                    """
+                    SELECT count(*) AS manifest_count,
+                           COALESCE(sum(byte_count), 0) AS archive_bytes,
+                           COALESCE(sum(record_count), 0) AS archived_records,
+                           COALESCE(sum(
+                               record_count - (
+                                   SELECT count(*)
+                                   FROM market.raw_archive_record_mappings mappings
+                                   WHERE mappings.manifest_id = manifests.id
+                               )
+                           ), 0) AS mapping_lag_records
+                    FROM market.raw_archive_manifests manifests
+                    WHERE definition_id = :definition_id
+                      AND session_id = :session_id
+                    """
+                ),
+                {
+                    "definition_id": str(definition_id),
+                    "session_id": str(session_id),
+                },
+            ).mappings().one()
+            coverage = session.execute(
+                text(
+                    """
+                    SELECT count(*) AS interval_count,
+                           count(*) FILTER (WHERE status = 'open_valid') AS open_count,
+                           count(*) FILTER (WHERE status = 'invalid') AS invalid_count
+                    FROM (
+                        SELECT DISTINCT ON (interval_id) interval_id, status
+                        FROM market.stream_coverage_interval_versions
+                        WHERE definition_id = :definition_id
+                          AND session_id = :session_id
+                        ORDER BY interval_id, revision DESC
+                    ) latest
+                    """
+                ),
+                {
+                    "definition_id": str(definition_id),
+                    "session_id": str(session_id),
+                },
+            ).mappings().one()
+            quality_rows = session.execute(
+                text(
+                    """
+                    SELECT classification, count(*) AS count
+                    FROM market.stream_quality_events
+                    WHERE definition_id = :definition_id
+                      AND session_id = :session_id
+                    GROUP BY classification
+                    ORDER BY classification
+                    """
+                ),
+                {
+                    "definition_id": str(definition_id),
+                    "session_id": str(session_id),
+                },
+            ).mappings().all()
+        started_at = lifecycle["started_at"]
+        stopped_at = lifecycle["stopped_at"]
+        derived_at = datetime.now(UTC)
+        session_active = started_at is not None and stopped_at is None
+        duration_end = stopped_at or (derived_at if session_active else None)
+        duration_seconds = (
+            max(0.0, (_utc(duration_end) - _utc(started_at)).total_seconds())
+            if started_at is not None and duration_end is not None
+            else 0.0
+        )
+        blockers: list[str] = []
+        if duration_seconds < 24 * 3600:
+            blockers.append("continuous_duration_below_24_hours")
+        if session_active:
+            blockers.append("validation_session_still_active")
+        elif int(lifecycle["stopped_count"] or 0) != 1:
+            blockers.append("graceful_terminal_event_missing_or_duplicated")
+        if int(lifecycle["failure_count"] or 0):
+            blockers.append("failed_or_interrupted_event_present")
+        if int(lifecycle["disconnect_count"] or 0) > int(
+            lifecycle["reconnect_count"] or 0
+        ):
+            blockers.append("disconnect_without_reconnect")
+        if int(archive["manifest_count"] or 0) <= 0:
+            blockers.append("archive_manifest_missing")
+        if int(archive["mapping_lag_records"] or 0):
+            blockers.append("archive_mapping_lag_present")
+        if int(coverage["interval_count"] or 0) <= 0:
+            blockers.append("coverage_evidence_missing")
+        if not session_active and int(coverage["open_count"] or 0):
+            blockers.append("coverage_interval_still_open")
+        if int(coverage["invalid_count"] or 0):
+            blockers.append("invalid_coverage_interval_present")
+        return {
+            "schema_version": "market.continuous_validation_evidence.v1",
+            "definition_id": str(definition_id),
+            "validation_session_id": str(session_id),
+            "started_at": _utc(started_at).isoformat() if started_at else None,
+            "stopped_at": _utc(stopped_at).isoformat() if stopped_at else None,
+            "session_active": session_active,
+            "duration_seconds": duration_seconds,
+            "continuous_capture_completed": not blockers,
+            "blockers": blockers,
+            "disconnect_count": int(lifecycle["disconnect_count"] or 0),
+            "reconnect_count": int(lifecycle["reconnect_count"] or 0),
+            "canonicalized_segment_count": int(
+                lifecycle["canonicalized_segment_count"] or 0
+            ),
+            "recovery_count": int(lifecycle["recovery_count"] or 0),
+            "manifest_count": int(archive["manifest_count"] or 0),
+            "archive_bytes": int(archive["archive_bytes"] or 0),
+            "archived_records": int(archive["archived_records"] or 0),
+            "mapping_lag_records": int(archive["mapping_lag_records"] or 0),
+            "coverage_interval_count": int(coverage["interval_count"] or 0),
+            "quality_counts": {
+                str(row["classification"]): int(row["count"])
+                for row in quality_rows
+            },
+            "derived_at": derived_at.isoformat(),
+        }
+
+    def list_archive_status_summaries(self) -> dict[str, dict[str, Any]]:
+        """Return operator-list status for every definition in one DB round trip."""
+
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT definitions.id AS definition_id,
+                           COALESCE(manifests.manifest_count, 0) AS manifest_count,
+                           COALESCE(manifests.archive_bytes, 0) AS archive_bytes,
+                           COALESCE(manifests.archived_records, 0) AS archived_records,
+                           COALESCE(manifests.mapping_lag_records, 0) AS archive_mapping_lag_records,
+                           manifests.last_acknowledged_at,
+                           COALESCE(quality.counts, '{}'::jsonb) AS quality_counts,
+                           COALESCE(coverage.intervals, '[]'::jsonb) AS coverage_intervals,
+                           COALESCE(book.intervals, '[]'::jsonb) AS book_validity_intervals,
+                           COALESCE(datasets.coverage, '[]'::jsonb) AS dataset_coverage
+                    FROM market.stream_definitions AS definitions
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS manifest_count,
+                               COALESCE(sum(manifest.byte_count), 0) AS archive_bytes,
+                               COALESCE(sum(manifest.record_count), 0) AS archived_records,
+                               max(manifest.acknowledged_at) AS last_acknowledged_at,
+                               COALESCE(sum(
+                                   manifest.record_count - (
+                                       SELECT count(*)
+                                       FROM market.raw_archive_record_mappings AS mapping
+                                       WHERE mapping.manifest_id = manifest.id
+                                   )
+                               ), 0) AS mapping_lag_records
+                        FROM market.raw_archive_manifests AS manifest
+                        WHERE manifest.definition_id = definitions.id
+                    ) AS manifests ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_object_agg(grouped.classification, grouped.count) AS counts
+                        FROM (
+                            SELECT classification, count(*) AS count
+                            FROM market.stream_quality_events
+                            WHERE definition_id = definitions.id
+                            GROUP BY classification
+                        ) AS grouped
+                    ) AS quality ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_agg(to_jsonb(selected) ORDER BY selected.known_at DESC) AS intervals
+                        FROM (
+                            SELECT DISTINCT ON (interval_id)
+                                   interval_id, revision, status, ordering_assurance,
+                                   archive_status, opening_effective_at,
+                                   closing_effective_at, known_at
+                            FROM market.stream_coverage_interval_versions
+                            WHERE definition_id = definitions.id
+                            ORDER BY interval_id, revision DESC
+                        ) AS selected
+                    ) AS coverage ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_agg(to_jsonb(selected) ORDER BY selected.known_at DESC) AS intervals
+                        FROM (
+                            SELECT DISTINCT ON (interval_id)
+                                   interval_id, revision, status, ordering_assurance,
+                                   opening_effective_at, last_valid_effective_at,
+                                   closing_effective_at, last_state_hash, known_at
+                            FROM market.book_validity_interval_versions
+                            WHERE series_id = definitions.series_id
+                            ORDER BY interval_id, revision DESC
+                        ) AS selected
+                    ) AS book ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT jsonb_agg(to_jsonb(scoped) ORDER BY scoped.range_end DESC) AS coverage
+                        FROM (
+                            SELECT dataset_series.dataset_id, dataset_series.series_id,
+                                   dataset_series.range_start, dataset_series.range_end,
+                                   dataset_series.row_count, dataset_series.material_hash,
+                                   dataset_series.quality_summary
+                            FROM market.dataset_series AS dataset_series
+                            WHERE dataset_series.series_id = definitions.series_id
+                            ORDER BY dataset_series.range_end DESC
+                            LIMIT 25
+                        ) AS scoped
+                    ) AS datasets ON TRUE
+                    ORDER BY definitions.id
+                    """
+                )
+            ).mappings().all()
+        return {
+            str(row["definition_id"]): {
+                "schema_version": "market.stream_archive_status_summary.v1",
+                **dict(row),
+            }
+            for row in rows
+        }
+
     def archive_status(self, *, definition_id: str) -> dict[str, Any]:
         with db.session() as session:
             definition = session.execute(
                 text(
                     """
                     SELECT id, series_id, provider_product_id, enabled,
-                           production_admitted, max_spool_bytes,
+                           max_spool_bytes,
                            max_segment_bytes, config
                     FROM market.stream_definitions
                     WHERE id = :definition_id
@@ -2767,12 +3618,7 @@ class PostgresMarketStructureRepository:
                 "max_spool_bytes": int(definition["max_spool_bytes"]),
                 "max_segment_bytes": int(definition["max_segment_bytes"]),
             },
-            "production_admitted": bool(definition["production_admitted"]),
-            "production_enabled": bool(definition["enabled"]),
-            "production_blockers": [
-                "post_phase4_24h_implemented_path_capture",
-                "explicit_storage_and_cost_budget",
-            ],
+            "continuous_enabled": bool(definition["enabled"]),
         }
 
     def get_manifest(self, manifest_id: str) -> dict[str, Any]:
@@ -2799,6 +3645,14 @@ class PostgresMarketStructureRepository:
                           SELECT 1
                           FROM market.raw_archive_compaction_sources AS compacted
                           WHERE compacted.source_manifest_id = raw_archive_manifests.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM market.storage_lifecycle_events AS lifecycle
+                          WHERE lifecycle.action = 'archive_expire'
+                            AND lifecycle.target_kind = 'raw_manifest'
+                            AND lifecycle.target_id = raw_archive_manifests.id
+                            AND lifecycle.event_type = 'completed'
                       )
                     ORDER BY connection_epoch, first_receive_ordinal, id
                     """
@@ -2844,6 +3698,7 @@ class PostgresMarketStructureRepository:
         status = "active" if active else "released"
         effective = _utc(effective_at or datetime.now(UTC))
         with db.session() as session:
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
             session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:pin_id, 0))"),
                 {"pin_id": pin_id},
@@ -2859,6 +3714,23 @@ class PostgresMarketStructureRepository:
             ).scalar_one_or_none()
             if target_exists is None:
                 raise ValueError("market_archive_retention_pin_invalid: target missing")
+            expired = bool(
+                session.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 "
+                        "FROM market.storage_lifecycle_events "
+                        "WHERE action = 'archive_expire' "
+                        "AND target_kind = :target_kind "
+                        "AND target_id = :target_id "
+                        "AND event_type = 'completed')"
+                    ),
+                    {"target_kind": normalized_target, "target_id": normalized_target_id},
+                ).scalar_one()
+            )
+            if active and expired:
+                raise ValueError(
+                    "market_archive_retention_pin_invalid: target already expired"
+                )
             prior = session.execute(
                 text(
                     """
@@ -3000,22 +3872,45 @@ class PostgresMarketStructureRepository:
                         {"target_id": normalized_target_id},
                     ).scalars()
                 ]
+            expired_event = session.execute(
+                text(
+                    """
+                    SELECT occurred_at, reason, evidence
+                    FROM market.storage_lifecycle_events
+                    WHERE action = 'archive_expire'
+                      AND target_kind = :target_kind
+                      AND target_id = :target_id
+                      AND event_type = 'completed'
+                    ORDER BY occurred_at DESC, event_ordinal DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "target_kind": normalized_target,
+                    "target_id": normalized_target_id,
+                },
+            ).mappings().first()
         explicit_pin_count = len(active_pins)
         pinned = bool(dataset_pin_count or explicit_pin_count)
+        expired = expired_event is not None
         return {
-            "schema_version": "market.archive_retention_status.v1",
+            "schema_version": "market.archive_retention_status.v2",
             "target_kind": normalized_target,
             "target_id": normalized_target_id,
             "object_uri": str(target["object_uri"]),
             "object_sha256": str(target["object_sha256"]),
             "content_fingerprint": str(target["content_fingerprint"]),
+            "expired": expired,
+            "expiration": dict(expired_event) if expired_event is not None else None,
             "dataset_pin_count": dataset_pin_count,
             "explicit_active_pins": [dict(row) for row in active_pins],
             "replacement_manifest_ids": replacement_ids,
             "source_manifest_ids": source_ids,
             "pinned": pinned,
-            "ordinary_retention_eligible": not pinned,
-            "object_retention_state": "pinned" if pinned else "active_unpinned",
+            "ordinary_retention_eligible": not pinned and not expired,
+            "object_retention_state": (
+                "expired" if expired else "pinned" if pinned else "active_unpinned"
+            ),
         }
 
     def list_book_checkpoints(
@@ -3257,7 +4152,7 @@ class PostgresMarketStructureRepository:
         derivative_facts: Iterable[DerivativeStateFeatureFact] = (),
         response_facts: Iterable[ResponseFeatureFact] = (),
     ) -> FeatureIngestionOutcome:
-        """Persist one deterministic append-only Phase 3 feature batch."""
+        """Persist one deterministic append-only market-state feature batch."""
 
         bbo_rows = tuple(bbo_facts)
         depth_rows = tuple(depth_facts)
@@ -4001,7 +4896,7 @@ class PostgresMarketStructureRepository:
         known_at: Optional[datetime] = None,
         as_of_commit_seq: Optional[int] = None,
     ) -> tuple[TypedFeatureRecord, ...]:
-        """Read one registered Phase 3 fact as storage-backed typed revisions."""
+        """Read one registered market-state fact as storage-backed typed revisions."""
 
         definitions = {
             "market.bbo": (
@@ -4088,6 +4983,51 @@ class PostgresMarketStructureRepository:
                 )
             )
         return tuple(records)
+
+
+def _coverage_version(row: Mapping[str, Any]) -> TradeCoverageIntervalVersion:
+    coverage = TradeCoverageIntervalVersion(
+        interval_id=str(row["interval_id"]),
+        revision=int(row["revision"]),
+        definition_id=str(row["definition_id"]),
+        session_id=str(row["session_id"]),
+        connection_epoch=int(row["connection_epoch"]),
+        provider_product_id=str(row["provider_product_id"]),
+        channel=str(row["channel"]),
+        status=str(row["status"]),
+        ordering_assurance=str(row["ordering_assurance"]),
+        archive_status=str(row["archive_status"]),
+        opening_raw_record_id=str(row["opening_raw_record_id"]),
+        opening_receive_ordinal=int(row["opening_receive_ordinal"]),
+        opening_effective_at=row["opening_effective_at"],
+        last_raw_record_id=str(row["last_raw_record_id"]),
+        last_receive_ordinal=int(row["last_receive_ordinal"]),
+        last_effective_at=row["last_effective_at"],
+        canonicalization_watermark_ordinal=int(
+            row["canonicalization_watermark_ordinal"]
+        ),
+        archive_complete_through_ordinal=int(
+            row["archive_complete_through_ordinal"]
+        ),
+        known_at=row["known_at"],
+        closing_raw_record_id=row["closing_raw_record_id"],
+        closing_receive_ordinal=(
+            int(row["closing_receive_ordinal"])
+            if row["closing_receive_ordinal"] is not None
+            else None
+        ),
+        closing_effective_at=row["closing_effective_at"],
+        first_provider_sequence_num=row["first_provider_sequence_num"],
+        last_provider_sequence_num=row["last_provider_sequence_num"],
+        gap_quality_event_ids=tuple(row["gap_quality_event_ids"] or ()),
+        opening_evidence=dict(row["opening_evidence"] or {}),
+        closing_evidence=dict(row["closing_evidence"] or {}),
+    )
+    if coverage.material_hash != str(row["material_hash"]):
+        raise RuntimeError("market_stream_coverage_storage_corrupt: hash mismatch")
+    return coverage
+
+
 def _trade_record(row: Mapping[str, Any]) -> MarketTradeRecord:
     fact = MarketTradeFact(
         provider_product_id=row["provider_product_id"],

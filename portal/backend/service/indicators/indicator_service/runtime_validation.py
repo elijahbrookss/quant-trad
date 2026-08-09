@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence
 
 from core.events import serialize_value
+from data_providers.utils.ohlcv import interval_to_timedelta
 from engines.bot_runtime.core.domain import Candle
 from engines.indicator_engine.contracts import configure_indicator_overlay_history
 from engines.indicator_engine.runtime_engine import IndicatorExecutionEngine
 from indicators.config import IndicatorExecutionContext
+from indicators.manifest import serialize_indicator_manifest
+from indicators.registry import get_indicator_manifest
+from market_data.frozen import semantic_hash
+from market_data.gaps import matching_gap_evidence, recorded_gaps_cover_interval
 
 from ...market import candle_service, instrument_service
 from .context import IndicatorServiceContext, _context
@@ -29,7 +34,41 @@ def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _build_runtime_candles(df: Any) -> list[Candle]:
+def _utc(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _event_known_at(value: Any) -> datetime:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    raw = str(value or "").strip()
+    if raw.replace(".", "", 1).isdigit():
+        return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+    return _utc(value)
+
+
+def _matching_recorded_gaps(
+    gap: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    return matching_gap_evidence(
+        start=_utc(gap["start"]),
+        end=_utc(gap["end"]),
+        evidence=evidence,
+    )
+
+
+def _build_runtime_candles(
+    df: Any, *, timeframe_seconds: int | None = None
+) -> list[Candle]:
     import pandas as pd
 
     if df is None or getattr(df, "empty", False):
@@ -37,9 +76,26 @@ def _build_runtime_candles(df: Any) -> list[Candle]:
     candles: list[Candle] = []
     timestamps = pd.to_datetime(df.index, utc=True)
     for timestamp, (_, row) in zip(timestamps, df.iterrows()):
+        open_time = timestamp.to_pydatetime()
+        close_time = (
+            _utc(row["close_time"])
+            if row.get("close_time") is not None
+            else (
+                open_time + timedelta(seconds=int(timeframe_seconds))
+                if timeframe_seconds is not None
+                else None
+            )
+        )
+        known_at = (
+            _utc(row["known_at"])
+            if row.get("known_at") is not None
+            else close_time
+        )
         candles.append(
             Candle(
-                time=timestamp.to_pydatetime(),
+                time=open_time,
+                end=close_time,
+                known_at=known_at,
                 open=float(row["open"]),
                 high=float(row["high"]),
                 low=float(row["low"]),
@@ -57,6 +113,7 @@ def _resolve_market_selection(
     datasource: Optional[str],
     exchange: Optional[str],
     instrument_id: Optional[str],
+    instrument_snapshot: Mapping[str, Any] | None = None,
 ) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
     resolved_symbol = str(symbol or "").strip()
     resolved_datasource = str(datasource or meta.get("datasource") or "").strip() or None
@@ -64,9 +121,21 @@ def _resolve_market_selection(
     resolved_instrument_id = str(instrument_id or "").strip() or None
 
     if resolved_instrument_id:
-        instrument = instrument_service.get_instrument_record(resolved_instrument_id)
+        instrument = (
+            dict(instrument_snapshot)
+            if instrument_snapshot is not None
+            else instrument_service.get_instrument_record(resolved_instrument_id)
+        )
         if not instrument:
             raise ValueError(f"Instrument record not found: {resolved_instrument_id}")
+        snapshot_id = str(
+            instrument.get("id") or instrument.get("instrument_id") or ""
+        ).strip()
+        if snapshot_id and snapshot_id != resolved_instrument_id:
+            raise ValueError(
+                "indicator_runtime_subject_mismatch: persisted instrument snapshot "
+                f"id={snapshot_id} requested={resolved_instrument_id}"
+            )
         if not resolved_symbol:
             resolved_symbol = str(instrument.get("symbol") or "").strip()
         if not resolved_datasource:
@@ -242,7 +311,10 @@ def validate_runtime_for_instance(
         exchange=resolved_exchange,
         instrument_id=resolved_instrument_id,
     )
-    candles = _build_runtime_candles(frame)
+    interval_seconds = int(interval_to_timedelta(interval).total_seconds())
+    candles = _build_runtime_candles(
+        frame, timeframe_seconds=interval_seconds
+    )
     if not candles:
         raise LookupError("No candles available for indicator runtime validation")
     configure_indicator_overlay_history(indicators, history_bars=len(candles))
@@ -436,17 +508,81 @@ def collect_runtime_output_evidence_for_instance(
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
     instrument_id: Optional[str] = None,
+    instrument_snapshot: Mapping[str, Any] | None = None,
     indicator_param_overrides: Mapping[str, Any] | None = None,
     candle_frame: Any = None,
     source_frame_cache: MutableMapping[tuple[str, ...], Any] | None = None,
     source_frame_cache_stats: MutableMapping[str, int] | None = None,
+    market_data_resolver: Any = None,
+    market_data_requirements_by_consumer: Mapping[
+        str, Sequence[Mapping[str, Any]]
+    ]
+    | None = None,
+    gap_policy: str | None = None,
+    gap_rewarm_bars: int = 0,
+    recorded_gap_evidence: Sequence[Mapping[str, Any]] | None = None,
+    require_recorded_discontinuities: bool = False,
+    expected_indicator_graph: Sequence[Mapping[str, Any]] | None = None,
+    indicator_plan_start: str | None = None,
+    indicator_plan_end: str | None = None,
     ctx: IndicatorServiceContext = _context,
 ) -> Dict[str, Any]:
     """Collect per-bar declared output evidence from the canonical runtime path."""
 
     t0 = perf_counter()
-    record = load_indicator_record(inst_id, ctx=ctx)
-    base_meta = build_meta_from_record(record, ctx=ctx)
+    expected_graph = (
+        [dict(row) for row in expected_indicator_graph]
+        if expected_indicator_graph is not None
+        else None
+    )
+    planned_metas: dict[str, dict[str, Any]] = {}
+    if expected_graph is not None:
+        for row in expected_graph:
+            configuration_hash = str(row.get("configuration_hash") or "")
+            material = {
+                key: value for key, value in row.items() if key != "configuration_hash"
+            }
+            if configuration_hash != semantic_hash(material):
+                raise RuntimeError(
+                    "indicator_evidence_graph_invalid: configuration hash disagreement"
+                )
+            indicator_id = str(row.get("indicator_id") or "").strip()
+            indicator_type = str(row.get("indicator_type") or "").strip()
+            if not indicator_id or not indicator_type:
+                raise RuntimeError(
+                    "indicator_evidence_graph_invalid: indicator identity missing"
+                )
+            if indicator_id in planned_metas:
+                raise RuntimeError(
+                    "indicator_evidence_graph_invalid: duplicate Indicator identity"
+                )
+            current_manifest = serialize_indicator_manifest(
+                get_indicator_manifest(indicator_type)
+            )
+            if current_manifest != dict(row.get("manifest") or {}):
+                raise RuntimeError(
+                    "indicator_evidence_graph_substitution: manifest differs from plan"
+                )
+            planned_metas[indicator_id] = build_meta_from_record(
+                {
+                    "id": indicator_id,
+                    "type": indicator_type,
+                    "version": current_manifest.get("version"),
+                    "name": current_manifest.get("label") or indicator_type,
+                    "params": dict(row.get("params") or {}),
+                    "dependencies": list(row.get("dependencies") or []),
+                    "enabled": True,
+                },
+                ctx=ctx,
+            )
+        if inst_id not in planned_metas:
+            raise RuntimeError(
+                "indicator_evidence_graph_invalid: root Indicator missing from plan"
+            )
+        base_meta = dict(planned_metas[inst_id])
+    else:
+        record = load_indicator_record(inst_id, ctx=ctx)
+        base_meta = build_meta_from_record(record, ctx=ctx)
     meta = _meta_with_param_overrides(base_meta, indicator_param_overrides)
     if not bool(meta.get("runtime_supported")):
         raise RuntimeError(f"Indicator is not runtime-supported: {inst_id}")
@@ -462,6 +598,7 @@ def collect_runtime_output_evidence_for_instance(
         datasource=datasource,
         exchange=exchange,
         instrument_id=instrument_id,
+        instrument_snapshot=instrument_snapshot,
     )
     execution_context = IndicatorExecutionContext(
         symbol=resolved_symbol,
@@ -473,14 +610,23 @@ def collect_runtime_output_evidence_for_instance(
         instrument_id=resolved_instrument_id,
     )
 
-    _, indicators = build_runtime_indicator_graph(
+    metas, indicators = build_runtime_indicator_graph(
         [inst_id],
         execution_context=execution_context,
         ctx=ctx,
-        preloaded_metas={inst_id: meta},
+        preloaded_metas=(planned_metas or {inst_id: meta}),
+        require_preloaded_metas=expected_graph is not None,
         source_frame_cache=source_frame_cache,
         source_frame_cache_stats=source_frame_cache_stats,
     )
+    actual_indicator_graph: list[dict[str, Any]] = []
+    if expected_graph is not None:
+        if set(metas) != set(planned_metas):
+            raise RuntimeError(
+                "indicator_evidence_graph_invalid: pinned graph contains unreachable "
+                "or missing dependency rows"
+            )
+        actual_indicator_graph = list(expected_graph)
     diagnostics = collect_runtime_indicator_diagnostics(indicators)
     frame = candle_frame
     if frame is None:
@@ -510,13 +656,113 @@ def collect_runtime_output_evidence_for_instance(
     candle_rows: list[dict[str, Any]] = []
     ready_counts: Counter[str] = Counter()
     not_ready_counts: Counter[str] = Counter()
+    gap_transitions: list[dict[str, Any]] = []
+    discontinuities: list[dict[str, Any]] = []
 
+    requested_start = _utc(start)
+    requested_end = _utc(end)
+    interval_seconds = int(interval_to_timedelta(interval).total_seconds())
+
+    def handle_discontinuity(
+        *, gap_start: datetime, gap_end: datetime, next_bar_time: datetime
+    ) -> None:
+        gap = {
+            "start": _iso_utc(gap_start),
+            "end": _iso_utc(gap_end),
+            "missing_bars": max(
+                0,
+                int((gap_end - gap_start).total_seconds() // interval_seconds),
+            ),
+            "timeframe_seconds": interval_seconds,
+        }
+        matching_evidence = (
+            _matching_recorded_gaps(gap, recorded_gap_evidence)
+            if recorded_gap_evidence is not None
+            else []
+        )
+        is_declared_gap = (
+            recorded_gaps_cover_interval(
+                start=gap_start,
+                end=gap_end,
+                evidence=matching_evidence,
+            )
+            if recorded_gap_evidence is not None
+            else True
+        )
+        gap_context = {
+            **gap,
+            "classification": (
+                "recorded_data_gap" if is_declared_gap else "unrecorded_discontinuity"
+            ),
+            "recorded_evidence": matching_evidence,
+        }
+        discontinuities.append(dict(gap_context))
+        if require_recorded_discontinuities and not is_declared_gap:
+            raise RuntimeError(
+                "indicator_unclassified_discontinuity: frozen candle "
+                f"gap has no matching Dataset evidence gap={gap}"
+            )
+        if gap_policy is not None:
+            actions = engine.handle_gap(
+                policy=gap_policy,
+                gap=gap_context,
+                next_bar_time=next_bar_time,
+                rewarm_bars=gap_rewarm_bars,
+            )
+            gap_transitions.append(
+                {**gap_context, "actions": [dict(row) for row in actions]}
+            )
+
+    if candles[0].time > requested_start:
+        handle_discontinuity(
+            gap_start=requested_start,
+            gap_end=candles[0].time,
+            next_bar_time=candles[0].time,
+        )
+    previous_candle_time: datetime | None = None
     for bar_index, candle in enumerate(candles):
+        if previous_candle_time is not None:
+            expected_time = previous_candle_time + timedelta(
+                seconds=interval_seconds
+            )
+            if candle.time != expected_time:
+                handle_discontinuity(
+                    gap_start=expected_time,
+                    gap_end=candle.time,
+                    next_bar_time=candle.time,
+                )
         candle_time = _iso_utc(candle.time)
+        source_row = frame.iloc[bar_index]
+        source_close_time = (
+            _utc(source_row["close_time"])
+            if source_row.get("close_time") is not None
+            else candle.time + timedelta(seconds=interval_seconds)
+        )
+        source_known_at = (
+            _utc(source_row["known_at"])
+            if source_row.get("known_at") is not None
+            else source_close_time
+        )
+        candle_close_time = _iso_utc(source_close_time)
         candle_rows.append(
             {
                 "bar_index": bar_index,
                 "time": candle_time,
+                "open_time": candle_time,
+                "close_time": candle_close_time,
+                "known_at": _iso_utc(source_known_at),
+                "known_at_method": source_row.get("known_at_method"),
+                "revision": (
+                    int(source_row["revision"])
+                    if source_row.get("revision") is not None
+                    else None
+                ),
+                "market_commit_seq": (
+                    int(source_row["market_commit_seq"])
+                    if source_row.get("market_commit_seq") is not None
+                    else None
+                ),
+                "source_identity_key": source_row.get("source_identity_key"),
                 "open": float(candle.open),
                 "high": float(candle.high),
                 "low": float(candle.low),
@@ -524,12 +770,27 @@ def collect_runtime_output_evidence_for_instance(
                 "volume": float(candle.volume or 0.0),
             }
         )
-        engine_frame = engine.step(
-            bar=candle,
-            bar_time=candle.time,
-            include_overlays=False,
-            include_details=False,
+        market_data_inputs = (
+            market_data_resolver.resolve(
+                requirements_by_consumer=dict(
+                    market_data_requirements_by_consumer or {}
+                ),
+                primary_instrument_id=resolved_instrument_id,
+                evaluation_time=candle.known_at or candle.end_time,
+            )
+            if market_data_resolver is not None
+            else None
         )
+        step_args = {
+            "bar": candle,
+            "bar_time": candle.time,
+            "include_overlays": False,
+            "include_details": False,
+        }
+        if market_data_inputs is not None:
+            step_args["market_data_inputs"] = market_data_inputs
+        engine_frame = engine.step(**step_args)
+        previous_candle_time = candle.time
         frame_outputs = getattr(engine_frame, "outputs", {}) or {}
         missing_keys = sorted(set(output_types) - set(frame_outputs))
         if missing_keys:
@@ -555,6 +816,18 @@ def collect_runtime_output_evidence_for_instance(
                     if not isinstance(event, Mapping):
                         continue
                     event_key = str(event.get("key") or event.get("stage") or "")
+                    event_known_at = (
+                        _event_known_at(event.get("known_at"))
+                        if event.get("known_at") is not None
+                        else source_known_at
+                    )
+                    if event_known_at != source_known_at:
+                        raise RuntimeError(
+                            "indicator_event_causality_invalid: event known_at must equal "
+                            "the current source candle known_at "
+                            f"indicator_id={indicator_id} "
+                            f"output_name={output_name} event_key={event_key or '<missing>'}"
+                        )
                     output_rows.append(
                         {
                             "bar_index": bar_index,
@@ -566,6 +839,7 @@ def collect_runtime_output_evidence_for_instance(
                             "output_type": output_type,
                             "event_index": event_index,
                             "event_key": event_key,
+                            "known_at": _iso_utc(event_known_at),
                             "event": serialize_value(dict(event)),
                             "value": value,
                         }
@@ -586,6 +860,14 @@ def collect_runtime_output_evidence_for_instance(
                     "value": value,
                 }
             )
+
+    trailing_gap_start = candles[-1].time + timedelta(seconds=interval_seconds)
+    if trailing_gap_start < requested_end:
+        handle_discontinuity(
+            gap_start=trailing_gap_start,
+            gap_end=requested_end,
+            next_bar_time=requested_end,
+        )
 
     duration_ms = (perf_counter() - t0) * 1000.0
     return {
@@ -618,6 +900,13 @@ def collect_runtime_output_evidence_for_instance(
         "output_types": output_types,
         "ready_counts": dict(sorted(ready_counts.items())),
         "not_ready_counts": dict(sorted(not_ready_counts.items())),
+        "gap_policy": gap_policy,
+        "gap_transitions": gap_transitions,
+        "continuity_discontinuities": discontinuities,
+        "indicator_graph": actual_indicator_graph,
+        "indicator_graph_hash": semantic_hash(
+            {"indicators": actual_indicator_graph}
+        ),
         "candles": candle_rows,
         "outputs": output_rows,
         "diagnostics": {

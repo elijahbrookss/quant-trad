@@ -3,7 +3,7 @@ component: adr-agent-mutation-promotion-gates
 subsystem: research-orchestration
 layer: decision
 doc_type: adr
-status: proposed
+status: accepted
 tags:
   - adr
   - agents
@@ -12,7 +12,6 @@ tags:
   - mutation
   - promotion
   - audit
-  - proposed
 code_paths:
   - cli/main.py
   - cli/mcp_server.py
@@ -25,8 +24,9 @@ code_paths:
 
 ## Status
 
-Proposed on 2026-07-25. Existing CLI/MCP guards are partial enforcement; the
-complete mutation and promotion policy is not yet implemented.
+Accepted on 2026-08-06 for offline autonomous research through
+`RESEARCH_CERTIFIED`. Operational deployment remains outside this ADR and is
+still closed by ADR 0049.
 
 ## Context
 
@@ -38,12 +38,12 @@ disabled, actor identity is weak, and promotion is not one enforced gate.
 
 ## Decision
 
-Agent actions will use approved CLI, MCP, service, and durable job contracts.
+Agent research actions use approved CLI, API, service, and durable contracts.
 Every mutation will have a plan/read phase, explicit apply intent, idempotency
 key, actor/request identity, bounded authority, and durable audit evidence for
 inputs, parameters, provenance, validation, outputs, caveats, and result.
 
-Research promotion will be an explicit state transition over immutable evidence.
+Research promotion is an explicit state transition over immutable evidence.
 It will require declared gates for dataset identity/quality, known-at validity,
 repeatability, accounting reconciliation, supported simulator assumptions, and
 human approval where policy requires it. Agents may recommend promotion but
@@ -63,9 +63,10 @@ cannot bypass the gate or mutate live/production state directly.
 
 ## Consequences
 
-Some current CLI paths will need a stricter agent mode or a common mutation
-service. `--no-audit-log` cannot be available to an agent mutation workflow.
-Promotion becomes slower but reviewable and safe to automate.
+The optional CLI audit file may be disabled, but that cannot disable the durable
+database proposal, decision, authority-event, attempt, holdout, certificate, or
+governance records. Applied offline research mutations use common service
+contracts. Non-research mutation surfaces remain outside this acceptance scope.
 
 ## Rejected Alternatives
 
@@ -77,22 +78,19 @@ Promotion becomes slower but reviewable and safe to automate.
 
 ## Enforcing Tests Or Evidence
 
-Current partial evidence:
+Implemented evidence:
 
-- `tests/test_cli/test_mcp_server.py` verifies experiment plans default to
-  dry-run and controlled mutations require apply/confirmation.
-- `cli/audit.py` and experiment state/event stores record local command and
-  orchestration evidence.
-- Research checks and report readiness expose evidence and caveats without
-  performing strategy promotion.
-
-Required before acceptance:
-
-- a common mutation contract across every agent-writable surface;
-- actor, request, idempotency, and durable audit assertions;
-- proof that agent mode cannot disable audit;
-- an enforced promotion state machine and negative bypass tests;
-- explicit denial of runtime and live-state direct mutation.
+- Phase 4 authority records actor, request, idempotency, protocol, dataset,
+  attempt, candidate, holdout, certificate, and append-only event evidence.
+- Phase 5 graph creation is schema-bound, family-bound, and charged to the
+  scientific search budget.
+- Phase 6 persists a proposal and a separate authorization decision for every
+  transition and rejects self-authorization and stale state versions.
+- Persisted end-to-end tests reach `RESEARCH_CERTIFIED` and negative tests prove
+  shadow, paper, controlled-live, live, deployment, and capital states are
+  structurally absent.
+- [ADR 0059](0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md)
+  records the slim in-application authority and honest assurance boundary.
 
 ## References
 

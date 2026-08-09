@@ -74,13 +74,14 @@ def canonical_series() -> dict[str, int | str]:
             )
         )
 
+    source_identity = SourceIdentity(
+        provider="TEST",
+        venue="ISOLATED",
+        source_kind="fixture",
+        adapter_version=f"dataset-db-test.{token}",
+    )
     source_id = market_data_repo.register_source(
-        SourceIdentity(
-            provider="TEST",
-            venue="ISOLATED",
-            source_kind="fixture",
-            adapter_version=f"dataset-db-test.{token}",
-        ),
+        source_identity,
         lineage={"fixture": "tests/test_market_data/test_repository_db.py"},
     )
     series_id = market_data_repo.register_series(
@@ -92,6 +93,7 @@ def canonical_series() -> dict[str, int | str]:
     return {
         "instrument_id": instrument_id,
         "source_id": source_id,
+        "source_identity_key": source_identity.identity_key,
         "series_id": series_id,
     }
 
@@ -146,6 +148,45 @@ def test_content_identical_freeze_reuses_exact_persisted_manifest(
     assert repeated.series == first.series
 
 
+def test_freeze_persists_source_bound_quality_evidence_array(
+    canonical_series: dict[str, int | str],
+) -> None:
+    series_id = int(canonical_series["series_id"])
+    source_id = int(canonical_series["source_id"])
+    _ingest(
+        canonical_series,
+        [_fact(0), _fact(2)],
+        source_revision="fixture-gap-v1",
+    )
+    evidence_hash = market_data_repo.record_gap_evidence(
+        series_id=series_id,
+        source_id=source_id,
+        start=_BASE + timedelta(hours=1),
+        end=_BASE + timedelta(hours=2),
+        classification="provider_missing_data",
+        expected_count=1,
+        observed_count=0,
+        evidence={
+            "schema_version": "market_gap_evidence.v1",
+            "source_id": source_id,
+            "reason_code": "fixture_gap",
+        },
+    )
+
+    frozen = market_data_repo.freeze_dataset([_request(series_id)])
+    persisted = market_data_repo.get_dataset(frozen.dataset_id)
+    quality = persisted.series[0]["quality_evidence"]
+
+    assert isinstance(quality, list)
+    assert quality == frozen.series[0]["quality_evidence"]
+    assert any(row["evidence_hash"] == evidence_hash for row in quality)
+    assert all(
+        row["source_identity_key"]
+        == canonical_series["source_identity_key"]
+        for row in quality
+    )
+
+
 def test_frozen_dataset_cannot_observe_post_freeze_correction(
     canonical_series: dict[str, int | str],
 ) -> None:
@@ -185,6 +226,57 @@ def test_frozen_dataset_cannot_observe_post_freeze_correction(
             series_id=series_id,
             start=_BASE - timedelta(hours=1),
         )
+
+
+def test_frozen_source_binding_filters_before_latest_revision_selection(
+    canonical_series: dict[str, int | str],
+) -> None:
+    series_id = int(canonical_series["series_id"])
+    first_source_id = int(canonical_series["source_id"])
+    first_source_identity_key = str(canonical_series["source_identity_key"])
+    original = _fact(0, close=101.0)
+    market_data_repo.ingest_candles(
+        series_id=series_id,
+        source_id=first_source_id,
+        facts=[original],
+        request={"fixture": "source-filter-before-revision"},
+        source_revision="source-a-v1",
+    )
+    second_source_id = market_data_repo.register_source(
+        SourceIdentity(
+            provider="TEST_B",
+            venue="ISOLATED",
+            source_kind="fixture",
+            adapter_version=f"source-filter.{uuid.uuid4().hex}",
+        ),
+        lineage={"fixture": "source-filter-before-revision"},
+    )
+    market_data_repo.ingest_candles(
+        series_id=series_id,
+        source_id=second_source_id,
+        facts=[_fact(0, close=202.0)],
+        request={"fixture": "source-filter-before-revision"},
+        source_revision="source-b-v2",
+    )
+    frozen = market_data_repo.freeze_dataset(
+        [
+            DatasetSeriesRequest(
+                series_id=series_id,
+                start=_BASE,
+                end=_BASE + timedelta(hours=1),
+            )
+        ]
+    )
+
+    replay = market_data_repo.read_dataset_series(
+        dataset_id=frozen.dataset_id,
+        series_id=series_id,
+        source_identity_keys=(first_source_identity_key,),
+    )
+
+    assert len(replay) == 1
+    assert replay[0].source_identity_key == first_source_identity_key
+    assert replay[0].fact.close == Decimal("101.0")
 
 
 def test_mixed_fact_freeze_uses_one_commit_clock_and_preserves_oi_revision(
@@ -350,7 +442,7 @@ def test_funding_rate_round_trip_and_freeze_preserve_causal_observations(
     ]
 
     installed = market_normalization_service.install_builtin_specs(
-        approved_by="phase4-db-test"
+        approved_by="normalization-db-test"
     )
     bps_spec_id = next(
         row["spec_id"] for row in installed if row["feature_name"] == "funding_rate_bps"

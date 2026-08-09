@@ -8,6 +8,7 @@ from engines.bot_runtime.runtime.components.canonical_facts import (
     CanonicalFactAppender,
     CanonicalFactPersistenceBuffer,
     CanonicalFactProjectionDispatcher,
+    _should_sample_debug_log,
     canonical_fact_payload,
 )
 
@@ -65,6 +66,14 @@ def _canonical_payload(*, known_at: str) -> dict:
             },
         ],
     }
+
+
+def test_canonical_fact_debug_logging_is_sampled() -> None:
+    assert _should_sample_debug_log(1)
+    assert not _should_sample_debug_log(2)
+    assert not _should_sample_debug_log(249)
+    assert _should_sample_debug_log(250)
+    assert _should_sample_debug_log(500)
 
 
 def test_canonical_fact_appender_persists_before_non_authoritative_consumers() -> None:

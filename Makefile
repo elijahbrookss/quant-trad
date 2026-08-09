@@ -28,6 +28,8 @@ export COMPOSE_BAKE
 
 SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null)
 export SOURCE_REVISION
+SOURCE_TREE_HASH ?= $(shell $(VENV_PYTHON) scripts/provenance/source_tree_hash.py --git-revision $(SOURCE_REVISION) 2>/dev/null)
+export SOURCE_TREE_HASH
 
 BOTS_COMPOSE_FILE ?= docker/docker-compose.bots.yml
 BOTS_COMPOSE_CMD  ?= docker compose -f $(BOTS_COMPOSE_FILE)
@@ -228,13 +230,13 @@ _ensure_venv_python:
 	}
 
 _ensure_dirs:
-	@mkdir -p $(PID_DIR) $(LOG_DIR)
+	@mkdir -p $(PID_DIR) $(LOG_DIR) $(LOG_DIR)/host-capacity
 
 ## ============================== DOCKER ================================== ##
 .PHONY: stack-up stack-stop stack-down stack-restart stack-logs stack-ps stack-build stack-rebuild \
 	bots-up bots-down bots-ps bots-logs
 
-stack-up: ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
+stack-up: _ensure_dirs ## Start selected docker compose profiles (STACK_PROFILES=all|core|database|observability)
 	@echo "► Starting stack [$(STACK_PROFILE_DISPLAY)]"
 	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) -d,$(COMPOSE_STATUS_RE))
 	@profiles="$(STACK_PROFILE_WORDS)"; \
@@ -262,7 +264,7 @@ stack-down: ## Remove containers for selected profiles
 	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) down --remove-orphans,$(COMPOSE_DOWN_STATUS_RE))
 	@echo "✓ Stack removed"
 
-stack-restart: ## Restart services for selected profiles (use BUILD=1 to rebuild)
+stack-restart: _ensure_dirs ## Restart services for selected profiles (use BUILD=1 to rebuild)
 	@echo "► Restarting stack [$(STACK_PROFILE_DISPLAY)]"
 	$(call RUN_COMPOSE_FILTERED,$(COMPOSE_CMD) $(STACK_PROFILE_ARGS) up $(STACK_BUILD_FLAG) --force-recreate -d,$(COMPOSE_STATUS_RE))
 	@echo "✓ Stack restarted"

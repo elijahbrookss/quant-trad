@@ -2,12 +2,39 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  BOTLENS_DURABLE_EVIDENCE_STAGES,
   resolveSelectedSymbolVisualRefreshIntervalMs,
+  resolveBotLensInitialHistoryEnd,
+  mergeBotLensForensicDocuments,
+  shouldAutoLoadInitialBotLensForensics,
+  shouldLoadMoreBotLensForensics,
+  shouldLoadInitialBotLensHistory,
   shouldRetryBotLensRunBootstrap,
   shouldRetryBotLensSelectedSymbolBootstrap,
+  shouldStartDurableEvidenceStages,
   shouldLoadOlderBotLensHistory,
+  shouldLoadNewerBotLensHistory,
   shouldPollSelectedSymbolVisual,
 } from '../src/features/bots/botlens/hooks/useBotLensController.js'
+
+test('active BotLens leaves durable forensic replay operator-triggered', () => {
+  assert.equal(
+    shouldAutoLoadInitialBotLensForensics({
+      open: true,
+      scopeKey: 'run-live:instrument-btc|1m',
+      transportEligible: true,
+    }),
+    false,
+  )
+  assert.equal(
+    shouldAutoLoadInitialBotLensForensics({
+      open: true,
+      scopeKey: 'run-terminal:instrument-btc|1m',
+      transportEligible: false,
+    }),
+    true,
+  )
+})
 
 test('load older history stays blocked while a chart retrieval request is already in flight', () => {
   assert.equal(
@@ -38,6 +65,123 @@ test('load older history requires an active run, selected symbol, and at least o
       chartCandles: [],
       chartHistoryStatus: 'ready',
     }),
+    false,
+  )
+})
+
+test('load older history stops at the frozen dataset boundary', () => {
+  assert.equal(
+    shouldLoadOlderBotLensHistory({
+      activeRunId: 'run-1',
+      selectedSymbolKey: 'instrument-btc|1m',
+      chartCandles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
+      chartHistoryStatus: 'ready',
+      hasMoreBefore: false,
+    }),
+    false,
+  )
+})
+
+test('load newer history follows the forward frozen-dataset boundary', () => {
+  const base = {
+    activeRunId: 'run-1',
+    selectedSymbolKey: 'instrument-btc|1m',
+    chartCandles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
+    chartHistoryStatus: 'ready',
+  }
+  assert.equal(
+    shouldLoadNewerBotLensHistory({
+      ...base,
+      hasMoreAfter: true,
+    }),
+    true,
+  )
+  assert.equal(
+    shouldLoadNewerBotLensHistory({
+      ...base,
+      hasMoreAfter: false,
+    }),
+    false,
+  )
+})
+test('completed dataset runs request an initial bounded chart page', () => {
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-1',
+      selectedSymbolKey: 'instrument-btc|1m',
+      selectedSymbolReady: false,
+      datasetId: 'mds-frozen',
+      chartHistoryStatus: 'idle',
+    }),
+    true,
+  )
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-1',
+      selectedSymbolKey: 'instrument-btc|1m',
+      selectedSymbolReady: true,
+      datasetId: '',
+      chartHistoryStatus: 'idle',
+    }),
+    false,
+  )
+  assert.equal(
+    resolveBotLensInitialHistoryEnd({
+      backtest_end: '2026-01-02T00:00:00Z',
+      ended_at: '2026-01-02T00:00:05Z',
+    }),
+    '2026-01-02T00:00:00Z',
+  )
+})
+
+test('active BotLens uses its ready bootstrap instead of cold chart reconstruction', () => {
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-live',
+      selectedSymbolKey: 'instrument-btc|1m',
+      datasetId: 'mds-frozen',
+      chartHistoryStatus: 'idle',
+      transportEligible: true,
+      chartCandles: [{ time: 1767225600, open: 1, high: 1, low: 1, close: 1 }],
+    }),
+    false,
+  )
+  assert.equal(
+    shouldLoadInitialBotLensHistory({
+      open: true,
+      activeRunId: 'run-live',
+      selectedSymbolKey: 'instrument-btc|1m',
+      datasetId: 'mds-frozen',
+      chartHistoryStatus: 'idle',
+      transportEligible: true,
+      chartCandles: [],
+    }),
+    true,
+  )
+})
+
+test('forensic replay deduplicates cursor documents and blocks completed streams', () => {
+  const merged = mergeBotLensForensicDocuments(
+    [
+      { document_id: 'event-1', cursor: { after_seq: 2, after_row_id: 4 }, truth: { value: 'old' } },
+    ],
+    [
+      { document_id: 'event-2', cursor: { after_seq: 1, after_row_id: 3 }, truth: {} },
+      { document_id: 'event-1', cursor: { after_seq: 2, after_row_id: 4 }, truth: { value: 'new' } },
+    ],
+  )
+
+  assert.deepEqual(merged.map((entry) => entry.document_id), ['event-2', 'event-1'])
+  assert.equal(merged[1].truth.value, 'new')
+  assert.equal(
+    shouldLoadMoreBotLensForensics({ status: 'ready', hasMore: true, scopeKey: 'run:symbol' }),
+    true,
+  )
+  assert.equal(
+    shouldLoadMoreBotLensForensics({ status: 'ready', hasMore: false, scopeKey: 'run:symbol' }),
     false,
   )
 })
@@ -121,4 +265,20 @@ test('selected-symbol bootstrap retries while projector snapshot is still unavai
     }),
     false,
   )
+})
+
+
+test('durable evidence waits for chart readiness and loads canonical sections in order', () => {
+  assert.deepEqual(BOTLENS_DURABLE_EVIDENCE_STAGES, ['decisions', 'trades', 'diagnostics'])
+  const base = {
+    open: true,
+    scopeKey: 'run-1:instrument-btc',
+    stageKey: 'run-1:instrument-btc:0',
+    activeStageKey: 'run-1:instrument-btc:0',
+    started: false,
+  }
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'loading' }), false)
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'ready' }), true)
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'ready', started: true }), false)
+  assert.equal(shouldStartDurableEvidenceStages({ ...base, chartHistoryStatus: 'ready', activeStageKey: 'stale' }), false)
 })

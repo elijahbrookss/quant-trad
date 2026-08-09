@@ -1,5 +1,6 @@
 import pytest
 
+from engines.bot_runtime.core import wallet as wallet_module
 from engines.bot_runtime.core.wallet import (
     WalletLedger,
     canonical_wallet_ledger_events,
@@ -345,6 +346,74 @@ def test_wallet_ledger_state_validation_passes_complete_absolute_events():
     ]
 
     validate_wallet_ledger_state(events)
+
+
+def test_wallet_ledger_state_validation_applies_each_event_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = [
+        {
+            "event_id": "wallet-init",
+            "event_name": "WALLET_INITIALIZED",
+            "context": {
+                "currency": "USD",
+                "wallet_commit_seq": 0,
+                "wallet_event_order": 0,
+                "balance_before": 0.0,
+                "balance_after": 1000.0,
+                "wallet_after": {
+                    "balances": {"USD": 1000.0},
+                    "locked_margin": {},
+                    "free_collateral": {"USD": 1000.0},
+                    "margin_positions": {},
+                },
+            },
+        }
+    ]
+    balance = 1000.0
+    for index in range(1, 501):
+        next_balance = balance - 0.01
+        events.append(
+            {
+                "event_id": f"fee-{index}",
+                "event_name": "FEE_APPLIED",
+                "context": {
+                    "currency": "USD",
+                    "wallet_commit_seq": index,
+                    "wallet_event_order": 20,
+                    "balance_before": balance,
+                    "balance_after": next_balance,
+                    "fee": 0.01,
+                    "wallet_before": {
+                        "balances": {"USD": balance},
+                        "locked_margin": {},
+                        "free_collateral": {"USD": balance},
+                        "margin_positions": {},
+                    },
+                    "wallet_after": {
+                        "balances": {"USD": next_balance},
+                        "locked_margin": {},
+                        "free_collateral": {"USD": next_balance},
+                        "margin_positions": {},
+                    },
+                },
+            }
+        )
+        balance = next_balance
+
+    apply_count = 0
+    original_apply = wallet_module._WalletProjector.apply
+
+    def counted_apply(projector, event):
+        nonlocal apply_count
+        apply_count += 1
+        return original_apply(projector, event)
+
+    monkeypatch.setattr(wallet_module._WalletProjector, "apply", counted_apply)
+
+    validate_wallet_ledger_state(events)
+
+    assert apply_count == len(events)
 
 
 def test_wallet_ledger_state_validation_rejects_missing_wallet_commit_seq():

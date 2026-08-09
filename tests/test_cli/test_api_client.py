@@ -506,8 +506,9 @@ def test_research_check_cli_accepts_run_id_for_report_backed_checks(tmp_path, mo
     assert exit_code == 0
     assert observed == {
         "method": "POST",
-        "path": "/api/research/checks/run",
+        "path": "/api/research/checks/evaluate",
         "body": {
+            "mode": "preview",
             "title": "Run signal check",
             "check_family": "run_signal_summary",
             "scope": {"run_id": "run-1"},
@@ -689,12 +690,13 @@ def test_bots_start_supports_observe_only_paper_overrides(tmp_path, monkeypatch)
     assert observed == {
         "method": "POST",
         "path": "/api/bots/bot-1/runs/start",
-        "body": {
-            "request_id": "req-1",
-            "run_type": "paper",
-            "execution_behavior": "observe-only",
-            "duration_seconds": 30.0,
-        },
+            "body": {
+                "request_id": "req-1",
+                "run_type": "paper",
+                "execution_behavior": "observe-only",
+                "duration_seconds": 30.0,
+                "economic_claim_intent": "exploration",
+            },
     }
 
 
@@ -728,6 +730,7 @@ def test_bots_start_supports_opt_in_backtest_profiling(tmp_path, monkeypatch):
         "run_type": "backtest",
         "dataset_id": "mds-1",
         "profile": True,
+        "economic_claim_intent": "exploration",
     }
 
 
@@ -1157,12 +1160,16 @@ def test_experiments_prepare_instrument_matrix_creates_solo_bots_and_plan(tmp_pa
         if path.startswith("/api/instruments/") and request.get_method() == "GET":
             instrument_id = path.split("/")[3]
             return _Response(json.dumps(instruments[instrument_id]).encode("utf-8"))
-        if path == "/api/strategies/" and request.get_method() == "POST":
+        if path == "/api/strategies/strategy-source/clone" and request.get_method() == "POST":
             strategy_id = next(created_strategy_ids)
             return _Response(
                 json.dumps(
                     {
-                        "strategy": {"id": strategy_id, "name": body["name"], "timeframe": body["timeframe"]},
+                        "schema_version": "strategy_clone.v1",
+                        "strategy": {
+                            "schema_version": "strategy_definition.v1",
+                            "strategy": {"id": strategy_id, "name": body["name"]},
+                        },
                     }
                 ).encode("utf-8")
             )
@@ -1243,6 +1250,18 @@ def test_experiments_prepare_instrument_matrix_creates_solo_bots_and_plan(tmp_pa
     assert bot_payloads[0]["execution_semantics"] == "proxy_derivative"
     assert bot_payloads[0]["strategy_id"] == "strategy-spot"
     assert bot_payloads[1]["execution_semantics"] == "derivative"
+    clone_calls = [
+        call
+        for call in calls
+        if call[0] == "POST"
+        and call[1] == "/api/strategies/strategy-source/clone"
+    ]
+    assert len(clone_calls) == 2
+    assert not any(
+        call[0] in {"POST", "PUT"}
+        and (call[1].endswith("/rules") or "/variants" in call[1])
+        for call in calls
+    )
 
 
 def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
@@ -1254,6 +1273,7 @@ def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
             "run_type": "backtest",
             "dataset_id": "mds-1",
             "request_id": "req-1",
+            "economic_claim_intent": "exploration",
         }
         return _Response(
             json.dumps(
@@ -1296,6 +1316,65 @@ def test_experiments_start_bot_writes_resumable_record(tmp_path, monkeypatch):
     assert payload["run_id"] == "run-1"
     assert payload["baseline_run_id"] == "base-run"
     assert payload["collect_defaults"]["export"] is True
+
+
+def test_deprecated_run_bot_validates_export_before_starting_run(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid wrapper invocation must not start a run")
+        ),
+    )
+
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "experiments",
+            "run-bot",
+            "bot-1",
+            "--dataset-id",
+            "mds-1",
+            "--export",
+        ]
+    )
+
+    assert exit_code == 2
+    assert list((tmp_path / "experiments").glob("**/experiment.json")) == []
+
+
+def test_deprecated_run_bot_forwards_profile_and_emits_deprecation(
+    tmp_path, monkeypatch, capsys
+):
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        assert urllib.parse.urlparse(request.full_url).path == "/api/bots/bot-1/runs/start"
+        assert json.loads(request.data.decode("utf-8"))["profile"] is True
+        return _Response(
+            b'{"run_id":"run-1","request_id":"req-1","status":"starting"}'
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    exit_code = main(
+        [
+            "--log-root",
+            str(tmp_path),
+            "experiments",
+            "run-bot",
+            "bot-1",
+            "--dataset-id",
+            "mds-1",
+            "--profile",
+            "--print-each",
+        ]
+    )
+
+    assert exit_code == 0
+    assert '"status": "deprecated_alias"' in capsys.readouterr().out
 
 
 def test_experiments_collect_exports_materializes_and_compares(tmp_path, monkeypatch):

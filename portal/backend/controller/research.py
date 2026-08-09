@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ..service import research as research_service
 from ..service.research import async_dispatch as research_async_dispatch
+from ..service.research import authority as research_authority
+from ..service.research import governance as research_governance
+from ..service.research import pass_gates as research_pass_gates
 
 
 router = APIRouter()
@@ -39,14 +43,33 @@ class ResearchLinkRequest(BaseModel):
 
 
 class ResearchCheckRunRequest(BaseModel):
-    title: str
+    title: Optional[str] = None
     body: Optional[str] = None
     observation_id: Optional[str] = None
     observation: Optional[Dict[str, Any]] = None
     check_family: Optional[str] = None
+    mode: Optional[str] = None
+    dataset_id: Optional[str] = None
     scope: Dict[str, Any]
     detector: Dict[str, Any]
     outcomes: Dict[str, Any] = Field(default_factory=dict)
+    inputs: List[Dict[str, Any]] = Field(default_factory=list)
+    statistics: Dict[str, Any] = Field(default_factory=dict)
+    assertions: List[Dict[str, Any]] = Field(default_factory=list)
+    gap_policy: Optional[str] = None
+    gap_rewarm_bars: Optional[int] = Field(default=None, ge=0)
+    preparation: Dict[str, Any] = Field(default_factory=dict)
+    freeze: Optional[bool] = None
+    acquire_missing: Optional[bool] = None
+    dataset_name: Optional[str] = None
+    created_by: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+
+
+class ResearchObservationFromCheckRequest(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+    status: str = "active"
     tags: List[str] = Field(default_factory=list)
 
 
@@ -61,14 +84,213 @@ class ResearchCheckSweepRequest(BaseModel):
     ranking: Dict[str, Any]
 
 
+class ExperimentPassGateEvaluationRequest(BaseModel):
+    plan: Dict[str, Any]
+    summaries: List[Dict[str, Any]]
+    comparison_refs: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ResearchAuthorityRequest(BaseModel):
+    actor_id: str
+    actor_role: str
+    request_id: str
+
+
+class ScientificProtocolRequest(ResearchAuthorityRequest):
+    protocol: Dict[str, Any]
+
+
+class ResearchFamilyRequest(ResearchAuthorityRequest):
+    protocol_id: str
+    family_id: Optional[str] = None
+    name: str
+
+
+class ResearchAttemptRequest(ResearchAuthorityRequest):
+    family_id: str
+    dataset_role: str = Field(pattern="^(train|validation|holdout)$")
+    trial_inputs: Dict[str, Any]
+    estimated_runtime_seconds: float = Field(ge=0)
+    estimated_compute_units: float = Field(ge=0)
+
+
+class ResearchAttemptCompletionRequest(ResearchAuthorityRequest):
+    status: str = Field(pattern="^(completed|failed|abandoned|invalid)$")
+    result_evidence: Dict[str, Any] = Field(default_factory=dict)
+    result_reference: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    actual_runtime_seconds: float = Field(default=0, ge=0)
+    actual_compute_units: float = Field(default=0, ge=0)
+
+
+class ResearchCandidateRequest(ResearchAuthorityRequest):
+    candidate: Dict[str, Any]
+
+
+class TypedStrategyGraphRequest(ResearchAuthorityRequest):
+    family_id: str
+    graph: Dict[str, Any]
+    mutation_dimensions: List[str]
+    influenced_by_attempt_ids: List[str] = Field(default_factory=list)
+    estimated_runtime_seconds: float = Field(default=0, ge=0)
+    estimated_compute_units: float = Field(default=0, ge=0)
+
+
+class HoldoutReservationRequest(ResearchAuthorityRequest):
+    family_id: str
+    candidate_id: str
+
+
+class FamilyAuthorityRequest(ResearchAuthorityRequest):
+    robustness: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GovernanceCaseRequest(ResearchAuthorityRequest):
+    case_id: Optional[str] = None
+    observation_id: str
+
+
+class GovernanceTransitionProposalRequest(ResearchAuthorityRequest):
+    proposal_id: Optional[str] = None
+    case_id: str
+    expected_state_version: int = Field(ge=0)
+    target_state: str
+    binding_updates: Dict[str, Any] = Field(default_factory=dict)
+    evidence_hashes: List[str]
+    rationale: str
+
+
+class GovernanceTransitionDecisionRequest(ResearchAuthorityRequest):
+    disposition: str = Field(pattern="^(approve|reject)$")
+
+
 def _model_payload(model: BaseModel) -> Dict[str, Any]:
     if hasattr(model, "model_dump"):
         return model.model_dump()
     return model.dict()
 
 
+def _authority_call(handler, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    try:
+        return handler(payload)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/authority/protocols", status_code=201)
+def create_scientific_protocol(body: ScientificProtocolRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.create_protocol, _model_payload(body))
+
+
+@router.get("/authority/protocols/{protocol_id}")
+def get_scientific_protocol(protocol_id: str) -> Dict[str, Any]:
+    try:
+        return research_authority.get_protocol(protocol_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/authority/families", status_code=201)
+def create_research_family(body: ResearchFamilyRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.create_family, _model_payload(body))
+
+
+@router.post("/authority/attempts", status_code=201)
+def register_research_attempt(body: ResearchAttemptRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.register_attempt, _model_payload(body))
+
+
+@router.post("/authority/attempts/{attempt_id}/complete")
+def complete_research_attempt(
+    attempt_id: str,
+    body: ResearchAttemptCompletionRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["attempt_id"] = attempt_id
+    return _authority_call(research_authority.complete_attempt, payload)
+
+
+@router.post("/authority/candidates", status_code=201)
+def freeze_research_candidate(body: ResearchCandidateRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.freeze_candidate, _model_payload(body))
+
+
+@router.post("/authority/strategy-graphs", status_code=201)
+def create_typed_strategy_graph(body: TypedStrategyGraphRequest) -> Dict[str, Any]:
+    return _authority_call(
+        research_authority.create_typed_strategy_graph, _model_payload(body)
+    )
+
+
+@router.post("/authority/holdouts/reserve", status_code=201)
+def reserve_research_holdout(body: HoldoutReservationRequest) -> Dict[str, Any]:
+    return _authority_call(research_authority.reserve_holdout, _model_payload(body))
+
+
+@router.post("/authority/families/{family_id}/close")
+def close_research_family(
+    family_id: str,
+    body: FamilyAuthorityRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["family_id"] = family_id
+    return _authority_call(research_authority.close_family, payload)
+
+
+@router.post("/authority/families/{family_id}/certify", status_code=201)
+def certify_research_family(
+    family_id: str,
+    body: FamilyAuthorityRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["family_id"] = family_id
+    return _authority_call(research_authority.certify_family, payload)
+
+
+@router.get("/authority/families/{family_id}/evidence")
+def get_research_family_evidence(family_id: str) -> Dict[str, Any]:
+    try:
+        return research_authority.family_evidence(family_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/governance/cases", status_code=201)
+def create_governance_case(body: GovernanceCaseRequest) -> Dict[str, Any]:
+    return _authority_call(research_governance.create_case, _model_payload(body))
+
+
+@router.post("/governance/proposals", status_code=201)
+def propose_governance_transition(
+    body: GovernanceTransitionProposalRequest,
+) -> Dict[str, Any]:
+    return _authority_call(
+        research_governance.propose_transition, _model_payload(body)
+    )
+
+
+@router.post("/governance/proposals/{proposal_id}/decide", status_code=201)
+def decide_governance_transition(
+    proposal_id: str,
+    body: GovernanceTransitionDecisionRequest,
+) -> Dict[str, Any]:
+    payload = _model_payload(body)
+    payload["proposal_id"] = proposal_id
+    return _authority_call(research_governance.decide_transition, payload)
+
+
+@router.get("/governance/cases/{case_id}")
+def get_governance_case(case_id: str) -> Dict[str, Any]:
+    try:
+        return research_governance.case_trail(case_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
 @router.post("/items", status_code=201)
-async def create_research_item(body: ResearchItemRequest) -> Dict[str, Any]:
+def create_research_item(body: ResearchItemRequest) -> Dict[str, Any]:
     try:
         return research_service.create_research_item(_model_payload(body))
     except ValueError as exc:
@@ -76,7 +298,7 @@ async def create_research_item(body: ResearchItemRequest) -> Dict[str, Any]:
 
 
 @router.get("/items")
-async def list_research_items(
+def list_research_items(
     kind: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     symbol: Optional[str] = Query(None),
@@ -96,8 +318,24 @@ async def list_research_items(
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.get("/activity")
+def get_research_activity(
+    type: str = Query("checks_completed", alias="type"),
+    days: int = Query(182, ge=1, le=366),
+) -> Dict[str, Any]:
+    """Return a complete zero-filled UTC activity projection."""
+
+    try:
+        return research_service.get_research_activity(
+            activity_type=type,
+            days=days,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/links", status_code=201)
-async def create_research_link(body: ResearchLinkRequest) -> Dict[str, Any]:
+def create_research_link(body: ResearchLinkRequest) -> Dict[str, Any]:
     try:
         return research_service.create_research_link(_model_payload(body))
     except KeyError as exc:
@@ -107,7 +345,7 @@ async def create_research_link(body: ResearchLinkRequest) -> Dict[str, Any]:
 
 
 @router.post("/checks/run", status_code=201)
-async def run_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
+def run_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
     try:
         return research_service.run_research_check(_model_payload(body))
     except KeyError as exc:
@@ -116,8 +354,36 @@ async def run_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
+@router.post("/checks/requirements")
+def get_research_check_requirements(
+    body: ResearchCheckRunRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_service.get_research_check_requirements(
+            _model_payload(body)
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/prepare")
+def prepare_research_check_evidence(
+    body: ResearchCheckRunRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_service.prepare_research_check_evidence(
+            _model_payload(body)
+        )
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.post("/checks/evaluate")
-async def evaluate_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
+def evaluate_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
     try:
         return research_service.evaluate_research_check(_model_payload(body))
     except KeyError as exc:
@@ -127,7 +393,7 @@ async def evaluate_research_check(body: ResearchCheckRunRequest) -> Dict[str, An
 
 
 @router.post("/checks/sweep")
-async def sweep_research_checks(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
+def sweep_research_checks(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
     try:
         return research_service.sweep_research_checks(_model_payload(body))
     except KeyError as exc:
@@ -137,7 +403,7 @@ async def sweep_research_checks(body: ResearchCheckSweepRequest) -> Dict[str, An
 
 
 @router.post("/jobs/checks/run", status_code=202)
-async def dispatch_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
+def dispatch_research_check(body: ResearchCheckRunRequest) -> Dict[str, Any]:
     try:
         return research_async_dispatch.dispatch_research_check_run(_model_payload(body))
     except ValueError as exc:
@@ -145,7 +411,7 @@ async def dispatch_research_check(body: ResearchCheckRunRequest) -> Dict[str, An
 
 
 @router.post("/jobs/checks/sweep", status_code=202)
-async def dispatch_research_check_sweep(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
+def dispatch_research_check_sweep(body: ResearchCheckSweepRequest) -> Dict[str, Any]:
     try:
         return research_async_dispatch.dispatch_research_check_sweep(_model_payload(body))
     except ValueError as exc:
@@ -153,7 +419,7 @@ async def dispatch_research_check_sweep(body: ResearchCheckSweepRequest) -> Dict
 
 
 @router.get("/jobs/{job_id}")
-async def get_research_job_status(job_id: str) -> Dict[str, Any]:
+def get_research_job_status(job_id: str) -> Dict[str, Any]:
     try:
         return research_async_dispatch.get_research_job_status(job_id)
     except KeyError as exc:
@@ -161,7 +427,7 @@ async def get_research_job_status(job_id: str) -> Dict[str, Any]:
 
 
 @router.get("/jobs/{job_id}/result")
-async def get_research_job_result(job_id: str) -> Dict[str, Any]:
+def get_research_job_result(job_id: str) -> Dict[str, Any]:
     try:
         return research_async_dispatch.get_research_job_result(job_id)
     except KeyError as exc:
@@ -171,9 +437,46 @@ async def get_research_job_result(job_id: str) -> Dict[str, Any]:
 
 
 @router.get("/checks/compare")
-async def compare_research_checks(left_check_id: str, right_check_id: str) -> Dict[str, Any]:
+def compare_research_checks(left_check_id: str, right_check_id: str) -> Dict[str, Any]:
     try:
         return research_service.compare_research_checks(left_check_id, right_check_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/comparisons/pass-gates/evaluate")
+def evaluate_experiment_pass_gates(
+    body: ExperimentPassGateEvaluationRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_pass_gates.evaluate_pass_gate_request(
+            _model_payload(body)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/{check_id}/replay")
+def replay_research_check(check_id: str) -> Dict[str, Any]:
+    try:
+        return research_service.replay_research_check(check_id)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/checks/{check_id}/observations", status_code=201)
+def create_observation_from_check(
+    check_id: str,
+    body: ResearchObservationFromCheckRequest,
+) -> Dict[str, Any]:
+    try:
+        return research_service.create_observation_from_check_evidence(
+            check_id, _model_payload(body)
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -183,7 +486,10 @@ async def compare_research_checks(left_check_id: str, right_check_id: str) -> Di
 @router.get("/runs/{run_id}/evidence")
 async def get_run_research_evidence(run_id: str) -> Dict[str, Any]:
     try:
-        return research_service.get_run_research_evidence(run_id)
+        return await run_in_threadpool(
+            research_service.get_run_research_evidence,
+            run_id,
+        )
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -191,7 +497,7 @@ async def get_run_research_evidence(run_id: str) -> Dict[str, Any]:
 
 
 @router.get("/items/{item_id}")
-async def get_research_item(item_id: str) -> Dict[str, Any]:
+def get_research_item(item_id: str) -> Dict[str, Any]:
     try:
         return research_service.get_research_item(item_id)
     except KeyError as exc:
@@ -199,7 +505,7 @@ async def get_research_item(item_id: str) -> Dict[str, Any]:
 
 
 @router.get("/items/{item_id}/trail")
-async def get_research_trail(item_id: str) -> Dict[str, Any]:
+def get_research_trail(item_id: str) -> Dict[str, Any]:
     try:
         return research_service.get_research_trail(item_id)
     except KeyError as exc:
@@ -207,7 +513,7 @@ async def get_research_trail(item_id: str) -> Dict[str, Any]:
 
 
 @router.get("/items/{item_id}/links")
-async def list_research_links(item_id: str, include_inbound: bool = True) -> Dict[str, Any]:
+def list_research_links(item_id: str, include_inbound: bool = True) -> Dict[str, Any]:
     try:
         links = research_service.list_research_links(item_id, include_inbound=include_inbound)
         return {"schema_version": "research_link_list.v1", "item_id": item_id, "items": links, "total": len(links)}

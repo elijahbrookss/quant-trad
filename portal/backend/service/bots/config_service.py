@@ -7,8 +7,22 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
 from core.settings import env_is_set, env_value, get_settings
+from engines.bot_runtime.core.execution_assumptions import (
+    legacy_execution_assumptions,
+    resolve_execution_assumptions,
+)
+from engines.bot_runtime.core.execution_context import (
+    build_execution_context_bundle,
+    execution_model_artifact_from_book_tape,
+    execution_model_artifact_from_passive_policy,
+    resolve_execution_context,
+)
+from engines.bot_runtime.core.book_execution import ExecutionBookTapeBundle
+from engines.bot_runtime.core.passive_execution import PassiveQueuePolicy
+from engines.bot_runtime.core.execution_plan import compile_runtime_execution_plan
 from engines.bot_runtime.core.execution_profile import compile_series_execution_profile, normalize_execution_semantics
 from engines.bot_runtime.runtime.components.runtime_policy import ExecutionMode
+from atm import normalise_template
 
 from .strategy_loader import StrategyLoader
 from .startup_validation import validate_wallet_config as normalize_wallet_config
@@ -647,7 +661,61 @@ class BotConfigService:
         run_type = str(bot.get("run_type") or "backtest").strip().lower()
         symbols: List[str] = []
         readiness_entries: List[Dict[str, Any]] = []
+        resolved_contexts = []
         errors: List[str] = []
+        raw_assumptions = (
+            dict(bot.get("execution_assumptions") or {})
+            if isinstance(bot.get("execution_assumptions"), Mapping)
+            else {}
+        )
+        if bot.get("economic_claim_intent") is not None:
+            execution_assumptions = resolve_execution_assumptions(
+                bot.get("economic_claim_intent"),
+                raw_assumptions,
+                source=str(raw_assumptions.get("source") or "run_start_request"),
+            )
+            pinned_manifest_hash = str(raw_assumptions.get("manifest_hash") or "").strip()
+            if pinned_manifest_hash and pinned_manifest_hash != execution_assumptions.manifest_hash:
+                raise ValueError("execution_assumption_manifest_hash_mismatch")
+        else:
+            execution_assumptions = legacy_execution_assumptions()
+
+        raw_book_bundle = bot.get("execution_book_tape_bundle")
+        if raw_book_bundle is not None:
+            if run_type != "backtest":
+                raise ValueError(
+                    "execution_book_tape_bundle is admitted only for backtest runs using book replay"
+                )
+            if not isinstance(raw_book_bundle, Mapping):
+                raise ValueError("execution_book_tape_bundle must be an object")
+            execution_book_bundle = ExecutionBookTapeBundle.from_dict(raw_book_bundle)
+        else:
+            execution_book_bundle = None
+        raw_queue_policy = bot.get("passive_queue_policy")
+        if raw_queue_policy is not None:
+            if run_type != "backtest":
+                raise ValueError("passive_queue_policy is admitted only for backtest runs")
+            if not isinstance(raw_queue_policy, Mapping):
+                raise ValueError("passive_queue_policy must be an object")
+            passive_queue_policy = PassiveQueuePolicy.from_dict(raw_queue_policy)
+            if execution_book_bundle is None:
+                raise ValueError("passive_queue_policy requires execution_book_tape_bundle")
+        else:
+            passive_queue_policy = None
+
+        execution_plan = compile_runtime_execution_plan(
+            normalise_template(getattr(strategy, "atm_template", None))
+        )
+        required_order_types = {
+            "market",  # terminal, risk, and lifecycle-completion closes
+            "stop_market",
+            execution_plan.entry.order_type,
+        }
+        if execution_plan.take_profits:
+            required_order_types.add("limit_resting")
+        post_only_order_types = (
+            {"limit_maker"} if execution_plan.entry.order_type == "limit_maker" else set()
+        )
 
         for link in strategy.instrument_links:
             instrument = self._resolve_runtime_instrument(strategy, link)
@@ -677,6 +745,40 @@ class BotConfigService:
                     require_margin_accounting=execution_semantics in {"derivative", "proxy_derivative"},
                     execution_semantics=execution_semantics,
                 )
+                book_tape = (
+                    execution_book_bundle.tape_for(str(instrument.get("id") or ""))
+                    if execution_book_bundle is not None
+                    else None
+                )
+                execution_context = resolve_execution_context(
+                    profile,
+                    execution_assumptions,
+                    instrument_payload=instrument,
+                    execution_model_artifact=(
+                        (
+                            execution_model_artifact_from_passive_policy(
+                                execution_assumptions,
+                                source_capability=book_tape.source_capability,
+                                execution_book_tape_hash=book_tape.tape_hash,
+                                queue_policy=passive_queue_policy,
+                            )
+                            if passive_queue_policy is not None
+                            else execution_model_artifact_from_book_tape(
+                                execution_assumptions,
+                                source_capability=book_tape.source_capability,
+                            )
+                        )
+                        if book_tape is not None
+                        else None
+                    ),
+                    source="backend_startup_resolution",
+                )
+                policy_conformance = execution_context.validate_policy_capabilities(
+                    required_order_types=required_order_types,
+                    required_time_in_force={"gtc"},
+                    post_only_order_types=post_only_order_types,
+                )
+                resolved_contexts.append(execution_context)
                 readiness_entries.append(
                     {
                         "symbol": symbol or None,
@@ -688,6 +790,27 @@ class BotConfigService:
                         "accounting_mode": profile.accounting_mode,
                         "margin_calc_type": profile.margin_calc_type,
                         "profile": profile.to_dict() if hasattr(profile, "to_dict") else {"instrument_type": instrument_type or None},
+                        "resolved_execution_context": execution_context.to_dict(),
+                        "resolved_execution_context_hash": execution_context.context_hash,
+                        "instrument_execution_contract_hash": execution_context.instrument.contract_hash,
+                        "venue_execution_profile_id": execution_context.venue.profile_id,
+                        "venue_execution_profile_version": execution_context.venue.version,
+                        "venue_execution_profile_hash": execution_context.venue.profile_hash,
+                        "fee_schedule_id": execution_context.fee_schedule.schedule_id,
+                        "fee_schedule_version": execution_context.fee_schedule.version,
+                        "fee_schedule_hash": execution_context.fee_schedule.schedule_hash,
+                        "execution_model_artifact_hash": execution_context.model.artifact_hash,
+                        "execution_book_tape_id": book_tape.tape_id if book_tape is not None else None,
+                        "execution_book_tape_hash": book_tape.tape_hash if book_tape is not None else None,
+                        "execution_book_replay_fingerprint": (
+                            book_tape.replay_fingerprint if book_tape is not None else None
+                        ),
+                        "passive_queue_policy_hash": (
+                            passive_queue_policy.policy_hash
+                            if passive_queue_policy is not None
+                            else None
+                        ),
+                        "order_policy_conformance": policy_conformance,
                     }
                 )
             except ValueError as exc:
@@ -700,6 +823,9 @@ class BotConfigService:
 
         if errors:
             raise ValueError("Bot startup preflight failed: " + " | ".join(errors))
+        context_bundle = build_execution_context_bundle(resolved_contexts)
+        if execution_book_bundle is not None and len(execution_book_bundle.tapes) != len(resolved_contexts):
+            raise ValueError("execution_book_tape_bundle contains unbound tapes")
 
         return {
             "strategy_id": strategy_id,
@@ -708,12 +834,30 @@ class BotConfigService:
             "symbols": symbols,
             "run_strategy_snapshot": dict(getattr(strategy, "run_strategy_snapshot", {}) or {}),
             "effective_strategy_config": dict(getattr(strategy, "effective_strategy_config", {}) or {}),
+            "resolved_execution_context_bundle": context_bundle.to_dict(),
+            "execution_book_tape_bundle": (
+                execution_book_bundle.to_dict() if execution_book_bundle is not None else None
+            ),
+            "passive_queue_policy": (
+                passive_queue_policy.to_dict() if passive_queue_policy is not None else None
+            ),
             "runtime_readiness": {
                 "datasource": strategy.datasource,
                 "exchange": strategy.exchange,
                 "timeframe": strategy.timeframe,
                 "symbols": symbols,
                 "profiles": readiness_entries,
+                "resolved_execution_context_bundle": context_bundle.to_dict(),
+                "execution_book_tape_bundle_hash": (
+                    execution_book_bundle.bundle_hash
+                    if execution_book_bundle is not None
+                    else None
+                ),
+                "passive_queue_policy_hash": (
+                    passive_queue_policy.policy_hash
+                    if passive_queue_policy is not None
+                    else None
+                ),
             },
         }
 

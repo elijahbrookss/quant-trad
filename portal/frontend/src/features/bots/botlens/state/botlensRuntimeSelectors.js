@@ -1,6 +1,7 @@
 import {
   getSelectedSymbolSlices,
   mergeCanonicalCandles,
+  mergeCanonicalTrades,
   normalizeSeriesKey,
 } from '../../../../components/bots/botlensProjection.js'
 import { getBotLensProjectionStore } from './botlensRuntimeState.js'
@@ -50,6 +51,12 @@ export function selectSelectedSymbolChartCandles(state) {
   return mergeCanonicalCandles(history?.candles || [], baseSlices?.candles || [], provisional)
 }
 
+export function selectSelectedSymbolChartTrades(state) {
+  const baseSlices = selectSelectedSymbolBaseSlices(state)
+  const history = selectSelectedSymbolChartHistory(state)
+  return mergeCanonicalTrades(history?.trades || [], baseSlices?.recentTrades || [])
+}
+
 export function selectSymbolOptions(state) {
   return Object.values(state?.runState?.symbolIndex || {}).sort((left, right) => {
     const leftLabel = String(left?.display_label || left?.symbol_key || '')
@@ -71,7 +78,15 @@ export function selectWarningItems(state) {
 }
 
 export function selectSelectedSymbolOverlays(state) {
-  return selectSelectedSymbolBaseSlices(state)?.overlays || []
+  const history = selectSelectedSymbolChartHistory(state)
+  const historyOverlays = Array.isArray(history?.overlays) ? history.overlays : []
+  const lifecycle = state?.runState?.lifecycle || {}
+  const runLive = lifecycle?.run_live === true
+    || ['live', 'running'].includes(String(lifecycle?.phase || lifecycle?.status || '').toLowerCase())
+  if (!runLive && historyOverlays.length) {
+    return historyOverlays
+  }
+  return selectSelectedSymbolBaseSlices(state)?.overlays || historyOverlays
 }
 
 export function selectSelectedSymbolRecentTrades(state) {

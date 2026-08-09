@@ -31,3 +31,19 @@ scrape_configs:
         regex: __meta_docker_container_label_(.+)
       - action: labeldrop
         regex: __meta_docker_container_(id|image|name)
+
+  - job_name: host-capacity
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: quanttrad
+          service: host-capacity
+          compose_service: host-capacity
+          __path__: /var/log/quanttrad-host-capacity/host-capacity-*.ndjson
+    pipeline_stages:
+      - json:
+          expressions:
+            observed_at: observed_at
+      - timestamp:
+          source: observed_at
+          format: RFC3339Nano

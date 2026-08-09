@@ -88,9 +88,15 @@ def _source_run_updated_at(payload: Optional[Mapping[str, Any]]) -> Optional[dat
     return _parse_optional_timestamp(payload.get("run_updated_at"))
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
 def _input_fingerprint_status_payload(
     *,
-    run: BotRunRecord,
+    run: Any,
     event_count: int,
     event_high_water_run_seq: int,
     event_high_water_id: int,
@@ -98,9 +104,10 @@ def _input_fingerprint_status_payload(
     trade_count: int,
     trade_updated_at: Any,
 ) -> Dict[str, Any]:
+    raw_config_snapshot = _row_value(run, "config_snapshot")
     config_snapshot = (
-        dict(run.config_snapshot)
-        if isinstance(run.config_snapshot, Mapping)
+        dict(raw_config_snapshot)
+        if isinstance(raw_config_snapshot, Mapping)
         else {}
     )
     dataset_binding = (
@@ -110,24 +117,24 @@ def _input_fingerprint_status_payload(
     )
     payload = {
         "schema_version": REPORT_INPUT_FINGERPRINT_SCHEMA_VERSION,
-        "run_id": str(run.run_id or ""),
-        "bot_id": str(run.bot_id or ""),
-        "status": str(run.status or ""),
-        "run_type": str(run.run_type or ""),
-        "started_at": _dt_iso(run.started_at),
-        "ended_at": _dt_iso(run.ended_at),
-        "run_updated_at": _dt_iso(run.updated_at),
-        "config_hash": str(run.config_hash or ""),
-        "material_config_hash": str(run.material_config_hash or ""),
-        "dataset_id": str(dataset_binding.get("dataset_id") or ""),
-        "dataset_hash": str(dataset_binding.get("dataset_hash") or ""),
-        "strategy_hash": str(run.strategy_hash or ""),
-        "data_snapshot_hash": str(run.data_snapshot_hash or ""),
-        "runtime_contract_version": str(run.runtime_contract_version or ""),
-        "runtime_source_revision": str(run.runtime_source_revision or ""),
-        "runtime_image": str(run.runtime_image or ""),
-        "storage_schema_version": str(run.storage_schema_version or ""),
-        "summary_hash": _hash_payload(run.summary or {}),
+        "run_id": str(_row_value(run, "run_id") or ""),
+        "bot_id": str(_row_value(run, "bot_id") or ""),
+        "status": str(_row_value(run, "status") or ""),
+        "run_type": str(_row_value(run, "run_type") or ""),
+        "started_at": _dt_iso(_row_value(run, "started_at")),
+        "ended_at": _dt_iso(_row_value(run, "ended_at")),
+        "run_updated_at": _dt_iso(_row_value(run, "updated_at")),
+        "config_hash": str(_row_value(run, "config_hash") or ""),
+        "material_config_hash": str(_row_value(run, "material_config_hash") or ""),
+        "dataset_id": str(_row_value(run, "dataset_id") or dataset_binding.get("dataset_id") or ""),
+        "dataset_hash": str(_row_value(run, "dataset_hash") or dataset_binding.get("dataset_hash") or ""),
+        "strategy_hash": str(_row_value(run, "strategy_hash") or ""),
+        "data_snapshot_hash": str(_row_value(run, "data_snapshot_hash") or ""),
+        "runtime_contract_version": str(_row_value(run, "runtime_contract_version") or ""),
+        "runtime_source_revision": str(_row_value(run, "runtime_source_revision") or ""),
+        "runtime_image": str(_row_value(run, "runtime_image") or ""),
+        "storage_schema_version": str(_row_value(run, "storage_schema_version") or ""),
+        "summary_hash": _hash_payload(_row_value(run, "summary") or {}),
         "event_count": int(event_count or 0),
         "event_high_water_run_seq": int(event_high_water_run_seq or 0),
         "event_high_water_id": int(event_high_water_id or 0),
@@ -142,12 +149,30 @@ def _fingerprints_for_run_ids(session: Any, run_ids: Sequence[str]) -> Dict[str,
     wanted = [str(run_id or "").strip() for run_id in dict.fromkeys(run_ids) if str(run_id or "").strip()]
     if not wanted:
         return {}
-    run_rows = (
-        session.execute(select(BotRunRecord).where(BotRunRecord.run_id.in_(wanted)))
-        .scalars()
-        .all()
-    )
-    runs_by_id = {str(row.run_id): row for row in run_rows}
+    config = BotRunRecord.config_snapshot
+    run_rows = session.execute(
+        select(
+            BotRunRecord.run_id,
+            BotRunRecord.bot_id,
+            BotRunRecord.status,
+            BotRunRecord.run_type,
+            BotRunRecord.started_at,
+            BotRunRecord.ended_at,
+            BotRunRecord.updated_at,
+            BotRunRecord.config_hash,
+            BotRunRecord.material_config_hash,
+            BotRunRecord.strategy_hash,
+            BotRunRecord.data_snapshot_hash,
+            BotRunRecord.runtime_contract_version,
+            BotRunRecord.runtime_source_revision,
+            BotRunRecord.runtime_image,
+            BotRunRecord.storage_schema_version,
+            BotRunRecord.summary,
+            config["dataset_binding"]["dataset_id"].as_string().label("dataset_id"),
+            config["dataset_binding"]["dataset_hash"].as_string().label("dataset_hash"),
+        ).where(BotRunRecord.run_id.in_(wanted))
+    ).mappings().all()
+    runs_by_id = {str(row["run_id"]): row for row in run_rows}
     event_rows = session.execute(
         select(
             BotRunEventRecord.run_id,
@@ -203,9 +228,119 @@ def _fingerprints_for_run_ids(session: Any, run_ids: Sequence[str]) -> Dict[str,
             "source_event_count": int(payload["event_count"]),
             "source_event_high_water_run_seq": int(payload["event_high_water_run_seq"]),
             "source_trade_count": int(payload["trade_count"]),
-            "source_run_updated_at": run.updated_at,
+            "source_run_updated_at": _row_value(run, "updated_at"),
         }
     return result
+
+
+def _status_projection_query(run_ids: Sequence[str]):
+    wanted = [str(run_id or "").strip() for run_id in dict.fromkeys(run_ids) if str(run_id or "").strip()]
+    artifact = ReportMaterializationRecord.artifact
+    return (
+        select(
+            ReportMaterializationRecord.run_id,
+            ReportMaterializationRecord.status,
+            ReportMaterializationRecord.contract_version,
+            ReportMaterializationRecord.report_schema_version,
+            ReportMaterializationRecord.dataset_schema_version,
+            ReportMaterializationRecord.builder_source_revision,
+            ReportMaterializationRecord.storage_schema_version,
+            ReportMaterializationRecord.artifact_id,
+            ReportMaterializationRecord.cache_key,
+            ReportMaterializationRecord.input_fingerprint,
+            ReportMaterializationRecord.input_fingerprint_payload,
+            ReportMaterializationRecord.source_event_count,
+            ReportMaterializationRecord.source_event_high_water_run_seq,
+            ReportMaterializationRecord.source_trade_count,
+            ReportMaterializationRecord.source_run_updated_at,
+            ReportMaterializationRecord.stale_reason,
+            ReportMaterializationRecord.error,
+            ReportMaterializationRecord.started_at,
+            ReportMaterializationRecord.built_at,
+            ReportMaterializationRecord.duration_ms,
+            (func.jsonb_typeof(artifact) == "object").label("artifact_valid"),
+            artifact["readiness"]["dataset_ready"].as_boolean().label("artifact_dataset_ready"),
+            artifact["readiness"]["results_ready"].as_boolean().label("artifact_results_ready"),
+            artifact["readiness"]["safe_to_compare"].as_boolean().label("artifact_safe_to_compare"),
+            artifact["readiness"]["reason"].as_string().label("artifact_readiness_reason"),
+            artifact["readiness"]["dataset_status"].as_string().label("artifact_dataset_status"),
+            artifact["readiness"]["results_status"].as_string().label("artifact_results_status"),
+            artifact["readiness"]["comparison_status"].as_string().label("artifact_comparison_status"),
+        )
+        .where(ReportMaterializationRecord.run_id.in_(wanted))
+    )
+
+
+def _status_from_projection(
+    row: Mapping[str, Any],
+    *,
+    contract_version: str,
+    input_fingerprint: Optional[str] = None,
+    freshness_verified: bool,
+) -> Dict[str, Any]:
+    run_id = str(row.get("run_id") or "")
+    raw_status = str(row.get("status") or REPORT_STATUS_NOT_STARTED)
+    artifact_valid = bool(row.get("artifact_valid"))
+    effective_status = (
+        REPORT_STATUS_STALE
+        if raw_status == REPORT_STATUS_READY and not artifact_valid
+        else raw_status
+    )
+    status = {
+        "run_id": run_id,
+        "status": effective_status,
+        "contract_version": row.get("contract_version"),
+        "report_schema_version": row.get("report_schema_version"),
+        "dataset_schema_version": row.get("dataset_schema_version"),
+        "builder_source_revision": row.get("builder_source_revision"),
+        "storage_schema_version": row.get("storage_schema_version"),
+        "artifact_id": row.get("artifact_id"),
+        "artifact_path": None,
+        "built_at": _dt_iso(row.get("built_at")),
+        "started_at": _dt_iso(row.get("started_at")),
+        "duration_ms": row.get("duration_ms"),
+        "error": row.get("error"),
+        "stale_reason": row.get("stale_reason") or (
+            "missing_artifact" if effective_status == REPORT_STATUS_STALE and not artifact_valid else None
+        ),
+        "cache_key": row.get("cache_key"),
+        "input_fingerprint": row.get("input_fingerprint"),
+        "input_fingerprint_payload": dict(row.get("input_fingerprint_payload") or {}),
+        "source_event_count": int(row.get("source_event_count") or 0),
+        "source_event_high_water_run_seq": int(row.get("source_event_high_water_run_seq") or 0),
+        "source_trade_count": int(row.get("source_trade_count") or 0),
+        "source_run_updated_at": _dt_iso(row.get("source_run_updated_at")),
+        "can_view": effective_status == REPORT_STATUS_READY and artifact_valid,
+        "can_build": effective_status in {REPORT_STATUS_NOT_STARTED, REPORT_STATUS_FAILED, REPORT_STATUS_STALE},
+        "can_retry": effective_status == REPORT_STATUS_FAILED,
+        "verification": "fingerprint_verified" if freshness_verified else "stored_observation",
+        "freshness_verified": bool(freshness_verified),
+        "artifact_readiness": {
+            "dataset_ready": bool(row.get("artifact_dataset_ready")),
+            "results_ready": bool(row.get("artifact_results_ready")),
+            "safe_to_compare": bool(row.get("artifact_safe_to_compare")),
+            "reason": row.get("artifact_readiness_reason"),
+            "dataset_status": row.get("artifact_dataset_status"),
+            "results_status": row.get("artifact_results_status"),
+            "comparison_status": row.get("artifact_comparison_status"),
+        },
+    }
+    if row.get("contract_version") != contract_version:
+        return _mark_status_stale(status, "contract_version_changed")
+    if row.get("report_schema_version") != REPORT_SCHEMA_VERSION:
+        return _mark_status_stale(status, "report_schema_version_changed")
+    if row.get("dataset_schema_version") != REPORT_DATASET_SCHEMA_VERSION:
+        return _mark_status_stale(status, "dataset_schema_version_changed")
+    if raw_status != REPORT_STATUS_NOT_STARTED and row.get("builder_source_revision") != source_revision():
+        return _mark_status_stale(status, "builder_source_revision_changed")
+    if raw_status == REPORT_STATUS_READY:
+        expected = str(input_fingerprint or "").strip()
+        actual = str(row.get("input_fingerprint") or "").strip()
+        if not actual:
+            return _mark_status_stale(status, "input_fingerprint_missing")
+        if expected and actual != expected:
+            return _mark_status_stale(status, "input_fingerprint_changed")
+    return status
 
 
 def compute_report_input_fingerprint(run_id: str) -> Dict[str, Any]:
@@ -307,22 +442,56 @@ def list_report_materialization_statuses(
         raise RuntimeError("Database not available for report materialization status")
     with db.session() as session:
         fingerprints = _fingerprints_for_run_ids(session, wanted)
-        rows = (
-            session.execute(select(ReportMaterializationRecord).where(ReportMaterializationRecord.run_id.in_(wanted)))
-            .scalars()
-            .all()
-        )
+        rows = session.execute(_status_projection_query(wanted)).mappings().all()
     statuses = {run_id: _empty_status(run_id, contract_version=contract_version) for run_id in wanted}
-    for record in rows:
-        run_id = str(record.run_id or "")
+    for row in rows:
+        run_id = str(row.get("run_id") or "")
         fingerprint = str((fingerprints.get(run_id) or {}).get("input_fingerprint") or "").strip()
-        statuses[run_id] = _record_status(
-            record,
-            run_id,
+        statuses[run_id] = _status_from_projection(
+            row,
             contract_version=contract_version,
             input_fingerprint=fingerprint,
+            freshness_verified=True,
         )
     return statuses
+
+
+def list_report_materialization_observations(
+    run_ids: list[str],
+    *,
+    contract_version: str = REPORT_CONTRACT_VERSION,
+) -> Dict[str, Dict[str, Any]]:
+    """Return stored catalog state without rescanning run event/trade ledgers.
+
+    This is intentionally an observed hot-read contract. Exact artifact reads
+    and report-detail readiness continue to recompute the input fingerprint.
+    """
+
+    normalized = [str(run_id or "").strip() for run_id in run_ids]
+    wanted = [run_id for run_id in dict.fromkeys(normalized) if run_id]
+    if not wanted:
+        return {}
+    if not db.available:
+        raise RuntimeError("Database not available for report materialization status")
+    with db.session() as session:
+        rows = session.execute(_status_projection_query(wanted)).mappings().all()
+    observations = {
+        run_id: {
+            **_empty_status(run_id, contract_version=contract_version),
+            "verification": "stored_observation",
+            "freshness_verified": False,
+        }
+        for run_id in wanted
+    }
+    for row in rows:
+        run_id = str(row.get("run_id") or "")
+        observations[run_id] = _status_from_projection(
+            row,
+            contract_version=contract_version,
+            input_fingerprint=str(row.get("input_fingerprint") or "").strip(),
+            freshness_verified=False,
+        )
+    return observations
 
 
 def get_materialized_run_report(
@@ -593,6 +762,7 @@ __all__ = [
     "get_materialized_run_report",
     "get_report_materialization_status",
     "list_report_materialization_statuses",
+    "list_report_materialization_observations",
     "mark_report_materialization_failed",
     "reset_report_materialization",
     "store_materialized_run_report",

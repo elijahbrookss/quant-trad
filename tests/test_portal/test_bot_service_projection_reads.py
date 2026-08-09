@@ -34,6 +34,7 @@ class _FakeConfigService:
 
 class _FakeStorage:
     def __init__(self) -> None:
+        self.botlens_evidence = {}
         self.run = {
             "run_id": "run-1",
             "bot_id": "bot-1",
@@ -118,6 +119,19 @@ class _FakeStorage:
     def list_bot_runs(self, bot_id: str):
         return [dict(self.run)] if str(bot_id) == "bot-1" else []
 
+    def list_bot_runs_page(
+        self, *, limit=100, before_sort_at=None, before_run_id=None
+    ):
+        _ = before_sort_at, before_run_id
+        return [dict(self.run)][:limit]
+
+    def list_botlens_run_evidence(self, run_ids):
+        return {
+            run_id: dict(self.botlens_evidence[run_id])
+            for run_id in run_ids
+            if run_id in self.botlens_evidence
+        }
+
 
 class _FakeTelemetryHub:
     def __init__(self, snapshots: dict[str, object] | None = None) -> None:
@@ -139,6 +153,79 @@ class _FakeComposition:
             watchdog_status=lambda: {},
         )
         self.watchdog = SimpleNamespace(set_orphan_callback=lambda callback: None)
+
+
+def test_list_bot_runs_inventory_is_bounded_and_does_not_replay(monkeypatch):
+    storage = _FakeStorage()
+    storage.run["config_snapshot"] = {
+        "dataset_binding": {
+            "dataset_id": "dataset-1",
+            "dataset_hash": "hash-1",
+            "raw_rows": ["must-not-leak"] * 100,
+        },
+        "runtime_payload": {"large": ["must-not-leak"] * 100},
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.list_bot_runs_inventory(limit=25)
+
+    assert result["schema_version"] == "bot_run_inventory.v1"
+    assert result["runs"][0]["run_id"] == "run-1"
+    assert result["runs"][0]["is_active"] is True
+    assert result["runs"][0]["botlens_available"] is False
+    assert result["runs"][0]["config_snapshot"] == {
+        "dataset_binding": {
+            "dataset_id": "dataset-1",
+            "dataset_hash": "hash-1",
+        }
+    }
+    assert result["next_cursor"] is None
+    assert result["observed_at"]
+
+
+def test_active_run_inventory_keeps_sibling_runs_of_one_definition_distinct(monkeypatch):
+    storage = _FakeStorage()
+    runs = {
+        "run-1": {
+            **storage.run,
+            "run_id": "run-1",
+            "created_at": "2026-04-09T04:21:37Z",
+            "started_at": "2026-04-09T04:21:38Z",
+        },
+        "run-2": {
+            **storage.run,
+            "run_id": "run-2",
+            "created_at": "2026-04-09T04:22:37Z",
+            "started_at": "2026-04-09T04:22:38Z",
+        },
+    }
+    lifecycles = {
+        run_id: {**storage.lifecycle, "run_id": run_id}
+        for run_id in runs
+    }
+    leases = [
+        {**storage.lease, "run_id": run_id}
+        for run_id in runs
+    ]
+    storage.list_active_bot_run_leases = lambda: list(leases)
+    storage.list_bot_runs_by_ids = lambda run_ids: {
+        run_id: dict(runs[run_id]) for run_id in run_ids
+    }
+    storage.list_bot_run_lifecycles = lambda run_ids: {
+        run_id: dict(lifecycles[run_id]) for run_id in run_ids
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.list_active_run_instances()
+
+    assert [row["run_id"] for row in result] == ["run-2", "run-1"]
+    assert {row["bot_id"] for row in result} == {"bot-1"}
+    assert all(row["is_active"] is True for row in result)
+    assert all(row["liveness"]["state"] == "awaiting_telemetry" for row in result)
 
 
 def test_list_bot_runs_for_bot_reports_snapshot_unavailable_without_replay(monkeypatch):
@@ -171,8 +258,58 @@ def test_list_bot_runs_for_bot_reports_snapshot_unavailable_without_replay(monke
 
     assert result["active_run_id"] == "run-1"
     assert result["runs"][0]["botlens_available"] is False
-    assert result["runs"][0]["botlens_reason"] == "snapshot_unavailable"
+    assert result["runs"][0]["botlens_reason"] == "durable_evidence_unavailable"
     assert result["runs"][0]["seq"] is None
+
+
+def test_run_inventory_exposes_durable_botlens_evidence_without_replay(monkeypatch):
+    storage = _FakeStorage()
+    storage.run["status"] = "completed"
+    storage.lifecycle.update({"phase": "completed", "status": "completed"})
+    storage.botlens_evidence["run-1"] = {
+        "source": "durable_event_ledger",
+        "event_count": 3254,
+        "max_seq": 3254,
+        "max_row_id": 9001,
+        "known_at": "2026-04-09T04:21:43Z",
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.list_bot_runs_inventory(limit=25)
+
+    run = result["runs"][0]
+    assert run["botlens_available"] is True
+    assert run["botlens_source"] == "durable_event_ledger"
+    assert run["seq"] == 3254
+    assert run["known_at"] == "2026-04-09T04:21:43Z"
+
+
+def test_run_inspection_exposes_durable_botlens_evidence_without_hot_snapshot(monkeypatch):
+    storage = _FakeStorage()
+    storage.botlens_evidence["run-1"] = {
+        "source": "durable_event_ledger",
+        "event_count": 81,
+        "max_seq": 79,
+        "max_row_id": 120,
+        "known_at": "2026-04-09T04:21:43Z",
+    }
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "_telemetry_hub", lambda: _FakeTelemetryHub())
+
+    result = bot_service.get_bot_run_inspection("run-1")
+
+    projection = result["run"]["projection"]
+    assert projection == {
+        "available": True,
+        "reason": None,
+        "source": "durable_event_ledger",
+        "known_at": "2026-04-09T04:21:43Z",
+        "seq": 79,
+        "event_count": 81,
+    }
 
 
 def test_list_bot_runs_for_bot_keeps_persisted_terminal_status_when_snapshot_is_stale(monkeypatch):
@@ -201,6 +338,63 @@ def test_list_bot_runs_for_bot_keeps_persisted_terminal_status_when_snapshot_is_
 
     assert result["runs"][0]["status"] == "completed"
     assert result["runs"][0]["runtime_status"] == "completed"
+
+
+def test_get_bot_run_status_uses_fresh_hot_checkpoint_and_progress(monkeypatch):
+    storage = _FakeStorage()
+    snapshot = SimpleNamespace(
+        health=SimpleNamespace(
+            to_dict=lambda: {
+                "status": "running",
+                "progress": 0.72,
+                "last_event_at": "2026-04-09T05:30:00Z",
+            }
+        ),
+    )
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(
+        bot_service,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub({"run-1": snapshot}),
+    )
+
+    result = bot_service.get_bot_run_status("bot-1", "run-1")
+
+    assert result["status"] == "running"
+    assert result["checkpoint_at"] == "2026-04-09T05:30:00Z"
+    assert result["updated_at"] == "2026-04-09T05:30:00Z"
+    assert result["progress"] == pytest.approx(0.72)
+    assert result["progress_unit"] == "fraction"
+
+
+def test_get_bot_run_status_prefers_persisted_terminal_truth_over_stale_lifecycle(monkeypatch):
+    storage = _FakeStorage()
+    storage.run["status"] = "completed"
+    storage.run["ended_at"] = "2026-04-09T06:00:00Z"
+    snapshot = SimpleNamespace(
+        health=SimpleNamespace(
+            to_dict=lambda: {
+                "status": "running",
+                "progress": 0.99,
+                "last_event_at": "2026-04-09T05:59:59Z",
+            }
+        ),
+    )
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=storage)
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(
+        bot_service,
+        "_telemetry_hub",
+        lambda: _FakeTelemetryHub({"run-1": snapshot}),
+    )
+
+    result = bot_service.get_bot_run_status("bot-1", "run-1")
+
+    assert result["status"] == "completed"
+    assert result["terminal"] is True
+    assert result["completed"] is True
+    assert result["active"] is False
 
 
 def test_runtime_capacity_marks_estimate_incomplete_when_snapshot_missing(monkeypatch):
@@ -339,3 +533,60 @@ def test_list_bots_uses_batched_projection_reads(monkeypatch):
     assert storage.batch_lifecycle_calls == 1
     assert storage.batch_status_calls == 1
     assert storage.single_latest_runtime_calls == 0
+
+
+def test_list_bots_hot_read_does_not_inspect_docker(monkeypatch):
+    bots = [
+        {"id": "bot-1", "name": "Bot 1"},
+        {"id": "bot-2", "name": "Bot 2"},
+    ]
+    inputs = {
+        bot["id"]: (
+            {"run_id": f"run-{bot['id'][-1]}", "status": "running"},
+            {
+                "run_id": f"run-{bot['id'][-1]}",
+                "phase": "live",
+                "status": "running",
+                "metadata": {},
+            },
+            None,
+            None,
+        )
+        for bot in bots
+    }
+    def _inspect(bot_id: str):
+        raise AssertionError(f"hot fleet read inspected Docker for {bot_id}")
+
+    monkeypatch.setattr(bot_service, "_load_projection_inputs_batch", lambda _bots: inputs)
+    monkeypatch.setattr(
+        "portal.backend.service.bots.bot_service.DockerBotRunner.inspect_bot_container",
+        _inspect,
+    )
+
+    result = bot_service._project_bots(bots, inspect_container=False)
+
+    assert [row["id"] for row in result] == ["bot-1", "bot-2"]
+    assert [row["lifecycle"]["container"]["id"] for row in result] == [
+        None,
+        None,
+    ]
+
+
+def test_bots_stream_uses_batched_facade_snapshot(monkeypatch):
+    observed = {}
+
+    class _StreamManager:
+        def subscribe_all(self, snapshot_fn):
+            observed["snapshot_fn"] = snapshot_fn
+            initial = {"type": "snapshot", "bots": snapshot_fn()}
+            return (lambda: None), SimpleNamespace(), initial
+
+    composition = _FakeComposition(config_service=_FakeConfigService(), storage=_FakeStorage())
+    composition.stream_manager = _StreamManager()
+    monkeypatch.setattr(bot_service, "_composition", lambda: composition)
+    monkeypatch.setattr(bot_service, "list_bots", lambda: [{"id": "batched-bot"}])
+
+    _release, _channel, initial = bot_service.bots_stream()
+
+    assert observed["snapshot_fn"] is bot_service.list_bots
+    assert initial["bots"] == [{"id": "batched-bot"}]

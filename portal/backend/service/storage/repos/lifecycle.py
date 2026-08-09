@@ -445,6 +445,15 @@ def get_bot_run_lifecycle(run_id: str) -> Optional[Dict[str, Any]]:
     return _latest_canonical_lifecycle_row(run_id)
 
 
+def list_bot_run_lifecycles(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Return latest canonical lifecycle rows keyed by exact run identity."""
+
+    normalized = [str(run_id or "").strip() for run_id in run_ids]
+    return _latest_canonical_lifecycle_rows(
+        [run_id for run_id in dict.fromkeys(normalized) if run_id]
+    )
+
+
 def get_latest_bot_run_lifecycle(bot_id: str) -> Optional[Dict[str, Any]]:
     normalized_bot_id = str(bot_id or "").strip()
     if not normalized_bot_id or not db.available:
@@ -504,6 +513,7 @@ def list_bot_run_lifecycle_events(run_id: str) -> List[Dict[str, Any]]:
 __all__ = [
     "get_bot_run_lifecycle",
     "get_latest_bot_run_lifecycle",
+    "list_bot_run_lifecycles",
     "list_bot_run_lifecycle_events",
     "list_latest_bot_run_lifecycles",
     "rebuild_bot_run_lifecycle_summary",

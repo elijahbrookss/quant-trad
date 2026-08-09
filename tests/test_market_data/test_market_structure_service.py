@@ -3,12 +3,29 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
+import portal.backend.service.market.market_structure_service as market_structure_module
+import pytest
 from data_providers.streams.contracts import ProviderRawMessage
-from market_data.order_book import BookLifecycle
-from market_data.structure import MarketTradeRecord
-from portal.backend.service.market.market_structure_service import MarketStructureService
+from market_data.fact_registry import get_fact_contract
+from market_data.order_book import (
+    BookLifecycle,
+    BookSide,
+    BookSourcePosition,
+    L2EventFact,
+    L2EventType,
+    L2Mutation,
+    L2ProductContract,
+    Level2BookReconstructor,
+)
+from market_data.structure import MarketTradeRecord, ProductContract, ProviderSizeUnit
+from market_data.market_state import DERIVATIVE_STATE_FACT_TYPE
+from portal.backend.service.market.market_structure_service import (
+    MarketStructureService,
+    _build_execution_book_tape_from_replay,
+)
 from portal.backend.service.storage.repos.market_structure import (
     AggregateIngestionOutcome,
     ArchiveCommitResult,
@@ -17,6 +34,97 @@ from portal.backend.service.storage.repos.market_structure import (
     StreamClaim,
     TradeIngestionOutcome,
 )
+
+
+class _SafetyRepository:
+    def __init__(self) -> None:
+        self.persisted = None
+
+    def record_safety_event(self, **kwargs):
+        self.persisted = kwargs
+        return dict(kwargs)
+
+    def list_safety_events(self, **_kwargs):
+        return []
+
+
+class _EnrollmentMarketDataRepository:
+    def __init__(self) -> None:
+        self._series_ids: dict[tuple[str, str, int | None, str], int] = {}
+
+    def register_source(self, _identity, *, lineage) -> int:
+        assert lineage["manifest_hash"]
+        return 1
+
+    def register_series(
+        self,
+        *,
+        instrument_id: str,
+        fact_type: str,
+        timeframe_seconds: int | None,
+        contract_version: str,
+    ) -> int:
+        key = (instrument_id, fact_type, timeframe_seconds, contract_version)
+        return self._series_ids.setdefault(key, len(self._series_ids) + 10)
+
+
+class _EnrollmentRepository:
+    def __init__(self) -> None:
+        self.definition_calls: list[dict] = []
+
+    def register_product_definition(self, **kwargs):
+        return kwargs
+
+    def upsert_stream_definition(self, **kwargs):
+        self.definition_calls.append(kwargs)
+        return kwargs
+
+
+def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    products = {
+        "b2deb0a0-f292-408a-876d-3dadd8e3819b": "BIP-20DEC30-CDE",
+        "44226144-fb38-4566-92c4-580734d76d3c": "ETP-20DEC30-CDE",
+        "bead556e-22e2-4ac0-8ee0-0d8c5310e9a0": "SLP-20DEC30-CDE",
+    }
+    market_data_repository = _EnrollmentMarketDataRepository()
+    repository = _EnrollmentRepository()
+    monkeypatch.setattr(
+        market_structure_module,
+        "market_data_repo",
+        market_data_repository,
+    )
+    monkeypatch.setattr(
+        market_structure_module,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "symbol": products[instrument_id],
+            "metadata": {
+                "instrument_fields": {
+                    "tick_size": "0.01",
+                    "qty_step": "0.01",
+                }
+            },
+        },
+    )
+    service = MarketStructureService(repository=repository)
+
+    first = service.apply_stream_enrollment_manifest()
+    second = service.apply_stream_enrollment_manifest()
+
+    assert first["manifest_hash"] == second["manifest_hash"]
+    assert len(repository.definition_calls) == 6
+    assert repository.definition_calls[:3] == repository.definition_calls[3:]
+    for call in repository.definition_calls:
+        runtime = call["config"]["collector_runtime"]
+        assert runtime == {
+            "schema_version": "market.collector_runtime.v2",
+            "mode": "continuous",
+            "stop_at": None,
+            "updated_by": "stream_enrollment_manifest",
+            "reason": "declarative_enrollment",
+        }
 
 
 class _FakeStream:
@@ -151,6 +259,7 @@ class _FakeRepository:
             max_spool_bytes=10 * 1024 * 1024,
             max_segment_bytes=1024 * 1024,
             config={
+                "product_definition_version_id": "coinbase.BTC-USD.product_contract.v1",
                 "aggregate_series_ids": {"1": 11, "60": 12},
                 "flow_feature_series_ids": {"1": 13, "60": 14},
             },
@@ -159,6 +268,15 @@ class _FakeRepository:
             lease_generation=1,
             lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
             session_id="test-session",
+        )
+
+    def get_product_contract(self, _definition_version_id: str) -> ProductContract:
+        return ProductContract(
+            provider_product_id="BTC-USD",
+            provider_size_unit="base",
+            base_currency="BTC",
+            quote_currency="USD",
+            product_definition_version_id="coinbase.BTC-USD.product_contract.v1",
         )
 
     def append_session_event(self, _claim, *, event_ordinal, **_kwargs) -> str:
@@ -428,6 +546,89 @@ def test_bounded_l2_reports_terminal_invalid_state_without_false_clean_close(
     assert repository.released is True
 
 
+def test_replay_projection_builds_causal_hash_verified_tape_and_closes_gaps() -> None:
+    base = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+    contract = L2ProductContract(
+        provider_product_id="BTC-USD",
+        product_definition_version_id="btc-product.v1",
+        provider_size_unit=ProviderSizeUnit.BASE,
+        price_increment=Decimal("1"),
+        quantity_increment=Decimal("0.1"),
+    )
+
+    def event(
+        event_type: L2EventType,
+        ordinal: int,
+        updates: list[tuple[BookSide, str, str]],
+    ) -> L2EventFact:
+        observed = base + timedelta(seconds=ordinal)
+        return L2EventFact(
+            event_type=event_type,
+            position=BookSourcePosition(
+                definition_id="definition-1",
+                session_id="session-1",
+                connection_epoch=0,
+                provider_product_id="BTC-USD",
+                provider_sequence_num=ordinal,
+                receive_ordinal=ordinal,
+                event_ordinal=0,
+            ),
+            product_definition_version_id="btc-product.v1",
+            mutations=tuple(
+                L2Mutation(
+                    mutation_ordinal=index,
+                    side=side,
+                    price=price,
+                    new_quantity=quantity,
+                    provider_event_time=observed,
+                    provider_size_unit=ProviderSizeUnit.BASE,
+                )
+                for index, (side, price, quantity) in enumerate(updates)
+            ),
+            provider_message_time=observed,
+            received_at=observed + timedelta(milliseconds=1),
+            accepted_at=observed + timedelta(milliseconds=2),
+            known_at=observed + timedelta(milliseconds=2),
+            raw_record_id=f"raw-{ordinal}",
+        )
+
+    reducer = Level2BookReconstructor(series_id=20, contract=contract)
+    opened = reducer.process(
+        event(
+            L2EventType.SNAPSHOT,
+            1,
+            [
+                (BookSide.BID, "99", "2"),
+                (BookSide.ASK, "101", "3"),
+            ],
+        )
+    )
+    assert opened.state is not None
+    invalidated = reducer.process(
+        event(
+            L2EventType.UPDATE,
+            2,
+            [(BookSide.BID, "101", "1")],
+        )
+    )
+    assert invalidated.validity_versions
+    tape = _build_execution_book_tape_from_replay(
+        states=[opened.state],
+        closing_validity=invalidated.validity_versions,
+        instrument_id="instrument-btc",
+        replay_fingerprint="f" * 64,
+    )
+
+    assert tape.replay_certified is True
+    assert tape.source_capability == "l2"
+    assert tape.snapshots[0].reconstruction_state_hash == opened.state.state_hash
+    assert tape.validity_closures[0].source_reference.receive_ordinal == 2
+    assert tape.tape_hash == type(tape).from_dict(tape.to_dict()).tape_hash
+    assert tape.select_at(opened.state.known_at).snapshot_hash == tape.snapshots[0].snapshot_hash
+    with pytest.raises(LookupError, match="invalid_at_arrival"):
+        tape.select_at(invalidated.validity_versions[0].known_at)
+
+
 def test_bounded_collector_spools_archives_persists_and_aggregates(
     tmp_path: Path,
 ) -> None:
@@ -454,3 +655,120 @@ def test_bounded_collector_spools_archives_persists_and_aggregates(
     assert repository.coverage is not None
     assert repository.aggregate_count > 0
     assert repository.released is True
+
+
+class _FakeConfigurationRepository:
+    def register_product_definition(self, **_kwargs) -> None:
+        return None
+
+    def upsert_stream_definition(self, **kwargs) -> dict:
+        return {
+            "definition_id": kwargs["definition_id"],
+            "provider_product_id": kwargs["provider_product_id"],
+        }
+
+    def register_instrument_mapping(self, **_kwargs) -> str:
+        return "mapping-1"
+
+
+class _ContractValidatingMarketDataRepository:
+    def __init__(self) -> None:
+        self.next_source_id = 1
+        self.next_series_id = 1
+        self.series_calls: list[dict] = []
+
+    def register_source(self, *_args, **_kwargs) -> int:
+        source_id = self.next_source_id
+        self.next_source_id += 1
+        return source_id
+
+    def register_series(self, **kwargs) -> int:
+        get_fact_contract(kwargs["fact_type"]).validate(
+            contract_version=kwargs["contract_version"],
+            timeframe_seconds=kwargs["timeframe_seconds"],
+        )
+        self.series_calls.append(dict(kwargs))
+        series_id = self.next_series_id
+        self.next_series_id += 1
+        return series_id
+
+
+def test_configure_pair_registers_derivative_state_without_timeframe(
+    monkeypatch,
+) -> None:
+    pair = market_structure_module.MARKET_STRUCTURE_PAIRS["bip_btc"]
+    futures = {
+        "id": "future-instrument",
+        "symbol": pair.futures_product_id,
+        "tick_size": "0.01",
+        "qty_step": "1",
+    }
+    spot = {
+        "id": "spot-instrument",
+        "symbol": pair.spot_product_id,
+        "tick_size": "0.01",
+        "qty_step": "0.00000001",
+    }
+    fake_market_data_repository = _ContractValidatingMarketDataRepository()
+
+    monkeypatch.setattr(
+        market_structure_module,
+        "get_instrument_record",
+        lambda _instrument_id: futures,
+    )
+    monkeypatch.setattr(
+        market_structure_module,
+        "resolve_or_create_instrument",
+        lambda *_args, **_kwargs: (spot, None),
+    )
+    monkeypatch.setattr(
+        market_structure_module,
+        "market_data_repo",
+        fake_market_data_repository,
+    )
+
+    result = MarketStructureService(
+        repository=_FakeConfigurationRepository(),
+    ).configure_pair(pair_id="bip_btc")
+
+    derivative_calls = [
+        call
+        for call in fake_market_data_repository.series_calls
+        if call["fact_type"] == DERIVATIVE_STATE_FACT_TYPE
+    ]
+    assert result["pair_id"] == "bip_btc"
+    assert len(derivative_calls) == 1
+    assert derivative_calls[0]["timeframe_seconds"] is None
+
+
+def test_operator_safety_halt_is_explicit_and_audited() -> None:
+    repository = _SafetyRepository()
+    service = MarketStructureService(repository=repository)
+    result = service.set_safety_halt(
+        request_id="request-a",
+        scope_type="stream",
+        scope_id="definition-a",
+        requested_by="operator-a",
+        reason="operator test",
+        policy_hash="a" * 64,
+        evidence={"ticket": "test"},
+    )
+
+    assert result["event_type"] == "halted"
+    assert repository.persisted["scope_id"] == "definition-a"
+
+
+def test_operator_safety_acknowledgement_is_a_separate_event() -> None:
+    repository = _SafetyRepository()
+    service = MarketStructureService(repository=repository)
+
+    result = service.acknowledge_safety_halt(
+        request_id="request-b",
+        scope_type="fleet",
+        scope_id="coinbase_perpetual_trades",
+        requested_by="operator-a",
+        reason="condition cleared",
+        policy_hash="a" * 64,
+    )
+
+    assert result["event_type"] == "acknowledged"

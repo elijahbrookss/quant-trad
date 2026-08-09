@@ -3,7 +3,7 @@ component: market-structure-phase1-trades
 subsystem: data
 layer: operations
 doc_type: architecture
-status: active
+status: historical
 tags:
   - market-data
   - market-structure
@@ -20,6 +20,8 @@ code_paths:
   - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
   - portal/backend/service/market/market_structure_service.py
+  - portal/backend/service/market/continuous_stream_collector.py
+  - portal/backend/service/market/collector_supervisor.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/controller/market_data.py
@@ -36,10 +38,11 @@ code_paths:
 ## Status And Boundary
 
 Phase 1 is implemented and accepted for bounded BIP/BTC capture and research
-dataset validation. It is not a production collector admission. Every stream
-definition remains disabled and `production_admitted=false`; the implemented
-24-hour capacity proof and explicit storage/cost budget remain mandatory after
-Phase 4.
+dataset validation. The generic continuous trade-stream implementation is now
+available for worker-owned validation and admitted indefinite production, but
+this code status is not itself production admission. The canonical 24-hour
+implemented-path evidence and an authoritative storage/growth budget remain
+mandatory after Phase 4; no definition is admitted merely by configuration.
 
 The implementation uses Coinbase Advanced Trade through the existing provider
 and credential registry. Stream definitions contain no secrets or credential
@@ -50,9 +53,9 @@ BIP/BTC has completed the Phase 1 live implemented-path proof.
 
 ```text
 Advanced Trade WebSocket
-  -> fenced bounded stream session
+  -> supervised fenced stream session
   -> fsynced definition-scoped local spool
-  -> deterministic Parquet/ZSTD archive object
+  -> time/size-rotated deterministic Parquet/ZSTD archive objects
   -> verified object acknowledgement + PostgreSQL manifest/mappings
   -> typed trade revisions + trade coverage intervals
   -> causal 1-second/1-minute flow revisions
@@ -64,6 +67,12 @@ One product owns one WebSocket connection. `market_trades` and `heartbeats`
 share the provider's observed connection sequence. The collector never copies
 credentials and cannot be claimed as a continuous production stream until the
 post-Phase-4 gate changes both its admission and enabled state.
+
+Long-lived acquisition does not wait for session close. It rotates durable
+segments through a bounded asynchronous finalizer while retaining the provider
+socket, reconnects with explicit epochs, and recovers orphaned WAL segments
+before a new session. The short `capture` command remains a diagnostic proof
+surface and does not implement production by looping one-hour captures.
 
 ## Identity, Durability, And Publication
 
@@ -145,10 +154,17 @@ The supported API-backed CLI operations are:
 
 ```bash
 qt data market-structure configure-pair --pair bip_btc --auth-mode authenticated
+qt data market-structure configure-pair --pair etp_eth --auth-mode authenticated
+qt data market-structure configure-pair --pair slp_sol --auth-mode authenticated
 qt data market-structure definitions
 qt data market-structure sessions --definition-id ms_coinbase_btc_usd
 qt data market-structure status ms_coinbase_btc_usd
 qt data market-structure capture ms_coinbase_btc_usd --duration 60
+qt data market-structure continuous-validate ms_coinbase_btc_usd --duration 86400 --requested-by <operator>
+qt data market-structure continuous-evidence ms_coinbase_btc_usd <session_id>
+qt data market-structure continuous-admit ms_coinbase_btc_usd --approved-by <operator> --evidence-json <proof.json> --storage-budget-json <budget.json>
+qt data market-structure continuous-start ms_coinbase_btc_usd --requested-by <operator>
+qt data market-structure continuous-stop ms_coinbase_btc_usd --requested-by <operator>
 qt data market-structure replay <manifest_id>
 qt data market-structure reconcile-recent ms_coinbase_btc_usd --limit 100
 ```
@@ -159,6 +175,32 @@ frozen dataset ranges, configured spool/segment limits, and production
 blockers. `replay` verifies object SHA-256, exact frame order, replay
 fingerprint, raw mapping completeness, and canonical provider-trade identity
 coverage.
+
+### Capacity campaigns
+
+Capacity measurement uses worker-owned validation sessions, not production
+enrollment. A representative three-product trade campaign targets the futures
+definitions `ms_coinbase_bip_20dec30_cde`,
+`ms_coinbase_etp_20dec30_cde`, and
+`ms_coinbase_slp_20dec30_cde`. Validation may run from 60 seconds through seven
+days and uses the exact same rotating/reconnect/recovery path as production.
+
+The campaign watches two different publication phases:
+
+1. During capture, the definition-scoped fsynced spool and process resources
+   can grow while canonical PostgreSQL trade and archive rows remain flat.
+2. As each segment rotates, the archive is verified, acknowledged, and
+   published with canonical trade, coverage, and aggregate facts without
+   pausing acquisition; PostgreSQL growth is incremental rather than a single
+   closing burst.
+
+The provisioned Grafana dashboard `QuantTrad Capacity & Database Growth`
+combines 15-second authority-labeled engine/host capacity telemetry with
+five-minute logical schema/table snapshots so both phases are visible. The
+24-hour proof is an admission requirement, not a lifetime cap: after canonical
+evidence and a physical/cloud resource budget are accepted, `continuous-start`
+has no duration limit. Docker Desktop guest free space is explicitly
+insufficient admission evidence.
 
 Recent REST reconciliation is deliberately only a bounded overlap diagnostic.
 REST-only IDs can occur after a capture and are not treated as gaps or evidence

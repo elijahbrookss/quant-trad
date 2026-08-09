@@ -43,6 +43,117 @@ FUTURE_INSTRUMENT = {
 }
 
 
+class _CountingWalletEvents:
+    def __init__(self, values):
+        self.values = list(values)
+        self.slice_reads = 0
+        self.item_reads = 0
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            self.slice_reads += 1
+        else:
+            self.item_reads += 1
+        return self.values[key]
+
+    def append(self, value):
+        self.values.append(value)
+
+
+class _Counter:
+    def __init__(self, value: int = 0):
+        self.value = int(value)
+        self.get_reads = 0
+
+    def get(self) -> int:
+        self.get_reads += 1
+        return self.value
+
+    def set(self, value: int) -> None:
+        self.value = int(value)
+
+
+class _CountingMapping(dict):
+    def __init__(self, values):
+        super().__init__(values)
+        self.copy_reads = 0
+
+    def copy(self):
+        self.copy_reads += 1
+        return dict(self)
+
+
+def test_shared_gateway_bulk_snapshots_wallet_events_once_per_commit_sequence():
+    init = _wallet_initialized_event().serialize()
+    init["seq"] = 0
+    events = _CountingWalletEvents([init])
+    counter = _Counter(0)
+    gateway = SharedWalletGateway(
+        {
+            "runtime_events": events,
+            "wallet_events": events,
+            "wallet_event_seq": counter,
+            "reservations": {},
+            "lock": threading.RLock(),
+        }
+    )
+
+    first = gateway.project()
+    second = gateway.project()
+
+    assert first.balances == second.balances
+    assert events.slice_reads == 1
+    assert events.item_reads == 0
+
+    entry = _entry_filled_event().serialize()
+    entry["seq"] = 1
+    events.append(entry)
+    counter.set(1)
+
+    updated = gateway.project()
+
+    assert updated.locked_margin["USD"] == pytest.approx(100.0)
+    assert events.slice_reads == 2
+    assert events.item_reads == 0
+
+
+def test_shared_gateway_projects_shared_snapshot_without_event_scan():
+    init = _wallet_initialized_event().serialize()
+    init["seq"] = 0
+    events = _CountingWalletEvents([init])
+    counter = _Counter(0)
+    reservations = _CountingMapping({})
+    wallet_state = _CountingMapping(
+        {
+            "balances": {"USD": 1000.0},
+            "locked_margin": {},
+            "free_collateral": {"USD": 1000.0},
+            "margin_positions": {},
+        }
+    )
+    gateway = SharedWalletGateway(
+        {
+            "runtime_events": events,
+            "wallet_events": events,
+            "wallet_state": wallet_state,
+            "wallet_event_seq": counter,
+            "reservations": reservations,
+            "lock": threading.RLock(),
+        }
+    )
+    initial_counter_reads = counter.get_reads
+
+    first = gateway.project()
+    second = gateway.project()
+
+    assert first.balances == second.balances == {"USD": 1000.0}
+    assert events.slice_reads == 0
+    assert events.item_reads == 0
+    assert counter.get_reads == initial_counter_reads
+    assert reservations.copy_reads == 0
+    assert wallet_state.copy_reads == 2
+
+
 def test_margin_positions_lock_and_release_collateral_through_trade_lifecycle():
     ledger = WalletLedger()
     ledger.deposit({"USD": 1000})

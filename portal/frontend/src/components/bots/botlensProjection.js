@@ -2,10 +2,13 @@ import { toFiniteNumber, toSec } from './chartDataUtils.js'
 import { createLogger } from '../../utils/logger.js'
 
 const DEFAULT_SYMBOL_STATE_LIMIT = 6
+const MAX_HOT_CANDLES = 320
 const MAX_LOGS = 300
 const MAX_DECISIONS = 600
 const MAX_TRADES = 240
+export const MAX_CHART_HISTORY_TRADES = 2000
 const SYMBOL_DELTA_DROP_WARN_INTERVAL_MS = 10000
+const TERMINAL_RUN_LIFECYCLE_STATES = new Set(['completed', 'canceled', 'cancelled', 'stopped', 'failed', 'crashed', 'startup_failed', 'error'])
 const logger = createLogger('botlensProjection')
 const symbolDeltaDropWarnings = new Map()
 
@@ -185,6 +188,23 @@ export function mergeCanonicalCandles(...streams) {
     .map((entry) => entry[1])
 }
 
+export function appendBoundedCanonicalCandle(candles, candle, limit = MAX_HOT_CANDLES) {
+  const normalized = normalizeCandle(candle)
+  if (!normalized) return Array.isArray(candles) ? candles : []
+  const rows = Array.isArray(candles) ? candles : []
+  const last = rows.at(-1)
+  if (!last || normalized.time > Number(last.time)) {
+    const appended = [...rows, normalized]
+    return appended.length > limit ? appended.slice(-limit) : appended
+  }
+  if (normalized.time === Number(last.time)) {
+    const replaced = rows.slice()
+    replaced[replaced.length - 1] = normalized
+    return replaced
+  }
+  return mergeCanonicalCandles(rows, [normalized]).slice(-limit)
+}
+
 export function validateCanonicalCandles(candles) {
   let previous = null
   for (let index = 0; index < (Array.isArray(candles) ? candles.length : 0); index += 1) {
@@ -202,7 +222,13 @@ export function validateCanonicalCandles(candles) {
 }
 
 function stableOverlayRevision(value) {
-  return JSON.stringify(sortValue(value))
+  const serialized = JSON.stringify(sortValue(value))
+  let hash = 0x811c9dc5
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash ^= serialized.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`
 }
 
 function sortValue(value) {
@@ -224,17 +250,76 @@ function overlayIdentity(overlay, index) {
   return explicitOverlayId
 }
 
+function withCompactOverlayRevision(overlay, overlayId) {
+  const normalized = {
+    ...(overlay && typeof overlay === 'object' ? overlay : {}),
+    overlay_id: overlayId,
+  }
+  delete normalized.overlay_revision
+  return {
+    ...normalized,
+    overlay_revision: stableOverlayRevision(normalized),
+  }
+}
+
+function applyPolylineTailPatch(payload, rawPatch, payloadSummary = {}) {
+  const patch = rawPatch && typeof rawPatch === 'object' ? rawPatch : {}
+  const expectedFingerprint = String(patch.expected_fingerprint || '').trim()
+  const resultFingerprint = String(patch.result_fingerprint || '').trim()
+  const entries = Array.isArray(patch.entries) ? patch.entries : []
+  const polylines = Array.isArray(payload?.polylines) ? payload.polylines : null
+  if (!expectedFingerprint || !resultFingerprint || !entries.length) {
+    throw new Error('overlay_delta.polyline_tail contract is incomplete')
+  }
+  if (!polylines) {
+    throw new Error('overlay_delta.polyline_tail requires existing polylines')
+  }
+  const knownFingerprint = String(payloadSummary?.polyline_fingerprint || '').trim()
+  if (knownFingerprint && knownFingerprint !== expectedFingerprint) {
+    throw new Error('overlay_delta.polyline_tail base fingerprint mismatch')
+  }
+  const nextPolylines = polylines.map((line) => (
+    line && typeof line === 'object' ? { ...line } : line
+  ))
+  entries.forEach((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      throw new Error('overlay_delta.polyline_tail entry must be an object')
+    }
+    const index = Number(entry.index)
+    const expectedCount = Number(entry.expected_count)
+    const dropPrefix = Number(entry.drop_prefix)
+    const append = Array.isArray(entry.append) ? entry.append : []
+    if (!Number.isInteger(index) || index < 0 || index >= nextPolylines.length) {
+      throw new Error('overlay_delta.polyline_tail index is out of range')
+    }
+    const line = nextPolylines[index]
+    if (!line || typeof line !== 'object' || !Array.isArray(line.points)) {
+      throw new Error('overlay_delta.polyline_tail requires existing point lists')
+    }
+    if (line.points.length !== expectedCount) {
+      throw new Error('overlay_delta.polyline_tail point count mismatch')
+    }
+    if (!Number.isInteger(dropPrefix) || dropPrefix < 0 || dropPrefix > line.points.length) {
+      throw new Error('overlay_delta.polyline_tail drop_prefix is out of range')
+    }
+    nextPolylines[index] = {
+      ...line,
+      points: [...line.points.slice(dropPrefix), ...append],
+    }
+  })
+  return {
+    polylines: nextPolylines,
+    fingerprint: resultFingerprint,
+  }
+}
+
 export function projectOverlayState(overlays = []) {
   const projected = new Map()
   ;(Array.isArray(overlays) ? overlays : []).forEach((overlay, index) => {
     if (!overlay || typeof overlay !== 'object') return
     const overlayId = overlayIdentity(overlay, index)
     if (!overlayId) return
-    projected.set(overlayId, {
-      ...overlay,
-      overlay_id: overlayId,
-      overlay_revision: stableOverlayRevision({ ...overlay, overlay_id: overlayId }),
-    })
+    projected.set(overlayId, withCompactOverlayRevision(overlay, overlayId))
   })
   return Array.from(projected.values())
 }
@@ -269,6 +354,12 @@ export function applyOverlayDelta(overlays = [], overlayDelta = {}) {
           payload[String(replaceKey)] = replaceValue
         })
       }
+      const tailResult = patch.polyline_tail
+        ? applyPolylineTailPatch(payload, patch.polyline_tail, existing.payload_summary)
+        : null
+      if (tailResult) {
+        payload.polylines = tailResult.polylines
+      }
       const nextOverlay = {
         ...existing,
         payload,
@@ -277,18 +368,22 @@ export function applyOverlayDelta(overlays = [], overlayDelta = {}) {
           : {}),
         overlay_id: key,
       }
-      overlayMap.set(key, {
-        ...nextOverlay,
-        overlay_revision: stableOverlayRevision({ ...nextOverlay, overlay_id: key }),
-      })
+      if (tailResult) {
+        nextOverlay.payload_summary = {
+          ...(existing.payload_summary && typeof existing.payload_summary === 'object'
+            ? existing.payload_summary
+            : {}),
+          ...(nextOverlay.payload_summary && typeof nextOverlay.payload_summary === 'object'
+            ? nextOverlay.payload_summary
+            : {}),
+          polyline_fingerprint: tailResult.fingerprint,
+        }
+      }
+      overlayMap.set(key, withCompactOverlayRevision(nextOverlay, key))
       return
     }
     if (opName !== 'upsert' || !op.overlay || typeof op.overlay !== 'object') return
-    overlayMap.set(key, {
-      ...op.overlay,
-      overlay_id: key,
-      overlay_revision: stableOverlayRevision({ ...op.overlay, overlay_id: key }),
-    })
+    overlayMap.set(key, withCompactOverlayRevision(op.overlay, key))
   })
   return Array.from(overlayMap.values())
 }
@@ -341,7 +436,7 @@ function tradeIsClosed(trade) {
   return tradeState === 'closed' || ['closed', 'completed', 'complete'].includes(status)
 }
 
-function mergeTradeProjection(existing, incoming) {
+export function mergeTradeProjection(existing, incoming) {
   if (!existing || typeof existing !== 'object') return incoming
   const existingClosed = tradeIsClosed(existing)
   const incomingClosed = tradeIsClosed(incoming)
@@ -437,6 +532,30 @@ function positionCommitSeq(trade) {
   return toPositiveInt(trade?.position_commit_seq)
 }
 
+export function mergeCanonicalTrades(...collections) {
+  const byTradeId = new Map()
+  collections.forEach((collection) => {
+    ;(Array.isArray(collection) ? collection : []).forEach((trade) => {
+      const normalized = normalizeTrade(trade)
+      if (!normalized) return
+      const existing = byTradeId.get(normalized.trade_id)
+      byTradeId.set(
+        normalized.trade_id,
+        mergeTradeProjection(existing, normalized),
+      )
+    })
+  })
+  const ordered = Array.from(byTradeId.values()).sort((left, right) => {
+    const timeDelta = Number(toSec(left.entry_time || left.opened_at) || 0)
+      - Number(toSec(right.entry_time || right.opened_at) || 0)
+    if (timeDelta !== 0) return timeDelta
+    return String(left.trade_id || "").localeCompare(String(right.trade_id || ""))
+  })
+  return ordered.length > MAX_CHART_HISTORY_TRADES
+    ? ordered.slice(-MAX_CHART_HISTORY_TRADES)
+    : ordered
+}
+
 function warningSeverityRank(value) {
   const normalized = String(value || '').trim().toLowerCase()
   if (normalized === 'error' || normalized === 'critical') return 0
@@ -444,7 +563,7 @@ function warningSeverityRank(value) {
   return 2
 }
 
-function normalizeWarning(warning, index = 0) {
+function normalizeWarning(warning) {
   if (!warning || typeof warning !== 'object') return null
   const warningType = String(warning.warning_type || '').trim()
   const warningId = String(warning.warning_id || '').trim()
@@ -672,6 +791,21 @@ function normalizeOverlayProjection(value) {
     : null
 }
 
+function normalizeOverlayValidity(value) {
+  const source = value && typeof value === 'object' ? value : {}
+  const status = String(source.status || 'valid').trim().toLowerCase()
+  return {
+    status: status === 'invalid' ? 'invalid' : 'valid',
+    invalid_reason: String(source.invalid_reason || '').trim() || null,
+    invalid_detail: String(source.invalid_detail || '').trim() || null,
+    invalidated_at_run_seq: toPositiveInt(source.invalidated_at_run_seq),
+    gap_expected_overlay_commit_seq: toNonNegativeInt(source.gap_expected_overlay_commit_seq),
+    gap_observed_base_overlay_commit_seq: toNonNegativeInt(source.gap_observed_base_overlay_commit_seq),
+    gap_observed_overlay_commit_seq: toPositiveInt(source.gap_observed_overlay_commit_seq),
+    recovered_at_run_seq: toPositiveInt(source.recovered_at_run_seq),
+  }
+}
+
 function mergeScopedCursors(base, patch) {
   const baseCursors = base && typeof base === 'object' ? base : {}
   const patchCursors = patch && typeof patch === 'object' ? patch : {}
@@ -716,7 +850,7 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
       symbol_live: false,
       run_live: false,
     }),
-    candles: mergeCanonicalCandles(source.candles || []),
+    candles: mergeCanonicalCandles(source.candles || []).slice(-MAX_HOT_CANDLES),
     provisional_candle: normalizeCandle(source.provisional_candle),
     overlays: projectOverlayState(source.overlays || []),
     signals: Array.isArray(source.signals) ? source.signals.filter((entry) => entry && typeof entry === 'object').map((entry) => ({ ...entry })) : [],
@@ -727,6 +861,7 @@ export function normalizeSelectedSymbolState(selectedSymbol, { symbolKey = null,
     runtime: source.runtime && typeof source.runtime === 'object' ? { ...source.runtime } : {},
     continuity: normalizeContinuity(source.continuity),
     overlay_projection: normalizeOverlayProjection(source.overlay_projection),
+    overlay_validity: normalizeOverlayValidity(source.overlay_validity),
     live_cursors: normalizeScopedCursors(source, { seq: normalizedSeq, trades: recentTrades }),
   }
 }
@@ -799,6 +934,11 @@ export function createRunStore(runBootstrap, { symbolStateLimit = DEFAULT_SYMBOL
     acc[normalized.trade_id] = normalized
     return acc
   }, {})
+  const openTradePositionSeqByTrade = Object.values(openTradesIndex).reduce((acc, trade) => {
+    const seq = positionCommitSeq(trade)
+    if (seq) acc[trade.trade_id] = seq
+    return acc
+  }, {})
   const selectedSymbolKey = normalizeSeriesKey(navigation?.selected_symbol_key || '')
   const selectedSymbolPayload = runBootstrap?.selected_symbol && typeof runBootstrap.selected_symbol === 'object'
     ? runBootstrap.selected_symbol
@@ -846,6 +986,7 @@ export function createRunStore(runBootstrap, { symbolStateLimit = DEFAULT_SYMBOL
     faults: [],
     symbolIndex,
     openTradesIndex,
+    openTradePositionSeqByTrade,
     symbolStates,
     symbolStateOrder,
     selectedSymbolKey: selectedSymbolKey || null,
@@ -939,15 +1080,20 @@ export function applyOpenTradesDelta(store, message) {
   store = gated.store
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {}
   const openTradesIndex = { ...(store?.openTradesIndex || {}) }
+  const positionCursors = { ...(store?.openTradePositionSeqByTrade || {}) }
   ;(Array.isArray(payload.upserts) ? payload.upserts : []).forEach((trade) => {
     const normalized = normalizeTrade(trade)
     if (!normalized) return
     const incomingPositionSeq = positionCommitSeq(normalized)
-    const existingPositionSeq = positionCommitSeq(openTradesIndex[normalized.trade_id])
+    const existingPositionSeq = Math.max(
+      Number(positionCommitSeq(openTradesIndex[normalized.trade_id]) || 0),
+      Number(positionCursors[normalized.trade_id] || 0),
+    )
     if (incomingPositionSeq && existingPositionSeq && incomingPositionSeq <= existingPositionSeq) {
       return
     }
     openTradesIndex[normalized.trade_id] = normalized
+    if (incomingPositionSeq) positionCursors[normalized.trade_id] = incomingPositionSeq
   })
   ;(Array.isArray(payload.removals) ? payload.removals : []).forEach((removal) => {
     const tradeId = typeof removal === 'object' && removal !== null
@@ -961,12 +1107,18 @@ export function applyOpenTradesDelta(store, message) {
     if (removalPositionSeq && existingPositionSeq && removalPositionSeq < existingPositionSeq) {
       return
     }
+    positionCursors[tradeId] = Math.max(
+      Number(positionCursors[tradeId] || 0),
+      Number(existingPositionSeq || 0),
+      Number(removalPositionSeq || 0),
+    )
     delete openTradesIndex[tradeId]
   })
   return {
     ...store,
     seq: Math.max(Number(store?.seq || 0), Number(message?.scope_seq || 0)),
     openTradesIndex,
+    openTradePositionSeqByTrade: positionCursors,
   }
 }
 
@@ -978,14 +1130,41 @@ export function applyRunLifecycleDelta(store, message) {
     ? message.payload.lifecycle
     : null
   if (!lifecycle) return store
+  const nextLifecycle = { ...(store?.lifecycle || {}), ...lifecycle }
+  const lifecycleState = String(nextLifecycle.status || nextLifecycle.phase || '').trim().toLowerCase()
+  const terminal = TERMINAL_RUN_LIFECYCLE_STATES.has(lifecycleState)
+  const runLive = terminal
+    ? false
+    : Boolean(nextLifecycle.live ?? store?.readiness?.run_live)
+  const symbolStates = terminal
+    ? Object.fromEntries(Object.entries(store?.symbolStates || {}).map(([symbolKey, symbolState]) => [
+        symbolKey,
+        {
+          ...symbolState,
+          status: lifecycleState,
+          readiness: normalizeSelectedSymbolReadiness({
+            ...(symbolState?.readiness || {}),
+            symbol_live: false,
+            run_live: false,
+          }, {
+            catalog_discovered: true,
+            snapshot_ready: Boolean(symbolState?.readiness?.snapshot_ready),
+            symbol_live: false,
+            run_live: false,
+          }),
+        },
+      ]))
+    : store?.symbolStates
   return {
     ...store,
     seq: Math.max(Number(store?.seq || 0), Number(message?.scope_seq || 0)),
-    lifecycle: { ...(store?.lifecycle || {}), ...lifecycle },
-    readiness: normalizeRunReadiness(store?.readiness, {
+    lifecycle: nextLifecycle,
+    transportEligible: terminal || lifecycle.live === false ? false : Boolean(store?.transportEligible),
+    readiness: normalizeRunReadiness({ ...(store?.readiness || {}), run_live: runLive }, {
       catalog_discovered: store?.readiness?.catalog_discovered || Object.keys(store?.symbolIndex || {}).length > 0,
-      run_live: Boolean(lifecycle.live ?? store?.readiness?.run_live),
+      run_live: runLive,
     }),
+    symbolStates,
   }
 }
 
@@ -1218,9 +1397,13 @@ function withSymbolState(store, message, applyChange) {
 
 export function applyCandleDelta(store, message) {
   return withSymbolState(store, message, (next, payload) => {
-    if (payload.candle && typeof payload.candle === 'object') {
-      next.candles = mergeCanonicalCandles(next.candles || [], [payload.candle])
-    }
+    const candles = [
+      ...(Array.isArray(payload.candles) ? payload.candles : []),
+      ...(payload.candle && typeof payload.candle === 'object' ? [payload.candle] : []),
+    ]
+    candles.forEach((candle) => {
+      next.candles = appendBoundedCanonicalCandle(next.candles, candle)
+    })
     return next
   })
 }
@@ -1243,6 +1426,13 @@ export function applyOverlayDeltaMessage(store, message) {
       return null
     }
     const currentOverlayCommitSeq = Number(current.live_cursors?.overlay_commit_seq || 0) || 0
+    const overlayValidity = normalizeOverlayValidity(payload.overlay_validity)
+    if (overlayValidity.status === 'invalid') {
+      next.overlays = []
+      next.overlay_validity = overlayValidity
+      return next
+    }
+    const isFullCheckpoint = String(payload.checkpoint_kind || '').trim().toLowerCase() === 'full_state'
     if (currentOverlayCommitSeq > 0 && clock.overlayCommitSeq <= currentOverlayCommitSeq) {
       warnDroppedStaleSymbolDelta(next.symbol_key, message, 'stale_overlay_commit_seq', {
         current_overlay_commit_seq: currentOverlayCommitSeq,
@@ -1250,7 +1440,7 @@ export function applyOverlayDeltaMessage(store, message) {
       })
       return null
     }
-    if (currentOverlayCommitSeq > 0 && clock.baseOverlayCommitSeq !== currentOverlayCommitSeq) {
+    if (!isFullCheckpoint && currentOverlayCommitSeq > 0 && clock.baseOverlayCommitSeq !== currentOverlayCommitSeq) {
       warnDroppedStaleSymbolDelta(next.symbol_key, message, 'overlay_base_mismatch', {
         current_overlay_commit_seq: currentOverlayCommitSeq,
         base_overlay_commit_seq: clock.baseOverlayCommitSeq,
@@ -1259,7 +1449,7 @@ export function applyOverlayDeltaMessage(store, message) {
       return null
     }
     if (Array.isArray(payload.ops)) {
-      next.overlays = applyOverlayDelta(next.overlays || [], { ops: payload.ops })
+      next.overlays = applyOverlayDelta(isFullCheckpoint ? [] : (next.overlays || []), { ops: payload.ops })
       next.live_cursors = {
         ...next.live_cursors,
         overlay_commit_seq: clock.overlayCommitSeq,
@@ -1268,6 +1458,7 @@ export function applyOverlayDeltaMessage(store, message) {
       next.overlay_commit_seq = clock.overlayCommitSeq
       next.overlay_commit_seq_status = clock.status
       next.overlay_projection = normalizeOverlayProjection(payload.projection)
+      next.overlay_validity = overlayValidity
     }
     return next
   })

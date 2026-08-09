@@ -6,15 +6,18 @@ canonical, auditable source-fact truth.
 ## Canonical Ownership
 
 Provider adapters under `src/data_providers/` acquire and normalize external
-responses. Typed contracts and requirement resolution live under
-`src/market_data/`. Historical candle intake lives in
+responses. Typed contracts, exact numeric meaning, dimensions, and requirement
+resolution live under `src/market_data/`. Historical candle intake lives in
 `portal/backend/service/market/feed_service.py`; scheduled producer
-orchestration lives in `portal/backend/service/market/collector_service.py`.
+orchestration lives in `portal/backend/service/market/collector_service.py`;
+explicit numeric acquisition lives in
+`portal/backend/service/market/numeric_fact_acquisition.py`.
 
 PostgreSQL schema `market` is owned by
 `portal/backend/service/storage/repos/market_data.py`. Durable collector
 definitions, attempts, pacing, retries, and ownership leases are owned by
-`portal/backend/service/storage/repos/market_collection.py`.
+`portal/backend/service/storage/repos/market_collection.py`. Providers do not
+own schema, canonical series, coverage cache policy, or frozen datasets.
 
 ## Implemented Intake
 
@@ -35,49 +38,116 @@ provider-reported funding time, and the funding interval. Coinbase documents the
 field but not its publication semantics, so funding time is preserved without
 driving known-at; schedule and platform acceptance remain authoritative.
 
+Provider-neutral exact scalar facts enter through a strict
+`market.numeric_fact_sources.v1` manifest and an explicitly authorized bounded
+operation. `market.reference_price.v1` and `market.reserve_balance.v1` retain
+unbounded exact decimal material, unchanged raw provider value, contract-owned
+unit/dimensions, causal clocks, source-event identity/material, provenance, and
+append-only revisions in `market.numeric_fact_versions`. Binary floats are
+rejected before canonicalization.
+
+The first exact-numeric adapter is `chainlink_aggregator_v3.v1`. It performs
+public read-only, phase-aware EVM log acquisition with chain/feed validation,
+round reconciliation, explicit confirmation depth, bounded requests/logs/blocks,
+and typed gap evidence. Checked-in ETH/USD and TUSD-reserves manifests are
+disabled references. No wallet, signer, transaction, continuous collector, or
+consumer fallback is introduced.
+
 ## Consumer And Dataset Reads
 
-Reads never acquire. Consumers declare typed facts and explicit primary,
-underlying, benchmark, or explicit instrument roles; they do not select provider
-endpoints or storage. Underlying and benchmark roles resolve from canonical IDs
-in immutable run configuration.
+Reads never acquire. Consumers declare typed facts, exact contract versions and
+dimensions, and explicit primary, underlying, benchmark, or explicit instrument
+roles; they do not select provider endpoints or storage. Underlying and
+benchmark roles resolve from canonical IDs in immutable run configuration.
 
-Candles, OI, and funding use append-only revisions and one shared market commit
-clock.
+All typed facts use append-only revisions and one shared market commit clock.
 Readers may pin commit and known-at cutoffs. Frozen datasets hash exact selected
-material, provenance, and quality. Backtests freeze all transitive inputs before
-execution, then resolve latest-known OI at every warmup and decision bar without
-provider calls. Paper/runtime reads use the same causal and staleness rules
-against current canonical storage.
+material, provenance, and quality. Exact numeric material includes raw and
+normalized values plus source-event material; acquisition coverage remains
+separate evidence.
+
+Backtest preparation fails on missing facts by default. It may invoke numeric
+history only when `acquire_missing` and an explicit manifest/binding,
+actor/reason authorization, and bounded budget are supplied. Matching complete
+coverage, including a zero-event range, is reused without constructing a
+provider. Partial/failed acquisition cannot satisfy a required freeze.
+Backtests freeze all transitive inputs before execution and replay locally at the
+admitted commit scope.
 
 Runtime separately hashes final derived candle/ATR frames, so source dataset
 identity and actual execution input identity remain visible.
 
-## Sparse Data, Corrections, And Legacy State
+## Sparse Data, Corrections, And Reorgs
 
-Sparse truth remains sparse. Quality and gap evidence never become synthetic
-source facts. Corrections append revisions; accepted facts and evidence cannot
-be updated or deleted.
+Sparse truth remains sparse. Quality, acquisition coverage, and gap evidence
+never become synthetic source facts. Corrections append revisions; accepted
+facts and evidence cannot be updated or deleted. A changed source-event material
+hash appends a correction even when numeric value and timestamps are unchanged.
+Only a complete explicit repair may invalidate an active event that disappeared;
+partial repair cannot prove absence.
 
 Legacy candle tables are archived under `legacy_market_v1` for manual reasoning
 only. Prior dataset manifests using the old provenance identity are archived by
 the fact-clock migration. There is no application fallback reader or writer.
 
+## Persistence Bootstrap
+
+`market.numeric_fact_versions`, `market.fact_acquisition_coverage`, and the
+dimensions addition to an existing `market.series` are owned by:
+
+```bash
+make db-file file=scripts/db/manual_migration_numeric_fact_store_v1.sql
+```
+
+Run it with backend, collector, worker, and paper writers stopped. Startup does
+not create or repair the two new tables; it validates its required subset and
+fails with the migration path. This exception is scoped to the new numeric
+objects. Existing model-owned schema bootstrap behavior remains unchanged, and
+`PG_DSN` remains the only persistence DSN.
+
+## OI And Funding Consolidation Gate
+
+The current result is **`NUMERIC_FACT_CONSOLIDATION_DEFERRED`**.
+
+Coinbase OI/funding v1 convert provider decimal strings to binary floats and
+store floats, so original exact text cannot be reconstructed. Funding interval
+is row-scoped rather than a v1 series dimension. Frozen v1 datasets pin the
+specialized series, revisions, commit sequence, ingestion/source provenance, row
+hashes, and material hashes. Rerouting them in place would change existing
+evidence and leave specialized consumers split across two truths.
+
+A bounded follow-up must use new v2 contracts/series, preserve raw decimal text
+and exact values at the adapter boundary, include funding interval in series
+identity, migrate consumers explicitly, and prove every existing v1 dataset
+identity and provider-free read unchanged. It must not fabricate v2 exact values
+from v1 floats; specialized v1 rows remain immutable evidence.
+
 ## Extending The Feed
 
-Basis or another observation must define its own fact contract and
-typed series semantics, then reuse source identity, ingestion, known-at,
-provenance, quality, collector, and dataset concepts where those semantics fit.
-New facts must not become optional columns on candle or OI tables. The current
-collector handlers support Coinbase OI and funding. They do not imply historical
-backfill, aggregation, basis, or strategy/indicator funding delivery.
+For a new scalar fact, first add a fact-registry contract that defines exact
+numeric type, unit, dimensions, value domain, time semantics, and dataset
+eligibility. If those semantics fit the exact-numeric storage shape, add a
+strict data-driven binding and provider adapter implementing
+`NumericFactProvider`; reuse canonical source/series, ingestion, gap, coverage,
+revision, and dataset paths. Do not add provider SQL or a routing branch in the
+repository.
+
+A fact gets a different physical storage shape only when its value/temporal
+constraints materially require one. New facts must not become optional columns
+on candle, OI, or funding tables. Coinbase OI/funding requirement resolution
+and mutable/frozen delivery are wired, but the collector handlers do not imply
+historical backfill, aggregation, basis derivation, or that every strategy or
+indicator already declares those facts as inputs.
 
 ## References
 
 - [Data boundary](../architecture/data/DATA_BOUNDARY.md)
+- [Numeric facts and on-demand acquisition](../architecture/data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md)
+- [Provider-neutral exact numeric ADR](../architecture/decisions/0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md)
 - [Canonical market-data ADR](../architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md)
 - [Frozen backtest ADR](../architecture/decisions/0051-require-frozen-datasets-for-canonical-backtests.md)
 - [Typed collector ADR](../architecture/decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md)
+- [Chainlink numeric facts guide](../guides/chainlink-numeric-facts.md)
 - [Coinbase OI collector guide](../guides/coinbase-open-interest-collector.md)
 - [Coinbase funding collector guide](../guides/coinbase-funding-rate-collector.md)
 - [Runtime contract](../contracts/platform/01_runtime_contract.md)

@@ -44,7 +44,7 @@ class ProviderStreamSmokeRequest(BaseModel):
 
 
 @router.get("/")
-async def list_providers() -> Dict[str, Any]:
+def list_providers() -> Dict[str, Any]:
     """Return all providers and their venues."""
 
     payload = provider_service.provider_payloads()
@@ -63,7 +63,7 @@ async def list_providers() -> Dict[str, Any]:
 
 
 @router.post("/validate")
-async def validate_selection(body: ProviderVenueRequest) -> Dict[str, Any]:
+def validate_selection(body: ProviderVenueRequest) -> Dict[str, Any]:
     """Validate provider/venue pairing and optionally a symbol."""
 
     valid, errors, normalized = provider_service.validate_provider_venue(body.provider_id, body.venue_id)
@@ -75,7 +75,7 @@ async def validate_selection(body: ProviderVenueRequest) -> Dict[str, Any]:
 
 
 @router.post("/tick-metadata")
-async def tick_metadata(body: ProviderVenueRequest) -> Dict[str, Any]:
+def tick_metadata(body: ProviderVenueRequest) -> Dict[str, Any]:
     """Return tick metadata for a provider/venue/symbol combo."""
 
     try:
@@ -92,7 +92,7 @@ async def tick_metadata(body: ProviderVenueRequest) -> Dict[str, Any]:
 
 
 @router.post("/credentials")
-async def upsert_credentials(body: ProviderCredentialsRequest) -> Dict[str, Any]:
+def upsert_credentials(body: ProviderCredentialsRequest) -> Dict[str, Any]:
     """Persist provider credentials and return the updated status."""
 
     try:
@@ -111,7 +111,7 @@ async def upsert_credentials(body: ProviderCredentialsRequest) -> Dict[str, Any]
 
 
 @router.get("/credentials/schema")
-async def credential_schema(
+def credential_schema(
     provider_id: Optional[str] = Query(None),
     venue_id: Optional[str] = Query(None),
     environment: Optional[str] = Query("paper"),
@@ -127,7 +127,7 @@ async def credential_schema(
 
 
 @router.get("/credentials")
-async def list_credentials(
+def list_credentials(
     provider_id: Optional[str] = Query(None),
     venue_id: Optional[str] = Query(None),
     include_revoked: bool = Query(False),
@@ -147,7 +147,7 @@ async def list_credentials(
 
 
 @router.post("/credentials/{credential_ref}/validate")
-async def validate_credentials(credential_ref: str) -> Dict[str, Any]:
+def validate_credentials(credential_ref: str) -> Dict[str, Any]:
     """Validate stored credential payload structure without exposing secrets."""
 
     try:
@@ -159,7 +159,7 @@ async def validate_credentials(credential_ref: str) -> Dict[str, Any]:
 
 
 @router.delete("/credentials/{credential_ref}")
-async def revoke_credentials(credential_ref: str) -> Dict[str, Any]:
+def revoke_credentials(credential_ref: str) -> Dict[str, Any]:
     """Revoke a stored credential reference without deleting audit metadata."""
 
     try:

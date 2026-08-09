@@ -64,7 +64,8 @@ def _public_row(row: Mapping[str, Any]) -> dict[str, Any]:
             payload[str(key)] = value.astimezone(UTC).isoformat()
         else:
             payload[str(key)] = value
-    payload["lease_active"] = bool(row.get("lease_owner"))
+    if "lease_owner" in row:
+        payload["lease_active"] = bool(row.get("lease_owner"))
     return payload
 
 
@@ -79,12 +80,14 @@ class MarketDataCollectorService:
         provider_factory: Callable[..., Any] = get_provider,
         clock: Callable[[], datetime] = _utcnow,
         sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.collection_repo = collection_repo
         self.store = store
         self.provider_factory = provider_factory
         self.clock = clock
         self.sleeper = sleeper
+        self.monotonic = monotonic
 
     def create_coinbase_open_interest_definition(
         self,
@@ -281,6 +284,54 @@ class MarketDataCollectorService:
             )
         ]
 
+    def collector_snapshot(self, *, attempt_limit: int = 5) -> dict[str, Any]:
+        definitions = self.list_definitions()
+        attempts = [
+            _public_row(row)
+            for row in self.collection_repo.list_recent_attempts(
+                limit_per_definition=attempt_limit
+            )
+        ]
+        grouped_attempts: dict[str, list[dict[str, Any]]] = {
+            str(definition["id"]): [] for definition in definitions
+        }
+        for attempt in attempts:
+            grouped_attempts.setdefault(str(attempt["definition_id"]), []).append(attempt)
+        workers = [
+            _public_row(row)
+            for row in self.collection_repo.list_worker_states()
+        ]
+        active_workers = [worker for worker in workers if bool(worker.get("alive"))]
+        observed_at = self.clock().astimezone(UTC).isoformat()
+        return {
+            "schema_version": "market_collector_snapshot.v1",
+            "observed_at": observed_at,
+            "worker_health": {
+                "status": "alive" if active_workers else "unavailable",
+                "active_count": len(active_workers),
+                "known_count": len(workers),
+                "observed_at": observed_at,
+            },
+            "workers": workers,
+            "collectors": [
+                {
+                    "definition": definition,
+                    "attempts": grouped_attempts.get(str(definition["id"]), []),
+                    "attempts_available": True,
+                }
+                for definition in definitions
+            ],
+        }
+
+    def register_worker(self, **kwargs: Any) -> dict[str, Any]:
+        return _public_row(self.collection_repo.register_worker(**kwargs))
+
+    def heartbeat_worker(self, **kwargs: Any) -> dict[str, Any]:
+        return _public_row(self.collection_repo.heartbeat_worker(**kwargs))
+
+    def stop_worker(self, **kwargs: Any) -> None:
+        self.collection_repo.stop_worker(**kwargs)
+
     def set_enabled(self, definition_id: str, *, enabled: bool) -> dict[str, Any]:
         return _public_row(
             self.collection_repo.set_enabled(definition_id, enabled=enabled)
@@ -298,6 +349,7 @@ class MarketDataCollectorService:
             return
         self.store.record_gap_evidence(
             series_id=claim.series_id,
+            source_id=claim.source_id,
             start=claim.missed_start,
             end=claim.scheduled_for,
             classification="collection_schedule_missed",
@@ -346,19 +398,52 @@ class MarketDataCollectorService:
                 f"fact_type={handler_key[2]} contract_version={handler_key[3]}"
             )
         self._record_missed_schedule(claim)
+        attempt_started = self.monotonic()
+        timing: dict[str, Any] = {
+            "schema_version": "market_collection_attempt_timing.v1",
+            "stage": "pacing_reservation",
+            "timings_ms": {
+                "schedule_lag": round(
+                    max(0.0, (self.clock().astimezone(UTC) - claim.scheduled_for).total_seconds())
+                    * 1000.0,
+                    3,
+                ),
+            },
+        }
         try:
+            stage_started = self.monotonic()
             delay = self.collection_repo.reserve_provider_request(
                 provider=claim.provider,
                 minimum_spacing_seconds=float(
                     claim.config.get("minimum_spacing_seconds", 1.0)
                 ),
             )
+            timing["timings_ms"]["pacing_reservation"] = round(
+                (self.monotonic() - stage_started) * 1000.0, 3
+            )
+            timing["timings_ms"]["pacing_wait_requested"] = round(delay * 1000.0, 3)
             if delay > 0:
                 self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
+                timing["stage"] = "pacing_wait"
+                stage_started = self.monotonic()
                 self.sleeper(delay)
+                timing["timings_ms"]["pacing_wait"] = round(
+                    (self.monotonic() - stage_started) * 1000.0, 3
+                )
+            else:
+                timing["timings_ms"]["pacing_wait"] = 0.0
             self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
+            timing["stage"] = "provider_factory"
+            stage_started = self.monotonic()
             provider = self.provider_factory(claim.provider, venue=claim.venue)
-            fact, outcome, snapshot = handler(claim, provider, lease_seconds)
+            timing["timings_ms"]["provider_factory"] = round(
+                (self.monotonic() - stage_started) * 1000.0, 3
+            )
+            fact, outcome, snapshot = handler(claim, provider, lease_seconds, timing)
+            timing["timings_ms"]["precomplete_total"] = round(
+                (self.monotonic() - attempt_started) * 1000.0, 3
+            )
+            timing.pop("stage", None)
             evidence = {
                 "schema_version": COLLECTOR_RESULT_VERSION,
                 "response_hash": snapshot.response_hash,
@@ -367,6 +452,7 @@ class MarketDataCollectorService:
                 "market_commit_seq": outcome.max_commit_seq,
                 "inserted_count": outcome.inserted_count,
                 "noop_count": outcome.noop_count,
+                "timing": timing,
             }
             self.collection_repo.complete(
                 claim,
@@ -384,14 +470,20 @@ class MarketDataCollectorService:
         except MarketCollectionOwnershipError:
             raise
         except Exception as exc:
+            timing["timings_ms"]["attempt_total"] = round(
+                (self.monotonic() - attempt_started) * 1000.0, 3
+            )
+            failure_stage = str(timing.pop("stage", "unknown"))
             exhausted = self.collection_repo.fail(
                 claim,
                 error=exc,
                 retry_base_seconds=float(claim.config.get("retry_base_seconds", 2.0)),
+                evidence={"failed_stage": failure_stage, "timing": timing},
             )
             if exhausted:
                 self.store.record_gap_evidence(
                     series_id=claim.series_id,
+                    source_id=claim.source_id,
                     start=claim.scheduled_for,
                     end=claim.scheduled_for
                     + timedelta(seconds=claim.poll_interval_seconds),
@@ -410,19 +502,35 @@ class MarketDataCollectorService:
             raise
 
     def _collect_open_interest(
-        self, claim: CollectionClaim, provider: Any, lease_seconds: float
+        self,
+        claim: CollectionClaim,
+        provider: Any,
+        lease_seconds: float,
+        timing: dict[str, Any],
     ) -> tuple[OpenInterestFact, Any, ProviderOpenInterestSnapshot]:
         fetch = getattr(provider, "fetch_open_interest", None)
         if not callable(fetch):
             raise RuntimeError(
                 "market_collection_provider_capability_missing: fetch_open_interest"
             )
+        timing["stage"] = "provider_request"
+        stage_started = self.monotonic()
         snapshot = fetch(str(claim.config["provider_product_id"]))
+        timing["timings_ms"]["provider_request"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "provider_contract_validation"
+        stage_started = self.monotonic()
         if not isinstance(snapshot, ProviderOpenInterestSnapshot):
             raise RuntimeError(
                 "market_collection_provider_contract_invalid: "
                 "expected normalized OI snapshot"
             )
+        timing["timings_ms"]["provider_contract_validation"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "canonical_normalization"
+        stage_started = self.monotonic()
         accepted_at = max(
             self.clock().astimezone(UTC),
             snapshot.received_at,
@@ -442,7 +550,17 @@ class MarketDataCollectorService:
             known_at=accepted_at,
             known_at_method="platform_acceptance",
         )
+        timing["timings_ms"]["canonical_normalization"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "lease_heartbeat"
+        stage_started = self.monotonic()
         self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
+        timing["timings_ms"]["lease_heartbeat"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "persistence"
+        stage_started = self.monotonic()
         outcome = self.store.ingest_open_interest(
             series_id=claim.series_id,
             source_id=claim.source_id,
@@ -461,22 +579,41 @@ class MarketDataCollectorService:
             allow_corrections=False,
             collection_fence=claim.fence(),
         )
+        timing["timings_ms"]["persistence"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
         return fact, outcome, snapshot
 
     def _collect_funding_rate(
-        self, claim: CollectionClaim, provider: Any, lease_seconds: float
+        self,
+        claim: CollectionClaim,
+        provider: Any,
+        lease_seconds: float,
+        timing: dict[str, Any],
     ) -> tuple[FundingRateFact, Any, ProviderFundingRateSnapshot]:
         fetch = getattr(provider, "fetch_funding_rate", None)
         if not callable(fetch):
             raise RuntimeError(
                 "market_collection_provider_capability_missing: fetch_funding_rate"
             )
+        timing["stage"] = "provider_request"
+        stage_started = self.monotonic()
         snapshot = fetch(str(claim.config["provider_product_id"]))
+        timing["timings_ms"]["provider_request"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "provider_contract_validation"
+        stage_started = self.monotonic()
         if not isinstance(snapshot, ProviderFundingRateSnapshot):
             raise RuntimeError(
                 "market_collection_provider_contract_invalid: "
                 "expected normalized funding-rate snapshot"
             )
+        timing["timings_ms"]["provider_contract_validation"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "canonical_normalization"
+        stage_started = self.monotonic()
         accepted_at = max(
             self.clock().astimezone(UTC),
             snapshot.received_at,
@@ -495,7 +632,17 @@ class MarketDataCollectorService:
             known_at=accepted_at,
             known_at_method="platform_acceptance",
         )
+        timing["timings_ms"]["canonical_normalization"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "lease_heartbeat"
+        stage_started = self.monotonic()
         self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
+        timing["timings_ms"]["lease_heartbeat"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "persistence"
+        stage_started = self.monotonic()
         outcome = self.store.ingest_funding_rates(
             series_id=claim.series_id,
             source_id=claim.source_id,
@@ -515,6 +662,9 @@ class MarketDataCollectorService:
             allow_corrections=False,
             collection_fence=claim.fence(),
         )
+        timing["timings_ms"]["persistence"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
         return fact, outcome, snapshot
 
     @staticmethod
@@ -528,6 +678,79 @@ class MarketDataCollectorService:
             "attempt_id": claim.attempt_id,
             "scheduled_for": claim.scheduled_for.isoformat(),
             "provider_product_id": provider_product_id,
+        }
+
+    def fact_history(
+        self,
+        *,
+        definition_id: str,
+        hours: int = 24,
+        limit: int = 240,
+    ) -> dict[str, Any]:
+        """Return bounded canonical fact history for one collector definition."""
+
+        definitions = self.list_definitions(definition_id=definition_id)
+        if not definitions:
+            raise ValueError(
+                f"market_collection_definition_unknown: definition_id={definition_id}"
+            )
+        definition = definitions[0]
+        fact_type = str(definition.get("fact_type") or "")
+        bounded_hours = max(1, min(int(hours or 24), 24 * 7))
+        bounded_limit = max(1, min(int(limit or 240), 1000))
+        end = self.clock().astimezone(UTC)
+        start = end - timedelta(hours=bounded_hours)
+        if fact_type == OPEN_INTEREST_FACT_TYPE:
+            records = self.store.read_open_interest(
+                series_id=int(definition["series_id"]), start=start, end=end
+            )
+        elif fact_type == FUNDING_RATE_FACT_TYPE:
+            records = self.store.read_funding_rates(
+                series_id=int(definition["series_id"]), start=start, end=end
+            )
+        else:
+            raise ValueError(
+                f"market_collection_fact_history_unsupported: fact_type={fact_type}"
+            )
+
+        samples = []
+        for record in records[-bounded_limit:]:
+            fact = record.fact.to_dict()
+            fact = {
+                key: (
+                    value.astimezone(UTC).isoformat()
+                    if isinstance(value, datetime)
+                    else value
+                )
+                for key, value in fact.items()
+            }
+            samples.append(
+                {
+                    "series_id": record.series_id,
+                    "revision": record.revision,
+                    "market_commit_seq": record.market_commit_seq,
+                    "ingestion_run_id": record.ingestion_run_id,
+                    "source_identity_key": record.source_identity_key,
+                    "source": {
+                        "provider": record.source.provider,
+                        "venue": record.source.venue,
+                        "source_kind": record.source.source_kind,
+                        "adapter_version": record.source.adapter_version,
+                    },
+                    "provenance": dict(record.provenance),
+                    "fact": fact,
+                }
+            )
+        return {
+            "schema_version": "market_collector_fact_history.v1",
+            "definition_id": str(definition_id),
+            "series_id": int(definition["series_id"]),
+            "fact_type": fact_type,
+            "range_start": start.isoformat(),
+            "range_end": end.isoformat(),
+            "samples": samples,
+            "truncated": len(records) > bounded_limit,
+            "observed_at": end.isoformat(),
         }
 
     def latest_open_interest(

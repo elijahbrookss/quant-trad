@@ -53,7 +53,7 @@ def _balance_breakout_events(state: MarketProfileBarState) -> list[dict[str, Any
         return [{
             "key": "balance_breakout_long",
             "direction": "long",
-            "known_at": int(state.bar_time.timestamp()),
+            "known_at": int((state.known_at or state.bar_time).timestamp()),
             "metadata": {
                 "trigger_price": float(state.close),
                 "reference": build_value_area_reference(state, level_name="VAH", price=state.vah),
@@ -64,7 +64,7 @@ def _balance_breakout_events(state: MarketProfileBarState) -> list[dict[str, Any
         return [{
             "key": "balance_breakout_short",
             "direction": "short",
-            "known_at": int(state.bar_time.timestamp()),
+            "known_at": int((state.known_at or state.bar_time).timestamp()),
             "metadata": {
                 "trigger_price": float(state.close),
                 "reference": build_value_area_reference(state, level_name="VAL", price=state.val),

@@ -397,6 +397,46 @@ def test_fetch_from_api_chunks_requests(monkeypatch):
     assert len(frame) == len(candle_calls)
 
 
+def test_fetch_from_api_normalizes_inclusive_page_end_to_half_open_range(monkeypatch):
+    def candle_provider(params):
+        return [
+            {
+                "start": str(params["start"]),
+                "open": "1",
+                "high": "1",
+                "low": "1",
+                "close": "1",
+                "volume": "1",
+            },
+            {
+                "start": str(params["end"]),
+                "open": "2",
+                "high": "2",
+                "low": "2",
+                "close": "2",
+                "volume": "1",
+            },
+        ]
+
+    fake_client = FakeClient(product={"product_id": "BTC-USD"}, candle_provider=candle_provider)
+    provider = _make_provider(fake_client)
+    monkeypatch.setattr(provider, "MAX_CANDLES_PER_REQUEST", 2)
+
+    start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    end = start + dt.timedelta(minutes=5)
+
+    frame = provider.fetch_from_api("BTC-USD", start, end, "1m")
+
+    assert frame["timestamp"].tolist() == [
+        pd.Timestamp("2024-01-01T00:00:00Z"),
+        pd.Timestamp("2024-01-01T00:01:00Z"),
+        pd.Timestamp("2024-01-01T00:02:00Z"),
+        pd.Timestamp("2024-01-01T00:03:00Z"),
+        pd.Timestamp("2024-01-01T00:04:00Z"),
+    ]
+    assert bool((frame["timestamp"] < pd.Timestamp(end)).all())
+
+
 def test_fetch_open_interest_normalizes_coinbase_future_snapshot():
     provider = _make_provider(
         FakeClient(

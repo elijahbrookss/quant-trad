@@ -28,12 +28,17 @@ from .runtime_graph import (
     collect_runtime_indicator_metas,
 )
 from .runtime_validation import validate_runtime_for_instance
+from .requirements import (
+    INDICATOR_REQUIREMENT_PLAN_VERSION,
+    plan_runtime_requirements_for_indicators,
+)
 
 IndicatorService = type(default_service)
 
 __all__ = [
     "IndicatorService",
     "IndicatorServiceContext",
+    "INDICATOR_REQUIREMENT_PLAN_VERSION",
     "build_runtime_indicator_instance",
     "bulk_delete_instances",
     "bulk_set_enabled",
@@ -52,6 +57,7 @@ __all__ = [
     "list_instances_meta",
     "list_types",
     "overlays_for_instance",
+    "plan_runtime_requirements_for_indicators",
     "runtime_input_plan_for_instance",
     "set_instance_enabled",
     "update_instance",

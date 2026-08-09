@@ -1,0 +1,116 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Collector safety
+    folder: Quant Trad
+    interval: 1m
+    rules:
+      - uid: qt-collector-safety-halt-active
+        title: Collector safety halt active
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: quanttrad-postgres
+            model:
+              datasource:
+                type: grafana-postgresql-datasource
+                uid: quanttrad-postgres
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT count(*)::double precision AS value
+                FROM market.collector_safety_state
+                WHERE active
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: A global, fleet, or stream safety latch is active.
+        labels:
+          component: market-data-collector
+          severity: critical
+        isPaused: false
+
+      - uid: qt-collector-storage-warning
+        title: Collector storage safety warning
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: quanttrad-postgres
+            model:
+              datasource:
+                type: grafana-postgresql-datasource
+                uid: quanttrad-postgres
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT count(*)::double precision AS value
+                FROM market.collector_safety_events
+                WHERE event_type = 'warning'
+                  AND occurred_at >= now() - interval '15 minutes'
+          - refId: C
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Alerting
+        for: 0s
+        annotations:
+          summary: Collector filesystem or spool utilization crossed a warning threshold.
+        labels:
+          component: market-data-collector
+          severity: warning
+        isPaused: false

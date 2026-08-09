@@ -333,6 +333,28 @@ class IndicatorExecutionEngine:
             guard_warnings=tuple(guard_warnings),
         )
 
+    def handle_gap(
+        self,
+        *,
+        policy: str,
+        gap: Mapping[str, Any],
+        next_bar_time: datetime,
+        rewarm_bars: int = 0,
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Delegate every gap-state decision to each registered Indicator."""
+
+        return tuple(
+            dict(
+                self._indicators_by_id[indicator_id].handle_gap(
+                    policy=policy,
+                    gap=dict(gap),
+                    next_bar_time=next_bar_time,
+                    rewarm_bars=int(rewarm_bars),
+                )
+            )
+            for indicator_id in self._order
+        )
+
     def snapshot_overlays(self, *, bar_time: datetime) -> EngineFrame:
         """Build overlay snapshots from already-advanced indicator state."""
 

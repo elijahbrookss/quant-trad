@@ -227,7 +227,9 @@ class RuntimeSetupPrepareMixin:
         self._log_revision: int = 0
         self._decision_revision: int = 0
         self._push_log_marker: Optional[str] = None
+        self._push_log_revision_seen: int = -1
         self._push_decision_marker: Optional[str] = None
+        self._push_wallet_stream_length: int = 0
         self._push_payload_size_probe_count: int = 0
         self._warning_revision: int = 0
         self._push_payload_bytes_sample_every: int = self._coerce_positive_int(
@@ -1503,7 +1505,6 @@ class RuntimeSetupPrepareMixin:
             "execution_intrabar_fallback_pessimistic",
             symbol_key or str(series.symbol or "").strip().upper(),
             str(series.timeframe or "").strip().lower(),
-            bar_time,
             normalized_reason,
         ]
         warning_id = "::".join(part for part in warning_id_parts if part)
@@ -1588,6 +1589,17 @@ class RuntimeSetupPrepareMixin:
             exit_settlement,
             execution_profile=getattr(series, "execution_profile", None),
         )
+        self._drain_order_lifecycle_events(series=series)
+        drain_pending_entry_fills = getattr(engine, "drain_pending_entry_fills", None)
+        if callable(drain_pending_entry_fills):
+            for delayed_trade in drain_pending_entry_fills():
+                self._emit_entry_filled_event(
+                    series=series,
+                    candle=minute_bar,
+                    trade=delayed_trade,
+                    direction=str(getattr(delayed_trade, "direction", "") or ""),
+                )
+                self._persist_trade_entry(series, delayed_trade)
         if fallback_triggered:
             state.intrabar_candles = []
             temp_candle = state.active_candle

@@ -12,8 +12,9 @@ import json
 import math
 import struct
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Optional
 
@@ -31,6 +32,7 @@ FUNDING_RATE_FACT_VERSION = "derivatives.funding_rate.v1"
 FUNDING_RATE_MATERIAL_HASH_VERSION = "funding_rate_material_hash.v1"
 DATASET_IDENTITY_HASH_VERSION = "market_dataset.v1"
 QUALITY_HASH_VERSION = "market_data_quality_hash.v1"
+NUMERIC_FACT_MATERIAL_HASH_VERSION = "numeric_fact_material_hash.v1"
 
 _RECEIPT_KNOWN_AT_METHODS = frozenset(
     {"platform_acceptance", "platform_receipt", "stream_receipt"}
@@ -51,6 +53,13 @@ class MarketDataAlignment(str, Enum):
 
     EXACT_INTERVAL = "exact_interval"
     LATEST_KNOWN = "latest_known"
+
+
+class NumericFactState(str, Enum):
+    """Validity state of one append-only numeric source-event revision."""
+
+    ACTIVE = "active"
+    INVALIDATED = "invalidated"
 
 
 def _utc_datetime(value: Any, *, field: str) -> datetime:
@@ -118,6 +127,27 @@ def _canonical_number(value: Optional[float]) -> Optional[str]:
     return None if value is None else struct.pack("!d", float(value)).hex()
 
 
+def _exact_decimal(value: Any, *, field: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError(
+            f"market_data_invalid: {field} must be Decimal, integer, or decimal string"
+        )
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"market_data_invalid: {field} must be an exact decimal") from exc
+    if not result.is_finite():
+        raise ValueError(f"market_data_invalid: {field} must be finite")
+    return Decimal(0) if result.is_zero() else result
+
+
+def _canonical_decimal(value: Decimal) -> str:
+    if value.is_zero():
+        return "0"
+    normalized = format(value.normalize(), "f")
+    return normalized.rstrip("0").rstrip(".") if "." in normalized else normalized
+
+
 def _stable_hash(payload: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -165,6 +195,7 @@ class MarketDataRequirement:
     key: str = "primary_bars"
     instrument_role: InstrumentRole | str = InstrumentRole.PRIMARY
     instrument_ref: Optional[str] = None
+    dimensions: Mapping[str, Any] = field(default_factory=dict)
     alignment: MarketDataAlignment | str | None = None
     max_staleness_seconds: Optional[int] = None
     allow_gaps: bool = False
@@ -192,6 +223,7 @@ class MarketDataRequirement:
                 "market_data_requirement_invalid: timeframe_seconds must be positive"
             )
         contract.validate(contract_version=contract_version, timeframe_seconds=self.timeframe_seconds)
+        dimensions = contract.normalize_dimensions(self.dimensions)
         try:
             raw_instrument_role = (
                 self.instrument_role.value
@@ -268,6 +300,7 @@ class MarketDataRequirement:
         object.__setattr__(self, "key", key)
         object.__setattr__(self, "instrument_role", instrument_role)
         object.__setattr__(self, "instrument_ref", instrument_ref)
+        object.__setattr__(self, "dimensions", dimensions)
         object.__setattr__(self, "alignment", alignment)
         object.__setattr__(self, "required", bool(self.required))
         object.__setattr__(self, "allow_gaps", bool(self.allow_gaps))
@@ -283,7 +316,7 @@ class MarketDataRequirement:
             object.__setattr__(self, "lookback_seconds", int(lookback_seconds))
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "key": self.key,
             "fact_type": self.fact_type,
             "contract_version": self.contract_version,
@@ -299,6 +332,9 @@ class MarketDataRequirement:
             "lookback_bars": self.lookback_bars,
             "lookback_seconds": self.lookback_seconds,
         }
+        if self.dimensions:
+            payload["dimensions"] = dict(self.dimensions)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -366,6 +402,222 @@ class DatasetSeriesRequest:
         object.__setattr__(self, "series_id", int(self.series_id))
         object.__setattr__(self, "start", start)
         object.__setattr__(self, "end", end)
+
+
+@dataclass(frozen=True)
+class NumericFact:
+    """Provider-neutral exact-decimal fact keyed by one logical source event."""
+
+    fact_type: str
+    contract_version: str
+    value: Decimal | int | str
+    raw_value: str
+    unit: str
+    dimensions: Mapping[str, Any]
+    effective_at: datetime
+    effective_at_method: str
+    accepted_at: datetime
+    known_at: datetime
+    known_at_method: str
+    source_event_key: str
+    source_published_at: Optional[datetime] = None
+    received_at: Optional[datetime] = None
+    source_event_group_key: Optional[str] = None
+    source_event_component_key: Optional[str] = None
+    state: NumericFactState | str = NumericFactState.ACTIVE
+    source_event_material_hash: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        fact_type = str(self.fact_type or "").strip().lower()
+        contract_version = str(self.contract_version or "").strip()
+        contract = get_fact_contract(fact_type)
+        contract.validate(contract_version=contract_version, timeframe_seconds=None)
+        value = _exact_decimal(self.value, field="value")
+        unit, dimensions = contract.validate_numeric_value(
+            value=value,
+            unit=self.unit,
+            dimensions=self.dimensions,
+        )
+        raw_value = str(self.raw_value or "").strip()
+        if not raw_value:
+            raise ValueError("numeric_fact_invalid: raw_value is required")
+
+        effective_at = _utc_datetime(self.effective_at, field="effective_at")
+        accepted_at = _utc_datetime(self.accepted_at, field="accepted_at")
+        known_at = _utc_datetime(self.known_at, field="known_at")
+        source_published_at = _optional_utc_datetime(
+            self.source_published_at, field="source_published_at"
+        )
+        received_at = _optional_utc_datetime(self.received_at, field="received_at")
+        effective_at_method = str(self.effective_at_method or "").strip().lower()
+        known_at_method = str(self.known_at_method or "").strip().lower()
+        if not effective_at_method:
+            raise ValueError("numeric_fact_invalid: effective_at_method is required")
+        if not known_at_method:
+            raise ValueError("numeric_fact_invalid: known_at_method is required")
+        if known_at < effective_at:
+            raise ValueError("numeric_fact_invalid: known_at must not precede effective_at")
+        if source_published_at is not None and known_at < source_published_at:
+            raise ValueError(
+                "numeric_fact_invalid: known_at must not precede source publication"
+            )
+        if received_at is not None and accepted_at < received_at:
+            raise ValueError(
+                "numeric_fact_invalid: accepted_at must not precede received_at"
+            )
+        if known_at_method in _RECEIPT_KNOWN_AT_METHODS:
+            if received_at is not None and known_at < received_at:
+                raise ValueError(
+                    "numeric_fact_invalid: receipt-based known_at must not precede receipt"
+                )
+            if known_at < accepted_at:
+                raise ValueError(
+                    "numeric_fact_invalid: receipt-based known_at must not precede acceptance"
+                )
+
+        source_event_key = str(self.source_event_key or "").strip()
+        group_key = str(self.source_event_group_key or "").strip() or None
+        component_key = str(self.source_event_component_key or "").strip() or None
+        if not source_event_key:
+            raise ValueError("numeric_fact_invalid: source_event_key is required")
+        source_event_material_hash = str(
+            self.source_event_material_hash or ""
+        ).strip().lower()
+        if not source_event_material_hash:
+            source_event_material_hash = _stable_hash(
+                {
+                    "schema_version": "market.source_event_material.v1",
+                    "material": {},
+                }
+            )
+        if len(source_event_material_hash) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in source_event_material_hash
+        ):
+            raise ValueError(
+                "numeric_fact_invalid: source_event_material_hash must be sha256"
+            )
+        try:
+            raw_state = self.state.value if isinstance(self.state, NumericFactState) else self.state
+            state = NumericFactState(str(raw_state).strip().lower())
+        except ValueError as exc:
+            raise ValueError(
+                "numeric_fact_invalid: state must be active or invalidated"
+            ) from exc
+
+        object.__setattr__(self, "fact_type", fact_type)
+        object.__setattr__(self, "contract_version", contract_version)
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "raw_value", raw_value)
+        object.__setattr__(self, "unit", unit)
+        object.__setattr__(self, "dimensions", dimensions)
+        object.__setattr__(self, "effective_at", effective_at)
+        object.__setattr__(self, "effective_at_method", effective_at_method)
+        object.__setattr__(self, "source_published_at", source_published_at)
+        object.__setattr__(self, "received_at", received_at)
+        object.__setattr__(self, "accepted_at", accepted_at)
+        object.__setattr__(self, "known_at", known_at)
+        object.__setattr__(self, "known_at_method", known_at_method)
+        object.__setattr__(self, "source_event_key", source_event_key)
+        object.__setattr__(self, "source_event_group_key", group_key)
+        object.__setattr__(self, "source_event_component_key", component_key)
+        object.__setattr__(
+            self, "source_event_material_hash", source_event_material_hash
+        )
+        object.__setattr__(self, "state", state)
+
+    @property
+    def row_hash(self) -> str:
+        return _stable_hash(
+            {
+                "schema_version": self.contract_version,
+                "fact_type": self.fact_type,
+                "value": _canonical_decimal(self.value),
+                "raw_value": self.raw_value,
+                "unit": self.unit,
+                "dimensions": dict(self.dimensions),
+                "effective_at": _canonical_time(self.effective_at),
+                "effective_at_method": self.effective_at_method,
+                "source_published_at": (
+                    _canonical_time(self.source_published_at)
+                    if self.source_published_at is not None
+                    else None
+                ),
+                "received_at": (
+                    _canonical_time(self.received_at)
+                    if self.received_at is not None
+                    else None
+                ),
+                "known_at": _canonical_time(self.known_at),
+                "known_at_method": self.known_at_method,
+                "source_event_key": self.source_event_key,
+                "source_event_group_key": self.source_event_group_key,
+                "source_event_component_key": self.source_event_component_key,
+                "source_event_material_hash": self.source_event_material_hash,
+                "state": self.state.value,
+            }
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fact_type": self.fact_type,
+            "contract_version": self.contract_version,
+            "value": _canonical_decimal(self.value),
+            "raw_value": self.raw_value,
+            "unit": self.unit,
+            "dimensions": dict(self.dimensions),
+            "effective_at": self.effective_at,
+            "effective_at_method": self.effective_at_method,
+            "source_published_at": self.source_published_at,
+            "received_at": self.received_at,
+            "accepted_at": self.accepted_at,
+            "known_at": self.known_at,
+            "known_at_method": self.known_at_method,
+            "source_event_key": self.source_event_key,
+            "source_event_group_key": self.source_event_group_key,
+            "source_event_component_key": self.source_event_component_key,
+            "source_event_material_hash": self.source_event_material_hash,
+            "state": self.state.value,
+            "row_hash": self.row_hash,
+        }
+
+
+@dataclass(frozen=True)
+class NumericFactRecord:
+    """Immutable storage revision of a provider-neutral numeric fact."""
+
+    series_id: int
+    revision: int
+    market_commit_seq: int
+    ingestion_run_id: str
+    source_identity_key: str
+    source: SourceIdentity
+    provenance: Mapping[str, Any]
+    fact: NumericFact
+
+    def __post_init__(self) -> None:
+        if int(self.series_id) <= 0:
+            raise ValueError("numeric_fact_record_invalid: series_id must be positive")
+        if int(self.revision) <= 0:
+            raise ValueError("numeric_fact_record_invalid: revision must be positive")
+        if int(self.market_commit_seq) <= 0:
+            raise ValueError(
+                "numeric_fact_record_invalid: market_commit_seq must be positive"
+            )
+        ingestion_run_id = str(self.ingestion_run_id or "").strip()
+        source_identity_key = str(self.source_identity_key or "").strip()
+        if not ingestion_run_id:
+            raise ValueError("numeric_fact_record_invalid: ingestion_run_id is required")
+        if not source_identity_key:
+            raise ValueError(
+                "numeric_fact_record_invalid: source_identity_key is required"
+            )
+        object.__setattr__(self, "series_id", int(self.series_id))
+        object.__setattr__(self, "revision", int(self.revision))
+        object.__setattr__(self, "market_commit_seq", int(self.market_commit_seq))
+        object.__setattr__(self, "ingestion_run_id", ingestion_run_id)
+        object.__setattr__(self, "source_identity_key", source_identity_key)
+        object.__setattr__(self, "provenance", dict(self.provenance or {}))
 
 
 @dataclass(frozen=True)
@@ -978,6 +1230,40 @@ def build_funding_rate_material_hash(
     )
 
 
+def build_numeric_fact_material_hash(
+    *,
+    series_identity: Mapping[str, Any],
+    records: Iterable[NumericFactRecord],
+) -> str:
+    """Hash every causal event revision without coupling identity to DB ordinals."""
+
+    rows = sorted(
+        records,
+        key=lambda item: (item.fact.source_event_key, int(item.revision)),
+    )
+    event_ordinals: dict[str, int] = {}
+    material: list[dict[str, Any]] = []
+    for record in rows:
+        event_key = record.fact.source_event_key
+        event_ordinal = event_ordinals.get(event_key, 0) + 1
+        event_ordinals[event_key] = event_ordinal
+        material.append(
+            {
+                "effective_at": _canonical_time(record.fact.effective_at),
+                "source_event_key": event_key,
+                "event_revision_ordinal": event_ordinal,
+                "row_hash": record.fact.row_hash,
+            }
+        )
+    return _stable_hash(
+        {
+            "schema_version": NUMERIC_FACT_MATERIAL_HASH_VERSION,
+            "series": dict(series_identity),
+            "rows": material,
+        }
+    )
+
+
 from .structure import MarketTradeRecord, TradeFlowAggregateRecord
 
 
@@ -1021,6 +1307,7 @@ MarketDataRecord = (
     CandleRecord
     | OpenInterestRecord
     | FundingRateRecord
+    | NumericFactRecord
     | MarketTradeRecord
     | TradeFlowAggregateRecord
     | TypedFeatureRecord
@@ -1034,6 +1321,8 @@ def _record_time(record: MarketDataRecord) -> datetime:
         return record.fact.sample_time
     if isinstance(record, FundingRateRecord):
         return record.fact.sample_time
+    if isinstance(record, NumericFactRecord):
+        return record.fact.effective_at
     if isinstance(record, MarketTradeRecord):
         return record.fact.provider_event_time
     if isinstance(record, TradeFlowAggregateRecord):
@@ -1094,7 +1383,18 @@ def build_typed_feature_material_hash(
 def build_provenance_hash(records: Iterable[MarketDataRecord]) -> str:
     """Hash acquisition lineage for exact visible typed-fact revisions."""
 
-    rows = sorted(records, key=_record_time)
+    rows = sorted(
+        records,
+        key=lambda record: (
+            _record_time(record),
+            str(getattr(record.fact, "source_event_key", "")),
+            (
+                int(record.revision)
+                if isinstance(record, NumericFactRecord)
+                else 0
+            ),
+        ),
+    )
     normalized: list[dict[str, Any]] = []
     market_structure_records = any(
         isinstance(record, (MarketTradeRecord, TradeFlowAggregateRecord, TypedFeatureRecord))
@@ -1197,6 +1497,32 @@ def build_dataset_identity_hash(series: Iterable[Mapping[str, Any]]) -> str:
     )
 
 
+def dataset_series_identity_payload(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the stable v1 Dataset-series identity fields.
+
+    Full quality evidence is pinned beside the manifest. Its material identity
+    is represented by ``quality_hash`` so historical v1 Dataset hashes remain
+    reconstructable after the evidence array became directly persisted.
+    """
+
+    return {
+        "series_id": int(entry["series_id"]),
+        "range_start": _canonical_time(
+            _utc_datetime(entry["range_start"], field="range_start")
+        ),
+        "range_end": _canonical_time(
+            _utc_datetime(entry["range_end"], field="range_end")
+        ),
+        "max_commit_seq": int(entry["max_commit_seq"]),
+        "row_count": int(entry["row_count"]),
+        "material_hash": str(entry["material_hash"]),
+        "provenance_hash": str(entry["provenance_hash"]),
+        "source_summary": dict(entry.get("source_summary") or {}),
+        "quality_hash": str(entry["quality_hash"]),
+        "quality_summary": dict(entry.get("quality_summary") or {}),
+    }
+
+
 def build_quality_hash(evidence: Iterable[Mapping[str, Any]]) -> str:
     """Hash quality evidence separately from exact candle material."""
 
@@ -1224,6 +1550,7 @@ __all__ = [
     "FUNDING_RATE_FACT_VERSION",
     "OPEN_INTEREST_FACT_TYPE",
     "OPEN_INTEREST_FACT_VERSION",
+    "NUMERIC_FACT_MATERIAL_HASH_VERSION",
     "CandleFact",
     "CandleRecord",
     "DatasetSeriesRequest",
@@ -1234,13 +1561,18 @@ __all__ = [
     "MarketDataRecord",
     "MarketDataRequirement",
     "MarketDataWindow",
+    "NumericFact",
+    "NumericFactRecord",
+    "NumericFactState",
     "OpenInterestFact",
     "OpenInterestRecord",
     "SourceIdentity",
     "build_candle_material_hash",
     "build_dataset_identity_hash",
+    "dataset_series_identity_payload",
     "build_funding_rate_material_hash",
     "build_open_interest_material_hash",
+    "build_numeric_fact_material_hash",
     "build_provenance_hash",
     "build_quality_hash",
 ]

@@ -2,8 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  applyOverlayDelta,
+  projectOverlayState,
   applyTypedSymbolDelta,
   applyCandleDelta,
+  appendBoundedCanonicalCandle,
   applyOpenTradesDelta,
   applyRunFaultDelta,
   applyRunHealthDelta,
@@ -12,7 +15,6 @@ import {
   applySelectedSymbolBootstrap,
   createRunStore,
   getSelectedSymbolState,
-  normalizeSeriesKey,
   selectSymbol,
 } from '../src/components/bots/botlensProjection.js'
 import { setLogSink } from '../src/utils/logger.js'
@@ -214,6 +216,27 @@ test('run bootstrap can seed selected symbol state and replay cursor in one resp
   assert.equal(selected.overlays[0].overlay_id, 'overlay-1')
 })
 
+test('terminal lifecycle delta closes live transport and releases historical evidence loading', () => {
+  let store = createRunStore(runBootstrapPayload())
+  store = applySelectedSymbolBootstrap(store, selectedSymbolBootstrapPayload())
+  assert.equal(store.transportEligible, true)
+  assert.equal(store.readiness.run_live, true)
+
+  store = applyRunLifecycleDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 23,
+    scope_seq: 21,
+    payload: { lifecycle: { phase: 'completed', status: 'completed', live: false } },
+  })
+
+  assert.equal(store.lifecycle.status, 'completed')
+  assert.equal(store.transportEligible, false)
+  assert.equal(store.readiness.run_live, false)
+  assert.equal(getSelectedSymbolState(store).status, 'completed')
+  assert.equal(getSelectedSymbolState(store).readiness.run_live, false)
+  assert.equal(getSelectedSymbolState(store).readiness.symbol_live, false)
+})
+
 test('run deltas and selected-symbol bootstrap stay on separate client boundaries', () => {
   let store = createRunStore(runBootstrapPayload())
   store = applySelectedSymbolBootstrap(store, selectedSymbolBootstrapPayload())
@@ -260,6 +283,50 @@ test('run deltas and selected-symbol bootstrap stay on separate client boundarie
   assert.equal(store.symbolIndex['instrument-eth|5m'].symbol, 'ETH')
   assert.equal(store.openTradesIndex['t-2'].symbol_key, 'instrument-eth|5m')
   assert.equal(getSelectedSymbolState(store).symbol_key, 'instrument-btc|1m')
+})
+
+test('run close tombstone blocks a late open-trade packet', () => {
+  let store = createRunStore(runBootstrapPayload())
+  store = applyOpenTradesDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 21,
+    payload: {
+      upserts: [{
+        trade_id: 'trade-late',
+        symbol_key: 'instrument-btc|1m',
+        status: 'open',
+        position_commit_seq: 1,
+      }],
+      removals: [],
+    },
+  })
+  store = applyOpenTradesDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 22,
+    scope_seq: 22,
+    payload: {
+      upserts: [],
+      removals: [{ trade_id: 'trade-late', position_commit_seq: 2 }],
+    },
+  })
+  store = applyOpenTradesDelta(store, {
+    stream_session_id: 'stream-1',
+    stream_seq: 23,
+    scope_seq: 23,
+    payload: {
+      upserts: [{
+        trade_id: 'trade-late',
+        symbol_key: 'instrument-btc|1m',
+        status: 'open',
+        position_commit_seq: 1,
+      }],
+      removals: [],
+    },
+  })
+
+  assert.equal(store.openTradesIndex['trade-late'], undefined)
+  assert.equal(store.openTradePositionSeqByTrade['trade-late'], 2)
 })
 
 test('run health warning summary stays run-scoped and only maps matching symbol warnings to selected runtime', () => {
@@ -449,6 +516,75 @@ test('stale overlay commit delta is ignored even with a newer stream sequence', 
   assert.equal(store.lastStreamSeq, 22)
   assert.equal(selected.live_cursors.overlay_commit_seq, 2)
   assert.equal(selected.overlays.some((entry) => entry.overlay_id === 'overlay-stale'), false)
+})
+
+test('overlay invalidation clears only overlays and preserves selected-symbol facts', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload({ overlayCommitSeq: 5 }).selected_symbol
+  let store = createRunStore(payload)
+  const before = getSelectedSymbolState(store)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 8,
+      base_overlay_commit_seq: 7,
+      overlay_commit_seq_status: 'overlay_scoped',
+      overlay_validity: {
+        status: 'invalid',
+        invalid_reason: 'overlay_clock_gap',
+        gap_expected_overlay_commit_seq: 5,
+        gap_observed_base_overlay_commit_seq: 7,
+        gap_observed_overlay_commit_seq: 8,
+      },
+      ops: [],
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(selected.overlays.length, 0)
+  assert.equal(selected.overlay_validity.status, 'invalid')
+  assert.equal(selected.overlay_validity.invalid_reason, 'overlay_clock_gap')
+  assert.deepEqual(selected.candles, before.candles)
+  assert.deepEqual(selected.recent_trades, before.recent_trades)
+})
+
+test('full overlay checkpoint recovers an invalid layer without matching the stale base', () => {
+  const payload = runBootstrapPayload()
+  payload.selected_symbol = selectedSymbolBootstrapPayload({ overlayCommitSeq: 5 }).selected_symbol
+  payload.selected_symbol.current.overlay_validity = { status: 'invalid', invalid_reason: 'overlay_clock_gap' }
+  payload.selected_symbol.current.overlays = []
+  let store = createRunStore(payload)
+
+  store = applyTypedSymbolDelta(store, {
+    type: 'botlens_symbol_overlay_delta',
+    stream_session_id: 'stream-1',
+    stream_seq: 21,
+    scope_seq: 26,
+    symbol_key: 'instrument-btc|1m',
+    payload: {
+      overlay_commit_seq: 20,
+      base_overlay_commit_seq: 19,
+      overlay_commit_seq_status: 'overlay_scoped',
+      checkpoint_kind: 'full_state',
+      overlay_validity: { status: 'valid', recovered_at_run_seq: 26 },
+      ops: [{
+        op: 'upsert',
+        key: 'overlay-checkpoint',
+        overlay: { type: 'ema_overlay', payload: { values: [10, 11] } },
+      }],
+    },
+  })
+
+  const selected = getSelectedSymbolState(store)
+  assert.equal(selected.overlay_validity.status, 'valid')
+  assert.equal(selected.live_cursors.overlay_commit_seq, 20)
+  assert.equal(selected.overlays.length, 1)
+  assert.equal(selected.overlays[0].overlay_id, 'overlay-checkpoint')
 })
 
 test('selected-symbol snapshot overlay cursor guards post-bootstrap overlay deltas', () => {
@@ -684,4 +820,108 @@ test('selectSymbol retains bounded client state and waits for explicit bootstrap
   assert.equal(getSelectedSymbolState(store), null)
   assert.equal(store.symbolStates['instrument-btc|1m'].symbol_key, 'instrument-btc|1m')
   assert.equal(store.symbolStates['instrument-eth|5m'].symbol_key, 'instrument-eth|5m')
+})
+
+
+test('ordered live candle appends stay bounded without reordering the hot tail', () => {
+  let candles = []
+  for (let time = 1; time <= 500; time += 1) {
+    candles = appendBoundedCanonicalCandle(candles, {
+      time,
+      open: time,
+      high: time,
+      low: time,
+      close: time,
+    })
+  }
+  assert.equal(candles.length, 320)
+  assert.equal(candles[0].time, 181)
+  assert.equal(candles.at(-1).time, 500)
+
+  candles = appendBoundedCanonicalCandle(candles, {
+    time: 500,
+    open: 500,
+    high: 501,
+    low: 499,
+    close: 500.5,
+  })
+  assert.equal(candles.length, 320)
+  assert.equal(candles.at(-1).close, 500.5)
+})
+
+test('compact polyline tail patches update overlay geometry immediately and retain a bounded revision', () => {
+  const baseFingerprint = 'a'.repeat(64)
+  const resultFingerprint = 'b'.repeat(64)
+  const overlays = projectOverlayState([{
+    overlay_id: 'overlay-lines',
+    type: 'strategy_signal',
+    payload: {
+      polylines: [{
+        role: 'signal',
+        points: [
+          { time: 1, price: 10 },
+          { time: 2, price: 11 },
+          { time: 3, price: 12 },
+        ],
+      }],
+    },
+    payload_summary: {
+      polyline_fingerprint: baseFingerprint,
+      point_count: 3,
+    },
+  }])
+
+  assert.match(overlays[0].overlay_revision, /^fnv1a32:[0-9a-f]{8}$/)
+  assert.ok(overlays[0].overlay_revision.length < 32)
+
+  const updated = applyOverlayDelta(overlays, {
+    ops: [{
+      op: 'patch',
+      key: 'overlay-lines',
+      payload_patch: {
+        polyline_tail: {
+          expected_fingerprint: baseFingerprint,
+          result_fingerprint: resultFingerprint,
+          entries: [{
+            index: 0,
+            expected_count: 3,
+            drop_prefix: 1,
+            append: [{ time: 4, price: 13 }],
+          }],
+        },
+        payload_summary: { point_count: 3 },
+      },
+    }],
+  })
+
+  assert.deepEqual(
+    updated[0].payload.polylines[0].points.map((point) => point.time),
+    [2, 3, 4],
+  )
+  assert.equal(updated[0].payload_summary.polyline_fingerprint, resultFingerprint)
+  assert.match(updated[0].overlay_revision, /^fnv1a32:[0-9a-f]{8}$/)
+})
+
+test('polyline tail patches fail loud when their base fingerprint diverges', () => {
+  const overlays = projectOverlayState([{
+    overlay_id: 'overlay-lines',
+    payload: { polylines: [{ points: [{ time: 1, price: 10 }] }] },
+    payload_summary: { polyline_fingerprint: 'expected' },
+  }])
+  assert.throws(
+    () => applyOverlayDelta(overlays, {
+      ops: [{
+        op: 'patch',
+        key: 'overlay-lines',
+        payload_patch: {
+          polyline_tail: {
+            expected_fingerprint: 'different',
+            result_fingerprint: 'result',
+            entries: [{ index: 0, expected_count: 1, drop_prefix: 0, append: [] }],
+          },
+        },
+      }],
+    }),
+    /base fingerprint mismatch/,
+  )
 })

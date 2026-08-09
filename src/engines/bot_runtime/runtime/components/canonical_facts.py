@@ -11,6 +11,13 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 logger = logging.getLogger(__name__)
+CANONICAL_FACT_DEBUG_LOG_EVERY = 250
+
+
+def _should_sample_debug_log(count: int, *, every: int = CANONICAL_FACT_DEBUG_LOG_EVERY) -> bool:
+    resolved_every = max(int(every), 1)
+    resolved_count = max(int(count), 0)
+    return resolved_count == 1 or resolved_count % resolved_every == 0
 
 _CANONICAL_SIMPLE_FACT_TYPES = frozenset(
     {
@@ -176,6 +183,7 @@ class CanonicalFactPersistenceBuffer:
         self._queued_count = 0
         self._persisted_row_count = 0
         self._persisted_batch_count = 0
+        self._persist_flush_count = 0
         self._persist_lag_ms = 0.0
         self._persist_batch_ms = 0.0
         self._persist_error_count = 0
@@ -408,18 +416,22 @@ class CanonicalFactPersistenceBuffer:
             with self._metrics_lock:
                 self._persisted_row_count += int(result.get("inserted_rows") or 0)
                 self._persisted_batch_count += len(batch)
+                self._persist_flush_count += 1
+                persist_flush_count = self._persist_flush_count
                 self._persist_batch_ms = persist_batch_ms
                 self._persist_lag_ms = persist_lag_ms
 
-            logger.debug(
-                "bot_canonical_fact_batch_persisted | batch_size=%s | inserted_rows=%s | row_count=%s | persist_batch_ms=%.3f | persist_lag_ms=%.3f | queue_depth=%s",
-                len(batch),
-                result.get("inserted_rows"),
-                result.get("row_count"),
-                persist_batch_ms,
-                persist_lag_ms,
-                self._queue.qsize(),
-            )
+            if _should_sample_debug_log(persist_flush_count):
+                logger.debug(
+                    "bot_canonical_fact_batch_persisted | flush_count=%s | batch_size=%s | inserted_rows=%s | row_count=%s | persist_batch_ms=%.3f | persist_lag_ms=%.3f | queue_depth=%s",
+                    persist_flush_count,
+                    len(batch),
+                    result.get("inserted_rows"),
+                    result.get("row_count"),
+                    persist_batch_ms,
+                    persist_lag_ms,
+                    self._queue.qsize(),
+                )
 
 
 def _consume_committed_batch(
@@ -714,18 +726,21 @@ class CanonicalFactProjectionDispatcher:
             dispatch_lag_ms = max((time.monotonic() - item.enqueued_monotonic) * 1000.0, 0.0)
             with self._metrics_lock:
                 self._dispatched_count += 1
+                dispatched_count = self._dispatched_count
                 self._dispatch_batch_ms = dispatch_batch_ms
                 self._dispatch_lag_ms = dispatch_lag_ms
-            logger.debug(
-                "bot_canonical_fact_projection_dispatched | run_id=%s | seq=%s | batch_kind=%s | dispatch_batch_ms=%.3f | dispatch_lag_ms=%.3f | queue_depth=%s | consumer_results=%s",
-                item.batch.run_id,
-                item.batch.seq,
-                item.batch.batch_kind,
-                dispatch_batch_ms,
-                dispatch_lag_ms,
-                self._queue.qsize(),
-                len(results),
-            )
+            if _should_sample_debug_log(dispatched_count):
+                logger.debug(
+                    "bot_canonical_fact_projection_dispatched | dispatched_count=%s | run_id=%s | seq=%s | batch_kind=%s | dispatch_batch_ms=%.3f | dispatch_lag_ms=%.3f | queue_depth=%s | consumer_results=%s",
+                    dispatched_count,
+                    item.batch.run_id,
+                    item.batch.seq,
+                    item.batch.batch_kind,
+                    dispatch_batch_ms,
+                    dispatch_lag_ms,
+                    self._queue.qsize(),
+                    len(results),
+                )
 
 
 class CanonicalFactAppender:

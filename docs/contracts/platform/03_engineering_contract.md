@@ -40,6 +40,22 @@ context.
 Lifecycle boundaries should be observable via structured logs.
 Correlation fields should include IDs and timing context when available.
 
+## API Execution Contract
+
+- A FastAPI HTTP handler that calls synchronous SQL, filesystem, Docker,
+  provider-client, subprocess, or CPU-bound services must be declared with
+  `def` so FastAPI executes it in the worker threadpool.
+- `async def` HTTP handlers are reserved for genuinely cooperative work that
+  awaits asynchronous I/O, queues, locks, timers, streams, or WebSockets.
+- A genuinely async handler or service that also needs a synchronous operation
+  must cross an explicit `run_in_threadpool` or `asyncio.to_thread` seam before
+  invoking it. Calling a synchronous function from an async function does not
+  make the operation asynchronous.
+- Long-running or unbounded CPU work belongs in an owned background worker/job.
+  The request threadpool is an isolation boundary, not a compute scheduler.
+- Event-loop ownership is a responsiveness contract: one slow request must not
+  delay health, navigation, unrelated BotLens projections, SSE, or WebSockets.
+
 ## Optimization Rule
 
 Preserve correctness and determinism first.

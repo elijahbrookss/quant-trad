@@ -83,7 +83,9 @@ def _cmd_active(args: argparse.Namespace) -> int:
 
 def _cmd_start(args: argparse.Namespace) -> int:
     url = f"{args.api_url.rstrip('/')}/api/bots/{args.bot_id}/start"
-    body = {"request_id": args.request_id} if args.request_id else {}
+    body = {"economic_claim_intent": "exploration"}
+    if args.request_id:
+        body["request_id"] = args.request_id
     payload = _api_json("POST", url, payload=body, timeout=args.timeout)
     keys = ("status", "bot_id", "run_id", "active_run_id", "request_id", "message")
     _print_json({key: payload.get(key) for key in keys})

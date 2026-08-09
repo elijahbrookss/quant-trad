@@ -24,6 +24,7 @@ from .models import (
     REQUIRED_PROVIDER_CREDENTIAL_INDEXES,
     REQUIRED_REPORT_MATERIALIZATION_INDEXES,
     REQUIRED_RESEARCH_ITEM_INDEXES,
+    REQUIRED_RESEARCH_AUTHORITY_INDEXES,
     REQUIRED_RESEARCH_LINK_INDEXES,
 )
 
@@ -59,6 +60,45 @@ _LEGACY_MARKET_DATA_TABLES = (
     "public.portal_candle_closures",
 )
 _CANONICAL_MARKET_DATA_TABLE = "market.candle_versions"
+_EXPLICIT_MIGRATION_TABLES = frozenset(
+    {
+        ("market", "numeric_fact_versions"),
+        ("market", "fact_acquisition_coverage"),
+    }
+)
+_NUMERIC_FACT_REQUIRED_INDEXES = frozenset(
+    {
+        "ix_market_numeric_fact_series_time_revision",
+        "ix_market_numeric_fact_series_commit",
+        "ix_market_numeric_fact_series_known",
+        "ix_market_numeric_fact_event_group",
+    }
+)
+_NUMERIC_COVERAGE_REQUIRED_INDEXES = frozenset(
+    {"ix_market_fact_acquisition_coverage_lookup"}
+)
+_COLUMN_MIGRATION_GUIDANCE = {
+    ("market", "gap_evidence", "source_id"):
+        "scripts/db/manual_migration_gap_source_identity_v1.sql",
+    ("market", "dataset_series", "quality_evidence"):
+        "scripts/db/manual_migration_dataset_quality_evidence_v1.sql",
+}
+_NUMERIC_FACT_REQUIRED_CONSTRAINTS = frozenset(
+    {
+        "ck_market_numeric_fact_revision_positive",
+        "ck_market_numeric_fact_type",
+        "ck_market_numeric_fact_contract",
+        "ck_market_numeric_fact_raw_value",
+        "ck_market_numeric_fact_unit",
+        "ck_market_numeric_fact_dimensions_object",
+        "ck_market_numeric_fact_state",
+        "ck_market_numeric_fact_known_after_effective",
+        "ck_market_numeric_fact_known_after_publication",
+        "ck_market_numeric_fact_acceptance_after_receipt",
+        "ck_market_numeric_fact_source_material_hash",
+        "ck_market_numeric_fact_row_hash",
+    }
+)
 
 _ASYNC_JOB_RUNNING_CLAIM_DEFINITION = (
     "status='running'andlock_ownerisnotnullandlocked_atisnotnull"
@@ -264,6 +304,7 @@ class Database:
             self._assert_market_commit_clock(conn, existing_only=True)
             self._assert_retired_tables_absent(conn)
             self._create_missing_tables(conn)
+            self._assert_numeric_fact_migration(conn)
             self._ensure_market_data_hypertables(conn)
             self._assert_market_commit_clock(conn, existing_only=False)
             self._assert_columns(conn)
@@ -351,6 +392,7 @@ class Database:
             "candle_versions",
             "open_interest_versions",
             "funding_rate_versions",
+            "numeric_fact_versions",
             "market_trade_versions",
             "trade_flow_aggregate_versions",
             "l2_snapshot_versions",
@@ -483,6 +525,7 @@ class Database:
             "raw_archive_record_mappings",
             "raw_archive_compaction_sources",
             "archive_retention_pin_versions",
+            "storage_lifecycle_events",
             "stream_coverage_interval_versions",
             "stream_quality_events",
             "market_trade_identities",
@@ -544,6 +587,8 @@ class Database:
 
         for table in Base.metadata.sorted_tables:
             schema_name = str(table.schema or "").strip() or None
+            if (schema_name, table.name) in _EXPLICIT_MIGRATION_TABLES:
+                continue
             retired_name = _HARD_CUTOVER_TABLE_RENAMES.get((schema_name, table.name))
             if retired_name:
                 active_ref = f"{schema_name or 'public'}.{table.name}"
@@ -606,6 +651,24 @@ class Database:
                 table.name,
                 ",".join(missing),
             )
+            migrations = sorted(
+                {
+                    migration
+                    for column in missing
+                    if (
+                        migration := _COLUMN_MIGRATION_GUIDANCE.get(
+                            (schema_name, table.name, column)
+                        )
+                    )
+                }
+            )
+            if migrations:
+                raise RuntimeError(
+                    f"Table '{schema_name + '.' if schema_name else ''}{table.name}' "
+                    f"is missing columns: {', '.join(missing)}. Run "
+                    f"{', then '.join(migrations)} with writers stopped before "
+                    "starting this code."
+                )
             raise RuntimeError(
                 f"Table '{schema_name + '.' if schema_name else ''}{table.name}' is missing columns: {', '.join(missing)}. "
                 "Drop the table or rebuild the database to ensure a clean schema."
@@ -617,6 +680,8 @@ class Database:
         inspector = inspect(conn)
         for table in Base.metadata.sorted_tables:
             schema_name = str(table.schema or "").strip() or None
+            if (schema_name, table.name) in _EXPLICIT_MIGRATION_TABLES:
+                continue
             existing = {str(index.get("name") or "") for index in inspector.get_indexes(table.name, schema=schema_name)}
             for index in sorted(table.indexes, key=lambda item: str(item.name or "")):
                 index_name = str(index.name or "").strip()
@@ -630,6 +695,140 @@ class Database:
                     index_name,
                 )
                 existing.add(index_name)
+
+    def _assert_numeric_fact_migration(self, conn) -> None:
+        """Validate migration-owned numeric objects without issuing startup DDL."""
+
+        missing_tables = [
+            f"{schema}.{name}"
+            for schema, name in sorted(_EXPLICIT_MIGRATION_TABLES)
+            if conn.execute(
+                text("SELECT to_regclass(:table_ref)"),
+                {"table_ref": f"{schema}.{name}"},
+            ).scalar_one_or_none()
+            is None
+        ]
+        if missing_tables:
+            logger.error(
+                "portal_db_numeric_fact_migration_missing | tables=%s",
+                ",".join(missing_tables),
+            )
+            raise RuntimeError(
+                "Migration-owned numeric fact schema is missing: "
+                f"{', '.join(missing_tables)}. Stop backend, collector, worker, "
+                "and paper processes, then run "
+                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
+
+        inspector = inspect(conn)
+        series_columns = {
+            str(column["name"])
+            for column in inspector.get_columns("series", schema="market")
+        }
+        if "dimensions" not in series_columns:
+            raise RuntimeError(
+                "Table 'market.series' is missing migration-owned column dimensions. "
+                "Run scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
+
+        primary_key = inspector.get_pk_constraint(
+            "numeric_fact_versions", schema="market"
+        )
+        primary_columns = tuple(primary_key.get("constrained_columns") or ())
+        if primary_columns != ("series_id", "source_event_key", "revision"):
+            raise RuntimeError(
+                "Table 'market.numeric_fact_versions' must use canonical primary "
+                "key (series_id, source_event_key, revision). Run "
+                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
+
+        numeric_type = conn.execute(
+            text(
+                """
+                SELECT format_type(attribute.atttypid, attribute.atttypmod)
+                FROM pg_attribute AS attribute
+                WHERE attribute.attrelid = 'market.numeric_fact_versions'::regclass
+                  AND attribute.attname = 'numeric_value'
+                  AND NOT attribute.attisdropped
+                """
+            )
+        ).scalar_one()
+        if str(numeric_type) != "numeric":
+            raise RuntimeError(
+                "Table 'market.numeric_fact_versions.numeric_value' must use "
+                "unbounded numeric. Run "
+                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
+
+        constraints = {
+            str(item.get("name") or "")
+            for item in inspector.get_check_constraints(
+                "numeric_fact_versions", schema="market"
+            )
+        }
+        missing_constraints = sorted(_NUMERIC_FACT_REQUIRED_CONSTRAINTS - constraints)
+        if missing_constraints:
+            raise RuntimeError(
+                "Table 'market.numeric_fact_versions' is missing required "
+                f"constraints: {', '.join(missing_constraints)}. Run "
+                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
+
+        numeric_indexes = {
+            str(item.get("name") or "")
+            for item in inspector.get_indexes(
+                "numeric_fact_versions", schema="market"
+            )
+        }
+        missing_indexes = sorted(_NUMERIC_FACT_REQUIRED_INDEXES - numeric_indexes)
+        if missing_indexes:
+            raise RuntimeError(
+                "Table 'market.numeric_fact_versions' is missing required "
+                f"indexes: {', '.join(missing_indexes)}. Run "
+                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
+
+        coverage_indexes = {
+            str(item.get("name") or "")
+            for item in inspector.get_indexes(
+                "fact_acquisition_coverage", schema="market"
+            )
+        }
+        missing_coverage_indexes = sorted(
+            _NUMERIC_COVERAGE_REQUIRED_INDEXES - coverage_indexes
+        )
+        if missing_coverage_indexes:
+            raise RuntimeError(
+                "Table 'market.fact_acquisition_coverage' is missing required "
+                f"indexes: {', '.join(missing_coverage_indexes)}. Run "
+                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
+
+        for table_name in ("numeric_fact_versions", "fact_acquisition_coverage"):
+            trigger_name = f"trg_reject_mutation_{table_name}"
+            exists = conn.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_trigger
+                        WHERE tgname = :trigger_name
+                          AND tgrelid = CAST(:table_ref AS regclass)
+                          AND NOT tgisinternal
+                    )
+                    """
+                ),
+                {
+                    "trigger_name": trigger_name,
+                    "table_ref": f"market.{table_name}",
+                },
+            ).scalar_one()
+            if not bool(exists):
+                raise RuntimeError(
+                    f"Table 'market.{table_name}' is missing immutable trigger "
+                    f"'{trigger_name}'. Run "
+                    "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+                )
 
     def _assert_required_constraints(self, conn) -> None:
         """Fail loud when an existing queue omits ownership constraints."""
@@ -706,6 +905,10 @@ class Database:
         assert_required_indexes("portal_bot_run_leases", REQUIRED_BOT_RUN_LEASE_INDEXES)
         assert_required_indexes("portal_research_items", REQUIRED_RESEARCH_ITEM_INDEXES)
         assert_required_indexes("portal_research_links", REQUIRED_RESEARCH_LINK_INDEXES)
+        for table_name, required_indexes in sorted(
+            REQUIRED_RESEARCH_AUTHORITY_INDEXES.items()
+        ):
+            assert_required_indexes(table_name, required_indexes)
         assert_required_indexes("portal_provider_credential_refs", REQUIRED_PROVIDER_CREDENTIAL_INDEXES)
         assert_required_indexes("portal_async_jobs", REQUIRED_ASYNC_JOB_INDEXES)
         self._assert_async_job_index_definitions(inspector)

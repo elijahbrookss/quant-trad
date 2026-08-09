@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from data_providers.providers.factory import get_provider
 from data_providers.registry import normalize_provider_id, normalize_venue_id
+from engines.bot_runtime.core.execution_assumptions import legacy_execution_assumptions
+from engines.bot_runtime.core.execution_context import resolve_execution_context
 from engines.bot_runtime.core.execution_profile import (
     compile_series_execution_profile,
     normalize_execution_semantics,
@@ -725,6 +727,13 @@ def instrument_runtime_profile(
         require_margin_accounting=resolved_execution_semantics in {"derivative", "proxy_derivative"},
         execution_semantics=resolved_execution_semantics,
     )
+    execution_context = resolve_execution_context(
+        profile,
+        legacy_execution_assumptions(),
+        instrument_payload=payload,
+        source="instrument_profile_preview",
+    )
+    profile = profile.bind_execution_context(execution_context)
     return {
         "schema_version": "instrument_runtime_profile.v1",
         "instrument_id": payload.get("id"),
@@ -732,6 +741,7 @@ def instrument_runtime_profile(
         "runtime_policy": _runtime_policy_from_execution_semantics(profile.instrument.execution_semantics),
         "runtime_policy_version": "instrument_runtime_policy.v1",
         "profile": profile.to_dict(),
+        "resolved_execution_context": execution_context.to_dict(),
     }
 
 

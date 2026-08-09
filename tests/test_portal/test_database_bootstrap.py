@@ -20,6 +20,14 @@ from portal.backend.db.models import (
 )
 
 
+_EXPLICIT_MIGRATION_TABLES = frozenset(
+    {
+        ("market", "numeric_fact_versions"),
+        ("market", "fact_acquisition_coverage"),
+    }
+)
+
+
 def _table_key(table) -> tuple[str | None, str]:
     schema = str(table.schema or "").strip() or None
     return schema, str(table.name)
@@ -57,7 +65,21 @@ class _Inspector:
         self.tables: dict[str | None, set[str]] = {}
         for schema, table in tables:
             self.tables.setdefault(schema, set()).add(table)
-        self.indexes = indexes or {}
+        self.indexes = {
+            key: set(value)
+            for key, value in (indexes or {}).items()
+        }
+        # Explicit-migration relations must already carry their model-declared
+        # indexes because startup deliberately skips index DDL for them.
+        for schema, table_name in _EXPLICIT_MIGRATION_TABLES:
+            if table_name not in self.tables.get(schema, set()):
+                continue
+            table = Base.metadata.tables[f"{schema}.{table_name}"]
+            self.indexes.setdefault((schema, table_name), set()).update(
+                str(index.name)
+                for index in table.indexes
+                if index.name
+            )
         self.missing_columns = missing_columns or {}
         self.missing_constraints = missing_constraints or {}
         self.constraint_overrides = constraint_overrides or {}
@@ -110,6 +132,21 @@ class _Inspector:
             payloads.append(payload)
         return payloads
 
+    def get_pk_constraint(
+        self,
+        name: str,
+        schema: str | None = None,
+    ) -> dict[str, Any]:
+        metadata_key = f"{schema}.{name}" if schema else name
+        table = Base.metadata.tables[metadata_key]
+        return {
+            "name": str(table.primary_key.name or ""),
+            "constrained_columns": [
+                str(column.name)
+                for column in table.primary_key.columns
+            ],
+        }
+
     def get_check_constraints(
         self,
         name: str,
@@ -148,8 +185,12 @@ class _Connection:
             return _Result(("2.14.2",))
         if "timescaledb_information.hypertables" in statement_text:
             return _Result((True,))
+        if "format_type(attribute.atttypid" in statement_text:
+            return _Result(("numeric",))
         if "FROM pg_attribute AS attribute" in statement_text:
             return _Result(("", "nextval('market.fact_commit_seq'::regclass)"))
+        if "FROM pg_trigger" in statement_text:
+            return _Result((True,))
         if isinstance(statement, CreateSchema):
             self.inspector.schemas.add(str(statement.element))
             return _Result(())
@@ -231,8 +272,41 @@ def test_database_ready_log_redacts_dsn(monkeypatch, caplog) -> None:
     assert "postgresql+psycopg2://redacted:***@tsdb:5432/quanttrad?token=redacted" in messages
 
 
-def test_bootstrap_fresh_database_creates_current_tables_and_indexes(monkeypatch) -> None:
+def test_bootstrap_fresh_database_requires_explicit_numeric_migration_without_runtime_ddl(
+    monkeypatch,
+) -> None:
     inspector = _Inspector()
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        database._bootstrap_schema_contract()
+
+    message = str(exc_info.value)
+    assert "market.numeric_fact_versions" in message
+    assert "market.fact_acquisition_coverage" in message
+    assert "scripts/db/manual_migration_numeric_fact_store_v1.sql" in message
+
+    created_tables = {
+        _table_key(statement.element)
+        for statement in connection.executed
+        if isinstance(statement, CreateTable)
+    }
+    created_indexes = {
+        _table_key(statement.element.table)
+        for statement in connection.executed
+        if isinstance(statement, CreateIndex)
+    }
+    assert created_tables.isdisjoint(_EXPLICIT_MIGRATION_TABLES)
+    assert created_indexes.isdisjoint(_EXPLICIT_MIGRATION_TABLES)
+
+
+def test_bootstrap_migrated_numeric_schema_passes_and_creates_other_objects(
+    monkeypatch,
+) -> None:
+    inspector = _Inspector(
+        schemas={"public", "market"},
+        tables=_EXPLICIT_MIGRATION_TABLES,
+    )
     database, connection = _database_with_fake_engine(monkeypatch, inspector)
 
     database._bootstrap_schema_contract()
@@ -251,6 +325,21 @@ def test_bootstrap_fresh_database_creates_current_tables_and_indexes(monkeypatch
     assert REQUIRED_ASYNC_JOB_CONSTRAINTS <= async_constraints
     assert "observability_events" in inspector.schemas
     assert "observability_metrics" in inspector.schemas
+
+    created_explicit_tables = {
+        _table_key(statement.element)
+        for statement in connection.executed
+        if isinstance(statement, CreateTable)
+        and _table_key(statement.element) in _EXPLICIT_MIGRATION_TABLES
+    }
+    created_explicit_indexes = {
+        _table_key(statement.element.table)
+        for statement in connection.executed
+        if isinstance(statement, CreateIndex)
+        and _table_key(statement.element.table) in _EXPLICIT_MIGRATION_TABLES
+    }
+    assert created_explicit_tables == set()
+    assert created_explicit_indexes == set()
 
     for statement in connection.executed:
         if isinstance(statement, (CreateSchema, CreateTable)):
@@ -298,6 +387,45 @@ def test_bootstrap_fails_loud_on_existing_column_drift_before_index_repair(monke
 
     created_indexes = [statement for statement in connection.executed if isinstance(statement, CreateIndex)]
     assert created_indexes == []
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "migration"),
+    [
+        (
+            "gap_evidence",
+            "source_id",
+            "scripts/db/manual_migration_gap_source_identity_v1.sql",
+        ),
+        (
+            "dataset_series",
+            "quality_evidence",
+            "scripts/db/manual_migration_dataset_quality_evidence_v1.sql",
+        ),
+    ],
+)
+def test_bootstrap_names_preserving_market_data_column_migration(
+    monkeypatch,
+    table: str,
+    column: str,
+    migration: str,
+) -> None:
+    inspector = _Inspector(
+        schemas={"public", "market", "observability_events", "observability_metrics"},
+        tables=[_table_key(candidate) for candidate in Base.metadata.sorted_tables],
+        missing_columns={("market", table): {column}},
+    )
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        database._bootstrap_schema_contract()
+
+    message = str(exc_info.value)
+    assert migration in message
+    assert "writers stopped" in message
+    assert not any(
+        isinstance(statement, CreateIndex) for statement in connection.executed
+    )
 
 
 def test_bootstrap_fails_loud_when_async_fencing_constraint_is_missing(

@@ -8,11 +8,14 @@ import pandas as pd
 from core.candle_continuity import expected_interval_seconds, summarize_candle_continuity
 from data_providers.utils.ohlcv import compute_tr_atr, interval_to_timedelta
 from indicators.config import DataContext
-from market_data.backtest import (
-    bound_instrument_for_id,
-    bound_instrument_for_symbol,
-    bound_series_for_request,
-    normalize_backtest_dataset_binding,
+from market_data.backtest import normalize_backtest_dataset_binding
+from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
+from market_data.frozen import (
+    FROZEN_MARKET_DATA_READ_BINDING_VERSION,
+    bound_frozen_series_for_request,
+    bound_frozen_subject_for_id,
+    bound_frozen_subject_for_symbol,
+    normalize_frozen_market_data_read_binding,
 )
 
 from . import instrument_service
@@ -27,10 +30,24 @@ class MarketDataReadScope:
     dataset_binding: Mapping[str, Any]
 
     def __post_init__(self) -> None:
+        if (
+            str(self.dataset_binding.get("schema_version") or "").strip()
+            == FROZEN_MARKET_DATA_READ_BINDING_VERSION
+        ):
+            normalized = normalize_frozen_market_data_read_binding(
+                self.dataset_binding
+            )
+        else:
+            normalized_backtest = normalize_backtest_dataset_binding(
+                self.dataset_binding
+            )
+            normalized = dict(
+                normalized_backtest["frozen_market_data_read_binding"]
+            )
         object.__setattr__(
             self,
             "dataset_binding",
-            normalize_backtest_dataset_binding(self.dataset_binding),
+            normalized,
         )
 
     @property
@@ -42,7 +59,25 @@ class MarketDataReadScope:
         return int(self.dataset_binding["max_commit_seq"])
 
 
-_MARKET_DATA_READ_SCOPE: ContextVar[Optional[MarketDataReadScope]] = ContextVar(
+@dataclass(frozen=True)
+class MarketDataPreviewReadScope:
+    """One ephemeral current-store view captured at a single commit watermark."""
+
+    as_of_commit_seq: int
+    source_revision: str
+
+    def __post_init__(self) -> None:
+        if int(self.as_of_commit_seq) < 0:
+            raise ValueError("market_data_preview_scope_invalid: watermark is negative")
+        if not str(self.source_revision or "").strip():
+            raise ValueError("market_data_preview_scope_invalid: source_revision is required")
+        object.__setattr__(self, "as_of_commit_seq", int(self.as_of_commit_seq))
+        object.__setattr__(self, "source_revision", str(self.source_revision).strip())
+
+
+_MARKET_DATA_READ_SCOPE: ContextVar[
+    Optional[MarketDataReadScope | MarketDataPreviewReadScope]
+] = ContextVar(
     "market_data_read_scope", default=None
 )
 
@@ -59,7 +94,24 @@ def market_data_read_scope(*, dataset_binding: Mapping[str, Any]) -> Iterator[Ma
         _MARKET_DATA_READ_SCOPE.reset(token)
 
 
-def current_market_data_read_scope() -> Optional[MarketDataReadScope]:
+@contextmanager
+def market_data_preview_read_scope(
+    *, as_of_commit_seq: int, source_revision: str
+) -> Iterator[MarketDataPreviewReadScope]:
+    """Pin all nested mutable candle reads to one captured store watermark."""
+
+    scope = MarketDataPreviewReadScope(
+        as_of_commit_seq=as_of_commit_seq,
+        source_revision=source_revision,
+    )
+    token = _MARKET_DATA_READ_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _MARKET_DATA_READ_SCOPE.reset(token)
+
+
+def current_market_data_read_scope() -> Optional[MarketDataReadScope | MarketDataPreviewReadScope]:
     return _MARKET_DATA_READ_SCOPE.get()
 
 
@@ -93,12 +145,12 @@ def fetch_ohlcv(
     """Read canonical stored candles; missing data requires explicit ingestion."""
 
     scope = current_market_data_read_scope()
-    if scope is None:
+    if scope is None or isinstance(scope, MarketDataPreviewReadScope):
         instrument_id = instrument_service.require_instrument_id(
             datasource, exchange, symbol
         )
     else:
-        instrument = bound_instrument_for_symbol(
+        instrument = bound_frozen_subject_for_symbol(
             scope.dataset_binding,
             datasource=datasource,
             exchange=exchange,
@@ -113,11 +165,13 @@ def fetch_ohlcv_by_instrument(
     start: str,
     end: str,
     interval: str,
+    *,
+    frozen_alias: str | None = None,
 ) -> pd.DataFrame:
     """Read one canonical instrument series without provider/API fallback."""
 
     scope = current_market_data_read_scope()
-    if scope is None:
+    if scope is None or isinstance(scope, MarketDataPreviewReadScope):
         try:
             instrument = instrument_service.get_instrument_record(instrument_id)
         except KeyError as exc:
@@ -127,18 +181,26 @@ def fetch_ohlcv_by_instrument(
             start=start,
             end=end,
             interval=interval,
+            as_of_commit_seq=(
+                scope.as_of_commit_seq
+                if isinstance(scope, MarketDataPreviewReadScope)
+                else None
+            ),
         )
     else:
-        instrument = bound_instrument_for_id(
+        instrument = bound_frozen_subject_for_id(
             scope.dataset_binding, instrument_id
         )
         timeframe_seconds = int(interval_to_timedelta(interval).total_seconds())
-        entry = bound_series_for_request(
+        entry = bound_frozen_series_for_request(
             scope.dataset_binding,
             instrument_id=instrument_id,
             timeframe_seconds=timeframe_seconds,
             start=start,
             end=end,
+            fact_type=CANDLE_FACT_TYPE,
+            contract_version=CANDLE_FACT_VERSION,
+            alias=frozen_alias,
         )
         frame = canonical_candle_feed.read_dataset_series(
             dataset_id=scope.dataset_id,
@@ -148,14 +210,28 @@ def fetch_ohlcv_by_instrument(
             start=start,
             end=end,
             quality=list(entry.get("quality_evidence") or []),
+            source_identity_keys=list(
+                (entry.get("source_binding") or {}).get(
+                    "resolved_source_identity_keys"
+                )
+                or []
+            ),
         )
     enriched = _with_runtime_candle_features(frame)
-    if scope is not None:
+    if isinstance(scope, MarketDataReadScope):
         enriched.attrs["market_data_read_scope"] = {
             "schema_version": "market_data_read_scope.v2",
             "dataset_id": scope.dataset_id,
             "dataset_hash": scope.dataset_binding["dataset_hash"],
             "as_of_commit_seq": scope.as_of_commit_seq,
+        }
+    elif isinstance(scope, MarketDataPreviewReadScope):
+        enriched.attrs["market_data_read_scope"] = {
+            "schema_version": "market_data_preview_read_scope.v1",
+            "as_of_commit_seq": scope.as_of_commit_seq,
+            "source_revision": scope.source_revision,
+            "mutable_store": True,
+            "replayable": False,
         }
     return enriched
 
@@ -321,6 +397,7 @@ def fetch_ohlcv_for_context(
     *,
     datasource: Optional[str] = None,
     exchange: Optional[str] = None,
+    frozen_alias: str | None = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV through the canonical candle service using an indicator/runtime data context."""
 
@@ -330,6 +407,7 @@ def fetch_ohlcv_for_context(
             str(ctx.start),
             str(ctx.end),
             str(ctx.interval),
+            frozen_alias=frozen_alias,
         )
     return fetch_ohlcv(
         str(ctx.symbol),

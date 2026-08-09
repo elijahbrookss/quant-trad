@@ -28,6 +28,27 @@ from engines.bot_runtime.core.execution_profile import (
     normalize_execution_semantics,
     normalize_runtime_instrument_type,
 )
+from engines.bot_runtime.core.execution_assumptions import (
+    ResolvedExecutionAssumptions,
+    legacy_execution_assumptions,
+    resolve_execution_assumptions,
+)
+from engines.bot_runtime.core.execution_context import (
+    ResolvedExecutionContext,
+    ResolvedExecutionContextBundle,
+    execution_model_artifact_from_book_tape,
+    execution_model_artifact_from_passive_policy,
+    resolve_execution_context,
+    validate_context_against_runtime,
+)
+from engines.bot_runtime.core.book_execution import (
+    BookExecutionModel,
+    ExecutionBookTapeBundle,
+)
+from engines.bot_runtime.core.passive_execution import (
+    PassiveBookExecutionModel,
+    PassiveQueuePolicy,
+)
 from market_data.backtest import resolve_backtest_warmup_bars
 from atm import normalise_template
 from risk import normalise_risk_config
@@ -389,6 +410,101 @@ class SeriesBuilderConstructionMixin:
             require_margin_accounting=execution_semantics in {"derivative", "proxy_derivative"},
             execution_semantics=execution_semantics,
         )
+        raw_execution_assumptions = (
+            dict(self.config.get("execution_assumptions") or {})
+            if isinstance(self.config.get("execution_assumptions"), Mapping)
+            else {}
+        )
+        execution_assumptions = (
+            resolve_execution_assumptions(
+                self.config.get("economic_claim_intent"),
+                raw_execution_assumptions,
+                source=str(raw_execution_assumptions.get("source") or "run_start_request"),
+            )
+            if "economic_claim_intent" in self.config
+            else legacy_execution_assumptions()
+        )
+        pinned_manifest_hash = str(raw_execution_assumptions.get("manifest_hash") or "").strip()
+        if pinned_manifest_hash and pinned_manifest_hash != execution_assumptions.manifest_hash:
+            raise RuntimeError("execution_assumption_manifest_hash_mismatch")
+        raw_context_bundle = self.config.get("resolved_execution_context_bundle")
+        if raw_context_bundle is not None and not isinstance(raw_context_bundle, Mapping):
+            raise RuntimeError("resolved_execution_context_bundle must be an object")
+        raw_book_bundle = self.config.get("execution_book_tape_bundle")
+        if raw_book_bundle is not None and not isinstance(raw_book_bundle, Mapping):
+            raise RuntimeError("execution_book_tape_bundle must be an object")
+        book_bundle = (
+            ExecutionBookTapeBundle.from_dict(raw_book_bundle)
+            if isinstance(raw_book_bundle, Mapping) and raw_book_bundle
+            else None
+        )
+        book_tape = (
+            book_bundle.tape_for(execution_profile.instrument.instrument_id or instrument_id)
+            if book_bundle is not None
+            else None
+        )
+        raw_queue_policy = self.config.get("passive_queue_policy")
+        if raw_queue_policy is not None and not isinstance(raw_queue_policy, Mapping):
+            raise RuntimeError("passive_queue_policy must be an object")
+        passive_queue_policy = (
+            PassiveQueuePolicy.from_dict(raw_queue_policy)
+            if isinstance(raw_queue_policy, Mapping) and raw_queue_policy
+            else None
+        )
+        if passive_queue_policy is not None and book_tape is None:
+            raise RuntimeError("passive_queue_policy requires an immutable execution book tape")
+        if book_tape is not None and self.run_type != "backtest":
+            raise RuntimeError("execution book replay is admitted only for backtest runs")
+        if isinstance(raw_context_bundle, Mapping) and raw_context_bundle:
+            context_bundle = ResolvedExecutionContextBundle.from_dict(raw_context_bundle)
+            execution_context = context_bundle.context_for(
+                instrument_id=execution_profile.instrument.instrument_id or instrument_id,
+                symbol=symbol,
+                execution_semantics=execution_profile.instrument.execution_semantics,
+            )
+            validate_context_against_runtime(
+                execution_context,
+                profile=execution_profile,
+                assumptions=execution_assumptions,
+                instrument_payload=instrument or {},
+            )
+        else:
+            execution_context = resolve_execution_context(
+                execution_profile,
+                execution_assumptions,
+                instrument_payload=instrument or {},
+                execution_model_artifact=(
+                    (
+                        execution_model_artifact_from_passive_policy(
+                            execution_assumptions,
+                            source_capability=book_tape.source_capability,
+                            execution_book_tape_hash=book_tape.tape_hash,
+                            queue_policy=passive_queue_policy,
+                        )
+                        if passive_queue_policy is not None
+                        else execution_model_artifact_from_book_tape(
+                            execution_assumptions,
+                            source_capability=book_tape.source_capability,
+                        )
+                    )
+                    if book_tape is not None
+                    else None
+                ),
+                source="legacy_runtime_compatibility_resolution",
+            )
+        execution_profile = execution_profile.bind_execution_context(execution_context)
+        if execution_context.model.input_capability != "bars" and book_tape is None:
+            raise RuntimeError("book execution context is missing its immutable execution book tape")
+        if execution_context.model.input_capability == "bars" and book_tape is not None:
+            raise RuntimeError("execution book tape was supplied to a bar execution context")
+        if execution_context.model.execution_quality_ceiling == "X5" and passive_queue_policy is None:
+            raise RuntimeError("X5 execution context is missing its immutable passive queue policy")
+        if passive_queue_policy is not None:
+            pinned_policy = dict(execution_context.model.parameters or {}).get("passive_queue_policy")
+            if not isinstance(pinned_policy, Mapping):
+                raise RuntimeError("execution context does not pin a passive queue policy")
+            if str(pinned_policy.get("policy_hash") or "") != passive_queue_policy.policy_hash:
+                raise RuntimeError("passive_queue_policy_hash_mismatch")
         profile_context = self._strategy_log_context(
             strategy,
             symbol=symbol,
@@ -403,6 +519,12 @@ class SeriesBuilderConstructionMixin:
             qty_step=execution_profile.constraints.qty_step,
             max_qty=execution_profile.constraints.max_qty,
             min_notional=execution_profile.constraints.min_notional,
+            resolved_execution_context_hash=execution_context.context_hash,
+            venue_execution_profile_id=execution_context.venue.profile_id,
+            venue_execution_profile_version=execution_context.venue.version,
+            fee_schedule_id=execution_context.fee_schedule.schedule_id,
+            fee_schedule_version=execution_context.fee_schedule.version,
+            execution_model_artifact_hash=execution_context.model.artifact_hash,
         )
         logger.info(with_log_context("series_execution_profile_compiled", profile_context))
         risk_engine = LadderRiskEngine(
@@ -410,6 +532,8 @@ class SeriesBuilderConstructionMixin:
             instrument=instrument,
             execution_profile=execution_profile,
             risk_config=risk_config,
+            execution_assumptions=execution_assumptions,
+            execution_context=execution_context,
         )
         risk_engine.set_runtime_context(
             strategy_id=strategy.id,
@@ -420,7 +544,27 @@ class SeriesBuilderConstructionMixin:
             symbol=symbol,
             instrument_id=(instrument.get("id") if isinstance(instrument, dict) else None) or instrument_id,
         )
-        self._attach_execution_adapter(risk_engine, execution_profile)
+        self._attach_execution_adapter(
+            risk_engine,
+            execution_profile,
+            execution_assumptions,
+            execution_context,
+        )
+        if book_tape is not None:
+            book_model = (
+                PassiveBookExecutionModel(
+                    execution_context=execution_context,
+                    tape=book_tape,
+                    queue_policy=passive_queue_policy,
+                )
+                if passive_queue_policy is not None
+                else BookExecutionModel(
+                    execution_context=execution_context,
+                    tape=book_tape,
+                )
+            )
+            risk_engine.attach_execution_model(book_model)
+            risk_engine.attach_execution_adapter(book_model)
         strategy_rules, strategy_params = strategy.compilation_inputs()
         compiled_strategy = compile_strategy(
             strategy_id=strategy.id,
@@ -440,6 +584,18 @@ class SeriesBuilderConstructionMixin:
             series_meta["research_market_role"] = execution_profile.instrument.research_market_role
         series_meta["atm_template"] = atm_template
         series_meta["risk_config"] = deepcopy(risk_config)
+        series_meta["resolved_execution_context"] = execution_context.to_dict()
+        if book_tape is not None:
+            series_meta["execution_book_tape"] = {
+                "schema_version": book_tape.schema_version,
+                "tape_id": book_tape.tape_id,
+                "tape_hash": book_tape.tape_hash,
+                "source_capability": book_tape.source_capability,
+                "replay_fingerprint": book_tape.replay_fingerprint,
+                "replay_certified": book_tape.replay_certified,
+                "snapshot_count": len(book_tape.snapshots),
+                "limitations": list(book_tape.limitations),
+            }
         if backtest_warmup_evidence is not None:
             series_meta["backtest_warmup"] = backtest_warmup_evidence
         if candle_gap_classification:
@@ -505,6 +661,7 @@ class SeriesBuilderConstructionMixin:
             atm_template=atm_template,
             replay_start_index=replay_start_index,
             execution_profile=execution_profile,
+            execution_context=execution_context,
         )
 
     def _build_backtest_candles_with_warmup(
@@ -954,6 +1111,8 @@ class SeriesBuilderConstructionMixin:
         self,
         risk_engine: LadderRiskEngine,
         execution_profile: SeriesExecutionProfile,
+        execution_assumptions: ResolvedExecutionAssumptions,
+        execution_context: ResolvedExecutionContext,
     ) -> None:
         short_requires_borrow = execution_profile.capabilities.short_requires_borrow
         constraints = execution_profile.constraints
@@ -965,6 +1124,8 @@ class SeriesBuilderConstructionMixin:
             min_qty=constraints.min_order_size,
             min_notional=constraints.min_notional,
             contract_size=constraints.contract_size,
+            execution_assumptions=execution_assumptions,
+            execution_context=execution_context,
         )
         risk_engine.attach_execution_adapter(adapter)
 
@@ -977,6 +1138,8 @@ class SeriesBuilderConstructionMixin:
         min_qty: Optional[float],
         min_notional: Optional[float],
         contract_size: float,
+        execution_assumptions: ResolvedExecutionAssumptions,
+        execution_context: ResolvedExecutionContext,
     ):
         if self.run_type == "backtest":
             return BacktestAdapter(
@@ -986,6 +1149,8 @@ class SeriesBuilderConstructionMixin:
                 min_notional=min_notional,
                 contract_size=contract_size,
                 short_requires_borrow=short_requires_borrow,
+                assumptions=execution_assumptions,
+                execution_context=execution_context,
             )
         if self.run_type == "paper":
             return PaperAdapter(
@@ -995,6 +1160,8 @@ class SeriesBuilderConstructionMixin:
                 min_notional=min_notional,
                 contract_size=contract_size,
                 short_requires_borrow=short_requires_borrow,
+                assumptions=execution_assumptions,
+                execution_context=execution_context,
             )
         if self.run_type == "live":
             spot_adapter = self.config.get("spot_execution_adapter")

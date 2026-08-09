@@ -147,6 +147,17 @@ output field. Research checks may name those fields in their expectation
 contracts, but they must not import indicator-family code or read private
 indicator state.
 
+Frozen evidence execution supplies recorded Dataset gaps to this same runtime
+graph. Each Indicator declares one versioned policy: reject, reset and re-warm,
+or continue with explicit degraded status. The Indicator owns the state
+transition, warmup floor, readiness, and whether an Indicator event exists.
+Orchestration and Check code may report the transition but may not recreate it.
+
+Signal event `known_at` must equal the availability time of the current source
+bar/output. Events learned after a Check evaluation boundary are excluded. A
+Check cannot relabel a metric or context row as an Indicator event; it may only
+consume a registered signal event emitted by this runtime timeline.
+
 ## How Indicator State Advances
 
 Indicators should have one internal timeline:
@@ -183,6 +194,9 @@ or unordered mapping iteration.
   report readiness separately from presence.
 - Indicator commit sequence is engine-owned; indicator implementations must not
   fabricate or persist alternate clocks.
+- Only the Indicator runtime may emit an Indicator-defined event.
+- Gap reset, re-warm, degraded state, and post-gap readiness are
+  Indicator-owned semantics.
 - Indicator-specific docs should exist only when an indicator family has architecture behavior beyond ordinary authoring guidance.
 
 ## Related Docs

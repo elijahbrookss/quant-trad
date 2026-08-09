@@ -66,6 +66,15 @@ class ArchiveObjectAcknowledgement:
     reused_existing: bool = False
 
 
+@dataclass(frozen=True)
+class ArchiveObjectDeletionAcknowledgement:
+    object_key: str
+    sha256: str
+    byte_count: int
+    deleted_at: datetime
+    already_absent: bool = False
+
+
 class RawArchiveObjectStore(Protocol):
     def put_verified(
         self, *, object_key: str, source_path: Path, expected_sha256: str
@@ -73,6 +82,11 @@ class RawArchiveObjectStore(Protocol):
         ...
 
     def local_path(self, object_key: str) -> Path:
+        ...
+
+    def delete_verified(
+        self, *, object_key: str, expected_sha256: str, allow_missing: bool = False
+    ) -> ArchiveObjectDeletionAcknowledgement:
         ...
 
 
@@ -188,15 +202,31 @@ class DurableRawSpoolSegment:
 
     @classmethod
     def from_path(cls, path: Path) -> "DurableRawSpoolSegment":
-        header, _rows, _tail = _read_spool_file(Path(path), repair_tail=False)
+        source = Path(path)
+        repair_open_tail = source.suffix == ".open"
+        header, rows, truncated = _read_spool_file(
+            source, repair_tail=repair_open_tail
+        )
         segment = cls(
-            root=_infer_spool_root(Path(path), header),
+            root=_infer_spool_root(source, header),
             definition_id=str(header["definition_id"]),
             session_id=str(header["session_id"]),
             connection_epoch=int(header["connection_epoch"]),
             segment_ordinal=int(header["segment_ordinal"]),
             create=False,
         )
+        segment._record_count = len(rows)
+        segment._last_receive_ordinal = (
+            int(rows[-1]["receive_ordinal"]) if rows else 0
+        )
+        if repair_open_tail:
+            segment.recovery_evidence = SpoolRecoveryEvidence(
+                spool_segment_id=segment.spool_segment_id,
+                path=source,
+                recovered_record_count=len(rows),
+                truncated_tail_bytes=truncated,
+                last_receive_ordinal=segment._last_receive_ordinal,
+            )
         return segment
 
     def _open_or_create(self) -> None:
@@ -505,6 +535,43 @@ class FilesystemRawArchiveObjectStore:
             acknowledged_at=datetime.now(UTC),
         )
 
+    def delete_verified(
+        self, *, object_key: str, expected_sha256: str, allow_missing: bool = False
+    ) -> ArchiveObjectDeletionAcknowledgement:
+        expected = str(expected_sha256 or "").strip().lower()
+        target = self.local_path(object_key)
+        if not target.exists():
+            if not allow_missing:
+                raise FileNotFoundError(
+                    f"market_archive_object_missing: object_key={object_key}"
+                )
+            return ArchiveObjectDeletionAcknowledgement(
+                object_key=str(object_key),
+                sha256=expected,
+                byte_count=0,
+                deleted_at=datetime.now(UTC),
+                already_absent=True,
+            )
+        observed = _sha256_file(target)
+        if observed != expected:
+            raise RuntimeError(
+                "market_archive_delete_forbidden: checksum mismatch "
+                f"object_key={object_key} expected={expected} observed={observed}"
+            )
+        byte_count = target.stat().st_size
+        target.unlink()
+        _fsync_directory(target.parent)
+        if target.exists():
+            raise RuntimeError(
+                f"market_archive_delete_failed: object_key={object_key}"
+            )
+        return ArchiveObjectDeletionAcknowledgement(
+            object_key=str(object_key),
+            sha256=expected,
+            byte_count=byte_count,
+            deleted_at=datetime.now(UTC),
+        )
+
 
 def archive_object_key(
     *, record: RawStreamRecord, spool_segment_id: str, captured_date: str | None = None
@@ -808,6 +875,7 @@ def discover_spool_segments(root: Path) -> tuple[Path, ...]:
 
 __all__ = [
     "ArchiveObjectAcknowledgement",
+    "ArchiveObjectDeletionAcknowledgement",
     "DurableRawSpoolSegment",
     "EncodedRawArchive",
     "FilesystemRawArchiveObjectStore",

@@ -13,7 +13,13 @@ import { CameraIntents, DEFAULT_CAMERA_SPAN_BARS } from './hooks/useViewportCont
 import { MarkerTooltip } from './MarkerTooltip.jsx'
 import { createLogger } from '../../utils/logger.js'
 import { validateCanonicalCandles } from './botlensProjection.js'
-import { resolveCandleUpdateCameraIntent } from './chartCameraPolicy.js'
+import {
+  resolveCandleUpdateCameraIntent,
+  resolveCandleUpdateViewport,
+} from './chartCameraPolicy.js'
+import { resolveChartArtifactRefreshKey } from './chartArtifactRefreshPolicy.js'
+
+const EMPTY_LIST = Object.freeze([])
 
 const parseTimeframeToSeconds = (rawTimeframe) => {
   const text = (rawTimeframe || '').toString().trim().toLowerCase()
@@ -148,8 +154,15 @@ export function BotLensChart({
   className = '',
   heightClass = 'h-[360px]',
   timeframe = null,
+  dataUpdateMode = null,
+  dataUpdateToken = null,
   overlayVisibility = {},
+  onNearHistoryStart = null,
+  onNearHistoryEnd = null,
   viewportResetKey = null,
+  selectedTradeId = null,
+  showActiveTradeLevels = true,
+  followLatestCandles = false,
 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -165,15 +178,17 @@ export function BotLensChart({
   const prevPriceLinesRef = useRef([])
   const markerDetailsRef = useRef([])
   const prevCandleDataRef = useRef([])
+  const incrementalCandleUpdatesSinceResetRef = useRef(0)
   const diagLoggedRef = useRef(false)
   const frameSampleRef = useRef({ total: 0, count: 0, logged: false })
-  const pendingCameraIntentRef = useRef(null)
+  const latestTradeSegmentsRef = useRef([])
+  const lastDataUpdateTokenRef = useRef(null)
   const { registerChart } = useChartState()
   const logger = useMemo(() => createLogger('BotLensChart', { chartId }), [chartId])
 
-  const resolvedCandles = Array.isArray(candles) ? candles : []
-  const resolvedTrades = Array.isArray(trades) ? trades : []
-  const resolvedOverlays = Array.isArray(overlays) ? overlays : []
+  const resolvedCandles = Array.isArray(candles) ? candles : EMPTY_LIST
+  const resolvedTrades = Array.isArray(trades) ? trades : EMPTY_LIST
+  const resolvedOverlays = Array.isArray(overlays) ? overlays : EMPTY_LIST
   const instantPlayback = Number(playbackSpeed) <= 0 || String(mode || '').toLowerCase() === 'instant'
   const playbackProfile = useMemo(() => {
     const speed = Number(playbackSpeed)
@@ -212,6 +227,16 @@ export function BotLensChart({
   const candleData = resolvedCandles
   const candleLookup = useMemo(() => buildCandleLookup(candleData), [candleData])
   const candleLookupRef = useRef(candleLookup)
+  const artifactRefreshKey = resolveChartArtifactRefreshKey({
+    candles: candleData,
+    timeframe,
+    dataUpdateToken,
+  })
+  // Live candles are the hot path. Chart artifacts are immutable between their
+  // own updates, so refresh their candle window at a bounded bar cadence.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const artifactCandles = useMemo(() => candleData, [artifactRefreshKey, resolvedOverlays, resolvedTrades])
+  const artifactCandleLookup = useMemo(() => buildCandleLookup(artifactCandles), [artifactCandles])
 
   useEffect(() => {
     latestCandlesRef.current = candleData
@@ -256,13 +281,17 @@ export function BotLensChart({
   }, [candleData, chartId, debugRanges, logger])
 
   const { markers: tradeMarkers, tooltips: tradeMarkerTooltips, regions: tradeRegions, segments: tradeSegments, priceLines: tradePriceLines } =
-    useTradeMarkers(resolvedTrades, candleLookup, candleData)
+    useTradeMarkers(resolvedTrades, artifactCandleLookup, artifactCandles, {
+      selectedTradeId,
+      showActiveTradeLevels,
+    })
 
   const showTradeMarkers = overlayVisibility.trade_markers !== false
   const showTradeRays = overlayVisibility.trade_rays !== false
   const showTradeRegions = overlayVisibility.trade_regions !== false
 
   const markerManager = useMarkerManager({ seriesRef, markersApiRef, markerCacheRef })
+  const refreshMarkers = markerManager.flush
 
   const { recenter, requestIntent, attachRangeGuards, setAnimationActive, focusAtTime, resetViewport } = useCameraLock({
     chartRef,
@@ -271,11 +300,14 @@ export function BotLensChart({
     latestCandlesRef,
     markerManager,
     debugRanges,
+    onNearHistoryStart,
+    onNearHistoryEnd,
   })
 
   const { pulseTradeElements, clearPulseArtifacts } = usePulseMarkers({
     seriesRef,
     markerManager,
+    latestCandlesRef,
   })
 
   useEffect(() => {
@@ -347,11 +379,16 @@ export function BotLensChart({
     if (seriesRef.current !== seriesInstanceRef.current) {
       seriesInstanceRef.current = seriesRef.current
       prevCandleDataRef.current = []
+      incrementalCandleUpdatesSinceResetRef.current = 0
       frameSampleRef.current = { total: 0, count: 0, logged: false }
       diagLoggedRef.current = false
     }
     const previous = prevCandleDataRef.current || []
     const next = candleData
+    const hasNewDataUpdate = dataUpdateToken != null && dataUpdateToken !== lastDataUpdateTokenRef.current
+    const effectiveUpdateMode = hasNewDataUpdate ? dataUpdateMode : null
+    const timeScale = chartRef.current?.timeScale?.()
+    const preservedViewport = resolveCandleUpdateViewport({ updateMode: effectiveUpdateMode, visibleRange: timeScale?.getVisibleRange?.() || null })
     const prevLast = previous[previous.length - 1]
     const nextLast = next[next.length - 1]
     const prevLastTime = prevLast?.time
@@ -359,13 +396,35 @@ export function BotLensChart({
 
     const timeAdvanced = Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && nextLastTime > prevLastTime
     const isAppend = timeAdvanced && next.length === previous.length + 1
+    const nextPreviousLast = timeAdvanced
+      ? next.find((candle) => Number.isFinite(candle?.time) && candle.time === prevLastTime)
+      : null
+    const forwardCandles = timeAdvanced
+      ? next.filter((candle) => Number.isFinite(candle?.time) && candle.time > prevLastTime)
+      : []
+    const canIncrementalCatchUp = Boolean(
+      timeAdvanced
+      && nextPreviousLast
+      && forwardCandles.length
+      && effectiveUpdateMode !== 'prepend',
+    )
     const isSameCandle = next.length === previous.length && Number.isFinite(nextLastTime) && nextLastTime === prevLastTime
     const historyRewound =
-      Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime) && (next.length < previous.length || nextLastTime < prevLastTime)
-    const longJump = next.length > previous.length + 1
-    const requiresReset = !previous.length || !next.length || historyRewound || longJump
+      Number.isFinite(prevLastTime) && Number.isFinite(nextLastTime)
+      && (nextLastTime < prevLastTime || (next.length < previous.length && !canIncrementalCatchUp))
+    const longJump = forwardCandles.length > 1
+    const requiresReset = !previous.length || !next.length || historyRewound
+      || (timeAdvanced && !canIncrementalCatchUp) || effectiveUpdateMode === 'prepend'
+    const shouldRebaseIncrementalSeries = canIncrementalCatchUp
+      && previous.length === next.length
+      && incrementalCandleUpdatesSinceResetRef.current + forwardCandles.length >= 64
     const shouldAnimate = isSameCandle && playbackProfile.allowIntrabar
-    const cameraIntent = resolveCandleUpdateCameraIntent({ previous, next })
+    const cameraIntent = resolveCandleUpdateCameraIntent({
+      previous,
+      next,
+      updateMode: effectiveUpdateMode,
+      followLatest: followLatestCandles,
+    })
 
     const sample = frameSampleRef.current
     const start = performance.now()
@@ -373,14 +432,23 @@ export function BotLensChart({
     if (requiresReset) {
       cancelAnimator('reset')
       seriesRef.current.setData(next)
+      refreshMarkers({ force: true })
+      incrementalCandleUpdatesSinceResetRef.current = 0
       frameSampleRef.current = { total: 0, count: 0, logged: false }
-      if (cameraIntent) pendingCameraIntentRef.current = cameraIntent
+    } else if (shouldRebaseIncrementalSeries) {
+      cancelAnimator('bounded-rebase')
+      seriesRef.current.setData(next)
+      refreshMarkers({ force: true })
+      incrementalCandleUpdatesSinceResetRef.current = 0
+      frameSampleRef.current = { total: 0, count: 0, logged: false }
+    } else if (canIncrementalCatchUp) {
+      cancelAnimator(longJump ? 'catch-up' : 'append')
+      seriesRef.current.update(nextPreviousLast)
+      forwardCandles.forEach((candle) => seriesRef.current.update(candle))
+      incrementalCandleUpdatesSinceResetRef.current += forwardCandles.length
     } else if (shouldAnimate) {
       const prevMatch = previous.find((candle) => Number.isFinite(candle?.time) && candle.time === nextLastTime)
       startAnimator({ series: seriesRef.current, fromCandle: prevMatch, toCandle: nextLast, speed: playbackSpeed })
-    } else if (isAppend) {
-      cancelAnimator('append')
-      seriesRef.current.update(nextLast)
     } else if (isSameCandle) {
       cancelAnimator('same-candle')
       seriesRef.current.update(nextLast)
@@ -388,6 +456,11 @@ export function BotLensChart({
       cancelAnimator('fallback')
       seriesRef.current.setData(next)
     }
+
+    if (preservedViewport) {
+      timeScale?.setVisibleRange?.(preservedViewport)
+    }
+    if (hasNewDataUpdate) lastDataUpdateTokenRef.current = dataUpdateToken
 
     const duration = performance.now() - start
     sample.total += duration
@@ -402,6 +475,14 @@ export function BotLensChart({
 
     prevCandleDataRef.current = next
 
+    if (cameraIntent) {
+      requestIntent({
+        ...cameraIntent,
+        payload: { ...(cameraIntent.payload || {}), segments: latestTradeSegmentsRef.current },
+        reason: cameraIntent.reason,
+      })
+    }
+
     if (debugRanges) {
       const timeScale = chartRef.current?.timeScale?.()
       const range = timeScale?.getVisibleRange?.() || null
@@ -413,11 +494,14 @@ export function BotLensChart({
         isSameCandle,
         historyRewound,
         longJump,
+        canIncrementalCatchUp,
+        shouldRebaseIncrementalSeries,
+        updateMode: effectiveUpdateMode,
         range,
         logicalRange,
       })
     }
-  }, [cancelAnimator, candleData, debugRanges, logger, playbackProfile, seriesRef, startAnimator])
+  }, [cancelAnimator, candleData, chartId, dataUpdateMode, dataUpdateToken, debugRanges, followLatestCandles, logger, playbackProfile, playbackSpeed, refreshMarkers, requestIntent, seriesRef, startAnimator])
 
   useEffect(() => {
     const last = candleData[candleData.length - 1]?.time ?? null
@@ -441,8 +525,8 @@ export function BotLensChart({
       tradeTooltips: showTradeMarkers ? tradeMarkerTooltips : [],
       tradeRegions: showTradeRegions ? tradeRegions : [],
       tradeSegments: showTradeRegions ? tradeSegments : [],
-      tradePriceLines: showTradeRays ? tradePriceLines : [],
-      candleData,
+      tradePriceLines: showTradeRays && showActiveTradeLevels ? tradePriceLines : [],
+      candleData: artifactCandles,
     })
     if (BOTLENS_DEBUG) {
       logger.debug('overlay_render_artifacts', {
@@ -457,6 +541,7 @@ export function BotLensChart({
       })
     }
     applyArtifacts(artifacts)
+    latestTradeSegmentsRef.current = artifacts.tradeSegments || []
     if (debugRanges) {
       const markerTimes = (artifacts?.markers || [])
         .map((marker) => marker?.time)
@@ -469,16 +554,7 @@ export function BotLensChart({
         last: markerTimes[markerTimes.length - 1] ?? null,
       })
     }
-    if (pendingCameraIntentRef.current) {
-      const pending = pendingCameraIntentRef.current
-      requestIntent({
-        ...pending,
-        payload: { ...(pending.payload || {}), segments: artifacts.tradeSegments },
-        reason: pending.reason,
-      })
-      pendingCameraIntentRef.current = null
-    }
-  }, [applyArtifacts, candleData, computeArtifacts, requestIntent, resolvedOverlays, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
+  }, [applyArtifacts, artifactCandles, computeArtifacts, debugRanges, logger, resolvedOverlays, showActiveTradeLevels, showTradeMarkers, showTradeRays, showTradeRegions, tradeMarkerTooltips, tradeMarkers, tradePriceLines, tradeRegions, tradeSegments])
 
   const containerClasses = [
     'relative w-full overflow-hidden rounded-[3px] border border-white/10 bg-[#0f1118]',

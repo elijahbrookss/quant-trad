@@ -14,6 +14,7 @@ import {
   createRunStore,
   isTypedSymbolDeltaMessage,
   mergeCanonicalCandles,
+  mergeCanonicalTrades,
   normalizeSeriesKey,
   selectSymbol,
 } from '../../../../components/bots/botlensProjection.js'
@@ -112,16 +113,154 @@ function commitProjectionStore(state, projectionStore) {
   }
 }
 
-function updateChartHistoryCache(cache, { symbolKey, candles, range }) {
+const MAX_CHART_OVERLAY_PAGES = 16
+export const MAX_CHART_HISTORY_CANDLES = 3840
+
+function evidenceEpochSeconds(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1e12 ? Math.floor(value / 1000) : value
+  }
+  const parsed = Date.parse(value || '')
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : null
+}
+
+function tradeOverlapsCandleWindow(trade, candles) {
+  const first = Number(candles?.[0]?.time)
+  const last = Number(candles?.[candles.length - 1]?.time)
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return false
+  const entry = evidenceEpochSeconds(
+    trade?.entry_time || trade?.opened_at || trade?.event_ts,
+  )
+  const exit = evidenceEpochSeconds(trade?.exit_time || trade?.closed_at)
+  if (!Number.isFinite(entry) && !Number.isFinite(exit)) return false
+  const start = Number.isFinite(entry) ? entry : exit
+  const end = Number.isFinite(exit) ? exit : Number.POSITIVE_INFINITY
+  return start <= last && end >= first
+}
+
+function updateChartHistoryCache(cache, {
+  symbolKey,
+  candles,
+  trades,
+  overlays,
+  range,
+  evidenceSource,
+  tradeEvidence,
+  overlayEvidence,
+  mergeMode = 'append',
+  focusTime = null,
+  focusToken = null,
+  focusTradeId = null,
+  requestId = null,
+}) {
   const existing = cache?.[symbolKey] || null
+  const mergedCandles = mergeMode === 'replace'
+    ? mergeCanonicalCandles(candles || [])
+    : mergeCanonicalCandles(candles || [], existing?.candles || [])
+  const boundedCandles = mergedCandles.length <= MAX_CHART_HISTORY_CANDLES
+    ? mergedCandles
+    : mergeMode === 'prepend'
+      ? mergedCandles.slice(0, MAX_CHART_HISTORY_CANDLES)
+      : mergedCandles.slice(-MAX_CHART_HISTORY_CANDLES)
+  const mergedTrades = mergeMode === 'replace'
+    ? mergeCanonicalTrades(trades || [])
+    : mergeCanonicalTrades(existing?.trades || [], trades || [])
+  const boundedTrades = mergedTrades.filter((trade) => (
+    tradeOverlapsCandleWindow(trade, boundedCandles)
+  ))
+  const pageTradeEvidence = tradeEvidence && typeof tradeEvidence === 'object'
+    ? { ...tradeEvidence }
+    : null
+  const pageFingerprints = Array.from(new Set([
+    ...(Array.isArray(existing?.tradeEvidence?.page_fingerprints)
+      ? existing.tradeEvidence.page_fingerprints
+      : []),
+    pageTradeEvidence?.fingerprint,
+  ].filter(Boolean))).slice(-64)
+  const mergedTradeEvidence = pageTradeEvidence
+    ? {
+        ...pageTradeEvidence,
+        loaded_trade_count: boundedTrades.length,
+        complete_for_loaded_candles: Boolean(
+          pageTradeEvidence.complete_for_returned_candles
+          && (existing?.tradeEvidence
+            ? existing.tradeEvidence.complete_for_loaded_candles
+              ?? existing.tradeEvidence.complete_for_returned_candles
+            : true),
+        ),
+        page_fingerprints: pageFingerprints,
+      }
+    : existing?.tradeEvidence || null
+  const pageOverlayEvidence = overlayEvidence && typeof overlayEvidence === 'object'
+    ? { ...overlayEvidence }
+    : null
+  const pageFingerprint = pageOverlayEvidence?.fingerprint
+    || [range?.returned_start_time, range?.returned_end_time].filter(Boolean).join(':')
+  const priorOverlayPages = mergeMode === 'replace'
+    ? []
+    : Array.isArray(existing?.overlayPages) ? existing.overlayPages : []
+  const overlayPages = pageFingerprint
+    ? [
+        ...priorOverlayPages.filter((page) => page.fingerprint !== pageFingerprint),
+        {
+          fingerprint: pageFingerprint,
+          range: range && typeof range === 'object' ? { ...range } : null,
+          overlays: Array.isArray(overlays) ? overlays.map((entry) => ({ ...entry })) : [],
+          evidence: pageOverlayEvidence,
+        },
+      ].slice(-MAX_CHART_OVERLAY_PAGES)
+    : priorOverlayPages
+  const mergedOverlayEvidence = pageOverlayEvidence
+    ? {
+        ...pageOverlayEvidence,
+        loaded_page_count: overlayPages.length,
+        loaded_overlay_count: overlayPages.reduce((total, page) => total + page.overlays.length, 0),
+        complete_for_loaded_candles: Boolean(
+          pageOverlayEvidence.complete_for_returned_candles
+          && overlayPages.every((page) => page.evidence?.complete_for_returned_candles),
+        ),
+        page_fingerprints: overlayPages.map((page) => page.fingerprint),
+      }
+    : existing?.overlayEvidence || null
+  const pageRange = range && typeof range === 'object' ? { ...range } : null
+  const sourceRange = pageRange || existing?.range || null
+  const wasTrimmed = mergedCandles.length > boundedCandles.length
+  const mergedRange = sourceRange
+    ? {
+        ...sourceRange,
+        returned_start_time: boundedCandles[0]?.time ?? null,
+        returned_end_time: boundedCandles[boundedCandles.length - 1]?.time ?? null,
+        has_more_before: mergeMode === 'append'
+          ? Boolean((existing?.range?.has_more_before ?? sourceRange.has_more_before) || wasTrimmed)
+          : Boolean(sourceRange.has_more_before || (mergeMode === 'replace' && wasTrimmed)),
+        has_more_after: mergeMode === 'prepend'
+          ? Boolean((existing?.range?.has_more_after ?? sourceRange.has_more_after) || wasTrimmed)
+          : Boolean(sourceRange.has_more_after),
+      }
+    : null
+
   return {
     ...(cache || {}),
     [symbolKey]: {
       symbolKey,
       status: 'ready',
       error: null,
-      candles: mergeCanonicalCandles(candles || [], existing?.candles || []),
-      range: range && typeof range === 'object' ? { ...range } : existing?.range || null,
+      candles: boundedCandles,
+      trades: boundedTrades,
+      overlays: overlayPages.flatMap((page) => page.overlays),
+      overlayPages,
+      range: mergedRange,
+      evidenceSource: evidenceSource && typeof evidenceSource === 'object'
+        ? { ...evidenceSource }
+        : existing?.evidenceSource || null,
+      tradeEvidence: mergedTradeEvidence,
+      overlayEvidence: mergedOverlayEvidence,
+      focusTime: focusTime || null,
+      focusToken: focusToken || null,
+      focusTradeId: focusTradeId || null,
+      requestId: requestId || existing?.requestId || null,
+      lastUpdateMode: mergeMode,
+      lastUpdateToken: requestId || focusToken || null,
     },
   }
 }
@@ -134,10 +273,7 @@ function matchesActiveRun(state, runId) {
   return activeRunId === requestedRunId
 }
 
-function applyLiveProjectionMessage(state, message) {
-  const projectionStore = getBotLensProjectionStore(state)
-  if (!projectionStore) return state
-
+function applyLiveProjectionMessageToStore(projectionStore, message) {
   let nextProjectionStore = projectionStore
   switch (String(message?.type || '')) {
     case RUN_LIFECYCLE_DELTA_TYPE:
@@ -162,7 +298,150 @@ function applyLiveProjectionMessage(state, message) {
       break
   }
 
-  return commitProjectionStore(state, nextProjectionStore)
+  return nextProjectionStore
+}
+
+function applyLiveProjectionMessage(state, message) {
+  const projectionStore = getBotLensProjectionStore(state)
+  if (!projectionStore) return state
+  return commitProjectionStore(
+    state,
+    applyLiveProjectionMessageToStore(projectionStore, message),
+  )
+}
+
+const COALESCED_ENTRY_FIELDS_BY_TYPE = {
+  botlens_symbol_signal_delta: ['entries'],
+  botlens_symbol_trade_delta: ['upserts', 'removals'],
+  botlens_symbol_diagnostic_delta: ['entries'],
+  botlens_symbol_decision_delta: ['entries'],
+}
+
+const COALESCED_LAST_VALUE_TYPES = new Set([
+  'botlens_symbol_provisional_candle_delta',
+  'botlens_symbol_stats_delta',
+])
+
+function mergeCoalescedTypedMessage(previous, message) {
+  const type = String(message?.type || '')
+  const previousPayload = previous?.payload && typeof previous.payload === 'object'
+    ? previous.payload
+    : {}
+  const payload = message?.payload && typeof message.payload === 'object'
+    ? message.payload
+    : {}
+  if (type === 'botlens_symbol_candle_delta') {
+    const candles = [
+      ...(Array.isArray(previousPayload.candles) ? previousPayload.candles : []),
+      ...(previousPayload.candle && typeof previousPayload.candle === 'object' ? [previousPayload.candle] : []),
+      ...(Array.isArray(payload.candles) ? payload.candles : []),
+      ...(payload.candle && typeof payload.candle === 'object' ? [payload.candle] : []),
+    ]
+    return {
+      ...message,
+      payload: { ...payload, candle: null, candles },
+    }
+  }
+  const entryFields = COALESCED_ENTRY_FIELDS_BY_TYPE[type]
+  if (type === 'botlens_symbol_overlay_delta') {
+    const previousCommitSeq = Number(previousPayload.overlay_commit_seq || 0)
+    const baseCommitSeq = Number(payload.base_overlay_commit_seq || -1)
+    if (
+      !Number.isFinite(previousCommitSeq)
+      || previousCommitSeq <= 0
+      || baseCommitSeq !== previousCommitSeq
+    ) {
+      return null
+    }
+    const messageIsFull = String(payload.checkpoint_kind || '').trim().toLowerCase() === 'full_state'
+    const previousIsFull = String(previousPayload.checkpoint_kind || '').trim().toLowerCase() === 'full_state'
+    const ops = messageIsFull
+      ? (Array.isArray(payload.ops) ? payload.ops : [])
+      : [
+          ...(Array.isArray(previousPayload.ops) ? previousPayload.ops : []),
+          ...(Array.isArray(payload.ops) ? payload.ops : []),
+        ]
+    return {
+      ...message,
+      payload: {
+        ...payload,
+        base_overlay_commit_seq: messageIsFull ? baseCommitSeq : Number(previousPayload.base_overlay_commit_seq || 0),
+        ops,
+        ...((messageIsFull || previousIsFull) ? { checkpoint_kind: 'full_state' } : {}),
+      },
+    }
+  }
+  if (entryFields) {
+    const mergedPayload = { ...payload }
+    entryFields.forEach((field) => {
+      mergedPayload[field] = [
+        ...(Array.isArray(previousPayload[field]) ? previousPayload[field] : []),
+        ...(Array.isArray(payload[field]) ? payload[field] : []),
+      ]
+    })
+    return { ...message, payload: mergedPayload }
+  }
+  if (COALESCED_LAST_VALUE_TYPES.has(type)) return message
+  return null
+}
+
+export function coalesceLiveProjectionMessages(messages) {
+  const source = Array.isArray(messages) ? messages : []
+  const grouped = new Map()
+  const output = []
+  source.forEach((message) => {
+    if (!isTypedSymbolDeltaMessage(message)) {
+      output.push(message)
+      return
+    }
+    const type = String(message?.type || '')
+    if (
+      !(
+        type === 'botlens_symbol_candle_delta'
+        || type === 'botlens_symbol_overlay_delta'
+        || COALESCED_ENTRY_FIELDS_BY_TYPE[type]
+        || COALESCED_LAST_VALUE_TYPES.has(type)
+      )
+    ) {
+      output.push(message)
+      return
+    }
+    const symbolKey = normalizeSeriesKey(message?.symbol_key || '')
+    if (!symbolKey) {
+      output.push(message)
+      return
+    }
+    const key = `${type}:${symbolKey}`
+    const previous = grouped.get(key)
+    if (!previous) {
+      grouped.set(key, message)
+      return
+    }
+    const merged = mergeCoalescedTypedMessage(previous, message)
+    if (merged) {
+      grouped.set(key, merged)
+    } else {
+      output.push(previous)
+      grouped.set(key, message)
+    }
+  })
+  output.push(...grouped.values())
+  return output.sort(
+    (left, right) => Number(left?.stream_seq || 0) - Number(right?.stream_seq || 0),
+  )
+}
+
+export function applyLiveProjectionMessages(state, messages) {
+  const projectionStore = getBotLensProjectionStore(state)
+  if (!projectionStore) return state
+  const nextProjectionStore = coalesceLiveProjectionMessages(messages)
+    .reduce(
+      (current, message) => applyLiveProjectionMessageToStore(current, message),
+      projectionStore,
+    )
+  return nextProjectionStore === projectionStore
+    ? state
+    : commitProjectionStore(state, nextProjectionStore)
 }
 
 export function reduceBotLensState(state, action) {
@@ -448,6 +727,9 @@ export function reduceBotLensState(state, action) {
     case 'live/messageReceived':
       return applyLiveProjectionMessage(state, action.message)
 
+    case 'live/messagesReceived':
+      return applyLiveProjectionMessages(state, action.messages)
+
     case 'retrieval/chartRequest': {
       if (!matchesActiveRun(state, action.runId)) return state
       const normalizedSymbolKey = normalizeSeriesKey(action.symbolKey || '')
@@ -461,6 +743,7 @@ export function reduceBotLensState(state, action) {
             [normalizedSymbolKey]: {
               ...(state.retrieval.chartHistoryBySymbol?.[normalizedSymbolKey] || {}),
               symbolKey: normalizedSymbolKey,
+              requestId: action.requestId || null,
               status: 'loading',
               error: null,
             },
@@ -473,6 +756,10 @@ export function reduceBotLensState(state, action) {
       if (!matchesActiveRun(state, action.runId)) return state
       const normalizedSymbolKey = normalizeSeriesKey(action.symbolKey || '')
       if (!normalizedSymbolKey) return state
+      const currentRequestId = state.retrieval.chartHistoryBySymbol?.[normalizedSymbolKey]?.requestId
+      if (action.requestId && currentRequestId && action.requestId !== currentRequestId) {
+        return state
+      }
       return {
         ...state,
         retrieval: {
@@ -482,7 +769,17 @@ export function reduceBotLensState(state, action) {
             {
               symbolKey: normalizedSymbolKey,
               candles: action.candles,
+              trades: action.trades,
+              overlays: action.overlays,
               range: action.range,
+              evidenceSource: action.evidenceSource,
+              tradeEvidence: action.tradeEvidence,
+              overlayEvidence: action.overlayEvidence,
+              mergeMode: action.mergeMode,
+              focusTime: action.focusTime,
+              focusToken: action.focusToken,
+              focusTradeId: action.focusTradeId,
+              requestId: action.requestId,
             },
           ),
         },
@@ -493,6 +790,10 @@ export function reduceBotLensState(state, action) {
       if (!matchesActiveRun(state, action.runId)) return state
       const normalizedSymbolKey = normalizeSeriesKey(action.symbolKey || '')
       if (!normalizedSymbolKey) return state
+      const currentRequestId = state.retrieval.chartHistoryBySymbol?.[normalizedSymbolKey]?.requestId
+      if (action.requestId && currentRequestId && action.requestId !== currentRequestId) {
+        return state
+      }
       return {
         ...state,
         retrieval: {

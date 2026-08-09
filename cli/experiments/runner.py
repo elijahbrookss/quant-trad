@@ -7,11 +7,11 @@ from typing import Any
 
 from cli.api import ApiClient, ApiError, filename_from_content_disposition
 from cli.audit import safe_path_part, utc_now
+from cli.research_operations import ResearchOperations
 
 from .contracts import COMPARISON_REF_SCHEMA, TERMINAL_RUN_STATUSES, json_safe
 from .event_log import ExperimentEventLog
 from .notifications import notify_terminal_state
-from .pass_gates import evaluate_pass_gates
 from .state_store import ExperimentStateStore, experiment_id_for_name, find_experiment_dir
 
 
@@ -237,6 +237,8 @@ class ExperimentRunner:
                     "request_id": request_id,
                     "run_type": "backtest",
                     "dataset_id": dataset_id,
+                    "economic_claim_intent": plan.get("economic_claim_intent"),
+                    "execution_assumptions": plan.get("execution_assumptions"),
                 },
             )
             if not isinstance(start_payload, dict):
@@ -460,6 +462,9 @@ class ExperimentRunner:
                         "right_run_id": candidate.get("run_id"),
                         "include_golden": bool(policy.get("include_golden", True)),
                         "require_golden": bool(policy.get("require_golden", False)),
+                        "minimum_execution_quality_class": str(
+                            policy.get("minimum_execution_quality_class") or "X0"
+                        ).upper(),
                     },
                 )
                 path = store.artifacts_dir / "comparisons" / f"{safe_path_part(window_id)}__{safe_path_part(str(comparison.get('id')))}.json"
@@ -499,7 +504,22 @@ class ExperimentRunner:
             path = ref.get("path") if isinstance(ref, dict) else None
             if path and Path(path).exists():
                 summaries[key] = json.loads(Path(path).read_text(encoding="utf-8"))
-        result = evaluate_pass_gates(plan=plan, summaries=summaries, comparison_refs=list(state.get("comparison_refs") or []))
+        result = ResearchOperations(self.client).evaluate_pass_gates(
+            {
+                "plan": plan,
+                "summaries": [
+                    {
+                        "window_id": window_id,
+                        "variant_id": variant_id,
+                        "summary": summary,
+                    }
+                    for (window_id, variant_id), summary in sorted(
+                        summaries.items()
+                    )
+                ],
+                "comparison_refs": list(state.get("comparison_refs") or []),
+            }
+        )
         path = store.artifacts_dir / "summaries" / "pass_gate_result.json"
         _write_json(path, result)
         state["pass_gate_result_ref"] = str(path)
@@ -529,4 +549,3 @@ class ExperimentRunner:
         state["notification_status"] = result
         _set_step_status(state, step_id, "COMPLETED", artifact_refs=[{"type": "notifications", "path": str(store.notifications_path)}])
         events.append(event_type="result", operation="notify_terminal_state", status="succeeded", step_id=step_id, target=result)
-

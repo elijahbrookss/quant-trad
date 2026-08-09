@@ -159,10 +159,14 @@ class PostgresMarketCollectionRepository:
                     SELECT definitions.*, sources.provider, sources.venue,
                            sources.source_kind, sources.adapter_version,
                            series.instrument_id, series.fact_type,
-                           series.timeframe_seconds, series.contract_version
+                           series.timeframe_seconds, series.contract_version,
+                           instruments.symbol AS instrument_symbol,
+                           instruments.instrument_type AS instrument_type,
+                           (definitions.lease_expires_at > now()) AS lease_current
                     FROM market.collection_definitions AS definitions
                     JOIN market.sources AS sources ON sources.id = definitions.source_id
                     JOIN market.series AS series ON series.id = definitions.series_id
+                    JOIN portal_instruments AS instruments ON instruments.id = series.instrument_id
                     {predicate}
                     ORDER BY definitions.id
                     """
@@ -495,10 +499,16 @@ class PostgresMarketCollectionRepository:
         *,
         error: BaseException,
         retry_base_seconds: float = 2.0,
+        evidence: Mapping[str, Any] | None = None,
     ) -> bool:
         """Fail one attempt and return whether its scheduled poll is exhausted."""
 
         message = str(error)[:4000]
+        failure_evidence = {
+            "schema_version": "market_collection_failure.v2",
+            "exhausted": claim.attempt_number >= claim.max_attempts,
+            **dict(evidence or {}),
+        }
         exhausted = claim.attempt_number >= claim.max_attempts
         backoff = min(300.0, max(0.1, float(retry_base_seconds)) * (2 ** (claim.attempt_number - 1)))
         with db.session() as session:
@@ -517,8 +527,7 @@ class PostgresMarketCollectionRepository:
                     "error": message,
                     "evidence": _json(
                         {
-                            "schema_version": "market_collection_failure.v1",
-                            "exhausted": exhausted,
+                            **failure_evidence,
                             "retry_backoff_seconds": None if exhausted else backoff,
                         }
                     ),
@@ -554,6 +563,180 @@ class PostgresMarketCollectionRepository:
                 },
             )
         return exhausted
+
+    def list_recent_attempts(self, *, limit_per_definition: int = 5) -> list[dict[str, Any]]:
+        """Read one bounded recent-attempt window for every collector definition."""
+
+        bounded_limit = max(1, min(int(limit_per_definition), 100))
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT id, definition_id, scheduled_for, attempt_number,
+                               lease_generation, owner_id, status, started_at,
+                               finished_at, ingestion_run_id, error, evidence,
+                               row_number() OVER (
+                                   PARTITION BY definition_id
+                                   ORDER BY scheduled_for DESC, attempt_number DESC
+                               ) AS attempt_rank
+                        FROM market.collection_attempts
+                    )
+                    SELECT id, definition_id, scheduled_for, attempt_number,
+                           lease_generation, owner_id, status, started_at,
+                           finished_at, ingestion_run_id, error, evidence
+                    FROM ranked
+                    WHERE attempt_rank <= :limit
+                    ORDER BY definition_id, scheduled_for DESC, attempt_number DESC
+                    """
+                ),
+                {"limit": bounded_limit},
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def register_worker(
+        self,
+        *,
+        worker_id: str,
+        worker_role: str,
+        worker_version: str,
+        ttl_seconds: float,
+        state: str = "starting",
+        capabilities: Mapping[str, Any] | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        worker = str(worker_id or "").strip()
+        role = str(worker_role or "").strip()
+        version = str(worker_version or "").strip()
+        ttl = float(ttl_seconds)
+        if not worker or not role or not version or ttl <= 0:
+            raise ValueError("market_collector_worker_invalid")
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    INSERT INTO market.collector_worker_state (
+                        worker_id, worker_role, worker_version, state,
+                        started_at, heartbeat_at, expires_at, last_loop_at,
+                        active_definition_id, active_attempt_id, last_error,
+                        capabilities, context, updated_at
+                    ) VALUES (
+                        :worker_id, :worker_role, :worker_version, :state,
+                        now(), now(), now() + (:ttl * interval '1 second'), now(),
+                        NULL, NULL, NULL, CAST(:capabilities AS jsonb),
+                        CAST(:context AS jsonb), now()
+                    )
+                    ON CONFLICT (worker_id) DO UPDATE
+                    SET worker_role = EXCLUDED.worker_role,
+                        worker_version = EXCLUDED.worker_version,
+                        state = EXCLUDED.state,
+                        started_at = EXCLUDED.started_at,
+                        heartbeat_at = EXCLUDED.heartbeat_at,
+                        expires_at = EXCLUDED.expires_at,
+                        last_loop_at = EXCLUDED.last_loop_at,
+                        active_definition_id = NULL,
+                        active_attempt_id = NULL,
+                        last_error = NULL,
+                        capabilities = EXCLUDED.capabilities,
+                        context = EXCLUDED.context,
+                        updated_at = now()
+                    RETURNING *
+                    """
+                ),
+                {
+                    "worker_id": worker,
+                    "worker_role": role,
+                    "worker_version": version,
+                    "state": str(state),
+                    "ttl": ttl,
+                    "capabilities": _json(capabilities),
+                    "context": _json(context),
+                },
+            ).mappings().one()
+        return dict(row)
+
+    def heartbeat_worker(
+        self,
+        *,
+        worker_id: str,
+        ttl_seconds: float,
+        state: str,
+        active_definition_id: Optional[str] = None,
+        active_attempt_id: Optional[str] = None,
+        last_error: Optional[str] = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        worker = str(worker_id or "").strip()
+        ttl = float(ttl_seconds)
+        if not worker or ttl <= 0:
+            raise ValueError("market_collector_worker_invalid")
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    UPDATE market.collector_worker_state
+                    SET state = :state, heartbeat_at = now(),
+                        expires_at = now() + (:ttl * interval '1 second'),
+                        last_loop_at = now(),
+                        active_definition_id = :active_definition_id,
+                        active_attempt_id = :active_attempt_id,
+                        last_error = :last_error,
+                        context = context || CAST(:context AS jsonb),
+                        updated_at = now()
+                    WHERE worker_id = :worker_id
+                    RETURNING *
+                    """
+                ),
+                {
+                    "worker_id": worker,
+                    "ttl": ttl,
+                    "state": str(state),
+                    "active_definition_id": str(active_definition_id) if active_definition_id else None,
+                    "active_attempt_id": str(active_attempt_id) if active_attempt_id else None,
+                    "last_error": str(last_error)[:4000] if last_error else None,
+                    "context": _json(context),
+                },
+            ).mappings().first()
+        if row is None:
+            raise ValueError(f"market_collector_worker_unknown: worker_id={worker}")
+        return dict(row)
+
+    def stop_worker(self, *, worker_id: str, state: str = "stopped") -> None:
+        worker = str(worker_id or "").strip()
+        if not worker:
+            return
+        with db.session() as session:
+            session.execute(
+                text(
+                    """
+                    UPDATE market.collector_worker_state
+                    SET state = :state, heartbeat_at = now(), expires_at = now(),
+                        active_definition_id = NULL, active_attempt_id = NULL,
+                        updated_at = now()
+                    WHERE worker_id = :worker_id
+                    """
+                ),
+                {"worker_id": worker, "state": str(state)},
+            )
+
+    def list_worker_states(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 1000))
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT workers.*,
+                           (workers.expires_at > now()
+                            AND workers.state NOT IN ('stopping', 'stopped')) AS alive,
+                           now() AS observed_at
+                    FROM market.collector_worker_state AS workers
+                    ORDER BY alive DESC, workers.heartbeat_at DESC, workers.worker_id
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": bounded_limit},
+            ).mappings().all()
+        return [dict(row) for row in rows]
 
     def reserve_provider_request(
         self, *, provider: str, minimum_spacing_seconds: float

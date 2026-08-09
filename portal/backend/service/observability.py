@@ -151,6 +151,7 @@ _SOURCE_BUDGETED_METRIC_COMPONENTS: dict[str, tuple[str, ...]] = {
     "container_runtime_telemetry": (
         "telemetry_emitted_total",
         "telemetry_enqueue_",
+        "telemetry_messages_coalesced_total",
         "telemetry_payload_bytes",
         "telemetry_queue_wait_ms",
         "telemetry_transport_payload_bytes",

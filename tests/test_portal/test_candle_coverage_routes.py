@@ -260,7 +260,7 @@ def test_dataset_freeze_route_accepts_exact_typed_series_ids(
         return SimpleNamespace(
             dataset_id="mds_typed",
             contract_version="market_dataset.v1",
-            name="phase4-proof",
+            name="normalization-proof",
             purpose="validation",
             metadata=kwargs["metadata"],
             dataset_hash="typed",
@@ -288,7 +288,7 @@ def test_dataset_freeze_route_accepts_exact_typed_series_ids(
                     "end": "2026-08-02T18:14:25Z",
                 }
             ],
-            "name": "phase4-proof",
+            "name": "normalization-proof",
             "purpose": "validation",
             "created_by": "operator",
         },

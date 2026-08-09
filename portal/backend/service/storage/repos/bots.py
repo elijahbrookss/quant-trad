@@ -88,6 +88,8 @@ def _watchdog_terminal_metadata(
     bot_id: str,
     reason: str,
     diagnostics: Optional[Mapping[str, Any]] = None,
+    *,
+    run_id: str | None = None,
 ) -> Dict[str, Any]:
     normalized = str(reason or "").strip().lower()
     metadata: Dict[str, Any] = {
@@ -98,7 +100,7 @@ def _watchdog_terminal_metadata(
         try:
             from ....service.bots.runner import DockerBotRunner
 
-            container = DockerBotRunner.inspect_bot_container(bot_id)
+            container = DockerBotRunner.inspect_bot_container(bot_id, run_id=run_id)
         except Exception:
             container = {}
         container_status = str(container.get("status") or "").strip().lower()
@@ -260,8 +262,10 @@ def mark_bot_crashed(
     bot_id: str,
     reason: str = "orphaned",
     diagnostics: Optional[Mapping[str, Any]] = None,
+    *,
+    run_id: str | None = None,
 ) -> bool:
-    """Record a watchdog crash/degradation checkpoint for the bot's latest run.
+    """Record a watchdog crash/degradation checkpoint for one exact run.
 
     Returns True if the bot was updated, False otherwise.
     """
@@ -271,15 +275,37 @@ def mark_bot_crashed(
     latest_run_id = ""
     try:
         from ....service.bots.startup_lifecycle import BotLifecyclePhase, BotLifecycleStatus, LifecycleOwner
-        from .lifecycle import get_latest_bot_run_lifecycle, record_bot_run_lifecycle_checkpoint
+        from .lifecycle import get_bot_run_lifecycle, get_latest_bot_run_lifecycle, record_bot_run_lifecycle_checkpoint
         from .run_leases import get_bot_run_lease
 
         with db.session() as session:
             record = session.get(BotRecord, bot_id)
             if record is None:
                 return False
-        latest_lifecycle = get_latest_bot_run_lifecycle(bot_id)
+        requested_run_id = str(run_id or "").strip()
+        latest_lifecycle = (
+            get_bot_run_lifecycle(requested_run_id)
+            if requested_run_id
+            else get_latest_bot_run_lifecycle(bot_id)
+        )
         latest_run_id = str(_row_value(latest_lifecycle, "run_id") or "").strip()
+        lifecycle_bot_id = str(_row_value(latest_lifecycle, "bot_id") or "").strip()
+        if requested_run_id and latest_run_id != requested_run_id:
+            logger.error(
+                "bot_mark_crashed_run_context_missing | id=%s | run_id=%s | reason=%s",
+                bot_id,
+                requested_run_id,
+                reason,
+            )
+            return False
+        if lifecycle_bot_id and lifecycle_bot_id != str(bot_id):
+            logger.error(
+                "bot_mark_crashed_run_owner_mismatch | id=%s | run_id=%s | lifecycle_bot_id=%s",
+                bot_id,
+                latest_run_id or requested_run_id,
+                lifecycle_bot_id,
+            )
+            return False
         latest_phase = str(_row_value(latest_lifecycle, "phase") or "").strip().lower()
         latest_status = str(_row_value(latest_lifecycle, "status") or "").strip().lower()
         lease = get_bot_run_lease(latest_run_id) if latest_run_id else None
@@ -341,7 +367,12 @@ def mark_bot_crashed(
                     "watchdog_reason_text": str(reason or "").strip() or "stale_run_lease",
                 }
                 if recoverable_watchdog_condition
-                else _watchdog_terminal_metadata(bot_id, reason, diagnostics)
+                else _watchdog_terminal_metadata(
+                    bot_id,
+                    reason,
+                    diagnostics,
+                    run_id=latest_run_id,
+                )
             )
             if recoverable_watchdog_condition:
                 terminal_metadata.update(_watchdog_diagnostics_metadata(diagnostics))

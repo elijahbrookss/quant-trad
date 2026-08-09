@@ -32,6 +32,9 @@ class ReportDiagnosticsResponse(BaseModel):
     run_id: str
     items: List[ReportDiagnosticModel] = Field(default_factory=list)
     summary: Dict[str, Any] = Field(default_factory=dict)
+    total: Optional[int] = None
+    limit: Optional[int] = None
+    offset: Optional[int] = None
 
 
 class ReportReadinessResponse(BaseModel):
@@ -89,6 +92,12 @@ class ResearchTrustDTO(BaseModel):
     golden_status: str = "not_available"
     golden_candidate_status: str = "unknown"
     research_status: str = "unknown"
+    reproducibility_status: str = "unknown"
+    execution_quality_class: str = "X0"
+    scientific_quality_class: str = "S0"
+    instrument_economics_class: str = "unknown"
+    promotion_eligibility: str = "ineligible"
+    promotion_blocking_reasons: List[str] = Field(default_factory=list)
     readiness_status: str = "unknown"
     readiness_blockers: List[str] = Field(default_factory=list)
     caveats: List[str] = Field(default_factory=list)
@@ -415,6 +424,18 @@ class FirstDivergenceDTO(BaseModel):
     source: str = "not_computed"
 
 
+class SemanticComparisonEligibilityDTO(BaseModel):
+    status: Literal["eligible", "incompatible", "unknown"] = "unknown"
+    equivalent: Optional[bool] = None
+    left_execution_semantics: List[str] = Field(default_factory=list)
+    right_execution_semantics: List[str] = Field(default_factory=list)
+    dataset_match: Optional[bool] = None
+    strategy_match: Optional[bool] = None
+    material_config_match: Optional[bool] = None
+    blockers: List[str] = Field(default_factory=list)
+    statement: Optional[str] = None
+
+
 class GoldenEvidenceDTO(BaseModel):
     available: bool = False
     status: str = "not_available"
@@ -468,6 +489,9 @@ class RunComparisonDTO(BaseModel):
     comparison_verdict: str
     can_compare: bool
     blocked_reason: Optional[str] = None
+    semantic_eligibility: SemanticComparisonEligibilityDTO = Field(
+        default_factory=SemanticComparisonEligibilityDTO
+    )
     trust_comparison: TrustComparisonDTO = Field(default_factory=TrustComparisonDTO)
     performance_delta: PerformanceDeltaDTO = Field(default_factory=PerformanceDeltaDTO)
     behavior_delta: BehaviorDeltaDTO = Field(default_factory=BehaviorDeltaDTO)
@@ -553,6 +577,24 @@ class ReportListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ReportActivityDayResponse(BaseModel):
+    date: str
+    total: int
+    by_status: Dict[str, int] = Field(default_factory=dict)
+
+
+class ReportActivityResponse(BaseModel):
+    schema_version: str = "report_activity.v1"
+    activity_type: str = "backtests_completed"
+    run_type: str
+    qualifying_statuses: List[str] = Field(default_factory=lambda: ["completed"])
+    timestamp_field: str = "ended_at"
+    timezone: str = "UTC"
+    description: str
+    since: str
+    days: List[ReportActivityDayResponse] = Field(default_factory=list)
 
 
 class ReportCompareRequest(BaseModel):

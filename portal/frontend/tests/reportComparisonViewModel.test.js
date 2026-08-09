@@ -186,3 +186,26 @@ test('report selection requires terminal ready materialized report state', () =>
   assert.equal(reportComparableForSelection({ lifecycleStatus: 'running', reportStatus: 'ready', canViewReport: true }), false)
   assert.equal(reportComparableForSelection({ lifecycleStatus: 'completed', reportStatus: 'building', canViewReport: false }), false)
 })
+
+
+test("comparison view model exposes descriptive-only semantic incompatibility", () => {
+  const view = buildRunComparisonView(comparisonPayload({
+    semantic_eligibility: {
+      status: "incompatible",
+      equivalent: false,
+      left_execution_semantics: ["spot"],
+      right_execution_semantics: ["proxy_derivative"],
+      dataset_match: true,
+      strategy_match: true,
+      material_config_match: false,
+      blockers: ["execution_semantics_mismatch", "material_config_mismatch"],
+      statement: "Runs are descriptive-only.",
+    },
+  }))
+
+  assert.equal(view.canCompare, true)
+  assert.equal(view.semanticEligibility.status, "incompatible")
+  assert.equal(view.semanticEligibility.equivalent, false)
+  assert.deepEqual(view.semanticEligibility.leftExecutionSemantics, ["spot"])
+  assert.deepEqual(view.semanticEligibility.rightExecutionSemantics, ["proxy_derivative"])
+})

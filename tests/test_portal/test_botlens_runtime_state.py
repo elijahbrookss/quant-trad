@@ -727,6 +727,7 @@ def test_run_open_trades_close_removes_existing_even_when_same_seq_open_arrives_
     open_trade_deltas = [delta for delta in deltas if hasattr(delta, "removals")]
     assert snapshot.open_trades.entries == {}
     assert open_trade_deltas[-1].removals == ("trade-1",)
+    assert open_trade_deltas[-1].removal_position_commit_seq == {"trade-1": 2}
 
 
 def test_apply_symbol_batch_accepts_durable_overlay_summary_without_geometry() -> None:
@@ -747,6 +748,7 @@ def test_apply_symbol_batch_accepts_durable_overlay_summary_without_geometry() -
                     "overlay_commit_seq": 9,
                     "base_overlay_commit_seq": 8,
                     "overlay_commit_seq_status": "overlay_scoped",
+                    "checkpoint_kind": "full_state",
                     "op_counts": {"upsert": 1},
                     "point_count": 12,
                     "ops": [
@@ -800,6 +802,87 @@ def test_apply_symbol_batch_accepts_durable_overlay_summary_without_geometry() -
     )
     assert roundtripped.overlays.overlay_commit_seq == 9
     assert roundtripped.overlays.overlay_commit_seq_status == "overlay_scoped"
+
+
+def test_symbol_overlay_gap_isolated_until_full_checkpoint_recovers() -> None:
+    def event(seq: int, base: int, *, checkpoint: bool = False):
+        return deserialize_botlens_domain_event(
+            {
+                "schema_version": 1,
+                "event_id": f"evt-overlay-{seq}",
+                "event_ts": f"2026-02-01T00:{seq:02d}:00Z",
+                "event_name": "OVERLAY_STATE_CHANGED",
+                "root_id": f"evt-overlay-{seq}",
+                "parent_id": None,
+                "correlation_id": "corr-overlay",
+                "context": {
+                    "run_id": "run-1",
+                    "bot_id": "bot-1",
+                    "series_key": "instr-1|1m",
+                    "overlay_delta": {
+                        "overlay_commit_seq": seq,
+                        "base_overlay_commit_seq": base,
+                        "overlay_commit_seq_status": "overlay_scoped",
+                        **({"checkpoint_kind": "full_state"} if checkpoint else {}),
+                        "ops": [
+                            {
+                                "op": "upsert",
+                                "key": "overlay-1",
+                                "overlay": {
+                                    "overlay_id": "overlay-1",
+                                    "type": "strategy_signal",
+                                    "payload": {"markers": [{"time": seq, "price": 100.0 + seq}]},
+                                },
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+
+    snapshot = empty_symbol_projection_snapshot("instr-1|1m")
+    for run_seq, overlay_event in ((1, event(1, 0)), (2, event(3, 2))):
+        snapshot, _ = apply_symbol_batch(
+            snapshot,
+            batch=ProjectionBatch(
+                batch_kind="ledger_tail",
+                run_id="run-1",
+                bot_id="bot-1",
+                seq=run_seq,
+                event_time=overlay_event.event_ts,
+                known_at=overlay_event.event_ts,
+                symbol_key="instr-1|1m",
+                bridge_session_id=None,
+                events=(overlay_event,),
+            ),
+        )
+
+    assert snapshot.overlays.overlays == ()
+    assert snapshot.overlays.validity_status == "invalid"
+    assert snapshot.overlays.invalid_reason == "overlay_clock_gap"
+    assert snapshot.overlays.gap_expected_overlay_commit_seq == 1
+    assert snapshot.overlays.gap_observed_base_overlay_commit_seq == 2
+
+    checkpoint = event(4, 3, checkpoint=True)
+    snapshot, _ = apply_symbol_batch(
+        snapshot,
+        batch=ProjectionBatch(
+            batch_kind="ledger_tail",
+            run_id="run-1",
+            bot_id="bot-1",
+            seq=3,
+            event_time=checkpoint.event_ts,
+            known_at=checkpoint.event_ts,
+            symbol_key="instr-1|1m",
+            bridge_session_id=None,
+            events=(checkpoint,),
+        ),
+    )
+
+    assert snapshot.overlays.validity_status == "valid"
+    assert snapshot.overlays.overlay_commit_seq == 4
+    assert snapshot.overlays.overlays[0]["overlay_id"] == "overlay-1"
+    assert snapshot.overlays.recovered_at_run_seq == 3
 
 
 def test_apply_overlay_delta_rejects_missing_overlay_clock() -> None:

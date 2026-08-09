@@ -190,6 +190,11 @@ class BreakoutRetestStateMachine:
         )
         self._sequence: BreakoutSequence | None = None
 
+    def clear_sequence(self) -> None:
+        """Discard transition candidates while preserving warmed ATR state."""
+
+        self._sequence = None
+
     def step(self, state: MarketProfileBarState) -> dict[str, list[dict[str, Any]]]:
         events = {
             "confirmed_balance_breakout": [],
@@ -550,7 +555,7 @@ class BreakoutRetestStateMachine:
             "key": f"confirmed_balance_breakout_{sequence.direction}",
             "direction": sequence.direction,
             "pattern_id": sequence.pattern_id,
-            "known_at": _epoch(state.bar_time),
+            "known_at": _epoch(state.known_at or state.bar_time),
             "metadata": {
                 "trigger_price": float(state.close),
                 "reference": build_value_area_reference(
@@ -583,7 +588,7 @@ class BreakoutRetestStateMachine:
             "key": f"balance_reclaim_{sequence.direction}",
             "direction": sequence.direction,
             "pattern_id": sequence.pattern_id,
-            "known_at": _epoch(state.bar_time),
+            "known_at": _epoch(state.known_at or state.bar_time),
             "metadata": {
                 "trigger_price": float(state.close),
                 "reference": build_value_area_reference(
@@ -627,7 +632,7 @@ class BreakoutRetestStateMachine:
             "key": f"balance_retest_{sequence.direction}",
             "direction": sequence.direction,
             "pattern_id": sequence.pattern_id,
-            "known_at": _epoch(state.bar_time),
+            "known_at": _epoch(state.known_at or state.bar_time),
             "metadata": {
                 "trigger_price": float(state.close),
                 "reference": build_value_area_reference(
@@ -784,7 +789,7 @@ class BreakoutRetestStateMachine:
             "source_event_key": source_event_key or f"balance_breakout_{sequence.direction}",
             "signal_output": signal_output,
             "signal_event_key": signal_event_key,
-            "known_at": _epoch(state.bar_time),
+            "known_at": _epoch(state.known_at or state.bar_time),
             "reason": reason,
             "reference": build_value_area_reference(
                 state,

@@ -187,7 +187,11 @@ def test_backtest_start_sends_the_existing_dataset_identity(monkeypatch) -> None
     assert observed == {
         "method": "POST",
         "path": "/api/bots/bot-1/runs/start",
-        "body": {"run_type": "backtest", "dataset_id": "mds_123"},
+        "body": {
+            "run_type": "backtest",
+            "dataset_id": "mds_123",
+            "economic_claim_intent": "exploration",
+        },
     }
 
 
@@ -360,7 +364,7 @@ def test_data_funding_rate_latest_declares_decision_time_and_staleness(
     }
 
 
-def test_market_structure_configure_is_bounded_and_never_production_enrolls(
+def test_market_structure_enroll_applies_a_manifest(
     monkeypatch,
 ) -> None:
     observed = {}
@@ -371,7 +375,7 @@ def test_market_structure_configure_is_bounded_and_never_production_enrolls(
             path=urllib.parse.urlparse(request.full_url).path,
             body=json.loads(request.data.decode("utf-8")),
         )
-        return _Response({"pair_id": "bip_btc", "production_admitted": False})
+        return _Response({"fleet_id": "coinbase_perpetual_trades"})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     exit_code = main(
@@ -379,32 +383,20 @@ def test_market_structure_configure_is_bounded_and_never_production_enrolls(
             "--no-audit-log",
             "data",
             "market-structure",
-            "configure-pair",
-            "--pair",
-            "bip_btc",
-            "--auth-mode",
-            "authenticated",
-            "--spool-gib",
-            "8",
-            "--segment-mib",
-            "128",
+            "enroll",
+            "--manifest-path",
+            "config/custom-fleet.json",
         ]
     )
     assert exit_code == 0
     assert observed == {
         "method": "POST",
-        "path": "/api/market-data/market-structure/pairs",
-        "body": {
-            "pair_id": "bip_btc",
-            "auth_mode": "authenticated",
-            "max_spool_bytes": 8 * 1024**3,
-            "max_segment_bytes": 128 * 1024**2,
-            "enable_production": False,
-        },
+        "path": "/api/market-data/market-structure/enrollments/apply",
+        "body": {"manifest_path": "config/custom-fleet.json"},
     }
 
 
-def test_market_structure_materialize_carries_explicit_causal_window(monkeypatch) -> None:
+def test_market_structure_safety_halt_is_scoped_and_audited(monkeypatch) -> None:
     observed = {}
 
     def fake_urlopen(request, timeout):
@@ -415,8 +407,7 @@ def test_market_structure_materialize_carries_explicit_causal_window(monkeypatch
         )
         return _Response(
             {
-                "schema_version": "market.cross_stream_materialization.v1",
-                "source_commit_seq": 42,
+                "schema_version": "market.collector_safety_event.v1",
             }
         )
 
@@ -426,25 +417,33 @@ def test_market_structure_materialize_carries_explicit_causal_window(monkeypatch
             "--no-audit-log",
             "data",
             "market-structure",
-            "materialize",
-            "--pair",
-            "bip_btc",
-            "--start",
-            "2026-08-02T14:00:00Z",
-            "--end",
-            "2026-08-02T14:01:00Z",
-            "--known-at",
-            "2026-08-02T14:02:00Z",
+            "safety-halt",
+            "--scope-type",
+            "fleet",
+            "--scope-id",
+            "coinbase_perpetual_trades",
+            "--request-id",
+            "request-a",
+            "--requested-by",
+            "operator-a",
+            "--reason",
+            "operator test",
+            "--policy-hash",
+            "abc123",
         ]
     )
     assert exit_code == 0
     assert observed == {
         "method": "POST",
-        "path": "/api/market-data/market-structure/pairs/bip_btc/materialize",
+        "path": "/api/market-data/market-structure/safety/halt",
         "body": {
-            "start": "2026-08-02T14:00:00Z",
-            "end": "2026-08-02T14:01:00Z",
-            "known_at": "2026-08-02T14:02:00Z",
+            "request_id": "request-a",
+            "scope_type": "fleet",
+            "scope_id": "coinbase_perpetual_trades",
+            "requested_by": "operator-a",
+            "reason": "operator test",
+            "policy_hash": "abc123",
+            "evidence": None,
         },
     }
 
@@ -652,3 +651,151 @@ def test_market_structure_recent_reconciliation_is_bounded(monkeypatch) -> None:
         "path": "/api/market-data/market-structure/definitions/definition-a/reconcile-recent",
         "query": {"limit": ["25"]},
     }
+
+
+def test_market_structure_continuous_controls_use_worker_owned_routes(monkeypatch) -> None:
+    observed = []
+
+    def fake_urlopen(request, timeout):
+        observed.append(
+            {
+                "method": request.get_method(),
+                "path": urllib.parse.urlparse(request.full_url).path,
+                "body": json.loads(request.data.decode("utf-8")) if request.data else None,
+            }
+        )
+        return _Response({"schema_version": "test.v1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "continuous-validate",
+            "definition-a",
+            "--duration",
+            "86400",
+            "--requested-by",
+            "operator-a",
+            "--policy-json",
+            '{"max_inflight_segments":3}',
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "continuous-evidence",
+            "definition-a",
+            "session-a",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "continuous-stop",
+            "definition-a",
+            "--requested-by",
+            "operator-a",
+        ]
+    ) == 0
+    assert observed == [
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/validate",
+            "body": {
+                "duration_seconds": 86400.0,
+                "requested_by": "operator-a",
+                "policy": {"max_inflight_segments": 3},
+            },
+        },
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/validation/session-a",
+            "body": None,
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/stop",
+            "body": {"requested_by": "operator-a"},
+        },
+    ]
+
+
+def test_market_storage_lifecycle_cli_is_dry_run_first(monkeypatch) -> None:
+    observed = []
+
+    def fake_urlopen(request, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        observed.append(
+            {
+                "method": request.get_method(),
+                "path": parsed.path,
+                "query": urllib.parse.parse_qs(parsed.query),
+                "body": (
+                    json.loads(request.data.decode("utf-8"))
+                    if request.data
+                    else None
+                ),
+            }
+        )
+        return _Response({"schema_version": "market.storage_lifecycle_run.v1"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "lifecycle-plan",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "lifecycle-run",
+            "--storage-root",
+            "/portable/market-data",
+        ]
+    ) == 0
+    assert main(
+        [
+            "--no-audit-log",
+            "data",
+            "market-structure",
+            "lifecycle-events",
+            "--limit",
+            "11",
+        ]
+    ) == 0
+
+    assert observed == [
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/storage-lifecycle/plan",
+            "query": {},
+            "body": None,
+        },
+        {
+            "method": "POST",
+            "path": "/api/market-data/market-structure/storage-lifecycle/run",
+            "query": {},
+            "body": {
+                "execute": False,
+                "storage_root": "/portable/market-data",
+                "owner_id": None,
+            },
+        },
+        {
+            "method": "GET",
+            "path": "/api/market-data/market-structure/storage-lifecycle/events",
+            "query": {"limit": ["11"]},
+            "body": None,
+        },
+    ]

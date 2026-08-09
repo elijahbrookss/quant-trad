@@ -11,21 +11,28 @@ tags:
   - ledger
   - leasing
   - postgres
+  - exact-numeric
+  - explicit-migration
 code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/market_data_models.py
   - portal/backend/db/session.py
+  - portal/backend/service/market/numeric_fact_acquisition.py
   - portal/backend/service/provenance.py
   - portal/backend/service/storage
   - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/storage/repos/capacity.py
   - portal/backend/service/bots/storage_gateway.py
   - portal/backend/service/storage/repos/lifecycle.py
   - portal/backend/service/storage/repos/run_leases.py
   - portal/backend/service/storage/repos/runtime_events.py
+  - portal/backend/service/storage/repos/runs.py
   - portal/backend/service/bots/botlens_domain_events.py
   - portal/backend/service/bots/botlens_canonical_facts.py
   - portal/backend/service/bots/botlens_event_retention.py
+  - portal/backend/service/bots/botlens_intake_router.py
   - src/engines/bot_runtime/runtime/components/canonical_facts.py
+  - src/engines/bot_runtime/runtime/components/persistence_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
@@ -34,8 +41,29 @@ code_paths:
   - scripts/db/manual_migration_versioning_hard_cutover.sql
   - scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql
   - scripts/db/manual_migration_async_job_fencing_v1.sql
+  - scripts/db/manual_migration_numeric_fact_store_v1.sql
+  - scripts/db/manual_add_operator_read_path_indexes_v1.sql
 ---
 # Persistence Boundary
+
+## Offline scientific authority and governance
+
+Phase 4-6 records remain inside the primary PostgreSQL boundary. The schema
+contract creates and validates immutable protocol manifests, experiment family
+projections, complete attempt records, typed strategy graph artifacts, frozen
+candidates, database-unique holdout uses, scientific certificates, append-only
+authority events, governance cases, immutable transition proposals, and
+immutable authorization decisions.
+
+Mutable family/case rows are current projections; attempts, graphs, candidates,
+holdout use, certificates, events, proposals, and decisions are durable evidence
+and are never overwritten as a substitute for a new version. Unique family
+holdout and proposal-decision constraints provide the concurrency boundary.
+
+Clean databases receive these tables through the existing schema contract. The
+idempotent additive migration
+`scripts/db/manual_migration_offline_research_governance_v1.sql` upgrades the
+early governance-case shape by making creation request identity mandatory.
 
 ## Purpose
 
@@ -64,10 +92,10 @@ builder source revision, and report storage provenance.
 ## Schema Bootstrap Contract
 
 Fresh database bootstrap is a first-class persistence responsibility. Backend
-startup creates the current model-declared schemas, tables, and indexes from
-`portal/backend/db/models.py` using the single `PG_DSN`; a new desktop or clean
-Docker volume must not require operators to replay historical manual migration
-files.
+startup creates the existing model-owned schemas, tables, and indexes from
+`portal/backend/db/models.py` using the single `PG_DSN`. Other than the scoped
+numeric-fact addition below, a new desktop or clean Docker volume does not
+require operators to replay historical manual migration files.
 
 Bootstrap may create missing schemas, tables, and model-declared indexes. It
 must not use blanket `IF NOT EXISTS` DDL as the schema contract. Existing tables
@@ -75,21 +103,45 @@ are inspected against the current column contract; missing columns fail loud
 with the table and column names so the operator can rebuild the database or
 intentionally run an out-of-band migration.
 
+Provider-neutral exact numeric storage is the explicit exception.
+`market.numeric_fact_versions` and
+`market.fact_acquisition_coverage`, plus the dimensions addition to an
+existing `market.series`, are owned by
+`scripts/db/manual_migration_numeric_fact_store_v1.sql`. Startup excludes the
+two numeric tables and their indexes from generic creation or repair. It
+validates table and dimensions-column presence, the numeric-fact unbounded
+numeric type and canonical event-revision primary key, required numeric-fact
+checks/indexes, required coverage indexes, and both immutable triggers. The
+migration also owns the dimensions-object constraint, coverage keys/checks,
+and commit-clock defaults; startup does not currently re-derive every one of
+those definitions. Validated missing or drifted objects fail with the exact
+migration path. Generic startup behavior for every pre-existing schema object
+is unchanged.
+
 Required operational indexes are part of the current schema contract. If they
 are still absent after bootstrap attempts to create model-declared indexes,
 startup fails. Historical SQL files under `scripts/db/` are repair/reference
-artifacts for old local databases, not normal fresh-start instructions.
+artifacts for old local databases, not normal fresh-start instructions; the
+named numeric migration is an intentional additive exception.
 
 Market-data persistence is model-declared in
 `portal/backend/db/market_data_models.py` under schema `market`. It owns
 source and typed-series identity, ingestion operations, append-only candle
-revisions, gap evidence, and frozen dataset manifests. Fresh bootstrap creates
-that schema, converts candle revisions to a TimescaleDB hypertable, and installs
-immutability triggers. Startup fails if active legacy tables remain in `public`;
-the explicit v2 hard-cutover migration verifies and archives them instead of
-supporting dual readers or writers. Provider credential helpers do not create
-their own table; `portal_provider_credential_refs` remains owned by portal ORM
-metadata.
+and exact-numeric revisions, gap/acquisition evidence, and frozen dataset
+manifests. Fresh bootstrap continues to create model-owned market objects other
+than the explicit numeric tables, converts eligible revisions to TimescaleDB
+hypertables, and installs their existing immutability triggers. Startup fails if
+active legacy tables remain in `public`; the explicit v2 hard-cutover migration
+verifies and archives them instead of supporting dual readers or writers.
+Provider credential helpers do not create their own table;
+`portal_provider_credential_refs` remains owned by portal ORM metadata.
+
+Normalization specifications are immutable evidence. Catalog reads recompute
+the full material hash and require the current 31-hex identity. A retired
+40-hex identity may be quarantined from the executable catalog only when its
+full material hash verifies independently and both normalized-fact and frozen-
+dataset reference counts are zero. Referenced legacy identities and every true
+hash mismatch remain fail-loud; runtime code never deletes or rewrites the row.
 
 ## Diagram Walkthrough
 
@@ -129,8 +181,10 @@ Active schema surfaces are justified by role:
   `portal_bot_run_event_seq_allocators`, `portal_bot_trades`,
   `portal_bot_trade_events`, `portal_bot_run_leases`, strategy/bot/instrument
   config tables, plus `market.sources`, `market.series`,
-  `market.ingestion_runs`, `market.candle_versions`, `market.gap_evidence`,
-  `market.datasets`, and `market.dataset_series`.
+  `market.ingestion_runs`, `market.candle_versions`,
+  `market.numeric_fact_versions`, `market.gap_evidence`,
+  `market.fact_acquisition_coverage`, `market.datasets`, and
+  `market.dataset_series`.
 - Keep as definition only: `portal_bots`. Runtime state belongs to
   `portal_bot_runs`, canonical lifecycle events, run leases, and report
   materialization tables. Fleet cards and API responses may project those rows
@@ -138,6 +192,16 @@ Active schema surfaces are justified by role:
   columns.
 - Keep as bounded observability: `observability_events.botlens_backend_events`
   and `observability_metrics.botlens_backend_metric_rollups`.
+- Keep as bounded capacity observability:
+  `observability_metrics.database_capacity_samples` stores one database-level
+  sample per configured time bucket, and
+  `observability_metrics.database_relation_capacity_samples` stores one
+  logical user-relation sample per bucket. They use the single `PG_DSN`, are
+  leader-fenced with a PostgreSQL advisory transaction lock, and delete rows
+  older than the configured retention window. TimescaleDB internal chunks are
+  excluded; hypertable size and activity are aggregated into the logical
+  schema/table identity. These rows support capacity planning and alerts but
+  cannot certify market facts, runtime semantics, or research validity.
 - Keep as bounded profiler data: `portal_bot_run_step_rollups` stores typed
   bucketed phase-duration metrics with mergeable histogram counts for p95/p99
   estimates. Raw `portal_bot_run_steps` rows are not part of the schema
@@ -206,12 +270,41 @@ Runtime events should carry typed hot fields for common query paths:
 
 The full payload can remain richer, but readers should not parse giant blobs for ordinary routing and correlation.
 
+Operator list reads are typed column projections, not entity dumps. Global run
+history reads scalar run/card fields, bounded summary, provenance hashes,
+execution semantics, and compact dataset identity; it does not select the full
+`portal_bot_runs.config_snapshot`. Exact-run inspection remains the boundary
+that may read the complete configuration. This distinction keeps list cost
+bounded as completed-run count grows without discarding durable provenance.
+
+Report catalog status reads follow the same rule. Batched rows select status,
+fingerprint inputs, and typed readiness scalars from the materialized artifact;
+they never hydrate the full report artifact. The catalog recomputes the input
+fingerprint from compact run fields and aggregate event/trade high-water marks.
+Only fingerprint-verified artifact readiness may advertise comparison safety;
+exact report reads remain the full-artifact boundary.
+
+Selected-symbol cold rebuilds use indexes aligned to the scoped reads:
+`(bot_id, run_id, series_key, event_name, run_seq, id)` for bounded concern and
+overlay-header reads, `(bot_id, run_id, series_key, trade_id, run_seq, id)` for
+latest trade state, `(run_id, updated_at, id)` for run trade history, and
+`(bot_id, run_id, status)` for open/closed trade ownership checks. The ORM
+declares these indexes for fresh schemas; the manual SQL file is an out-of-band
+repair artifact for an existing local database.
+
 `seq` is a producer/batch sequence and may repeat for multiple BotLens-domain
 facts emitted in one runtime batch. Canonical replay order is `run_seq`: a
 dense, monotonic, per-run event sequence assigned by the runtime-event
 persistence boundary at canonical append time. `run_seq` starts at 1 for a run
 and is stamped into durable event context with `run_seq_status=runtime_assigned`.
 It is not assigned by frontend, projection, reporting, or export code.
+
+`run_seq` remains cross-domain persistence order; it does not replace a scoped
+domain clock. In particular, retained overlay rows may arrive out of `run_seq`
+order across asynchronous producers. Overlay reconstruction orders compact
+headers by `overlay_commit_seq`, proves each `base_overlay_commit_seq`, and
+loads geometry only for the accepted contiguous suffix or a later full-state
+checkpoint.
 
 Within one producer/batch `seq`, persistence preserves the producer's semantic
 event order while assigning dense `run_seq` values. Event IDs are idempotency
@@ -256,6 +349,31 @@ prechecks for stable health, overlay, diagnostic, or stats facts. The database
 uniqueness constraint remains the final correctness guard after restarts or
 retries.
 
+Transport-owned retained rows from concurrent runs share a bounded
+write-contract queue in the portal process. One flush may contain multiple
+`(bot_id, run_id)` groups; the repository locks and reserves each run's
+allocator independently inside the same transaction before one bulk insert.
+The queue flushes at 512 rows or 2,000 ms, whichever comes first, so concurrent
+backtests aggregate sparse transport-owned facts without delaying canonical
+runtime ownership.
+Process-local run locks are acquired in sorted order so overlapping flushes
+cannot reorder a run or deadlock, while disjoint flushes remain eligible for
+parallel execution. A terminal run forces the whole pending mixed batch that
+contains it to drain. Mixed-batch logs report run and bot counts rather than
+mislabeling the transaction as one run.
+
+The runtime trade-snapshot and trade-event read models use the same strict
+failure policy through a dedicated ordered writer. The bar path copies each
+typed payload into a bounded queue; one background worker writes accepted
+payloads in enqueue order so an open snapshot cannot be overtaken by its close
+snapshot or related event. These writes are never coalesced or dropped.
+`persistence_queue_max`, `persistence_batch_size`,
+`persistence_flush_interval_s`, and `persistence_drain_timeout_s` bound the
+queue, batch, live lag, and terminal wait. Queue overflow, repository writer
+failure, and terminal drain timeout fail the run. Terminal completion is not
+published until this queue drains, while failure cleanup makes a best effort to
+drain already accepted records without replacing the original runtime error.
+
 Projection fanout uses a separate bounded dispatcher over the already committed
 batch. That dispatcher is not a second persistence authority and must not assign
 or rewrite durable ordering. It exists to keep websocket/projector fanout
@@ -267,12 +385,14 @@ canonical persistence also failed.
 Source-owned runtime batches carry both live facts and durable facts. The
 durable writer filters those batches through
 `botlens_event_retention.py`: signals, decisions, material trades, wallet facts,
-and compact catalog facts are retained; raw candle, health, overlay, stats, and
-nonmaterial diagnostic messages are summarized, aggregated, or kept live-only.
+compact catalog facts, and bounded overlay delta/checkpoint research context are
+retained; raw candle, repeated health, stats, and nonmaterial diagnostic
+messages are summarized, aggregated, or kept live-only.
 Before retention, the runtime fact stream already compacts high-volume
 projection/debug facts at the source: health facts exclude full snapshots,
-series identity excludes full instrument/provider blobs, stats facts use the
-compact reportable summary, and overlay deltas use bounded render payloads with
+series identity excludes full instrument/provider blobs and is emitted only on
+first discovery or an identity revision, stats facts use the compact reportable
+summary, and overlay deltas use bounded render payloads with
 payload summaries. The storage layer should not depend on a second pass to make
 unbounded live payloads safe.
 
@@ -291,6 +411,9 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 ## Failure And Recovery
 
 - Required persistence for audit trails fails loud.
+- Missing or drifted explicit-migration numeric objects fail with
+  `scripts/db/manual_migration_numeric_fact_store_v1.sql`; startup never
+  creates or repairs them.
 - Missing required columns fail with actionable errors.
 - Missing model-declared indexes are created during bootstrap.
 - Missing required indexes after bootstrap fail with actionable errors.
@@ -302,7 +425,8 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - Durable truth is append-friendly and replayable.
 - Runtime events preserve known-at context.
 - Storage does not perform hidden execution reconstruction.
-- Fresh schemas come from current clean definitions.
+- Fresh schemas come from current clean definitions, with the explicitly named
+  numeric-fact migration applied before startup admits those new objects.
 - Existing schema drift fails loud instead of being patched with hidden runtime backfills.
 
 ## Related Docs
@@ -311,6 +435,9 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - [Identity and correlation boundary](../identity/IDENTITY_AND_CORRELATION_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
+- [Numeric Facts And On-Demand Acquisition](../data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md)
+- [ADR 0061: Provider-Neutral Exact Numeric Facts](../decisions/0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md)
+- [Chainlink Numeric Facts Operator Guide](../../guides/chainlink-numeric-facts.md)
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
 - [ADR 0042: Runtime event ledger as lifecycle truth](../decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md)
 - [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)

@@ -8,6 +8,7 @@ This document describes the current GitHub Actions test topology as it actually 
 - Isolate optional-provider and web import boundary failures.
 - Avoid hidden coupling by centralizing suite definitions.
 - Run every backend test that does not require a live database.
+- Run DB-marked tests only against a disposable container database.
 
 ## Current CI Flow
 
@@ -20,6 +21,7 @@ Suite commands are centralized in `scripts/ci/run_test_suite.sh` and run directl
 ## Current Boundary
 
 - GitHub PR CI is host-run.
+- The local `db` suite always uses the disposable Docker test stack.
 - Product/runtime behavior is still container-first.
 - These are not the same thing.
 
@@ -72,7 +74,7 @@ If a bug only appears once services are inside the Docker network, host-run PR C
 ## Operational Rule
 
 If you change suite commands, update only `scripts/ci/run_test_suite.sh`.
-If you change profile membership, update `tests/conftest.py`.
+If you change profile membership or DB isolation guards, update `tests/conftest.py`.
 Workflow jobs should continue to call the suite script and avoid duplicating pytest arguments.
 
 
@@ -90,7 +92,8 @@ Useful local-only layers:
 - `./scripts/ci/run_test_suite.sh backend` is an explicit alias for the same
   all-non-database test boundary as `pr`.
 - `./scripts/ci/run_test_suite.sh full` runs the full pytest suite, with DB tests skipped unless `RUN_DB_TESTS=1`.
-- `./scripts/ci/run_test_suite.sh db` runs DB-marked tests and requires a reachable `PG_DSN`.
+- `./scripts/ci/run_test_suite.sh db` runs DB-marked tests in the disposable Docker test stack. It never reuses the operator `PG_DSN`.
+- Direct `RUN_DB_TESTS=1 pytest ...` is rejected unless the isolated marker injected by the suite runner is present.
 - `./scripts/ci/run_test_suite.sh runtime` runs the runtime profile without DB-marked tests.
 - `./scripts/ci/run_test_suite.sh reports` runs the reporting profile without DB-marked tests.
 ## Optional Container Reproduction

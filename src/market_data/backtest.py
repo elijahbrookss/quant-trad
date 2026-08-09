@@ -17,6 +17,10 @@ from .contracts import (
     OPEN_INTEREST_FACT_VERSION,
 )
 from .fact_registry import get_fact_contract
+from .frozen import (
+    bound_frozen_series_for_request,
+    build_frozen_market_data_read_binding,
+)
 
 
 BACKTEST_DATASET_BINDING_VERSION = "backtest_dataset_binding.v1"
@@ -41,6 +45,7 @@ _BACKTEST_EXECUTION_BOT_FIELDS = (
     "run_type",
     "bot_env",
     "execution_semantics",
+    "execution_book_tape_bundle",
 )
 
 
@@ -550,6 +555,31 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
             "backtest_dataset_binding_invalid: series watermark exceeds dataset watermark"
         )
 
+    ordered_series = sorted(
+        series,
+        key=lambda row: (
+            str(row["instrument_id"]),
+            str(row["fact_type"]),
+            int(row["timeframe_seconds"] or -1),
+            int(row["series_id"]),
+        ),
+    )
+    recorded_gaps = [
+        {"series_id": int(row["series_id"]), **dict(gap)}
+        for row in ordered_series
+        for gap in list(row.get("disclosed_gaps") or [])
+        if isinstance(gap, Mapping)
+    ]
+    frozen_read_binding = build_frozen_market_data_read_binding(
+        dataset_id=dataset_id,
+        dataset_hash=dataset_hash,
+        max_commit_seq=max_commit_seq,
+        series=ordered_series,
+        subjects=execution_instruments,
+        recorded_gaps=recorded_gaps,
+        quality=dict(quality),
+    )
+
     return {
         **dict(payload),
         "schema_version": BACKTEST_DATASET_BINDING_VERSION,
@@ -566,15 +596,8 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
         "instrument_config_hash": instrument_config_hash,
         **normalized_windows,
         "instruments": execution_instruments,
-        "series": sorted(
-            series,
-            key=lambda row: (
-                str(row["instrument_id"]),
-                str(row["fact_type"]),
-                int(row["timeframe_seconds"] or -1),
-                int(row["series_id"]),
-            ),
-        ),
+        "series": ordered_series,
+        "frozen_market_data_read_binding": frozen_read_binding,
     }
 
 
@@ -645,40 +668,25 @@ def bound_series_for_request(
     """Resolve one exact bound series and reject all range expansion."""
 
     normalized = normalize_backtest_dataset_binding(binding)
-    instrument_id = str(instrument_id or "").strip()
-    timeframe = int(timeframe_seconds) if timeframe_seconds is not None else None
-    fact_type = str(fact_type or "").strip().lower()
-    contract_version = str(contract_version or "").strip()
-    requested_start = _utc(start, field="requested_start")
-    requested_end = _utc(end, field="requested_end")
-    matches = [
-        row
-        for row in normalized["series"]
-        if row["instrument_id"] == instrument_id
-        and row["timeframe_seconds"] == timeframe
-        and row["fact_type"] == fact_type
-        and row["contract_version"] == contract_version
-    ]
-    if len(matches) != 1:
-        raise ValueError(
-            "backtest_dataset_series_missing: dataset does not contain exactly one "
-            f"series for instrument_id={instrument_id} fact_type={fact_type} "
-            f"contract_version={contract_version} timeframe_seconds={timeframe}"
+    try:
+        return bound_frozen_series_for_request(
+            normalized["frozen_market_data_read_binding"],
+            instrument_id=instrument_id,
+            timeframe_seconds=timeframe_seconds,
+            start=start,
+            end=end,
+            fact_type=fact_type,
+            contract_version=contract_version,
         )
-    entry = dict(matches[0])
-    bound_start = _utc(entry["range_start"], field="bound_start")
-    bound_end = _utc(entry["range_end"], field="bound_end")
-    if requested_end <= requested_start:
-        raise ValueError(
-            "backtest_dataset_range_invalid: requested end must be after start"
-        )
-    if requested_start < bound_start or requested_end > bound_end:
-        raise ValueError(
-            "backtest_dataset_range_expansion_forbidden: requested "
-            f"[{iso_utc(requested_start)}, {iso_utc(requested_end)}) outside frozen "
-            f"[{iso_utc(bound_start)}, {iso_utc(bound_end)})"
-        )
-    return entry
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("frozen_market_data_series_missing"):
+            raise ValueError(message.replace("frozen_market_data", "backtest_dataset", 1)) from exc
+        if message.startswith("frozen_market_data_range_invalid"):
+            raise ValueError(message.replace("frozen_market_data", "backtest_dataset", 1)) from exc
+        if message.startswith("frozen_market_data_range_expansion_forbidden"):
+            raise ValueError(message.replace("frozen_market_data", "backtest_dataset", 1)) from exc
+        raise
 
 
 __all__ = [

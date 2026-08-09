@@ -194,6 +194,7 @@ class HistoricalCandleIngestor:
             except Exception as exc:
                 self.store.record_gap_evidence(
                     series_id=series_id,
+                    source_id=source_id,
                     start=segment_start.to_pydatetime(),
                     end=segment_end.to_pydatetime(),
                     classification="ingestion_failure",
@@ -220,6 +221,7 @@ class HistoricalCandleIngestor:
             if frame is None or frame.empty:
                 self.store.record_gap_evidence(
                     series_id=series_id,
+                    source_id=source_id,
                     start=segment_start.to_pydatetime(),
                     end=segment_end.to_pydatetime(),
                     classification="provider_missing_data",
@@ -348,6 +350,7 @@ class HistoricalCandleIngestor:
             )
             self.store.record_gap_evidence(
                 series_id=series_id,
+                source_id=source_id,
                 start=gap_start,
                 end=gap_end,
                 classification="provider_missing_data",
@@ -428,6 +431,7 @@ class CanonicalCandleFeed:
         start: Optional[Any] = None,
         end: Optional[Any] = None,
         quality: Sequence[Mapping[str, Any]] = (),
+        source_identity_keys: Sequence[str] = (),
     ) -> pd.DataFrame:
         records = self.store.read_dataset_series(
             dataset_id=dataset_id,
@@ -443,6 +447,16 @@ class CanonicalCandleFeed:
                 if known_at_lte is not None
                 else None
             ),
+            source_identity_keys=tuple(
+                sorted(
+                    {
+                        str(value).strip()
+                        for value in source_identity_keys
+                        if str(value).strip()
+                    }
+                )
+            ),
+            causal_at_interval_close=True,
         )
         return self._records_to_frame(
             records,

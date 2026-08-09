@@ -30,6 +30,7 @@ class Candle:
     volume: Optional[float] = None
     range: Optional[float] = None
     lookback_15: Optional[Dict[str, Optional[float]]] = None
+    known_at: Optional[datetime] = None
 
     def serialize(self) -> Dict[str, Optional[float]]:
         payload = {
@@ -39,6 +40,7 @@ class Candle:
             "low": round(self.low, 4),
             "close": round(self.close, 4),
             "end": isoformat(self.end),
+            "known_at": isoformat(self.known_at),
         }
         if self.range is not None:
             payload["range"] = round(self.range, 6)
@@ -347,6 +349,7 @@ class EntryFill:
     fee_source: Optional[str] = None
     fee_version: Optional[str] = None
     raw: Optional[Dict[str, Any]] = None
+    fill_id: Optional[str] = None
 
 
 @dataclass

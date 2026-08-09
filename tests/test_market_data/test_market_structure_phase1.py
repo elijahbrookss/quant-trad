@@ -16,7 +16,7 @@ from market_data.structure import (
     CoverageStatus,
     MarketSide,
     OrderingAssurance,
-    PHASE1_COINBASE_TRADE_CONTRACTS,
+    ProductContract,
     ProviderSizeUnit,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
@@ -26,12 +26,30 @@ from market_data.structure import (
     build_spool_segment_id,
     translate_coinbase_market_trade,
 )
+from market_data.stream_enrollment import load_stream_enrollment_manifest
 
 
 FIXTURE_PATH = (
     Path(__file__).parents[1]
     / "fixtures/providers/coinbase/market_structure_phase0/raw_frames.json.gz"
 )
+
+
+def _product_contract(product_id: str) -> ProductContract:
+    manifest = load_stream_enrollment_manifest(
+        "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
+    )
+    for enrollment in manifest.enrollments:
+        if enrollment.product_contract.provider_product_id == product_id:
+            return enrollment.product_contract
+    base, quote = product_id.split("-", maxsplit=1)
+    return ProductContract(
+        provider_product_id=product_id,
+        provider_size_unit="base",
+        base_currency=base,
+        quote_currency=quote,
+        product_definition_version_id=f"coinbase.{product_id}.product_contract.v1",
+    )
 
 
 def _captured_trade_event(product_id: str, *, delivery_kind: str = "update"):
@@ -83,7 +101,7 @@ def _fact(product_id: str = "BTC-USD"):
     accepted_at = datetime(2026, 8, 2, 7, 20, 1, tzinfo=UTC)
     fact = translate_coinbase_market_trade(
         event,
-        contract=PHASE1_COINBASE_TRADE_CONTRACTS[product_id],
+        contract=_product_contract(product_id),
         raw_record_id=record.raw_record_id,
         connection_epoch=0,
         receive_ordinal=7,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -106,6 +107,107 @@ class _Store:
         return "gap-hash"
 
 
+def test_collector_snapshot_groups_attempts_and_exposes_worker_liveness() -> None:
+    class SnapshotRepo:
+        def list_definitions(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [{
+                "id": "mcd_test",
+                "enabled": True,
+                "provider": "COINBASE",
+                "instrument_id": "instrument-1",
+                "instrument_symbol": "BIP-20DEC30-CDE",
+            }]
+
+        def list_recent_attempts(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [{
+                "id": "mca_test",
+                "definition_id": "mcd_test",
+                "status": "succeeded",
+                "started_at": SCHEDULED,
+            }]
+
+        def list_worker_states(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [{
+                "worker_id": "worker-1",
+                "state": "idle",
+                "heartbeat_at": SCHEDULED,
+                "alive": True,
+            }]
+
+    service = MarketDataCollectorService(
+        collection_repo=SnapshotRepo(),
+        store=_Store(),
+        clock=lambda: SCHEDULED,
+    )
+
+    snapshot = service.collector_snapshot(attempt_limit=3)
+
+    assert snapshot["schema_version"] == "market_collector_snapshot.v1"
+    assert snapshot["worker_health"]["status"] == "alive"
+    assert snapshot["collectors"][0]["definition"]["instrument_symbol"] == (
+        "BIP-20DEC30-CDE"
+    )
+    assert snapshot["collectors"][0]["attempts"][0]["id"] == "mca_test"
+
+
+def test_fact_history_is_bounded_and_uses_canonical_typed_store() -> None:
+    class HistoryRepo:
+        def list_definitions(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "mcd_test",
+                    "series_id": 22,
+                    "fact_type": "derivatives.open_interest",
+                }
+            ]
+
+    class HistoryStore(_Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reads = []
+
+        def read_open_interest(self, **kwargs: Any):
+            self.reads.append(kwargs)
+            return [
+                SimpleNamespace(
+                    series_id=22,
+                    revision=1,
+                    market_commit_seq=41,
+                    ingestion_run_id="mca_test",
+                    source_identity_key="source-test",
+                    source=SimpleNamespace(
+                        provider="COINBASE",
+                        venue="COINBASE_DIRECT",
+                        source_kind="poll_api",
+                        adapter_version="test.v1",
+                    ),
+                    provenance={"response_hash": "a" * 64},
+                    fact=SimpleNamespace(
+                        to_dict=lambda: {
+                            "sample_time": SCHEDULED,
+                            "known_at": SCHEDULED + timedelta(seconds=1),
+                            "value": 42.0,
+                            "unit": "contracts",
+                        }
+                    ),
+                )
+            ]
+
+    store = HistoryStore()
+    service = MarketDataCollectorService(
+        collection_repo=HistoryRepo(), store=store, clock=lambda: SCHEDULED
+    )
+
+    result = service.fact_history(
+        definition_id="mcd_test", hours=999, limit=9999
+    )
+
+    assert result["schema_version"] == "market_collector_fact_history.v1"
+    assert result["samples"][0]["fact"]["value"] == 42.0
+    assert result["samples"][0]["source"]["provider"] == "COINBASE"
+    assert store.reads[0]["start"] == SCHEDULED - timedelta(days=7)
+
+
 def test_collection_accepts_one_fenced_known_at_open_interest_fact() -> None:
     received_at = SCHEDULED + timedelta(seconds=2)
     snapshot = ProviderOpenInterestSnapshot(
@@ -149,6 +251,11 @@ def test_collection_accepts_one_fenced_known_at_open_interest_fact() -> None:
     assert ingestion["collection_fence"] == claim.fence()
     assert ingestion["provenance"]["response_hash"] == "a" * 64
     assert repo.completed[0][1]["ingestion_run_id"] == "mca_test"
+    timing = repo.completed[0][1]["evidence"]["timing"]
+    assert timing["schema_version"] == "market_collection_attempt_timing.v1"
+    assert timing["timings_ms"]["provider_request"] >= 0
+    assert timing["timings_ms"]["canonical_normalization"] >= 0
+    assert timing["timings_ms"]["persistence"] >= 0
     assert store.gaps[0]["classification"] == "collection_schedule_missed"
     assert store.gaps[0]["expected_count"] == 2
 
@@ -172,9 +279,13 @@ def test_exhausted_collection_failure_records_explicit_quality_gap() -> None:
         service.collect(_claim(attempt_number=3, max_attempts=3))
 
     assert len(repo.failed) == 1
+    failure_evidence = repo.failed[0][1]["evidence"]
+    assert failure_evidence["failed_stage"] == "provider_request"
+    assert failure_evidence["timing"]["timings_ms"]["attempt_total"] >= 0
     assert store.gaps == [
         {
             "series_id": 22,
+            "source_id": 11,
             "start": SCHEDULED,
             "end": SCHEDULED + timedelta(seconds=60),
             "classification": "collection_failed",

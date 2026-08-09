@@ -12,6 +12,7 @@ from engines.bot_runtime.core.domain import Candle, StrategySignal
 from engines.bot_runtime.core.runtime_events import (
     EntryFilledContext,
     ExitKind,
+    OrderLifecycleChangedContext,
     ReasonCode,
     RuntimeEventName,
     WalletDelta,
@@ -442,10 +443,16 @@ def test_botlens_fact_stream_overlay_delta_uses_bounded_render_payload() -> None
         {"time": 8, "price": 8.0},
         {"time": 9, "price": 9.0},
     ]
-    assert overlay["payload_summary"] == {
+    payload_summary = dict(overlay["payload_summary"])
+    polyline_fingerprint = payload_summary.pop("polyline_fingerprint")
+    assert len(polyline_fingerprint) == 64
+    assert payload_summary == {
         "geometry_keys": ["markers", "polylines"],
         "payload_counts": {"markers": 2, "polylines": 1},
         "point_count": 2,
+        "source_payload_counts": {"markers": 3, "polylines": 1},
+        "source_point_count": 9,
+        "truncated": True,
     }
     assert overlay["ui"] == {"label": "ATR", "color": "#38bdf8"}
 
@@ -754,6 +761,71 @@ def test_wallet_initialized_round_trip_preserves_wallet_commit_clock() -> None:
     assert restored.context.wallet_eval_seq == 0
     assert facts[0]["wallet_event"]["wallet_commit_seq"] == 0
     assert facts[0]["wallet_event"]["wallet_commit_seq_status"] == "runtime_assigned"
+
+
+def test_order_lifecycle_runtime_event_round_trip_preserves_residual_and_pins() -> None:
+    event = new_runtime_event(
+        event_name=RuntimeEventName.ORDER_LIFECYCLE_CHANGED,
+        event_id="order-event-4",
+        correlation_id="run-1:BTC-USD:1h:2026-02-01T00:00:00.000Z",
+        root_id="signal-1",
+        parent_id="decision-1",
+        event_ts=datetime(2026, 2, 1, 1, tzinfo=timezone.utc),
+        context=OrderLifecycleChangedContext(
+            run_id="run-1",
+            bot_id="bot-1",
+            strategy_id="strategy-1",
+            series_key="instrument-btc|1h",
+            instrument_id="instrument-btc",
+            symbol="BTC-USD",
+            timeframe="1h",
+            bar_ts=datetime(2026, 2, 1, 1, tzinfo=timezone.utc),
+            order_request_id="order-1",
+            order_request_manifest_hash="request-hash",
+            attempt_id="attempt-1",
+            order_attempt_manifest_hash="attempt-hash",
+            order_event_seq=4,
+            previous_state="open",
+            state="partially_filled",
+            known_at=datetime(2026, 2, 1, 1, tzinfo=timezone.utc),
+            side="buy",
+            requested_qty=10.0,
+            attempt_requested_qty=10.0,
+            attempt_cumulative_filled_qty=4.0,
+            attempt_remaining_qty=6.0,
+            order_cumulative_filled_qty=4.0,
+            order_remaining_qty=6.0,
+            execution_context_hash="context-hash",
+            execution_policy_hash="policy-hash",
+            order_lifecycle_replay_hash="replay-prefix-hash",
+            trade_id="trade-1",
+            signal_id="signal-domain-1",
+            decision_id="decision-domain-1",
+            fill_id="fill-1",
+            fill_qty=4.0,
+            fill_price=100.0,
+            fill_fee=0.04,
+            venue_event_name="open",
+            book_execution_evidence={
+                "schema_version": "book_execution_evidence.v1",
+                "execution_book_tape_hash": "a" * 64,
+                "execution_book_snapshot_hash": "b" * 64,
+                "book_level_index": 1,
+                "consumed_level_qty": 4.0,
+            },
+        ),
+    )
+
+    restored = runtime_event_from_dict(event.serialize())
+
+    assert restored.serialize() == event.serialize()
+    assert restored.context.state == "partially_filled"
+    assert restored.context.order_remaining_qty == 6.0
+    assert restored.context.execution_context_hash == "context-hash"
+    assert restored.context.execution_policy_hash == "policy-hash"
+    assert restored.context.book_execution_evidence[
+        "execution_book_snapshot_hash"
+    ] == "b" * 64
 
 
 def test_wallet_facts_emit_exit_ledger_with_absolute_release_state() -> None:
@@ -1937,6 +2009,8 @@ def test_overlay_projection_uses_bar_cadence_and_emits_bounded_delta() -> None:
         "window_bars": 640,
         "emit_every_bars": 3,
         "bar_index": 1,
+        "reason": "test",
+        "terminal": False,
     }
     assert first_delta["ops"][0]["overlay"]["detail_level"] == "bounded_render"
 
@@ -2043,6 +2117,44 @@ def test_push_update_coalesces_unchanged_series_stats() -> None:
 
     assert "series_stats_updated" in first_fact_types
     assert "series_stats_updated" not in second_fact_types
+
+
+def test_push_update_coalesces_unchanged_series_metadata_until_identity_revision() -> None:
+    runtime = _PushRuntime()
+    series = SimpleNamespace(
+        instrument={"id": "instrument-bip"},
+        timeframe="1h",
+        strategy_id="strategy-1",
+        symbol="BIP-20DEC30-CDE",
+        datasource="COINBASE",
+        exchange="coinbase_direct",
+        candles=[{"time": 1}, {"time": 2}],
+        risk_engine=SimpleNamespace(
+            trade_revision=0,
+            serialise_trades=lambda: [],
+            stats=lambda: {"total_trades": 0, "net_pnl": 0.0},
+        ),
+    )
+    runtime._series = [series]
+    candle = SimpleNamespace(
+        to_dict=lambda: {"time": 2, "open": 1.5, "high": 2.5, "low": 1.0, "close": 2.0},
+    )
+
+    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=10.0):
+        runtime._push_update("bar", series=series, candle=candle)
+    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=11.0):
+        runtime._push_update("bar", series=series, candle=candle)
+    series.symbol = "BIP-REVISED"
+    with patch("engines.bot_runtime.runtime.mixins.runtime_push_stream.time.monotonic", return_value=12.0):
+        runtime._push_update("bar", series=series, candle=candle)
+
+    emitted = [
+        [fact["fact_type"] for fact in payload["facts"]]
+        for payload in runtime.broadcast_payloads
+    ]
+    assert "series_state_observed" in emitted[0]
+    assert "series_state_observed" not in emitted[1]
+    assert "series_state_observed" in emitted[2]
 
 
 def test_push_update_bounds_live_log_and_decision_fact_batches() -> None:
@@ -2187,3 +2299,40 @@ def test_push_update_coalesces_repeated_runtime_warning_counts_until_health_hear
     assert "runtime_state_observed" not in second_fact_types
     assert "runtime_state_observed" in third_fact_types
     assert snapshot_calls == 2
+
+
+def test_log_facts_skip_retained_log_scan_when_revision_is_unchanged() -> None:
+    runtime = _PushRuntime()
+    runtime._logs = [{"id": "log-1", "message": "first"}]
+    runtime._log_revision = 1
+    runtime._push_log_revision_seen = -1
+
+    first, first_dropped = runtime._log_facts()
+    runtime._entries_after_marker = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("unchanged logs must not be rescanned")
+    )
+    second, second_dropped = runtime._log_facts()
+
+    assert [fact["log"]["id"] for fact in first] == ["log-1"]
+    assert first_dropped == 0
+    assert second == []
+    assert second_dropped == 0
+
+
+def test_wallet_facts_read_only_new_runtime_events_after_first_cursor() -> None:
+    runtime = _PushRuntime()
+    runtime._run_context.runtime_event_stream = [
+        {"event_id": "event-1", "event_name": "IGNORED", "context": {}},
+    ]
+    runtime._push_wallet_stream_length = 0
+
+    assert runtime._wallet_facts() == []
+    runtime._entries_after_marker = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("append-only wallet stream must not be rescanned")
+    )
+    runtime._run_context.runtime_event_stream.append(
+        {"event_id": "event-2", "event_name": "IGNORED", "context": {}}
+    )
+
+    assert runtime._wallet_facts() == []
+    assert runtime._push_wallet_stream_length == 2

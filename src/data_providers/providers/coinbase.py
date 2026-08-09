@@ -902,7 +902,11 @@ class CoinbaseProvider(BaseDataProvider):
         if end_ts <= start_ts:
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-        chunk_seconds = interval_seconds * self.MAX_CANDLES_PER_REQUEST
+        # Coinbase treats both request bounds as candle candidates. Keep each
+        # page within the provider limit before normalizing it to QT's half-open
+        # range; otherwise a 300-interval page can contain 301 timestamps and
+        # the provider may drop the earliest candle.
+        chunk_seconds = interval_seconds * max(self.MAX_CANDLES_PER_REQUEST - 1, 1)
         rows: List[Dict[str, Any]] = []
 
         window_start = start_ts
@@ -923,10 +927,22 @@ class CoinbaseProvider(BaseDataProvider):
                 start_value = candle_payload.get("start")
                 if start_value is None:
                     continue
+                candle_start = int(start_value)
+                if candle_start < window_start or candle_start > window_end:
+                    raise CoinbaseAPIError(
+                        "Coinbase candle response escaped requested bounds "
+                        f"| product_id={symbol} candle_start={candle_start} "
+                        f"window_start={window_start} window_end={window_end}"
+                    )
+                # Coinbase may include the candle that opens exactly on the
+                # request end. QT candle acquisition is half-open [start, end),
+                # so normalize that boundary overlap at the provider boundary.
+                if candle_start == window_end:
+                    continue
                 rows.append(
                     {
                         "timestamp": pd.to_datetime(
-                            int(start_value), unit="s", utc=True
+                            candle_start, unit="s", utc=True
                         ),
                         "open": float(candle_payload.get("open"))
                         if candle_payload.get("open") is not None

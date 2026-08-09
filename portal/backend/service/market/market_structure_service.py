@@ -27,6 +27,7 @@ from data_providers.streams.contracts import (
     MarketSubscription,
     ProviderRawMessage,
 )
+from data_providers.streams.runtime import ContinuousStreamPolicy
 from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
@@ -85,7 +86,7 @@ from market_data.structure import (
     MARKET_TRADE_FACT_TYPE,
     MARKET_TRADE_FACT_VERSION,
     OrderingAssurance,
-    PHASE1_COINBASE_TRADE_CONTRACTS,
+    ProductContract,
     RawStreamRecord,
     TRADE_FLOW_FACT_TYPE,
     TRADE_FLOW_FACT_VERSION,
@@ -93,6 +94,19 @@ from market_data.structure import (
     aggregate_trade_bucket,
     bucket_start_for,
     translate_coinbase_market_trade,
+)
+from market_data.stream_enrollment import (
+    QualificationEvidence,
+    StreamEnrollment,
+    StreamEnrollmentManifest,
+    load_stream_enrollment_manifest,
+)
+from engines.bot_runtime.core.book_execution import (
+    EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+    ExecutionBookSourceReference,
+    ExecutionBookTape,
+    ExecutionBookTapeBundle,
+    ExecutionBookValidityClosure,
 )
 
 from ..storage.repos.market_data import market_data_repo
@@ -103,47 +117,64 @@ from ..storage.repos.market_structure import (
     market_structure_repository,
 )
 from .instrument_service import get_instrument_record, resolve_or_create_instrument
+from .collector_safety import evaluate_collector_safety
 
 
 logger = logging.getLogger(__name__)
 
-PHASE1_PROOF_EFFECTIVE_AT = datetime(2026, 8, 2, tzinfo=UTC)
-PHASE1_AUTHENTICATED_PROOF_SHA256 = (
+AUTHENTICATED_STREAM_PROOF_EFFECTIVE_AT = datetime(2026, 8, 2, tzinfo=UTC)
+ENROLLMENT_PRODUCT_CONTRACT_EFFECTIVE_AT = datetime(2026, 8, 6, tzinfo=UTC)
+AUTHENTICATED_STREAM_PROOF_SHA256 = (
     "81fe668956a794aada0821ee83d202938c5b8ed3c0d1ffb3e83219e83cead032"
 )
 DEFAULT_SPOOL_BYTES = 8 * 1024**3
 DEFAULT_SEGMENT_BYTES = 128 * 1024**2
 DEFAULT_STORAGE_ROOT = Path("logs/market-structure")
+MAX_ANALYZER_SEQUENCE_HASHES = 8192
+DEFAULT_TRADE_FLEET_MANIFEST = Path(
+    "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
+)
 
 
 @dataclass(frozen=True)
-class PairDefinition:
+class MarketStructurePairContract:
     pair_id: str
     futures_instrument_id: str
     futures_product_id: str
     spot_product_id: str
 
 
-PHASE1_PAIRS: Mapping[str, PairDefinition] = {
-    "bip_btc": PairDefinition(
+MARKET_STRUCTURE_PAIRS: Mapping[str, MarketStructurePairContract] = {
+    "bip_btc": MarketStructurePairContract(
         pair_id="bip_btc",
         futures_instrument_id="b2deb0a0-f292-408a-876d-3dadd8e3819b",
         futures_product_id="BIP-20DEC30-CDE",
         spot_product_id="BTC-USD",
     ),
-    "etp_eth": PairDefinition(
+    "etp_eth": MarketStructurePairContract(
         pair_id="etp_eth",
         futures_instrument_id="44226144-fb38-4566-92c4-580734d76d3c",
         futures_product_id="ETP-20DEC30-CDE",
         spot_product_id="ETH-USD",
     ),
-    "slp_sol": PairDefinition(
+    "slp_sol": MarketStructurePairContract(
         pair_id="slp_sol",
         futures_instrument_id="bead556e-22e2-4ac0-8ee0-0d8c5310e9a0",
         futures_product_id="SLP-20DEC30-CDE",
         spot_product_id="SOL-USD",
     ),
 }
+
+
+def _trade_fleet_manifest() -> StreamEnrollmentManifest:
+    return load_stream_enrollment_manifest(DEFAULT_TRADE_FLEET_MANIFEST)
+
+
+def _product_contracts() -> dict[str, ProductContract]:
+    return {
+        row.product_contract.provider_product_id: row.product_contract
+        for row in _trade_fleet_manifest().enrollments
+    }
 
 
 @dataclass(frozen=True)
@@ -184,6 +215,62 @@ def _stable_hash(payload: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def _build_execution_book_tape_from_replay(
+    *,
+    states: Sequence[Any],
+    closing_validity: Sequence[Any],
+    instrument_id: str,
+    replay_fingerprint: str,
+    trade_records: Sequence[Any] = (),
+) -> ExecutionBookTape:
+    """Project certified provider-neutral replay facts into an execution tape."""
+
+    normalized_instrument_id = str(instrument_id or "").strip()
+    if not normalized_instrument_id:
+        raise ValueError("market_book_replay_invalid: execution instrument id is empty")
+    if not states:
+        raise RuntimeError(
+            "market_book_replay_invalid: no causal book states are available for execution"
+        )
+    closures = tuple(
+        ExecutionBookValidityClosure(
+            validity_interval_id=row.interval_id,
+            status=str(getattr(row.status, "value", row.status)),
+            known_at=row.known_at,
+            reason=str(row.reason or getattr(row.status, "value", row.status)),
+            source_reference=ExecutionBookSourceReference(
+                definition_id=row.closing_position.definition_id,
+                session_id=row.closing_position.session_id,
+                connection_epoch=row.closing_position.connection_epoch,
+                source_product_id=row.closing_position.provider_product_id,
+                source_sequence=row.closing_position.provider_sequence_num,
+                receive_ordinal=row.closing_position.receive_ordinal,
+                event_ordinal=row.closing_position.event_ordinal,
+            ),
+            evidence_hash=str(row.closing_quality_hash or row.version_id),
+        )
+        for row in closing_validity
+    )
+    limitations = {
+        "aggregated_depth_only",
+        "exact_queue_position_unavailable",
+    }
+    if trade_records:
+        limitations.add("passive_queue_requires_explicit_bounded_policy")
+    else:
+        limitations.add("resting_order_execution_not_modeled")
+    return ExecutionBookTape.from_book_states(
+        states,
+        instrument_id=normalized_instrument_id,
+        replay_fingerprint=replay_fingerprint,
+        source_capability="l2",
+        replay_certified=True,
+        limitations=tuple(sorted(limitations)),
+        validity_closures=closures,
+        trade_records=trade_records,
+    )
+
+
 def _observed_channel(raw_frame: bytes) -> str:
     try:
         payload = json.loads(raw_frame)
@@ -212,7 +299,7 @@ def _utc_time(value: datetime, *, field_name: str) -> datetime:
 
 
 class MarketStructureService:
-    """Coordinates Phase 1 without creating a second credential or data plane."""
+    """Coordinates canonical market-structure collection and replay."""
 
     def __init__(
         self,
@@ -223,6 +310,139 @@ class MarketStructureService:
         self.repository = repository
         self.stream_factory = stream_factory
 
+    def apply_stream_enrollment_manifest(
+        self,
+        *,
+        manifest_path: Path | str = DEFAULT_TRADE_FLEET_MANIFEST,
+    ) -> dict[str, Any]:
+        """Register a validated fleet without product-specific Python branches."""
+
+        manifest = load_stream_enrollment_manifest(manifest_path)
+        source_ids: dict[tuple[str, str, str], int] = {}
+        definitions: list[dict[str, Any]] = []
+        now = datetime.now(UTC)
+        for enrollment in manifest.enrollments:
+            instrument = get_instrument_record(enrollment.instrument_id)
+            if str(instrument.get("symbol") or "") != (
+                enrollment.product_contract.provider_product_id
+            ):
+                raise RuntimeError(
+                    "stream_enrollment_catalog_conflict: "
+                    f"enrollment_id={enrollment.enrollment_id}"
+                )
+            source_key = (
+                enrollment.provider,
+                enrollment.venue,
+                enrollment.adapter_version,
+            )
+            source_id = source_ids.get(source_key)
+            if source_id is None:
+                source_id = market_data_repo.register_source(
+                    SourceIdentity(
+                        provider=enrollment.provider,
+                        venue=enrollment.venue,
+                        source_kind="stream",
+                        adapter_version=enrollment.adapter_version,
+                    ),
+                    lineage={
+                        "schema_version": "market.stream_source_lineage.v1",
+                        "channels": list(enrollment.channels),
+                        "manifest_hash": manifest.manifest_hash,
+                        "authenticated_stream_proof_sha256": (
+                            AUTHENTICATED_STREAM_PROOF_SHA256
+                        ),
+                    },
+                )
+                source_ids[source_key] = source_id
+            series_id = market_data_repo.register_series(
+                instrument_id=enrollment.instrument_id,
+                fact_type=MARKET_TRADE_FACT_TYPE,
+                timeframe_seconds=None,
+                contract_version=enrollment.contract_version,
+            )
+            aggregate_series_ids = {
+                interval: market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=TRADE_FLOW_FACT_TYPE,
+                    timeframe_seconds=interval,
+                    contract_version=TRADE_FLOW_FACT_VERSION,
+                )
+                for interval in (1, 60)
+            }
+            contract = enrollment.product_contract
+            self.repository.register_product_definition(
+                definition_version_id=contract.product_definition_version_id,
+                source_id=source_id,
+                instrument_id=enrollment.instrument_id,
+                provider_product_id=contract.provider_product_id,
+                product_type=enrollment.product_type,
+                venue=enrollment.venue,
+                status="online_proven",
+                base_currency=contract.base_currency,
+                quote_currency=contract.quote_currency,
+                provider_size_unit=contract.provider_size_unit.value,
+                contract_size=contract.contract_size,
+                price_increment=_instrument_decimal(instrument, "tick_size"),
+                base_increment=_instrument_decimal(instrument, "qty_step"),
+                effective_at=ENROLLMENT_PRODUCT_CONTRACT_EFFECTIVE_AT,
+                received_at=now,
+                provenance={
+                    "schema_version": "market.product_contract_provenance.v1",
+                    "manifest_hash": manifest.manifest_hash,
+                    "authenticated_stream_proof_sha256": (
+                        AUTHENTICATED_STREAM_PROOF_SHA256
+                    ),
+                },
+            )
+            definition_id = (
+                "ms_coinbase_"
+                + contract.provider_product_id.lower().replace("-", "_")
+            )
+            definitions.append(
+                self.repository.upsert_stream_definition(
+                    definition_id=definition_id,
+                    source_id=source_id,
+                    series_id=series_id,
+                    provider=enrollment.provider,
+                    venue=enrollment.venue,
+                    provider_product_id=contract.provider_product_id,
+                    channels=enrollment.channels,
+                    auth_mode=enrollment.auth_mode,
+                    contract_version=enrollment.contract_version,
+                    max_spool_bytes=enrollment.max_spool_bytes,
+                    max_segment_bytes=enrollment.max_segment_bytes,
+                    enabled=enrollment.continuous,
+                    config={
+                        "schema_version": "market.stream_runtime_config.v1",
+                        "enrollment_id": enrollment.enrollment_id,
+                        "fleet_id": enrollment.fleet_id,
+                        "manifest_hash": manifest.manifest_hash,
+                        "safety_policy": manifest.safety_policy.to_dict(),
+                        "product_definition_version_id": (
+                            contract.product_definition_version_id
+                        ),
+                        "aggregate_series_ids": {
+                            str(key): value
+                            for key, value in aggregate_series_ids.items()
+                        },
+                        "collector_runtime": {
+                            "schema_version": "market.collector_runtime.v2",
+                            "mode": "continuous" if enrollment.continuous else "stopped",
+                            "stop_at": None,
+                            "updated_by": "stream_enrollment_manifest",
+                            "reason": "declarative_enrollment",
+                        },
+                    },
+                )
+            )
+        return {
+            "schema_version": "market.stream_enrollment_result.v1",
+            "fleet_id": manifest.fleet_id,
+            "manifest_hash": manifest.manifest_hash,
+            "safety_policy_hash": manifest.safety_policy.policy_hash,
+            "definitions": definitions,
+        }
+
     def configure_pair(
         self,
         *,
@@ -230,17 +450,12 @@ class MarketStructureService:
         auth_mode: str = "authenticated",
         max_spool_bytes: int = DEFAULT_SPOOL_BYTES,
         max_segment_bytes: int = DEFAULT_SEGMENT_BYTES,
-        enable_production: bool = False,
     ) -> dict[str, Any]:
         normalized_pair = str(pair_id or "").strip().lower()
-        pair = PHASE1_PAIRS.get(normalized_pair)
+        pair = MARKET_STRUCTURE_PAIRS.get(normalized_pair)
         if pair is None:
             raise ValueError(
-                f"market_structure_pair_invalid: allowed={','.join(PHASE1_PAIRS)}"
-            )
-        if enable_production:
-            raise ValueError(
-                "market_stream_production_not_admitted: the implemented-path 24-hour proof and explicit budget are deferred until after Phase 4"
+                f"market_structure_pair_invalid: allowed={','.join(MARKET_STRUCTURE_PAIRS)}"
             )
         futures = get_instrument_record(pair.futures_instrument_id)
         if str(futures.get("symbol")) != pair.futures_product_id:
@@ -270,7 +485,7 @@ class MarketStructureService:
                 "schema_version": "market_structure_source_lineage.v1",
                 "provider_surface": "Coinbase Advanced Trade WebSocket",
                 "channels": ["market_trades", "heartbeats"],
-                "phase0_proof_sha256": PHASE1_AUTHENTICATED_PROOF_SHA256,
+                "authenticated_stream_proof_sha256": AUTHENTICATED_STREAM_PROOF_SHA256,
             },
         )
         l2_source_id = market_data_repo.register_source(
@@ -284,7 +499,7 @@ class MarketStructureService:
                 "schema_version": "market_structure_source_lineage.v1",
                 "provider_surface": "Coinbase Advanced Trade WebSocket",
                 "channels": ["level2", "heartbeats"],
-                "phase0_proof_sha256": PHASE1_AUTHENTICATED_PROOF_SHA256,
+                "authenticated_stream_proof_sha256": AUTHENTICATED_STREAM_PROOF_SHA256,
                 "ordering_scope": "one product per connection epoch",
             },
         )
@@ -358,13 +573,29 @@ class MarketStructureService:
                 market_data_repo.register_series(
                     instrument_id=instrument_id,
                     fact_type=DERIVATIVE_STATE_FACT_TYPE,
-                    timeframe_seconds=60,
+                    timeframe_seconds=None,
                     contract_version=DERIVATIVE_STATE_FACT_VERSION,
                 )
                 if product_type == "future"
                 else None
             )
-            contract = PHASE1_COINBASE_TRADE_CONTRACTS[product_id]
+            contract = _product_contracts().get(product_id)
+            if contract is None and product_type == "spot":
+                base_currency, quote_currency = product_id.split("-", maxsplit=1)
+                contract = ProductContract(
+                    provider_product_id=product_id,
+                    provider_size_unit="base",
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                    product_definition_version_id=(
+                        f"coinbase.{product_id}.product_contract.v1"
+                    ),
+                )
+            if contract is None:
+                raise RuntimeError(
+                    "market_product_contract_missing: "
+                    f"provider_product_id={product_id}"
+                )
             self.repository.register_product_definition(
                 definition_version_id=contract.product_definition_version_id,
                 source_id=source_id,
@@ -372,19 +603,19 @@ class MarketStructureService:
                 provider_product_id=product_id,
                 product_type=product_type,
                 venue="COINBASE_DIRECT",
-                status="online_phase0_proven",
+                status="online_proven",
                 base_currency=contract.base_currency,
                 quote_currency=contract.quote_currency,
                 provider_size_unit=contract.provider_size_unit.value,
                 contract_size=contract.contract_size,
                 price_increment=_instrument_decimal(instrument, "tick_size"),
                 base_increment=_instrument_decimal(instrument, "qty_step"),
-                effective_at=PHASE1_PROOF_EFFECTIVE_AT,
+                effective_at=AUTHENTICATED_STREAM_PROOF_EFFECTIVE_AT,
                 received_at=datetime.now(UTC),
                 provenance={
-                    "phase0_proof_sha256": PHASE1_AUTHENTICATED_PROOF_SHA256,
-                    "proof_contract": "market_structure_phase0_proof.v3",
-                    "quantity_semantics": "phase0_proven",
+                    "authenticated_stream_proof_sha256": AUTHENTICATED_STREAM_PROOF_SHA256,
+                    "proof_contract": "market_structure_authenticated_stream_proof.v1",
+                    "quantity_semantics": "provider_proven",
                 },
             )
             definition_id = f"ms_coinbase_{product_id.lower().replace('-', '_')}"
@@ -400,8 +631,7 @@ class MarketStructureService:
                 contract_version=MARKET_TRADE_FACT_VERSION,
                 max_spool_bytes=max_spool_bytes,
                 max_segment_bytes=max_segment_bytes,
-                enabled=False,
-                production_admitted=False,
+                enabled=None,
                 config={
                     "schema_version": "market_structure_stream_config.v1",
                     "pair_id": normalized_pair,
@@ -413,7 +643,7 @@ class MarketStructureService:
                     },
                     "response_feature_series_id": response_series_id,
                     "product_definition_version_id": contract.product_definition_version_id,
-                    "production_blocker": "post_phase4_24h_capacity_and_budget_gate",
+                    "fleet_id": "coinbase_perpetual_trades",
                 },
             )
             definitions.append(definition)
@@ -432,8 +662,7 @@ class MarketStructureService:
                 contract_version=L2_BOOK_FACT_VERSION,
                 max_spool_bytes=max_spool_bytes,
                 max_segment_bytes=max_segment_bytes,
-                enabled=False,
-                production_admitted=False,
+                enabled=None,
                 config={
                     "schema_version": "market_structure_l2_stream_config.v1",
                     "pair_id": normalized_pair,
@@ -469,7 +698,7 @@ class MarketStructureService:
                     ),
                     "checkpoint_max_seconds": 300,
                     "checkpoint_max_mutations": 100000,
-                    "production_blocker": "post_phase4_24h_capacity_and_budget_gate",
+                    "fleet_id": "coinbase_perpetual_trades",
                 },
             )
             definitions.append(l2_definition)
@@ -499,9 +728,9 @@ class MarketStructureService:
             primary_instrument_id=str(futures["id"]),
             related_instrument_id=str(spot["id"]),
             role="spot_reference",
-            effective_from=PHASE1_PROOF_EFFECTIVE_AT,
-            mapping_reason="operator-approved Phase 1 futures/spot pair",
-            mapping_source="market_structure_phase0_proof.v3",
+            effective_from=AUTHENTICATED_STREAM_PROOF_EFFECTIVE_AT,
+            mapping_reason="operator-approved futures/spot market-structure relationship",
+            mapping_source="market_structure_authenticated_stream_proof.v1",
         )
         return {
             "schema_version": "market_structure_pair_configuration.v1",
@@ -509,11 +738,7 @@ class MarketStructureService:
             "mapping_id": mapping_id,
             "definitions": definitions,
             "series": series_catalog,
-            "production_admitted": False,
-            "production_blockers": [
-                "post_phase4_24h_implemented_path_capture",
-                "explicit_storage_and_cost_budget",
-            ],
+            "continuous_collection": "requires_system_qualification",
         }
 
     def materialize_pair_features(
@@ -524,7 +749,7 @@ class MarketStructureService:
         end: datetime,
         known_at: datetime,
     ) -> dict[str, Any]:
-        """Materialize cross-stream Phase 3 facts at one causal commit watermark."""
+        """Materialize declared cross-stream facts at one causal commit watermark."""
 
         start_at = _utc_time(start, field_name="start")
         end_at = _utc_time(end, field_name="end")
@@ -534,7 +759,7 @@ class MarketStructureService:
                 "market_feature_materialization_invalid: end must follow start"
             )
         configured = self.configure_pair(pair_id=pair_id)
-        pair = PHASE1_PAIRS[str(configured["pair_id"])]
+        pair = MARKET_STRUCTURE_PAIRS[str(configured["pair_id"])]
         series_by_product = {
             str(row["product_id"]): dict(row) for row in configured["series"]
         }
@@ -644,6 +869,16 @@ class MarketStructureService:
             basis_facts=basis_facts,
             derivative_facts=derivative_facts,
         )
+        execution_trade_records = ()
+        if replay_states and config.get("trade_series_id") is not None:
+            execution_trade_records = tuple(
+                self.repository.read_trades(
+                    series_id=int(config["trade_series_id"]),
+                    start=min(row.effective_at for row in replay_states) - timedelta(seconds=2),
+                    end=max(row.effective_at for row in replay_states) + timedelta(seconds=2),
+                    known_at_lte=max(row.known_at for row in replay_states),
+                )
+            )
         fingerprint = _stable_hash(
             {
                 "schema_version": "market.cross_stream_materialization.v1",
@@ -677,6 +912,165 @@ class MarketStructureService:
             "noop": outcome.noop_count,
             "max_commit_seq": outcome.max_commit_seq,
             "materialization_fingerprint": fingerprint,
+        }
+
+    def start_continuous_validation(
+        self,
+        *,
+        definition_id: str,
+        duration_seconds: float,
+        requested_by: str,
+        policy: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        duration = float(duration_seconds)
+        if not 60 <= duration <= 7 * 24 * 3600:
+            raise ValueError(
+                "market_stream_validation_invalid: duration must be 60..604800 seconds"
+            )
+        runtime_policy = ContinuousStreamPolicy.from_mapping(policy)
+        stop_at = datetime.now(UTC) + timedelta(seconds=duration)
+        row = self.repository.configure_continuous_runtime(
+            definition_id=definition_id,
+            enabled=True,
+            mode="validation",
+            requested_by=requested_by,
+            policy=runtime_policy.to_dict(),
+            stop_at=stop_at,
+        )
+        return {
+            "schema_version": "market.continuous_collector_control.v1",
+            "definition_id": str(row["id"]),
+            "enabled": bool(row["enabled"]),
+            "mode": "validation",
+            "stop_at": stop_at.isoformat(),
+            "policy": runtime_policy.to_dict(),
+        }
+
+    def start_continuous(
+        self,
+        *,
+        definition_id: str,
+        requested_by: str,
+        policy: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        definitions = self.repository.list_stream_definitions(
+            definition_id=definition_id
+        )
+        if len(definitions) != 1:
+            raise ValueError(
+                f"market_stream_definition_unknown: definition_id={definition_id}"
+            )
+        definition = definitions[0]
+        adapter_supported = (
+            str(definition.get("provider") or "").upper() == "COINBASE"
+            and tuple(definition.get("channels") or ())
+            == ("market_trades", "heartbeats")
+        )
+        qualification, safety = evaluate_collector_safety(
+            definition=definition,
+            repository=self.repository,
+            adapter_supported=adapter_supported,
+            storage_root=DEFAULT_STORAGE_ROOT,
+        )
+        if not qualification.qualified:
+            raise ValueError(
+                "market_stream_not_qualified: "
+                + ",".join(qualification.reasons)
+            )
+        runtime_policy = ContinuousStreamPolicy.from_mapping(policy)
+        row = self.repository.configure_continuous_runtime(
+            definition_id=definition_id,
+            enabled=True,
+            mode="continuous",
+            requested_by=requested_by,
+            policy=runtime_policy.to_dict(),
+        )
+        return {
+            "schema_version": "market.continuous_collector_control.v2",
+            "definition_id": str(row["id"]),
+            "enabled": bool(row["enabled"]),
+            "mode": "continuous",
+            "stop_at": None,
+            "policy": runtime_policy.to_dict(),
+            "qualification": qualification.to_dict(),
+            "safety": {
+                "severity": safety.severity,
+                "reasons": list(safety.reasons),
+            },
+        }
+
+    def stop_continuous(
+        self,
+        *,
+        definition_id: str,
+        requested_by: str,
+    ) -> dict[str, Any]:
+        row = self.repository.configure_continuous_runtime(
+            definition_id=definition_id,
+            enabled=False,
+            mode="stopped",
+            requested_by=requested_by,
+            policy={},
+        )
+        return {
+            "schema_version": "market.continuous_collector_control.v1",
+            "definition_id": str(row["id"]),
+            "enabled": bool(row["enabled"]),
+            "mode": "stopped",
+        }
+
+    def set_safety_halt(
+        self,
+        *,
+        request_id: str,
+        scope_type: str,
+        scope_id: str,
+        requested_by: str,
+        reason: str,
+        policy_hash: str,
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        return self.repository.record_safety_event(
+            request_id=request_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            event_type="halted",
+            severity="operator",
+            actor_id=requested_by,
+            reason=reason,
+            policy_hash=policy_hash,
+            evidence=dict(evidence or {}),
+        )
+
+    def acknowledge_safety_halt(
+        self,
+        *,
+        request_id: str,
+        scope_type: str,
+        scope_id: str,
+        requested_by: str,
+        reason: str,
+        policy_hash: str,
+        evidence: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        return self.repository.record_safety_event(
+            request_id=request_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            event_type="acknowledged",
+            severity="operator",
+            actor_id=requested_by,
+            reason=reason,
+            policy_hash=policy_hash,
+            evidence=dict(evidence or {}),
+        )
+
+    def safety_status(self, *, limit: int = 100) -> dict[str, Any]:
+        events = self.repository.list_safety_events(limit=limit)
+        return {
+            "schema_version": "market.collector_safety_status.v1",
+            "active": [row for row in events if bool(row.get("active"))],
+            "events": events,
         }
 
     async def capture_bounded(
@@ -1025,7 +1419,9 @@ class MarketStructureService:
                 translated.append(
                     translate_coinbase_market_trade(
                         item.event,
-                        contract=PHASE1_COINBASE_TRADE_CONTRACTS[claim.provider_product_id],
+                        contract=self.repository.get_product_contract(
+                            str(claim.config["product_definition_version_id"])
+                        ),
                         raw_record_id=item.raw_record.raw_record_id,
                         connection_epoch=item.raw_record.connection_epoch,
                         receive_ordinal=item.raw_record.receive_ordinal,
@@ -1215,11 +1611,7 @@ class MarketStructureService:
                 },
                 "quality_event_ids": quality_event_ids,
                 "archive_status": status,
-                "production_admitted": False,
-                "production_blockers": [
-                    "post_phase4_24h_implemented_path_capture",
-                    "explicit_storage_and_cost_budget",
-                ],
+                "capture_scope": "bounded",
             }
             logger.info(
                 "market_structure_capture_completed | definition_id=%s session_id=%s product_id=%s raw_records=%s trades=%s manifests=%s elapsed_seconds=%.3f",
@@ -1680,11 +2072,7 @@ class MarketStructureService:
             },
             "quality_event_ids": quality_event_ids,
             "archive_status": status,
-            "production_admitted": False,
-            "production_blockers": [
-                "post_phase4_24h_implemented_path_capture",
-                "explicit_storage_and_cost_budget",
-            ],
+            "capture_scope": "bounded",
         }
         logger.info(
             "market_structure_l2_capture_completed | definition_id=%s session_id=%s product_id=%s snapshots=%s batches=%s mutations=%s checkpoints=%s final_state_hash=%s",
@@ -1702,6 +2090,15 @@ class MarketStructureService:
     def replay_manifest(
         self, *, manifest_id: str, storage_root: Path = DEFAULT_STORAGE_ROOT
     ) -> dict[str, Any]:
+        retention = self.repository.archive_retention_status(
+            target_kind="raw_manifest",
+            target_id=manifest_id,
+        )
+        if retention["object_retention_state"] == "expired":
+            raise RuntimeError(
+                "market_archive_object_expired: "
+                f"manifest_id={manifest_id} expiration={retention['expiration']}"
+            )
         manifest = self.repository.get_manifest(manifest_id)
         store = FilesystemRawArchiveObjectStore(
             Path(storage_root).expanduser().resolve() / "objects"
@@ -1888,6 +2285,7 @@ class MarketStructureService:
         *,
         definition_id: str,
         session_id: str,
+        execution_instrument_id: Optional[str] = None,
         storage_root: Path = DEFAULT_STORAGE_ROOT,
     ) -> dict[str, Any]:
         """Replay acknowledged raw objects without provider access."""
@@ -2015,12 +2413,20 @@ class MarketStructureService:
         def reduce_operations(
             reducer: Level2BookReconstructor,
             selected: Sequence[tuple[str, BookSourcePosition, Any]],
-        ) -> tuple[list[str], list[str], dict[str, Any], dict[str, Any], list[Any]]:
+        ) -> tuple[
+            list[str],
+            list[str],
+            dict[str, Any],
+            dict[str, Any],
+            list[Any],
+            list[Any],
+        ]:
             snapshot_ids: list[str] = []
             batch_ids: list[str] = []
             checkpoints: dict[str, Any] = {}
             opening_validity: dict[str, Any] = {}
             states: list[Any] = []
+            closing_validity: list[Any] = []
             for kind, position, payload in selected:
                 if kind == "invalidate":
                     result = reducer.invalidate_transport(
@@ -2040,16 +2446,30 @@ class MarketStructureService:
                 for validity in result.validity_versions:
                     if validity.revision == 1:
                         opening_validity[validity.interval_id] = validity
-            return snapshot_ids, batch_ids, checkpoints, opening_validity, states
+                    elif validity.closing_position is not None:
+                        closing_validity.append(validity)
+            return (
+                snapshot_ids,
+                batch_ids,
+                checkpoints,
+                opening_validity,
+                states,
+                closing_validity,
+            )
 
         full = Level2BookReconstructor(
             series_id=int(definition["series_id"]),
             contract=contract,
             ordering_assurance=OrderingAssurance.PROVIDER_DELIVERY_GUARANTEED,
         )
-        snapshot_ids, batch_ids, replay_checkpoints, opening_validity, replay_states = (
-            reduce_operations(full, operations)
-        )
+        (
+            snapshot_ids,
+            batch_ids,
+            replay_checkpoints,
+            opening_validity,
+            replay_states,
+            closing_validity,
+        ) = reduce_operations(full, operations)
         final_state_hash = full.current_state_hash
         reconciliation = self.repository.reconcile_book_replay(
             definition_id=definition_id,
@@ -2191,6 +2611,12 @@ class MarketStructureService:
                 "checkpoint_checks": checkpoint_checks,
                 "bbo_feature_hashes": sorted(row.material_hash for row in replay_bbo),
                 "depth_feature_hashes": sorted(row.material_hash for row in replay_depth),
+                "execution_trade_version_ids": [
+                    row.version_id for row in execution_trade_records
+                ],
+                "execution_trade_material_hashes": [
+                    row.fact.material_hash for row in execution_trade_records
+                ],
                 "transport_quality_hashes": sorted(
                     str(row["evidence_hash"])
                     for row in quality_rows
@@ -2198,7 +2624,16 @@ class MarketStructureService:
                 ),
             }
         )
-        return {
+        execution_book_tape = None
+        if execution_instrument_id is not None:
+            execution_book_tape = _build_execution_book_tape_from_replay(
+                states=replay_states,
+                closing_validity=closing_validity,
+                instrument_id=execution_instrument_id,
+                replay_fingerprint=fingerprint,
+                trade_records=execution_trade_records,
+            ).to_dict()
+        result = {
             "schema_version": "market.book_session_replay.v1",
             "definition_id": definition_id,
             "session_id": session_id,
@@ -2222,6 +2657,13 @@ class MarketStructureService:
                 "persisted_equal": feature_equal,
             },
         }
+        if execution_book_tape is not None:
+            result["execution_book_tape"] = execution_book_tape
+            result["execution_book_tape_bundle"] = ExecutionBookTapeBundle(
+                schema_version=EXECUTION_BOOK_TAPE_BUNDLE_SCHEMA_VERSION,
+                tapes=(ExecutionBookTape.from_dict(execution_book_tape),),
+            ).to_dict()
+        return result
 
     def reconcile_recent_trades(
         self, *, definition_id: str, limit: int = 100
@@ -2325,6 +2767,8 @@ class _CaptureAnalyzer:
             prior_hash = self.sequence_hashes.get(message_sequence)
             if prior_hash is None:
                 self.sequence_hashes[message_sequence] = record.raw_frame_sha256
+                if len(self.sequence_hashes) > MAX_ANALYZER_SEQUENCE_HASHES:
+                    self.sequence_hashes.pop(next(iter(self.sequence_hashes)))
             elif prior_hash != record.raw_frame_sha256:
                 self._quality(
                     record,
@@ -2498,6 +2942,6 @@ __all__ = [
     "DEFAULT_SPOOL_BYTES",
     "DEFAULT_STORAGE_ROOT",
     "MarketStructureService",
-    "PHASE1_PAIRS",
+    "MARKET_STRUCTURE_PAIRS",
     "market_structure_service",
 ]

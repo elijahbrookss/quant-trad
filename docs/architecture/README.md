@@ -32,6 +32,8 @@ that are easier to understand at a glance than in prose.
 - [Signal consumption contract](decision-layer/diagrams/signal-consumption-contract.mmd)
 - [Runtime hot path](execution-runtime/diagrams/runtime-hot-path.mmd)
 - [Runtime lifecycle state](execution-runtime/diagrams/runtime-lifecycle-state.mmd)
+- [Resolved execution context](execution-runtime/diagrams/resolved-execution-context.mmd)
+- [Canonical order lifecycle](execution-runtime/diagrams/canonical-order-lifecycle.mmd)
 - [Wallet and capital flow](execution-runtime/diagrams/wallet-capital-flow.mmd)
 - [BotLens projection flow](botlens-projections/diagrams/botlens-projection-flow.mmd)
 - [Runtime event ledger flow](persistence/diagrams/runtime-event-ledger-flow.mmd)
@@ -60,6 +62,9 @@ SVGs are the quick-reference files to open while reading nearby docs.
 | Decision layer | [decision-layer/DECISION_LAYER_BOUNDARY.md](decision-layer/DECISION_LAYER_BOUNDARY.md) | Strategy compilation/evaluation, signals, guards, decision artifacts |
 | Regime context | [decision-layer/REGIME_CONTEXT_BOUNDARY.md](decision-layer/REGIME_CONTEXT_BOUNDARY.md) | Regime as indicator-produced decision context |
 | Execution runtime | [execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md](execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md) | Deterministic execution, FAST/FULL semantics, lifecycle, events |
+| Economic execution | [execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) | Immutable claim intent, versioned bar assumptions, X0-X2 evidence, cost stress |
+| Venue-neutral execution context | [execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) | Immutable instrument/venue/fee/model contracts, run pinning, conformance, fill evidence |
+| Canonical order lifecycle | [execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) | Immutable order/attempt identity, append-only transitions, residuals, replacement lineage, replay and projections |
 | Runtime composition | [execution-runtime/RUNTIME_COMPOSITION_ROOT.md](execution-runtime/RUNTIME_COMPOSITION_ROOT.md) | Backend runtime wiring and mode-aware collaborator selection |
 | Wallet and capital | [execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md](execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md) | Capital reservation, fees, margin, settlement, shared-wallet ordering |
 | BotLens projections | [botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md](botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md) | Debug/read models over runtime truth |

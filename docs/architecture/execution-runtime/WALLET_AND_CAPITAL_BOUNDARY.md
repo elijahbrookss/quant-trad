@@ -108,6 +108,15 @@ Wallet ledger facts derived from runtime events preserve two order concepts:
   appends a minimal internal fill marker under its process lock before
   runtime-event transport append; this locked snapshot is the source of current
   wallet state for subsequent decisions and settlements.
+- the process-shared wallet event list is a canonical append ledger, not a
+  per-decision remote iterator. A gateway reads it through one bulk manager
+  snapshot and caches that local snapshot by wallet commit sequence. An
+  unchanged commit sequence performs no event-list transfer; a changed sequence
+  refreshes once under the existing process lock. Shared wallet-state and
+  reservation dictionaries use the same bulk-copy rule.
+- the cache changes transport cost only. Event ordering, reservation
+  reconciliation, projection, and durable wallet evidence continue to use the
+  same complete canonical event sequence.
 - `source_run_seq` remains diagnostic lineage only. It is not a wallet replay
   ordering fallback.
 
@@ -121,6 +130,16 @@ The absolute `wallet_before` for fill and release facts must come from the
 wallet gateway's committed settlement metadata. Runtime-event append order is
 transport, not the synchronization point for capital state. The persisted
 before/after state and wallet replay must agree.
+
+Full wallet replay and absolute-state validation share one canonical
+incremental transition reducer. Full projection folds the ordered ledger into a
+final snapshot. Validation walks that same order once, snapshots immediately
+before and after each material transition, and compares those states with the
+persisted absolute evidence. It must not replay every growing prefix or
+implement a report-specific accounting interpretation. Duplicate-event,
+initialization, fill, margin, fee, realized-PnL, and invariant behavior remain
+owned by the shared reducer; malformed-state diagnostics retain their first
+causal event and prior-event evidence.
 
 When multiple exit fills for the same trade are emitted before the next durable
 wallet fact batch, wallet fact construction must continue from the prior
@@ -167,6 +186,16 @@ snapshot has absorbed the fill.
   event ledger without relying on arrival order or projection state.
 - Wallet replay uses wallet commit ordering for ledger facts and must fail loud
   on missing clocks, malformed rows, or stale absolute state.
+- Wallet validation applies each canonical event at most once after ordering;
+  validation complexity is linear in ledger length apart from sorting and
+  bounded diagnostic context.
+- Manager-backed event storage is never traversed item by item from a hot
+  wallet evaluation path. Cache invalidation is keyed to the shared wallet
+  commit sequence and occurs under the wallet lock.
+- Read-only wallet projection uses the canonical shared wallet-state snapshot
+  under the wallet lock; it does not consult the event cursor or reservation
+  map on every bar. The event ledger remains authoritative for reconciliation,
+  explicit event reads, and replay.
 - Terminal close behavior must release or account for reserved capital.
 
 ## Related Docs

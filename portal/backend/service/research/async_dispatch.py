@@ -86,18 +86,32 @@ def _result_summary(result: Mapping[str, Any]) -> dict[str, Any]:
             "rank_by": leaderboard.get("rank_by"),
             "top_rows": rows[:5],
         }
-    if schema_version == "research_check_run.v1":
+    if schema_version in {
+        "research_check_run.v1",
+        "research_check_run.v2",
+        "research_check_preview.v2",
+    }:
         check = result.get("check") if isinstance(result.get("check"), Mapping) else {}
         run_result = result.get("result") if isinstance(result.get("result"), Mapping) else {}
+        semantic_result = (
+            run_result.get("result")
+            if isinstance(run_result.get("result"), Mapping)
+            else run_result
+        )
         return {
             "schema_version": "research_job_result_summary.v1",
-            "result_type": "research_check_run",
-            "check_id": run_result.get("check_id") or check.get("id"),
+            "result_type": (
+                "research_check_preview"
+                if schema_version == "research_check_preview.v2"
+                else "research_check_run"
+            ),
+            "check_id": check.get("id"),
             "symbol": check.get("symbol"),
             "timeframe": check.get("timeframe"),
             "status": result.get("status"),
-            "sample_count": run_result.get("sample_count"),
-            "recommendation": run_result.get("recommendation"),
+            "sample_count": semantic_result.get("sample_count"),
+            "recommendation": semantic_result.get("recommendation"),
+            "result_hash": run_result.get("result_hash"),
         }
     return {
         "schema_version": "research_job_result_summary.v1",
@@ -174,6 +188,10 @@ def dispatch_research_job(*, job_type: str, request: Mapping[str, Any]) -> dict[
 
 
 def dispatch_research_check_run(request: Mapping[str, Any]) -> dict[str, Any]:
+    if str(request.get("mode") or "").strip().lower() != "evidence":
+        raise ValueError(
+            "check_evidence_mode_required: async Check run accepts durable evidence only"
+        )
     return dispatch_research_job(job_type=JOB_TYPE_RESEARCH_CHECK_RUN, request=request)
 
 

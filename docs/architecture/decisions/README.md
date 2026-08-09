@@ -78,3 +78,13 @@ respect.
 | [0050](0050-use-one-canonical-append-only-market-data-store.md) | Use one canonical append-only market-data store | Accepted, retroactive cleanup |
 | [0051](0051-require-frozen-datasets-for-canonical-backtests.md) | Require frozen datasets for canonical backtests | Accepted |
 | [0052](0052-use-typed-fact-collectors-and-explicit-instrument-roles.md) | Use typed fact collectors and explicit instrument roles | Accepted |
+| [0053](0053-use-tiered-market-structure-archive-and-replay-boundary.md) | Use a tiered market-structure archive and replay boundary | Accepted |
+| [0054](0054-keep-blocking-api-work-off-the-event-loop.md) | Keep blocking API work off the event loop | Accepted |
+| [0055](0055-separate-bounded-botlens-hot-state-from-durable-inspection.md) | Separate bounded BotLens hot state from durable inspection | Accepted |
+| [0056](0056-pin-venue-neutral-execution-contexts-per-run.md) | Pin venue-neutral execution contexts per run | Accepted |
+| [0057](0057-use-append-only-canonical-order-lifecycle.md) | Use an append-only canonical order lifecycle | Accepted |
+| [0058](0058-use-replay-certified-execution-book-tapes.md) | Use replay-certified execution-book tapes | Accepted |
+| [0059](0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md) | Use in-app scientific authority and an offline certification ceiling | Accepted |
+| [0060](0060-use-capability-native-research-and-collection-contracts.md) | Use capability-native research and collection contracts | Accepted |
+| [0061](0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md) | Use provider-neutral exact numeric facts and bounded acquisition | Accepted |
+| [0062](0062-use-frozen-bindings-for-durable-check-evidence.md) | Use frozen bindings for durable Check evidence | Accepted |

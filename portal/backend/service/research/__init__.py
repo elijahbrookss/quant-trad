@@ -1,29 +1,41 @@
 """Research memory and lightweight analytical check services."""
 
 from .service import (
+    build_research_check_evidence,
     compare_research_checks,
+    create_observation_from_check_evidence,
     create_research_item,
     create_research_link,
     evaluate_research_check,
     get_research_item,
+    get_research_check_requirements,
     get_research_trail,
     get_run_research_evidence,
     list_research_items,
     list_research_links,
+    persist_built_research_check_evidence,
+    prepare_research_check_evidence,
     run_research_check,
+    replay_research_check,
     sweep_research_checks,
 )
 
 __all__ = [
+    "build_research_check_evidence",
     "compare_research_checks",
+    "create_observation_from_check_evidence",
     "create_research_item",
     "create_research_link",
     "evaluate_research_check",
     "get_research_item",
+    "get_research_check_requirements",
     "get_research_trail",
     "get_run_research_evidence",
     "list_research_items",
     "list_research_links",
+    "persist_built_research_check_evidence",
+    "prepare_research_check_evidence",
     "run_research_check",
+    "replay_research_check",
     "sweep_research_checks",
 ]

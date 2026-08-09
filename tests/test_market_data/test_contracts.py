@@ -21,6 +21,7 @@ from market_data.contracts import (
     SourceIdentity,
     build_candle_material_hash,
     build_dataset_identity_hash,
+    dataset_series_identity_payload,
     build_funding_rate_material_hash,
     build_open_interest_material_hash,
     build_quality_hash,
@@ -334,3 +335,27 @@ def test_dataset_identity_ignores_storage_watermark_but_not_evidence() -> None:
 
     assert first == unrelated_commit
     assert first != changed_quality
+
+
+def test_dataset_series_identity_projects_quality_evidence_through_hash() -> None:
+    entry = {
+        "series_id": 11,
+        "range_start": "2024-01-01T00:00:00Z",
+        "range_end": "2024-01-02T00:00:00Z",
+        "max_commit_seq": 10,
+        "row_count": 1440,
+        "material_hash": "material",
+        "provenance_hash": "provenance",
+        "quality_hash": "quality",
+        "source_summary": {"counts": {"source": 1440}},
+        "quality_summary": {"evidence_count": 1},
+        "quality_evidence": [{"classification": "provider_missing_data"}],
+        "identity_key": "joined-series-detail-not-in-v1-identity",
+    }
+
+    projected = dataset_series_identity_payload(entry)
+
+    assert "quality_evidence" not in projected
+    assert "identity_key" not in projected
+    assert projected["quality_hash"] == "quality"
+    assert projected["range_start"] == "2024-01-01T00:00:00.000000Z"

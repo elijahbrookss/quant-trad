@@ -45,7 +45,13 @@ def emit_lifecycle_event(payload: Mapping[str, Any]) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(telemetry_hub.ingest(event))
+        if not telemetry_hub.submit_ingest_threadsafe(event):
+            logger.warning(
+                "botlens_lifecycle_hot_projection_deferred | run_id=%s | bot_id=%s | "
+                "reason=serving_loop_unavailable | durable_lifecycle=true",
+                event["run_id"],
+                event["bot_id"],
+            )
         return
     loop.create_task(telemetry_hub.ingest(event))
 

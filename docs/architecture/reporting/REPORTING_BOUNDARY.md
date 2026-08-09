@@ -15,11 +15,18 @@ code_paths:
   - portal/backend/service/reports
   - portal/backend/service/reports/candle_continuity.py
   - portal/backend/controller/reports.py
+  - portal/backend/controller/research.py
+  - portal/frontend/src/adapters/report.adapter.js
+  - portal/frontend/src/components/reports/reportComparisonViewModel.js
   - portal/backend/service/reports/comparison.py
   - portal/backend/service/reports/golden_evidence.py
   - portal/backend/service/storage/repos/report_materializations.py
   - portal/backend/service/storage/repos/candles.py
   - portal/backend/service/storage/repos/runtime_events.py
+  - src/engines/bot_runtime/core/wallet.py
+  - portal/backend/service/bots/botlens_intake_router.py
+  - config/defaults.yaml
+  - src/core/settings.py
   - docs/architecture/reporting/diagrams/run-research-dataset-flow.mmd
 ---
 # Reporting Boundary
@@ -40,11 +47,19 @@ research-performance sections while keeping raw rows available only as
 referenced/debug data.
 
 Terminal report artifacts are materialized separately from run lifecycle truth.
-When a run reaches a terminal status, the backend may enqueue a
-`RunReportDTO` build and persist the artifact/status in
+When a run reaches a terminal status, the backend enqueues a
+`RunReportDTO` build that persists the artifact/status in
 `portal_report_materializations`. Report states (`not_started`, `building`,
 `ready`, `failed`, `stale`) do not alter run terminal status; report build
 failure is a reporting condition, not a runtime failure.
+
+The default enqueue is asynchronous and delayed one second after terminal
+lifecycle intake. The delay lets immediately preceding bounded projection
+intake settle without putting report work on the execution critical path. A
+manual `POST /run-report/build` remains the retry/explicit-build boundary. The
+build's durable input fingerprint is authoritative: late durable input makes an
+artifact stale and forces a rebuild rather than allowing an old report to look
+ready.
 
 Materialized report artifacts are valid only for the exact durable input
 fingerprint recorded with the artifact. The fingerprint includes the run row,
@@ -54,6 +69,48 @@ serving or comparing. Contract/schema version alone is not a cache validity
 boundary. Report materializations also record the builder source revision; a
 ready artifact built by another source revision is stale for the current backend
 and must be rebuilt before serving or comparing.
+
+Interactive report pages share one bounded in-process `RunResearchDataset`
+reconstruction cache. Active runs, alternate builders, and sources whose durable
+fingerprint cannot be proven receive only the 15-second request-burst cache.
+Canonical terminal-run datasets may remain in an eight-entry LRU for at most 15
+minutes only when the run/event/trade input fingerprint is identical before and
+after reconstruction. After the burst window, every reuse rechecks that durable
+fingerprint. A mismatch or unavailable proof evicts the entry and rebuilds from
+durable truth; this cache is never persisted, never crosses backend processes,
+and never becomes report or comparison truth.
+
+Cold reconstruction is synchronous internally because it reads one coherent
+durable input boundary, but HTTP controllers must not execute it on the ASGI
+event-loop thread. Controllers either dispatch reconstruction to the bounded
+threadpool or use the existing asynchronous materialization boundary. This
+isolation preserves portal, BotLens, health, and stream responsiveness; it does
+not make reconstruction itself faster or change its canonical output.
+
+Cold reconstruction reads each run-scoped source set once and reuses the loaded
+run, runtime events, projected decision ledger, and stored trades for readiness
+evaluation. Trade excursion evidence is grouped by instrument/timeframe and
+read through bounded multi-window candle queries. Each trade window retains its
+own exclusive end, latest-revision selection, row limit, fallback timeframe,
+and partial/unavailable result; batching changes round trips, not evidence.
+Wallet state validation advances the canonical wallet reducer once per ordered
+event and compares the same before/after snapshots that growing-prefix replay
+previously produced. Full replay and validation must share that reducer.
+
+These optimizations are admissible only when representative cold builds retain
+the exact semantic and operational fingerprints and the same diagnostics. They
+do not permit using mutable overlay state, skipping malformed wallet events, or
+turning truncated candle evidence into complete excursion evidence.
+
+Within one backend process, concurrent requests for the same reconstruction
+key share one single-flight owner. Followers wait for that owner's result and
+must log their wait duration rather than launching duplicate builds. The cache
+owner's completion log records total duration, durable-fingerprint checks, and
+the canonical dataset-build duration. The dataset builder's completion log
+records total duration and phase durations for source loading, trade
+enrichment, readiness, wallet accounting, observability, remaining assembly,
+and serialization on the same structured log event. These timings are
+operational evidence only and cannot enter dataset identity.
 
 Paired run-report comparison reads ready `RunReportDTO` artifacts from
 `portal_report_materializations`. It returns structured blockers for
@@ -66,6 +123,16 @@ include it as read-only evidence for decision equality, verdict changes, trade
 lifecycle equality, wallet/order checks, runtime ordering, and first semantic
 divergence. The comparison API must not generate golden artifacts unless a
 future explicit build path is requested.
+
+Comparison first publishes `semantic_eligibility` from execution semantics,
+dataset identity, strategy identity, and material configuration identity.
+Mismatched execution semantics make repeatability equivalence incompatible even
+when decision and trade counts happen to match. Such runs remain available for
+descriptive performance/behavior inspection, but the UI must explain that equal
+counts do not prove equal fills, sizing, fees, wallet accounting, or P&L.
+Incomplete identity evidence produces `unknown`, not an optimistic eligibility
+claim. The first divergence points at `identity.execution_semantics` when that
+is the earliest proven incompatibility.
 
 CLI/agent consumers use compact projections for orchestration:
 `run_research_summary.v1` for single-run summary, an explicit
@@ -103,6 +170,12 @@ The dataset is rebuildable from durable DB/read-model truth:
   mergeable p95/p99 histogram estimates when present,
 - observability events for normalized report diagnostics.
 - the reporting candle service for bounded candle windows when requested.
+
+Run-scoped chart history remains a separate bounded BotLens concern. Historical
+candles, trades, and overlay deltas are requested for the visible range and are
+not regenerated through the indicator engine during report reconstruction.
+Candidate-lifecycle report rows filter finalized indicator-output artifacts;
+they do not require loading or replaying every visual overlay.
 
 Run configuration metadata preserves strategy variant provenance when available
 without embedding the full raw run snapshot in report artifacts.
@@ -267,8 +340,11 @@ Reporting publishes report API payloads, compare payloads, compact research and
 comparison summaries for CLI/agent workflows, downloadable export bundles,
 normalized diagnostics, paged signal/decision/trade/context/candidate-lifecycle
 datasets, readiness/caveat explanations, and optional research exports with
-candle files. These are downstream products of the dataset, not new execution
-semantics.
+candle files. Diagnostics preserve the original full response when no page
+limit is requested and return explicit `total`, `limit`, and `offset` when a
+bounded operator page is requested. Paging changes delivery only; diagnostic
+identity, summary, and ordering remain canonical. These are downstream products
+of the dataset, not new execution semantics.
 
 ## Failure And Recovery
 
@@ -296,6 +372,10 @@ semantics.
   report-file existence. Materialized run-report compare additionally requires
   both RunReportDTO contract (`run_report.v2`) artifacts to be `ready` so the comparison UI can use
   the same artifact truth source as single-run reports.
+- Repeatability equivalence is eligible only when execution semantics and the
+  available dataset, strategy, and material configuration identities match.
+  Equal decision/trade counts alone are descriptive evidence, never equivalence
+  proof.
 - Standard computed metrics are exposed by the dataset; consumers should not need
   private formula implementations for normal report views.
 - Narrative summaries are bounded views over dataset facts.
@@ -341,9 +421,14 @@ semantics.
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
 - [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
 - [ADR 0046: Exact candle inputs and separate quality](../decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
+- [ADR 0055: Bounded BotLens hot state and durable inspection](../decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md)
 
 ## Known Gaps
 
+- Large report payloads still require full typed-dataset assembly and JSON-safe
+  serialization on a true cold build. Terminal materialization and bounded
+  request caching remain the serving optimization; reporting must not omit
+  canonical sections merely to reduce serialization time.
 - Indicator/world-state context depends on structured runtime capture. When it
   is absent from decision artifact `observed_outputs`/`referenced_outputs`,
   reports expose explicit unavailable sections rather than replaying hidden

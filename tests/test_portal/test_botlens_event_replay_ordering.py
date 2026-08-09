@@ -62,3 +62,68 @@ def test_domain_projection_replay_orders_by_run_seq_before_source_seq(monkeypatc
 
     assert [batch.seq for batch in batches] == [1, 2]
     assert [batch.events[0].event_name.value for batch in batches] == ["RUN_READY", "RUN_COMPLETED"]
+
+
+def test_overlay_replay_gap_stays_explicit_without_recovery_checkpoint() -> None:
+    event_ids, gap = replay._plan_overlay_replay(
+        [
+            {
+                "event_id": "overlay-1",
+                "run_seq": 1,
+                "overlay_commit_seq": 1,
+                "base_overlay_commit_seq": 0,
+            },
+            {
+                "event_id": "overlay-3",
+                "run_seq": 2,
+                "overlay_commit_seq": 3,
+                "base_overlay_commit_seq": 2,
+            },
+        ]
+    )
+
+    assert event_ids == ()
+    assert gap == {
+        "status": "invalid",
+        "invalid_reason": "overlay_clock_gap",
+        "invalid_detail": "Overlay evidence is incomplete: expected base commit 1 but received 2.",
+        "invalidated_at_run_seq": 2,
+        "gap_expected_overlay_commit_seq": 1,
+        "gap_observed_base_overlay_commit_seq": 2,
+        "gap_observed_overlay_commit_seq": 3,
+    }
+
+
+def test_overlay_replay_checkpoint_recovers_gap_and_discards_unusable_prefix() -> None:
+    event_ids, gap = replay._plan_overlay_replay(
+        [
+            {
+                "event_id": "overlay-1",
+                "run_seq": 1,
+                "overlay_commit_seq": 1,
+                "base_overlay_commit_seq": 0,
+            },
+            {
+                "event_id": "overlay-3",
+                "run_seq": 2,
+                "overlay_commit_seq": 3,
+                "base_overlay_commit_seq": 2,
+            },
+            {
+                "event_id": "checkpoint-20",
+                "run_seq": 15,
+                "overlay_commit_seq": 20,
+                "base_overlay_commit_seq": 19,
+                "checkpoint_kind": "full_state",
+            },
+            {
+                "event_id": "overlay-21",
+                "run_seq": 16,
+                "overlay_commit_seq": 21,
+                "base_overlay_commit_seq": 20,
+            },
+        ]
+    )
+
+    assert gap is None
+    assert event_ids == ("checkpoint-20", "overlay-21")

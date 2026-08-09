@@ -23,6 +23,7 @@ class MarketProfileBarState:
     vah: float
     poc: float
     precision: int
+    known_at: datetime | None = None
 
 
 __all__ = ["MarketProfileBarState"]

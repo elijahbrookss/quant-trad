@@ -62,7 +62,10 @@ class BotStreamManager:
                 logger.warning("[BotStream] dropping subscriber after repeated enqueue failure")
 
     def subscribe_all(
-        self, snapshot_fn: Callable[[], object]
+        self,
+        snapshot_fn: Callable[[], object],
+        *,
+        snapshot_key: str = "bots",
     ) -> Tuple[Callable[[], None], Queue, Dict[str, object]]:
         """Register a new subscriber and return (release, queue, initial).
 
@@ -83,7 +86,10 @@ class BotStreamManager:
                 self._drain_queue(existing)
             logger.debug("[BotStream] subscriber released", extra={"token": token})
 
-        initial = {"type": "snapshot", "bots": snapshot_fn()}
+        normalized_snapshot_key = str(snapshot_key or "").strip()
+        if not normalized_snapshot_key:
+            raise ValueError("snapshot_key is required")
+        initial = {"type": "snapshot", normalized_snapshot_key: snapshot_fn()}
         return _release, channel, initial
 
     def _offer(self, channel: Queue, message: Mapping[str, object]) -> bool:

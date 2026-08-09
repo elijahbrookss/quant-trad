@@ -1,0 +1,27 @@
+flowchart LR
+    A[Agent or researcher] --> P[Proposal service]
+    P --> G[Mutation and authorization policy]
+    G --> V[Immutable strategy version]
+    G --> R[Immutable research protocol and budget]
+    D[Frozen causal dataset] --> F[Causal fact view]
+    V --> C[Typed expression compiler]
+    F --> C
+    C --> I[Canonical intents]
+    R --> X[Deterministic trial runner]
+    I --> X
+    X --> O[Canonical order and execution engine]
+    E[Instrument execution contract] --> O
+    U[Venue execution profile] --> O
+    M[Versioned execution model] --> O
+    O --> L[Canonical fills and lifecycle]
+    L --> W[Wallet, position, and accounting owners]
+    W --> Q[Run and trial evidence]
+    R --> Q
+    Q --> S[Independent certification]
+    S --> T[Promotion state machine]
+    T --> H[Shadow or paper]
+    H --> K[Expected-versus-realized reconciliation]
+    K --> B[Calibration candidate registry]
+    B --> M
+    T -. policy-authorized only .-> Z[Controlled live adapter]
+    Z --> K

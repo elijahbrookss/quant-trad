@@ -73,6 +73,28 @@ def test_spool_fsync_recovery_truncates_only_incomplete_crash_tail(tmp_path: Pat
     assert list(recovered.records()) == [first, second]
 
 
+def test_spool_discovery_repairs_open_tail_and_preserves_recovery_evidence(
+    tmp_path: Path,
+) -> None:
+    segment = _segment(tmp_path / "spool")
+    records = [_record(segment, 1), _record(segment, 2)]
+    for record in records:
+        segment.append(record)
+    segment.close()
+    with segment.open_path.open("ab") as handle:
+        handle.write(b'{"record_kind":"raw_frame"')
+        handle.flush()
+
+    discovered = DurableRawSpoolSegment.from_path(segment.open_path)
+
+    assert discovered.record_count == 2
+    assert discovered.recovery_evidence is not None
+    assert discovered.recovery_evidence.truncated_tail_bytes > 0
+    assert list(discovered.records()) == records
+    discovered.seal()
+    assert discovered.sealed_path.exists()
+
+
 def test_spool_rejects_duplicate_or_reordered_receive_positions(tmp_path: Path) -> None:
     segment = _segment(tmp_path / "spool")
     segment.append(_record(segment, 1))
@@ -264,3 +286,37 @@ def test_spool_backlog_and_capacity_are_definition_scoped(tmp_path: Path) -> Non
         max_backlog_bytes=first_bytes + 1,
         next_frame_bytes=1,
     )
+
+
+def test_verified_object_deletion_requires_matching_evidence(tmp_path: Path) -> None:
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    object_key = "raw/provider=coinbase/sample.parquet"
+    target = store.local_path(object_key)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = b"immutable archive bytes"
+    target.write_bytes(payload)
+    expected = hashlib.sha256(payload).hexdigest()
+
+    with pytest.raises(RuntimeError, match="delete_forbidden: checksum mismatch"):
+        store.delete_verified(
+            object_key=object_key,
+            expected_sha256="0" * 64,
+        )
+    assert target.read_bytes() == payload
+
+    acknowledgement = store.delete_verified(
+        object_key=object_key,
+        expected_sha256=expected,
+    )
+    assert acknowledgement.sha256 == expected
+    assert acknowledgement.byte_count == len(payload)
+    assert acknowledgement.already_absent is False
+    assert not target.exists()
+
+    recovered = store.delete_verified(
+        object_key=object_key,
+        expected_sha256=expected,
+        allow_missing=True,
+    )
+    assert recovered.already_absent is True
+    assert recovered.byte_count == 0

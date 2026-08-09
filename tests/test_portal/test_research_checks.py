@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import nullcontext
 from typing import Any
 
@@ -42,6 +41,13 @@ def _candles() -> pd.DataFrame:
             utc=True,
         ),
     )
+
+
+def _run_legacy_check(payload: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the retained v1 reader/persistence compatibility seam directly."""
+
+    evaluation = service._evaluate_legacy_research_check(payload)
+    return service.persist_research_check(payload, evaluation=evaluation)
 
 
 def test_raw_event_check_summarizes_forward_outcomes() -> None:
@@ -181,7 +187,7 @@ def test_research_check_service_creates_observation_check_and_link(monkeypatch: 
     )
     monkeypatch.setattr(service.candle_service, "fetch_ohlcv_by_instrument", lambda *args: _candles())
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "ETH contraction follow-through",
             "scope": {
@@ -248,7 +254,7 @@ def test_research_check_service_fails_loud_for_invalid_detector_before_blocked_d
     )
 
     with pytest.raises(ValueError, match="unsupported raw detector field"):
-        service.run_research_check(
+        service.evaluate_research_check(
             {
                 "title": "ETH bad field",
                 "scope": {
@@ -467,10 +473,6 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
         claim_token="token-1",
         claim_generation=1,
     )
-    evaluation = {
-        "schema_version": "research_check_evaluation.v1",
-        "check_family": "indicator_forward_outcome",
-    }
     observed: dict[str, Any] = {}
 
     monkeypatch.setattr(
@@ -478,17 +480,14 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
         "maintain_job_heartbeat",
         lambda claimed: nullcontext(),
     )
-    monkeypatch.setattr(
-        research_worker.research_service,
-        "evaluate_research_check",
-        lambda request: evaluation,
-    )
-
-    def fake_persist(request, *, evaluation, session):
+    def fake_build(request):
         observed["request"] = request
-        observed["evaluation"] = evaluation
+        return {"schema_version": "research_check_evidence_build.v1"}
+
+    def fake_persist(built, *, session):
+        observed["built"] = built
         observed["session"] = session
-        return {"schema_version": "research_check_run.v1", "status": "completed"}
+        return {"schema_version": "research_check_run.v2", "status": "completed"}
 
     def fake_complete(claimed, effect):
         observed["claim"] = claimed
@@ -496,7 +495,12 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
 
     monkeypatch.setattr(
         research_worker.research_service,
-        "persist_research_check",
+        "build_research_check_evidence",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        research_worker.research_service,
+        "persist_built_research_check_evidence",
         fake_persist,
     )
     monkeypatch.setattr(
@@ -510,7 +514,7 @@ def test_research_worker_commits_check_artifacts_under_the_current_claim(
     assert result["status"] == "completed"
     assert observed == {
         "request": {"title": "ATR check"},
-        "evaluation": evaluation,
+        "built": {"schema_version": "research_check_evidence_build.v1"},
         "session": "owned-session",
         "claim": job,
     }
@@ -714,7 +718,7 @@ def test_report_backed_research_check_rejects_mismatched_detector_before_persist
     monkeypatch.setattr(service.repository, "create_item", lambda **kwargs: created.append(kwargs) or kwargs)
 
     with pytest.raises(ValueError, match="unsupported run check detector type for run_signal_summary"):
-        service.run_research_check(
+        service.evaluate_research_check(
             {
                 "title": "Mismatched detector",
                 "check_family": "run_signal_summary",
@@ -779,7 +783,7 @@ def test_report_backed_research_check_links_observation_and_run(monkeypatch: pyt
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Run signal check",
             "check_family": "run_signal_summary",
@@ -848,7 +852,7 @@ def test_report_backed_research_check_blocks_on_report_readiness(monkeypatch: py
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Failed run signal check",
             "check_family": "run_signal_summary",
@@ -891,7 +895,7 @@ def test_report_backed_research_check_fails_loud_for_unsupported_detector(monkey
     )
 
     with pytest.raises(ValueError, match="unsupported run check detector type"):
-        service.run_research_check(
+        service.evaluate_research_check(
             {
                 "title": "Bad run signal check",
                 "check_family": "run_signal_summary",
@@ -1561,7 +1565,7 @@ def test_indicator_research_check_uses_persisted_indicator_evidence(monkeypatch:
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Indicator range follow-through",
             "check_family": "indicator_forward_outcome",
@@ -1672,7 +1676,7 @@ def test_signal_audit_research_check_uses_persisted_indicator_evidence(monkeypat
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Signal audit",
             "check_family": "signal_audit",
@@ -1790,7 +1794,7 @@ def test_candidate_lifecycle_research_check_uses_persisted_indicator_evidence(mo
         },
     )
 
-    payload = service.run_research_check(
+    payload = _run_legacy_check(
         {
             "title": "Lifecycle audit",
             "check_family": "candidate_lifecycle",
@@ -1812,6 +1816,46 @@ def test_candidate_lifecycle_research_check_uses_persisted_indicator_evidence(mo
     assert created[1]["payload"]["request"]["scope"]["indicator_id"] == "indicator-1"
     assert created[1]["payload"]["result"]["check_family"] == "candidate_lifecycle"
     assert created[1]["payload"]["result"]["recommendation"] == "contract_holds"
+
+
+def test_active_run_research_evidence_does_not_materialize_growing_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_calls = 0
+
+    def _dataset(_run_id):
+        nonlocal dataset_calls
+        dataset_calls += 1
+        raise AssertionError("active evidence must not build the research dataset")
+
+    monkeypatch.setattr(
+        service.runs_repo,
+        "get_bot_run",
+        lambda run_id: {
+            "run_id": run_id,
+            "bot_id": "bot-1",
+            "status": "running",
+            "config_snapshot": {
+                "strategy_id": "strategy-1",
+                "symbols": ["BTCUSDT"],
+                "timeframe": "5m",
+            },
+            "summary": {"total_trades": 7, "open_trades": 1},
+        },
+    )
+    monkeypatch.setattr(
+        service.lifecycle_repo,
+        "get_bot_run_lifecycle",
+        lambda _run_id: {"status": "running", "phase": "live"},
+    )
+    monkeypatch.setattr(service.reports_contract, "get_run_research_dataset", _dataset)
+
+    payload = service.get_run_research_evidence("run-1")
+
+    assert payload["readiness"]["dataset_status"] == "deferred_while_run_active"
+    assert payload["readiness"]["safe_to_compare"] is False
+    assert payload["counts"]["trades"] == 7
+    assert dataset_calls == 0
 
 
 def test_run_research_evidence_summarizes_checkable_report_fields(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2104,27 +2148,25 @@ def test_research_job_routes_delegate_to_async_dispatch(monkeypatch: pytest.Monk
     monkeypatch.setattr(research_controller.research_async_dispatch, "get_research_job_status", fake_status)
     monkeypatch.setattr(research_controller.research_async_dispatch, "get_research_job_result", fake_result)
 
-    dispatch_response = asyncio.run(
-        research_controller.dispatch_research_check_sweep(
-            research_controller.ResearchCheckSweepRequest(
-                **{
-                    "check_family": "candidate_lifecycle",
-                    "scope": {
-                        "indicator_id": "indicator-1",
-                        "instrument_id": "inst-1",
-                        "timeframe": "1h",
-                        "start": "2026-01-01T00:00:00Z",
-                        "end": "2026-01-02T00:00:00Z",
-                    },
-                    "detector": {"type": "candidate_lifecycle"},
-                    "variants": [{"id": "base", "param_overrides": {}}],
-                    "ranking": {"rank_by": "sample_count", "direction": "desc"},
-                }
-            )
+    dispatch_response = research_controller.dispatch_research_check_sweep(
+        research_controller.ResearchCheckSweepRequest(
+            **{
+                "check_family": "candidate_lifecycle",
+                "scope": {
+                    "indicator_id": "indicator-1",
+                    "instrument_id": "inst-1",
+                    "timeframe": "1h",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-02T00:00:00Z",
+                },
+                "detector": {"type": "candidate_lifecycle"},
+                "variants": [{"id": "base", "param_overrides": {}}],
+                "ranking": {"rank_by": "sample_count", "direction": "desc"},
+            }
         )
     )
-    status_response = asyncio.run(research_controller.get_research_job_status("job-1"))
-    result_response = asyncio.run(research_controller.get_research_job_result("job-1"))
+    status_response = research_controller.get_research_job_status("job-1")
+    result_response = research_controller.get_research_job_result("job-1")
 
     assert dispatch_response["job_id"] == "job-1"
     assert status_response["status"] == "queued"
@@ -2134,8 +2176,51 @@ def test_research_job_routes_delegate_to_async_dispatch(monkeypatch: pytest.Monk
     assert observed["result"] == "job-1"
 
 
+def test_research_pass_gate_route_delegates_to_owned_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+
+    def fake_evaluate(payload):
+        observed["payload"] = payload
+        return {
+            "schema_version": "pass_gate_result.v2",
+            "status": "PASSED",
+            "gates": [],
+        }
+
+    monkeypatch.setattr(
+        research_controller.research_pass_gates,
+        "evaluate_pass_gate_request",
+        fake_evaluate,
+    )
+    response = TestClient(app).post(
+        "/api/research/comparisons/pass-gates/evaluate",
+        json={
+            "plan": {"intent": "exploration", "pass_gates": {"gates": []}},
+            "summaries": [
+                {
+                    "window_id": "w1",
+                    "variant_id": "candidate",
+                    "summary": {"metrics": {"trade_count": 3}},
+                }
+            ],
+            "comparison_refs": [],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PASSED"
+    assert observed["payload"]["summaries"][0]["variant_id"] == "candidate"
+
+
 def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.MonkeyPatch) -> None:
     observed = {}
+
+    async def fake_run_in_threadpool(function, *args, **kwargs):
+        observed["threadpool_function"] = function
+        observed["threadpool_args"] = args
+        return function(*args, **kwargs)
 
     def fake_run_research_evidence(run_id: str):
         observed["run_id"] = run_id
@@ -2155,6 +2240,7 @@ def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.Mo
         }
 
     monkeypatch.setattr(research_controller.research_service, "get_run_research_evidence", fake_run_research_evidence)
+    monkeypatch.setattr(research_controller, "run_in_threadpool", fake_run_in_threadpool)
     monkeypatch.setattr(research_controller.research_service, "get_research_trail", fake_research_trail)
     monkeypatch.setattr(research_controller.research_service, "compare_research_checks", fake_compare)
 
@@ -2175,6 +2261,8 @@ def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.Mo
     assert compare_response.json()["left"]["check_id"] == "check-a"
     assert observed == {
         "run_id": "run-1",
+        "threadpool_function": fake_run_research_evidence,
+        "threadpool_args": ("run-1",),
         "trail_item_id": "obs-1",
         "compare": ("check-a", "check-b"),
     }

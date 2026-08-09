@@ -102,8 +102,9 @@ Current strengths:
   display evidence and never become execution/runtime truth.
 - `portal/backend/service/bots/paper_market_stream.py` owns container-local
   provider stream intake for paper workers.
-- `portal/backend/service/bots/market_data_stream_policy.py` owns the
-  bot-level reconnect policy used by paper/live market-data streams.
+- `src/data_providers/streams/runtime.py` owns provider-neutral reconnect
+  semantics; `portal/backend/service/bots/market_data_stream_policy.py` adapts
+  settings into the bot-level policy frozen for paper/live streams.
 - Terminal paper runs persist stream diagnostics under
   `run.summary.paper_market_stream`.
 - `InstrumentMetadata` already provides a canonical contract shape for runtime

@@ -96,10 +96,10 @@ class RuntimePersistenceMixin:
             context = self._runtime_log_context(status=status, error=str(exc))
             logger.warning(with_log_context("bot_runtime_state_callback_failed", context))
 
-    def _flush_persistence_buffer(self, reason: str) -> None:
+    def _flush_persistence_buffer(self, reason: str, *, raise_on_error: bool = True) -> None:
         flush_started = datetime.now(timezone.utc)
         try:
-            self._persistence_buffer.flush(reason=reason)
+            self._persistence_buffer.flush(reason=reason, shutdown=True)
             self._record_step_trace(
                 "persistence_flush",
                 started_at=flush_started,
@@ -109,7 +109,7 @@ class RuntimePersistenceMixin:
             )
         except Exception as exc:  # pragma: no cover
             context = self._runtime_log_context(reason=reason, error=str(exc))
-            logger.warning(with_log_context("bot_runtime_persistence_flush_failed", context))
+            logger.error(with_log_context("bot_runtime_persistence_flush_failed", context))
             self._record_step_trace(
                 "persistence_flush",
                 started_at=flush_started,
@@ -118,6 +118,8 @@ class RuntimePersistenceMixin:
                 error=str(exc),
                 context={"reason": reason},
             )
+            if raise_on_error:
+                raise
 
     def _flush_step_trace_buffer(self, reason: str, *, shutdown: bool = False) -> None:
         try:

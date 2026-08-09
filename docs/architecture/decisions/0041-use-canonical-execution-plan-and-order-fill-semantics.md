@@ -17,6 +17,7 @@ code_paths:
   - src/engines/bot_runtime/core/execution_plan.py
   - src/atm/schema.py
   - src/engines/bot_runtime/core/execution_order.py
+  - src/engines/bot_runtime/core/execution_context.py
   - src/engines/bot_runtime/core/domain/engine.py
   - src/engines/bot_runtime/core/domain/position.py
   - src/engines/bot_runtime/core/entry_execution.py
@@ -54,6 +55,13 @@ Runtime now has two canonical execution layers:
   stop-adjustment plans.
 - `FillOrder` carries executable fill semantics: side, quantity, price,
   `order_type`, `liquidity_role`, `price_source`, and fee rate.
+
+Phase 2A extends `FillOrder` with time in force, post-only intent, pinned fee
+schedule identity, and `ResolvedExecutionContext`. It remains an immediate
+full-fill request adapter, not a durable venue order. ADR 0057 and Phase 2B now
+provide the accepted successor: immutable requests and attempts plus requested,
+validated, accepted, open, partial, fill, cancel, replace, reject, and expiry
+events. The adapter remains only for incremental caller compatibility.
 
 ATM schema version 2 has one accepted authoring shape: snake-case field names,
 `take_profit_orders` with explicit stable IDs and `size_fraction` values,
@@ -98,9 +106,18 @@ interpretations.
   wallet settlement.
 - Strategy ATM policy and instrument execution economics have separate owners.
 - Maker/taker and order-type fields are attached before fills reach adapters.
+- Startup and per-order conformance reject semantics unsupported by the pinned
+  venue profile before an adapter can fabricate a fill.
+- Durable state, residual quantity, replacement lineage, and replay now belong
+  to the Phase 2B lifecycle rather than `FillOrder`.
 - Disabled trailing cannot activate from stale distance fields.
 - Malformed targets and exit rules fail during normalization or plan
   compilation instead of silently becoming market entry, disabled policy, or
   omitted legs.
 - Same-bar bar-resolution defaults are pessimistic unless a caller explicitly
   asks for target-first behavior.
+
+## References
+
+- [ADR 0056: Pin venue-neutral execution contexts per run](0056-pin-venue-neutral-execution-contexts-per-run.md)
+- [Phase 2A venue-neutral execution context](../execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md)

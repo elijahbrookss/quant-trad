@@ -4,13 +4,27 @@ from __future__ import annotations
 
 import cProfile
 import pstats
+import resource
+import sys
 import time
-import tracemalloc
 from typing import Any, Mapping
 
 
+def _process_peak_rss_bytes() -> int | None:
+    """Return the process peak RSS without enabling allocation tracing."""
+
+    try:
+        peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if peak_rss < 0:
+        return None
+    # Linux reports KiB while macOS reports bytes.
+    return peak_rss if sys.platform == "darwin" else peak_rss * 1024
+
+
 class PythonProfileSession:
-    """Capture one bounded cProfile/tracemalloc summary without affecting normal runs."""
+    """Capture one bounded cProfile summary without affecting normal runs."""
 
     def __init__(
         self,
@@ -28,7 +42,6 @@ class PythonProfileSession:
         self._profile: cProfile.Profile | None = None
         self._started_wall: float | None = None
         self._started_cpu: float | None = None
-        self._owns_tracemalloc = False
         self._started = False
 
     def start(self) -> None:
@@ -38,9 +51,6 @@ class PythonProfileSession:
         self._profile = cProfile.Profile()
         self._started_wall = time.perf_counter()
         self._started_cpu = time.process_time()
-        self._owns_tracemalloc = not tracemalloc.is_tracing()
-        if self._owns_tracemalloc:
-            tracemalloc.start()
         self._profile.enable()
 
     @staticmethod
@@ -87,12 +97,7 @@ class PythonProfileSession:
             time.process_time() - float(self._started_cpu or 0.0),
             0.0,
         )
-        current_bytes = None
-        peak_bytes = None
-        if tracemalloc.is_tracing():
-            current_bytes, peak_bytes = tracemalloc.get_traced_memory()
-            if self._owns_tracemalloc:
-                tracemalloc.stop()
+        peak_bytes = _process_peak_rss_bytes()
         stats = pstats.Stats(profile).strip_dirs()
         throughput = (
             float(self.work_units) / wall_seconds
@@ -107,8 +112,8 @@ class PythonProfileSession:
             "wall_seconds": round(wall_seconds, 9),
             "cpu_seconds": round(cpu_seconds, 9),
             "peak_memory_bytes": int(peak_bytes) if peak_bytes is not None else None,
-            "current_memory_bytes": int(current_bytes) if current_bytes is not None else None,
-            "memory_scope": "profile_session" if self._owns_tracemalloc else "existing_process_tracer",
+            "current_memory_bytes": None,
+            "memory_scope": "process_peak_rss",
             "work_units": self.work_units,
             "work_units_per_second": round(throughput, 6) if throughput is not None else None,
             "primitive_call_count": int(stats.prim_calls),
@@ -126,6 +131,7 @@ class PythonProfileSession:
             "context": dict(self.context),
             "caveats": [
                 "profiling_is_opt_in_and_adds_measurement_overhead",
+                "peak_memory_is_process_lifetime_rss_not_profile_session_allocations",
                 "report_materialization_runs_in_the_backend_and_is_timed_separately",
             ],
         }
@@ -139,8 +145,6 @@ class PythonProfileSession:
         profile = self._profile
         if profile is not None:
             profile.disable()
-        if self._owns_tracemalloc and tracemalloc.is_tracing():
-            tracemalloc.stop()
         message = f"{type(error).__name__}: {error}"[:1000]
         self.summary = {
             "schema_version": "python_profile.v1",

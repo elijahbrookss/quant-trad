@@ -8,6 +8,7 @@ from typing import Any, Deque, Dict, List, Optional
 
 from engines.bot_runtime.core.domain import Candle, LadderRiskEngine, StrategySignal
 from engines.bot_runtime.core.execution_profile import SeriesExecutionProfile
+from engines.bot_runtime.core.execution_context import ResolvedExecutionContext
 
 
 @dataclass
@@ -33,6 +34,7 @@ class StrategySeries:
     replay_start_index: int = 0
     bootstrap_completed: bool = False
     execution_profile: Optional[SeriesExecutionProfile] = None
+    execution_context: Optional[ResolvedExecutionContext] = None
 
 
 __all__ = ["StrategySeries"]

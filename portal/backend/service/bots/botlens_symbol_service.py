@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import replace
@@ -161,7 +162,7 @@ async def load_symbol_detail_state(
     if bounded_max_seq is None or bounded_max_seq <= 0:
         live_snapshot = _telemetry_hub().get_symbol_snapshot(run_id=str(run_id), symbol_key=normalized_symbol_key)
         if live_snapshot is None:
-            bot_id = _run_bot_id(run_id=run_id)
+            bot_id = await asyncio.to_thread(_run_bot_id, run_id=run_id)
             live_snapshot = await _telemetry_hub().ensure_symbol_snapshot(
                 run_id=str(run_id),
                 bot_id=bot_id,
@@ -170,8 +171,12 @@ async def load_symbol_detail_state(
     if live_snapshot is not None:
         return _trim_symbol_snapshot(symbol_state=live_snapshot, limit=limit)
 
-    bot_id, run_state = _historical_run_snapshot(run_id=run_id)
-    detail_state = rebuild_symbol_projection_snapshot(
+    bot_id, run_state = await asyncio.to_thread(
+        _historical_run_snapshot,
+        run_id=run_id,
+    )
+    detail_state = await asyncio.to_thread(
+        rebuild_symbol_projection_snapshot,
         bot_id=bot_id,
         run_id=str(run_id),
         symbol_key=normalized_symbol_key,
@@ -187,7 +192,7 @@ async def load_symbol_detail_state(
 
 async def get_symbol_detail(*, run_id: str, symbol_key: str, limit: int = 320) -> Dict[str, Any]:
     detail_state = await load_symbol_detail_state(run_id=run_id, symbol_key=symbol_key, limit=limit)
-    bot_id = _run_bot_id(run_id=run_id)
+    bot_id = await asyncio.to_thread(_run_bot_id, run_id=run_id)
     run_state = _telemetry_hub().get_run_snapshot(run_id=str(run_id))
     if run_state is None:
         run_state = await _telemetry_hub().ensure_run_snapshot(run_id=str(run_id), bot_id=bot_id)
@@ -201,7 +206,7 @@ async def get_symbol_detail(*, run_id: str, symbol_key: str, limit: int = 320) -
 
 async def get_selected_symbol_snapshot(*, run_id: str, symbol_key: str, limit: int = 320) -> Dict[str, Any]:
     request_started = time.perf_counter()
-    bot_id = _run_bot_id(run_id=run_id)
+    bot_id = await asyncio.to_thread(_run_bot_id, run_id=run_id)
     normalized_symbol_key = normalize_series_key(symbol_key)
     if not normalized_symbol_key:
         raise ValueError("canonical symbol_key is required")
@@ -332,7 +337,7 @@ async def get_selected_symbol_visual(*, run_id: str, symbol_key: str, limit: int
 
 
 async def list_run_symbols(*, run_id: str) -> Dict[str, Any]:
-    bot_id = _run_bot_id(run_id=run_id)
+    bot_id = await asyncio.to_thread(_run_bot_id, run_id=run_id)
     summary = _telemetry_hub().get_run_snapshot(run_id=str(run_id))
     if summary is None:
         summary = await _telemetry_hub().ensure_run_snapshot(run_id=str(run_id), bot_id=bot_id)

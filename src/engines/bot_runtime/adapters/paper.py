@@ -6,6 +6,8 @@ from typing import Optional, Tuple
 
 from ..core.execution import FillRejection, FillResult
 from ..core.execution_adapter import ExecutionAdapter
+from ..core.execution_assumptions import ResolvedExecutionAssumptions
+from ..core.execution_context import ResolvedExecutionContext
 from ..core.execution_order import FillOrder
 from .backtest import BacktestAdapter
 
@@ -25,6 +27,8 @@ class PaperAdapter(ExecutionAdapter):
         max_qty: Optional[float] = None,
         amount_precision: Optional[int] = None,
         slippage_bps: float = 0.0,
+        assumptions: ResolvedExecutionAssumptions | None = None,
+        execution_context: ResolvedExecutionContext | None = None,
     ) -> None:
         self._delegate = BacktestAdapter(
             tick_size=tick_size,
@@ -36,6 +40,8 @@ class PaperAdapter(ExecutionAdapter):
             max_qty=max_qty,
             amount_precision=amount_precision,
             slippage_bps=slippage_bps,
+            assumptions=assumptions,
+            execution_context=execution_context,
         )
 
     def execute_order(

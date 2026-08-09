@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
-import { LocateFixed, Maximize2, Minimize2, RefreshCcw } from 'lucide-react'
+import { memo, useEffect, useMemo, useState } from 'react'
+import { LocateFixed, Maximize2, Minimize2 } from 'lucide-react'
 
 import { BotLensChart } from '../../../../components/bots/BotLensChart.jsx'
 import { OverlayToggleBar } from '../../../../components/bots/OverlayToggleBar.jsx'
 import { useChartState } from '../../../../contexts/ChartStateContext.jsx'
 import { SymbolSelectorPanel } from './SymbolSelectorPanel.jsx'
+import { OperatorErrorNotice } from '../../../../v2/components/OperatorErrorNotice.jsx'
 
 const RUNTIME_CHART_ID = 'botlens-runtime-chart'
 
@@ -177,7 +178,8 @@ function ChartViewport({
   centerView,
   isFullscreen,
   model,
-  onLoadOlderHistory,
+  onNearHistoryStart,
+  onNearHistoryEnd,
   onToggleFullscreen,
   overlayVisibility,
   viewportResetKey,
@@ -205,16 +207,6 @@ function ChartViewport({
         </button>
         <button
           type="button"
-          onClick={onLoadOlderHistory}
-          disabled={!model.candles.length}
-          className="inline-flex h-8 items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/45 px-2.5 text-xs font-semibold text-slate-200 transition hover:border-white/20 hover:bg-black/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-          title="Load older chart history"
-        >
-          <RefreshCcw className="size-3.5" />
-          Older
-        </button>
-        <button
-          type="button"
           onClick={onToggleFullscreen}
           className="inline-flex h-8 w-8 items-center justify-center rounded-[3px] border border-white/10 bg-black/45 text-slate-200 transition hover:border-white/20 hover:bg-black/60 hover:text-white"
           title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen chart'}
@@ -236,9 +228,16 @@ function ChartViewport({
             mode={model.mode}
             playbackSpeed={model.playbackSpeed}
             timeframe={model.timeframe}
+            dataUpdateMode={model.dataUpdateMode}
+            dataUpdateToken={model.dataUpdateToken}
             overlayVisibility={overlayVisibility}
+            onNearHistoryStart={onNearHistoryStart}
+            onNearHistoryEnd={onNearHistoryEnd}
             viewportResetKey={viewportResetKey}
             heightClass={chartHeightClass}
+            selectedTradeId={model.focusTradeId}
+            showActiveTradeLevels={model.showActiveTradeLevels}
+            followLatestCandles={model.followLatestCandles}
           />
         </>
       ) : (
@@ -250,12 +249,13 @@ function ChartViewport({
   )
 }
 
-export function ChartPanel({
+export const ChartPanel = memo(function ChartPanel({
   model,
   symbolSelector,
   overlayOptions,
   overlayVisibility,
   onLoadOlderHistory,
+  onLoadNewerHistory,
   onSelectSymbol,
   onToggleOverlay,
   onToggleOverlayCollapse,
@@ -264,11 +264,42 @@ export function ChartPanel({
 }) {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const { getChart } = useChartState()
-  const centerView = getChart(RUNTIME_CHART_ID)?.handles?.centerView
+  const chartHandles = getChart(RUNTIME_CHART_ID)?.handles
+  const centerView = chartHandles?.centerView
+  const focusAtTime = chartHandles?.focusAtTime
+  const pulseTrade = chartHandles?.pulseTrade
   const canRefocus = model.candles.length > 0 && typeof centerView === 'function'
   const barCount = Array.isArray(model.candles) ? model.candles.length : 0
   const overlayProjection = model.overlayProjection || {}
   const overlayCount = Number(overlayProjection.overlays || 0) || 0
+  const tradeEvidence = model.tradeEvidence || {}
+  const loadedTradeCount = Number(tradeEvidence.loaded_trade_count || tradeEvidence.trade_count || 0) || 0
+  const loadedTradeCoverageComplete = Boolean(
+    tradeEvidence.complete_for_loaded_candles ?? tradeEvidence.complete_for_returned_candles,
+  )
+  const overlayEvidence = model.overlayEvidence || {}
+  const overlayValidity = model.overlayValidity || { status: 'valid' }
+  const overlaysInvalid = overlayValidity.status === 'invalid'
+  const overlayCoverageComplete = Boolean(
+    overlayEvidence.complete_for_loaded_candles
+      ?? overlayEvidence.complete_for_returned_candles,
+  )
+  const overlayCoverageLabel = overlayCoverageComplete
+    ? 'ledger verified'
+    : overlayEvidence.coverage === 'unavailable'
+      ? 'not retained'
+      : 'bounded replay'
+
+  useEffect(() => {
+    if (!model.focusToken || !model.focusTime || typeof focusAtTime !== 'function') return
+    const entryPrice = Number(model.focusedTrade?.entry_price)
+    focusAtTime(model.focusTime, Number.isFinite(entryPrice) ? entryPrice : undefined)
+    if (!model.focusedTrade || typeof pulseTrade !== 'function') return undefined
+    const timerId = window.setTimeout(() => {
+      pulseTrade(model.focusedTrade)
+    }, 100)
+    return () => window.clearTimeout(timerId)
+  }, [focusAtTime, model.focusTime, model.focusToken, model.focusedTrade, pulseTrade])
 
   useEffect(() => {
     if (!isFullscreen) return undefined
@@ -291,13 +322,26 @@ export function ChartPanel({
               </span>
             ) : null}
             {model.historyStatus === 'loading' ? (
-              <span className="text-xs text-slate-500">Loading older bars</span>
+              <span className="text-xs text-slate-500">Loading bars</span>
+            ) : null}
+            {model.historyEvidenceSource?.kind ? (
+              <span className="text-xs text-slate-500">
+                source {model.historyEvidenceSource.kind.replaceAll('_', ' ')}
+              </span>
+            ) : null}
+            {loadedTradeCount > 0 ? (
+              <span className="text-xs text-slate-500">
+                {loadedTradeCount} {loadedTradeCount === 1 ? 'trade' : 'trades'} · {loadedTradeCoverageComplete ? 'ledger verified' : 'provisional'}
+              </span>
             ) : null}
             {overlayCount > 0 ? (
               <span className="text-xs text-slate-500">
                 {overlayCount} {overlayCount === 1 ? 'overlay' : 'overlays'}
-                {overlayProjection.mode ? ` · ${overlayProjection.mode}` : ''}
+                {overlayProjection.mode ? ' · ' + overlayProjection.mode : ''}
+                {' · ' + overlayCoverageLabel}
               </span>
+            ) : overlayEvidence.coverage === 'unavailable' ? (
+              <span className="text-xs text-slate-500">overlays not retained for this run</span>
             ) : null}
           </div>
           <p className="mt-1 truncate text-xs text-slate-500">
@@ -306,6 +350,24 @@ export function ChartPanel({
         </div>
         <SymbolSelectorPanel model={symbolSelector} onSelectSymbol={onSelectSymbol} />
       </div>
+
+      {overlaysInvalid ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-400/20 bg-amber-400/[0.06] px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-amber-100">Overlay layer unavailable for this interval</p>
+            <p className="mt-1 text-xs leading-5 text-slate-400">
+              Retained overlay evidence has a gap. Candles, decisions, and trades remain available.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-white/20 hover:bg-white/[0.08] hover:text-white"
+            onClick={() => navigator.clipboard?.writeText(JSON.stringify(overlayValidity, null, 2))}
+          >
+            Copy details
+          </button>
+        </div>
+      ) : null}
 
       <OverlayToggleBar
         overlays={overlayOptions}
@@ -317,16 +379,19 @@ export function ChartPanel({
 
       <LiveTradeStrip entries={model.liveTrades} onSelectSymbol={onSelectSymbol} />
 
+      {model.historyError ? <OperatorErrorNotice error={model.historyError} compact /> : null}
+
       <ChartViewport
         canRefocus={canRefocus}
         centerView={centerView}
         isFullscreen={isFullscreen}
         model={model}
-        onLoadOlderHistory={onLoadOlderHistory}
+        onNearHistoryEnd={onLoadNewerHistory}
+        onNearHistoryStart={onLoadOlderHistory}
         onToggleFullscreen={() => setIsFullscreen((value) => !value)}
         overlayVisibility={overlayVisibility}
         viewportResetKey={viewportResetKey}
       />
     </section>
   )
-}
+})

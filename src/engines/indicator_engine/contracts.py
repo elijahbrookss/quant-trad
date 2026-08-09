@@ -14,6 +14,18 @@ from .signal_output import assert_signal_output_event
 OutputType = Literal["signal", "context", "metric", "lifecycle"]
 
 
+class IndicatorGapRejectedError(RuntimeError):
+    """Raised by an Indicator when its explicit policy rejects a source gap."""
+
+    def __init__(self, *, indicator_id: str, gap: Mapping[str, Any]) -> None:
+        self.indicator_id = str(indicator_id)
+        self.gap = dict(gap)
+        super().__init__(
+            "indicator_gap_rejected: "
+            f"indicator_id={self.indicator_id} gap={self.gap}"
+        )
+
+
 @dataclass(frozen=True)
 class OutputRef:
     indicator_id: str
@@ -190,6 +202,40 @@ class Indicator(ABC):
                 f"indicator_id={self.runtime_spec.instance_id} key={normalized or '<missing>'}"
             )
         return inputs[normalized]
+
+    def handle_gap(
+        self,
+        *,
+        policy: str,
+        gap: Mapping[str, Any],
+        next_bar_time: datetime,
+        rewarm_bars: int,
+    ) -> Mapping[str, Any]:
+        """Own this Indicator's state transition across a declared source gap."""
+
+        normalized = str(policy or "").strip().lower()
+        if normalized == "reject":
+            raise IndicatorGapRejectedError(
+                indicator_id=self.runtime_spec.instance_id,
+                gap=gap,
+            )
+        if normalized == "continue_degraded":
+            return {
+                "indicator_id": self.runtime_spec.instance_id,
+                "policy": normalized,
+                "action": "continued_degraded",
+                "gap_classification": str(gap.get("classification") or "unknown"),
+                "next_bar_time": next_bar_time.isoformat(),
+            }
+        if normalized == "reset_rewarm":
+            raise RuntimeError(
+                "indicator_gap_policy_unsupported: "
+                f"indicator_id={self.runtime_spec.instance_id} policy={normalized}"
+            )
+        raise RuntimeError(
+            "indicator_gap_policy_invalid: "
+            f"indicator_id={self.runtime_spec.instance_id} policy={normalized}"
+        )
 
     @abstractmethod
     def apply_bar(
@@ -466,22 +512,32 @@ def _validate_lifecycle_output(output_name: str, value: Mapping[str, Any]) -> No
                 "indicator_output_invalid: lifecycle event keys invalid "
                 f"output={output_name} index={index} keys={unexpected}"
             )
-        for field in required_text:
-            _require_lifecycle_text(event.get(field), output_name=output_name, index=index, field=field)
-        for field in optional_text:
-            value_for_field = event.get(field)
+        for field_name in required_text:
+            _require_lifecycle_text(
+                event.get(field_name),
+                output_name=output_name,
+                index=index,
+                field=field_name,
+            )
+        for field_name in optional_text:
+            value_for_field = event.get(field_name)
             if value_for_field is not None:
-                _require_lifecycle_text(value_for_field, output_name=output_name, index=index, field=field)
+                _require_lifecycle_text(
+                    value_for_field,
+                    output_name=output_name,
+                    index=index,
+                    field=field_name,
+                )
         if event.get("known_at") is None or str(event.get("known_at")).strip() == "":
             raise RuntimeError(
                 f"indicator_output_invalid: lifecycle known_at required output={output_name} index={index}"
             )
-        for field in ("reference", "metrics", "thresholds"):
-            value_for_field = event.get(field)
+        for field_name in ("reference", "metrics", "thresholds"):
+            value_for_field = event.get(field_name)
             if value_for_field is not None and not isinstance(value_for_field, Mapping):
                 raise RuntimeError(
                     "indicator_output_invalid: lifecycle field must be mapping "
-                    f"output={output_name} index={index} field={field}"
+                    f"output={output_name} index={index} field={field_name}"
                 )
 
 
@@ -571,6 +627,7 @@ __all__ = [
     "DetailDefinition",
     "EngineFrame",
     "Indicator",
+    "IndicatorGapRejectedError",
     "IndicatorGuardMetric",
     "IndicatorGuardWarning",
     "IndicatorRuntimeSpec",

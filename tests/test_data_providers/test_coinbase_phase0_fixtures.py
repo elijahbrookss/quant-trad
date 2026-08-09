@@ -62,7 +62,7 @@ def _parse_exact_frame(
     )
 
 
-def test_phase0_fixture_bundle_preserves_exact_public_frames_and_checksums() -> None:
+def test_provider_proof_fixture_bundle_preserves_exact_public_frames_and_checksums() -> None:
     manifest, frames, entries = _load_fixture_bundle()
 
     assert manifest["source"]["auth_mode"] == "public"
@@ -88,7 +88,7 @@ def test_phase0_fixture_bundle_preserves_exact_public_frames_and_checksums() -> 
         )
 
 
-def test_phase0_trade_fixtures_preserve_provider_maker_side_and_units() -> None:
+def test_provider_proof_trade_fixtures_preserve_maker_side_and_units() -> None:
     _, frames, entries = _load_fixture_bundle()
 
     for prefix in ("bip", "btc_spot"):
@@ -109,7 +109,7 @@ def test_phase0_trade_fixtures_preserve_provider_maker_side_and_units() -> None:
                 )
 
 
-def test_phase0_level2_fixtures_preserve_snapshot_and_absolute_zero_delete() -> None:
+def test_provider_proof_level2_fixtures_preserve_snapshot_and_zero_delete() -> None:
     _, frames, entries = _load_fixture_bundle()
 
     for prefix in ("bip", "btc_spot"):

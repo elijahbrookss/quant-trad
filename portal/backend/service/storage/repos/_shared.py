@@ -26,6 +26,8 @@ from ....db import (
     ReportMaterializationRecord,
     BotlensBackendEventRecord,
     BotlensBackendMetricRollupRecord,
+    DatabaseCapacitySampleRecord,
+    DatabaseRelationCapacitySampleRecord,
     BotTradeEventRecord,
     BotTradeRecord,
     IndicatorRecord,

@@ -65,6 +65,10 @@ class MarketDataSeriesRecord(Base):
             "fact_type <> 'candle.ohlcv' OR timeframe_seconds IS NOT NULL",
             name="ck_market_series_candle_timeframe",
         ),
+        CheckConstraint(
+            "jsonb_typeof(dimensions) = 'object'",
+            name="ck_market_series_dimensions_object",
+        ),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
@@ -78,6 +82,9 @@ class MarketDataSeriesRecord(Base):
     fact_type = Column(String(64), nullable=False)
     timeframe_seconds = Column(Integer, nullable=True)
     contract_version = Column(String(64), nullable=False)
+    dimensions = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
     __table_args__ = __table_args__[:-1] + (
@@ -375,6 +382,112 @@ class MarketFundingRateVersionRecord(Base):
     row_hash = Column(String(64), nullable=False)
 
 
+class MarketNumericFactVersionRecord(Base):
+    """One append-only exact-decimal revision keyed by a logical source event."""
+
+    __tablename__ = "numeric_fact_versions"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "series_id",
+            "source_event_key",
+            "revision",
+            name="pk_market_numeric_fact_versions",
+        ),
+        CheckConstraint("revision > 0", name="ck_market_numeric_fact_revision_positive"),
+        CheckConstraint("fact_type <> ''", name="ck_market_numeric_fact_type"),
+        CheckConstraint("contract_version <> ''", name="ck_market_numeric_fact_contract"),
+        CheckConstraint("raw_value <> ''", name="ck_market_numeric_fact_raw_value"),
+        CheckConstraint("unit <> ''", name="ck_market_numeric_fact_unit"),
+        CheckConstraint(
+            "jsonb_typeof(dimensions) = 'object'",
+            name="ck_market_numeric_fact_dimensions_object",
+        ),
+        CheckConstraint(
+            "state IN ('active', 'invalidated')",
+            name="ck_market_numeric_fact_state",
+        ),
+        CheckConstraint(
+            "known_at >= effective_at",
+            name="ck_market_numeric_fact_known_after_effective",
+        ),
+        CheckConstraint(
+            "source_published_at IS NULL OR known_at >= source_published_at",
+            name="ck_market_numeric_fact_known_after_publication",
+        ),
+        CheckConstraint(
+            "received_at IS NULL OR accepted_at >= received_at",
+            name="ck_market_numeric_fact_acceptance_after_receipt",
+        ),
+        CheckConstraint(
+            "source_event_material_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_numeric_fact_source_material_hash",
+        ),
+        CheckConstraint(
+            "row_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_numeric_fact_row_hash",
+        ),
+        Index(
+            "ix_market_numeric_fact_series_time_revision",
+            "series_id",
+            text("effective_at DESC"),
+            text("revision DESC"),
+        ),
+        Index(
+            "ix_market_numeric_fact_series_commit",
+            "series_id",
+            "market_commit_seq",
+        ),
+        Index("ix_market_numeric_fact_series_known", "series_id", "known_at"),
+        Index(
+            "ix_market_numeric_fact_event_group",
+            "series_id",
+            "source_event_group_key",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_event_key = Column(String(512), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
+    ingestion_run_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    fact_type = Column(String(64), nullable=False)
+    contract_version = Column(String(64), nullable=False)
+    numeric_value = Column(Numeric(), nullable=False)
+    raw_value = Column(Text, nullable=False)
+    unit = Column(String(64), nullable=False)
+    dimensions = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    effective_at = Column(DateTime(timezone=True), nullable=False)
+    effective_at_method = Column(String(64), nullable=False)
+    source_published_at = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    known_at_method = Column(String(64), nullable=False)
+    source_event_group_key = Column(String(512), nullable=True)
+    source_event_component_key = Column(String(256), nullable=True)
+    state = Column(String(16), nullable=False)
+    source_event_material_hash = Column(String(64), nullable=False)
+    provenance = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    row_hash = Column(String(64), nullable=False)
+
+
 class MarketCollectionDefinitionRecord(Base):
     """Mutable scheduler state for one provider/fact/series polling definition."""
 
@@ -494,6 +607,43 @@ class MarketCollectionAttemptRecord(Base):
     )
 
 
+class MarketCollectorWorkerStateRecord(Base):
+    """Mutable liveness projection for one scheduled market-fact worker."""
+
+    __tablename__ = "collector_worker_state"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('starting', 'idle', 'collecting', 'degraded', 'stopping', 'stopped')",
+            name="ck_market_collector_worker_state",
+        ),
+        Index("ix_market_collector_worker_expiry", "expires_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    worker_id = Column(String(128), primary_key=True)
+    worker_role = Column(String(64), nullable=False)
+    worker_version = Column(String(64), nullable=False)
+    state = Column(String(16), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    last_loop_at = Column(DateTime(timezone=True), nullable=True)
+    active_definition_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.collection_definitions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    active_attempt_id = Column(String(64), nullable=True)
+    last_error = Column(Text, nullable=True)
+    capabilities = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    context = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class MarketProviderRateBudgetRecord(Base):
     """Database-coordinated minimum-spacing budget for provider poll requests."""
 
@@ -521,6 +671,7 @@ class MarketGapEvidenceRecord(Base):
             name="uq_market_gap_evidence",
         ),
         Index("ix_market_gap_evidence_series_window", "series_id", "start_time", "end_time"),
+        Index("ix_market_gap_evidence_source_window", "source_id", "start_time", "end_time"),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
@@ -529,6 +680,11 @@ class MarketGapEvidenceRecord(Base):
         BigInteger,
         ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
         nullable=False,
+    )
+    source_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.sources.id", ondelete="RESTRICT"),
+        nullable=True,
     )
     ingestion_run_id = Column(
         String(64),
@@ -543,6 +699,71 @@ class MarketGapEvidenceRecord(Base):
     detected_as_of_commit_seq = Column(BigInteger, nullable=False)
     evidence_hash = Column(String(64), nullable=False)
     evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactAcquisitionCoverageRecord(Base):
+    """Immutable evidence that one bounded provider-neutral source range was scanned."""
+
+    __tablename__ = "fact_acquisition_coverage"
+    __table_args__ = (
+        CheckConstraint(
+            "range_end > range_start",
+            name="ck_market_fact_acquisition_coverage_range",
+        ),
+        CheckConstraint(
+            "status IN ('complete', 'partial', 'failed')",
+            name="ck_market_fact_acquisition_coverage_status",
+        ),
+        CheckConstraint(
+            "confirmation_depth >= 0",
+            name="ck_market_fact_acquisition_confirmation_depth",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'object'",
+            name="ck_market_fact_acquisition_evidence_object",
+        ),
+        Index(
+            "ix_market_fact_acquisition_coverage_lookup",
+            "series_id",
+            "binding_id",
+            "manifest_hash",
+            "status",
+            "range_start",
+            "range_end",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    identity_key = Column(String(64), primary_key=True)
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.sources.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    binding_id = Column(String(128), nullable=False)
+    manifest_hash = Column(String(64), nullable=False)
+    interface_version = Column(String(64), nullable=False)
+    confirmation_depth = Column(Integer, nullable=False)
+    range_start = Column(DateTime(timezone=True), nullable=False)
+    range_end = Column(DateTime(timezone=True), nullable=False)
+    source_position_start = Column(String(128), nullable=False)
+    source_position_end = Column(String(128), nullable=False)
+    source_position_head = Column(String(128), nullable=True)
+    status = Column(String(16), nullable=False)
+    ingestion_run_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    evidence = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
@@ -602,6 +823,7 @@ class MarketDatasetSeriesRecord(Base):
     source_summary = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     quality_hash = Column(String(64), nullable=False)
     quality_summary = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    quality_evidence = Column(JSONB, nullable=True)
 
 
 class MarketProductDefinitionVersionRecord(Base):
@@ -737,13 +959,80 @@ class MarketStreamDefinitionRecord(Base):
     auth_mode = Column(String(32), nullable=False)
     contract_version = Column(String(64), nullable=False)
     enabled = Column(Boolean, nullable=False, default=False, server_default="false")
-    production_admitted = Column(Boolean, nullable=False, default=False, server_default="false")
     max_spool_bytes = Column(BigInteger, nullable=False)
     max_segment_bytes = Column(BigInteger, nullable=False)
     generation = Column(BigInteger, nullable=False, default=1, server_default="1")
     config = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketCollectorSafetyEventRecord(Base):
+    """Append-only warning, halt, and acknowledgement evidence."""
+
+    __tablename__ = "collector_safety_events"
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_market_collector_safety_request"),
+        CheckConstraint(
+            "scope_type IN ('global', 'fleet', 'stream')",
+            name="ck_market_collector_safety_scope",
+        ),
+        CheckConstraint(
+            "event_type IN ('warning', 'halted', 'acknowledged')",
+            name="ck_market_collector_safety_event_type",
+        ),
+        CheckConstraint(
+            "severity IN ('warning', 'critical', 'operator')",
+            name="ck_market_collector_safety_severity",
+        ),
+        Index(
+            "ix_market_collector_safety_scope_time",
+            "scope_type",
+            "scope_id",
+            "occurred_at",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), primary_key=True)
+    request_id = Column(String(128), nullable=False)
+    scope_type = Column(String(16), nullable=False)
+    scope_id = Column(String(128), nullable=False)
+    event_type = Column(String(32), nullable=False)
+    severity = Column(String(16), nullable=False)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    actor_id = Column(String(128), nullable=False)
+    reason = Column(Text, nullable=False)
+    policy_hash = Column(String(64), nullable=False)
+    evidence_hash = Column(String(64), nullable=False)
+    evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketCollectorSafetyStateRecord(Base):
+    """Restart-persistent current safety latch derived from immutable events."""
+
+    __tablename__ = "collector_safety_state"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "scope_type",
+            "scope_id",
+            name="pk_market_collector_safety_state",
+        ),
+        CheckConstraint(
+            "scope_type IN ('global', 'fleet', 'stream')",
+            name="ck_market_collector_safety_state_scope",
+        ),
+        Index("ix_market_collector_safety_state_active", "active", "scope_type"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    scope_type = Column(String(16), nullable=False)
+    scope_id = Column(String(128), nullable=False)
+    active = Column(Boolean, nullable=False, default=False, server_default="false")
+    halt_event_id = Column(String(128), nullable=True)
+    acknowledged_event_id = Column(String(128), nullable=True)
+    reason = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class MarketStreamLeaseStateRecord(Base):
@@ -973,6 +1262,62 @@ class MarketArchiveRetentionPinVersionRecord(Base):
     reason = Column(Text, nullable=False)
     effective_at = Column(DateTime(timezone=True), nullable=False)
     known_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketStorageLifecycleEventRecord(Base):
+    """Append-only evidence for compaction, compression, and retention work."""
+
+    __tablename__ = "storage_lifecycle_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "event_ordinal",
+            name="uq_market_storage_lifecycle_event",
+        ),
+        CheckConstraint(
+            "event_ordinal >= 0",
+            name="ck_market_storage_lifecycle_event_ordinal",
+        ),
+        CheckConstraint(
+            "action IN ('archive_compact', 'archive_expire', 'chunk_compress', 'chunk_expire')",
+            name="ck_market_storage_lifecycle_action",
+        ),
+        CheckConstraint(
+            "event_type IN ('planned', 'completed', 'skipped', 'failed')",
+            name="ck_market_storage_lifecycle_event_type",
+        ),
+        CheckConstraint(
+            "target_kind IN ('raw_manifest_set', 'raw_manifest', 'book_checkpoint', 'hypertable_chunk')",
+            name="ck_market_storage_lifecycle_target_kind",
+        ),
+        Index(
+            "ix_market_storage_lifecycle_target",
+            "target_kind",
+            "target_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_market_storage_lifecycle_action_time",
+            "action",
+            "occurred_at",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(128), primary_key=True)
+    operation_id = Column(String(128), nullable=False)
+    event_ordinal = Column(Integer, nullable=False)
+    policy_version = Column(String(64), nullable=False)
+    action = Column(String(32), nullable=False)
+    event_type = Column(String(16), nullable=False)
+    target_kind = Column(String(32), nullable=False)
+    target_id = Column(Text, nullable=False)
+    cutoff_at = Column(DateTime(timezone=True), nullable=True)
+    occurred_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    reason = Column(Text, nullable=True)
+    evidence_hash = Column(String(64), nullable=False)
+    evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
 
 class MarketStreamCoverageIntervalVersionRecord(Base):
@@ -2073,6 +2418,8 @@ __all__ = [
     "MarketCandleVersionRecord",
     "MarketCollectionAttemptRecord",
     "MarketCollectionDefinitionRecord",
+    "MarketCollectorSafetyEventRecord",
+    "MarketCollectorSafetyStateRecord",
     "MarketDataIngestionRunRecord",
     "MarketDataSeriesRecord",
     "MarketDataSourceRecord",
@@ -2082,10 +2429,13 @@ __all__ = [
     "MarketNormalizationSpecRecord",
     "MarketNormalizedFeatureVersionRecord",
     "MarketGapEvidenceRecord",
+    "MarketFactAcquisitionCoverageRecord",
+    "MarketNumericFactVersionRecord",
     "MarketOpenInterestVersionRecord",
     "MarketProviderRateBudgetRecord",
     "MarketDatasetArchiveRefRecord",
     "MarketArchiveRetentionPinVersionRecord",
+    "MarketStorageLifecycleEventRecord",
     "MarketInstrumentRoleMappingVersionRecord",
     "MarketBookCheckpointManifestRecord",
     "MarketBookQualityEventLinkRecord",

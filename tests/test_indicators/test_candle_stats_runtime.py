@@ -11,6 +11,8 @@ def _candle(index: int, *, close: float, half_range: float) -> Candle:
     time = datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(hours=index)
     return Candle(
         time=time,
+        end=time + timedelta(hours=1),
+        known_at=time + timedelta(hours=1),
         open=close,
         high=close + half_range,
         low=close - half_range,
@@ -66,7 +68,7 @@ def test_candle_stats_emits_atr_expansion_signal_on_threshold_cross_only() -> No
     assert [event["key"] for event in events] == ["atr_expansion_long"]
     event = events[0]
     assert event["direction"] == "long"
-    assert event["known_at"] == int(bars[2].time.timestamp())
+    assert event["known_at"] == int(bars[2].end_time.timestamp())
     assert event["metadata"]["signal_style"] == "threshold_cross"
     assert event["metadata"]["threshold"] == 0.5
     assert event["metadata"]["previous_atr_zscore"] <= 0.5

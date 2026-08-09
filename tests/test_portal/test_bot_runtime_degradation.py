@@ -132,6 +132,25 @@ def test_runtime_warning_store_aggregates_repeated_indicator_warnings():
     assert warnings[0]["count"] == 2
     assert warnings[0]["first_seen_at"] is not None
     assert warnings[0]["last_seen_at"] is not None
+    assert runtime._warning_revision == 1
+
+
+def test_runtime_warning_store_advances_revision_for_material_warning_change():
+    runtime = BotRuntime("bot-1", {"wallet_config": {"balances": {"USDC": 100}}}, deps=_runtime_deps())
+    warning = {
+        "warning_type": "indicator_time_budget_exceeded",
+        "indicator_id": "typed_regime",
+        "symbol_key": "instrument-btc|1m",
+        "symbol": "BTC",
+        "timeframe": "1m",
+        "message": "Indicator execution budget exceeded.",
+        "source": "indicator_guard",
+    }
+
+    runtime._record_runtime_warning(warning)
+    runtime._record_runtime_warning({**warning, "message": "Indicator execution budget remains exceeded."})
+
+    assert runtime._warning_revision == 2
 
 
 def test_runtime_artifact_performance_summary_uses_precise_duration_fields():

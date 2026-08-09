@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 pytest.importorskip("sqlalchemy")
+from fastapi import WebSocketDisconnect
 
 from portal.backend.service.observability import (
     BackendObserver,
@@ -69,6 +70,7 @@ from portal.backend.service.bots.botlens_projector_registry import ProjectorRegi
 from portal.backend.service.bots.botlens_intake_router import IntakeRouter
 import portal.backend.service.bots.botlens_intake_router as intake_mod
 import portal.backend.service.bots.botlens_run_projector as run_mod
+from portal.backend.controller import bots as bots_controller
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +117,50 @@ def _iso_candle_time(candle_time: int) -> str:
 def _epoch_candle_time(candle_time: int) -> int:
     value = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(candle_time))
     return int(value.timestamp())
+
+
+def test_telemetry_ingest_yields_for_websocket_protocol_fairness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fairness_tick = asyncio.Event()
+    ingested: list[dict[str, Any]] = []
+
+    class _BackloggedIngestWebSocket:
+        def __init__(self) -> None:
+            self.accepted = False
+            self.receive_count = 0
+
+        async def accept(self) -> None:
+            self.accepted = True
+
+        async def receive_text(self) -> str:
+            self.receive_count += 1
+            if self.receive_count == 1:
+                asyncio.get_running_loop().call_soon(fairness_tick.set)
+                return json.dumps(
+                    {
+                        "kind": BRIDGE_FACTS_KIND,
+                        "bot_id": "bot-1",
+                        "run_id": "run-1",
+                        "series_key": "instrument-btc|1m",
+                        "facts": [],
+                    }
+                )
+            assert fairness_tick.is_set()
+            raise WebSocketDisconnect()
+
+    async def _ingest(payload: dict[str, Any]) -> None:
+        ingested.append(dict(payload))
+
+    websocket = _BackloggedIngestWebSocket()
+    monkeypatch.setattr(bots_controller.telemetry_hub, "ingest", _ingest)
+
+    asyncio.run(bots_controller.bot_telemetry_ingest(websocket))  # type: ignore[arg-type]
+
+    assert websocket.accepted is True
+    assert websocket.receive_count == 2
+    assert len(ingested) == 1
+    assert ingested[0]["run_id"] == "run-1"
 
 
 def _intake_payload(payload: dict) -> dict:
@@ -779,11 +825,13 @@ class TestRunProjectorSymbolNotification:
         async def scenario() -> None:
             import portal.backend.service.bots.bot_service as bot_service
 
-            published: list[tuple[str, dict[str, Any]]] = []
+            published: list[tuple[str, str, dict[str, Any]]] = []
             monkeypatch.setattr(
                 bot_service,
                 "publish_runtime_update",
-                lambda bot_id, runtime: published.append((bot_id, dict(runtime))),
+                lambda bot_id, runtime, *, run_id: published.append(
+                    (bot_id, run_id, dict(runtime))
+                ),
             )
             monkeypatch.setattr(run_mod, "load_domain_projection_batches", lambda **_kwargs: ())
 
@@ -811,8 +859,9 @@ class TestRunProjectorSymbolNotification:
             )
 
             assert published
-            bot_id, payload = published[-1]
+            bot_id, run_id, payload = published[-1]
             assert bot_id == "bot-1"
+            assert run_id == "run-1"
             assert payload["run_id"] == "run-1"
             assert payload["open_trade_count"] == 1
             assert payload["trade_count"] == 1
@@ -824,9 +873,9 @@ class TestRunProjectorSymbolNotification:
             await projector._process_symbol_notification(stats_notification)
 
             assert published
-            assert published[-1][1]["open_trade_count"] == 1
-            assert published[-1][1]["stats"]["total_trades"] == 3
-            assert published[-1][1]["stats"]["net_pnl"] == 7.5
+            assert published[-1][2]["open_trade_count"] == 1
+            assert published[-1][2]["stats"]["total_trades"] == 3
+            assert published[-1][2]["stats"]["net_pnl"] == 7.5
 
         asyncio.run(scenario())
 
@@ -1226,10 +1275,10 @@ class TestHubIntegration:
             await hub.ingest(_intake_payload(_bootstrap_payload(candle_time=1, run_seq=1)))
             await hub.ingest(_intake_payload(_facts_payload(candle_time=2, run_seq=2)))
 
-            # Give background tasks and thread pool operations time to complete.
-            # asyncio.sleep(0) yields to other tasks but doesn't wait for threads;
-            # a real sleep ensures asyncio.to_thread persistence calls finish.
-            await asyncio.sleep(0.15)
+            # Validate the explicit durability boundary rather than coupling the
+            # integration test to the router's batching interval.
+            await hub._router._flush_pending_run_rows(bot_id="bot-1", run_id="run-1")
+            await asyncio.sleep(0)
 
             symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             run_snapshot = hub.get_run_snapshot(run_id="run-1")
@@ -1313,10 +1362,20 @@ class TestHubIntegration:
                     ))
                 )
 
-            await asyncio.sleep(0.15)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 2.0
+            symbol_snapshot = None
+            while loop.time() < deadline:
+                symbol_snapshot = hub.get_symbol_snapshot(
+                    run_id="run-1",
+                    symbol_key="instrument-btc|1m",
+                )
+                if symbol_snapshot is not None and symbol_snapshot.candles.candles:
+                    break
+                await asyncio.sleep(0.01)
 
-            symbol_snapshot = hub.get_symbol_snapshot(run_id="run-1", symbol_key="instrument-btc|1m")
             assert symbol_snapshot is not None
+            assert symbol_snapshot.candles.candles
             assert symbol_snapshot.candles.candles[-1]["time"] == _epoch_candle_time(99)
 
         asyncio.run(scenario())
