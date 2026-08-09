@@ -63,6 +63,17 @@ VALUES
     true
 ),
 (
+    'market.l2_book.v1',
+    'market.l2_book',
+    'efdc9d85a0f927b9610ecd55267442aee5e2dca26c904fa3d1c5cf23f9870976',
+    $fact_contract${"additional_properties":false,"dataset_eligible":false,"fact_type":"market.l2_book","fields":[{"enum":["snapshot","update"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"event_type","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"product_definition_version_id","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"validity_interval_id","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"reconstruction_version","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"before_state_hash","nullable":true,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"after_state_hash","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"event_material_hash","nullable":false,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"entry_count","nullable":false,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":true,"name":"unknown_zero_delete_count","nullable":false,"required":true},{"enum":[],"items":{"additional_properties":false,"fields":[{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":true,"name":"ordinal","nullable":false,"required":true},{"enum":["bid","ask"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"side","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"price","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"quantity","nullable":false,"required":true},{"enum":["base","contracts"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"provider_size_unit","nullable":false,"required":true},{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"provider_event_time","nullable":false,"required":true}],"kind":"object"},"kind":"array","minimum":null,"minimum_inclusive":true,"name":"entries","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"effective_at","query_fields":["event_type","validity_interval_id","before_state_hash","after_state_hash","entry_count"],"row_hash_version":"market.fact_row.v1","schema_id":"market.l2_book.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'effective_at',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["event_type","validity_interval_id","before_state_hash","after_state_hash","entry_count"]'::jsonb,
+    false
+),
+(
     'market.reference_price.v1',
     'market.reference_price',
     '3f2cad6915814acbda3cae56ce43b47adea09f19ade194d87baedcb719f419f3',

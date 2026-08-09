@@ -115,6 +115,9 @@ non-deterministic encoding, series mismatch, or causal-clock violation.
 
 Payload JSONB is bounded by that registry. It is not a general metadata bag.
 Provider-specific or operational detail belongs in versioned provenance.
+Array fields are also schema-owned: their item object declares exact required,
+nullable, enum, numeric-domain, and additional-property rules. Python and
+PostgreSQL validate the same nested contract before accepting a Fact.
 
 ## Initial Payload Schemas
 
@@ -130,7 +133,7 @@ The migration must register the real retained families, including:
 | `market.reference_price.v1` | exact scalar/reference unit | migrates current Chainlink rows |
 | `market.trade.v1` | structured trade | retains provider delivery/source position evidence |
 | `market.trade_flow.v1` | structured causal aggregate | retains coverage and completeness evidence |
-| L2 snapshot/mutation/checkpoint schemas | structured book state | large level/mutation children may use typed child relations |
+| `market.l2_book.v1` | atomic snapshot/update with strict ordered price-level entries | operational and not directly dataset-eligible; full state remains reconstructable from typed entries and raw archive evidence |
 | BBO/depth/flow/basis/derivative/response schemas | structured derived state | input fingerprints and source hashes retained |
 | `market.normalized_feature.v1` | typed scalar/invalid feature | retains spec and input evidence |
 

@@ -138,6 +138,52 @@ def test_trade_and_trade_flow_payloads_are_provider_neutral_and_strict() -> None
         trade.normalize_payload({**normalized_trade, "provider_product_id": "BTC-PERP"})
 
 
+def test_l2_payload_validates_every_atomic_entry() -> None:
+    schema = get_fact_payload_schema("market.l2_book.v1")
+    payload = {
+        "event_type": "snapshot",
+        "product_definition_version_id": "coinbase.BTC-USD.v1",
+        "validity_interval_id": "validity-1",
+        "reconstruction_version": "l2-absolute.v1",
+        "before_state_hash": None,
+        "after_state_hash": "a" * 64,
+        "event_material_hash": "b" * 64,
+        "entry_count": 1,
+        "unknown_zero_delete_count": 0,
+        "entries": [
+            {
+                "ordinal": 0,
+                "side": "bid",
+                "price": Decimal("118000.00"),
+                "quantity": Decimal("1.2500"),
+                "provider_size_unit": "base",
+                "provider_event_time": _BASE,
+            }
+        ],
+    }
+
+    normalized = schema.normalize_payload(payload)
+
+    assert normalized["entries"] == [
+        {
+            "ordinal": 0,
+            "side": "bid",
+            "price": "118000",
+            "quantity": "1.25",
+            "provider_size_unit": "base",
+            "provider_event_time": "2026-08-09T12:00:00.000000Z",
+        }
+    ]
+    assert schema.contract["fields"][-1]["items"]["additional_properties"] is False
+
+    invalid = {**payload, "entries": [{**payload["entries"][0], "venue": "COINBASE"}]}
+    with pytest.raises(ValueError, match="unexpected=venue"):
+        schema.normalize_payload(invalid)
+    invalid = {**payload, "entries": [{**payload["entries"][0], "price": 1.0}]}
+    with pytest.raises(ValueError, match="forbids binary floating point"):
+        schema.normalize_payload(invalid)
+
+
 def test_exact_decimal_payload_rejects_binary_float_and_is_canonical() -> None:
     fact = _funding_fact()
 

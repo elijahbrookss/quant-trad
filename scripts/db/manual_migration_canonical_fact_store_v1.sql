@@ -84,16 +84,15 @@ CREATE TABLE IF NOT EXISTS market.fact_schemas (
         CHECK (jsonb_typeof(query_fields) = 'array')
 );
 
-CREATE OR REPLACE FUNCTION market.validate_fact_payload(
-    requested_schema_id text,
+CREATE OR REPLACE FUNCTION market.validate_fact_fields(
+    field_contracts jsonb,
     candidate jsonb
 )
 RETURNS boolean
 LANGUAGE plpgsql
-STABLE
+IMMUTABLE
 AS $$
 DECLARE
-    schema_contract jsonb;
     field_contract jsonb;
     field_name text;
     field_kind text;
@@ -104,21 +103,19 @@ DECLARE
     minimum_text text;
     minimum_inclusive boolean;
     numeric_value numeric;
+    items_contract jsonb;
+    array_item jsonb;
 BEGIN
-    SELECT contract
-    INTO schema_contract
-    FROM market.fact_schemas
-    WHERE schema_id = requested_schema_id;
-    IF schema_contract IS NULL OR jsonb_typeof(candidate) <> 'object' THEN
+    IF jsonb_typeof(field_contracts) <> 'array'
+       OR jsonb_typeof(candidate) <> 'object' THEN
         RETURN false;
     END IF;
-
     IF EXISTS (
         SELECT 1
         FROM jsonb_object_keys(candidate) AS candidate_key
         WHERE NOT EXISTS (
             SELECT 1
-            FROM jsonb_array_elements(schema_contract->'fields') AS declared
+            FROM jsonb_array_elements(field_contracts) AS declared
             WHERE declared->>'name' = candidate_key
         )
     ) THEN
@@ -126,8 +123,7 @@ BEGIN
     END IF;
 
     FOR field_contract IN
-        SELECT value
-        FROM jsonb_array_elements(schema_contract->'fields')
+        SELECT value FROM jsonb_array_elements(field_contracts)
     LOOP
         field_name := field_contract->>'name';
         field_kind := field_contract->>'kind';
@@ -149,6 +145,7 @@ BEGIN
             CONTINUE;
         END IF;
         field_text := candidate->>field_name;
+        numeric_value := NULL;
 
         IF field_kind IN ('decimal', 'float64') THEN
             IF jsonb_typeof(field_value) <> 'string'
@@ -166,32 +163,45 @@ BEGIN
             IF jsonb_typeof(field_value) <> 'string' OR field_text = '' THEN
                 RETURN false;
             END IF;
-            IF jsonb_array_length(field_contract->'enum') > 0
+            IF jsonb_array_length(COALESCE(field_contract->'enum', '[]'::jsonb)) > 0
                AND NOT (field_contract->'enum' ? field_text) THEN
                 RETURN false;
             END IF;
-            numeric_value := NULL;
         ELSIF field_kind = 'timestamp' THEN
             IF jsonb_typeof(field_value) <> 'string' THEN
                 RETURN false;
             END IF;
             PERFORM field_text::timestamptz;
-            numeric_value := NULL;
         ELSIF field_kind = 'boolean' THEN
             IF jsonb_typeof(field_value) <> 'boolean' THEN
                 RETURN false;
             END IF;
-            numeric_value := NULL;
         ELSIF field_kind = 'object' THEN
             IF jsonb_typeof(field_value) <> 'object' THEN
                 RETURN false;
             END IF;
-            numeric_value := NULL;
         ELSIF field_kind = 'array' THEN
             IF jsonb_typeof(field_value) <> 'array' THEN
                 RETURN false;
             END IF;
-            numeric_value := NULL;
+            items_contract := field_contract->'items';
+            IF items_contract IS NOT NULL
+               AND jsonb_typeof(items_contract) <> 'null' THEN
+                IF items_contract->>'kind' <> 'object'
+                   OR jsonb_typeof(items_contract->'fields') <> 'array' THEN
+                    RETURN false;
+                END IF;
+                FOR array_item IN
+                    SELECT value FROM jsonb_array_elements(field_value)
+                LOOP
+                    IF NOT market.validate_fact_fields(
+                        items_contract->'fields',
+                        array_item
+                    ) THEN
+                        RETURN false;
+                    END IF;
+                END LOOP;
+            END IF;
         ELSE
             RETURN false;
         END IF;
@@ -210,8 +220,35 @@ BEGIN
     END LOOP;
     RETURN true;
 EXCEPTION
-    WHEN invalid_text_representation OR datetime_field_overflow OR numeric_value_out_of_range THEN
+    WHEN invalid_text_representation
+       OR datetime_field_overflow
+       OR numeric_value_out_of_range THEN
         RETURN false;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION market.validate_fact_payload(
+    requested_schema_id text,
+    candidate jsonb
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    schema_contract jsonb;
+BEGIN
+    SELECT contract
+    INTO schema_contract
+    FROM market.fact_schemas
+    WHERE schema_id = requested_schema_id;
+    IF schema_contract IS NULL THEN
+        RETURN false;
+    END IF;
+    RETURN market.validate_fact_fields(
+        schema_contract->'fields',
+        candidate
+    );
 END;
 $$;
 

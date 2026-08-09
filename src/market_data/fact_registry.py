@@ -131,6 +131,7 @@ class FactPayloadField:
     enum: tuple[str, ...] = ()
     minimum: Decimal | None = None
     minimum_inclusive: bool = True
+    item_fields: tuple["FactPayloadField", ...] = ()
 
     def __post_init__(self) -> None:
         name = str(self.name or "").strip()
@@ -143,6 +144,7 @@ class FactPayloadField:
                 f"market_fact_payload_field_invalid: field={name} kind is unsupported"
             ) from exc
         enum = tuple(str(item) for item in self.enum)
+        item_fields = tuple(self.item_fields)
         if len(enum) != len(set(enum)) or any(not item for item in enum):
             raise ValueError(
                 f"market_fact_payload_field_invalid: field={name} enum is invalid"
@@ -151,12 +153,24 @@ class FactPayloadField:
             raise ValueError(
                 f"market_fact_payload_field_invalid: field={name} enum requires string kind"
             )
+        if item_fields and kind is not FactPayloadKind.ARRAY:
+            raise ValueError(
+                "market_fact_payload_field_invalid: "
+                f"field={name} item_fields require array kind"
+            )
+        item_names = tuple(field.name for field in item_fields)
+        if len(item_names) != len(set(item_names)):
+            raise ValueError(
+                "market_fact_payload_field_invalid: "
+                f"field={name} item_fields contain duplicate names"
+            )
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "enum", enum)
+        object.__setattr__(self, "item_fields", item_fields)
 
     def contract_dict(self) -> dict[str, Any]:
-        return {
+        contract = {
             "name": self.name,
             "kind": self.kind.value,
             "required": bool(self.required),
@@ -169,6 +183,13 @@ class FactPayloadField:
             ),
             "minimum_inclusive": bool(self.minimum_inclusive),
         }
+        if self.item_fields:
+            contract["items"] = {
+                "kind": "object",
+                "additional_properties": False,
+                "fields": [field.contract_dict() for field in self.item_fields],
+            }
+        return contract
 
     def normalize(self, value: Any) -> Any:
         if value is None:
@@ -226,7 +247,45 @@ class FactPayloadField:
                 raise ValueError(
                     f"market_fact_payload_invalid: field={self.name} must be an array"
                 )
-            normalized = _canonical_json_value(value, field=self.name)
+            if self.item_fields:
+                normalized = []
+                allowed = {field.name for field in self.item_fields}
+                for index, item in enumerate(value):
+                    if not isinstance(item, Mapping):
+                        raise ValueError(
+                            "market_fact_payload_invalid: "
+                            f"field={self.name}[{index}] must be an object"
+                        )
+                    raw_item = dict(item)
+                    unexpected = sorted(
+                        str(key) for key in raw_item if str(key) not in allowed
+                    )
+                    if unexpected:
+                        raise ValueError(
+                            "market_fact_payload_invalid: "
+                            f"field={self.name}[{index}] "
+                            f"unexpected={','.join(unexpected)}"
+                        )
+                    missing = sorted(
+                        field.name
+                        for field in self.item_fields
+                        if field.required and field.name not in raw_item
+                    )
+                    if missing:
+                        raise ValueError(
+                            "market_fact_payload_invalid: "
+                            f"field={self.name}[{index}] "
+                            f"missing={','.join(missing)}"
+                        )
+                    normalized.append(
+                        {
+                            field.name: field.normalize(raw_item[field.name])
+                            for field in self.item_fields
+                            if field.name in raw_item
+                        }
+                    )
+            else:
+                normalized = _canonical_json_value(value, field=self.name)
             comparable = None
         else:  # pragma: no cover - Enum construction makes this unreachable.
             raise AssertionError(self.kind)
@@ -730,6 +789,88 @@ _PAYLOAD_SCHEMAS = {
             material_hash_version="numeric_fact_material_hash.v1",
             row_hash_version="market.reserve_balance.v1",
             query_fields=("value",),
+        ),
+        FactPayloadSchema(
+            schema_id="market.l2_book.v1",
+            fact_type="market.l2_book",
+            fields=(
+                FactPayloadField(
+                    "event_type",
+                    FactPayloadKind.STRING,
+                    enum=("snapshot", "update"),
+                ),
+                FactPayloadField(
+                    "product_definition_version_id",
+                    FactPayloadKind.STRING,
+                ),
+                FactPayloadField("validity_interval_id", FactPayloadKind.STRING),
+                FactPayloadField("reconstruction_version", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "before_state_hash",
+                    FactPayloadKind.STRING,
+                    nullable=True,
+                ),
+                FactPayloadField("after_state_hash", FactPayloadKind.STRING),
+                FactPayloadField("event_material_hash", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "entry_count",
+                    FactPayloadKind.INTEGER,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "unknown_zero_delete_count",
+                    FactPayloadKind.INTEGER,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "entries",
+                    FactPayloadKind.ARRAY,
+                    item_fields=(
+                        FactPayloadField(
+                            "ordinal",
+                            FactPayloadKind.INTEGER,
+                            minimum=Decimal("0"),
+                        ),
+                        FactPayloadField(
+                            "side",
+                            FactPayloadKind.STRING,
+                            enum=("bid", "ask"),
+                        ),
+                        FactPayloadField(
+                            "price",
+                            FactPayloadKind.DECIMAL,
+                            minimum=Decimal("0"),
+                            minimum_inclusive=False,
+                        ),
+                        FactPayloadField(
+                            "quantity",
+                            FactPayloadKind.DECIMAL,
+                            minimum=Decimal("0"),
+                        ),
+                        FactPayloadField(
+                            "provider_size_unit",
+                            FactPayloadKind.STRING,
+                            enum=("base", "contracts"),
+                        ),
+                        FactPayloadField(
+                            "provider_event_time",
+                            FactPayloadKind.TIMESTAMP,
+                        ),
+                    ),
+                ),
+            ),
+            observation_time_field="effective_at",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=(
+                "event_type",
+                "validity_interval_id",
+                "before_state_hash",
+                "after_state_hash",
+                "entry_count",
+            ),
+            dataset_eligible=False,
         ),
         FactPayloadSchema(
             schema_id="market.trade.v1",

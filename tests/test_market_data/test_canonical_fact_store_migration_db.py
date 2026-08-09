@@ -300,6 +300,41 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
     try:
         with engine.begin() as conn:
             _insert_fixture_identity(conn)
+            l2_payload = """{
+                "event_type":"snapshot",
+                "product_definition_version_id":"coinbase.BTC-USD.v1",
+                "validity_interval_id":"validity-1",
+                "reconstruction_version":"l2-absolute.v1",
+                "before_state_hash":null,
+                "after_state_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "event_material_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "entry_count":1,
+                "unknown_zero_delete_count":0,
+                "entries":[{
+                    "ordinal":0,
+                    "side":"bid",
+                    "price":"118000",
+                    "quantity":"1.25",
+                    "provider_size_unit":"base",
+                    "provider_event_time":"2026-08-09T12:00:00.000000Z"
+                }]
+            }"""
+            assert conn.execute(
+                text(
+                    "SELECT market.validate_fact_payload("
+                    "'market.l2_book.v1', CAST(:payload AS jsonb))"
+                ),
+                {"payload": l2_payload},
+            ).scalar_one() is True
+            assert conn.execute(
+                text(
+                    "SELECT market.validate_fact_payload("
+                    "'market.l2_book.v1', "
+                    "jsonb_set(CAST(:payload AS jsonb), "
+                    "'{entries,0,provider}', '\"COINBASE\"'::jsonb))"
+                ),
+                {"payload": l2_payload},
+            ).scalar_one() is False
             with pytest.raises(DBAPIError, match="payload does not satisfy"):
                 with conn.begin_nested():
                     conn.execute(
