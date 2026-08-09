@@ -77,3 +77,16 @@ def test_source_tree_attestation_covers_runtime_dependencies(tmp_path) -> None:
     requirements.write_text("numpy==2.0\n", encoding="utf-8")
 
     assert source_tree_hash.working_tree_hash(tmp_path) != original
+
+
+def test_source_tree_attestation_ignores_generated_package_metadata(tmp_path) -> None:
+    source = tmp_path / "src" / "package.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    original = source_tree_hash.working_tree_hash(tmp_path)
+
+    metadata = tmp_path / "src" / "quant_trad.egg-info" / "PKG-INFO"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text("Version: local\n", encoding="utf-8")
+
+    assert source_tree_hash.working_tree_hash(tmp_path) == original

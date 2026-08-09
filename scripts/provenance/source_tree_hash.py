@@ -12,14 +12,17 @@ from pathlib import Path, PurePosixPath
 ROOTS = ("config", "src", "portal", "scripts/provenance")
 ROOT_FILES = ("requirements.txt",)
 IGNORED_PARTS = {"__pycache__", "node_modules", "dist", ".vite", ".npm-cache"}
+IGNORED_PART_SUFFIXES = (".egg-info",)
 IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
 
 def _included(path: str) -> bool:
     candidate = PurePosixPath(path)
-    return not any(part in IGNORED_PARTS for part in candidate.parts) and (
-        candidate.suffix not in IGNORED_SUFFIXES
-    )
+    return not any(
+        part in IGNORED_PARTS
+        or any(part.endswith(suffix) for suffix in IGNORED_PART_SUFFIXES)
+        for part in candidate.parts
+    ) and candidate.suffix not in IGNORED_SUFFIXES
 
 
 def _digest(files: list[tuple[str, bytes]]) -> str:
