@@ -800,6 +800,10 @@ class MarketDatasetSeriesRecord(Base):
         CheckConstraint("range_end > range_start", name="ck_market_dataset_series_range"),
         CheckConstraint("max_commit_seq >= 0", name="ck_market_dataset_series_commit_seq"),
         CheckConstraint("row_count >= 0", name="ck_market_dataset_series_row_count"),
+        CheckConstraint(
+            "jsonb_typeof(payload_schemas) = 'array'",
+            name="ck_market_dataset_series_payload_schemas_array",
+        ),
         Index("ix_market_dataset_series_series", "series_id", "range_start", "range_end"),
         {"schema": MARKET_DATA_SCHEMA},
     )
@@ -824,6 +828,9 @@ class MarketDatasetSeriesRecord(Base):
     quality_hash = Column(String(64), nullable=False)
     quality_summary = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     quality_evidence = Column(JSONB, nullable=True)
+    payload_schemas = Column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
 
 
 class MarketProductDefinitionVersionRecord(Base):

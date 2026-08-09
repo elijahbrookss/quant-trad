@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Dict, Iterator, Optional
 
 from core.settings import get_settings
+from market_data.fact_registry import supported_fact_payload_schemas
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
@@ -77,11 +78,28 @@ _NUMERIC_FACT_REQUIRED_INDEXES = frozenset(
 _NUMERIC_COVERAGE_REQUIRED_INDEXES = frozenset(
     {"ix_market_fact_acquisition_coverage_lookup"}
 )
+_CANONICAL_FACT_REQUIRED_INDEXES = frozenset(
+    {
+        "ix_market_fact_series_time_revision",
+        "ix_market_fact_series_commit",
+        "ix_market_fact_series_known",
+        "ix_market_fact_schema_time",
+        "ix_market_fact_source_time",
+        "ix_market_fact_external_group",
+        "ix_market_fact_payload_gin",
+        "ix_market_fact_provenance_gin",
+        "ix_market_fact_exact_value",
+        "ix_market_fact_exact_rate",
+        "ix_market_fact_funding_time",
+    }
+)
 _COLUMN_MIGRATION_GUIDANCE = {
     ("market", "gap_evidence", "source_id"):
         "scripts/db/manual_migration_gap_source_identity_v1.sql",
     ("market", "dataset_series", "quality_evidence"):
         "scripts/db/manual_migration_dataset_quality_evidence_v1.sql",
+    ("market", "dataset_series", "payload_schemas"):
+        "scripts/db/manual_migration_canonical_fact_store_v1.sql",
 }
 _NUMERIC_FACT_REQUIRED_CONSTRAINTS = frozenset(
     {
@@ -305,6 +323,7 @@ class Database:
             self._assert_retired_tables_absent(conn)
             self._create_missing_tables(conn)
             self._assert_numeric_fact_migration(conn)
+            self._assert_canonical_fact_migration(conn)
             self._ensure_market_data_hypertables(conn)
             self._assert_market_commit_clock(conn, existing_only=False)
             self._assert_columns(conn)
@@ -389,6 +408,7 @@ class Database:
         """Reject per-table identity clocks before heterogeneous facts can start."""
 
         for table_name in (
+            "fact_versions",
             "candle_versions",
             "open_interest_versions",
             "funding_rate_versions",
@@ -828,6 +848,98 @@ class Database:
                     f"Table 'market.{table_name}' is missing immutable trigger "
                     f"'{trigger_name}'. Run "
                     "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+                )
+
+    def _assert_canonical_fact_migration(self, conn) -> None:
+        """Require the explicit generalized Fact schema and code registry."""
+
+        for table_name in ("fact_schemas", "fact_versions"):
+            if conn.execute(
+                text("SELECT to_regclass(:table_ref)"),
+                {"table_ref": f"market.{table_name}"},
+            ).scalar_one_or_none() is None:
+                raise RuntimeError(
+                    "Canonical Fact schema is missing table "
+                    f"market.{table_name}. Stop backend, collectors, workers, "
+                    "and paper runtimes, then run "
+                    "scripts/db/manual_migration_canonical_fact_store_v1.sql."
+                )
+
+        inspector = inspect(conn)
+        primary_key = inspector.get_pk_constraint("fact_versions", schema="market")
+        if tuple(primary_key.get("constrained_columns") or ()) != ("id",):
+            raise RuntimeError(
+                "Table 'market.fact_versions' must use canonical primary key (id). "
+                "Run scripts/db/manual_migration_canonical_fact_store_v1.sql."
+            )
+        indexes = {
+            str(item.get("name") or "")
+            for item in inspector.get_indexes("fact_versions", schema="market")
+        }
+        missing_indexes = sorted(_CANONICAL_FACT_REQUIRED_INDEXES - indexes)
+        if missing_indexes:
+            raise RuntimeError(
+                "Table 'market.fact_versions' is missing required indexes: "
+                f"{', '.join(missing_indexes)}. Run "
+                "scripts/db/manual_migration_canonical_fact_store_v1.sql."
+            )
+        dataset_columns = {
+            str(column["name"])
+            for column in inspector.get_columns("dataset_series", schema="market")
+        }
+        if "payload_schemas" not in dataset_columns:
+            raise RuntimeError(
+                "Table 'market.dataset_series' is missing payload_schemas. Run "
+                "scripts/db/manual_migration_canonical_fact_store_v1.sql."
+            )
+
+        stored_registry = {
+            str(row["schema_id"]): (
+                str(row["fact_type"]),
+                str(row["contract_hash"]),
+            )
+            for row in conn.execute(
+                text(
+                    "SELECT schema_id, fact_type, contract_hash "
+                    "FROM market.fact_schemas"
+                )
+            ).mappings()
+        }
+        expected_registry = {
+            schema.schema_id: (schema.fact_type, schema.contract_hash)
+            for schema in supported_fact_payload_schemas()
+        }
+        if stored_registry != expected_registry:
+            raise RuntimeError(
+                "Canonical Fact schema registry differs from code. Stop all writers "
+                "and apply scripts/db/manual_migration_canonical_fact_store_v1.sql."
+            )
+        for table_name, trigger_name in (
+            ("fact_schemas", "trg_reject_mutation_fact_schemas"),
+            ("fact_versions", "trg_reject_mutation_fact_versions"),
+            ("fact_versions", "trg_assert_fact_version_valid"),
+        ):
+            exists = conn.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM pg_trigger
+                        WHERE tgname = :trigger_name
+                          AND tgrelid = CAST(:table_ref AS regclass)
+                          AND NOT tgisinternal
+                    )
+                    """
+                ),
+                {
+                    "trigger_name": trigger_name,
+                    "table_ref": f"market.{table_name}",
+                },
+            ).scalar_one()
+            if not bool(exists):
+                raise RuntimeError(
+                    f"Table 'market.{table_name}' is missing trigger "
+                    f"'{trigger_name}'. Run "
+                    "scripts/db/manual_migration_canonical_fact_store_v1.sql."
                 )
 
     def _assert_required_constraints(self, conn) -> None:

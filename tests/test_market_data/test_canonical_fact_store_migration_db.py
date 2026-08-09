@@ -166,6 +166,14 @@ def _schema_snapshot(dsn: str) -> dict[str, Any]:
             ).scalar_one()
             return {
                 "tables": tuple(sorted(inspector.get_table_names(schema="market"))),
+                "dataset_series_columns": tuple(
+                    sorted(
+                        str(column["name"])
+                        for column in inspector.get_columns(
+                            "dataset_series", schema="market"
+                        )
+                    )
+                ),
                 "registry": registry,
                 "primary_key": tuple(
                     inspector.get_pk_constraint(
@@ -274,6 +282,7 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
     assert second == first
     assert {"fact_schemas", "fact_versions"} <= set(second["tables"])
     assert second["primary_key"] == ("id",)
+    assert "payload_schemas" in second["dataset_series_columns"]
     assert _REQUIRED_INDEXES <= set(second["indexes"])
     assert "market.fact_commit_seq" in second["commit_default"]
     assert second["triggers"] == (

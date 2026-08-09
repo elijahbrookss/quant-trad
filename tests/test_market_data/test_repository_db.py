@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 
+from market_data.canonical import CanonicalFact, CanonicalFactRecord
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
@@ -543,3 +544,107 @@ def test_funding_rate_round_trip_and_freeze_preserve_causal_observations(
         if int(row["id"]) == normalized_series_id
     )
     assert normalized_series["feature_count"] == 2
+
+
+def test_structured_canonical_fact_freezes_and_replays_with_schema_contract() -> None:
+    token = uuid.uuid4().hex
+    instrument_id = f"canonical-v2-{token[:20]}"
+    with db.session() as session:
+        session.add(
+            InstrumentRecord(
+                id=instrument_id,
+                datasource="TEST",
+                exchange="ISOLATED",
+                symbol=f"CFT-{token[:8].upper()}",
+                instrument_type="perpetual",
+                can_short=False,
+                short_requires_borrow=False,
+                has_funding=True,
+                extra_metadata={},
+            )
+        )
+    source = SourceIdentity(
+        provider="TEST",
+        venue="ISOLATED",
+        source_kind="fixture",
+        adapter_version=f"canonical-funding-v2.{token}",
+    )
+    source_id = market_data_repo.register_source(source)
+    series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type=FUNDING_RATE_FACT_TYPE,
+        timeframe_seconds=None,
+        contract_version="derivatives.funding_rate.v2",
+    )
+    fact = CanonicalFact(
+        fact_type=FUNDING_RATE_FACT_TYPE,
+        payload_schema_id="derivatives.funding_rate.v2",
+        observation_key="schedule:2024-01-01T00:00:00Z",
+        observation_time=_BASE,
+        observation_time_method="collector_schedule",
+        received_at=_BASE + timedelta(seconds=1),
+        accepted_at=_BASE + timedelta(seconds=2),
+        known_at=_BASE + timedelta(seconds=2),
+        known_at_method="platform_acceptance",
+        source=source,
+        transformation_id="fixture_funding_to_canonical.v2",
+        payload={
+            "rate": Decimal("0.00012500"),
+            "raw_rate": "0.00012500",
+            "funding_time": _BASE - timedelta(hours=1),
+            "interval_seconds": 3600,
+            "unit": "fraction",
+        },
+        provenance={"external_object": "fixture-funding-response"},
+    )
+
+    outcome = market_data_repo.ingest_facts(
+        series_id=series_id,
+        source_id=source_id,
+        facts=[fact],
+        request={"fixture": "structured_canonical_replay"},
+    )
+    direct = market_data_repo.read_facts(
+        series_id=series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=1),
+    )
+    frozen = market_data_repo.freeze_dataset(
+        [
+            DatasetSeriesRequest(
+                series_id=series_id,
+                start=_BASE,
+                end=_BASE + timedelta(hours=1),
+            )
+        ]
+    )
+    replay = market_data_repo.read_dataset_series(
+        dataset_id=frozen.dataset_id,
+        series_id=series_id,
+    )
+    listed = next(
+        row
+        for row in market_data_repo.list_series()
+        if int(row["id"]) == series_id
+    )
+
+    assert outcome.inserted_count == 1
+    assert len(direct) == 1
+    assert isinstance(direct[0], CanonicalFactRecord)
+    assert direct[0].fact.payload["rate"] == "0.000125"
+    assert direct[0].fact.payload["funding_time"] == (
+        "2023-12-31T23:00:00.000000Z"
+    )
+    assert frozen.series[0]["payload_schemas"] == [
+        {
+            "schema_id": "derivatives.funding_rate.v2",
+            "contract_hash": fact.payload_contract_hash,
+        }
+    ]
+    assert len(replay) == 1
+    assert isinstance(replay[0], CanonicalFactRecord)
+    assert replay[0].fact.payload_schema_id == "derivatives.funding_rate.v2"
+    assert replay[0].fact.payload_contract_hash == fact.payload_contract_hash
+    assert listed["version_count"] == 1
+    assert listed["fact_count"] == 1
+    assert listed["funding_rate_count"] == 1

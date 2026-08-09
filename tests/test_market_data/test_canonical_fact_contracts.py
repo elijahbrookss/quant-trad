@@ -168,3 +168,21 @@ def test_canonical_envelope_enforces_schema_and_causal_clocks() -> None:
             accepted_at=_BASE + timedelta(seconds=3),
             known_at=_BASE + timedelta(seconds=2),
         )
+
+
+def test_record_can_preserve_a_schema_owned_historical_row_hash() -> None:
+    fact = _funding_fact()
+    historical_hash = "a" * 64
+
+    record = CanonicalFactRecord(
+        series_id=1,
+        source_id=2,
+        revision=3,
+        market_commit_seq=4,
+        fact=fact,
+        row_hash=historical_hash,
+    )
+
+    assert record.row_hash == historical_hash
+    assert record.fact_version_id is not None
+    assert len(record.fact_version_id) == 44

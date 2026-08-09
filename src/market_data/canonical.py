@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -295,8 +296,103 @@ class CanonicalFact:
             }
         )
 
+    def _historical_row_hash(self) -> str | None:
+        """Reproduce retained v1 evidence identities from canonical fields."""
+
+        def float64(value: Any) -> str | None:
+            return None if value is None else struct.pack("!d", float(value)).hex()
+
+        if self.payload_schema_id == "candle.ohlcv.v1":
+            return _hash(
+                {
+                    "schema_version": self.payload_schema_id,
+                    "open_time": _time(self.observation_time),
+                    "close_time": self.payload["close_time"],
+                    "open": float64(self.payload["open"]),
+                    "high": float64(self.payload["high"]),
+                    "low": float64(self.payload["low"]),
+                    "close": float64(self.payload["close"]),
+                    "volume": float64(self.payload.get("volume")),
+                    "trade_count": self.payload.get("trade_count"),
+                    "source_published_at": _time(self.source_published_at),
+                    "received_at": _time(self.received_at),
+                    "known_at": _time(self.known_at),
+                    "known_at_method": self.known_at_method,
+                }
+            )
+        if self.payload_schema_id == "derivatives.open_interest.v1":
+            return _hash(
+                {
+                    "schema_version": self.payload_schema_id,
+                    "sample_time": _time(self.observation_time),
+                    "sample_time_method": self.observation_time_method,
+                    "value": float64(self.payload["value"]),
+                    "unit": self.payload["unit"],
+                    "source_published_at": _time(self.source_published_at),
+                    "received_at": _time(self.received_at),
+                    "known_at": _time(self.known_at),
+                    "known_at_method": self.known_at_method,
+                }
+            )
+        if self.payload_schema_id == "derivatives.funding_rate.v1":
+            return _hash(
+                {
+                    "schema_version": self.payload_schema_id,
+                    "sample_time": _time(self.observation_time),
+                    "sample_time_method": self.observation_time_method,
+                    "rate": float64(self.payload["rate"]),
+                    "funding_time": self.payload["funding_time"],
+                    "interval_seconds": self.payload["interval_seconds"],
+                    "unit": self.payload["unit"],
+                    "source_published_at": _time(self.source_published_at),
+                    "received_at": _time(self.received_at),
+                    "known_at": _time(self.known_at),
+                    "known_at_method": self.known_at_method,
+                }
+            )
+        if self.payload_schema_id in {
+            "market.reference_price.v1",
+            "market.reserve_balance.v1",
+        }:
+            evidence = self.provenance.get("_qt_numeric_evidence")
+            if not isinstance(evidence, Mapping):
+                migration = self.provenance.get("_qt_migration")
+                evidence = migration if isinstance(migration, Mapping) else None
+            if evidence is None:
+                return None
+            dimensions = evidence.get("series_dimensions")
+            source_material_hash = evidence.get("source_event_material_hash")
+            if not isinstance(dimensions, Mapping) or not source_material_hash:
+                return None
+            return _hash(
+                {
+                    "schema_version": self.payload_schema_id,
+                    "fact_type": self.fact_type,
+                    "value": self.payload["value"],
+                    "raw_value": self.payload["raw_value"],
+                    "unit": self.payload["unit"],
+                    "dimensions": dict(dimensions),
+                    "effective_at": _time(self.observation_time),
+                    "effective_at_method": self.observation_time_method,
+                    "source_published_at": _time(self.source_published_at),
+                    "received_at": _time(self.received_at),
+                    "known_at": _time(self.known_at),
+                    "known_at_method": self.known_at_method,
+                    "source_event_key": self.external_event_key
+                    or self.observation_key,
+                    "source_event_group_key": self.external_event_group_key,
+                    "source_event_component_key": self.external_event_component_key,
+                    "source_event_material_hash": str(source_material_hash),
+                    "state": self.state.value,
+                }
+            )
+        return None
+
     @property
     def row_hash(self) -> str:
+        historical = self._historical_row_hash()
+        if historical is not None:
+            return historical
         schema = get_fact_payload_schema(self.payload_schema_id)
         return _hash(
             {
@@ -375,6 +471,7 @@ class CanonicalFactRecord:
     market_commit_seq: int
     fact: CanonicalFact
     ingestion_run_id: str | None = None
+    row_hash: str | None = None
     fact_version_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -386,14 +483,34 @@ class CanonicalFactRecord:
                 )
             object.__setattr__(self, name, value)
         ingestion_run_id = str(self.ingestion_run_id or "").strip() or None
+        row_hash = str(self.row_hash or self.fact.row_hash).strip().lower()
+        if len(row_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in row_hash
+        ):
+            raise ValueError(
+                "canonical_fact_record_invalid: row_hash must be sha256"
+            )
         fact_version_id = str(self.fact_version_id or "").strip() or build_fact_version_id(
             series_id=self.series_id,
             observation_key=self.fact.observation_key,
             revision=self.revision,
-            row_hash=self.fact.row_hash,
+            row_hash=row_hash,
         )
         object.__setattr__(self, "ingestion_run_id", ingestion_run_id)
+        object.__setattr__(self, "row_hash", row_hash)
         object.__setattr__(self, "fact_version_id", fact_version_id)
+
+    @property
+    def source_identity_key(self) -> str:
+        return self.fact.source.identity_key
+
+    @property
+    def source(self) -> SourceIdentity:
+        return self.fact.source
+
+    @property
+    def provenance(self) -> Mapping[str, Any]:
+        return self.fact.provenance
 
 
 __all__ = [

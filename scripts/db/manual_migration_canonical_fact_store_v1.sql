@@ -29,9 +29,10 @@ BEGIN
     IF to_regclass('market.series') IS NULL
        OR to_regclass('market.sources') IS NULL
        OR to_regclass('market.ingestion_runs') IS NULL
-       OR to_regclass('market.fact_commit_seq') IS NULL THEN
+       OR to_regclass('market.fact_commit_seq') IS NULL
+       OR to_regclass('market.dataset_series') IS NULL THEN
         RAISE EXCEPTION
-            'canonical fact store migration requires market series, sources, ingestion_runs, and fact_commit_seq';
+            'canonical fact store migration requires market series, sources, ingestion_runs, fact_commit_seq, and dataset_series';
     END IF;
     IF to_regclass('market.candle_versions') IS NULL
        OR to_regclass('market.open_interest_versions') IS NULL
@@ -39,6 +40,23 @@ BEGIN
        OR to_regclass('market.numeric_fact_versions') IS NULL THEN
         RAISE EXCEPTION
             'canonical fact store migration requires the complete pre-cutover fact store';
+    END IF;
+END $$;
+
+ALTER TABLE market.dataset_series
+    ADD COLUMN IF NOT EXISTS payload_schemas jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'market.dataset_series'::regclass
+          AND conname = 'ck_market_dataset_series_payload_schemas_array'
+    ) THEN
+        ALTER TABLE market.dataset_series
+            ADD CONSTRAINT ck_market_dataset_series_payload_schemas_array
+            CHECK (jsonb_typeof(payload_schemas) = 'array');
     END IF;
 END $$;
 

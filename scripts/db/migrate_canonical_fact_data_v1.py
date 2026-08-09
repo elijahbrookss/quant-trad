@@ -80,6 +80,11 @@ def _migration_provenance(
 def _canonical_values(
     *, row: Mapping[str, Any], fact: CanonicalFact, source_row_hash: str
 ) -> MigrationRow:
+    if fact.row_hash != source_row_hash:
+        raise RuntimeError(
+            "canonical_fact_migration_schema_hash_mismatch: "
+            f"schema_id={fact.payload_schema_id} series_id={row['series_id']}"
+        )
     version_id = build_fact_version_id(
         series_id=int(row["series_id"]),
         observation_key=fact.observation_key,

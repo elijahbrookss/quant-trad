@@ -13,6 +13,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from market_data.canonical import (
+    CanonicalFact,
+    CanonicalFactRecord,
+    build_fact_version_id,
+)
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     FUNDING_RATE_FACT_TYPE,
@@ -42,7 +47,7 @@ from market_data.contracts import (
     build_typed_feature_material_hash,
     record_effective_time,
 )
-from market_data.fact_registry import get_fact_contract
+from market_data.fact_registry import get_fact_contract, get_fact_payload_schema
 from market_data.store import FrozenDataset, IngestionOutcome
 from market_data.structure import (
     MARKET_TRADE_FACT_TYPE,
@@ -85,6 +90,353 @@ def _iso(value: datetime) -> str:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
         "+00:00", "Z"
+    )
+
+
+def _observation_key(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _canonical_source(row: Mapping[str, Any]) -> SourceIdentity:
+    source = SourceIdentity(
+        provider=str(row["source_provider"]),
+        venue=str(row["source_venue"]),
+        source_kind=str(row["source_kind"]),
+        adapter_version=str(row["source_adapter_version"]),
+    )
+    if source.identity_key != str(row["source_identity_key"]):
+        raise RuntimeError(
+            "market_data_corrupt: canonical source identity mismatch "
+            f"source_id={row.get('source_id')}"
+        )
+    return source
+
+
+def _canonical_row_to_record(row: Mapping[str, Any]) -> CanonicalFactRecord:
+    fact = CanonicalFact(
+        fact_type=str(row["fact_type"]),
+        payload_schema_id=str(row["payload_schema_id"]),
+        observation_key=str(row["observation_key"]),
+        observation_time=row["observation_time"],
+        observation_time_method=str(row["observation_time_method"]),
+        source_published_at=row.get("source_published_at"),
+        received_at=row.get("received_at"),
+        accepted_at=row["accepted_at"],
+        known_at=row["known_at"],
+        known_at_method=str(row["known_at_method"]),
+        source=_canonical_source(row),
+        transformation_id=str(row["transformation_id"]),
+        external_event_key=row.get("external_event_key"),
+        external_event_group_key=row.get("external_event_group_key"),
+        external_event_component_key=row.get("external_event_component_key"),
+        state=str(row["state"]),
+        payload=dict(row.get("payload") or {}),
+        provenance_schema_id=str(row["provenance_schema_id"]),
+        provenance=dict(row.get("provenance") or {}),
+        quality_schema_id=str(row["quality_schema_id"]),
+        quality=dict(row.get("quality") or {}),
+    )
+    expected = {
+        "payload_contract_hash": fact.payload_contract_hash,
+        "payload_hash": fact.payload_hash,
+        "material_hash": fact.material_hash,
+        "provenance_hash": fact.provenance_hash,
+        "quality_hash": fact.quality_hash,
+        "row_hash": fact.row_hash,
+    }
+    for field_name, expected_hash in expected.items():
+        if str(row.get(field_name) or "") != expected_hash:
+            raise RuntimeError(
+                "market_data_corrupt: canonical Fact hash mismatch "
+                f"field={field_name} fact_version_id={row.get('id')}"
+            )
+    return CanonicalFactRecord(
+        series_id=int(row["series_id"]),
+        source_id=int(row["source_id"]),
+        revision=int(row["revision"]),
+        market_commit_seq=int(row["market_commit_seq"]),
+        ingestion_run_id=row.get("ingestion_run_id"),
+        fact_version_id=str(row["id"]),
+        row_hash=str(row["row_hash"]),
+        fact=fact,
+    )
+
+
+def _source_provenance(fact: CanonicalFact) -> dict[str, Any]:
+    provenance = dict(fact.provenance)
+    provenance.pop("_qt_migration", None)
+    provenance.pop("_qt_numeric_evidence", None)
+    return provenance
+
+
+def _canonical_to_candle_record(row: Mapping[str, Any]) -> CandleRecord:
+    record = _canonical_row_to_record(row)
+    payload = record.fact.payload
+    fact = CandleFact(
+        open_time=record.fact.observation_time,
+        close_time=payload["close_time"],
+        open=payload["open"],
+        high=payload["high"],
+        low=payload["low"],
+        close=payload["close"],
+        volume=payload.get("volume"),
+        trade_count=payload.get("trade_count"),
+        source_published_at=record.fact.source_published_at,
+        received_at=record.fact.received_at,
+        accepted_at=record.fact.accepted_at,
+        known_at=record.fact.known_at,
+        known_at_method=record.fact.known_at_method,
+    )
+    return CandleRecord(
+        series_id=record.series_id,
+        revision=record.revision,
+        market_commit_seq=record.market_commit_seq,
+        ingestion_run_id=str(record.ingestion_run_id or ""),
+        source_identity_key=record.fact.source.identity_key,
+        source=record.fact.source,
+        provenance=_source_provenance(record.fact),
+        fact=fact,
+    )
+
+
+def _canonical_to_open_interest_record(
+    row: Mapping[str, Any],
+) -> OpenInterestRecord:
+    record = _canonical_row_to_record(row)
+    payload = record.fact.payload
+    fact = OpenInterestFact(
+        sample_time=record.fact.observation_time,
+        sample_time_method=record.fact.observation_time_method,
+        value=payload["value"],
+        unit=payload["unit"],
+        source_published_at=record.fact.source_published_at,
+        received_at=record.fact.received_at,
+        accepted_at=record.fact.accepted_at,
+        known_at=record.fact.known_at,
+        known_at_method=record.fact.known_at_method,
+    )
+    return OpenInterestRecord(
+        series_id=record.series_id,
+        revision=record.revision,
+        market_commit_seq=record.market_commit_seq,
+        ingestion_run_id=str(record.ingestion_run_id or ""),
+        source_identity_key=record.fact.source.identity_key,
+        source=record.fact.source,
+        provenance=_source_provenance(record.fact),
+        fact=fact,
+    )
+
+
+def _canonical_to_funding_rate_record(
+    row: Mapping[str, Any],
+) -> FundingRateRecord:
+    record = _canonical_row_to_record(row)
+    payload = record.fact.payload
+    fact = FundingRateFact(
+        sample_time=record.fact.observation_time,
+        sample_time_method=record.fact.observation_time_method,
+        rate=payload["rate"],
+        funding_time=payload["funding_time"],
+        interval_seconds=payload["interval_seconds"],
+        unit=payload["unit"],
+        source_published_at=record.fact.source_published_at,
+        received_at=record.fact.received_at,
+        accepted_at=record.fact.accepted_at,
+        known_at=record.fact.known_at,
+        known_at_method=record.fact.known_at_method,
+    )
+    return FundingRateRecord(
+        series_id=record.series_id,
+        revision=record.revision,
+        market_commit_seq=record.market_commit_seq,
+        ingestion_run_id=str(record.ingestion_run_id or ""),
+        source_identity_key=record.fact.source.identity_key,
+        source=record.fact.source,
+        provenance=_source_provenance(record.fact),
+        fact=fact,
+    )
+
+
+def _canonical_to_numeric_record(row: Mapping[str, Any]) -> NumericFactRecord:
+    record = _canonical_row_to_record(row)
+    payload = record.fact.payload
+    evidence = record.fact.provenance.get("_qt_numeric_evidence")
+    if not isinstance(evidence, Mapping):
+        migration = record.fact.provenance.get("_qt_migration")
+        evidence = migration if isinstance(migration, Mapping) else None
+    if evidence is None or not evidence.get("source_event_material_hash"):
+        raise RuntimeError(
+            "market_data_corrupt: numeric canonical Fact lacks source-event evidence "
+            f"fact_version_id={record.fact_version_id}"
+        )
+    dimensions = dict(row.get("series_dimensions") or {})
+    if dict(evidence.get("series_dimensions") or {}) != dimensions:
+        raise RuntimeError(
+            "market_data_corrupt: numeric canonical Fact dimensions disagree with series "
+            f"fact_version_id={record.fact_version_id}"
+        )
+    fact = NumericFact(
+        fact_type=record.fact.fact_type,
+        contract_version=record.fact.payload_schema_id,
+        value=payload["value"],
+        raw_value=str(payload["raw_value"]),
+        unit=str(payload["unit"]),
+        dimensions=dimensions,
+        effective_at=record.fact.observation_time,
+        effective_at_method=record.fact.observation_time_method,
+        source_published_at=record.fact.source_published_at,
+        received_at=record.fact.received_at,
+        accepted_at=record.fact.accepted_at,
+        known_at=record.fact.known_at,
+        known_at_method=record.fact.known_at_method,
+        source_event_key=record.fact.external_event_key
+        or record.fact.observation_key,
+        source_event_group_key=record.fact.external_event_group_key,
+        source_event_component_key=record.fact.external_event_component_key,
+        source_event_material_hash=str(evidence["source_event_material_hash"]),
+        state=record.fact.state.value,
+    )
+    return NumericFactRecord(
+        series_id=record.series_id,
+        revision=record.revision,
+        market_commit_seq=record.market_commit_seq,
+        ingestion_run_id=str(record.ingestion_run_id or ""),
+        source_identity_key=record.fact.source.identity_key,
+        source=record.fact.source,
+        provenance=_source_provenance(record.fact),
+        fact=fact,
+    )
+
+
+def _candle_to_canonical(
+    fact: CandleFact, *, source: SourceIdentity, provenance: Mapping[str, Any]
+) -> CanonicalFact:
+    return CanonicalFact(
+        fact_type=CANDLE_FACT_TYPE,
+        payload_schema_id="candle.ohlcv.v1",
+        observation_key=_observation_key(fact.open_time),
+        observation_time=fact.open_time,
+        observation_time_method="interval_open",
+        source_published_at=fact.source_published_at,
+        received_at=fact.received_at,
+        accepted_at=fact.accepted_at,
+        known_at=fact.known_at,
+        known_at_method=fact.known_at_method,
+        source=source,
+        transformation_id="candle_fact_to_canonical.v1",
+        payload={
+            "close_time": fact.close_time,
+            "open": fact.open,
+            "high": fact.high,
+            "low": fact.low,
+            "close": fact.close,
+            "volume": fact.volume,
+            "trade_count": fact.trade_count,
+        },
+        provenance=dict(provenance),
+    )
+
+
+def _open_interest_to_canonical(
+    fact: OpenInterestFact, *, source: SourceIdentity, provenance: Mapping[str, Any]
+) -> CanonicalFact:
+    return CanonicalFact(
+        fact_type=OPEN_INTEREST_FACT_TYPE,
+        payload_schema_id=OPEN_INTEREST_FACT_VERSION,
+        observation_key=_observation_key(fact.sample_time),
+        observation_time=fact.sample_time,
+        observation_time_method=fact.sample_time_method,
+        source_published_at=fact.source_published_at,
+        received_at=fact.received_at,
+        accepted_at=fact.accepted_at,
+        known_at=fact.known_at,
+        known_at_method=fact.known_at_method,
+        source=source,
+        transformation_id="open_interest_fact_to_canonical.v1",
+        payload={"value": fact.value, "unit": fact.unit},
+        provenance=dict(provenance),
+    )
+
+
+def _funding_rate_to_canonical(
+    fact: FundingRateFact, *, source: SourceIdentity, provenance: Mapping[str, Any]
+) -> CanonicalFact:
+    return CanonicalFact(
+        fact_type=FUNDING_RATE_FACT_TYPE,
+        payload_schema_id=FUNDING_RATE_FACT_VERSION,
+        observation_key=_observation_key(fact.sample_time),
+        observation_time=fact.sample_time,
+        observation_time_method=fact.sample_time_method,
+        source_published_at=fact.source_published_at,
+        received_at=fact.received_at,
+        accepted_at=fact.accepted_at,
+        known_at=fact.known_at,
+        known_at_method=fact.known_at_method,
+        source=source,
+        transformation_id="funding_rate_fact_to_canonical.v1",
+        payload={
+            "rate": fact.rate,
+            "funding_time": fact.funding_time,
+            "interval_seconds": fact.interval_seconds,
+            "unit": fact.unit,
+        },
+        provenance=dict(provenance),
+    )
+
+
+def _numeric_to_canonical(
+    fact: NumericFact, *, source: SourceIdentity, provenance: Mapping[str, Any]
+) -> CanonicalFact:
+    canonical_provenance = dict(provenance)
+    if "_qt_numeric_evidence" in canonical_provenance:
+        raise ValueError(
+            "market_data_ingest_invalid: provenance uses reserved _qt_numeric_evidence"
+        )
+    canonical_provenance["_qt_numeric_evidence"] = {
+        "source_event_material_hash": fact.source_event_material_hash,
+        "series_dimensions": dict(fact.dimensions),
+    }
+    return CanonicalFact(
+        fact_type=fact.fact_type,
+        payload_schema_id=fact.contract_version,
+        observation_key=fact.source_event_key,
+        observation_time=fact.effective_at,
+        observation_time_method=fact.effective_at_method,
+        source_published_at=fact.source_published_at,
+        received_at=fact.received_at,
+        accepted_at=fact.accepted_at,
+        known_at=fact.known_at,
+        known_at_method=fact.known_at_method,
+        source=source,
+        transformation_id="numeric_fact_to_canonical.v1",
+        external_event_key=fact.source_event_key,
+        external_event_group_key=fact.source_event_group_key,
+        external_event_component_key=fact.source_event_component_key,
+        state=fact.state.value,
+        payload={
+            "value": fact.value,
+            "raw_value": fact.raw_value,
+            "unit": fact.unit,
+        },
+        provenance=canonical_provenance,
+    )
+
+
+def _decode_core_canonical_rows(
+    fact_type: str, rows: Sequence[Mapping[str, Any]]
+) -> list[MarketDataRecord]:
+    if fact_type == CANDLE_FACT_TYPE:
+        return [_canonical_to_candle_record(row) for row in rows]
+    if fact_type == OPEN_INTEREST_FACT_TYPE:
+        return [_canonical_to_open_interest_record(row) for row in rows]
+    if fact_type == FUNDING_RATE_FACT_TYPE:
+        return [_canonical_to_funding_rate_record(row) for row in rows]
+    if get_fact_contract(fact_type).uses_exact_numeric_storage:
+        return [_canonical_to_numeric_record(row) for row in rows]
+    raise RuntimeError(
+        f"market_dataset_unsupported_canonical_fact: fact_type={fact_type}"
     )
 
 
@@ -247,8 +599,34 @@ def _build_material_hash(
     *,
     fact_type: str,
     series_identity: Mapping[str, Any],
-    records: Sequence[MarketDataRecord],
+    records: Sequence[Any],
 ) -> str:
+    if records and all(isinstance(record, CanonicalFactRecord) for record in records):
+        canonical_rows = sorted(
+            records,
+            key=lambda record: (
+                record.fact.observation_time,
+                record.fact.observation_key,
+                record.revision,
+            ),
+        )
+        return _stable_hash(
+            {
+                "schema_version": "market.canonical_fact_series_material.v1",
+                "series": dict(series_identity),
+                "rows": [
+                    {
+                        "observation_time": _iso(record.fact.observation_time),
+                        "observation_key": record.fact.observation_key,
+                        "revision": record.revision,
+                        "payload_schema_id": record.fact.payload_schema_id,
+                        "payload_contract_hash": record.fact.payload_contract_hash,
+                        "row_hash": record.row_hash,
+                    }
+                    for record in canonical_rows
+                ],
+            }
+        )
     if fact_type == CANDLE_FACT_TYPE:
         return build_candle_material_hash(
             series_identity=series_identity,
@@ -289,6 +667,44 @@ def _build_material_hash(
     raise RuntimeError(
         f"market_dataset_unsupported_fact: fact_type={fact_type}"
     )
+
+
+def _build_canonical_provenance_hash(
+    records: Sequence[CanonicalFactRecord],
+) -> str:
+    rows = sorted(
+        records,
+        key=lambda record: (
+            record.fact.observation_time,
+            record.fact.observation_key,
+            record.revision,
+        ),
+    )
+    return _stable_hash(
+        {
+            "schema_version": "market.canonical_fact_provenance.v1",
+            "records": [
+                {
+                    "fact_version_id": record.fact_version_id,
+                    "source_identity_key": record.source_identity_key,
+                    "ingestion_run_id": record.ingestion_run_id,
+                    "provenance_hash": record.fact.provenance_hash,
+                }
+                for record in rows
+            ],
+        }
+    )
+
+
+_HISTORICAL_CORE_PAYLOAD_SCHEMAS = frozenset(
+    {
+        "candle.ohlcv.v1",
+        "derivatives.open_interest.v1",
+        "derivatives.funding_rate.v1",
+        "market.reference_price.v1",
+        "market.reserve_balance.v1",
+    }
+)
 
 
 
@@ -582,6 +998,7 @@ class PostgresMarketDataRepository:
                 text(
                     """
                     SELECT GREATEST(
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.fact_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.candle_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.open_interest_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.funding_rate_versions), 0),
@@ -620,41 +1037,75 @@ class PostgresMarketDataRepository:
                     SELECT series.id, series.identity_key, series.instrument_id,
                            series.fact_type, series.timeframe_seconds,
                            series.contract_version, series.dimensions,
-                           COALESCE(candles.version_count, 0)
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                             THEN COALESCE(canonical.version_count, 0)
+                             ELSE COALESCE(candles.version_count, 0)
                              + COALESCE(open_interest.version_count, 0)
                              + COALESCE(funding.version_count, 0)
                              + COALESCE(numeric_facts.version_count, 0)
                              + COALESCE(trades.version_count, 0)
                              + COALESCE(trade_flow.version_count, 0)
-                             + COALESCE(typed_features.version_count, 0) AS version_count,
-                           COALESCE(candles.fact_count, 0)
+                             + COALESCE(typed_features.version_count, 0)
+                           END AS version_count,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                             THEN COALESCE(canonical.fact_count, 0)
+                             ELSE COALESCE(candles.fact_count, 0)
                              + COALESCE(open_interest.fact_count, 0)
                              + COALESCE(funding.fact_count, 0)
                              + COALESCE(numeric_facts.fact_count, 0)
                              + COALESCE(trades.fact_count, 0)
                              + COALESCE(trade_flow.fact_count, 0)
-                             + COALESCE(typed_features.fact_count, 0) AS fact_count,
-                           COALESCE(candles.fact_count, 0) AS candle_count,
-                           COALESCE(open_interest.fact_count, 0)
-                             + COALESCE(funding.fact_count, 0) AS observation_count,
-                           COALESCE(funding.fact_count, 0) AS funding_rate_count,
-                           COALESCE(numeric_facts.fact_count, 0) AS numeric_fact_count,
+                             + COALESCE(typed_features.fact_count, 0)
+                           END AS fact_count,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                                  AND series.fact_type = 'candle.ohlcv'
+                             THEN COALESCE(canonical.fact_count, 0)
+                             ELSE COALESCE(candles.fact_count, 0)
+                           END AS candle_count,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                                  AND series.fact_type IN (
+                                      'derivatives.open_interest',
+                                      'derivatives.funding_rate'
+                                  )
+                             THEN COALESCE(canonical.fact_count, 0)
+                             ELSE COALESCE(open_interest.fact_count, 0)
+                                + COALESCE(funding.fact_count, 0)
+                           END AS observation_count,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                                  AND series.fact_type = 'derivatives.funding_rate'
+                             THEN COALESCE(canonical.fact_count, 0)
+                             ELSE COALESCE(funding.fact_count, 0)
+                           END AS funding_rate_count,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                                  AND series.fact_type IN (
+                                      'market.reference_price',
+                                      'market.reserve_balance'
+                                  )
+                             THEN COALESCE(canonical.fact_count, 0)
+                             ELSE COALESCE(numeric_facts.fact_count, 0)
+                           END AS numeric_fact_count,
                            COALESCE(trades.fact_count, 0) AS trade_count,
                            COALESCE(trade_flow.fact_count, 0) AS trade_flow_count,
                            COALESCE(typed_features.fact_count, 0) AS feature_count,
-                           COALESCE(candles.first_fact_time, open_interest.first_fact_time,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                             THEN canonical.first_fact_time
+                             ELSE COALESCE(candles.first_fact_time, open_interest.first_fact_time,
                                     funding.first_fact_time, trades.first_fact_time,
                                     numeric_facts.first_fact_time,
                                     trade_flow.first_fact_time,
                                     typed_features.first_fact_time)
-                             AS first_fact_time,
-                           COALESCE(candles.last_fact_time, open_interest.last_fact_time,
+                           END AS first_fact_time,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                             THEN canonical.last_fact_time
+                             ELSE COALESCE(candles.last_fact_time, open_interest.last_fact_time,
                                     funding.last_fact_time, trades.last_fact_time,
                                     numeric_facts.last_fact_time,
                                     trade_flow.last_fact_time,
                                     typed_features.last_fact_time)
-                             AS last_fact_time,
-                           GREATEST(
+                           END AS last_fact_time,
+                           CASE WHEN registered_schema.schema_id IS NOT NULL
+                             THEN COALESCE(canonical.max_commit_seq, 0)
+                             ELSE GREATEST(
                              COALESCE(candles.max_commit_seq, 0),
                              COALESCE(open_interest.max_commit_seq, 0),
                              COALESCE(funding.max_commit_seq, 0),
@@ -662,8 +1113,20 @@ class PostgresMarketDataRepository:
                              COALESCE(trades.max_commit_seq, 0),
                              COALESCE(trade_flow.max_commit_seq, 0),
                              COALESCE(typed_features.max_commit_seq, 0)
-                           ) AS max_commit_seq
+                           ) END AS max_commit_seq
                     FROM market.series AS series
+                    LEFT JOIN market.fact_schemas AS registered_schema
+                      ON registered_schema.schema_id = series.contract_version
+                     AND registered_schema.fact_type = series.fact_type
+                    LEFT JOIN LATERAL (
+                        SELECT count(*) AS version_count,
+                               count(DISTINCT observation_key) AS fact_count,
+                               min(observation_time) AS first_fact_time,
+                               max(observation_time) AS last_fact_time,
+                               max(market_commit_seq) AS max_commit_seq
+                        FROM market.fact_versions
+                        WHERE series_id = series.id
+                    ) AS canonical ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT count(*) AS version_count,
                                count(DISTINCT candle_open_time) AS fact_count,
@@ -801,6 +1264,7 @@ class PostgresMarketDataRepository:
                            dataset_series.provenance_hash, dataset_series.source_summary,
                            dataset_series.quality_hash, dataset_series.quality_summary,
                            dataset_series.quality_evidence,
+                           dataset_series.payload_schemas,
                            series.identity_key, series.instrument_id, series.fact_type,
                            series.timeframe_seconds, series.contract_version,
                            series.dimensions
@@ -1058,6 +1522,76 @@ class PostgresMarketDataRepository:
             )
         return int(rows[0])
 
+    def ingest_facts(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[CanonicalFact],
+        request: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        """Persist schema-registered canonical Facts through the one writer."""
+
+        series_id = int(series_id)
+        source_id = int(source_id)
+        rows = sorted(
+            list(facts),
+            key=lambda item: (item.observation_time, item.observation_key),
+        )
+        if series_id <= 0 or source_id <= 0:
+            raise ValueError(
+                "market_data_ingest_invalid: series_id and source_id must be positive"
+            )
+        if not rows:
+            raise ValueError(
+                "market_data_ingest_invalid: at least one canonical Fact is required"
+            )
+        observation_keys = [fact.observation_key for fact in rows]
+        if len(observation_keys) != len(set(observation_keys)):
+            raise ValueError(
+                "market_data_ingest_invalid: duplicate canonical observation_key"
+            )
+        series = self._get_series(series_id)
+        source = self._get_source_identity(source_id)
+        for fact in rows:
+            if (
+                fact.fact_type != str(series["fact_type"])
+                or fact.payload_schema_id != str(series["contract_version"])
+                or fact.source.identity_key != source.identity_key
+            ):
+                raise ValueError(
+                    "market_data_ingest_invalid: canonical Fact disagrees with "
+                    f"series/source series_id={series_id} "
+                    f"observation_key={fact.observation_key}"
+                )
+        run_id = str(ingestion_run_id or uuid.uuid4().hex).strip()
+        if not run_id or len(run_id) > 64:
+            raise ValueError("market_data_ingest_invalid: ingestion_run_id is invalid")
+        self._start_ingestion_run(
+            run_id=run_id,
+            source_id=source_id,
+            request=request,
+            source_revision=source_revision,
+            requested_start=rows[0].observation_time,
+            requested_end=rows[-1].observation_time,
+            requested_count=len(rows),
+        )
+        try:
+            return self._ingest_canonical_rows(
+                run_id=run_id,
+                series_id=series_id,
+                rows=rows,
+                allow_corrections=bool(allow_corrections),
+                collection_fence=collection_fence,
+            )
+        except Exception as exc:
+            self._fail_ingestion_run(run_id, exc)
+            raise
+
     def ingest_candles(
         self,
         *,
@@ -1117,10 +1651,14 @@ class PostgresMarketDataRepository:
             requested_count=len(rows),
         )
         try:
-            outcome = self._ingest_candle_rows(
+            source = self._get_source_identity(source_id)
+            outcome = self._ingest_canonical_rows(
                 run_id=run_id,
                 series_id=series_id,
-                rows=rows,
+                rows=[
+                    _candle_to_canonical(fact, source=source, provenance={})
+                    for fact in rows
+                ],
                 allow_corrections=bool(allow_corrections),
             )
         except Exception as exc:
@@ -1184,11 +1722,18 @@ class PostgresMarketDataRepository:
             requested_count=len(rows),
         )
         try:
-            return self._ingest_open_interest_rows(
+            source = self._get_source_identity(source_id)
+            return self._ingest_canonical_rows(
                 run_id=run_id,
                 series_id=series_id,
-                rows=rows,
-                provenance=dict(provenance or {}),
+                rows=[
+                    _open_interest_to_canonical(
+                        fact,
+                        source=source,
+                        provenance=dict(provenance or {}),
+                    )
+                    for fact in rows
+                ],
                 allow_corrections=bool(allow_corrections),
                 collection_fence=collection_fence,
             )
@@ -1252,11 +1797,18 @@ class PostgresMarketDataRepository:
             requested_count=len(rows),
         )
         try:
-            return self._ingest_funding_rate_rows(
+            source = self._get_source_identity(source_id)
+            return self._ingest_canonical_rows(
                 run_id=run_id,
                 series_id=series_id,
-                rows=rows,
-                provenance=dict(provenance or {}),
+                rows=[
+                    _funding_rate_to_canonical(
+                        fact,
+                        source=source,
+                        provenance=dict(provenance or {}),
+                    )
+                    for fact in rows
+                ],
                 allow_corrections=bool(allow_corrections),
                 collection_fence=collection_fence,
             )
@@ -1330,15 +1882,26 @@ class PostgresMarketDataRepository:
             requested_count=len(rows),
         )
         try:
-            return self._ingest_numeric_fact_rows(
+            source = self._get_source_identity(source_id)
+            common_provenance = dict(provenance or {})
+            event_provenance = {
+                str(key): dict(value)
+                for key, value in dict(provenance_by_event or {}).items()
+            }
+            return self._ingest_canonical_rows(
                 run_id=run_id,
                 series_id=series_id,
-                rows=rows,
-                provenance=dict(provenance or {}),
-                provenance_by_event={
-                    str(key): dict(value)
-                    for key, value in dict(provenance_by_event or {}).items()
-                },
+                rows=[
+                    _numeric_to_canonical(
+                        fact,
+                        source=source,
+                        provenance={
+                            **common_provenance,
+                            **dict(event_provenance.get(fact.source_event_key) or {}),
+                        },
+                    )
+                    for fact in rows
+                ],
                 allow_corrections=bool(allow_corrections),
             )
         except Exception as exc:
@@ -2131,6 +2694,324 @@ class PostgresMarketDataRepository:
         return dict(row)
 
     @staticmethod
+    def _get_source_identity(source_id: int) -> SourceIdentity:
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT id AS source_id,
+                           identity_key AS source_identity_key,
+                           provider AS source_provider,
+                           venue AS source_venue,
+                           source_kind,
+                           adapter_version AS source_adapter_version
+                    FROM market.sources
+                    WHERE id = :source_id
+                    """
+                ),
+                {"source_id": int(source_id)},
+            ).mappings().first()
+        if row is None:
+            raise ValueError(
+                f"market_data_source_unknown: source_id={int(source_id)}"
+            )
+        return _canonical_source(row)
+
+    @staticmethod
+    def _canonical_source_for_run(session, run_id: str) -> tuple[int, SourceIdentity]:
+        row = session.execute(
+            text(
+                """
+                SELECT sources.id AS source_id,
+                       sources.identity_key AS source_identity_key,
+                       sources.provider AS source_provider,
+                       sources.venue AS source_venue,
+                       sources.source_kind,
+                       sources.adapter_version AS source_adapter_version
+                FROM market.ingestion_runs AS runs
+                JOIN market.sources AS sources ON sources.id = runs.source_id
+                WHERE runs.id = :run_id
+                """
+            ),
+            {"run_id": run_id},
+        ).mappings().one()
+        return int(row["source_id"]), _canonical_source(row)
+
+    def _ingest_canonical_rows(
+        self,
+        *,
+        run_id: str,
+        series_id: int,
+        rows: Sequence[CanonicalFact],
+        allow_corrections: bool,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        inserted_count = 0
+        corrected_count = 0
+        noop_count = 0
+        max_commit_seq = 0
+        with db.session() as session:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:series_id)"),
+                {"series_id": series_id},
+            )
+            self._assert_collection_fence(
+                session,
+                series_id=series_id,
+                collection_fence=collection_fence,
+            )
+            source_id, source = self._canonical_source_for_run(session, run_id)
+            for fact in rows:
+                if fact.source.identity_key != source.identity_key:
+                    raise ValueError(
+                        "market_data_ingest_invalid: canonical Fact source disagrees "
+                        f"with ingestion run run_id={run_id}"
+                    )
+                latest = session.execute(
+                    text(
+                        """
+                        SELECT revision, row_hash, market_commit_seq
+                        FROM market.fact_versions
+                        WHERE series_id = :series_id
+                          AND observation_key = :observation_key
+                        ORDER BY revision DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "series_id": series_id,
+                        "observation_key": fact.observation_key,
+                    },
+                ).mappings().first()
+                if latest is not None:
+                    max_commit_seq = max(
+                        max_commit_seq, int(latest["market_commit_seq"])
+                    )
+                    if str(latest["row_hash"]) == fact.row_hash:
+                        noop_count += 1
+                        continue
+                    if not allow_corrections:
+                        raise RuntimeError(
+                            "market_data_correction_rejected: immutable consumer path "
+                            "cannot accept changed canonical Fact "
+                            f"series_id={series_id} "
+                            f"observation_key={fact.observation_key}"
+                        )
+                revision = 1 if latest is None else int(latest["revision"]) + 1
+                version_id = build_fact_version_id(
+                    series_id=series_id,
+                    observation_key=fact.observation_key,
+                    revision=revision,
+                    row_hash=fact.row_hash,
+                )
+                commit_seq = int(
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO market.fact_versions (
+                                id, series_id, observation_key, revision,
+                                source_id, ingestion_run_id, fact_type,
+                                payload_schema_id, payload_contract_hash,
+                                observation_time, observation_time_method,
+                                source_published_at, received_at, accepted_at,
+                                known_at, known_at_method, transformation_id,
+                                external_event_key, external_event_group_key,
+                                external_event_component_key, state, payload,
+                                payload_hash, material_hash,
+                                provenance_schema_id, provenance, provenance_hash,
+                                quality_schema_id, quality, quality_hash, row_hash
+                            ) VALUES (
+                                :id, :series_id, :observation_key, :revision,
+                                :source_id, :ingestion_run_id, :fact_type,
+                                :payload_schema_id, :payload_contract_hash,
+                                :observation_time, :observation_time_method,
+                                :source_published_at, :received_at, :accepted_at,
+                                :known_at, :known_at_method, :transformation_id,
+                                :external_event_key, :external_event_group_key,
+                                :external_event_component_key, :state,
+                                CAST(:payload AS jsonb), :payload_hash,
+                                :material_hash, :provenance_schema_id,
+                                CAST(:provenance AS jsonb), :provenance_hash,
+                                :quality_schema_id, CAST(:quality AS jsonb),
+                                :quality_hash, :row_hash
+                            )
+                            RETURNING market_commit_seq
+                            """
+                        ),
+                        {
+                            "id": version_id,
+                            "series_id": series_id,
+                            "observation_key": fact.observation_key,
+                            "revision": revision,
+                            "source_id": source_id,
+                            "ingestion_run_id": run_id,
+                            "fact_type": fact.fact_type,
+                            "payload_schema_id": fact.payload_schema_id,
+                            "payload_contract_hash": fact.payload_contract_hash,
+                            "observation_time": fact.observation_time,
+                            "observation_time_method": fact.observation_time_method,
+                            "source_published_at": fact.source_published_at,
+                            "received_at": fact.received_at,
+                            "accepted_at": fact.accepted_at,
+                            "known_at": fact.known_at,
+                            "known_at_method": fact.known_at_method,
+                            "transformation_id": fact.transformation_id,
+                            "external_event_key": fact.external_event_key,
+                            "external_event_group_key": fact.external_event_group_key,
+                            "external_event_component_key": fact.external_event_component_key,
+                            "state": fact.state.value,
+                            "payload": _json_text(fact.payload),
+                            "payload_hash": fact.payload_hash,
+                            "material_hash": fact.material_hash,
+                            "provenance_schema_id": fact.provenance_schema_id,
+                            "provenance": _json_text(fact.provenance),
+                            "provenance_hash": fact.provenance_hash,
+                            "quality_schema_id": fact.quality_schema_id,
+                            "quality": _json_text(fact.quality),
+                            "quality_hash": fact.quality_hash,
+                            "row_hash": fact.row_hash,
+                        },
+                    ).scalar_one()
+                )
+                max_commit_seq = max(max_commit_seq, commit_seq)
+                if latest is None:
+                    inserted_count += 1
+                else:
+                    corrected_count += 1
+            if max_commit_seq == 0:
+                max_commit_seq = self._current_commit_seq_with_session(session)
+            session.execute(
+                text(
+                    """
+                    UPDATE market.ingestion_runs
+                    SET status = 'completed', finished_at = now(),
+                        inserted_count = :inserted_count,
+                        corrected_count = :corrected_count,
+                        noop_count = :noop_count
+                    WHERE id = :run_id AND status = 'running'
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "inserted_count": inserted_count,
+                    "corrected_count": corrected_count,
+                    "noop_count": noop_count,
+                },
+            )
+        return IngestionOutcome(
+            ingestion_run_id=run_id,
+            requested_count=len(rows),
+            inserted_count=inserted_count,
+            corrected_count=corrected_count,
+            noop_count=noop_count,
+            max_commit_seq=max_commit_seq,
+        )
+
+    @staticmethod
+    def _read_canonical_rows_with_session(
+        session,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int],
+        known_at_lte: Optional[datetime],
+        source_identity_keys: Sequence[str] = (),
+        latest_only: bool = True,
+        include_invalidated: bool = False,
+        causal_at_interval_close: bool = False,
+    ) -> list[Mapping[str, Any]]:
+        request = DatasetSeriesRequest(series_id=series_id, start=start, end=end)
+        predicates = [
+            "versions.series_id = :series_id",
+            "versions.observation_time >= :start",
+            "versions.observation_time < :end",
+        ]
+        params: dict[str, Any] = {
+            "series_id": request.series_id,
+            "start": request.start,
+            "end": request.end,
+        }
+        if as_of_commit_seq is not None:
+            predicates.append("versions.market_commit_seq <= :as_of_commit_seq")
+            params["as_of_commit_seq"] = int(as_of_commit_seq)
+        if known_at_lte is not None:
+            predicates.append("versions.known_at <= :known_at_lte")
+            params["known_at_lte"] = known_at_lte
+        if causal_at_interval_close:
+            predicates.append(
+                "versions.known_at <= "
+                "market.canonical_fact_utc_timestamp(versions.payload->>'close_time')"
+            )
+        allowed_sources = sorted(
+            {str(value).strip() for value in source_identity_keys if str(value).strip()}
+        )
+        if allowed_sources:
+            predicates.append("sources.identity_key = ANY(:source_identity_keys)")
+            params["source_identity_keys"] = allowed_sources
+        select_prefix = (
+            "SELECT DISTINCT ON (versions.observation_key)"
+            if latest_only
+            else "SELECT"
+        )
+        revision_order = (
+            "versions.observation_key, versions.revision DESC"
+            if latest_only
+            else "versions.observation_key, versions.revision"
+        )
+        state_predicate = "" if include_invalidated else "WHERE visible.state = 'active'"
+        rows = session.execute(
+            text(
+                f"""
+                WITH visible AS (
+                    {select_prefix}
+                           versions.*,
+                           sources.identity_key AS source_identity_key,
+                           sources.provider AS source_provider,
+                           sources.venue AS source_venue,
+                           sources.source_kind,
+                           sources.adapter_version AS source_adapter_version,
+                           series.dimensions AS series_dimensions
+                    FROM market.fact_versions AS versions
+                    JOIN market.sources AS sources ON sources.id = versions.source_id
+                    JOIN market.series AS series ON series.id = versions.series_id
+                    WHERE {' AND '.join(predicates)}
+                    ORDER BY {revision_order}
+                )
+                SELECT visible.*
+                FROM visible
+                {state_predicate}
+                ORDER BY visible.observation_time,
+                         visible.observation_key, visible.revision
+                """
+            ),
+            params,
+        ).mappings().all()
+        return [dict(row) for row in rows]
+
+    def read_facts(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        with db.session() as session:
+            rows = self._read_canonical_rows_with_session(
+                session,
+                series_id=series_id,
+                start=start,
+                end=end,
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
+            )
+        return [_canonical_row_to_record(row) for row in rows]
+
+    @staticmethod
     def _read_candles_with_session(
         session,
         *,
@@ -2206,7 +3087,7 @@ class PostgresMarketDataRepository:
         source_identity_keys: Sequence[str] = (),
     ) -> list[CandleRecord]:
         with db.session() as session:
-            return self._read_candles_with_session(
+            rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
                 start=start,
@@ -2215,6 +3096,7 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
                 source_identity_keys=source_identity_keys,
             )
+        return [_canonical_to_candle_record(row) for row in rows]
 
     @staticmethod
     def _read_open_interest_with_session(
@@ -2289,7 +3171,7 @@ class PostgresMarketDataRepository:
         source_identity_keys: Sequence[str] = (),
     ) -> list[OpenInterestRecord]:
         with db.session() as session:
-            return self._read_open_interest_with_session(
+            rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
                 start=start,
@@ -2298,6 +3180,7 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
                 source_identity_keys=source_identity_keys,
             )
+        return [_canonical_to_open_interest_record(row) for row in rows]
 
     @staticmethod
     def _read_funding_rates_with_session(
@@ -2372,7 +3255,7 @@ class PostgresMarketDataRepository:
         source_identity_keys: Sequence[str] = (),
     ) -> list[FundingRateRecord]:
         with db.session() as session:
-            return self._read_funding_rates_with_session(
+            rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
                 start=start,
@@ -2381,6 +3264,7 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
                 source_identity_keys=source_identity_keys,
             )
+        return [_canonical_to_funding_rate_record(row) for row in rows]
 
     @staticmethod
     def _read_numeric_facts_with_session(
@@ -2477,7 +3361,7 @@ class PostgresMarketDataRepository:
         source_identity_keys: Sequence[str] = (),
     ) -> list[NumericFactRecord]:
         with db.session() as session:
-            return self._read_numeric_facts_with_session(
+            rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
                 start=start,
@@ -2488,6 +3372,7 @@ class PostgresMarketDataRepository:
                 include_invalidated=False,
                 source_identity_keys=source_identity_keys,
             )
+        return [_canonical_to_numeric_record(row) for row in rows]
 
     def read_numeric_fact_revisions(
         self,
@@ -2501,7 +3386,7 @@ class PostgresMarketDataRepository:
         """Return retained active and invalidated revisions for audit/reorg repair."""
 
         with db.session() as session:
-            return self._read_numeric_facts_with_session(
+            rows = self._read_canonical_rows_with_session(
                 session,
                 series_id=series_id,
                 start=start,
@@ -2511,6 +3396,7 @@ class PostgresMarketDataRepository:
                 latest_only=False,
                 include_invalidated=True,
             )
+        return [_canonical_to_numeric_record(row) for row in rows]
 
     def record_gap_evidence(
         self,
@@ -3000,6 +3886,25 @@ class PostgresMarketDataRepository:
         if identity is None:
             raise ValueError(f"market_data_series_unknown: series_id={series_id}")
         fact_type = str(identity["fact_type"])
+        contract_version = str(identity["contract_version"])
+        try:
+            registered_payload = get_fact_payload_schema(contract_version)
+        except ValueError:
+            registered_payload = None
+        if (
+            registered_payload is not None
+            and contract_version not in _HISTORICAL_CORE_PAYLOAD_SCHEMAS
+        ):
+            return list(
+                self.read_facts(
+                    series_id=int(series_id),
+                    start=start,
+                    end=end,
+                    as_of_commit_seq=as_of_commit_seq,
+                    known_at_lte=known_at_lte,
+                    source_identity_keys=source_identity_keys,
+                )
+            )
         if get_fact_contract(fact_type).uses_exact_numeric_storage:
             return list(
                 self.read_numeric_facts(
@@ -3163,19 +4068,29 @@ class PostgresMarketDataRepository:
                     raise RuntimeError(
                         f"market_dataset_unsupported_fact: series_id={item.series_id} fact_type={fact_type}"
                     )
-                if contract.uses_exact_numeric_storage:
-                    records = list(
-                        self._read_numeric_facts_with_session(
-                            session,
-                            series_id=item.series_id,
-                            start=item.start,
-                            end=item.end,
-                            as_of_commit_seq=watermark,
-                            known_at_lte=None,
-                            latest_only=False,
-                            include_invalidated=True,
-                        )
+                if fact_type in {
+                    CANDLE_FACT_TYPE,
+                    OPEN_INTEREST_FACT_TYPE,
+                    FUNDING_RATE_FACT_TYPE,
+                } or contract.uses_exact_numeric_storage:
+                    canonical_rows = self._read_canonical_rows_with_session(
+                        session,
+                        series_id=item.series_id,
+                        start=item.start,
+                        end=item.end,
+                        as_of_commit_seq=watermark,
+                        known_at_lte=None,
+                        latest_only=not contract.uses_exact_numeric_storage,
+                        include_invalidated=contract.uses_exact_numeric_storage,
                     )
+                    if str(identity["contract_version"]) in _HISTORICAL_CORE_PAYLOAD_SCHEMAS:
+                        records = _decode_core_canonical_rows(
+                            fact_type, canonical_rows
+                        )
+                    else:
+                        records = [
+                            _canonical_row_to_record(row) for row in canonical_rows
+                        ]
                 else:
                     records = self.read_series_records(
                         series_id=item.series_id,
@@ -3418,7 +4333,15 @@ class PostgresMarketDataRepository:
                             series_identity=series_identity,
                             records=records,
                         ),
-                        "provenance_hash": build_provenance_hash(records),
+                        "provenance_hash": (
+                            _build_canonical_provenance_hash(records)
+                            if records
+                            and all(
+                                isinstance(record, CanonicalFactRecord)
+                                for record in records
+                            )
+                            else build_provenance_hash(records)
+                        ),
                         "source_summary": {
                             "counts": dict(sorted(source_counts.items())),
                             "sources": {key: source_details[key] for key in sorted(source_details)},
@@ -3429,6 +4352,33 @@ class PostgresMarketDataRepository:
                             "classifications": dict(sorted(classifications.items())),
                         },
                         "quality_evidence": [dict(row) for row in quality],
+                        **(
+                            {
+                                "payload_schemas": [
+                                    {
+                                        "schema_id": schema_id,
+                                        "contract_hash": next(
+                                            record.fact.payload_contract_hash
+                                            for record in records
+                                            if record.fact.payload_schema_id
+                                            == schema_id
+                                        ),
+                                    }
+                                    for schema_id in sorted(
+                                        {
+                                            record.fact.payload_schema_id
+                                            for record in records
+                                        }
+                                    )
+                                ]
+                            }
+                            if records
+                            and all(
+                                isinstance(record, CanonicalFactRecord)
+                                for record in records
+                            )
+                            else {}
+                        ),
                     }
                 )
                 if fact_type.startswith("market.normalized."):
@@ -3567,13 +4517,14 @@ class PostgresMarketDataRepository:
                             dataset_id, series_id, range_start, range_end,
                             max_commit_seq, row_count, material_hash,
                             provenance_hash, source_summary, quality_hash,
-                            quality_summary, quality_evidence
+                            quality_summary, quality_evidence, payload_schemas
                         ) VALUES (
                             :dataset_id, :series_id, :range_start, :range_end,
                             :max_commit_seq, :row_count, :material_hash,
                             :provenance_hash, CAST(:source_summary AS jsonb),
                             :quality_hash, CAST(:quality_summary AS jsonb),
-                            CAST(:quality_evidence AS jsonb)
+                            CAST(:quality_evidence AS jsonb),
+                            CAST(:payload_schemas AS jsonb)
                         )
                         ON CONFLICT DO NOTHING
                         """
@@ -3585,6 +4536,9 @@ class PostgresMarketDataRepository:
                         "quality_summary": _json_text(entry["quality_summary"]),
                         "quality_evidence": _json_mapping_array_text(
                             entry["quality_evidence"]
+                        ),
+                        "payload_schemas": _json_mapping_array_text(
+                            entry.get("payload_schemas") or ()
                         ),
                     },
                 )
@@ -3669,7 +4623,7 @@ class PostgresMarketDataRepository:
                     """
                     SELECT dataset_series.range_start, dataset_series.range_end,
                            dataset_series.max_commit_seq, series.fact_type,
-                           series.timeframe_seconds
+                           series.timeframe_seconds, series.contract_version
                     FROM market.dataset_series AS dataset_series
                     JOIN market.series AS series ON series.id = dataset_series.series_id
                     WHERE dataset_series.dataset_id = :dataset_id
@@ -3693,49 +4647,30 @@ class PostgresMarketDataRepository:
                     "market_dataset_range_expansion_forbidden: requested range is outside "
                     f"dataset_id={dataset_id} series_id={series_id} frozen bounds"
                 )
-            if get_fact_contract(str(entry["fact_type"])).uses_exact_numeric_storage:
-                return self._read_numeric_facts_with_session(
+            fact_type = str(entry["fact_type"])
+            contract = get_fact_contract(fact_type)
+            if fact_type in {
+                CANDLE_FACT_TYPE,
+                OPEN_INTEREST_FACT_TYPE,
+                FUNDING_RATE_FACT_TYPE,
+            } or contract.uses_exact_numeric_storage:
+                rows = self._read_canonical_rows_with_session(
                     session,
                     series_id=int(series_id),
                     start=requested.start,
                     end=requested.end,
                     as_of_commit_seq=int(entry["max_commit_seq"]),
                     known_at_lte=known_at_lte,
-                    latest_only=False,
-                    include_invalidated=True,
+                    latest_only=not contract.uses_exact_numeric_storage,
+                    include_invalidated=contract.uses_exact_numeric_storage,
                     source_identity_keys=source_identity_keys,
+                    causal_at_interval_close=(
+                        causal_at_interval_close and fact_type == CANDLE_FACT_TYPE
+                    ),
                 )
-            if str(entry["fact_type"]) == CANDLE_FACT_TYPE:
-                return self._read_candles_with_session(
-                    session,
-                    series_id=int(series_id),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                    source_identity_keys=source_identity_keys,
-                    causal_at_interval_close=causal_at_interval_close,
-                )
-            if str(entry["fact_type"]) == OPEN_INTEREST_FACT_TYPE:
-                return self._read_open_interest_with_session(
-                    session,
-                    series_id=int(series_id),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                    source_identity_keys=source_identity_keys,
-                )
-            if str(entry["fact_type"]) == FUNDING_RATE_FACT_TYPE:
-                return self._read_funding_rates_with_session(
-                    session,
-                    series_id=int(series_id),
-                    start=requested.start,
-                    end=requested.end,
-                    as_of_commit_seq=int(entry["max_commit_seq"]),
-                    known_at_lte=known_at_lte,
-                    source_identity_keys=source_identity_keys,
-                )
+                if str(entry.get("contract_version") or "") in _HISTORICAL_CORE_PAYLOAD_SCHEMAS:
+                    return _decode_core_canonical_rows(fact_type, rows)
+                return [_canonical_row_to_record(row) for row in rows]
             if source_identity_keys:
                 raise ValueError(
                     "market_dataset_source_binding_unsupported: exact source filtering "

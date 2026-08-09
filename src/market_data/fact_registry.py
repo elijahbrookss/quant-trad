@@ -360,6 +360,11 @@ class FactContract:
     ) -> None:
         actual_version = str(contract_version or "").strip()
         version_valid = actual_version == self.contract_version
+        payload_schema = globals().get("_PAYLOAD_SCHEMAS", {}).get(
+            actual_version.lower()
+        )
+        if payload_schema is not None:
+            version_valid = payload_schema.fact_type == self.fact_type
         if self.fact_type.startswith(NORMALIZED_FACT_PREFIX):
             pattern = (
                 rf"{re.escape(NORMALIZED_FACT_VERSION)}/nsp_[0-9a-f]{{31}}"
