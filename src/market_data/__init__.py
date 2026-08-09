@@ -1,5 +1,11 @@
 """Canonical market-data contracts and feed boundaries."""
 
+from .canonical import (
+    CanonicalFact,
+    CanonicalFactRecord,
+    FactState,
+    build_fact_version_id,
+)
 from .store import FrozenDataset, IngestionOutcome, MarketDataStore
 from .contracts import (
     CANDLE_FACT_TYPE,
@@ -151,6 +157,10 @@ from .stream_enrollment import (
 )
 
 __all__ = [
+    "CanonicalFact",
+    "CanonicalFactRecord",
+    "FactState",
+    "build_fact_version_id",
     "FrozenDataset",
     "IngestionOutcome",
     "MarketDataStore",
