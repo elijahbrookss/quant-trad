@@ -19,6 +19,10 @@ from typing import Any
 from sqlalchemy import create_engine, text
 
 from market_data.canonical import CanonicalFact, build_fact_version_id
+from market_data.canonical_adapters import (
+    canonicalize_market_trade,
+    canonicalize_trade_flow,
+)
 from market_data.contracts import (
     CandleFact,
     FundingRateFact,
@@ -393,61 +397,18 @@ def _trade(row: Mapping[str, Any]) -> MigrationRow:
             f"family=trade kind=row series_id={row['series_id']} "
             f"provider_trade_id={legacy.provider_trade_id}"
         )
-    provenance = _migration_provenance(
-        row,
-        source_table="market.market_trade_versions",
-        extra={
-            "legacy_version_id": str(row["id"]),
-            "legacy_provenance_hash": str(row["provenance_hash"]),
-        },
-    )
-    provenance["_qt_trade_evidence"] = {
-        "provider_product_id": legacy.provider_product_id,
-        "provider_trade_id": legacy.provider_trade_id,
-        "delivery_kind": legacy.delivery_kind.value,
-        "aggressor_transform_version": legacy.aggressor_transform_version,
-        "product_definition_version_id": legacy.product_definition_version_id,
-        "provider_message_time": legacy.provider_message_time,
-        "provider_sequence_num": legacy.provider_sequence_num,
-        "connection_epoch": legacy.connection_epoch,
-        "receive_ordinal": legacy.receive_ordinal,
-        "event_ordinal": legacy.event_ordinal,
-        "trade_ordinal": legacy.trade_ordinal,
-        "raw_record_id": legacy.raw_record_id,
-        "coverage_interval_id": legacy.coverage_interval_id,
-    }
-    canonical = CanonicalFact(
-        fact_type="market.trade",
-        payload_schema_id="market.trade.v1",
-        observation_key=(
-            f"{legacy.provider_product_id}:{legacy.provider_trade_id}"
-        ),
-        observation_time=legacy.provider_event_time,
-        observation_time_method="provider_event_time",
-        source_published_at=legacy.provider_message_time,
-        received_at=legacy.received_at,
-        accepted_at=legacy.accepted_at,
-        known_at=legacy.known_at,
-        known_at_method="platform_acceptance",
+    canonical = canonicalize_market_trade(
+        legacy,
         source=_source(row),
         transformation_id="migration.market_trade_versions.v1",
-        external_event_key=legacy.provider_trade_id,
-        external_event_group_key=legacy.provider_product_id,
-        payload={
-            "price": legacy.price,
-            "reported_quantity": legacy.provider_size,
-            "reported_quantity_unit": legacy.provider_size_unit.value,
-            "contract_quantity": legacy.contract_quantity,
-            "base_quantity": legacy.base_quantity,
-            "quote_notional": legacy.quote_notional,
-            "base_currency": legacy.base_currency,
-            "quote_currency": legacy.quote_currency,
-            "maker_side": legacy.maker_side.value,
-            "aggressor_side": (
-                legacy.aggressor_side.value if legacy.aggressor_side else None
-            ),
-        },
-        provenance=provenance,
+        provenance=_migration_provenance(
+            row,
+            source_table="market.market_trade_versions",
+            extra={
+                "legacy_version_id": str(row["id"]),
+                "legacy_provenance_hash": str(row["provenance_hash"]),
+            },
+        ),
         quality=dict(row["quality"] or {}),
     )
     return _canonical_values(
@@ -506,70 +467,19 @@ def _trade_flow(row: Mapping[str, Any]) -> MigrationRow:
             f"family=trade_flow series_id={row['series_id']} "
             f"bucket_start={legacy.bucket_start.isoformat()}"
         )
-    quality = dict(row["quality"] or {})
-    if "_qt_trade_flow_quality" in quality:
-        raise RuntimeError(
-            "canonical_fact_migration_reserved_quality_key: "
-            f"series_id={row['series_id']} bucket_start={legacy.bucket_start.isoformat()}"
-        )
-    quality["_qt_trade_flow_quality"] = {
-        "aggregate_complete": legacy.aggregate_complete,
-        "archive_complete": legacy.archive_complete,
-        "canonicalization_complete": legacy.canonicalization_complete,
-        "late_trade_count": legacy.late_trade_count,
-    }
-    provenance = _migration_provenance(
-        row,
-        source_table="market.trade_flow_aggregate_versions",
-        extra={
-            "legacy_version_id": str(row["id"]),
-            "legacy_provenance_hash": str(row["provenance_hash"]),
-        },
-    )
-    provenance["_qt_trade_flow_evidence"] = {
-        "interval_seconds": legacy.interval_seconds,
-        "first_trade_id": legacy.first_trade_id,
-        "last_trade_id": legacy.last_trade_id,
-        "first_receive_ordinal": legacy.first_receive_ordinal,
-        "last_receive_ordinal": legacy.last_receive_ordinal,
-        "coverage_interval_id": legacy.coverage_interval_id,
-        "coverage_revision": legacy.coverage_revision,
-        "input_fingerprint": legacy.input_fingerprint,
-    }
-    canonical = CanonicalFact(
-        fact_type="market.trade_flow",
-        payload_schema_id="market.trade_flow.v1",
-        observation_key=legacy.bucket_start.isoformat(),
-        observation_time=legacy.bucket_start,
-        observation_time_method="bucket_start",
-        accepted_at=legacy.known_at,
-        known_at=legacy.known_at,
-        known_at_method="derived_materialization",
+    canonical = canonicalize_trade_flow(
+        legacy,
         source=_source(row),
-        transformation_id=str(row["aggregation_version"]),
-        payload={
-            "bucket_end": legacy.bucket_end,
-            "trade_count": legacy.trade_count,
-            "maker_buy_count": legacy.maker_buy_count,
-            "maker_sell_count": legacy.maker_sell_count,
-            "aggressor_buy_count": legacy.aggressor_buy_count,
-            "aggressor_sell_count": legacy.aggressor_sell_count,
-            "contract_volume": legacy.contract_volume,
-            "base_volume": legacy.base_volume,
-            "quote_notional": legacy.quote_notional,
-            "maker_buy_base_volume": legacy.maker_buy_base_volume,
-            "maker_sell_base_volume": legacy.maker_sell_base_volume,
-            "aggressor_buy_base_volume": legacy.aggressor_buy_base_volume,
-            "aggressor_sell_base_volume": legacy.aggressor_sell_base_volume,
-            "cvd_delta": legacy.cvd_delta,
-            "cvd_unit": legacy.cvd_unit,
-            "open_price": legacy.open_price,
-            "high_price": legacy.high_price,
-            "low_price": legacy.low_price,
-            "close_price": legacy.close_price,
-        },
-        provenance=provenance,
-        quality=quality,
+        aggregation_version=str(row["aggregation_version"]),
+        provenance=_migration_provenance(
+            row,
+            source_table="market.trade_flow_aggregate_versions",
+            extra={
+                "legacy_version_id": str(row["id"]),
+                "legacy_provenance_hash": str(row["provenance_hash"]),
+            },
+        ),
+        quality=dict(row["quality"] or {}),
     )
     return _canonical_values(
         row=row,
