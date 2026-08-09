@@ -3,7 +3,7 @@ component: generalized-fact-data-plane
 subsystem: data
 layer: boundary
 doc_type: architecture
-status: proposed
+status: active
 tags:
   - market-data
   - canonical-facts
@@ -17,6 +17,8 @@ tags:
   - migration
 code_paths:
   - src/market_data/contracts.py
+  - src/market_data/canonical.py
+  - src/market_data/canonical_adapters.py
   - src/market_data/fact_registry.py
   - src/market_data/store.py
   - src/data_providers
@@ -36,9 +38,14 @@ code_paths:
 
 ## Status
 
-This is the proposed post-migration contract. It does not describe completed
-runtime behavior until ADR 0063 is accepted. The current deployed boundary is
-documented by `DATA_BOUNDARY.md` and the migration discovery report.
+ADR 0063 is accepted and this is the active target contract. The canonical
+registry, envelope, selector, and store currently own candles, open interest,
+funding, exact numeric facts, market trades, and trade-flow aggregates. Trade
+and flow writers no longer dual-write their retired typed version tables;
+their public typed records are decoded from canonical payloads at the consumer
+boundary. Level 2 and the remaining derived market-state families are still
+being migrated, so this campaign is not yet at its hard-cutover completion
+boundary. The migration discovery report records the pre-change surface.
 
 ## Boundary
 

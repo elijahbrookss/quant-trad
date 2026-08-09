@@ -27,6 +27,12 @@ from market_data.book_archive import (
     BOOK_CHECKPOINT_FORMAT,
     EncodedBookCheckpoint,
 )
+from market_data.canonical_adapters import (
+    canonicalize_market_trade,
+    canonicalize_trade_flow,
+    decode_market_trade_record,
+    decode_trade_flow_record,
+)
 from market_data.contracts import TypedFeatureRecord
 from market_data.market_state import (
     BasisFeatureFact,
@@ -59,7 +65,7 @@ from market_data.structure import (
 )
 
 from ._shared import db
-
+from .market_data import market_data_repo
 from .market_lifecycle import market_storage_lifecycle_repository
 
 
@@ -2054,6 +2060,74 @@ class PostgresMarketStructureRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _collection_fence(claim: StreamClaim) -> dict[str, Any]:
+        return {
+            "fence_kind": "stream",
+            "definition_id": claim.definition_id,
+            "definition_generation": claim.definition_generation,
+            "source_id": claim.source_id,
+            "owner_id": claim.owner_id,
+            "lease_token": claim.lease_token,
+            "lease_generation": claim.lease_generation,
+        }
+
+    @staticmethod
+    def _canonical_heads(
+        *,
+        series_id: int,
+        observation_keys: Sequence[str],
+    ) -> dict[str, Mapping[str, Any]]:
+        if not observation_keys:
+            return {}
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (observation_key)
+                           observation_key, material_hash, row_hash,
+                           market_commit_seq
+                    FROM market.fact_versions
+                    WHERE series_id = :series_id
+                      AND observation_key = ANY(:observation_keys)
+                    ORDER BY observation_key, revision DESC
+                    """
+                ),
+                {
+                    "series_id": int(series_id),
+                    "observation_keys": list(observation_keys),
+                },
+            ).mappings().all()
+        return {str(row["observation_key"]): dict(row) for row in rows}
+
+    @staticmethod
+    def _resolve_derived_source_id(series_id: int) -> int:
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT min(facts.source_id) AS source_id,
+                           count(DISTINCT facts.source_id) AS source_count
+                    FROM market.series AS derived_series
+                    JOIN market.series AS trade_series
+                      ON trade_series.instrument_id = derived_series.instrument_id
+                     AND trade_series.fact_type = 'market.trade'
+                    JOIN market.fact_versions AS facts
+                      ON facts.series_id = trade_series.id
+                    WHERE derived_series.id = :series_id
+                    """
+                ),
+                {"series_id": int(series_id)},
+            ).mappings().one()
+        source_count = int(row["source_count"])
+        if source_count != 1 or row["source_id"] is None:
+            raise RuntimeError(
+                "market_trade_flow_source_invalid: expected exactly one canonical "
+                f"upstream trade source series_id={int(series_id)} "
+                f"source_count={source_count}"
+            )
+        return int(row["source_id"])
+
     def ingest_trades(
         self,
         claim: StreamClaim,
@@ -2065,188 +2139,134 @@ class PostgresMarketStructureRepository:
             facts,
             key=lambda item: (
                 item.provider_event_time,
-                item.provider_sequence_num if item.provider_sequence_num is not None else 2**63,
+                item.provider_sequence_num
+                if item.provider_sequence_num is not None
+                else 2**63,
                 item.receive_ordinal,
                 item.event_ordinal,
                 item.trade_ordinal,
                 item.provider_trade_id,
             ),
         )
-        inserted: list[MarketTradeRecord] = []
-        noop_count = 0
-        max_commit_seq = 0
+        if not rows:
+            return TradeIngestionOutcome(
+                requested_count=0,
+                inserted_count=0,
+                noop_count=0,
+                max_commit_seq=0,
+                records=(),
+            )
+
         with db.session() as session:
             self._require_fence(session, claim)
             for fact in rows:
                 if fact.provider_product_id != claim.provider_product_id:
-                    raise ValueError("market_trade_ingest_invalid: product scope mismatch")
+                    raise ValueError(
+                        "market_trade_ingest_invalid: product scope mismatch"
+                    )
                 if require_archive_mapping:
-                    mapping = session.execute(
+                    mapped = session.execute(
                         text(
                             """
-                            SELECT 1 FROM market.raw_archive_record_mappings
-                            WHERE raw_record_id = :raw_record_id LIMIT 1
+                            SELECT 1
+                            FROM market.raw_archive_record_mappings
+                            WHERE raw_record_id = :raw_record_id
+                            LIMIT 1
                             """
                         ),
                         {"raw_record_id": fact.raw_record_id},
                     ).first()
-                    if mapping is None:
+                    if mapped is None:
                         raise ValueError(
-                            "market_trade_archive_pending: canonical publication requires acknowledged mapping"
+                            "market_trade_archive_pending: canonical publication "
+                            "requires acknowledged mapping"
                         )
-                identity_text = f"{claim.source_id}:{fact.provider_product_id}:{fact.provider_trade_id}"
-                session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:identity, 0))"),
-                    {"identity": identity_text},
+
+        source = market_data_repo.get_source_identity(claim.source_id)
+        canonical = [
+            canonicalize_market_trade(
+                fact,
+                source=source,
+                provenance={
+                    "stream_definition_id": claim.definition_id,
+                    "stream_session_id": claim.session_id,
+                },
+            )
+            for fact in rows
+        ]
+        keys = [fact.observation_key for fact in canonical]
+        if len(keys) != len(set(keys)):
+            raise ValueError(
+                "market_trade_ingest_invalid: duplicate canonical observation key"
+            )
+        heads = self._canonical_heads(
+            series_id=claim.series_id,
+            observation_keys=keys,
+        )
+        pending = []
+        noop_count = 0
+        for fact in canonical:
+            head = heads.get(fact.observation_key)
+            if head is None:
+                pending.append(fact)
+                continue
+            if str(head["material_hash"]) != fact.material_hash:
+                raise MarketTradeConflictError(
+                    "market_trade_conflict: same provider trade ID has divergent "
+                    f"material product_id={fact.external_event_group_key} "
+                    f"trade_id={fact.external_event_key}"
                 )
-                identity = session.execute(
-                    text(
-                        """
-                        SELECT * FROM market.market_trade_identities
-                        WHERE source_id = :source_id
-                          AND provider_product_id = :product_id
-                          AND provider_trade_id = :trade_id
-                        """
-                    ),
-                    {
-                        "source_id": claim.source_id,
-                        "product_id": fact.provider_product_id,
-                        "trade_id": fact.provider_trade_id,
-                    },
-                ).mappings().first()
-                if identity is not None:
-                    if identity["first_material_hash"] != fact.material_hash:
-                        raise MarketTradeConflictError(
-                            "market_trade_conflict: same provider trade ID has divergent material "
-                            f"product_id={fact.provider_product_id} trade_id={fact.provider_trade_id}"
-                        )
-                    noop_count += 1
-                    continue
-                version_material = {
-                    "source_id": claim.source_id,
-                    "provider_product_id": fact.provider_product_id,
-                    "provider_trade_id": fact.provider_trade_id,
-                    "revision": 1,
-                    "material_hash": fact.material_hash,
-                }
-                version_id = _version_id("mtv", version_material)
-                provenance_hash = _stable_hash(
-                    {
-                        "schema_version": "market.trade_provenance.v1",
-                        "raw_record_id": fact.raw_record_id,
-                        "coverage_interval_id": fact.coverage_interval_id,
-                        "connection_epoch": fact.connection_epoch,
-                        "receive_ordinal": fact.receive_ordinal,
-                    }
-                )
-                result = session.execute(
-                    text(
-                        """
-                        INSERT INTO market.market_trade_versions (
-                            id, source_id, series_id, revision,
-                            provider_product_id, provider_trade_id, delivery_kind,
-                            price, provider_size, provider_size_unit, maker_side,
-                            aggressor_side, aggressor_transform_version,
-                            contract_quantity, base_quantity, quote_notional,
-                            base_currency, quote_currency,
-                            product_definition_version_id, provider_event_time,
-                            provider_message_time, received_at, accepted_at,
-                            known_at, provider_sequence_num, connection_epoch,
-                            receive_ordinal, event_ordinal, trade_ordinal,
-                            raw_record_id, coverage_interval_id, material_hash,
-                            row_hash, provenance_hash, quality
-                        ) VALUES (
-                            :id, :source_id, :series_id, 1, :product_id,
-                            :trade_id, :delivery_kind, :price, :provider_size,
-                            :size_unit, :maker_side, :aggressor_side,
-                            :transform_version, :contract_quantity,
-                            :base_quantity, :quote_notional, :base_currency,
-                            :quote_currency, :product_definition_id,
-                            :event_time, :message_time, :received_at,
-                            :accepted_at, :known_at, :sequence_num, :epoch,
-                            :receive_ordinal, :event_ordinal, :trade_ordinal,
-                            :raw_record_id, :coverage_interval_id, :material_hash,
-                            :row_hash, :provenance_hash, '{}'::jsonb
-                        ) RETURNING market_commit_seq
-                        """
-                    ),
-                    {
-                        "id": version_id,
-                        "source_id": claim.source_id,
-                        "series_id": claim.series_id,
-                        "product_id": fact.provider_product_id,
-                        "trade_id": fact.provider_trade_id,
-                        "delivery_kind": fact.delivery_kind.value,
-                        "price": fact.price,
-                        "provider_size": fact.provider_size,
-                        "size_unit": fact.provider_size_unit.value,
-                        "maker_side": fact.maker_side.value,
-                        "aggressor_side": fact.aggressor_side.value if fact.aggressor_side else None,
-                        "transform_version": fact.aggressor_transform_version,
-                        "contract_quantity": fact.contract_quantity,
-                        "base_quantity": fact.base_quantity,
-                        "quote_notional": fact.quote_notional,
-                        "base_currency": fact.base_currency,
-                        "quote_currency": fact.quote_currency,
-                        "product_definition_id": fact.product_definition_version_id,
-                        "event_time": fact.provider_event_time,
-                        "message_time": fact.provider_message_time,
-                        "received_at": fact.received_at,
-                        "accepted_at": fact.accepted_at,
-                        "known_at": fact.known_at,
-                        "sequence_num": fact.provider_sequence_num,
-                        "epoch": fact.connection_epoch,
-                        "receive_ordinal": fact.receive_ordinal,
-                        "event_ordinal": fact.event_ordinal,
-                        "trade_ordinal": fact.trade_ordinal,
-                        "raw_record_id": fact.raw_record_id,
-                        "coverage_interval_id": fact.coverage_interval_id,
-                        "material_hash": fact.material_hash,
-                        "row_hash": fact.row_hash,
-                        "provenance_hash": provenance_hash,
-                    },
-                ).one()
-                commit_seq = int(result[0])
-                session.execute(
-                    text(
-                        """
-                        INSERT INTO market.market_trade_identities (
-                            id, source_id, provider_product_id, provider_trade_id,
-                            first_material_hash, first_version_id, created_at
-                        ) VALUES (
-                            :id, :source_id, :product_id, :trade_id,
-                            :material_hash, :version_id, now()
-                        )
-                        """
-                    ),
-                    {
-                        "id": _version_id("mti", {"identity": identity_text}),
-                        "source_id": claim.source_id,
-                        "product_id": fact.provider_product_id,
-                        "trade_id": fact.provider_trade_id,
-                        "material_hash": fact.material_hash,
-                        "version_id": version_id,
-                    },
-                )
-                max_commit_seq = max(max_commit_seq, commit_seq)
-                inserted.append(
-                    MarketTradeRecord(
-                        version_id=version_id,
-                        series_id=claim.series_id,
-                        source_id=claim.source_id,
-                        revision=1,
-                        market_commit_seq=commit_seq,
-                        provenance_hash=provenance_hash,
-                        quality={},
-                        fact=fact,
-                    )
-                )
+            noop_count += 1
+
+        if not pending:
+            return TradeIngestionOutcome(
+                requested_count=len(rows),
+                inserted_count=0,
+                noop_count=noop_count,
+                max_commit_seq=max(
+                    (int(row["market_commit_seq"]) for row in heads.values()),
+                    default=0,
+                ),
+                records=(),
+            )
+
+        outcome = market_data_repo.ingest_facts(
+            series_id=claim.series_id,
+            source_id=claim.source_id,
+            facts=pending,
+            request={
+                "operation": "market_trade_stream_canonicalization",
+                "definition_id": claim.definition_id,
+                "session_id": claim.session_id,
+            },
+            source_revision=claim.contract_version,
+            allow_corrections=False,
+            collection_fence=self._collection_fence(claim),
+        )
+        pending_keys = {fact.observation_key for fact in pending}
+        stored = market_data_repo.read_facts(
+            series_id=claim.series_id,
+            start=min(fact.observation_time for fact in pending),
+            end=max(fact.observation_time for fact in pending)
+            + timedelta(microseconds=1),
+            as_of_commit_seq=outcome.max_commit_seq,
+        )
+        records = tuple(
+            decode_market_trade_record(record)
+            for record in stored
+            if record.fact.observation_key in pending_keys
+        )
+        if len(records) != outcome.inserted_count:
+            raise RuntimeError(
+                "market_trade_ingest_corrupt: canonical write/read count mismatch "
+                f"expected={outcome.inserted_count} actual={len(records)}"
+            )
         return TradeIngestionOutcome(
             requested_count=len(rows),
-            inserted_count=len(inserted),
-            noop_count=noop_count,
-            max_commit_seq=max_commit_seq,
-            records=tuple(inserted),
+            inserted_count=outcome.inserted_count,
+            noop_count=noop_count + outcome.noop_count,
+            max_commit_seq=outcome.max_commit_seq,
+            records=records,
         )
 
     def read_trades(
@@ -2258,44 +2278,29 @@ class PostgresMarketStructureRepository:
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
     ) -> list[MarketTradeRecord]:
-        predicates = [
-            "series_id = :series_id",
-            "provider_event_time >= :start",
-            "provider_event_time < :end",
+        records = [
+            decode_market_trade_record(record)
+            for record in market_data_repo.read_facts(
+                series_id=int(series_id),
+                start=_utc(start),
+                end=_utc(end),
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+            )
         ]
-        params: dict[str, Any] = {
-            "series_id": int(series_id),
-            "start": _utc(start),
-            "end": _utc(end),
-        }
-        if as_of_commit_seq is not None:
-            predicates.append("market_commit_seq <= :commit_seq")
-            params["commit_seq"] = int(as_of_commit_seq)
-        if known_at_lte is not None:
-            predicates.append("known_at <= :known_at")
-            params["known_at"] = _utc(known_at_lte)
-        with db.session() as session:
-            rows = session.execute(
-                text(
-                    f"""
-                    SELECT * FROM (
-                        SELECT versions.*,
-                               row_number() OVER (
-                                   PARTITION BY source_id, provider_product_id, provider_trade_id
-                                   ORDER BY revision DESC, market_commit_seq DESC
-                               ) AS selected_revision
-                        FROM market.market_trade_versions AS versions
-                        WHERE {' AND '.join(predicates)}
-                    ) AS selected
-                    WHERE selected_revision = 1
-                    ORDER BY provider_event_time, provider_sequence_num NULLS LAST,
-                             receive_ordinal, event_ordinal, trade_ordinal,
-                             provider_trade_id
-                    """
-                ),
-                params,
-            ).mappings().all()
-        return [_trade_record(row) for row in rows]
+        return sorted(
+            records,
+            key=lambda record: (
+                record.fact.provider_event_time,
+                record.fact.provider_sequence_num
+                if record.fact.provider_sequence_num is not None
+                else 2**63,
+                record.fact.receive_ordinal,
+                record.fact.event_ordinal,
+                record.fact.trade_ordinal,
+                record.fact.provider_trade_id,
+            ),
+        )
 
     def ingest_aggregates(
         self,
@@ -2304,156 +2309,98 @@ class PostgresMarketStructureRepository:
         facts: Iterable[TradeFlowAggregateFact],
         aggregation_version: str = "market.trade_flow.v1",
     ) -> AggregateIngestionOutcome:
-        inserted: list[TradeFlowAggregateRecord] = []
-        noop_count = 0
-        max_commit_seq = 0
-        ordered = sorted(facts, key=lambda fact: (fact.bucket_start, fact.interval_seconds, fact.known_at))
-        with db.session() as session:
-            for fact in ordered:
-                session.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:identity, 0))"),
-                    {"identity": f"{series_id}:{fact.interval_seconds}:{fact.bucket_start.isoformat()}:{aggregation_version}"},
-                )
-                prior = session.execute(
-                    text(
-                        """
-                        SELECT revision, material_hash
-                        FROM market.trade_flow_aggregate_versions
-                        WHERE series_id = :series_id
-                          AND interval_seconds = :interval
-                          AND bucket_start = :bucket_start
-                          AND aggregation_version = :version
-                        ORDER BY revision DESC LIMIT 1
-                        """
-                    ),
-                    {
-                        "series_id": int(series_id),
-                        "interval": fact.interval_seconds,
-                        "bucket_start": fact.bucket_start,
-                        "version": aggregation_version,
-                    },
-                ).mappings().first()
-                if prior is not None and prior["material_hash"] == fact.material_hash:
-                    noop_count += 1
-                    continue
-                revision = int(prior["revision"] if prior else 0) + 1
-                version_id = _version_id(
-                    "tfav",
-                    {
-                        "series_id": int(series_id),
-                        "interval": fact.interval_seconds,
-                        "bucket_start": fact.bucket_start.isoformat(),
-                        "version": aggregation_version,
-                        "revision": revision,
-                        "material_hash": fact.material_hash,
-                    },
-                )
-                provenance_hash = _stable_hash(
-                    {
-                        "schema_version": "market.trade_flow_provenance.v1",
-                        "input_fingerprint": fact.input_fingerprint,
-                        "coverage_interval_id": fact.coverage_interval_id,
-                        "coverage_revision": fact.coverage_revision,
-                    }
-                )
-                result = session.execute(
-                    text(
-                        """
-                        INSERT INTO market.trade_flow_aggregate_versions (
-                            id, series_id, interval_seconds, bucket_start,
-                            bucket_end, aggregation_version, revision,
-                            trade_count, maker_buy_count, maker_sell_count,
-                            aggressor_buy_count, aggressor_sell_count,
-                            contract_volume, base_volume, quote_notional,
-                            maker_buy_base_volume, maker_sell_base_volume,
-                            aggressor_buy_base_volume, aggressor_sell_base_volume,
-                            cvd_delta, cvd_unit, open_price, high_price, low_price,
-                            close_price, first_trade_id, last_trade_id,
-                            first_receive_ordinal, last_receive_ordinal,
-                            coverage_interval_id, coverage_revision,
-                            aggregate_complete, archive_complete,
-                            canonicalization_complete, late_trade_count, known_at,
-                            input_fingerprint, material_hash, provenance_hash, quality
-                        ) VALUES (
-                            :id, :series_id, :interval, :bucket_start, :bucket_end,
-                            :version, :revision, :trade_count, :maker_buy_count,
-                            :maker_sell_count, :aggressor_buy_count,
-                            :aggressor_sell_count, :contract_volume, :base_volume,
-                            :quote_notional, :maker_buy_base_volume,
-                            :maker_sell_base_volume, :aggressor_buy_base_volume,
-                            :aggressor_sell_base_volume, :cvd_delta, :cvd_unit,
-                            :open_price, :high_price, :low_price, :close_price,
-                            :first_trade_id, :last_trade_id,
-                            :first_receive_ordinal, :last_receive_ordinal,
-                            :coverage_interval_id, :coverage_revision,
-                            :aggregate_complete, :archive_complete,
-                            :canonicalization_complete, :late_trade_count,
-                            :known_at, :input_fingerprint, :material_hash,
-                            :provenance_hash, '{}'::jsonb
-                        ) RETURNING market_commit_seq
-                        """
-                    ),
-                    {
-                        "id": version_id,
-                        "series_id": int(series_id),
-                        "interval": fact.interval_seconds,
-                        "bucket_start": fact.bucket_start,
-                        "bucket_end": fact.bucket_end,
-                        "version": aggregation_version,
-                        "revision": revision,
-                        "trade_count": fact.trade_count,
-                        "maker_buy_count": fact.maker_buy_count,
-                        "maker_sell_count": fact.maker_sell_count,
-                        "aggressor_buy_count": fact.aggressor_buy_count,
-                        "aggressor_sell_count": fact.aggressor_sell_count,
-                        "contract_volume": fact.contract_volume,
-                        "base_volume": fact.base_volume,
-                        "quote_notional": fact.quote_notional,
-                        "maker_buy_base_volume": fact.maker_buy_base_volume,
-                        "maker_sell_base_volume": fact.maker_sell_base_volume,
-                        "aggressor_buy_base_volume": fact.aggressor_buy_base_volume,
-                        "aggressor_sell_base_volume": fact.aggressor_sell_base_volume,
-                        "cvd_delta": fact.cvd_delta,
-                        "cvd_unit": fact.cvd_unit,
-                        "open_price": fact.open_price,
-                        "high_price": fact.high_price,
-                        "low_price": fact.low_price,
-                        "close_price": fact.close_price,
-                        "first_trade_id": fact.first_trade_id,
-                        "last_trade_id": fact.last_trade_id,
-                        "first_receive_ordinal": fact.first_receive_ordinal,
-                        "last_receive_ordinal": fact.last_receive_ordinal,
-                        "coverage_interval_id": fact.coverage_interval_id,
-                        "coverage_revision": fact.coverage_revision,
-                        "aggregate_complete": fact.aggregate_complete,
-                        "archive_complete": fact.archive_complete,
-                        "canonicalization_complete": fact.canonicalization_complete,
-                        "late_trade_count": fact.late_trade_count,
-                        "known_at": fact.known_at,
-                        "input_fingerprint": fact.input_fingerprint,
-                        "material_hash": fact.material_hash,
-                        "provenance_hash": provenance_hash,
-                    },
-                ).one()
-                commit_seq = int(result[0])
-                max_commit_seq = max(max_commit_seq, commit_seq)
-                inserted.append(
-                    TradeFlowAggregateRecord(
-                        version_id=version_id,
-                        series_id=int(series_id),
-                        revision=revision,
-                        market_commit_seq=commit_seq,
-                        aggregation_version=aggregation_version,
-                        provenance_hash=provenance_hash,
-                        quality={},
-                        fact=fact,
-                    )
-                )
+        ordered = sorted(
+            facts,
+            key=lambda fact: (
+                fact.bucket_start,
+                fact.interval_seconds,
+                fact.known_at,
+            ),
+        )
+        if not ordered:
+            return AggregateIngestionOutcome(
+                inserted_count=0,
+                noop_count=0,
+                max_commit_seq=0,
+                records=(),
+            )
+        source_id = self._resolve_derived_source_id(int(series_id))
+        source = market_data_repo.get_source_identity(source_id)
+        canonical = [
+            canonicalize_trade_flow(
+                fact,
+                source=source,
+                aggregation_version=aggregation_version,
+                provenance={"source_kind": "canonical_market_trade_aggregation"},
+            )
+            for fact in ordered
+        ]
+        keys = [fact.observation_key for fact in canonical]
+        if len(keys) != len(set(keys)):
+            raise ValueError(
+                "market_trade_flow_ingest_invalid: duplicate canonical "
+                "observation key"
+            )
+        heads = self._canonical_heads(
+            series_id=int(series_id),
+            observation_keys=keys,
+        )
+        pending = [
+            fact
+            for fact in canonical
+            if (
+                fact.observation_key not in heads
+                or str(heads[fact.observation_key]["material_hash"])
+                != fact.material_hash
+            )
+        ]
+        noop_count = len(canonical) - len(pending)
+        if not pending:
+            return AggregateIngestionOutcome(
+                inserted_count=0,
+                noop_count=noop_count,
+                max_commit_seq=max(
+                    (int(row["market_commit_seq"]) for row in heads.values()),
+                    default=0,
+                ),
+                records=(),
+            )
+
+        outcome = market_data_repo.ingest_facts(
+            series_id=int(series_id),
+            source_id=source_id,
+            facts=pending,
+            request={
+                "operation": "market_trade_flow_materialization",
+                "aggregation_version": str(aggregation_version),
+            },
+            source_revision=str(aggregation_version),
+            allow_corrections=True,
+        )
+        pending_keys = {fact.observation_key for fact in pending}
+        stored = market_data_repo.read_facts(
+            series_id=int(series_id),
+            start=min(fact.observation_time for fact in pending),
+            end=max(fact.observation_time for fact in pending)
+            + timedelta(microseconds=1),
+            as_of_commit_seq=outcome.max_commit_seq,
+        )
+        records = tuple(
+            decode_trade_flow_record(record)
+            for record in stored
+            if record.fact.observation_key in pending_keys
+        )
+        written_count = outcome.inserted_count + outcome.corrected_count
+        if len(records) != written_count:
+            raise RuntimeError(
+                "market_trade_flow_ingest_corrupt: canonical write/read count "
+                f"mismatch expected={written_count} actual={len(records)}"
+            )
         return AggregateIngestionOutcome(
-            inserted_count=len(inserted),
-            noop_count=noop_count,
-            max_commit_seq=max_commit_seq,
-            records=tuple(inserted),
+            inserted_count=written_count,
+            noop_count=noop_count + outcome.noop_count,
+            max_commit_seq=outcome.max_commit_seq,
+            records=records,
         )
 
     def read_aggregates(
@@ -2466,41 +2413,28 @@ class PostgresMarketStructureRepository:
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
     ) -> list[TradeFlowAggregateRecord]:
-        predicates = [
-            "series_id = :series_id", "interval_seconds = :interval",
-            "bucket_start >= :start", "bucket_start < :end",
+        records = [
+            decode_trade_flow_record(record)
+            for record in market_data_repo.read_facts(
+                series_id=int(series_id),
+                start=_utc(start),
+                end=_utc(end),
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+            )
         ]
-        params: dict[str, Any] = {
-            "series_id": int(series_id), "interval": int(interval_seconds),
-            "start": _utc(start), "end": _utc(end),
-        }
-        if as_of_commit_seq is not None:
-            predicates.append("market_commit_seq <= :commit_seq")
-            params["commit_seq"] = int(as_of_commit_seq)
-        if known_at_lte is not None:
-            predicates.append("known_at <= :known_at")
-            params["known_at"] = _utc(known_at_lte)
-        with db.session() as session:
-            rows = session.execute(
-                text(
-                    f"""
-                    SELECT * FROM (
-                        SELECT versions.*,
-                               row_number() OVER (
-                                   PARTITION BY series_id, interval_seconds,
-                                                bucket_start, aggregation_version
-                                   ORDER BY revision DESC, market_commit_seq DESC
-                               ) AS selected_revision
-                        FROM market.trade_flow_aggregate_versions AS versions
-                        WHERE {' AND '.join(predicates)}
-                    ) AS selected
-                    WHERE selected_revision = 1
-                    ORDER BY bucket_start
-                    """
-                ),
-                params,
-            ).mappings().all()
-        return [_aggregate_record(row) for row in rows]
+        invalid = [
+            record.fact.interval_seconds
+            for record in records
+            if record.fact.interval_seconds != int(interval_seconds)
+        ]
+        if invalid:
+            raise RuntimeError(
+                "market_trade_flow_read_corrupt: interval disagrees with series "
+                f"series_id={int(series_id)} requested={int(interval_seconds)} "
+                f"actual={invalid[0]}"
+            )
+        return sorted(records, key=lambda record: record.fact.bucket_start)
 
     def ingest_book_facts(
         self,
@@ -4269,7 +4203,7 @@ class PostgresMarketStructureRepository:
             for fact in flow_rows:
                 _require_material_source(
                     session,
-                    table_name="trade_flow_aggregate_versions",
+                    table_name="fact_versions",
                     series_id=fact.source_trade_flow_series_id,
                     material_hash=fact.aggregate_material_hash,
                 )

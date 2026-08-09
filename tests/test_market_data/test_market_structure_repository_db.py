@@ -475,6 +475,40 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
         end=bucket + timedelta(seconds=1),
     )
     assert stored_aggregate[0].fact.material_hash == aggregate.material_hash
+    with db.session() as session:
+        canonical_counts = dict(
+            session.execute(
+                text(
+                    """
+                    SELECT series_id, count(*)
+                    FROM market.fact_versions
+                    WHERE series_id IN (:trade_series_id, :flow_series_id)
+                    GROUP BY series_id
+                    """
+                ),
+                {
+                    "trade_series_id": trade_series_id,
+                    "flow_series_id": aggregate_series_id,
+                },
+            ).all()
+        )
+        legacy_trade_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.market_trade_versions "
+                "WHERE series_id = :series_id"
+            ),
+            {"series_id": trade_series_id},
+        ).scalar_one()
+        legacy_flow_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.trade_flow_aggregate_versions "
+                "WHERE series_id = :series_id"
+            ),
+            {"series_id": aggregate_series_id},
+        ).scalar_one()
+    assert canonical_counts == {trade_series_id: 1, aggregate_series_id: 1}
+    assert legacy_trade_count == 0
+    assert legacy_flow_count == 0
 
     flow_feature = derive_trade_flow_feature(
         series_id=flow_feature_series_id,

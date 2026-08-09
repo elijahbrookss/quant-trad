@@ -696,16 +696,17 @@ def _build_canonical_provenance_hash(
     )
 
 
-_HISTORICAL_CORE_PAYLOAD_SCHEMAS = frozenset(
+_HISTORICAL_TYPED_PAYLOAD_SCHEMAS = frozenset(
     {
         "candle.ohlcv.v1",
         "derivatives.open_interest.v1",
         "derivatives.funding_rate.v1",
         "market.reference_price.v1",
         "market.reserve_balance.v1",
+        "market.trade.v1",
+        "market.trade_flow.v1",
     }
 )
-
 
 
 def _collect_typed_archive_refs(
@@ -813,8 +814,8 @@ def _collect_typed_archive_refs(
             row = session.execute(
                 text(
                     """
-                    SELECT raw_record_id
-                    FROM market.market_trade_versions
+                    SELECT provenance
+                    FROM market.fact_versions
                     WHERE series_id = :series_id AND material_hash = :material_hash
                     LIMIT 1
                     """
@@ -823,6 +824,13 @@ def _collect_typed_archive_refs(
             ).mappings().first()
             if row is None:
                 raise RuntimeError("market_dataset_provenance_incomplete: trade source missing")
+            trade_evidence = dict(row["provenance"] or {}).get("_qt_trade_evidence")
+            if not isinstance(trade_evidence, Mapping) or not trade_evidence.get(
+                "raw_record_id"
+            ):
+                raise RuntimeError(
+                    "market_dataset_provenance_incomplete: canonical trade raw reference missing"
+                )
             manifests = session.execute(
                 text(
                     """
@@ -835,7 +843,7 @@ def _collect_typed_archive_refs(
                     WHERE mappings.raw_record_id = :raw_record_id
                     """
                 ),
-                {"raw_record_id": str(row["raw_record_id"])},
+                {"raw_record_id": str(trade_evidence["raw_record_id"])},
             ).mappings().all()
             if not manifests:
                 raise RuntimeError("market_dataset_archive_incomplete: trade raw mapping missing")
@@ -845,25 +853,36 @@ def _collect_typed_archive_refs(
             row = session.execute(
                 text(
                     """
-                    SELECT coverage_interval_id, archive_complete,
-                           canonicalization_complete
-                    FROM market.trade_flow_aggregate_versions
+                    SELECT provenance, quality
+                    FROM market.fact_versions
                     WHERE series_id = :series_id AND material_hash = :material_hash
                     LIMIT 1
                     """
                 ),
                 {"series_id": series_id, "material_hash": material_hash},
             ).mappings().first()
+            flow_evidence = (
+                dict(row["provenance"] or {}).get("_qt_trade_flow_evidence")
+                if row is not None
+                else None
+            )
+            flow_quality = (
+                dict(row["quality"] or {}).get("_qt_trade_flow_quality")
+                if row is not None
+                else None
+            )
             if (
                 row is None
-                or not bool(row["archive_complete"])
-                or not bool(row["canonicalization_complete"])
-                or not row.get("coverage_interval_id")
+                or not isinstance(flow_evidence, Mapping)
+                or not isinstance(flow_quality, Mapping)
+                or not bool(flow_quality.get("archive_complete"))
+                or not bool(flow_quality.get("canonicalization_complete"))
+                or not flow_evidence.get("coverage_interval_id")
             ):
                 raise RuntimeError(
                     "market_dataset_archive_incomplete: trade-flow source is incomplete"
                 )
-            add_coverage(str(row["coverage_interval_id"]))
+            add_coverage(str(flow_evidence["coverage_interval_id"]))
             continue
         if fact_type in {"market.bbo", "market.depth_observation"}:
             table_name = (
@@ -2094,6 +2113,9 @@ class PostgresMarketDataRepository:
     ) -> None:
         if collection_fence is None:
             return
+        fence_kind = str(
+            collection_fence.get("fence_kind") or "collection"
+        ).strip()
         definition_id = str(
             collection_fence.get("definition_id") or ""
         ).strip()
@@ -2110,6 +2132,57 @@ class PostgresMarketDataRepository:
         if not definition_id or not owner_id or not lease_token:
             raise ValueError(
                 "market_collection_fence_invalid: complete ownership is required"
+            )
+        if fence_kind == "stream":
+            try:
+                definition_generation = int(
+                    collection_fence.get("definition_generation")
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    "market_collection_fence_invalid: stream definition "
+                    "generation is required"
+                ) from exc
+            ownership = session.execute(
+                text(
+                    """
+                    SELECT definitions.source_id, definitions.series_id,
+                           definitions.generation AS definition_generation,
+                           leases.owner_id, leases.token_hash,
+                           leases.lease_generation,
+                           leases.expires_at > now() AS lease_current
+                    FROM market.stream_definitions AS definitions
+                    JOIN market.stream_lease_state AS leases
+                      ON leases.definition_id = definitions.id
+                    WHERE definitions.id = :definition_id
+                    FOR UPDATE OF leases
+                    """
+                ),
+                {"definition_id": definition_id},
+            ).mappings().first()
+            expected_token_hash = hashlib.sha256(
+                lease_token.encode("utf-8")
+            ).hexdigest()
+            if (
+                ownership is None
+                or int(ownership["source_id"]) != fenced_source_id
+                or int(ownership["series_id"]) != series_id
+                or int(ownership["definition_generation"])
+                != definition_generation
+                or str(ownership["owner_id"] or "") != owner_id
+                or str(ownership["token_hash"] or "") != expected_token_hash
+                or int(ownership["lease_generation"]) != lease_generation
+                or not bool(ownership["lease_current"])
+            ):
+                raise RuntimeError(
+                    "market_collection_ownership_lost: rejected stale stream "
+                    "fact mutation"
+                )
+            return
+        if fence_kind != "collection":
+            raise ValueError(
+                "market_collection_fence_invalid: unsupported fence_kind="
+                f"{fence_kind}"
             )
         ownership = session.execute(
             text(
@@ -2716,6 +2789,11 @@ class PostgresMarketDataRepository:
                 f"market_data_source_unknown: source_id={int(source_id)}"
             )
         return _canonical_source(row)
+
+    def get_source_identity(self, source_id: int) -> SourceIdentity:
+        """Resolve the canonical provenance identity for an accepted source."""
+
+        return self._get_source_identity(source_id)
 
     @staticmethod
     def _canonical_source_for_run(session, run_id: str) -> tuple[int, SourceIdentity]:
@@ -3893,7 +3971,7 @@ class PostgresMarketDataRepository:
             registered_payload = None
         if (
             registered_payload is not None
-            and contract_version not in _HISTORICAL_CORE_PAYLOAD_SCHEMAS
+            and contract_version not in _HISTORICAL_TYPED_PAYLOAD_SCHEMAS
         ):
             return list(
                 self.read_facts(
@@ -4083,7 +4161,7 @@ class PostgresMarketDataRepository:
                         latest_only=not contract.uses_exact_numeric_storage,
                         include_invalidated=contract.uses_exact_numeric_storage,
                     )
-                    if str(identity["contract_version"]) in _HISTORICAL_CORE_PAYLOAD_SCHEMAS:
+                    if str(identity["contract_version"]) in _HISTORICAL_TYPED_PAYLOAD_SCHEMAS:
                         records = _decode_core_canonical_rows(
                             fact_type, canonical_rows
                         )
@@ -4668,7 +4746,7 @@ class PostgresMarketDataRepository:
                         causal_at_interval_close and fact_type == CANDLE_FACT_TYPE
                     ),
                 )
-                if str(entry.get("contract_version") or "") in _HISTORICAL_CORE_PAYLOAD_SCHEMAS:
+                if str(entry.get("contract_version") or "") in _HISTORICAL_TYPED_PAYLOAD_SCHEMAS:
                     return _decode_core_canonical_rows(fact_type, rows)
                 return [_canonical_row_to_record(row) for row in rows]
             if source_identity_keys:

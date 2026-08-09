@@ -222,7 +222,10 @@ Authority is intentionally split:
   long-term archive authority;
 - acknowledged raw object bytes plus manifest-to-record mappings are
   authoritative archive evidence for what the WebSocket client received;
-- PostgreSQL typed revisions are authoritative for canonical query facts;
+- PostgreSQL `market.fact_versions` revisions are authoritative for migrated
+  canonical query facts; retained typed records are decoded projections, while
+  the remaining unmigrated Level 2/derived tables are temporary source
+  authorities only until their explicit cutovers;
 - book reconstruction code plus version is authoritative for reproducible book
   state, never an in-memory map by itself;
 - normalization specifications are authoritative for feature semantics;
@@ -267,7 +270,9 @@ explicit nulls, and sorted field/level order as specified by a contract version.
 ### Shared Rules
 
 - All source and derived fact versions use `market.fact_commit_seq`.
-- Materially different fact families have typed physical tables.
+- Materially different fact families have strict schema-registered payloads in
+  `market.fact_versions`. Large repeated children may use schema-owned child
+  relations; payload shape alone does not create another top-level fact store.
 - Append-only tables receive immutability triggers. Mutable rows are restricted
   to operator configuration, leases, and disposable projections.
 - `source_id`, `series_id`, `ingestion_run_id`, `raw_record_id`,
@@ -354,7 +359,7 @@ similarity may propose a mapping but cannot publish it automatically.
 
 | Table | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
 |---|---|---|---|---|---|
-| `market.market_trade_versions` | one provider trade revision | PK UUID; natural `(source_id, provider_product_id, provider_trade_id, revision)`; first material hash is idempotency | series/instrument, price, `provider_size`, `provider_size_unit`, maker side, nullable aggressor side + transform version, nullable contract/base quantity and quote notional, provider event/message time, receipt/acceptance/known-at, sequence, receive ordinal, raw record ID, coverage interval ID, provenance/quality | append-only; duplicate identical material no-op; conflicting same ID appends correction/revision evidence or fails per provider proof | hypertable by provider event time; product/time, known-at, trade ID indexes; append-heavy; hot 180d, raw/frozen longer |
+| `market.fact_versions` / `market.trade.v1` | one canonical trade revision | natural `(series_id, observation_key, revision)`; observation key is the provider product/trade identity after canonicalization | atomic price/quantity/currency/side payload; delivery, product-definition, provider clocks/sequence, raw record, coverage, and transformation evidence in typed provenance | append-only; identical trade material is a no-op and divergent material for the same identity fails loud | canonical observation/known-at/source indexes; raw archive references are resolved from canonical provenance; `market.market_trade_versions` is migration input only and receives no runtime writes |
 
 No field is populated by guesswork. Contract quantity, base quantity, and quote
 notional remain null until the exact size unit and applicable product-definition
@@ -380,7 +385,7 @@ revision are known.
 |---|---|---|---|---|---|
 | `market.bbo_feature_versions` | one-second best bid/ask from the last complete valid state in the bucket | natural `(series_id, bucket_start, revision)`; material hash idempotency | bid/ask price/qty, mid, spread absolute/bps, source state/position, validity interval, provider units, effective/known-at, input fingerprint | append-only revisions | hypertable; series/time/known-at; hot 400d, frozen longer |
 | `market.depth_feature_versions` | one-second depth/imbalance observation for one fixed band | natural `(series_id, band_bps, bucket_start, revision)`; material hash idempotency | 5/10/25 bps band, bid/ask quantity/base/notional, bounded imbalance, source BBO/state/position, validity, known-at | append-only revisions | hypertable; series/time/band; hot 400d |
-| `market.trade_flow_aggregate_versions` | causal 1s or 1m trade bucket | natural `(series_id, interval_seconds, bucket_start, aggregation_version, revision)` | counts, maker/aggressor buy/sell quantities, contracts/base/notional, CVD delta/cumulative anchor, OHLC/last, first/last trade source position, coverage interval/revision, coverage opening/closing positions, complete/late/archive flags, known-at | append-only bucket revisions; late trades or archive completion append later-known revision | hypertable; series/interval/time/known-at; hot 400d |
+| `market.fact_versions` / `market.trade_flow.v1` | one atomic causal 1s or 1m trade bucket | natural `(series_id, bucket-start observation key, revision)` | counts, maker/aggressor buy/sell quantities, contracts/base/notional, CVD and OHLC payload; first/last trade, coverage and input fingerprint in provenance; completeness/late/archive state in quality | append-only; same material is a no-op and changed late/archive state appends a revision | canonical observation/known-at/source indexes; frozen archive lineage follows canonical coverage provenance; `market.trade_flow_aggregate_versions` is migration input only and receives no runtime writes |
 | `market.trade_flow_feature_versions` | validated flow/CVD projection from one complete aggregate | natural `(series_id, interval_seconds, bucket_start, revision)` | aggregate material/input hashes, buy/sell base and notional, CVD delta/share, known-at and input fingerprint | append-only; incomplete and zero-denominator aggregates emit no numeric feature | hypertable; series/interval/time; hot 400d |
 | `market.derivative_fact_reconciliations` | comparison evidence between live OI/funding and a historical/public reference | natural `(left_series_id, right_source_id, fact_type, effective_time, reconciliation_version)` | left/right fact refs, unit transform, absolute/relative delta, tolerance, status, compared/known-at, evidence hash | append-only; never overwrites either source | fact/time/status index; indefinite quality evidence |
 | `market.futures_spot_relationship_versions` | paired causal futures/spot observation | natural `(mapping_version_id, effective_time, relationship_contract_version, revision)` | future/spot source fact refs, mids, basis absolute/bps, staleness each side, alignment policy, known-at, quality | append-only revisions | hypertable; mapping/time/known-at; hot 400d |
