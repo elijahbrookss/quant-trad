@@ -39,6 +39,11 @@ code_paths:
 
 Accepted on 2026-08-07.
 
+The exact-numeric acquisition, finality, provenance, and authorization rules
+remain active. Its scalar-only storage decision is scheduled to be superseded
+by proposed [ADR 0063](0063-use-schema-registered-canonical-facts.md) only after
+the generalized Fact hard cutover is fully enforced.
+
 ## Context
 
 Externally published numeric observations do not all fit candle, open-interest,
