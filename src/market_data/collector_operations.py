@@ -6,6 +6,8 @@ from enum import Enum
 
 
 COLLECTOR_OPERATIONAL_SNAPSHOT_VERSION = "market.collector_operational_snapshot.v1"
+COLLECTOR_PROVIDER_SUMMARY_VERSION = "market.collector_provider_summary.v1"
+COLLECTOR_PAGE_VERSION = "market.collector_page.v1"
 COLLECTOR_DETAIL_VERSION = "market.collector_operational_detail.v1"
 COLLECTOR_DIAGNOSTIC_VERSION = "market.collector_diagnostic.v1"
 COLLECTOR_OPERATION_VERSION = "market.collector_operation.v1"
@@ -42,6 +44,26 @@ class CollectorActualState(str, Enum):
     RECOVERING = "RECOVERING"
     FAILED = "FAILED"
     STOPPING = "STOPPING"
+
+
+class CollectorOperationalState(str, Enum):
+    """Operator intent/runtime state, independent of health."""
+
+    DISABLED = "DISABLED"
+    RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
+    PAUSED = "PAUSED"
+    STOPPING = "STOPPING"
+
+
+class CollectorHealthStatus(str, Enum):
+    """Health only has meaning while a collector is expected to run."""
+
+    HEALTHY = "HEALTHY"
+    DELAYED = "DELAYED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class CollectorAction(str, Enum):
@@ -106,9 +128,13 @@ __all__ = [
     "COLLECTOR_GAP_CATALOG_VERSION",
     "COLLECTOR_OPERATION_VERSION",
     "COLLECTOR_OPERATIONAL_SNAPSHOT_VERSION",
+    "COLLECTOR_PROVIDER_SUMMARY_VERSION",
+    "COLLECTOR_PAGE_VERSION",
     "MARKET_DATA_PLANE_OPERATIONAL_VERSION",
     "CollectorAction",
     "CollectorActualState",
+    "CollectorOperationalState",
+    "CollectorHealthStatus",
     "CollectorConfiguredState",
     "CollectorDesiredState",
     "CollectorDiagnosticBoundary",

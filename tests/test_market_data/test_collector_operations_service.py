@@ -83,7 +83,7 @@ class _CollectionRepository:
         ]
 
     def list_recent_attempts(self, *, limit_per_definition):
-        assert limit_per_definition == 5
+        assert 1 <= limit_per_definition <= 5
         return [
             {
                 "id": "attempt-1",
@@ -341,3 +341,61 @@ def test_data_plane_snapshot_reuses_canonical_fleet_metrics():
     assert snapshot["ingestion_rate_per_minute"] == 121
     assert snapshot["active_schema_count"] == 4
     assert snapshot["collector_health"] == {"HEALTHY": 2}
+
+
+def test_provider_summary_is_lightweight_and_health_is_separate_from_state():
+    summary = _service().provider_summary_snapshot()
+
+    assert summary["schema_version"] == "market.collector_provider_summary.v1"
+    assert len(summary["providers"]) == 1
+    provider = summary["providers"][0]
+    assert provider["provider"] == "COINBASE"
+    assert provider["operational_state_counts"] == {"RUNNING": 2}
+    assert provider["health_status"] == "HEALTHY"
+    assert provider["attention_count"] == 0
+    assert provider["accepted_last_minute"] == 121
+    assert "collectors" not in summary
+    assert "workers" not in summary["worker_fleet"]
+
+
+def test_collector_page_is_bounded_searchable_and_contextual():
+    page = _service().collector_page(
+        provider="coinbase", query="open_interest", limit=1
+    )
+
+    assert page["schema_version"] == "market.collector_page.v1"
+    assert page["provider"] == "COINBASE"
+    assert page["total"] == 1
+    assert len(page["collectors"]) == 1
+    collector = page["collectors"][0]
+    assert collector["operational_state"] == "RUNNING"
+    assert collector["health_status"] == "HEALTHY"
+    assert collector["needs_attention"] is False
+    assert collector["capabilities"]["actions"] == [
+        "health_probe",
+        "stop",
+        "pause",
+        "restart",
+    ]
+
+
+def test_stopped_collectors_have_no_health_claim_or_irrelevant_actions():
+    collector = {
+        "configured_state": "enabled",
+        "desired_state": "stopped",
+        "actual_state": "STOPPED",
+        "registration_errors": [],
+        "error": {"active": False},
+    }
+
+    CollectorOperationsService._attach_operator_projection(collector)
+
+    assert collector["operational_state"] == "STOPPED"
+    assert collector["health_status"] == "NOT_APPLICABLE"
+    assert collector["needs_attention"] is False
+    assert CollectorOperationsService._lifecycle_capabilities(
+        configured_state=CollectorConfiguredState.ENABLED,
+        registration_errors=[],
+        desired_state=CollectorDesiredState.STOPPED,
+        active=False,
+    ) == ["health_probe", "start"]

@@ -323,6 +323,78 @@ class MarketStructureRetentionPinRequest(BaseModel):
     reason: str
 
 
+
+@router.get("/operations/collector-providers/snapshot")
+def get_collector_provider_summary() -> dict[str, Any]:
+    return collector_operations_service.provider_summary_snapshot()
+
+
+@router.get("/operations/collector-providers/stream")
+async def stream_collector_provider_summary() -> StreamingResponse:
+    async def event_iterator():
+        event_id = 1
+        snapshot = collector_operations_service.provider_summary_snapshot()
+        fingerprint = _operational_collector_fingerprint(snapshot)
+        yield _format_sse("snapshot", snapshot, event_id=event_id)
+        keepalive_ticks = 0
+        while True:
+            try:
+                await asyncio.sleep(10.0)
+                current = await asyncio.to_thread(
+                    collector_operations_service.provider_summary_snapshot
+                )
+            except asyncio.CancelledError:
+                break
+            current_fingerprint = _operational_collector_fingerprint(current)
+            if current_fingerprint != fingerprint:
+                event_id += 1
+                fingerprint = current_fingerprint
+                yield _format_sse("delta", current, event_id=event_id)
+                keepalive_ticks = 0
+                continue
+            keepalive_ticks += 1
+            if keepalive_ticks >= 3:
+                yield ": keepalive\n\n"
+                keepalive_ticks = 0
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/operations/collector-providers/{provider}/collectors")
+def get_provider_collector_page(
+    provider: str,
+    query: Optional[str] = None,
+    attention_only: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    return collector_operations_service.collector_page(
+        provider=provider,
+        query=query,
+        attention_only=attention_only,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.get("/operations/collector-search")
+def search_operational_collectors(
+    query: Optional[str] = None,
+    attention_only: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    return collector_operations_service.collector_page(
+        query=query,
+        attention_only=attention_only,
+        offset=offset,
+        limit=limit,
+    )
+
 @router.get("/operations/collectors/snapshot")
 def get_operational_collector_snapshot(
     attempt_limit: int = Query(default=5, ge=1, le=100),

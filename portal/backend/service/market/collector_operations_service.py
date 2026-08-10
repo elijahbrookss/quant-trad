@@ -13,9 +13,13 @@ from market_data.collector_operations import (
     COLLECTOR_GAP_CATALOG_VERSION,
     COLLECTOR_OPERATION_VERSION,
     COLLECTOR_OPERATIONAL_SNAPSHOT_VERSION,
+    COLLECTOR_PAGE_VERSION,
+    COLLECTOR_PROVIDER_SUMMARY_VERSION,
     MARKET_DATA_PLANE_OPERATIONAL_VERSION,
     CollectorAction,
     CollectorActualState,
+    CollectorHealthStatus,
+    CollectorOperationalState,
     CollectorConfiguredState,
     CollectorDesiredState,
     CollectorDiagnosticBoundary,
@@ -241,6 +245,72 @@ class CollectorOperationsService:
         return CollectorActualState.HEALTHY
 
     @staticmethod
+    def _operational_state(
+        collector: Mapping[str, Any],
+    ) -> CollectorOperationalState:
+        configured = str(collector.get("configured_state") or "")
+        desired = str(collector.get("desired_state") or "")
+        actual = str(collector.get("actual_state") or "")
+        if configured == CollectorConfiguredState.DISABLED.value:
+            return CollectorOperationalState.DISABLED
+        if actual == CollectorActualState.STOPPING.value:
+            return CollectorOperationalState.STOPPING
+        if desired == CollectorDesiredState.STOPPED.value:
+            return CollectorOperationalState.STOPPED
+        if desired == CollectorDesiredState.PAUSED.value:
+            return CollectorOperationalState.PAUSED
+        return CollectorOperationalState.RUNNING
+
+    @staticmethod
+    def _health_status(
+        collector: Mapping[str, Any],
+        operational_state: CollectorOperationalState,
+    ) -> CollectorHealthStatus:
+        if operational_state in {
+            CollectorOperationalState.DISABLED,
+            CollectorOperationalState.STOPPED,
+            CollectorOperationalState.PAUSED,
+            CollectorOperationalState.STOPPING,
+        }:
+            return CollectorHealthStatus.NOT_APPLICABLE
+        actual = str(collector.get("actual_state") or "")
+        if (
+            collector.get("registration_errors")
+            or actual == CollectorActualState.FAILED.value
+            or bool(dict(collector.get("error") or {}).get("active"))
+        ):
+            return CollectorHealthStatus.FAILED
+        if actual in {
+            CollectorActualState.DEGRADED.value,
+            CollectorActualState.RETRYING.value,
+            CollectorActualState.RECOVERING.value,
+        }:
+            return CollectorHealthStatus.DELAYED
+        if actual == CollectorActualState.HEALTHY.value:
+            return CollectorHealthStatus.HEALTHY
+        return CollectorHealthStatus.UNKNOWN
+
+    @classmethod
+    def _attach_operator_projection(
+        cls, collector: dict[str, Any]
+    ) -> dict[str, Any]:
+        operational_state = cls._operational_state(collector)
+        health_status = cls._health_status(collector, operational_state)
+        attention_reason = None
+        if collector.get("registration_errors"):
+            attention_reason = "registration_invalid"
+        elif operational_state == CollectorOperationalState.RUNNING:
+            if health_status == CollectorHealthStatus.FAILED:
+                attention_reason = "acquisition_failed"
+            elif health_status == CollectorHealthStatus.DELAYED:
+                attention_reason = "acquisition_delayed"
+        collector["operational_state"] = operational_state.value
+        collector["health_status"] = health_status.value
+        collector["needs_attention"] = attention_reason is not None
+        collector["attention_reason"] = attention_reason
+        return collector
+
+    @staticmethod
     def _lifecycle_capabilities(
         *,
         configured_state: CollectorConfiguredState,
@@ -257,7 +327,12 @@ class CollectorOperationsService:
             return actions
         if configured_state != CollectorConfiguredState.ENABLED:
             return actions
-        actions.extend(["start", "stop", "restart", "pause", "resume"])
+        if desired_state == CollectorDesiredState.STOPPED:
+            actions.append("start")
+        elif desired_state == CollectorDesiredState.PAUSED:
+            actions.extend(["resume", "stop"])
+        else:
+            actions.extend(["stop", "pause", "restart"])
         return actions
 
     @staticmethod
@@ -678,7 +753,13 @@ class CollectorOperationsService:
             for definition in continuous
         ]
         collectors.sort(key=lambda item: (item["provider"], item["collector_id"]))
+        for collector in collectors:
+            self._attach_operator_projection(collector)
         state_counts = Counter(item["actual_state"] for item in collectors)
+        operational_state_counts = Counter(
+            item["operational_state"] for item in collectors
+        )
+        health_counts = Counter(item["health_status"] for item in collectors)
         provider_counts = Counter(item["provider"] for item in collectors)
         return {
             "schema_version": COLLECTOR_OPERATIONAL_SNAPSHOT_VERSION,
@@ -693,6 +774,13 @@ class CollectorOperationsService:
                 "desired_running_count": sum(
                     item["desired_state"] == CollectorDesiredState.RUNNING.value
                     for item in collectors
+                ),
+                "operational_state_counts": dict(
+                    sorted(operational_state_counts.items())
+                ),
+                "health_counts": dict(sorted(health_counts.items())),
+                "attention_count": sum(
+                    bool(item["needs_attention"]) for item in collectors
                 ),
                 "state_counts": dict(sorted(state_counts.items())),
                 "provider_counts": dict(sorted(provider_counts.items())),
@@ -715,6 +803,176 @@ class CollectorOperationsService:
                 "continuous_supervisor_state": supervisor.get("state"),
             },
             "collectors": collectors,
+        }
+
+    @staticmethod
+    def _collector_search_text(collector: Mapping[str, Any]) -> str:
+        values: list[Any] = [
+            collector.get("collector_id"),
+            collector.get("collector_kind"),
+            collector.get("provider"),
+            collector.get("venue"),
+            collector.get("operational_state"),
+            collector.get("health_status"),
+        ]
+        for subject in collector.get("subjects") or []:
+            values.extend(dict(subject).values())
+        for schema in collector.get("fact_schemas") or []:
+            values.extend(
+                [schema.get("fact_type"), schema.get("schema_version")]
+            )
+        return " ".join(str(value or "") for value in values).lower()
+
+    def provider_summary_snapshot(
+        self, *, attempt_limit: int = 1
+    ) -> dict[str, Any]:
+        """Return the light fleet stream contract used by operator surfaces."""
+
+        fleet = self.fleet_snapshot(attempt_limit=attempt_limit)
+        providers: list[dict[str, Any]] = []
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for collector in fleet["collectors"]:
+            grouped.setdefault(collector["provider"], []).append(collector)
+        for provider, collectors in sorted(grouped.items()):
+            operational_counts = Counter(
+                item["operational_state"] for item in collectors
+            )
+            health_counts = Counter(item["health_status"] for item in collectors)
+            running = [
+                item
+                for item in collectors
+                if item["operational_state"] == CollectorOperationalState.RUNNING.value
+            ]
+            running_freshness = [
+                float(item["acquisition"]["freshness_seconds"])
+                for item in running
+                if item["acquisition"].get("freshness_seconds") is not None
+            ]
+            accepted_times = [
+                item["acquisition"].get("last_accepted_fact_at")
+                for item in running
+                if item["acquisition"].get("last_accepted_fact_at")
+            ]
+            attention = [item for item in collectors if item["needs_attention"]]
+            if health_counts[CollectorHealthStatus.FAILED.value]:
+                provider_health = CollectorHealthStatus.FAILED.value
+            elif health_counts[CollectorHealthStatus.DELAYED.value]:
+                provider_health = CollectorHealthStatus.DELAYED.value
+            elif (
+                running
+                and health_counts[CollectorHealthStatus.HEALTHY.value] == len(running)
+            ):
+                provider_health = CollectorHealthStatus.HEALTHY.value
+            elif running:
+                provider_health = CollectorHealthStatus.UNKNOWN.value
+            else:
+                provider_health = CollectorHealthStatus.NOT_APPLICABLE.value
+            schemas = {
+                (schema["fact_type"], schema["schema_version"])
+                for item in collectors
+                for schema in item["fact_schemas"]
+            }
+            providers.append(
+                {
+                    "provider": provider,
+                    "collector_count": len(collectors),
+                    "operational_state_counts": dict(
+                        sorted(operational_counts.items())
+                    ),
+                    "health_counts": dict(sorted(health_counts.items())),
+                    "health_status": provider_health,
+                    "attention_count": len(attention),
+                    "accepted_last_minute": sum(
+                        int(item["throughput"]["accepted_last_minute"])
+                        for item in collectors
+                    ),
+                    "freshness_seconds": (
+                        max(running_freshness) if running_freshness else None
+                    ),
+                    "last_accepted_fact_at": (
+                        max(accepted_times) if accepted_times else None
+                    ),
+                    "fact_schema_count": len(schemas),
+                    "attention_collectors": [
+                        {
+                            "collector_id": item["collector_id"],
+                            "collector_kind": item["collector_kind"],
+                            "display_subject": next(
+                                (
+                                    subject.get("provider_product_id")
+                                    or subject.get("symbol")
+                                    or subject.get("instrument_id")
+                                    for subject in item["subjects"]
+                                ),
+                                item["collector_id"],
+                            ),
+                            "health_status": item["health_status"],
+                            "attention_reason": item["attention_reason"],
+                            "evidence_at": (
+                                item["acquisition"].get("last_attempt_at")
+                                or item["acquisition"].get("last_accepted_fact_at")
+                                or item["worker"].get("heartbeat_at")
+                            ),
+                        }
+                        for item in attention[:5]
+                    ],
+                }
+            )
+        schemas = {
+            (schema["fact_type"], schema["schema_version"])
+            for collector in fleet["collectors"]
+            for schema in collector["fact_schemas"]
+        }
+        return {
+            "schema_version": COLLECTOR_PROVIDER_SUMMARY_VERSION,
+            "observed_at": fleet["observed_at"],
+            "fleet": {
+                **fleet["fleet"],
+                "active_schema_count": len(schemas),
+            },
+            "worker_fleet": {
+                key: value
+                for key, value in fleet["worker_fleet"].items()
+                if key != "workers"
+            },
+            "providers": providers,
+        }
+
+    def collector_page(
+        self,
+        *,
+        provider: str | None = None,
+        query: str | None = None,
+        attention_only: bool = False,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return one bounded page; detail telemetry remains lazy."""
+
+        fleet = self.fleet_snapshot(attempt_limit=1)
+        provider_key = str(provider or "").strip().upper()
+        needle = str(query or "").strip().lower()
+        rows = [
+            item
+            for item in fleet["collectors"]
+            if (not provider_key or item["provider"] == provider_key)
+            and (not attention_only or item["needs_attention"])
+            and (not needle or needle in self._collector_search_text(item))
+        ]
+        bounded_offset = max(0, int(offset))
+        bounded_limit = max(1, min(int(limit), 100))
+        return {
+            "schema_version": COLLECTOR_PAGE_VERSION,
+            "observed_at": fleet["observed_at"],
+            "provider": provider_key or None,
+            "query": needle or None,
+            "attention_only": bool(attention_only),
+            "offset": bounded_offset,
+            "limit": bounded_limit,
+            "total": len(rows),
+            "collectors": rows[
+                bounded_offset : bounded_offset + bounded_limit
+            ],
         }
 
     def _find_collector(
