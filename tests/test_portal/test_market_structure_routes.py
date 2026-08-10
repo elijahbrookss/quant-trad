@@ -42,6 +42,79 @@ def test_collector_snapshot_route_is_bounded_and_observed(monkeypatch) -> None:
     assert response.json()["worker_health"]["status"] == "alive"
 
 
+def test_canonical_collector_fleet_route_projects_both_implementations(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_snapshot(*, attempt_limit: int):
+        observed["attempt_limit"] = attempt_limit
+        return {
+            "schema_version": "market.collector_operational_snapshot.v1",
+            "observed_at": "2026-08-10T12:00:00+00:00",
+            "fleet": {"collector_count": 2},
+            "worker_fleet": {"alive_count": 1},
+            "collectors": [
+                {"collector_kind": "scheduled_fact", "collector_id": "poll-1"},
+                {
+                    "collector_kind": "continuous_stream",
+                    "collector_id": "stream-1",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(
+        controller.collector_operations_service,
+        "fleet_snapshot",
+        fake_snapshot,
+    )
+    response = _client().get(
+        "/api/market-data/operations/collectors/snapshot",
+        params={"attempt_limit": 9},
+    )
+
+    assert response.status_code == 200
+    assert observed["attempt_limit"] == 9
+    assert response.json()["fleet"]["collector_count"] == 2
+
+
+def test_canonical_collector_action_forwards_audited_operator_context(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_execute(**kwargs):
+        observed.update(kwargs)
+        return {
+            "schema_version": "market.collector_operation.v1",
+            "mutated": True,
+            "operation": {"status": "succeeded"},
+        }
+
+    monkeypatch.setattr(
+        controller.collector_operations_service,
+        "execute_action",
+        fake_execute,
+    )
+    response = _client().post(
+        "/api/market-data/operations/collectors/continuous_stream/stream-1/actions/restart",
+        json={
+            "request_id": "operator-request-1",
+            "actor_id": "frontend-v2:local-operator",
+            "requested_at": "2026-08-10T12:00:00Z",
+            "confirmation": "continuous_stream:stream-1:restart",
+            "context": {"surface": "collector-console"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert observed["collector_kind"] == "continuous_stream"
+    assert observed["collector_id"] == "stream-1"
+    assert observed["action"] == "restart"
+    assert observed["actor_id"] == "frontend-v2:local-operator"
+    assert observed["context"] == {"surface": "collector-console"}
+
+
 def test_collector_fact_history_route_clamps_window_and_limit(monkeypatch) -> None:
     observed = {}
 

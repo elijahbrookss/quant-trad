@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.settings import get_settings
 from data_providers.numeric_facts import NumericAcquisitionBudget
@@ -27,6 +27,9 @@ from ..service.market.normalization_service import market_normalization_service
 from market_data.requirements import UnavailableMarketData
 
 from ..service.market.collector_service import market_data_collector
+from ..service.market.collector_operations_service import (
+    collector_operations_service,
+)
 from ..service.market.market_storage_lifecycle import market_storage_lifecycle_service
 from ..service.market.market_structure_service import market_structure_service
 from ..service.market.numeric_fact_acquisition import (
@@ -38,6 +41,9 @@ from ..service.storage.repos.market_lifecycle import (
     market_storage_lifecycle_repository,
 )
 from ..service.storage.repos.market_structure import market_structure_repository
+from ..service.storage.repos.collector_operations import (
+    CollectorOperationRequestConflict,
+)
 
 
 router = APIRouter()
@@ -61,6 +67,24 @@ def _collector_fingerprint(snapshot: dict[str, Any]) -> str:
         _collector_material(snapshot), sort_keys=True, separators=(",", ":"), default=str
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _operational_collector_fingerprint(snapshot: dict[str, Any]) -> str:
+    material = {
+        key: value for key, value in snapshot.items() if key != "observed_at"
+    }
+    payload = json.dumps(
+        material, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class CollectorOperationRequest(BaseModel):
+    request_id: str
+    actor_id: str
+    requested_at: datetime
+    confirmation: Optional[str] = None
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 _market_structure_component_errors: dict[str, str] = {}
@@ -486,6 +510,160 @@ def set_collector_enabled(
         "schema_version": "market_collection_definition_response.v1",
         "definition": definition,
     }
+
+
+@router.get("/operations/collectors/snapshot")
+def get_operational_collector_snapshot(
+    attempt_limit: int = Query(default=5, ge=1, le=100),
+) -> dict[str, Any]:
+    return collector_operations_service.fleet_snapshot(
+        attempt_limit=attempt_limit
+    )
+
+
+@router.get("/operations/collectors/stream")
+async def stream_operational_collectors(
+    attempt_limit: int = Query(default=5, ge=1, le=100),
+) -> StreamingResponse:
+    async def event_iterator():
+        event_id = 1
+        snapshot = collector_operations_service.fleet_snapshot(
+            attempt_limit=attempt_limit
+        )
+        fingerprint = _operational_collector_fingerprint(snapshot)
+        yield _format_sse("snapshot", snapshot, event_id=event_id)
+        keepalive_ticks = 0
+        while True:
+            try:
+                await asyncio.sleep(2.0)
+                current = await asyncio.to_thread(
+                    collector_operations_service.fleet_snapshot,
+                    attempt_limit=attempt_limit,
+                )
+            except asyncio.CancelledError:
+                break
+            current_fingerprint = _operational_collector_fingerprint(current)
+            if current_fingerprint != fingerprint:
+                event_id += 1
+                fingerprint = current_fingerprint
+                yield _format_sse("delta", current, event_id=event_id)
+                keepalive_ticks = 0
+                continue
+            keepalive_ticks += 1
+            if keepalive_ticks >= 8:
+                yield ": keepalive\n\n"
+                keepalive_ticks = 0
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/operations/collectors/{collector_kind}/{collector_id}")
+def get_operational_collector_detail(
+    collector_kind: str,
+    collector_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return collector_operations_service.detail(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/operations/collectors/{collector_kind}/{collector_id}/diagnostics")
+def diagnose_operational_collector(
+    collector_kind: str,
+    collector_id: str,
+) -> dict[str, Any]:
+    try:
+        return collector_operations_service.diagnose(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/operations/collectors/{collector_kind}/{collector_id}/events")
+def get_operational_collector_events(
+    collector_kind: str,
+    collector_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return collector_operations_service.event_catalog(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/operations/collectors/{collector_kind}/{collector_id}/gaps")
+def get_operational_collector_gaps(
+    collector_kind: str,
+    collector_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return collector_operations_service.gap_catalog(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/operations/collectors/{collector_kind}/{collector_id}/actions/{action}"
+)
+def execute_operational_collector_action(
+    collector_kind: str,
+    collector_id: str,
+    action: str,
+    req: CollectorOperationRequest,
+) -> dict[str, Any]:
+    try:
+        result = collector_operations_service.execute_action(
+            request_id=req.request_id,
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            action=action,
+            requested_at=req.requested_at,
+            actor_id=req.actor_id,
+            confirmation=req.confirmation,
+            context=req.context,
+        )
+    except CollectorOperationRequestConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = (
+            409
+            if "confirmation_required" in detail
+            or "request_conflict" in detail
+            else 404
+            if "collector_unknown" in detail
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    if result.get("operation", {}).get("status") == "failed":
+        raise HTTPException(status_code=409, detail=result)
+    return result
+
+
+@router.get("/operations/data-plane")
+def get_market_data_plane_operational_snapshot() -> dict[str, Any]:
+    return collector_operations_service.data_plane_snapshot()
 
 
 @router.get("/collectors/{definition_id}/facts")
