@@ -656,9 +656,78 @@ class CanonicalFactRecord:
         return self.fact.provenance
 
 
+def build_canonical_fact_series_material_hash(
+    *,
+    series_identity: Mapping[str, Any],
+    records: Sequence[CanonicalFactRecord],
+) -> str:
+    """Hash exact canonical Fact revisions independently of storage watermarks."""
+
+    rows = sorted(
+        records,
+        key=lambda record: (
+            record.fact.observation_time,
+            record.fact.observation_key,
+            record.revision,
+        ),
+    )
+    if not rows:
+        raise ValueError("canonical_fact_series_material_hash_invalid: records required")
+    return _hash(
+        {
+            "schema_version": "market.canonical_fact_series_material.v1",
+            "series": dict(series_identity),
+            "rows": [
+                {
+                    "observation_time": _time(record.fact.observation_time),
+                    "observation_key": record.fact.observation_key,
+                    "revision": record.revision,
+                    "payload_schema_id": record.fact.payload_schema_id,
+                    "payload_contract_hash": record.fact.payload_contract_hash,
+                    "row_hash": record.row_hash,
+                }
+                for record in rows
+            ],
+        }
+    )
+
+
+def build_canonical_fact_provenance_hash(
+    records: Sequence[CanonicalFactRecord],
+) -> str:
+    """Hash the immutable acquisition lineage of canonical Fact revisions."""
+
+    rows = sorted(
+        records,
+        key=lambda record: (
+            record.fact.observation_time,
+            record.fact.observation_key,
+            record.revision,
+        ),
+    )
+    if not rows:
+        raise ValueError("canonical_fact_provenance_hash_invalid: records required")
+    return _hash(
+        {
+            "schema_version": "market.canonical_fact_provenance.v1",
+            "records": [
+                {
+                    "fact_version_id": record.fact_version_id,
+                    "source_identity_key": record.source_identity_key,
+                    "ingestion_run_id": record.ingestion_run_id,
+                    "provenance_hash": record.fact.provenance_hash,
+                }
+                for record in rows
+            ],
+        }
+    )
+
+
 __all__ = [
     "CanonicalFact",
     "CanonicalFactRecord",
     "FactState",
+    "build_canonical_fact_provenance_hash",
+    "build_canonical_fact_series_material_hash",
     "build_fact_version_id",
 ]

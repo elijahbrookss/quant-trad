@@ -16,6 +16,8 @@ from typing import Any, Optional
 from market_data.canonical import (
     CanonicalFact,
     CanonicalFactRecord,
+    build_canonical_fact_provenance_hash,
+    build_canonical_fact_series_material_hash,
     build_fact_version_id,
 )
 from market_data.contracts import (
@@ -451,30 +453,9 @@ def _build_material_hash(
     records: Sequence[Any],
 ) -> str:
     if records and all(isinstance(record, CanonicalFactRecord) for record in records):
-        canonical_rows = sorted(
-            records,
-            key=lambda record: (
-                record.fact.observation_time,
-                record.fact.observation_key,
-                record.revision,
-            ),
-        )
-        return _stable_hash(
-            {
-                "schema_version": "market.canonical_fact_series_material.v1",
-                "series": dict(series_identity),
-                "rows": [
-                    {
-                        "observation_time": _iso(record.fact.observation_time),
-                        "observation_key": record.fact.observation_key,
-                        "revision": record.revision,
-                        "payload_schema_id": record.fact.payload_schema_id,
-                        "payload_contract_hash": record.fact.payload_contract_hash,
-                        "row_hash": record.row_hash,
-                    }
-                    for record in canonical_rows
-                ],
-            }
+        return build_canonical_fact_series_material_hash(
+            series_identity=series_identity,
+            records=records,
         )
     if fact_type == CANDLE_FACT_TYPE:
         return build_candle_material_hash(
@@ -515,33 +496,6 @@ def _build_material_hash(
         )
     raise RuntimeError(
         f"market_dataset_unsupported_fact: fact_type={fact_type}"
-    )
-
-
-def _build_canonical_provenance_hash(
-    records: Sequence[CanonicalFactRecord],
-) -> str:
-    rows = sorted(
-        records,
-        key=lambda record: (
-            record.fact.observation_time,
-            record.fact.observation_key,
-            record.revision,
-        ),
-    )
-    return _stable_hash(
-        {
-            "schema_version": "market.canonical_fact_provenance.v1",
-            "records": [
-                {
-                    "fact_version_id": record.fact_version_id,
-                    "source_identity_key": record.source_identity_key,
-                    "ingestion_run_id": record.ingestion_run_id,
-                    "provenance_hash": record.fact.provenance_hash,
-                }
-                for record in rows
-            ],
-        }
     )
 
 
@@ -3335,7 +3289,7 @@ class PostgresMarketDataRepository:
                             records=records,
                         ),
                         "provenance_hash": (
-                            _build_canonical_provenance_hash(records)
+                            build_canonical_fact_provenance_hash(records)
                             if records
                             and all(
                                 isinstance(record, CanonicalFactRecord)
@@ -3672,17 +3626,13 @@ class PostgresMarketDataRepository:
                 if str(entry.get("contract_version") or "") in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS:
                     return _decode_core_canonical_rows(fact_type, rows)
                 return [_canonical_row_to_record(row) for row in rows]
-            if source_identity_keys:
-                raise ValueError(
-                    "market_dataset_source_binding_unsupported: exact source filtering "
-                    f"is not implemented for fact_type={entry['fact_type']}"
-                )
             return self.read_series_records(
                 series_id=int(series_id),
                 start=requested.start,
                 end=requested.end,
                 as_of_commit_seq=int(entry["max_commit_seq"]),
                 known_at_lte=known_at_lte,
+                source_identity_keys=source_identity_keys,
             )
 
 

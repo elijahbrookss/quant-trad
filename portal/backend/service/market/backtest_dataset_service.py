@@ -28,6 +28,11 @@ from market_data.backtest import (
     normalize_backtest_execution_instruments,
     resolve_backtest_warmup_bars,
 )
+from market_data.canonical import (
+    CanonicalFactRecord,
+    build_canonical_fact_provenance_hash,
+    build_canonical_fact_series_material_hash,
+)
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     CANDLE_FACT_VERSION,
@@ -1120,7 +1125,14 @@ def validate_frozen_dataset_series(
     dimensions = dict(entry.get("dimensions") or {})
     if dimensions:
         series_identity["dimensions"] = dimensions
-    if fact_type == CANDLE_FACT_TYPE:
+    if records and all(
+        isinstance(record, CanonicalFactRecord) for record in records
+    ):
+        material_hash = build_canonical_fact_series_material_hash(
+            series_identity=series_identity,
+            records=records,
+        )
+    elif fact_type == CANDLE_FACT_TYPE:
         material_hash = build_candle_material_hash(
             series_identity=series_identity,
             records=records,
@@ -1155,7 +1167,12 @@ def validate_frozen_dataset_series(
             series_identity=series_identity,
             records=records,
         )
-    provenance_hash = build_provenance_hash(records)
+    provenance_hash = (
+        build_canonical_fact_provenance_hash(records)
+        if records
+        and all(isinstance(record, CanonicalFactRecord) for record in records)
+        else build_provenance_hash(records)
+    )
     quality_hash = build_quality_hash(quality)
     disagreements = {
         "material_hash": (material_hash, str(entry["material_hash"])),
