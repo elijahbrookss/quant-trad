@@ -25,14 +25,15 @@ collectors.
 | --- | --- | --- | --- | --- |
 | Coinbase scheduled open interest | Code-recognized `scheduled_fact` definitions | `derivatives.open_interest.v1` | Latest-state polling; durable attempts and missed-schedule gaps; no arbitrary provider history | Three production definitions healthy |
 | Coinbase scheduled funding | Code-recognized `scheduled_fact` definitions | `derivatives.funding_rate.v1` | Latest-state polling; durable attempts and missed-schedule gaps; no arbitrary provider history | Three production definitions healthy |
-| Chainlink MVR reserve state | Reviewed structured scheduled adapter/manifest | `asset.reserve_state.v1` | Current/latest report with forward accumulation; no pre-collector history claim | Adapter implemented; no definition installed in the live fleet |
+| Chainlink MVR reserve state | Reviewed structured scheduled adapter/manifest | `asset.reserve_state.v1` | Current/latest report with forward accumulation; no pre-collector history claim | One production definition installed, running, and healthy |
 | Coinbase continuous trades | `coinbase.market_structure_trades.v1` | `market.trade.v1`, `market.trade_flow.v1`, `market.trade_flow_feature.v1` | Forward collection plus fenced, idempotent spool/archive recovery | Three production definitions configured and intentionally stopped |
 | Coinbase Level 2 | Not admitted as an indefinite collector | Bounded L2 capture/reconstruction contracts | Explicit bounded capture/replay only | Disabled durable definitions are visible but expose no start action |
 
-After the full test run, the live projection contained 18 code-owned
-collectors: six `HEALTHY`, three `STOPPED`, and nine `DISABLED`. One worker was
-current, desired-running count was six, accepted throughput was six Facts per
-minute, and no registered collector was failed.
+After Chainlink activation, the live projection contained 19 code-owned
+collectors: seven `HEALTHY`, three `STOPPED`, and nine `DISABLED`. One worker
+was current, desired-running count was seven, and no registered collector was
+failed. Intentionally disabled Level 2 definitions retain registration
+diagnostics without being counted as operator attention.
 
 The database also contains 45 historical/test definitions that the deployed
 code does not admit. Seventeen are referenced by frozen Dataset archive
@@ -101,6 +102,26 @@ A restart without confirmation, request ID
 `campaign-rejected-restart-20260810-1`, returned HTTP 409 and appended a failed
 operation event. Prior and resulting generation remained 1. This proves failed
 preconditions are auditable without mutating collector state.
+
+### Chainlink structured acquisition
+
+The checked-in nxtAssets reserve definition
+`mcd_4a39a2f2dc042d7443c283510f77e04c` was installed enabled and restarted
+through the canonical audited command path after the Chainlink RPC endpoint
+was configured.
+
+- the versioned manifest keeps code-owned instrument provisioning separate
+  from the exact provider runtime binding;
+- the worker acquired and decoded the confirmed Arbitrum MVR bundle;
+- one `asset.reserve_state.v1` Fact was accepted with observation time
+  `2026-08-10T19:00:00Z` and platform `known_at`
+  `2026-08-10T19:32:35.856420Z`;
+- the atomic payload retained report identity, BTC reserve quantity, unit,
+  quality, response hash, confirmed block, manifest hash, and source path;
+- the collector returned to `RUNNING` / `HEALTHY`, cleared its active error,
+  reset consecutive failures to zero, and scheduled its next hourly poll;
+- earlier endpoint/configuration failures remain as durable gap and attempt
+  evidence rather than being rewritten as successful history.
 
 ### Worker/backend restart
 
@@ -180,8 +201,9 @@ rewrite unrelated frontend debt.
   synthesize them.
 - Current Coinbase OI/funding and Chainlink reserve adapters cannot reconstruct
   arbitrary pre-collector history.
-- No production Chainlink structured definition is installed in the live
-  catalog, so the live fleet currently groups only Coinbase.
+- The public Arbitrum RPC bootstrap is suitable for local low-volume operation
+  but has no availability, latency, or rate-limit guarantee; deployments should
+  configure a reviewed endpoint appropriate to their operating requirements.
 - Production continuous trade definitions remain intentionally stopped and are
   not production-admitted by this campaign.
 - Level 2 remains bounded capture/replay until a code-reviewed indefinite
