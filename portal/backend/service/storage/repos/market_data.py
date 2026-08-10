@@ -696,7 +696,7 @@ def _build_canonical_provenance_hash(
     )
 
 
-_HISTORICAL_TYPED_PAYLOAD_SCHEMAS = frozenset(
+_TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
     {
         "candle.ohlcv.v1",
         "derivatives.open_interest.v1",
@@ -789,6 +789,41 @@ def _collect_typed_archive_refs(
                 "market_dataset_archive_incomplete: coverage interval has no acknowledged archive"
             )
         add_manifest_rows(rows)
+
+    def canonical_evidence(
+        *,
+        series_id: int,
+        material_hash: str,
+        evidence_key: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        row = session.execute(
+            text(
+                "SELECT provenance -> :evidence_key AS evidence, payload "
+                "FROM market.fact_versions "
+                "WHERE series_id = :series_id "
+                "  AND provenance -> :evidence_key "
+                "      ->> 'legacy_material_hash' = :material_hash "
+                "ORDER BY market_commit_seq DESC "
+                "LIMIT 1"
+            ),
+            {
+                "series_id": int(series_id),
+                "evidence_key": str(evidence_key),
+                "material_hash": str(material_hash),
+            },
+        ).mappings().first()
+        if row is None:
+            raise RuntimeError(
+                "market_dataset_provenance_incomplete: canonical derived "
+                f"evidence is missing series_id={series_id}"
+            )
+        evidence = dict(row["evidence"] or {})
+        if not evidence:
+            raise RuntimeError(
+                "market_dataset_provenance_incomplete: canonical derived "
+                f"evidence is malformed series_id={series_id}"
+            )
+        return evidence, dict(row["payload"] or {})
 
     while queue:
         series_id, material_hash = queue.pop()
@@ -894,24 +929,11 @@ def _collect_typed_archive_refs(
                 if fact_type == "market.bbo"
                 else "_qt_depth_evidence"
             )
-            row = session.execute(
-                text(
-                    "SELECT provenance -> :evidence_key AS evidence "
-                    "FROM market.fact_versions "
-                    "WHERE series_id = :series_id "
-                    "  AND provenance -> :evidence_key "
-                    "      ->> 'legacy_material_hash' = :material_hash "
-                    "LIMIT 1"
-                ),
-                {
-                    "series_id": series_id,
-                    "evidence_key": evidence_key,
-                    "material_hash": material_hash,
-                },
-            ).mappings().first()
-            if row is None:
-                raise RuntimeError("market_dataset_provenance_incomplete: book feature missing")
-            evidence = dict(row["evidence"] or {})
+            evidence, _payload = canonical_evidence(
+                series_id=series_id,
+                material_hash=material_hash,
+                evidence_key=evidence_key,
+            )
             if not isinstance(evidence.get("source_position"), Mapping):
                 raise RuntimeError(
                     "market_dataset_provenance_incomplete: book position missing"
@@ -919,66 +941,55 @@ def _collect_typed_archive_refs(
             add_book_position(dict(evidence["source_position"]))
             continue
         if fact_type == "market.trade_flow_feature":
-            row = session.execute(
-                text(
-                    """
-                    SELECT source_trade_flow_series_id, aggregate_material_hash
-                    FROM market.trade_flow_feature_versions
-                    WHERE series_id = :series_id AND material_hash = :material_hash
-                    LIMIT 1
-                    """
-                ),
-                {"series_id": series_id, "material_hash": material_hash},
-            ).mappings().first()
-            if row is None:
-                raise RuntimeError("market_dataset_provenance_incomplete: flow feature missing")
+            evidence, payload = canonical_evidence(
+                series_id=series_id,
+                material_hash=material_hash,
+                evidence_key="_qt_trade_flow_feature_evidence",
+            )
             queue.append(
-                (int(row["source_trade_flow_series_id"]), str(row["aggregate_material_hash"]))
+                (
+                    int(evidence["source_trade_flow_series_id"]),
+                    str(payload["aggregate_material_hash"]),
+                )
             )
             continue
         if fact_type == "market.futures_spot_relationship":
-            row = session.execute(
-                text(
-                    """
-                    SELECT futures_series_id, spot_series_id,
-                           futures_bbo_material_hash, spot_bbo_material_hash
-                    FROM market.futures_spot_relationship_versions
-                    WHERE series_id = :series_id AND material_hash = :material_hash
-                    LIMIT 1
-                    """
-                ),
-                {"series_id": series_id, "material_hash": material_hash},
-            ).mappings().first()
-            if row is None:
-                raise RuntimeError("market_dataset_provenance_incomplete: basis feature missing")
+            evidence, _payload = canonical_evidence(
+                series_id=series_id,
+                material_hash=material_hash,
+                evidence_key="_qt_basis_evidence",
+            )
             queue.extend(
                 (
-                    (int(row["futures_series_id"]), str(row["futures_bbo_material_hash"])),
-                    (int(row["spot_series_id"]), str(row["spot_bbo_material_hash"])),
+                    (
+                        int(evidence["futures_series_id"]),
+                        str(evidence["futures_bbo_material_hash"]),
+                    ),
+                    (
+                        int(evidence["spot_series_id"]),
+                        str(evidence["spot_bbo_material_hash"]),
+                    ),
                 )
             )
             continue
         if fact_type == "market.market_response":
-            row = session.execute(
-                text(
-                    """
-                    SELECT source_flow_feature_series_id,
-                           source_flow_material_hash, source_positions
-                    FROM market.market_response_feature_versions
-                    WHERE series_id = :series_id AND material_hash = :material_hash
-                    LIMIT 1
-                    """
-                ),
-                {"series_id": series_id, "material_hash": material_hash},
-            ).mappings().first()
-            if row is None:
-                raise RuntimeError("market_dataset_provenance_incomplete: response feature missing")
-            queue.append(
-                (int(row["source_flow_feature_series_id"]), str(row["source_flow_material_hash"]))
+            evidence, _payload = canonical_evidence(
+                series_id=series_id,
+                material_hash=material_hash,
+                evidence_key="_qt_response_evidence",
             )
-            positions = dict(row["source_positions"])
-            for name in ("pre_book", "trough_book", "post_book"):
-                add_book_position(dict(positions[name]))
+            queue.append(
+                (
+                    int(evidence["source_flow_feature_series_id"]),
+                    str(evidence["source_flow_material_hash"]),
+                )
+            )
+            for name in (
+                "pre_book_source_position",
+                "trough_book_source_position",
+                "post_book_source_position",
+            ):
+                add_book_position(dict(evidence[name]))
             continue
         if fact_type.startswith("market.normalized."):
             # The required frozen source series owns transitive archive lineage;
@@ -1041,10 +1052,6 @@ class PostgresMarketDataRepository:
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.numeric_fact_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.market_trade_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_aggregate_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_feature_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.futures_spot_relationship_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.derivative_state_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.market_response_feature_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.normalized_feature_versions), 0)
                     )
                     """
@@ -1230,28 +1237,13 @@ class PostgresMarketDataRepository:
                             FROM market.fact_versions
                             WHERE series_id = series.id
                               AND payload_schema_id IN (
-                                  'market.bbo.v1', 'market.depth_band.v1'
+                                  'market.bbo.v1',
+                                  'market.depth_band.v1',
+                                  'market.trade_flow_feature.v1',
+                                  'market.futures_spot_basis.v1',
+                                  'market.derivative_state.v1',
+                                  'market.market_response.v1'
                               )
-                            UNION ALL
-                            SELECT jsonb_build_array(bucket_start, interval_seconds),
-                                   bucket_start, market_commit_seq
-                            FROM market.trade_flow_feature_versions
-                            WHERE series_id = series.id
-                            UNION ALL
-                            SELECT jsonb_build_array(effective_at),
-                                   effective_at, market_commit_seq
-                            FROM market.futures_spot_relationship_versions
-                            WHERE series_id = series.id
-                            UNION ALL
-                            SELECT jsonb_build_array(effective_at),
-                                   effective_at, market_commit_seq
-                            FROM market.derivative_state_versions
-                            WHERE series_id = series.id
-                            UNION ALL
-                            SELECT jsonb_build_array(bucket_start, direction),
-                                   bucket_start, market_commit_seq
-                            FROM market.market_response_feature_versions
-                            WHERE series_id = series.id
                             UNION ALL
                             SELECT jsonb_build_array(effective_at, spec_id),
                                    effective_at, market_commit_seq
@@ -4117,7 +4109,7 @@ class PostgresMarketDataRepository:
             registered_payload = None
         if (
             registered_payload is not None
-            and contract_version not in _HISTORICAL_TYPED_PAYLOAD_SCHEMAS
+            and contract_version not in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS
         ):
             return list(
                 self.read_facts(
@@ -4307,7 +4299,7 @@ class PostgresMarketDataRepository:
                         latest_only=not contract.uses_exact_numeric_storage,
                         include_invalidated=contract.uses_exact_numeric_storage,
                     )
-                    if str(identity["contract_version"]) in _HISTORICAL_TYPED_PAYLOAD_SCHEMAS:
+                    if str(identity["contract_version"]) in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS:
                         records = _decode_core_canonical_rows(
                             fact_type, canonical_rows
                         )
@@ -4892,7 +4884,7 @@ class PostgresMarketDataRepository:
                         causal_at_interval_close and fact_type == CANDLE_FACT_TYPE
                     ),
                 )
-                if str(entry.get("contract_version") or "") in _HISTORICAL_TYPED_PAYLOAD_SCHEMAS:
+                if str(entry.get("contract_version") or "") in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS:
                     return _decode_core_canonical_rows(fact_type, rows)
                 return [_canonical_row_to_record(row) for row in rows]
             if source_identity_keys:

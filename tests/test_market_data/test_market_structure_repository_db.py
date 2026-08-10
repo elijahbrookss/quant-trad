@@ -533,6 +533,24 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
         known_at=flow_feature.known_at + timedelta(microseconds=1),
     )
     assert stored_flow[0].material_hash == flow_feature.material_hash
+    with db.session() as session:
+        canonical_flow_feature_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.fact_versions "
+                "WHERE series_id = :series_id "
+                "  AND payload_schema_id = 'market.trade_flow_feature.v1'"
+            ),
+            {"series_id": flow_feature_series_id},
+        ).scalar_one()
+        legacy_flow_feature_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.trade_flow_feature_versions "
+                "WHERE series_id = :series_id"
+            ),
+            {"series_id": flow_feature_series_id},
+        ).scalar_one()
+    assert canonical_flow_feature_count == 1
+    assert legacy_flow_feature_count == 0
 
     aggressive_spec = NormalizationSpec(
         feature_name=f"aggressive_buy_share_db_{token[:8]}",
