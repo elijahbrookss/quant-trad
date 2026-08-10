@@ -22,20 +22,22 @@ function run(overrides = {}) {
   }
 }
 
-function collectorEntry({ status = 'succeeded', enabled = true, minutesAgo = 1, nextScheduledAt } = {}) {
-  const attemptAt = new Date(NOW - minutesAgo * 60_000).toISOString()
+function collectorEntry({ state = 'HEALTHY', configuredState = 'enabled', active = false, minutesAgo = 1 } = {}) {
+  const evidenceAt = new Date(NOW - minutesAgo * 60_000).toISOString()
   return {
-    definition: {
-      id: 'col-1',
-      provider: 'COINBASE',
-      fact_type: 'derivatives.open_interest',
-      enabled,
-      poll_interval_seconds: 60,
-      next_scheduled_at: nextScheduledAt || new Date(NOW + 60_000).toISOString(),
-      worker_health: { status: 'alive' },
-    },
-    attempts: [{ id: 'a1', status, started_at: attemptAt, finished_at: status === 'running' ? null : attemptAt }],
-    attemptsAvailable: true,
+    collector_id: 'col-1',
+    collector_kind: 'scheduled_fact',
+    provider: 'COINBASE',
+    configured_state: configuredState,
+    desired_state: active ? 'running' : 'stopped',
+    actual_state: state,
+    subjects: [{ instrument_id: 'btc-perp', symbol: 'BTC-PERP' }],
+    fact_schemas: [{ fact_type: 'derivatives.open_interest', schema_version: 'derivatives.open_interest.v1' }],
+    runtime: { active, restart_count: 0 },
+    acquisition: { last_attempt_at: evidenceAt, last_accepted_fact_at: evidenceAt, freshness_seconds: 60 },
+    worker: { alive: true, heartbeat_at: evidenceAt },
+    throughput: { accepted_last_minute: 1 },
+    error: { active: state === 'FAILED', message: state === 'FAILED' ? 'provider failed' : null },
   }
 }
 
@@ -52,10 +54,7 @@ test('attention is severity then evidence recency across run, collector, researc
       run({ run_id: 'failed-old', status: 'failed', ended_at: new Date(NOW - 120_000).toISOString() }),
       run({ run_id: 'degraded', status: 'degraded', started_at: new Date(NOW - 30_000).toISOString() }),
     ],
-    collectors: [{
-      ...collectorEntry({ status: 'failed' }),
-      attempts: [{ id: 'a1', status: 'failed', started_at: new Date(NOW - 90_000).toISOString() }],
-    }],
+    collectors: [collectorEntry({ state: 'FAILED', minutesAgo: 1.5 })],
     researchItems: [{
       id: 'check-1',
       kind: 'research_check',
@@ -78,7 +77,7 @@ test('attention is severity then evidence recency across run, collector, researc
   assert.deepEqual(items.slice(0, 4).map((item) => item.id), [
     'market:bip_btc',
     'research:check-1',
-    'collector:col-1',
+    'collector:scheduled_fact:col-1',
     'run:failed-old',
   ])
 })
@@ -92,7 +91,7 @@ test('attention excludes healthy evidence, disabled schedules, and terminal fail
     ],
     collectors: [
       collectorEntry(),
-      collectorEntry({ enabled: false, status: 'failed' }),
+      collectorEntry({ configuredState: 'disabled', state: 'DISABLED' }),
     ],
     nowEpochMs: NOW,
   })
@@ -112,23 +111,19 @@ test('attention deduplicates repeated canonical evidence identities', () => {
   assert.equal(items[0].id, 'research:check-1')
 })
 
-test('current operations contains run instances, in-flight attempts, and leased sessions—not healthy schedules', () => {
+test('current operations contains active run and collector instances, not inactive registered intent', () => {
   const operations = buildCurrentOperations({
     runs: [
       run({ run_id: 'active-run', status: 'running' }),
       run({ run_id: 'completed-run', status: 'completed' }),
     ],
     collectors: [
-      collectorEntry({ status: 'running' }),
-      collectorEntry({ status: 'succeeded' }),
-    ],
-    streamRows: [
-      { id: 'def:session', leaseCurrent: true, productId: 'BIP-20DEC30-CDE', channels: ['market_trades'], eventLabel: 'Connected', eventType: 'connected', occurredAt: new Date(NOW - 20_000).toISOString() },
-      { id: 'def:old', leaseCurrent: false, productId: 'ETH-USD', channels: ['level2'], eventLabel: 'Disconnected', eventType: 'disconnected' },
+      collectorEntry({ state: 'STARTING', active: true }),
+      collectorEntry({ state: 'STOPPED', active: false }),
     ],
   })
 
-  assert.deepEqual(new Set(operations.map((item) => item.kind)), new Set(['run', 'collector attempt', 'stream session']))
+  assert.deepEqual(new Set(operations.map((item) => item.kind)), new Set(['run', 'collector']))
   assert.equal(operations.some((item) => item.id === 'run:completed-run'), false)
-  assert.equal(operations.filter((item) => item.kind === 'collector attempt').length, 1)
+  assert.equal(operations.filter((item) => item.kind === 'collector').length, 1)
 })

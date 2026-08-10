@@ -3,13 +3,8 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { Copy, MoreHorizontal, RefreshCcw, Search } from 'lucide-react'
 import { listResearchItems } from '../../adapters/research.adapter.js'
 import { useFleetBotsFeed } from '../../features/bots/page/useFleetBotsFeed.js'
-import { buildCollectorCardViewModel } from '../../features/collectors/buildCollectorCardViewModel.js'
+import { CollectorFleetConsole } from '../../features/collectors/CollectorFleetConsole.jsx'
 import { useCollectorsFeed } from '../../features/collectors/useCollectorsFeed.js'
-import {
-  buildMarketPostureRows,
-  buildStreamSessionRows,
-} from '../../features/market-structure/buildMarketPosture.js'
-import { formatMarketStructureComponentError, useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
 import {
   buildRunRows,
   filterAndSortRunRows,
@@ -169,132 +164,6 @@ function CurrentRunCards({ rows, loading }) {
   )
 }
 
-function instrumentLookup(instruments = []) {
-  return new Map(instruments.map((instrument) => [String(instrument.id), instrument]))
-}
-
-function buildCollectorGroups(collectorFeed, nowEpochMs, query) {
-  const instruments = instrumentLookup(collectorFeed.instruments)
-  const groups = new Map()
-  collectorFeed.collectors.forEach((entry) => {
-    const { definition, attempts } = entry
-    const vm = buildCollectorCardViewModel(definition, attempts, { nowEpochMs })
-    const instrument = instruments.get(String(definition.instrument_id)) || null
-    const productId = definition?.config?.provider_product_id
-      || definition?.provider_product_id
-      || instrument?.symbol
-      || 'Instrument unavailable'
-    const provider = String(definition.provider || 'Provider unavailable').toUpperCase()
-    const key = `${provider}:${productId}`
-    if (!groups.has(key)) {
-      groups.set(key, {
-        id: key,
-        provider,
-        productId,
-        canonicalSymbol: instrument?.symbol || null,
-        instrumentId: definition.instrument_id || null,
-        facts: [],
-      })
-    }
-    groups.get(key).facts.push({ ...entry, vm })
-  })
-
-  const needle = query.trim().toLowerCase()
-  return [...groups.values()]
-    .map((group) => {
-      const enabled = group.facts.filter(({ definition }) => definition.enabled)
-      const issues = enabled.filter(({ vm }) => vm.health.status !== 'healthy')
-      const healthy = enabled.length - issues.length
-      return { ...group, enabledCount: enabled.length, healthyCount: healthy, issues }
-    })
-    .filter((group) => !needle || [
-      group.provider,
-      group.productId,
-      group.canonicalSymbol,
-      group.instrumentId,
-      ...group.facts.flatMap(({ definition, vm }) => [definition.fact_type, vm.statusLabel]),
-    ].some((value) => String(value || '').toLowerCase().includes(needle)))
-    .sort((left, right) => left.provider.localeCompare(right.provider) || left.productId.localeCompare(right.productId))
-}
-
-function CollectorsTable({ pageModel, loading, onPageChange, showPagination = true }) {
-  if (loading && !pageModel.total) return <OperatorSkeleton rows={4} label="Loading collector health" />
-  if (!pageModel.total) return <div className="qt2-empty">No collectors match the current filter.</div>
-  return (
-    <>
-      <div className="qt2-collector-summary">
-        <span><strong>{pageModel.total}</strong> provider/instrument groups</span>
-        <span>Healthy requires a live worker heartbeat, current schedule, and fresh delivery.</span>
-      </div>
-      <div className="qt2-table-wrap">
-        <table className="qt2-data-table qt2-collector-table">
-          <thead><tr><th>Instrument</th><th>Provider</th><th>Facts</th><th>Delivery</th><th aria-label="Actions" /></tr></thead>
-          <tbody>
-            {pageModel.rows.map((group) => {
-              const firstIssue = group.issues[0] || group.facts[0]
-              return (
-                <tr key={group.id}>
-                  <td><strong>{group.productId}</strong><small>{group.canonicalSymbol || 'Canonical symbol unavailable'}</small></td>
-                  <td><strong>{group.provider}</strong><small>{group.instrumentId || 'Instrument ID unavailable'}</small></td>
-                  <td><div className="qt2-chip-list">{group.facts.map(({ definition }) => <span key={definition.id}>{definition.fact_type}</span>)}</div></td>
-                  <td>
-                    <StatusBadge value={group.issues.length ? `${group.issues.length} problem${group.issues.length === 1 ? '' : 's'}` : 'On schedule'} tone={group.issues.length ? 'danger' : 'success'} />
-                    <small>{group.healthyCount}/{group.enabledCount} enabled schedules on time</small>
-                  </td>
-                  <td className="qt2-actions-cell">
-                    {firstIssue ? <Link className="qt2-button" to={'/operations/market/' + firstIssue.definition.id} state={{ from: '/operations?tab=market' }}>Inspect</Link> : null}
-                    <details className="qt2-context-menu">
-                      <summary aria-label={`Collector schedules for ${group.productId}`}><MoreHorizontal size={16} /></summary>
-                      <div>
-                        {group.facts.map(({ definition, vm }) => (
-                          <Link key={definition.id} to={'/operations/market/' + definition.id} state={{ from: '/operations?tab=market' }}>
-                            {definition.fact_type}<small>{vm.statusLabel}</small>
-                          </Link>
-                        ))}
-                      </div>
-                    </details>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-      {showPagination ? <Pagination {...pageModel} onChange={onPageChange} /> : null}
-    </>
-  )
-}
-
-function MarketDataTable({ pageModel, loading, streamCount, onPageChange, showPagination = true }) {
-  if (loading && !pageModel.total) return <OperatorSkeleton rows={3} label="Loading market evidence" />
-  if (!pageModel.total) return <div className="qt2-empty">No market-data pairs match the current filter.</div>
-  return (
-    <>
-      <div className="qt2-collector-summary">
-        <span><strong>{pageModel.total}</strong> configured pairs</span>
-        <span>{streamCount} persisted stream-session records are available to deeper forensic tooling.</span>
-      </div>
-      <div className="qt2-table-wrap">
-        <table className="qt2-data-table qt2-market-table">
-          <thead><tr><th>Pair</th><th>Collection</th><th>Coverage / book</th><th>Archive / normalization</th><th>Safety</th></tr></thead>
-          <tbody>
-            {pageModel.rows.map((row) => (
-              <tr key={row.id}>
-                <td><strong>{row.label}</strong><small>{row.products.join(', ') || 'Products unavailable'}</small></td>
-                <td><StatusBadge value={row.collection.label} tone={row.collection.tone} /><small>{row.collection.detail}</small></td>
-                <td><StatusBadge value={row.coverage.label} tone={row.coverage.tone} /><small>{row.book.label} · {row.qualityCount} quality records</small></td>
-                <td><StatusBadge value={row.archive.label} tone={row.archive.tone} /><small>{row.normalization.label}</small></td>
-                <td><StatusBadge value={row.safety.label} tone={row.safety.tone} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {showPagination ? <Pagination {...pageModel} onChange={onPageChange} /> : null}
-    </>
-  )
-}
-
 function ResearchTable({ pageModel, loading, onPageChange }) {
   if (loading && !pageModel.total) return <OperatorSkeleton rows={5} label="Loading research evidence" />
   if (!pageModel.total) return <div className="qt2-empty">No research evidence matches the current filters.</div>
@@ -315,12 +184,6 @@ function ResearchTable({ pageModel, loading, onPageChange }) {
   )
 }
 
-function matchesMarketQuery(row, query) {
-  const needle = query.trim().toLowerCase()
-  return !needle || [row.label, ...row.products, row.collection.label, row.coverage.label, row.safety.label]
-    .some((value) => String(value || '').toLowerCase().includes(needle))
-}
-
 export function FleetRoom() {
   const [params, setParams] = useSearchParams()
   const rawTab = params.get('tab')
@@ -334,7 +197,6 @@ export function FleetRoom() {
   const activeRunsFeed = useActiveRunsFeed({ enabled: tab === 'runs' && runView === 'current' })
   const runInventory = useRunInventory(sortedBots, { enabled: tab === 'runs' && runView === 'history' })
   const collectorFeed = useCollectorsFeed({ enabled: tab === 'market' })
-  const marketFeed = useMarketStructureFeed({ enabled: tab === 'market' })
   const [researchItems, setResearchItems] = useState([])
   const [researchLoading, setResearchLoading] = useState(true)
   const [researchError, setResearchError] = useState(null)
@@ -376,24 +238,7 @@ export function FleetRoom() {
       : buildRunRows(activeRunsFeed.runs, { nowEpochMs }),
     { query, status, runType, sort },
   ), [activeRunsFeed.runs, runInventory.runs, runView, nowEpochMs, query, status, runType, sort])
-  const collectorGroups = useMemo(
-    () => buildCollectorGroups(collectorFeed, nowEpochMs, query),
-    [collectorFeed, nowEpochMs, query],
-  )
   const researchRows = useMemo(() => filterResearchRows(researchItems, { query, status }), [researchItems, query, status])
-  const streamRows = useMemo(() => buildStreamSessionRows({
-    definitions: marketFeed.definitions,
-    sessions: marketFeed.sessions,
-  }), [marketFeed.definitions, marketFeed.sessions])
-  const postureRows = useMemo(() => buildMarketPostureRows({
-    definitions: marketFeed.definitions,
-    sessions: marketFeed.sessions,
-    statusByDefinition: marketFeed.statusByDefinition,
-    normalizationSpecs: marketFeed.normalizationSpecs,
-    normalizationAvailable: !marketFeed.componentErrors.normalization_specs,
-    collectors: collectorFeed.collectors,
-    nowEpochMs,
-  }).filter((row) => matchesMarketQuery(row, query)), [marketFeed.definitions, marketFeed.sessions, marketFeed.statusByDefinition, marketFeed.normalizationSpecs, marketFeed.componentErrors.normalization_specs, collectorFeed.collectors, nowEpochMs, query])
   const statusOptions = useMemo(() => {
     const source = tab === 'research' ? researchItems.map((item) => item.status) : runRows.map((run) => run.status)
     return [...new Set(source.filter(Boolean))].sort()
@@ -401,11 +246,6 @@ export function FleetRoom() {
   const visibleRows = tab === 'research' ? researchRows : []
   const pageModel = paginateRows(visibleRows, page, PAGE_SIZE)
   const runPageModel = paginateRows(runRows, 1, Math.max(PAGE_SIZE, runRows.length))
-  const collectorPageModel = paginateRows(collectorGroups, 1, Math.max(PAGE_SIZE, collectorGroups.length))
-  const marketPageModel = paginateRows(postureRows, 1, Math.max(PAGE_SIZE, postureRows.length))
-  const marketComponentErrors = Object.entries(marketFeed.componentErrors)
-    .map(([component, error]) => ({ component, error: formatMarketStructureComponentError(error) }))
-    .filter((entry) => entry.error)
 
   function selectTab(nextTab) {
     setStatus('all')
@@ -427,7 +267,6 @@ export function FleetRoom() {
       }
     } else if (tab === 'market') {
       collectorFeed.refresh()
-      marketFeed.refresh()
     } else {
       setResearchRevision((value) => value + 1)
     }
@@ -480,19 +319,11 @@ export function FleetRoom() {
         ) : null}
         {tab === 'market' ? (
           <div className="qt2-market-inventory-stack">
-            <section aria-labelledby="scheduled-facts-heading">
-              <div className="qt2-inventory-heading"><div><h2 id="scheduled-facts-heading">Scheduled facts</h2><p>Provider, instrument, worker liveness, schedule, and delivery.</p></div><span>{collectorGroups.length}</span></div>
-              {collectorFeed.error ? <OperatorErrorNotice error={collectorFeed.error} compact /> : null}
-              {collectorFeed.streamError ? <OperatorErrorNotice error={collectorFeed.streamError} compact /> : null}
-              <CollectorsTable pageModel={collectorPageModel} loading={collectorFeed.loading} showPagination={false} />
-            </section>
-            <section aria-labelledby="structure-streams-heading">
-              <div className="qt2-inventory-heading"><div><h2 id="structure-streams-heading">Structure streams</h2><p>Coverage, book validity, archive, normalization, and safety policy.</p></div><span>{postureRows.length}</span></div>
-              {marketFeed.error ? <OperatorErrorNotice error={marketFeed.error} compact /> : null}
-              {marketFeed.streamError ? <OperatorErrorNotice error={marketFeed.streamError} compact /> : null}
-              {marketComponentErrors.map(({ component, error }) => <div className="qt2-component-boundary" data-component={component} key={component}><OperatorErrorNotice error={error} compact /></div>)}
-              <MarketDataTable pageModel={marketPageModel} loading={marketFeed.loading} streamCount={streamRows.length} showPagination={false} />
-            </section>
+            {collectorFeed.error ? <OperatorErrorNotice error={collectorFeed.error} compact /> : null}
+            {collectorFeed.streamError ? <OperatorErrorNotice error={collectorFeed.streamError} compact /> : null}
+            {collectorFeed.loading && !collectorFeed.collectors.length
+              ? <OperatorSkeleton rows={6} label="Loading canonical collector operations" />
+              : <CollectorFleetConsole feed={collectorFeed} query={query} />}
           </div>
         ) : null}
         {tab === 'research' ? (

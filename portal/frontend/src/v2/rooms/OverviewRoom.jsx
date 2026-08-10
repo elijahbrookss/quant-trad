@@ -1,13 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { RefreshCcw } from 'lucide-react'
-import { buildCollectorCardViewModel } from '../../features/collectors/buildCollectorCardViewModel.js'
 import { useCollectorsFeed } from '../../features/collectors/useCollectorsFeed.js'
-import { formatMarketStructureComponentError, useMarketStructureFeed } from '../../features/market-structure/useMarketStructureFeed.js'
-import {
-  buildMarketPostureRows,
-  buildStreamSessionRows,
-} from '../../features/market-structure/buildMarketPosture.js'
 import { useActiveRunsFeed } from '../../features/operations/useActiveRunsFeed.js'
 import {
   ACTIVITY_FILTERS,
@@ -73,70 +67,37 @@ function CurrentOperations({ operations }) {
   )
 }
 
-function marketIssueCount(rows) {
-  return rows.filter((row) => [
-    row.collection,
-    row.coverage,
-    row.book,
-    row.archive,
-    row.normalization,
-    row.safety,
-  ].some((state) => ['danger', 'warning', 'rose', 'amber'].includes(state?.tone)) || Number(row.unavailableStatusCount || 0) > 0).length
-}
-
 export function OverviewRoom() {
   const activeRunsFeed = useActiveRunsFeed()
   const nowEpochMs = Date.now()
   const collectorFeed = useCollectorsFeed()
-  const marketFeed = useMarketStructureFeed()
   const [activityType, setActivityType] = useState('backtests_completed')
   const researchFeed = useOverviewBacktestActivity(activityType)
   const projectedRuns = activeRunsFeed.runs
 
-  const postureRows = useMemo(() => buildMarketPostureRows({
-    definitions: marketFeed.definitions,
-    sessions: marketFeed.sessions,
-    statusByDefinition: marketFeed.statusByDefinition,
-    normalizationSpecs: marketFeed.normalizationSpecs,
-    normalizationAvailable: !marketFeed.componentErrors.normalization_specs,
-    collectors: collectorFeed.collectors,
-    nowEpochMs,
-  }), [marketFeed.definitions, marketFeed.sessions, marketFeed.statusByDefinition, marketFeed.normalizationSpecs, marketFeed.componentErrors.normalization_specs, collectorFeed.collectors, nowEpochMs])
-  const streamRows = useMemo(() => buildStreamSessionRows({
-    definitions: marketFeed.definitions,
-    sessions: marketFeed.sessions,
-  }), [marketFeed.definitions, marketFeed.sessions])
   const attentionItems = useMemo(() => rankAttentionItems({
     runs: projectedRuns,
     collectors: collectorFeed.collectors,
-    postureRows,
     researchItems: researchFeed.researchItems,
     nowEpochMs,
-  }), [projectedRuns, collectorFeed.collectors, postureRows, researchFeed.researchItems, nowEpochMs])
+  }), [projectedRuns, collectorFeed.collectors, researchFeed.researchItems, nowEpochMs])
   const currentOperations = useMemo(() => buildCurrentOperations({
     runs: projectedRuns,
     collectors: collectorFeed.collectors,
-    streamRows,
-  }), [projectedRuns, collectorFeed.collectors, streamRows])
+  }), [projectedRuns, collectorFeed.collectors])
   const collectorSummary = useMemo(() => {
-    const rows = collectorFeed.collectors
-      .map(({ definition, attempts }) => ({
-        definition,
-        vm: buildCollectorCardViewModel(definition, attempts, { nowEpochMs }),
-      }))
-      .filter(({ definition }) => definition?.enabled)
-    const healthy = rows.filter(({ vm }) => vm.health.status === 'healthy').length
-    return { enabled: rows.length, healthy, issues: rows.length - healthy }
-  }, [collectorFeed.collectors, nowEpochMs])
+    const enabled = collectorFeed.collectors.filter((collector) => collector.configured_state === 'enabled')
+    const healthy = enabled.filter((collector) => collector.actual_state === 'HEALTHY').length
+    const issues = enabled.filter((collector) => ['DEGRADED', 'FAILED', 'RETRYING'].includes(collector.actual_state)).length
+    return { enabled: enabled.length, healthy, issues }
+  }, [collectorFeed.collectors])
   const activeRuns = currentOperations.filter((item) => ['run', 'backtest'].includes(item.kind)).length
-  const marketIssues = marketIssueCount(postureRows)
+  const staleStreams = Number(collectorFeed.dataPlane?.stale_stream_count || 0)
   const filter = ACTIVITY_FILTERS.find((item) => item.value === activityType)
   const currentOperationIssues = [
     { component: "Active runs", error: activeRunsFeed.error },
     { component: "Collector schedules", error: collectorFeed.error },
     { component: "Collector live updates", error: collectorFeed.streamError },
-    { component: "Market structure", error: marketFeed.error },
-    { component: "Market live updates", error: marketFeed.streamError },
   ].filter((issue) => issue.error)
   const attentionIssues = [
     ...currentOperationIssues.filter((issue) => !issue.component.endsWith("live updates")),
@@ -144,12 +105,11 @@ export function OverviewRoom() {
   ]
   const researchActivityIssues = researchFeed.errors.filter((issue) => issue.component === "Research activity")
   const topResultIssues = researchFeed.errors.filter((issue) => issue.component === "Top result")
-  const operationsLoading = activeRunsFeed.loading || collectorFeed.loading || marketFeed.loading
+  const operationsLoading = activeRunsFeed.loading || collectorFeed.loading
 
   function refresh() {
     activeRunsFeed.refresh()
     collectorFeed.refresh()
-    marketFeed.refresh()
     researchFeed.refresh()
   }
 
@@ -166,8 +126,8 @@ export function OverviewRoom() {
       <div className="qt2-summary-grid">
         <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? "Within " + ATTENTION_CONTRACT.lookbackHours + " hours" : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} partial={attentionIssues.length > 0} />
         <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run instance' : 'Run instances currently owned'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={activeRunsFeed.loading && !projectedRuns.length} error={activeRunsFeed.error && !projectedRuns.length ? activeRunsFeed.error : null} partial={Boolean(activeRunsFeed.error)} />
-        <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} schedule${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'On-schedule delivery evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.collectors.length} error={collectorFeed.error && !collectorFeed.collectors.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
-        <SummaryCard label="Market pairs" value={postureRows.length || 'None'} detail={marketIssues ? `${marketIssues} pair${marketIssues === 1 ? '' : 's'} need review` : 'No known quality issues'} tone={marketIssues ? 'warning' : 'success'} to="/operations?tab=market" loading={marketFeed.loading && !postureRows.length} error={!postureRows.length ? marketFeed.error || formatMarketStructureComponentError(marketFeed.componentErrors.definitions) : null} partial={Boolean(marketFeed.error || marketFeed.streamError || Object.keys(marketFeed.componentErrors).length)} />
+        <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} collector${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'Canonical lifecycle evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.collectors.length} error={collectorFeed.error && !collectorFeed.collectors.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
+        <SummaryCard label="Market data plane" value={collectorFeed.dataPlane?.active_schema_count ?? 'Unavailable'} detail={staleStreams ? `${staleStreams} stale stream${staleStreams === 1 ? '' : 's'}` : `${collectorFeed.dataPlane?.ingestion_rate_per_minute ?? 0} accepted facts/min`} tone={staleStreams ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.dataPlane} error={collectorFeed.error && !collectorFeed.dataPlane ? collectorFeed.error : null} partial={Boolean(collectorFeed.error)} />
       </div>
 
       <div className="qt2-dashboard-grid">

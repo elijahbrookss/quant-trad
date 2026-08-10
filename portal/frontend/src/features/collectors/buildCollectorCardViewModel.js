@@ -1,91 +1,75 @@
 import { formatRelativeTime } from '../bots/state/botRuntimeStatus.js'
-import { deriveCollectorHealth, COLLECTOR_HEALTH_COPY } from './collectorHealth.js'
 
-const STATUS_TONE = {
-  healthy: 'emerald',
-  failed: 'rose',
-  offline: 'rose',
-  stalled: 'rose',
-  disabled: 'slate',
-  overdue: 'rose',
-  stale: 'amber',
-  unknown: 'slate',
+const STATE_TONE = {
+  HEALTHY: 'emerald',
+  STARTING: 'cyan',
+  RECOVERING: 'cyan',
+  RETRYING: 'amber',
+  DEGRADED: 'amber',
+  FAILED: 'rose',
+  STOPPING: 'amber',
+  STOPPED: 'slate',
+  PAUSED: 'slate',
+  DISABLED: 'slate',
 }
 
-const STATUS_BADGE_LABEL = {
-  healthy: 'On schedule',
-  failed: 'Failed',
-  offline: 'Offline',
-  stalled: 'Stalled',
-  disabled: 'Disabled',
-  overdue: 'Overdue',
-  stale: 'Stale',
-  unknown: 'Unknown',
+const STATE_COPY = {
+  HEALTHY: 'Worker, acquisition, persistence, and freshness evidence are coherent.',
+  STARTING: 'Running is desired; accepted canonical fact evidence has not arrived yet.',
+  RECOVERING: 'A bounded recovery operation is active.',
+  RETRYING: 'The collector is waiting in its canonical retry policy.',
+  DEGRADED: 'The backend detected stale, missing, or failing operational evidence.',
+  FAILED: 'The registered collector cannot currently execute safely.',
+  STOPPING: 'The desired state changed and active ownership is draining.',
+  STOPPED: 'The registered collector is intentionally stopped.',
+  PAUSED: 'The registered collector is intentionally paused.',
+  DISABLED: 'The collector is disabled in code-owned configuration.',
 }
 
-function formatCadence(pollIntervalSeconds) {
-  const seconds = Number(pollIntervalSeconds)
-  if (!Number.isFinite(seconds) || seconds <= 0) return 'unknown cadence'
-  if (seconds < 60) return `every ${seconds}s`
-  if (seconds < 3600) return `every ${Math.round(seconds / 60)}m`
-  return `every ${Math.round(seconds / 3600)}h`
+function subjectLabel(collector) {
+  return (collector?.subjects || [])
+    .map((subject) => subject?.provider_product_id || subject?.symbol || subject?.instrument_id)
+    .filter(Boolean)
+    .join(', ') || 'Subject unavailable'
 }
 
-function statusDetailFor(health, nowEpochMs) {
-  if (health.status === 'unknown') {
-    return health.lastAttemptAt
-      ? `no successful attempt yet · last try ${formatRelativeTime(health.lastAttemptAt, { nowEpochMs }) || 'unknown'}`
-      : 'no recorded attempts yet'
-  }
-  if (health.status === 'disabled') {
-    return health.lastSuccessAt
-      ? `scheduler disabled · last success ${formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || 'unknown'}`
-      : 'scheduler disabled · no successful attempt recorded'
-  }
-  if (health.status === 'failed') return 'latest collection attempt failed'
-  if (health.status === 'offline') return 'worker heartbeat expired · delivery may be stale'
-  if (health.status === 'stalled') return 'active attempt lease expired before completion'
-  if (health.status === 'overdue') {
-    return `past expected poll time · next expected ${formatRelativeTime(health.nextExpectedAt, { nowEpochMs }) || 'unknown'}`
-  }
-  if (health.status === 'stale') {
-    return `last success ${formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || 'unknown'} · connection stale`
-  }
-  return `last success ${formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || 'unknown'} · worker heartbeat current`
+function schemaLabel(collector) {
+  return (collector?.fact_schemas || [])
+    .map((schema) => `${schema.fact_type}@${schema.schema_version}`)
+    .join(', ') || 'Schema unavailable'
 }
 
-/**
- * Maps a collector definition + its recent attempts into the same card-view
- * shape `buildBotCardViewModel` produces (statusLabel/display.tone/metricStats)
- * so it renders through the existing .qt2-fleet-card/TONE_CLASS styling.
- * Never reports 'healthy' on missing timestamps — see deriveCollectorHealth.
- */
-export function buildCollectorCardViewModel(definition, attempts = [], { nowEpochMs = Date.now() } = {}) {
-  const health = deriveCollectorHealth(definition, attempts, nowEpochMs)
-  const id = String(definition?.id || '').trim()
-  const displayName = [definition?.provider, definition?.fact_type].filter(Boolean).join(' · ') || 'Collector'
-  const instrumentLabel = String(definition?.instrument_id || '—')
-  const venueLabel = String(definition?.venue || '—')
-  const cadenceLabel = formatCadence(definition?.poll_interval_seconds)
+/** Render-only mapping. Lifecycle and health are supplied by the backend. */
+export function buildCollectorCardViewModel(collector, { nowEpochMs = Date.now() } = {}) {
+  const state = String(collector?.actual_state || 'UNKNOWN').toUpperCase()
+  const acceptedAt = collector?.acquisition?.last_accepted_fact_at || null
+  const heartbeatAt = collector?.worker?.heartbeat_at || null
+  const freshness = collector?.acquisition?.freshness_seconds
+  const id = String(collector?.collector_id || '')
 
   return {
     id,
-    displayName,
-    instrumentLabel,
-    venueLabel,
-    cadenceLabel,
-    health,
-    statusLabel: STATUS_BADGE_LABEL[health.status] || 'Unknown',
-    statusCopy: COLLECTOR_HEALTH_COPY[health.status],
-    statusDetail: statusDetailFor(health, nowEpochMs),
-    metricStats: [
-      { key: 'last-success', label: 'Last success', value: formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || '—' },
-      { key: 'next-expected', label: 'Next expected', value: formatRelativeTime(health.nextExpectedAt, { nowEpochMs }) || '—' },
-    ],
-    display: {
-      tone: STATUS_TONE[health.status] || 'slate',
-      warningCount: health.status === 'healthy' ? 0 : 1,
-      controls: { canOpenLens: true },
-    },
+    key: `${collector?.collector_kind || 'unknown'}:${id}`,
+    route: `/operations/market/${encodeURIComponent(collector?.collector_kind || '')}/${encodeURIComponent(id)}`,
+    displayName: subjectLabel(collector),
+    providerLabel: collector?.provider || 'Provider unavailable',
+    kindLabel: String(collector?.collector_kind || '').replaceAll('_', ' ') || 'Collector',
+    schemaLabel: schemaLabel(collector),
+    state,
+    stateCopy: STATE_COPY[state] || 'The backend did not report a recognized lifecycle state.',
+    tone: STATE_TONE[state] || 'slate',
+    needsAttention: ['DEGRADED', 'FAILED', 'RETRYING'].includes(state),
+    evidenceAt: collector?.acquisition?.last_attempt_at || acceptedAt || heartbeatAt,
+    freshnessLabel: Number.isFinite(Number(freshness))
+      ? `${Math.round(Number(freshness))}s lag`
+      : 'Lag unavailable',
+    lastAcceptedLabel: formatRelativeTime(acceptedAt, { nowEpochMs }) || 'No accepted fact',
+    heartbeatLabel: collector?.worker?.alive
+      ? formatRelativeTime(heartbeatAt, { nowEpochMs }) || 'Current'
+      : 'Worker unavailable',
+    throughputLabel: `${Number(collector?.throughput?.accepted_last_minute || 0).toLocaleString()}/min`,
   }
 }
+
+export const COLLECTOR_STATE_TONE = STATE_TONE
+export const COLLECTOR_STATE_COPY = STATE_COPY

@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
-import { BrowserRouter, NavLink, Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { Activity, LayoutDashboard, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { ChartStateProvider } from '../contexts/ChartStateContext.jsx'
 import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
@@ -33,11 +33,6 @@ function initialSidebarCollapsed() {
   } catch {
     return false
   }
-}
-
-function LegacyCollectorRedirect() {
-  const { definitionId } = useParams()
-  return <Navigate to={'/operations/market/' + definitionId} replace />
 }
 
 function StatusPill() {
@@ -149,13 +144,11 @@ function AppV2Shell() {
           <Route path="/overview" element={<Suspense fallback={<RoomFallback label="Overview" />}><OverviewRoom /></Suspense>} />
           <Route path="/operations" element={<Suspense fallback={<RoomFallback label="Operations" />}><OperationsRoom /></Suspense>} />
           <Route path="/operations/runs/:runId" element={<Suspense fallback={<RoomFallback label="BotLens" />}><BotLensRoom /></Suspense>} />
-          <Route path="/operations/market/:definitionId" element={<Suspense fallback={<RoomFallback label="market evidence" />}><CollectorLensRoom /></Suspense>} />
-          <Route path="/operations/collectors/:definitionId" element={<LegacyCollectorRedirect />} />
+          <Route path="/operations/market/:collectorKind/:collectorId" element={<Suspense fallback={<RoomFallback label="collector operations" />}><CollectorLensRoom /></Suspense>} />
           <Route path="/operations/research/:itemId" element={<Suspense fallback={<RoomFallback label="research evidence" />}><ResearchEvidenceRoom /></Suspense>} />
 
           <Route path="/fleet" element={<Navigate to="/operations" replace />} />
           <Route path="/fleet/bots/:botId" element={<Navigate to="/operations?tab=definitions" replace />} />
-          <Route path="/fleet/collectors/:definitionId" element={<LegacyCollectorRedirect />} />
           <Route path="/studio/*" element={<Navigate to="/overview" replace />} />
           <Route path="/research/*" element={<Navigate to="/operations?tab=research" replace />} />
           <Route path="/memory/*" element={<Navigate to="/operations?tab=research" replace />} />

@@ -5,15 +5,14 @@ import { openSse } from './realtime.adapter.js'
 const BASE = API_ORIGIN
 const log = createLogger('MarketDataAdapter')
 
-// Deliberately read-only: this adapter wraps GET collector, market-structure,
-// normalization-spec, instrument, and latest-fact projections. Mutation
-// endpoints are intentionally absent; v2 cannot operate collectors or
-// materialize data.
+// Collector reads and mutations are confined to the canonical operational
+// contract. The UI cannot define collectors, register schemas, mutate provider
+// credentials, or invoke unrestricted acquisition.
 
 async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
-    method: 'GET',
     headers: { 'Content-Type': 'application/json' },
+    method: 'GET',
     mode: 'cors',
     ...options,
   })
@@ -47,84 +46,69 @@ function buildQuery(params = {}) {
   return text ? `?${text}` : ''
 }
 
-export async function fetchCollectorSnapshot({ attemptLimit = 5 } = {}) {
-  return request('/api/market-data/collectors/snapshot' + buildQuery({ attempt_limit: attemptLimit }))
+function collectorPath(collectorKind, collectorId, suffix = '') {
+  if (!collectorKind || !collectorId) throw new Error('Collector kind and ID are required')
+  return '/api/market-data/operations/collectors/'
+    + encodeURIComponent(collectorKind)
+    + '/'
+    + encodeURIComponent(collectorId)
+    + suffix
 }
 
-export function openCollectorsStream({ attemptLimit = 5 } = {}) {
+export async function fetchCollectorOperationsSnapshot({ attemptLimit = 5 } = {}) {
+  return request('/api/market-data/operations/collectors/snapshot' + buildQuery({ attempt_limit: attemptLimit }))
+}
+
+export function openCollectorOperationsStream({ attemptLimit = 5 } = {}) {
   return openSse(
-    '/api/market-data/collectors/stream' + buildQuery({ attempt_limit: attemptLimit }),
+    '/api/market-data/operations/collectors/stream' + buildQuery({ attempt_limit: attemptLimit }),
     { withCredentials: false, base: BASE },
   )
 }
 
-export async function listCollectorDefinitions({ definitionId } = {}) {
-  const payload = await request(`/api/market-data/collectors${buildQuery({ definition_id: definitionId })}`)
-  return Array.isArray(payload?.definitions) ? payload.definitions : []
+export async function fetchCollectorOperationsDetail(collectorKind, collectorId, { limit = 100 } = {}) {
+  return request(collectorPath(collectorKind, collectorId) + buildQuery({ limit }))
+}
+
+export async function fetchCollectorDiagnostics(collectorKind, collectorId) {
+  return request(collectorPath(collectorKind, collectorId, '/diagnostics'))
+}
+
+export async function fetchCollectorEvents(collectorKind, collectorId, { limit = 100 } = {}) {
+  return request(collectorPath(collectorKind, collectorId, '/events') + buildQuery({ limit }))
+}
+
+export async function fetchCollectorGaps(collectorKind, collectorId, { limit = 100 } = {}) {
+  return request(collectorPath(collectorKind, collectorId, '/gaps') + buildQuery({ limit }))
+}
+
+export async function fetchMarketDataPlaneSnapshot() {
+  return request('/api/market-data/operations/data-plane')
+}
+
+export async function executeCollectorAction(
+  collectorKind,
+  collectorId,
+  action,
+  { actorId = 'frontend-v2:local-operator', reason = '', confirmation = null } = {},
+) {
+  const requestId = globalThis.crypto?.randomUUID?.()
+    || `frontend-v2-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return request(collectorPath(collectorKind, collectorId, '/actions/' + encodeURIComponent(action)), {
+    method: 'POST',
+    body: JSON.stringify({
+      request_id: requestId,
+      actor_id: actorId,
+      requested_at: new Date().toISOString(),
+      confirmation,
+      context: { surface: 'frontend_v2', reason: String(reason || '').trim() || null },
+    }),
+  })
 }
 
 export async function listInstruments() {
   const payload = await request('/api/instruments/')
   return Array.isArray(payload) ? payload : []
-}
-
-export async function fetchCollectorFactHistory(definitionId, { hours = 24, limit = 240 } = {}) {
-  if (!definitionId) return null
-  return request(
-    "/api/market-data/collectors/" + encodeURIComponent(definitionId) + "/facts" + buildQuery({ hours, limit }),
-  )
-}
-
-export async function fetchCollectorAttempts(definitionId, { limit } = {}) {
-  if (!definitionId) return []
-  const payload = await request(
-    `/api/market-data/collectors/${encodeURIComponent(definitionId)}/attempts${buildQuery({ limit })}`,
-  )
-  return Array.isArray(payload?.attempts) ? payload.attempts : []
-}
-
-export async function fetchMarketStructureSnapshot({ sessionLimit = 250 } = {}) {
-  return request('/api/market-data/market-structure/snapshot' + buildQuery({ session_limit: sessionLimit }))
-}
-
-export function openMarketStructureStream({ sessionLimit = 250 } = {}) {
-  return openSse(
-    '/api/market-data/market-structure/stream' + buildQuery({ session_limit: sessionLimit }),
-    { withCredentials: false, base: BASE },
-  )
-}
-
-export async function listMarketStructureDefinitions({ definitionId } = {}) {
-  const payload = await request(
-    `/api/market-data/market-structure/definitions${buildQuery({
-      definition_id: definitionId,
-    })}`,
-  )
-  return Array.isArray(payload?.definitions) ? payload.definitions : []
-}
-
-export async function listMarketStructureSessions({ definitionId, limit = 100 } = {}) {
-  const payload = await request(
-    `/api/market-data/market-structure/sessions${buildQuery({
-      definition_id: definitionId,
-      limit,
-    })}`,
-  )
-  return Array.isArray(payload?.sessions) ? payload.sessions : []
-}
-
-export async function fetchMarketStructureStatus(definitionId) {
-  if (!definitionId) return null
-  return request(
-    `/api/market-data/market-structure/definitions/${encodeURIComponent(definitionId)}/status`,
-  )
-}
-
-export async function listMarketNormalizationSpecs() {
-  const payload = await request(
-    '/api/market-data/market-structure/normalization/specs',
-  )
-  return Array.isArray(payload?.specs) ? payload.specs : []
 }
 
 // required=false always: the backend's default (required=true) raises a 400
