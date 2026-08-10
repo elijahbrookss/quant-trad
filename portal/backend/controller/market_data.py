@@ -217,6 +217,14 @@ class NumericFactAcquisitionRequest(BaseModel):
     repair: bool = False
 
 
+class StructuredCollectorDefinitionInstallRequest(BaseModel):
+    manifest_path: str
+    binding_id: str
+    enabled: bool = False
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    minimum_spacing_seconds: float = Field(default=1.0, ge=0)
+
+
 @router.post("/numeric-facts/acquire")
 def acquire_numeric_facts(req: NumericFactAcquisitionRequest) -> dict[str, Any]:
     """Run only an explicitly authorized bounded provider acquisition."""
@@ -396,6 +404,39 @@ def search_operational_collectors(
     )
 
 @router.get("/operations/collectors/snapshot")
+
+@router.post("/definitions/install-structured")
+def install_structured_collector_definition(
+    req: StructuredCollectorDefinitionInstallRequest,
+) -> dict[str, Any]:
+    repository_root = Path(__file__).resolve().parents[3]
+    manifest_root = (
+        repository_root / "config" / "market-data" / "structured-facts"
+    ).resolve()
+    candidate = Path(req.manifest_path)
+    manifest_path = (
+        candidate if candidate.is_absolute() else repository_root / candidate
+    ).resolve()
+    if manifest_path.parent != manifest_root:
+        raise HTTPException(
+            status_code=400,
+            detail="collector_definition_install_forbidden: checked-in structured manifest required",
+        )
+    try:
+        definition = market_data_collector.create_structured_fact_definition(
+            manifest_path=str(manifest_path),
+            binding_id=req.binding_id,
+            max_attempts=req.max_attempts,
+            minimum_spacing_seconds=req.minimum_spacing_seconds,
+            enabled=req.enabled,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "schema_version": "market.collector_definition_install.v1",
+        "definition": definition,
+    }
+
 def get_operational_collector_snapshot(
     attempt_limit: int = Query(default=5, ge=1, le=100),
 ) -> dict[str, Any]:

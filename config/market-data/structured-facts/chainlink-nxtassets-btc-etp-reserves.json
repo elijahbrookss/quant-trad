@@ -36,6 +36,18 @@
         "verified_at": "2026-08-09"
       },
       "config": {
+        "canonical_instrument": {
+          "id": "nxtassets-de000nxta018",
+          "symbol": "DE000NXTA018",
+          "datasource": "CHAINLINK",
+          "exchange": "ARBITRUM_MAINNET",
+          "instrument_type": "research_reference",
+          "metadata": {
+            "subject_kind": "exchange_traded_product",
+            "subject_id": "DE000NXTA018",
+            "research_only": true
+          }
+        },
         "chain_id": 42161,
         "network": "arbitrum-mainnet",
         "proxy_address": "0xf5eA763bbFc7968A27b28bc612a8B89fCF9E0069",

@@ -1361,6 +1361,25 @@ def _cmd_data_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_collector_definitions_install_structured(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/definitions/install-structured",
+            payload={
+                "manifest_path": args.manifest_path,
+                "binding_id": args.binding_id,
+                "enabled": bool(args.enabled),
+                "max_attempts": args.max_attempts,
+                "minimum_spacing_seconds": args.minimum_spacing_seconds,
+            },
+        )
+    )
+    return 0
+
+
 def _cmd_data_collectors_fleet(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -3697,6 +3716,27 @@ def build_parser() -> argparse.ArgumentParser:
     data_dataset.add_argument("dataset_id")
     data_dataset.set_defaults(func=_cmd_data_dataset)
 
+    data_collector_definitions = data_sub.add_parser(
+        "collector-definitions",
+        help="Install code-reviewed collector definitions; lifecycle remains separate.",
+    )
+    data_collector_definitions_sub = data_collector_definitions.add_subparsers(
+        dest="data_collector_definitions_command", required=True
+    )
+    install_structured = data_collector_definitions_sub.add_parser(
+        "install-structured",
+        help="Install one binding from a checked-in structured Fact manifest.",
+    )
+    install_structured.add_argument("--manifest-path", required=True)
+    install_structured.add_argument("--binding-id", required=True)
+    install_structured.add_argument("--enabled", action="store_true")
+    install_structured.add_argument("--max-attempts", type=int, default=3)
+    install_structured.add_argument(
+        "--minimum-spacing-seconds", type=float, default=1.0
+    )
+    install_structured.set_defaults(
+        func=_cmd_data_collector_definitions_install_structured
+    )
     data_collectors = data_sub.add_parser(
         "collectors", help="Inspect and safely operate registered collectors."
     )

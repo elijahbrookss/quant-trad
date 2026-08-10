@@ -127,6 +127,73 @@ def find_instrument(datasource: Optional[str], exchange: Optional[str], symbol: 
         return record.to_dict() if record else None
 
 
+def install_code_owned_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Install one reviewed instrument with a stable repository-owned ID."""
+
+    instrument_id = str(meta.get("id") or "").strip()
+    symbol = str(meta.get("symbol") or "").strip().upper()
+    datasource = str(meta.get("datasource") or "").strip()
+    exchange = str(meta.get("exchange") or "").strip()
+    if not all((instrument_id, symbol, datasource, exchange)):
+        raise ValueError("Code-owned instrument identity is incomplete")
+    if not db.available:
+        raise RuntimeError("Instrument persistence is unavailable")
+    try:
+        with db.session() as session:
+            by_id = session.get(InstrumentRecord, instrument_id)
+            by_identity = session.execute(
+                select(InstrumentRecord).where(
+                    InstrumentRecord.symbol == symbol,
+                    InstrumentRecord.datasource == datasource,
+                    InstrumentRecord.exchange == exchange,
+                )
+            ).scalars().first()
+            if (
+                by_id is not None
+                and by_identity is not None
+                and by_id.id != by_identity.id
+            ):
+                raise ValueError(
+                    "Code-owned instrument ID conflicts with canonical identity"
+                )
+            if by_identity is not None and by_identity.id != instrument_id:
+                raise ValueError(
+                    "Code-owned instrument identity already has a different ID"
+                )
+            record = by_id or by_identity
+            if record is None:
+                record = InstrumentRecord(id=instrument_id)
+                session.add(record)
+            elif (
+                record.symbol not in (None, symbol)
+                or record.datasource not in (None, datasource)
+                or record.exchange not in (None, exchange)
+            ):
+                raise ValueError(
+                    "Code-owned instrument ID already represents another identity"
+                )
+            now = _utcnow()
+            record.datasource = datasource
+            record.exchange = exchange
+            record.symbol = symbol
+            record.instrument_type = meta.get("instrument_type")
+            existing_metadata = dict(record.extra_metadata or {})
+            existing_metadata.update(dict(meta.get("metadata") or {}))
+            existing_metadata["definition_ownership"] = "code_owned"
+            record.extra_metadata = existing_metadata
+            record.updated_at = now
+            if record.created_at is None:
+                record.created_at = now
+            return record.to_dict()
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "code_owned_instrument_install_failed | id=%s | error=%s",
+            instrument_id,
+            exc,
+        )
+        raise
+
+
 def upsert_instrument(meta: Dict[str, Any]) -> Dict[str, Any]:
     """Insert or update an instrument record."""
 

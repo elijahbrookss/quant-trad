@@ -244,7 +244,24 @@ class MarketDataCollectorService:
             raise ValueError(
                 "market_collection_definition_invalid: provider spacing is outside poll interval"
             )
-        instrument = instrument_service.get_instrument_record(binding.instrument_id)
+        try:
+            instrument = instrument_service.get_instrument_record(
+                binding.instrument_id
+            )
+        except KeyError:
+            instrument_spec = dict(
+                binding.config.get("canonical_instrument") or {}
+            )
+            if instrument_spec.get("id") != binding.instrument_id:
+                raise ValueError(
+                    "market_collection_definition_invalid: reviewed canonical "
+                    "instrument metadata is required"
+                )
+            instrument = (
+                instrument_service.install_code_owned_research_instrument(
+                    instrument_spec
+                )
+            )
         provider_id = str(instrument.get("datasource") or "").strip().upper()
         venue_id = str(instrument.get("exchange") or "").strip().upper()
         if (
