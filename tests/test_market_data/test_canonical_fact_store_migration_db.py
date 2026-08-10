@@ -19,6 +19,9 @@ pytestmark = pytest.mark.db
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION = _REPO_ROOT / "scripts/db/manual_migration_canonical_fact_store_v1.sql"
+_HARD_CUTOVER = (
+    _REPO_ROOT / "scripts/db/manual_migration_canonical_fact_hard_cutover_v1.sql"
+)
 _NUMERIC_MIGRATION = _REPO_ROOT / "scripts/db/manual_migration_numeric_fact_store_v1.sql"
 _NUMERIC_MIGRATION_TABLES = frozenset(
     {
@@ -40,6 +43,24 @@ _REQUIRED_INDEXES = frozenset(
         "ix_market_fact_exact_rate",
         "ix_market_fact_funding_time",
     }
+)
+_PRE_CUTOVER_TABLES = (
+    "candle_versions",
+    "open_interest_versions",
+    "funding_rate_versions",
+    "market_trade_versions",
+    "trade_flow_aggregate_versions",
+    "l2_snapshot_versions",
+    "l2_snapshot_levels",
+    "l2_mutation_batches",
+    "l2_mutations",
+    "bbo_feature_versions",
+    "depth_feature_versions",
+    "trade_flow_feature_versions",
+    "futures_spot_relationship_versions",
+    "derivative_state_versions",
+    "market_response_feature_versions",
+    "normalized_feature_versions",
 )
 
 
@@ -89,6 +110,16 @@ def _prepare_pre_migration_schema(dsn: str) -> None:
             )
             conn.execute(text("DROP TABLE IF EXISTS market.fact_versions"))
             conn.execute(text("DROP TABLE IF EXISTS market.fact_schemas"))
+            # Runtime metadata deliberately no longer owns the retired tables.
+            # Reconstruct the explicit empty pre-cutover boundary needed to
+            # prove the historical schema migration and destructive cutover.
+            for table_name in _PRE_CUTOVER_TABLES:
+                conn.execute(
+                    text(
+                        f'CREATE TABLE IF NOT EXISTS market."{table_name}" '
+                        '(id varchar PRIMARY KEY)'
+                    )
+                )
     finally:
         engine.dispose()
 
@@ -118,6 +149,10 @@ def _run_sql_migration(dsn: str, migration: Path, label: str) -> None:
 
 def _run_migration(dsn: str) -> None:
     _run_sql_migration(dsn, _MIGRATION, "canonical Fact store")
+
+
+def _run_hard_cutover(dsn: str) -> None:
+    _run_sql_migration(dsn, _HARD_CUTOVER, "canonical Fact hard cutover")
 
 
 def _schema_snapshot(dsn: str) -> dict[str, Any]:
@@ -374,5 +409,24 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
                             "WHERE id='mfv_fixture'"
                         )
                     )
+    finally:
+        engine.dispose()
+
+    _run_hard_cutover(dsn)
+    engine = create_engine(dsn, future=True)
+    try:
+        with engine.connect() as conn:
+            remaining = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_tables "
+                    "WHERE schemaname='market' "
+                    "AND tablename = ANY(CAST(:tables AS text[]))"
+                ),
+                {"tables": list(_PRE_CUTOVER_TABLES) + ["numeric_fact_versions"]},
+            ).scalar_one()
+            assert int(remaining) == 0
+            assert conn.execute(
+                text("SELECT count(*) FROM market.fact_versions")
+            ).scalar_one() == 1
     finally:
         engine.dispose()
