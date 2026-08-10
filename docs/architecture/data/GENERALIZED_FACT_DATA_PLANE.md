@@ -40,12 +40,14 @@ code_paths:
 
 ADR 0063 is accepted and this is the active target contract. The canonical
 registry, envelope, selector, and store currently own candles, open interest,
-funding, exact numeric facts, market trades, and trade-flow aggregates. Trade
-and flow writers no longer dual-write their retired typed version tables;
-their public typed records are decoded from canonical payloads at the consumer
-boundary. Level 2 and the remaining derived market-state families are still
-being migrated, so this campaign is not yet at its hard-cutover completion
-boundary. The migration discovery report records the pre-change surface.
+funding, exact numeric facts, market trades, trade-flow aggregates, and atomic
+Level 2 book observations. Trade, flow, snapshot, and mutation writers no
+longer write their retired typed version tables. Level 2 validity intervals,
+reconstruction state, and checkpoints remain operational evidence around the
+canonical book Facts rather than alternate Fact stores. The remaining derived
+market-state families are still being migrated, so this campaign is not yet at
+its hard-cutover completion boundary. The migration discovery report records
+the pre-change surface.
 
 ## Boundary
 

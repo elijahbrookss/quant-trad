@@ -223,9 +223,10 @@ Authority is intentionally split:
 - acknowledged raw object bytes plus manifest-to-record mappings are
   authoritative archive evidence for what the WebSocket client received;
 - PostgreSQL `market.fact_versions` revisions are authoritative for migrated
-  canonical query facts; retained typed records are decoded projections, while
-  the remaining unmigrated Level 2/derived tables are temporary source
-  authorities only until their explicit cutovers;
+  canonical query facts, including atomic Level 2 snapshots and mutation
+  batches; retained typed records are decoded projections, while the remaining
+  unmigrated derived tables are temporary source authorities only until their
+  explicit cutovers;
 - book reconstruction code plus version is authoritative for reproducible book
   state, never an in-memory map by itself;
 - normalization specifications are authoritative for feature semantics;
@@ -369,10 +370,7 @@ revision are known.
 
 | Table/dataset | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
 |---|---|---|---|---|---|
-| `market.l2_snapshot_versions` | one accepted provider snapshot event per product | composite PK `(id, effective_at)` for Timescale; natural source position plus effective time; raw/event hash idempotency | series, sequence, event/message/receipt/known-at, level count, state hash after snapshot, raw record ID, provenance/quality | append-only | hypertable by effective time; series/time and commit indexes; hot 7d |
-| `market.l2_snapshot_levels` | one typed side/price level in a snapshot | PK `(snapshot_version_id, snapshot_effective_at, side, price)`; parent ownership is atomic repository enforcement because installed Timescale rejects FKs to hypertables | absolute quantity, provider unit, update event time, ordinal | append-only child | snapshot/side/price index; one typed recordset insert per snapshot; hot 7d |
-| `market.l2_mutation_batches` | one provider update event applied atomically | composite PK `(id, effective_at)`; natural source position plus effective time; raw/event hash idempotency | series, sequence, provider message/event bounds, receipt/known-at, mutation count, before/after state hash, validity interval, raw record ID | append-only; exact duplicate no-op; divergent duplicate invalidates | hypertable by effective time; series/time/commit and source-position indexes; hot 7d |
-| `market.l2_mutations` | one ordered absolute level mutation in a batch | PK `(batch_id, batch_effective_at, mutation_ordinal)`; transactional parent ownership | side, exact price, new absolute quantity, provider event time, provider unit | append-only child; order is semantic | batch/side/price index; one typed recordset insert per batch; hot 7d |
+| `market.fact_versions` / `market.l2_book.v1` | one accepted snapshot or ordered absolute-update event as one atomic canonical observation | natural `(series_id, observation_key, revision)`; observation key is stream definition/session/source position; component key retains the reconstruction snapshot/batch ID | event kind, product-definition version, validity interval, reconstruction version, before/after state hashes, retained event hash, ordered exact price/quantity/unit/event-time entries; provider source position and raw record live in typed provenance; provider/message/receipt/acceptance/known-at clocks remain in the envelope | append-only; exact duplicate no-op; divergent duplicate fails loud; snapshot levels and batch mutations cannot be split across observations | canonical observation/known-at/source indexes; the writer shares the fenced transaction with validity and reconstruction-state updates; the four legacy Level 2 tables are migration input only and receive no runtime writes |
 | `market.book_checkpoint_manifests` | one deterministic reconstructable book checkpoint | PK UUID; natural `(series_id, reconstruction_version, checkpoint_time, source_position_hash)` | source session/epoch/sequence/ordinal, validity interval, object URI/checksum, sorted-level state hash, counts, created/known-at, source manifest range | append-only | series/time index; metadata indefinite; objects 90d or dataset-pinned |
 | `book_checkpoint_levels.v1` object dataset | typed sorted levels for one checkpoint | natural `(checkpoint_id, side, price)` | exact quantity and unit; schema/reconstruction version | immutable Parquet/ZSTD object | ordered by side then numeric price; replay read; tiered retention |
 | `market.book_validity_interval_versions` | one version of a valid or invalid reconstruction interval | PK UUID; natural `(series_id, interval_id, revision)` | start/end source positions and event/receipt/known-at times, status, reason, opening snapshot, closing quality event, reconstruction version | append-only; open revision has null end, closure appends final revision | series/time/status indexes; indefinite quality evidence |

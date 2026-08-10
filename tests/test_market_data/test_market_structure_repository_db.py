@@ -1095,18 +1095,30 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
         session_id=claim.session_id,
     )[0]["state_hash"] == checkpoints[0].state_hash
     with db.session() as session:
-        snapshot_level_count = session.execute(
+        canonical_book_rows = session.execute(
             text(
-                "SELECT count(*) FROM market.l2_snapshot_levels "
-                "WHERE snapshot_version_id = :snapshot_id"
+                "SELECT external_event_component_key, payload_schema_id, "
+                "       payload ->> 'event_type' AS event_type, "
+                "       CAST(payload ->> 'entry_count' AS bigint) AS entry_count, "
+                "       jsonb_array_length(payload -> 'entries') AS stored_entry_count "
+                "FROM market.fact_versions "
+                "WHERE series_id = :series_id "
+                "  AND external_event_component_key = ANY(:component_ids)"
             ),
-            {"snapshot_id": snapshots[0].snapshot_id},
-        ).scalar_one()
-        mutation_count = session.execute(
+            {
+                "series_id": claim.series_id,
+                "component_ids": [snapshots[0].snapshot_id, batches[0].batch_id],
+            },
+        ).mappings().all()
+        legacy_parent_count = session.execute(
             text(
-                "SELECT count(*) FROM market.l2_mutations WHERE batch_id = :batch_id"
+                "SELECT "
+                "  (SELECT count(*) FROM market.l2_snapshot_versions "
+                "   WHERE series_id = :series_id) + "
+                "  (SELECT count(*) FROM market.l2_mutation_batches "
+                "   WHERE series_id = :series_id)"
             ),
-            {"batch_id": batches[0].batch_id},
+            {"series_id": claim.series_id},
         ).scalar_one()
         reconstruction_epoch = session.execute(
             text(
@@ -1115,8 +1127,20 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
             ),
             {"series_id": claim.series_id},
         ).scalar_one()
-    assert snapshot_level_count == len(snapshots[0].bids) + len(snapshots[0].asks)
-    assert mutation_count == len(batches[0].event.mutations)
+    canonical_by_type = {row["event_type"]: row for row in canonical_book_rows}
+    assert set(canonical_by_type) == {"snapshot", "update"}
+    assert all(
+        row["payload_schema_id"] == "market.l2_book.v1"
+        and row["entry_count"] == row["stored_entry_count"]
+        for row in canonical_book_rows
+    )
+    assert canonical_by_type["snapshot"]["entry_count"] == (
+        len(snapshots[0].bids) + len(snapshots[0].asks)
+    )
+    assert canonical_by_type["update"]["entry_count"] == len(
+        batches[0].event.mutations
+    )
+    assert legacy_parent_count == 0
     assert reconstruction_epoch == last_fact.position.connection_epoch
     quality_event_id = market_structure_repository.record_quality_event(
         claim,

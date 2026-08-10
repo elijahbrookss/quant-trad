@@ -1611,6 +1611,119 @@ class PostgresMarketDataRepository:
             self._fail_ingestion_run(run_id, exc)
             raise
 
+    def ingest_facts_in_session(
+        self,
+        session,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[CanonicalFact],
+        request: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        """Persist canonical Facts inside an existing operational transaction."""
+
+        series_id = int(series_id)
+        source_id = int(source_id)
+        rows = sorted(
+            list(facts),
+            key=lambda item: (item.observation_time, item.observation_key),
+        )
+        if series_id <= 0 or source_id <= 0:
+            raise ValueError(
+                "market_data_ingest_invalid: series_id and source_id must be positive"
+            )
+        if not rows:
+            raise ValueError(
+                "market_data_ingest_invalid: at least one canonical Fact is required"
+            )
+        observation_keys = [fact.observation_key for fact in rows]
+        if len(observation_keys) != len(set(observation_keys)):
+            raise ValueError(
+                "market_data_ingest_invalid: duplicate canonical observation_key"
+            )
+        series = session.execute(
+            text(
+                """
+                SELECT id, identity_key, instrument_id, fact_type,
+                       timeframe_seconds, contract_version, dimensions
+                FROM market.series
+                WHERE id = :series_id
+                """
+            ),
+            {"series_id": series_id},
+        ).mappings().first()
+        if series is None:
+            raise ValueError(f"market_data_series_unknown: series_id={series_id}")
+        source_row = session.execute(
+            text(
+                """
+                SELECT id AS source_id,
+                       identity_key AS source_identity_key,
+                       provider AS source_provider,
+                       venue AS source_venue,
+                       source_kind,
+                       adapter_version AS source_adapter_version
+                FROM market.sources
+                WHERE id = :source_id
+                """
+            ),
+            {"source_id": source_id},
+        ).mappings().first()
+        if source_row is None:
+            raise ValueError(f"market_data_source_unknown: source_id={source_id}")
+        source = _canonical_source(source_row)
+        for fact in rows:
+            if (
+                fact.fact_type != str(series["fact_type"])
+                or fact.payload_schema_id != str(series["contract_version"])
+                or fact.source.identity_key != source.identity_key
+            ):
+                raise ValueError(
+                    "market_data_ingest_invalid: canonical Fact disagrees with "
+                    f"series/source series_id={series_id} "
+                    f"observation_key={fact.observation_key}"
+                )
+        run_id = str(ingestion_run_id or uuid.uuid4().hex).strip()
+        if not run_id or len(run_id) > 64:
+            raise ValueError("market_data_ingest_invalid: ingestion_run_id is invalid")
+        session.execute(
+            text(
+                """
+                INSERT INTO market.ingestion_runs (
+                    id, source_id, status, request, source_revision,
+                    requested_start, requested_end, requested_count
+                ) VALUES (
+                    :id, :source_id, 'running', CAST(:request AS jsonb),
+                    :source_revision, :requested_start, :requested_end,
+                    :requested_count
+                )
+                """
+            ),
+            {
+                "id": run_id,
+                "source_id": source_id,
+                "request": _json_text(request),
+                "source_revision": (
+                    str(source_revision).strip() if source_revision else None
+                ),
+                "requested_start": rows[0].observation_time,
+                "requested_end": rows[-1].observation_time,
+                "requested_count": len(rows),
+            },
+        )
+        return self._ingest_canonical_rows_with_session(
+            session,
+            run_id=run_id,
+            series_id=series_id,
+            rows=rows,
+            allow_corrections=bool(allow_corrections),
+            collection_fence=collection_fence,
+        )
+
     def ingest_candles(
         self,
         *,
@@ -2824,158 +2937,177 @@ class PostgresMarketDataRepository:
         allow_corrections: bool,
         collection_fence: Optional[Mapping[str, Any]] = None,
     ) -> IngestionOutcome:
+        with db.session() as session:
+            return self._ingest_canonical_rows_with_session(
+                session,
+                run_id=run_id,
+                series_id=series_id,
+                rows=rows,
+                allow_corrections=allow_corrections,
+                collection_fence=collection_fence,
+            )
+
+    def _ingest_canonical_rows_with_session(
+        self,
+        session,
+        *,
+        run_id: str,
+        series_id: int,
+        rows: Sequence[CanonicalFact],
+        allow_corrections: bool,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
         inserted_count = 0
         corrected_count = 0
         noop_count = 0
         max_commit_seq = 0
-        with db.session() as session:
-            session.execute(
-                text("SELECT pg_advisory_xact_lock(:series_id)"),
-                {"series_id": series_id},
-            )
-            self._assert_collection_fence(
-                session,
-                series_id=series_id,
-                collection_fence=collection_fence,
-            )
-            source_id, source = self._canonical_source_for_run(session, run_id)
-            for fact in rows:
-                if fact.source.identity_key != source.identity_key:
-                    raise ValueError(
-                        "market_data_ingest_invalid: canonical Fact source disagrees "
-                        f"with ingestion run run_id={run_id}"
-                    )
-                latest = session.execute(
-                    text(
-                        """
-                        SELECT revision, row_hash, market_commit_seq
-                        FROM market.fact_versions
-                        WHERE series_id = :series_id
-                          AND observation_key = :observation_key
-                        ORDER BY revision DESC
-                        LIMIT 1
-                        """
-                    ),
-                    {
-                        "series_id": series_id,
-                        "observation_key": fact.observation_key,
-                    },
-                ).mappings().first()
-                if latest is not None:
-                    max_commit_seq = max(
-                        max_commit_seq, int(latest["market_commit_seq"])
-                    )
-                    if str(latest["row_hash"]) == fact.row_hash:
-                        noop_count += 1
-                        continue
-                    if not allow_corrections:
-                        raise RuntimeError(
-                            "market_data_correction_rejected: immutable consumer path "
-                            "cannot accept changed canonical Fact "
-                            f"series_id={series_id} "
-                            f"observation_key={fact.observation_key}"
-                        )
-                revision = 1 if latest is None else int(latest["revision"]) + 1
-                version_id = build_fact_version_id(
-                    series_id=series_id,
-                    observation_key=fact.observation_key,
-                    revision=revision,
-                    row_hash=fact.row_hash,
+        session.execute(
+            text("SELECT pg_advisory_xact_lock(:series_id)"),
+            {"series_id": series_id},
+        )
+        self._assert_collection_fence(
+            session,
+            series_id=series_id,
+            collection_fence=collection_fence,
+        )
+        source_id, source = self._canonical_source_for_run(session, run_id)
+        for fact in rows:
+            if fact.source.identity_key != source.identity_key:
+                raise ValueError(
+                    "market_data_ingest_invalid: canonical Fact source disagrees "
+                    f"with ingestion run run_id={run_id}"
                 )
-                commit_seq = int(
-                    session.execute(
-                        text(
-                            """
-                            INSERT INTO market.fact_versions (
-                                id, series_id, observation_key, revision,
-                                source_id, ingestion_run_id, fact_type,
-                                payload_schema_id, payload_contract_hash,
-                                observation_time, observation_time_method,
-                                source_published_at, received_at, accepted_at,
-                                known_at, known_at_method, transformation_id,
-                                external_event_key, external_event_group_key,
-                                external_event_component_key, state, payload,
-                                payload_hash, material_hash,
-                                provenance_schema_id, provenance, provenance_hash,
-                                quality_schema_id, quality, quality_hash, row_hash
-                            ) VALUES (
-                                :id, :series_id, :observation_key, :revision,
-                                :source_id, :ingestion_run_id, :fact_type,
-                                :payload_schema_id, :payload_contract_hash,
-                                :observation_time, :observation_time_method,
-                                :source_published_at, :received_at, :accepted_at,
-                                :known_at, :known_at_method, :transformation_id,
-                                :external_event_key, :external_event_group_key,
-                                :external_event_component_key, :state,
-                                CAST(:payload AS jsonb), :payload_hash,
-                                :material_hash, :provenance_schema_id,
-                                CAST(:provenance AS jsonb), :provenance_hash,
-                                :quality_schema_id, CAST(:quality AS jsonb),
-                                :quality_hash, :row_hash
-                            )
-                            RETURNING market_commit_seq
-                            """
-                        ),
-                        {
-                            "id": version_id,
-                            "series_id": series_id,
-                            "observation_key": fact.observation_key,
-                            "revision": revision,
-                            "source_id": source_id,
-                            "ingestion_run_id": run_id,
-                            "fact_type": fact.fact_type,
-                            "payload_schema_id": fact.payload_schema_id,
-                            "payload_contract_hash": fact.payload_contract_hash,
-                            "observation_time": fact.observation_time,
-                            "observation_time_method": fact.observation_time_method,
-                            "source_published_at": fact.source_published_at,
-                            "received_at": fact.received_at,
-                            "accepted_at": fact.accepted_at,
-                            "known_at": fact.known_at,
-                            "known_at_method": fact.known_at_method,
-                            "transformation_id": fact.transformation_id,
-                            "external_event_key": fact.external_event_key,
-                            "external_event_group_key": fact.external_event_group_key,
-                            "external_event_component_key": fact.external_event_component_key,
-                            "state": fact.state.value,
-                            "payload": _json_text(fact.payload),
-                            "payload_hash": fact.payload_hash,
-                            "material_hash": fact.material_hash,
-                            "provenance_schema_id": fact.provenance_schema_id,
-                            "provenance": _json_text(fact.provenance),
-                            "provenance_hash": fact.provenance_hash,
-                            "quality_schema_id": fact.quality_schema_id,
-                            "quality": _json_text(fact.quality),
-                            "quality_hash": fact.quality_hash,
-                            "row_hash": fact.row_hash,
-                        },
-                    ).scalar_one()
-                )
-                max_commit_seq = max(max_commit_seq, commit_seq)
-                if latest is None:
-                    inserted_count += 1
-                else:
-                    corrected_count += 1
-            if max_commit_seq == 0:
-                max_commit_seq = self._current_commit_seq_with_session(session)
-            session.execute(
+            latest = session.execute(
                 text(
                     """
-                    UPDATE market.ingestion_runs
-                    SET status = 'completed', finished_at = now(),
-                        inserted_count = :inserted_count,
-                        corrected_count = :corrected_count,
-                        noop_count = :noop_count
-                    WHERE id = :run_id AND status = 'running'
+                    SELECT revision, row_hash, market_commit_seq
+                    FROM market.fact_versions
+                    WHERE series_id = :series_id
+                      AND observation_key = :observation_key
+                    ORDER BY revision DESC
+                    LIMIT 1
                     """
                 ),
                 {
-                    "run_id": run_id,
-                    "inserted_count": inserted_count,
-                    "corrected_count": corrected_count,
-                    "noop_count": noop_count,
+                    "series_id": series_id,
+                    "observation_key": fact.observation_key,
                 },
+            ).mappings().first()
+            if latest is not None:
+                max_commit_seq = max(
+                    max_commit_seq, int(latest["market_commit_seq"])
+                )
+                if str(latest["row_hash"]) == fact.row_hash:
+                    noop_count += 1
+                    continue
+                if not allow_corrections:
+                    raise RuntimeError(
+                        "market_data_correction_rejected: immutable consumer path "
+                        "cannot accept changed canonical Fact "
+                        f"series_id={series_id} "
+                        f"observation_key={fact.observation_key}"
+                    )
+            revision = 1 if latest is None else int(latest["revision"]) + 1
+            version_id = build_fact_version_id(
+                series_id=series_id,
+                observation_key=fact.observation_key,
+                revision=revision,
+                row_hash=fact.row_hash,
             )
+            commit_seq = int(
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.fact_versions (
+                            id, series_id, observation_key, revision,
+                            source_id, ingestion_run_id, fact_type,
+                            payload_schema_id, payload_contract_hash,
+                            observation_time, observation_time_method,
+                            source_published_at, received_at, accepted_at,
+                            known_at, known_at_method, transformation_id,
+                            external_event_key, external_event_group_key,
+                            external_event_component_key, state, payload,
+                            payload_hash, material_hash,
+                            provenance_schema_id, provenance, provenance_hash,
+                            quality_schema_id, quality, quality_hash, row_hash
+                        ) VALUES (
+                            :id, :series_id, :observation_key, :revision,
+                            :source_id, :ingestion_run_id, :fact_type,
+                            :payload_schema_id, :payload_contract_hash,
+                            :observation_time, :observation_time_method,
+                            :source_published_at, :received_at, :accepted_at,
+                            :known_at, :known_at_method, :transformation_id,
+                            :external_event_key, :external_event_group_key,
+                            :external_event_component_key, :state,
+                            CAST(:payload AS jsonb), :payload_hash,
+                            :material_hash, :provenance_schema_id,
+                            CAST(:provenance AS jsonb), :provenance_hash,
+                            :quality_schema_id, CAST(:quality AS jsonb),
+                            :quality_hash, :row_hash
+                        )
+                        RETURNING market_commit_seq
+                        """
+                    ),
+                    {
+                        "id": version_id,
+                        "series_id": series_id,
+                        "observation_key": fact.observation_key,
+                        "revision": revision,
+                        "source_id": source_id,
+                        "ingestion_run_id": run_id,
+                        "fact_type": fact.fact_type,
+                        "payload_schema_id": fact.payload_schema_id,
+                        "payload_contract_hash": fact.payload_contract_hash,
+                        "observation_time": fact.observation_time,
+                        "observation_time_method": fact.observation_time_method,
+                        "source_published_at": fact.source_published_at,
+                        "received_at": fact.received_at,
+                        "accepted_at": fact.accepted_at,
+                        "known_at": fact.known_at,
+                        "known_at_method": fact.known_at_method,
+                        "transformation_id": fact.transformation_id,
+                        "external_event_key": fact.external_event_key,
+                        "external_event_group_key": fact.external_event_group_key,
+                        "external_event_component_key": fact.external_event_component_key,
+                        "state": fact.state.value,
+                        "payload": _json_text(fact.payload),
+                        "payload_hash": fact.payload_hash,
+                        "material_hash": fact.material_hash,
+                        "provenance_schema_id": fact.provenance_schema_id,
+                        "provenance": _json_text(fact.provenance),
+                        "provenance_hash": fact.provenance_hash,
+                        "quality_schema_id": fact.quality_schema_id,
+                        "quality": _json_text(fact.quality),
+                        "quality_hash": fact.quality_hash,
+                        "row_hash": fact.row_hash,
+                    },
+                ).scalar_one()
+            )
+            max_commit_seq = max(max_commit_seq, commit_seq)
+            if latest is None:
+                inserted_count += 1
+            else:
+                corrected_count += 1
+        if max_commit_seq == 0:
+            max_commit_seq = self._current_commit_seq_with_session(session)
+        session.execute(
+            text(
+                """
+                UPDATE market.ingestion_runs
+                SET status = 'completed', finished_at = now(),
+                    inserted_count = :inserted_count,
+                    corrected_count = :corrected_count,
+                    noop_count = :noop_count
+                WHERE id = :run_id AND status = 'running'
+                """
+            ),
+            {
+                "run_id": run_id,
+                "inserted_count": inserted_count,
+                "corrected_count": corrected_count,
+                "noop_count": noop_count,
+            },
+        )
         return IngestionOutcome(
             ingestion_run_id=run_id,
             requested_count=len(rows),

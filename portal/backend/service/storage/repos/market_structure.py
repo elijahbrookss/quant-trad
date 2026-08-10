@@ -28,6 +28,8 @@ from market_data.book_archive import (
     EncodedBookCheckpoint,
 )
 from market_data.canonical_adapters import (
+    canonicalize_l2_mutation_batch,
+    canonicalize_l2_snapshot,
     canonicalize_market_trade,
     canonicalize_trade_flow,
     decode_market_trade_record,
@@ -277,22 +279,17 @@ def _require_book_state_source(
         text(
             """
             SELECT 1
-            FROM (
-                SELECT series_id, connection_epoch, receive_ordinal,
-                       event_ordinal, validity_interval_id, state_hash
-                FROM market.l2_snapshot_versions
-                UNION ALL
-                SELECT series_id, connection_epoch, receive_ordinal,
-                       event_ordinal, validity_interval_id,
-                       after_state_hash AS state_hash
-                FROM market.l2_mutation_batches
-            ) AS states
+            FROM market.fact_versions
             WHERE series_id = :series_id
-              AND connection_epoch = :connection_epoch
-              AND receive_ordinal = :receive_ordinal
-              AND event_ordinal = :event_ordinal
-              AND validity_interval_id = :validity_interval_id
-              AND state_hash = :state_hash
+              AND payload_schema_id = 'market.l2_book.v1'
+              AND provenance -> '_qt_l2_evidence' ->> 'connection_epoch'
+                    = CAST(:connection_epoch AS text)
+              AND provenance -> '_qt_l2_evidence' ->> 'receive_ordinal'
+                    = CAST(:receive_ordinal AS text)
+              AND provenance -> '_qt_l2_evidence' ->> 'event_ordinal'
+                    = CAST(:event_ordinal AS text)
+              AND payload ->> 'validity_interval_id' = :validity_interval_id
+              AND payload ->> 'after_state_hash' = :state_hash
             LIMIT 1
             """
         ),
@@ -2452,7 +2449,7 @@ class PostgresMarketStructureRepository:
         final_event_ordinal: int,
         final_sequence_num: Optional[int],
     ) -> BookIngestionOutcome:
-        """Persist accepted typed book evidence only after raw archive mapping."""
+        """Persist canonical book Facts and operational state atomically."""
 
         snapshot_rows = sorted(
             snapshots,
@@ -2471,6 +2468,36 @@ class PostgresMarketStructureRepository:
         validity_rows = sorted(
             validity_versions, key=lambda row: (row.interval_id, row.revision)
         )
+        source = market_data_repo.get_source_identity(claim.source_id)
+        canonical_provenance = {
+            "stream_definition_id": claim.definition_id,
+            "stream_session_id": claim.session_id,
+        }
+        canonical_snapshots = [
+            canonicalize_l2_snapshot(
+                fact,
+                source=source,
+                provenance=canonical_provenance,
+            )
+            for fact in snapshot_rows
+        ]
+        canonical_batches = [
+            canonicalize_l2_mutation_batch(
+                fact,
+                source=source,
+                provenance=canonical_provenance,
+            )
+            for fact in batch_rows
+        ]
+        observation_keys = [
+            fact.observation_key
+            for fact in (*canonical_snapshots, *canonical_batches)
+        ]
+        if len(observation_keys) != len(set(observation_keys)):
+            raise ValueError(
+                "market_l2_ingest_invalid: duplicate canonical observation key"
+            )
+
         inserted_snapshots = 0
         noop_snapshots = 0
         inserted_batches = 0
@@ -2479,9 +2506,11 @@ class PostgresMarketStructureRepository:
         max_commit_seq = 0
         with db.session() as session:
             self._require_fence(session, claim)
-            for fact in snapshot_rows:
+            for fact in (*snapshot_rows, *batch_rows):
                 if fact.series_id != claim.series_id:
-                    raise ValueError("market_l2_ingest_invalid: snapshot series mismatch")
+                    raise ValueError(
+                        "market_l2_ingest_invalid: canonical Fact series mismatch"
+                    )
                 mapped = session.execute(
                     text(
                         "SELECT 1 FROM market.raw_archive_record_mappings "
@@ -2491,267 +2520,62 @@ class PostgresMarketStructureRepository:
                 ).scalar_one_or_none()
                 if mapped is None:
                     raise ValueError(
-                        "market_l2_archive_incomplete: snapshot raw record is not acknowledged"
+                        "market_l2_archive_incomplete: raw record is not acknowledged"
                     )
-                existing = session.execute(
-                    text(
-                        "SELECT event_material_hash, state_hash "
-                        "FROM market.l2_snapshot_versions "
-                        "WHERE id = :id AND effective_at = :effective_at"
-                    ),
-                    {"id": fact.snapshot_id, "effective_at": fact.event.effective_at},
-                ).mappings().first()
-                if existing is not None:
-                    if (
-                        str(existing["event_material_hash"]) != fact.event.material_hash
-                        or str(existing["state_hash"]) != fact.state_hash
-                    ):
-                        raise RuntimeError("market_l2_snapshot_conflict")
-                    noop_snapshots += 1
-                    continue
-                provenance_hash = _stable_hash(
-                    {
-                        "schema_version": "market.l2_snapshot_provenance.v1",
-                        "raw_record_id": fact.event.raw_record_id,
-                        "event_material_hash": fact.event.material_hash,
-                        "validity_interval_id": fact.validity_interval_id,
-                    }
-                )
-                commit_seq = int(
-                    session.execute(
-                        text(
-                            """
-                            INSERT INTO market.l2_snapshot_versions (
-                                id, series_id, definition_id, session_id,
-                                connection_epoch, provider_product_id,
-                                product_definition_version_id,
-                                provider_sequence_num, receive_ordinal,
-                                event_ordinal, effective_at, provider_message_time,
-                                received_at, accepted_at, known_at, level_count,
-                                state_hash, event_material_hash, raw_record_id,
-                                validity_interval_id, provenance_hash, quality
-                            ) VALUES (
-                                :id, :series_id, :definition_id, :session_id,
-                                :epoch, :product_id, :product_definition_id,
-                                :sequence_num, :receive_ordinal, :event_ordinal,
-                                :effective_at, :message_time, :received_at,
-                                :accepted_at, :known_at, :level_count,
-                                :state_hash, :event_hash, :raw_record_id,
-                                :validity_interval_id, :provenance_hash,
-                                '{}'::jsonb
-                            ) RETURNING market_commit_seq
-                            """
-                        ),
-                        {
-                            "id": fact.snapshot_id,
-                            "series_id": fact.series_id,
-                            "definition_id": fact.event.position.definition_id,
-                            "session_id": fact.event.position.session_id,
-                            "epoch": fact.event.position.connection_epoch,
-                            "product_id": fact.event.position.provider_product_id,
-                            "product_definition_id": fact.event.product_definition_version_id,
-                            "sequence_num": fact.event.position.provider_sequence_num,
-                            "receive_ordinal": fact.event.position.receive_ordinal,
-                            "event_ordinal": fact.event.position.event_ordinal,
-                            "effective_at": fact.event.effective_at,
-                            "message_time": fact.event.provider_message_time,
-                            "received_at": fact.event.received_at,
-                            "accepted_at": fact.event.accepted_at,
-                            "known_at": fact.event.known_at,
-                            "level_count": len(fact.bids) + len(fact.asks),
-                            "state_hash": fact.state_hash,
-                            "event_hash": fact.event.material_hash,
-                            "raw_record_id": fact.event.raw_record_id,
-                            "validity_interval_id": fact.validity_interval_id,
-                            "provenance_hash": provenance_hash,
-                        },
-                    ).scalar_one()
-                )
-                mutation_by_level = {
-                    (row.side.value, row.price): row for row in fact.event.mutations
-                }
-                level_ordinal = 0
-                level_parameters: list[dict[str, Any]] = []
-                for side, levels in (("bid", fact.bids), ("ask", fact.asks)):
-                    for price, quantity in levels:
-                        mutation = mutation_by_level[(side, price)]
-                        level_parameters.append(
-                            {
-                                "side": side,
-                                "price": str(price),
-                                "quantity": str(quantity),
-                                "size_unit": mutation.provider_size_unit.value,
-                                "event_time": mutation.provider_event_time.isoformat(),
-                                "level_ordinal": level_ordinal,
-                            },
-                        )
-                        level_ordinal += 1
-                session.execute(
-                    text(
-                        """
-                        INSERT INTO market.l2_snapshot_levels (
-                            snapshot_version_id, snapshot_effective_at,
-                            side, price, quantity, provider_size_unit,
-                            provider_event_time, level_ordinal
-                        )
-                        SELECT :snapshot_id, :effective_at, levels.side,
-                               levels.price, levels.quantity, levels.size_unit,
-                               levels.event_time, levels.level_ordinal
-                        FROM jsonb_to_recordset(CAST(:levels AS jsonb)) AS levels(
-                            side text,
-                            price numeric,
-                            quantity numeric,
-                            size_unit text,
-                            event_time timestamptz,
-                            level_ordinal bigint
-                        )
-                        """
-                    ),
-                    {
-                        "snapshot_id": fact.snapshot_id,
-                        "effective_at": fact.event.effective_at,
-                        "levels": _json(level_parameters),
-                    },
-                )
-                inserted_snapshots += 1
-                max_commit_seq = max(max_commit_seq, commit_seq)
 
-            for fact in batch_rows:
-                if fact.series_id != claim.series_id:
-                    raise ValueError("market_l2_ingest_invalid: batch series mismatch")
-                mapped = session.execute(
-                    text(
-                        "SELECT 1 FROM market.raw_archive_record_mappings "
-                        "WHERE raw_record_id = :raw_record_id LIMIT 1"
-                    ),
-                    {"raw_record_id": fact.event.raw_record_id},
-                ).scalar_one_or_none()
-                if mapped is None:
-                    raise ValueError(
-                        "market_l2_archive_incomplete: batch raw record is not acknowledged"
-                    )
-                existing = session.execute(
-                    text(
-                        "SELECT event_material_hash, before_state_hash, after_state_hash "
-                        "FROM market.l2_mutation_batches "
-                        "WHERE id = :id AND effective_at = :effective_at"
-                    ),
-                    {"id": fact.batch_id, "effective_at": fact.event.effective_at},
-                ).mappings().first()
-                if existing is not None:
-                    if (
-                        str(existing["event_material_hash"]) != fact.event.material_hash
-                        or str(existing["before_state_hash"]) != fact.before_state_hash
-                        or str(existing["after_state_hash"]) != fact.after_state_hash
-                    ):
-                        raise RuntimeError("market_l2_batch_conflict")
-                    noop_batches += 1
-                    continue
-                provenance_hash = _stable_hash(
-                    {
-                        "schema_version": "market.l2_mutation_provenance.v1",
-                        "raw_record_id": fact.event.raw_record_id,
-                        "event_material_hash": fact.event.material_hash,
-                        "validity_interval_id": fact.validity_interval_id,
-                    }
-                )
-                commit_seq = int(
-                    session.execute(
-                        text(
-                            """
-                            INSERT INTO market.l2_mutation_batches (
-                                id, series_id, definition_id, session_id,
-                                connection_epoch, provider_product_id,
-                                product_definition_version_id,
-                                provider_sequence_num, receive_ordinal,
-                                event_ordinal, effective_at, provider_message_time,
-                                received_at, accepted_at, known_at,
-                                mutation_count, before_state_hash,
-                                after_state_hash, event_material_hash,
-                                raw_record_id, validity_interval_id,
-                                unknown_zero_delete_count, provenance_hash,
-                                quality
-                            ) VALUES (
-                                :id, :series_id, :definition_id, :session_id,
-                                :epoch, :product_id, :product_definition_id,
-                                :sequence_num, :receive_ordinal, :event_ordinal,
-                                :effective_at, :message_time, :received_at,
-                                :accepted_at, :known_at, :mutation_count,
-                                :before_hash, :after_hash, :event_hash,
-                                :raw_record_id, :validity_interval_id,
-                                :unknown_delete_count, :provenance_hash,
-                                '{}'::jsonb
-                            ) RETURNING market_commit_seq
-                            """
-                        ),
-                        {
-                            "id": fact.batch_id,
-                            "series_id": fact.series_id,
-                            "definition_id": fact.event.position.definition_id,
-                            "session_id": fact.event.position.session_id,
-                            "epoch": fact.event.position.connection_epoch,
-                            "product_id": fact.event.position.provider_product_id,
-                            "product_definition_id": fact.event.product_definition_version_id,
-                            "sequence_num": fact.event.position.provider_sequence_num,
-                            "receive_ordinal": fact.event.position.receive_ordinal,
-                            "event_ordinal": fact.event.position.event_ordinal,
-                            "effective_at": fact.event.effective_at,
-                            "message_time": fact.event.provider_message_time,
-                            "received_at": fact.event.received_at,
-                            "accepted_at": fact.event.accepted_at,
-                            "known_at": fact.event.known_at,
-                            "mutation_count": len(fact.event.mutations),
-                            "before_hash": fact.before_state_hash,
-                            "after_hash": fact.after_state_hash,
-                            "event_hash": fact.event.material_hash,
-                            "raw_record_id": fact.event.raw_record_id,
-                            "validity_interval_id": fact.validity_interval_id,
-                            "unknown_delete_count": fact.unknown_zero_delete_count,
-                            "provenance_hash": provenance_hash,
-                        },
-                    ).scalar_one()
-                )
-                mutation_parameters = [
-                    {
-                        "ordinal": mutation.mutation_ordinal,
-                        "side": mutation.side.value,
-                        "price": str(mutation.price),
-                        "quantity": str(mutation.new_quantity),
-                        "size_unit": mutation.provider_size_unit.value,
-                        "event_time": mutation.provider_event_time.isoformat(),
-                    }
-                    for mutation in fact.event.mutations
-                ]
-                session.execute(
-                    text(
-                        """
-                        INSERT INTO market.l2_mutations (
-                            batch_id, batch_effective_at, mutation_ordinal,
-                            side, price, new_quantity, provider_size_unit,
-                            provider_event_time
-                        )
-                        SELECT :batch_id, :effective_at, mutations.ordinal,
-                               mutations.side, mutations.price,
-                               mutations.quantity, mutations.size_unit,
-                               mutations.event_time
-                        FROM jsonb_to_recordset(CAST(:mutations AS jsonb)) AS mutations(
-                            ordinal integer,
-                            side text,
-                            price numeric,
-                            quantity numeric,
-                            size_unit text,
-                            event_time timestamptz
-                        )
-                        """
-                    ),
-                    {
-                        "batch_id": fact.batch_id,
-                        "effective_at": fact.event.effective_at,
-                        "mutations": _json(mutation_parameters),
+            if canonical_snapshots:
+                outcome = market_data_repo.ingest_facts_in_session(
+                    session,
+                    series_id=claim.series_id,
+                    source_id=claim.source_id,
+                    facts=canonical_snapshots,
+                    request={
+                        "operation": "market_l2_snapshot_stream_canonicalization",
+                        "definition_id": claim.definition_id,
+                        "session_id": claim.session_id,
                     },
+                    source_revision=claim.contract_version,
+                    allow_corrections=False,
+                    collection_fence=self._collection_fence(claim),
                 )
-                inserted_batches += 1
-                max_commit_seq = max(max_commit_seq, commit_seq)
+                if (
+                    outcome.corrected_count != 0
+                    or outcome.inserted_count + outcome.noop_count
+                    != len(canonical_snapshots)
+                ):
+                    raise RuntimeError(
+                        "market_l2_ingest_corrupt: canonical snapshot outcome mismatch"
+                    )
+                inserted_snapshots = outcome.inserted_count
+                noop_snapshots = outcome.noop_count
+                max_commit_seq = max(max_commit_seq, outcome.max_commit_seq)
+
+            if canonical_batches:
+                outcome = market_data_repo.ingest_facts_in_session(
+                    session,
+                    series_id=claim.series_id,
+                    source_id=claim.source_id,
+                    facts=canonical_batches,
+                    request={
+                        "operation": "market_l2_mutation_stream_canonicalization",
+                        "definition_id": claim.definition_id,
+                        "session_id": claim.session_id,
+                    },
+                    source_revision=claim.contract_version,
+                    allow_corrections=False,
+                    collection_fence=self._collection_fence(claim),
+                )
+                if (
+                    outcome.corrected_count != 0
+                    or outcome.inserted_count + outcome.noop_count
+                    != len(canonical_batches)
+                ):
+                    raise RuntimeError(
+                        "market_l2_ingest_corrupt: canonical mutation outcome mismatch"
+                    )
+                inserted_batches = outcome.inserted_count
+                noop_batches = outcome.noop_count
+                max_commit_seq = max(max_commit_seq, outcome.max_commit_seq)
 
             for validity in validity_rows:
                 inserted_validity += int(
@@ -3036,9 +2860,21 @@ class PostgresMarketStructureRepository:
                 str(value)
                 for value in session.execute(
                     text(
-                        "SELECT id FROM market.l2_snapshot_versions "
-                        "WHERE definition_id = :definition_id AND session_id = :session_id "
-                        "ORDER BY receive_ordinal, event_ordinal"
+                        "SELECT external_event_component_key "
+                        "FROM market.fact_versions "
+                        "WHERE payload_schema_id = 'market.l2_book.v1' "
+                        "AND payload ->> 'event_type' = 'snapshot' "
+                        "AND provenance -> '_qt_l2_evidence' ->> 'definition_id' "
+                        "= :definition_id "
+                        "AND provenance -> '_qt_l2_evidence' ->> 'session_id' "
+                        "= :session_id "
+                        "ORDER BY "
+                        "CAST(provenance -> '_qt_l2_evidence' ->> "
+                        "'connection_epoch' AS bigint), "
+                        "CAST(provenance -> '_qt_l2_evidence' ->> "
+                        "'receive_ordinal' AS bigint), "
+                        "CAST(provenance -> '_qt_l2_evidence' ->> "
+                        "'event_ordinal' AS bigint)"
                     ),
                     {"definition_id": definition_id, "session_id": session_id},
                 ).scalars()
@@ -3047,9 +2883,21 @@ class PostgresMarketStructureRepository:
                 str(value)
                 for value in session.execute(
                     text(
-                        "SELECT id FROM market.l2_mutation_batches "
-                        "WHERE definition_id = :definition_id AND session_id = :session_id "
-                        "ORDER BY receive_ordinal, event_ordinal"
+                        "SELECT external_event_component_key "
+                        "FROM market.fact_versions "
+                        "WHERE payload_schema_id = 'market.l2_book.v1' "
+                        "AND payload ->> 'event_type' = 'update' "
+                        "AND provenance -> '_qt_l2_evidence' ->> 'definition_id' "
+                        "= :definition_id "
+                        "AND provenance -> '_qt_l2_evidence' ->> 'session_id' "
+                        "= :session_id "
+                        "ORDER BY "
+                        "CAST(provenance -> '_qt_l2_evidence' ->> "
+                        "'connection_epoch' AS bigint), "
+                        "CAST(provenance -> '_qt_l2_evidence' ->> "
+                        "'receive_ordinal' AS bigint), "
+                        "CAST(provenance -> '_qt_l2_evidence' ->> "
+                        "'event_ordinal' AS bigint)"
                     ),
                     {"definition_id": definition_id, "session_id": session_id},
                 ).scalars()
@@ -3482,14 +3330,21 @@ class PostgresMarketStructureRepository:
                       ON state.series_id = scope.requested_series_id
                     LEFT JOIN LATERAL (
                         SELECT count(*) AS snapshot_count
-                        FROM market.l2_snapshot_versions
+                        FROM market.fact_versions
                         WHERE series_id = scope.requested_series_id
+                          AND payload_schema_id = 'market.l2_book.v1'
+                          AND payload ->> 'event_type' = 'snapshot'
                     ) AS snapshots ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT count(*) AS batch_count,
-                               COALESCE(sum(mutation_count), 0) AS mutation_count
-                        FROM market.l2_mutation_batches
+                               COALESCE(
+                                   sum(CAST(payload ->> 'entry_count' AS bigint)),
+                                   0
+                               ) AS mutation_count
+                        FROM market.fact_versions
                         WHERE series_id = scope.requested_series_id
+                          AND payload_schema_id = 'market.l2_book.v1'
+                          AND payload ->> 'event_type' = 'update'
                     ) AS batches ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT count(*) AS checkpoint_count
