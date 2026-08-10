@@ -705,6 +705,10 @@ _HISTORICAL_TYPED_PAYLOAD_SCHEMAS = frozenset(
         "market.reserve_balance.v1",
         "market.trade.v1",
         "market.trade_flow.v1",
+        "market.trade_flow_feature.v1",
+        "market.futures_spot_basis.v1",
+        "market.derivative_state.v1",
+        "market.market_response.v1",
     }
 )
 
@@ -885,21 +889,34 @@ def _collect_typed_archive_refs(
             add_coverage(str(flow_evidence["coverage_interval_id"]))
             continue
         if fact_type in {"market.bbo", "market.depth_observation"}:
-            table_name = (
-                "bbo_feature_versions"
+            evidence_key = (
+                "_qt_bbo_evidence"
                 if fact_type == "market.bbo"
-                else "depth_feature_versions"
+                else "_qt_depth_evidence"
             )
             row = session.execute(
                 text(
-                    f"SELECT source_position FROM market.{table_name} "
-                    "WHERE series_id = :series_id AND material_hash = :material_hash LIMIT 1"
+                    "SELECT provenance -> :evidence_key AS evidence "
+                    "FROM market.fact_versions "
+                    "WHERE series_id = :series_id "
+                    "  AND provenance -> :evidence_key "
+                    "      ->> 'legacy_material_hash' = :material_hash "
+                    "LIMIT 1"
                 ),
-                {"series_id": series_id, "material_hash": material_hash},
+                {
+                    "series_id": series_id,
+                    "evidence_key": evidence_key,
+                    "material_hash": material_hash,
+                },
             ).mappings().first()
             if row is None:
                 raise RuntimeError("market_dataset_provenance_incomplete: book feature missing")
-            add_book_position(dict(row["source_position"]))
+            evidence = dict(row["evidence"] or {})
+            if not isinstance(evidence.get("source_position"), Mapping):
+                raise RuntimeError(
+                    "market_dataset_provenance_incomplete: book position missing"
+                )
+            add_book_position(dict(evidence["source_position"]))
             continue
         if fact_type == "market.trade_flow_feature":
             row = session.execute(
@@ -1024,8 +1041,6 @@ class PostgresMarketDataRepository:
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.numeric_fact_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.market_trade_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_aggregate_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.bbo_feature_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.depth_feature_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_feature_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.futures_spot_relationship_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.derivative_state_versions), 0),
@@ -1209,15 +1224,14 @@ class PostgresMarketDataRepository:
                                max(fact_time) AS last_fact_time,
                                max(market_commit_seq) AS max_commit_seq
                         FROM (
-                            SELECT jsonb_build_array(bucket_start) AS fact_key,
-                                   bucket_start AS fact_time, market_commit_seq
-                            FROM market.bbo_feature_versions
+                            SELECT jsonb_build_array(observation_key) AS fact_key,
+                                   observation_time AS fact_time,
+                                   market_commit_seq
+                            FROM market.fact_versions
                             WHERE series_id = series.id
-                            UNION ALL
-                            SELECT jsonb_build_array(bucket_start, band_bps),
-                                   bucket_start, market_commit_seq
-                            FROM market.depth_feature_versions
-                            WHERE series_id = series.id
+                              AND payload_schema_id IN (
+                                  'market.bbo.v1', 'market.depth_band.v1'
+                              )
                             UNION ALL
                             SELECT jsonb_build_array(bucket_start, interval_seconds),
                                    bucket_start, market_commit_seq

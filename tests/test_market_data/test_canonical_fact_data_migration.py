@@ -14,6 +14,7 @@ from market_data.contracts import (
     SourceIdentity,
 )
 from market_data.order_book import BookSourcePosition, L2EventFact, L2Mutation
+from market_data.market_state import BboFeatureFact, DepthFeatureFact
 from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
 
 
@@ -72,6 +73,18 @@ def _assert_preserved(result, legacy_hash: str, schema_id: str) -> None:
     provenance = json.loads(str(values["provenance"]))
     assert provenance["external_object"] == "fixture-1"
     assert provenance["_qt_migration"]["source_table"].startswith("market.")
+
+
+def _book_position() -> BookSourcePosition:
+    return BookSourcePosition(
+        definition_id="fixture-l2",
+        session_id="fixture-session",
+        connection_epoch=0,
+        provider_product_id="BTC-USD",
+        provider_sequence_num=5,
+        receive_ordinal=7,
+        event_ordinal=0,
+    )
 
 
 def test_candle_migration_preserves_v1_evidence_identity() -> None:
@@ -479,3 +492,122 @@ def test_l2_migration_preserves_atomic_snapshot_and_mutation_entries() -> None:
     assert mutation_payload["before_state_hash"] == "1" * 64
     assert mutation_payload["entries"][1]["quantity"] == "0"
     assert mutation_payload["unknown_zero_delete_count"] == 1
+
+
+def test_book_feature_migration_preserves_typed_material_evidence() -> None:
+    bucket_start = datetime(2026, 8, 9, 12, 0, tzinfo=_UTC)
+    bucket_end = bucket_start + timedelta(seconds=1)
+    source_effective_at = bucket_start + timedelta(milliseconds=500)
+    position = _book_position()
+    bbo = BboFeatureFact(
+        series_id=21,
+        source_l2_series_id=20,
+        bucket_start=bucket_start,
+        bucket_end=bucket_end,
+        source_effective_at=source_effective_at,
+        known_at=bucket_end,
+        source_position=position,
+        validity_interval_id="validity-1",
+        product_definition_version_id="coinbase.BTC-USD.v1",
+        provider_size_unit="base",
+        source_state_hash="a" * 64,
+        bid_price=Decimal("99"),
+        bid_quantity=Decimal("2"),
+        bid_base_quantity=Decimal("2"),
+        ask_price=Decimal("101"),
+        ask_quantity=Decimal("3"),
+        ask_base_quantity=Decimal("3"),
+        mid_price=Decimal("100"),
+        spread=Decimal("2"),
+        spread_bps=Decimal("200"),
+        input_fingerprint="b" * 64,
+    )
+    bbo_row = {
+        **_envelope(),
+        "id": "legacy-bbo-1",
+        "source_l2_series_id": bbo.source_l2_series_id,
+        "bucket_start": bbo.bucket_start,
+        "bucket_end": bbo.bucket_end,
+        "known_at": bbo.known_at,
+        "source_effective_at": bbo.source_effective_at,
+        "source_position": bbo.source_position.material(),
+        "validity_interval_id": bbo.validity_interval_id,
+        "product_definition_version_id": bbo.product_definition_version_id,
+        "provider_size_unit": bbo.provider_size_unit.value,
+        "source_state_hash": bbo.source_state_hash,
+        "bid_price": bbo.bid_price,
+        "bid_quantity": bbo.bid_quantity,
+        "bid_base_quantity": bbo.bid_base_quantity,
+        "ask_price": bbo.ask_price,
+        "ask_quantity": bbo.ask_quantity,
+        "ask_base_quantity": bbo.ask_base_quantity,
+        "mid_price": bbo.mid_price,
+        "spread": bbo.spread,
+        "spread_bps": bbo.spread_bps,
+        "input_fingerprint": bbo.input_fingerprint,
+        "material_hash": bbo.material_hash,
+        "provenance_hash": "c" * 64,
+        "quality": {},
+    }
+    bbo_result = _MIGRATION["_bbo_feature"](bbo_row)
+    assert bbo_result.values["payload_schema_id"] == "market.bbo.v1"
+    bbo_provenance = json.loads(str(bbo_result.values["provenance"]))
+    assert bbo_provenance["_qt_bbo_evidence"]["legacy_material_hash"] == (
+        bbo.material_hash
+    )
+
+    depth = DepthFeatureFact(
+        series_id=21,
+        source_l2_series_id=20,
+        bucket_start=bucket_start,
+        bucket_end=bucket_end,
+        source_effective_at=source_effective_at,
+        known_at=bucket_end,
+        source_position=position,
+        validity_interval_id="validity-1",
+        source_state_hash="a" * 64,
+        bbo_input_fingerprint="b" * 64,
+        provider_size_unit="base",
+        band_bps=5,
+        mid_price=Decimal("100"),
+        bid_quantity=Decimal("2"),
+        ask_quantity=Decimal("3"),
+        bid_base_quantity=Decimal("2"),
+        ask_base_quantity=Decimal("3"),
+        bid_notional=Decimal("198"),
+        ask_notional=Decimal("303"),
+        imbalance=Decimal("-0.2"),
+        input_fingerprint="d" * 64,
+    )
+    depth_row = {
+        **_envelope(),
+        "id": "legacy-depth-1",
+        "source_l2_series_id": depth.source_l2_series_id,
+        "bucket_start": depth.bucket_start,
+        "bucket_end": depth.bucket_end,
+        "known_at": depth.known_at,
+        "source_effective_at": depth.source_effective_at,
+        "source_position": depth.source_position.material(),
+        "validity_interval_id": depth.validity_interval_id,
+        "source_state_hash": depth.source_state_hash,
+        "bbo_input_fingerprint": depth.bbo_input_fingerprint,
+        "provider_size_unit": depth.provider_size_unit.value,
+        "band_bps": depth.band_bps,
+        "mid_price": depth.mid_price,
+        "bid_quantity": depth.bid_quantity,
+        "ask_quantity": depth.ask_quantity,
+        "bid_base_quantity": depth.bid_base_quantity,
+        "ask_base_quantity": depth.ask_base_quantity,
+        "bid_notional": depth.bid_notional,
+        "ask_notional": depth.ask_notional,
+        "imbalance": depth.imbalance,
+        "input_fingerprint": depth.input_fingerprint,
+        "material_hash": depth.material_hash,
+        "provenance_hash": "e" * 64,
+        "quality": {},
+    }
+    depth_result = _MIGRATION["_depth_feature"](depth_row)
+    assert depth_result.values["payload_schema_id"] == "market.depth_band.v1"
+    depth_payload = json.loads(str(depth_result.values["payload"]))
+    assert depth_payload["band_bps"] == 5
+    assert depth_payload["imbalance"] == "-0.2"

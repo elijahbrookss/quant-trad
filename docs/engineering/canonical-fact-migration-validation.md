@@ -152,6 +152,22 @@ Two of 1,043 mutation batches had provider event timestamps ahead of QT
 Canonical validation therefore keeps those platform causal constraints while
 allowing external clocks to lead QT's clock. No clock was rewritten.
 
+## BBO and depth transformation proof
+
+The same protected restore contained 77 BBO revisions and 231 fixed-band depth
+revisions. Both families completed validation-only transformation, canonical
+write with full stored-column comparison, and a second execute with
+`inserted_rows=0`. Every legacy row reconstructed its typed material hash
+before canonicalization. Canonical provenance retains that hash, the source L2
+series and source position, while payloads retain exact book values, validity,
+state, units, and input fingerprints.
+
+The live repository database test now writes BBO and depth exclusively through
+the canonical writer, reads their typed projections back from canonical Facts,
+and asserts zero rows for the test series in both retired typed tables. Dataset
+archive resolution follows canonical source-position provenance rather than a
+legacy table lookup.
+
 The restored database was 2,099,860,271 bytes after the L2-only canonical
 write; `market.fact_versions` occupied 37,257,216 bytes. This target remains
 disposable and does not alter source `quanttrad`.

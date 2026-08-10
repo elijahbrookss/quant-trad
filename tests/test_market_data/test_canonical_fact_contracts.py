@@ -7,11 +7,19 @@ from decimal import Decimal
 import pytest
 
 from market_data.canonical import CanonicalFact, CanonicalFactRecord
+from market_data.canonical_adapters import (
+    canonicalize_bbo_feature,
+    canonicalize_depth_feature,
+    decode_bbo_feature_record,
+    decode_depth_feature_record,
+)
 from market_data.contracts import SourceIdentity
 from market_data.fact_registry import (
     get_fact_payload_schema,
     supported_fact_payload_schemas,
 )
+from market_data.market_state import BboFeatureFact, DepthFeatureFact
+from market_data.order_book import BookSourcePosition
 
 
 _BASE = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
@@ -175,6 +183,88 @@ def test_derived_market_state_payload_contracts_are_registered_and_strict() -> N
     assert normalized["mid_price"] == "118000"
     with pytest.raises(ValueError, match="unexpected=provider"):
         bbo.normalize_payload({**normalized, "provider": "coinbase"})
+
+
+def test_book_features_round_trip_without_source_shape_in_payload() -> None:
+    position = BookSourcePosition(
+        definition_id="btc-l2",
+        session_id="session-1",
+        connection_epoch=0,
+        provider_product_id="BTC-USD",
+        provider_sequence_num=101,
+        receive_ordinal=7,
+        event_ordinal=0,
+    )
+    source_effective_at = _BASE + timedelta(milliseconds=500)
+    bucket_end = _BASE + timedelta(seconds=1)
+    bbo = BboFeatureFact(
+        series_id=51,
+        source_l2_series_id=41,
+        bucket_start=_BASE,
+        bucket_end=bucket_end,
+        source_effective_at=source_effective_at,
+        known_at=bucket_end,
+        source_position=position,
+        validity_interval_id="validity-1",
+        product_definition_version_id="coinbase.BTC-USD.v1",
+        provider_size_unit="base",
+        source_state_hash="a" * 64,
+        bid_price=Decimal("99"),
+        bid_quantity=Decimal("2"),
+        bid_base_quantity=Decimal("2"),
+        ask_price=Decimal("101"),
+        ask_quantity=Decimal("3"),
+        ask_base_quantity=Decimal("3"),
+        mid_price=Decimal("100"),
+        spread=Decimal("2"),
+        spread_bps=Decimal("200"),
+        input_fingerprint="b" * 64,
+    )
+    depth = DepthFeatureFact(
+        series_id=52,
+        source_l2_series_id=41,
+        bucket_start=_BASE,
+        bucket_end=bucket_end,
+        source_effective_at=source_effective_at,
+        known_at=bucket_end,
+        source_position=position,
+        validity_interval_id="validity-1",
+        source_state_hash="a" * 64,
+        bbo_input_fingerprint="b" * 64,
+        provider_size_unit="base",
+        band_bps=5,
+        mid_price=Decimal("100"),
+        bid_quantity=Decimal("2"),
+        ask_quantity=Decimal("3"),
+        bid_base_quantity=Decimal("2"),
+        ask_base_quantity=Decimal("3"),
+        bid_notional=Decimal("198"),
+        ask_notional=Decimal("303"),
+        imbalance=Decimal("-0.2"),
+        input_fingerprint="c" * 64,
+    )
+    canonical_bbo = canonicalize_bbo_feature(bbo, source=_COINBASE)
+    canonical_depth = canonicalize_depth_feature(depth, source=_COINBASE)
+    assert "source_l2_series_id" not in canonical_bbo.payload
+    assert "source_l2_series_id" not in canonical_depth.payload
+    assert decode_bbo_feature_record(
+        CanonicalFactRecord(
+            series_id=51,
+            source_id=1,
+            revision=1,
+            market_commit_seq=1,
+            fact=canonical_bbo,
+        )
+    ).fact == bbo
+    assert decode_depth_feature_record(
+        CanonicalFactRecord(
+            series_id=52,
+            source_id=1,
+            revision=1,
+            market_commit_seq=2,
+            fact=canonical_depth,
+        )
+    ).fact == depth
 
 
 def test_l2_payload_validates_every_atomic_entry() -> None:

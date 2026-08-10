@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 from .canonical import CanonicalFact, CanonicalFactRecord
-from .contracts import SourceIdentity
+from .contracts import SourceIdentity, TypedFeatureRecord
+from .market_state import BboFeatureFact, DepthFeatureFact
 from .order_book import (
     BOOK_RECONSTRUCTION_VERSION,
+    BookSourcePosition,
     L2MutationBatchFact,
     L2SnapshotFact,
 )
@@ -17,6 +20,14 @@ from .structure import (
     MarketTradeRecord,
     TradeFlowAggregateFact,
     TradeFlowAggregateRecord,
+)
+
+
+DERIVED_MARKET_STATE_SOURCE = SourceIdentity(
+    provider="QT",
+    venue="",
+    source_kind="deterministic_derivation",
+    adapter_version="market_state.canonical.v1",
 )
 
 
@@ -45,6 +56,20 @@ def _legacy_identity(
         str(migration.get("legacy_version_id") or version_id),
         str(migration.get("legacy_provenance_hash") or provenance_hash),
     )
+
+
+def _timestamp(value: Any, *, field: str) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    raw = str(value or "").strip()
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"market_canonical_fact_corrupt: field={field} is not a timestamp"
+        ) from exc
 
 
 def canonicalize_market_trade(
@@ -409,6 +434,243 @@ def canonicalize_l2_mutation_batch(
     )
 
 
+def _derived_provenance(
+    provenance: Mapping[str, Any] | None,
+    *,
+    evidence_key: str,
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    canonical_provenance = dict(provenance or {})
+    if evidence_key in canonical_provenance:
+        raise ValueError(
+            "market_state_canonicalization_invalid: reserved provenance key "
+            f"key={evidence_key}"
+        )
+    canonical_provenance[evidence_key] = dict(evidence)
+    return canonical_provenance
+
+
+def canonicalize_bbo_feature(
+    fact: BboFeatureFact,
+    *,
+    source: SourceIdentity,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    """Translate one deterministic BBO state into its canonical payload."""
+
+    canonical_provenance = _derived_provenance(
+        provenance,
+        evidence_key="_qt_bbo_evidence",
+        evidence={
+            "source_l2_series_id": fact.source_l2_series_id,
+            "source_effective_at": fact.source_effective_at,
+            "source_position": fact.source_position.material(),
+            "legacy_material_hash": fact.material_hash,
+        },
+    )
+    return CanonicalFact(
+        fact_type="market.bbo",
+        payload_schema_id="market.bbo.v1",
+        observation_key=fact.bucket_start.isoformat(),
+        observation_time=fact.bucket_start,
+        observation_time_method="derived_bucket_start",
+        source_published_at=fact.source_effective_at,
+        received_at=fact.known_at,
+        accepted_at=fact.known_at,
+        known_at=fact.known_at,
+        known_at_method="derived_input_watermark",
+        source=source,
+        transformation_id="market.bbo.canonicalization.v1",
+        external_event_group_key=fact.validity_interval_id,
+        external_event_component_key=fact.source_state_hash,
+        payload={
+            "bucket_end": fact.bucket_end,
+            "product_definition_version_id": fact.product_definition_version_id,
+            "validity_interval_id": fact.validity_interval_id,
+            "provider_size_unit": fact.provider_size_unit.value,
+            "source_state_hash": fact.source_state_hash,
+            "bid_price": fact.bid_price,
+            "bid_quantity": fact.bid_quantity,
+            "bid_base_quantity": fact.bid_base_quantity,
+            "ask_price": fact.ask_price,
+            "ask_quantity": fact.ask_quantity,
+            "ask_base_quantity": fact.ask_base_quantity,
+            "mid_price": fact.mid_price,
+            "spread": fact.spread,
+            "spread_bps": fact.spread_bps,
+            "input_fingerprint": fact.input_fingerprint,
+        },
+        provenance=canonical_provenance,
+        quality=dict(quality or {}),
+    )
+
+
+def canonicalize_depth_feature(
+    fact: DepthFeatureFact,
+    *,
+    source: SourceIdentity,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    """Translate one fixed-band depth state into its canonical payload."""
+
+    canonical_provenance = _derived_provenance(
+        provenance,
+        evidence_key="_qt_depth_evidence",
+        evidence={
+            "source_l2_series_id": fact.source_l2_series_id,
+            "source_effective_at": fact.source_effective_at,
+            "source_position": fact.source_position.material(),
+            "legacy_material_hash": fact.material_hash,
+        },
+    )
+    return CanonicalFact(
+        fact_type="market.depth_observation",
+        payload_schema_id="market.depth_band.v1",
+        observation_key=f"{fact.bucket_start.isoformat()}:{fact.band_bps}",
+        observation_time=fact.bucket_start,
+        observation_time_method="derived_bucket_start",
+        source_published_at=fact.source_effective_at,
+        received_at=fact.known_at,
+        accepted_at=fact.known_at,
+        known_at=fact.known_at,
+        known_at_method="derived_input_watermark",
+        source=source,
+        transformation_id="market.depth_band.canonicalization.v1",
+        external_event_group_key=fact.validity_interval_id,
+        external_event_component_key=fact.source_state_hash,
+        payload={
+            "bucket_end": fact.bucket_end,
+            "validity_interval_id": fact.validity_interval_id,
+            "source_state_hash": fact.source_state_hash,
+            "bbo_input_fingerprint": fact.bbo_input_fingerprint,
+            "provider_size_unit": fact.provider_size_unit.value,
+            "band_bps": fact.band_bps,
+            "mid_price": fact.mid_price,
+            "bid_quantity": fact.bid_quantity,
+            "ask_quantity": fact.ask_quantity,
+            "bid_base_quantity": fact.bid_base_quantity,
+            "ask_base_quantity": fact.ask_base_quantity,
+            "bid_notional": fact.bid_notional,
+            "ask_notional": fact.ask_notional,
+            "imbalance": fact.imbalance,
+            "input_fingerprint": fact.input_fingerprint,
+        },
+        provenance=canonical_provenance,
+        quality=dict(quality or {}),
+    )
+
+
+def _typed_feature_record(
+    record: CanonicalFactRecord,
+    *,
+    fact: BboFeatureFact | DepthFeatureFact,
+    evidence: Mapping[str, Any],
+) -> TypedFeatureRecord:
+    if fact.material_hash != str(evidence["legacy_material_hash"]):
+        raise RuntimeError(
+            "market_state_decode_corrupt: canonical evidence and typed material "
+            f"disagree fact_version_id={record.fact_version_id}"
+        )
+    version_id, provenance_hash = _legacy_identity(
+        record.fact,
+        version_id=str(record.fact_version_id),
+        provenance_hash=record.fact.provenance_hash,
+    )
+    return TypedFeatureRecord(
+        version_id=version_id,
+        series_id=record.series_id,
+        revision=record.revision,
+        market_commit_seq=record.market_commit_seq,
+        provenance_hash=provenance_hash,
+        quality=dict(record.fact.quality),
+        fact=fact,
+    )
+
+
+def decode_bbo_feature_record(record: CanonicalFactRecord) -> TypedFeatureRecord:
+    if record.fact.payload_schema_id != "market.bbo.v1":
+        raise ValueError(
+            "market_bbo_decode_invalid: expected market.bbo.v1 "
+            f"actual={record.fact.payload_schema_id}"
+        )
+    payload = record.fact.payload
+    evidence = _evidence_mapping(
+        record.fact.provenance,
+        key="_qt_bbo_evidence",
+        fact_version_id=str(record.fact_version_id),
+    )
+    fact = BboFeatureFact(
+        series_id=record.series_id,
+        source_l2_series_id=evidence["source_l2_series_id"],
+        bucket_start=record.fact.observation_time,
+        bucket_end=_timestamp(payload["bucket_end"], field="bucket_end"),
+        source_effective_at=_timestamp(
+            evidence["source_effective_at"], field="source_effective_at"
+        ),
+        known_at=record.fact.known_at,
+        source_position=BookSourcePosition(**evidence["source_position"]),
+        validity_interval_id=payload["validity_interval_id"],
+        product_definition_version_id=payload[
+            "product_definition_version_id"
+        ],
+        provider_size_unit=payload["provider_size_unit"],
+        source_state_hash=payload["source_state_hash"],
+        bid_price=payload["bid_price"],
+        bid_quantity=payload["bid_quantity"],
+        bid_base_quantity=payload["bid_base_quantity"],
+        ask_price=payload["ask_price"],
+        ask_quantity=payload["ask_quantity"],
+        ask_base_quantity=payload["ask_base_quantity"],
+        mid_price=payload["mid_price"],
+        spread=payload["spread"],
+        spread_bps=payload["spread_bps"],
+        input_fingerprint=payload["input_fingerprint"],
+    )
+    return _typed_feature_record(record, fact=fact, evidence=evidence)
+
+
+def decode_depth_feature_record(record: CanonicalFactRecord) -> TypedFeatureRecord:
+    if record.fact.payload_schema_id != "market.depth_band.v1":
+        raise ValueError(
+            "market_depth_decode_invalid: expected market.depth_band.v1 "
+            f"actual={record.fact.payload_schema_id}"
+        )
+    payload = record.fact.payload
+    evidence = _evidence_mapping(
+        record.fact.provenance,
+        key="_qt_depth_evidence",
+        fact_version_id=str(record.fact_version_id),
+    )
+    fact = DepthFeatureFact(
+        series_id=record.series_id,
+        source_l2_series_id=evidence["source_l2_series_id"],
+        bucket_start=record.fact.observation_time,
+        bucket_end=_timestamp(payload["bucket_end"], field="bucket_end"),
+        source_effective_at=_timestamp(
+            evidence["source_effective_at"], field="source_effective_at"
+        ),
+        known_at=record.fact.known_at,
+        source_position=BookSourcePosition(**evidence["source_position"]),
+        validity_interval_id=payload["validity_interval_id"],
+        source_state_hash=payload["source_state_hash"],
+        bbo_input_fingerprint=payload["bbo_input_fingerprint"],
+        provider_size_unit=payload["provider_size_unit"],
+        band_bps=payload["band_bps"],
+        mid_price=payload["mid_price"],
+        bid_quantity=payload["bid_quantity"],
+        ask_quantity=payload["ask_quantity"],
+        bid_base_quantity=payload["bid_base_quantity"],
+        ask_base_quantity=payload["ask_base_quantity"],
+        bid_notional=payload["bid_notional"],
+        ask_notional=payload["ask_notional"],
+        imbalance=payload["imbalance"],
+        input_fingerprint=payload["input_fingerprint"],
+    )
+    return _typed_feature_record(record, fact=fact, evidence=evidence)
+
+
 def decode_market_trade_record(record: CanonicalFactRecord) -> MarketTradeRecord:
     if record.fact.payload_schema_id != "market.trade.v1":
         raise ValueError(
@@ -553,10 +815,15 @@ def decode_trade_flow_record(
 
 
 __all__ = [
+    "DERIVED_MARKET_STATE_SOURCE",
+    "canonicalize_bbo_feature",
+    "canonicalize_depth_feature",
     "canonicalize_l2_mutation_batch",
     "canonicalize_l2_snapshot",
     "canonicalize_market_trade",
     "canonicalize_trade_flow",
+    "decode_bbo_feature_record",
+    "decode_depth_feature_record",
     "decode_market_trade_record",
     "decode_trade_flow_record",
 ]

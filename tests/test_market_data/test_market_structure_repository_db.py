@@ -1050,6 +1050,31 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
     )
     assert first_features.inserted_count == len(bbo_facts) + len(depth_facts)
     assert repeated_features.noop_count == len(bbo_facts) + len(depth_facts)
+    with db.session() as session:
+        canonical_feature_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.fact_versions "
+                "WHERE series_id = ANY(:series_ids) "
+                "  AND payload_schema_id IN "
+                "      ('market.bbo.v1', 'market.depth_band.v1')"
+            ),
+            {"series_ids": [bbo_series_id, depth_series_id]},
+        ).scalar_one()
+        legacy_feature_count = session.execute(
+            text(
+                "SELECT "
+                "  (SELECT count(*) FROM market.bbo_feature_versions "
+                "   WHERE series_id = :bbo_series_id) + "
+                "  (SELECT count(*) FROM market.depth_feature_versions "
+                "   WHERE series_id = :depth_series_id)"
+            ),
+            {
+                "bbo_series_id": bbo_series_id,
+                "depth_series_id": depth_series_id,
+            },
+        ).scalar_one()
+    assert canonical_feature_count == len(bbo_facts) + len(depth_facts)
+    assert legacy_feature_count == 0
     feature_start = bbo_facts[0].bucket_start
     feature_end = bbo_facts[-1].bucket_end
     stored_bbo = market_structure_repository.read_bbo_features(

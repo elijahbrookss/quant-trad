@@ -20,6 +20,9 @@ from sqlalchemy import create_engine, text
 
 from market_data.canonical import CanonicalFact, build_fact_version_id
 from market_data.canonical_adapters import (
+    DERIVED_MARKET_STATE_SOURCE,
+    canonicalize_bbo_feature,
+    canonicalize_depth_feature,
     canonicalize_l2_mutation_batch,
     canonicalize_l2_snapshot,
     canonicalize_market_trade,
@@ -34,6 +37,7 @@ from market_data.contracts import (
     SourceIdentity,
 )
 from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
+from market_data.market_state import BboFeatureFact, DepthFeatureFact
 from market_data.order_book import (
     BookSourcePosition,
     L2EventFact,
@@ -45,6 +49,7 @@ from market_data.order_book import (
 
 _ADVISORY_LOCK_ID = 9_021_011
 _BATCH_SIZE = 2_000
+_DERIVED_SOURCE = DERIVED_MARKET_STATE_SOURCE
 
 
 @dataclass(frozen=True)
@@ -620,6 +625,114 @@ def _l2_mutation(row: Mapping[str, Any]) -> MigrationRow:
     return _canonical_values(row=row, fact=canonical)
 
 
+def _book_position(value: Mapping[str, Any]) -> BookSourcePosition:
+    return BookSourcePosition(
+        definition_id=str(value["definition_id"]),
+        session_id=str(value["session_id"]),
+        connection_epoch=int(value["connection_epoch"]),
+        provider_product_id=str(value["provider_product_id"]),
+        provider_sequence_num=(
+            int(value["provider_sequence_num"])
+            if value.get("provider_sequence_num") is not None
+            else None
+        ),
+        receive_ordinal=int(value["receive_ordinal"]),
+        event_ordinal=int(value["event_ordinal"]),
+    )
+
+
+def _bbo_feature(row: Mapping[str, Any]) -> MigrationRow:
+    legacy = BboFeatureFact(
+        series_id=int(row["series_id"]),
+        source_l2_series_id=int(row["source_l2_series_id"]),
+        bucket_start=row["bucket_start"],
+        bucket_end=row["bucket_end"],
+        source_effective_at=row["source_effective_at"],
+        known_at=row["known_at"],
+        source_position=_book_position(dict(row["source_position"])),
+        validity_interval_id=str(row["validity_interval_id"]),
+        product_definition_version_id=str(
+            row["product_definition_version_id"]
+        ),
+        provider_size_unit=str(row["provider_size_unit"]),
+        source_state_hash=str(row["source_state_hash"]),
+        bid_price=row["bid_price"],
+        bid_quantity=row["bid_quantity"],
+        bid_base_quantity=row["bid_base_quantity"],
+        ask_price=row["ask_price"],
+        ask_quantity=row["ask_quantity"],
+        ask_base_quantity=row["ask_base_quantity"],
+        mid_price=row["mid_price"],
+        spread=row["spread"],
+        spread_bps=row["spread_bps"],
+        input_fingerprint=str(row["input_fingerprint"]),
+    )
+    if legacy.material_hash != str(row["material_hash"]):
+        raise RuntimeError(
+            "canonical_fact_migration_source_hash_mismatch: "
+            f"family=bbo_feature series_id={row['series_id']} id={row['id']}"
+        )
+    canonical = canonicalize_bbo_feature(
+        legacy,
+        source=_source(row),
+        provenance=_migration_provenance(
+            row,
+            source_table="market.bbo_feature_versions",
+            extra={
+                "legacy_version_id": str(row["id"]),
+                "legacy_provenance_hash": str(row["provenance_hash"]),
+            },
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
+def _depth_feature(row: Mapping[str, Any]) -> MigrationRow:
+    legacy = DepthFeatureFact(
+        series_id=int(row["series_id"]),
+        source_l2_series_id=int(row["source_l2_series_id"]),
+        bucket_start=row["bucket_start"],
+        bucket_end=row["bucket_end"],
+        source_effective_at=row["source_effective_at"],
+        known_at=row["known_at"],
+        source_position=_book_position(dict(row["source_position"])),
+        validity_interval_id=str(row["validity_interval_id"]),
+        source_state_hash=str(row["source_state_hash"]),
+        bbo_input_fingerprint=str(row["bbo_input_fingerprint"]),
+        provider_size_unit=str(row["provider_size_unit"]),
+        band_bps=int(row["band_bps"]),
+        mid_price=row["mid_price"],
+        bid_quantity=row["bid_quantity"],
+        ask_quantity=row["ask_quantity"],
+        bid_base_quantity=row["bid_base_quantity"],
+        ask_base_quantity=row["ask_base_quantity"],
+        bid_notional=row["bid_notional"],
+        ask_notional=row["ask_notional"],
+        imbalance=row["imbalance"],
+        input_fingerprint=str(row["input_fingerprint"]),
+    )
+    if legacy.material_hash != str(row["material_hash"]):
+        raise RuntimeError(
+            "canonical_fact_migration_source_hash_mismatch: "
+            f"family=depth_feature series_id={row['series_id']} id={row['id']}"
+        )
+    canonical = canonicalize_depth_feature(
+        legacy,
+        source=_source(row),
+        provenance=_migration_provenance(
+            row,
+            source_table="market.depth_feature_versions",
+            extra={
+                "legacy_version_id": str(row["id"]),
+                "legacy_provenance_hash": str(row["provenance_hash"]),
+            },
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
 _SOURCE_JOIN = """
     JOIN market.ingestion_runs AS ingestion
       ON ingestion.id = fact.ingestion_run_id
@@ -640,6 +753,15 @@ _SOURCE_IDENTITY_COLUMNS = """
     source.venue AS source_venue,
     source.source_kind,
     source.adapter_version AS source_adapter_version
+"""
+_DERIVED_SOURCE_COLUMNS = f"""
+    CAST(:derived_source_id AS bigint) AS source_id,
+    '{_DERIVED_SOURCE.identity_key}'::text AS source_identity_key,
+    '{_DERIVED_SOURCE.provider}'::text AS source_provider,
+    '{_DERIVED_SOURCE.venue}'::text AS source_venue,
+    '{_DERIVED_SOURCE.source_kind}'::text AS source_kind,
+    '{_DERIVED_SOURCE.adapter_version}'::text AS source_adapter_version,
+    NULL::text AS ingestion_run_id
 """
 
 _FAMILIES = (
@@ -755,6 +877,22 @@ _FAMILIES = (
         "ORDER BY fact.series_id, fact.effective_at, fact.id",
         _l2_mutation,
     ),
+    MigrationFamily(
+        "bbo_feature",
+        "market.bbo_feature_versions",
+        f"SELECT fact.*, {_DERIVED_SOURCE_COLUMNS} "
+        "FROM market.bbo_feature_versions AS fact "
+        "ORDER BY fact.series_id, fact.bucket_start, fact.revision",
+        _bbo_feature,
+    ),
+    MigrationFamily(
+        "depth_feature",
+        "market.depth_feature_versions",
+        f"SELECT fact.*, {_DERIVED_SOURCE_COLUMNS} "
+        "FROM market.depth_feature_versions AS fact "
+        "ORDER BY fact.series_id, fact.bucket_start, fact.band_bps, fact.revision",
+        _depth_feature,
+    ),
 )
 
 _INSERT = text(
@@ -819,6 +957,64 @@ _VALIDATION_COLUMNS = (
 )
 
 
+def _resolve_derived_source_id(conn, *, execute: bool) -> int:
+    row = conn.execute(
+        text(
+            """
+            SELECT id, provider, venue, source_kind, adapter_version
+            FROM market.sources
+            WHERE identity_key = :identity_key
+            """
+        ),
+        {"identity_key": _DERIVED_SOURCE.identity_key},
+    ).mappings().first()
+    if row is not None:
+        actual = SourceIdentity(
+            provider=str(row["provider"]),
+            venue=str(row["venue"]),
+            source_kind=str(row["source_kind"]),
+            adapter_version=str(row["adapter_version"]),
+        )
+        if actual != _DERIVED_SOURCE:
+            raise RuntimeError(
+                "canonical_fact_migration_derived_source_conflict: "
+                f"source_id={row['id']}"
+            )
+        return int(row["id"])
+    if not execute:
+        return 0
+    return int(
+        conn.execute(
+            text(
+                """
+                INSERT INTO market.sources (
+                    identity_key, provider, venue, source_kind,
+                    adapter_version, lineage
+                ) VALUES (
+                    :identity_key, :provider, :venue, :source_kind,
+                    :adapter_version, CAST(:lineage AS jsonb)
+                )
+                RETURNING id
+                """
+            ),
+            {
+                "identity_key": _DERIVED_SOURCE.identity_key,
+                "provider": _DERIVED_SOURCE.provider,
+                "venue": _DERIVED_SOURCE.venue,
+                "source_kind": _DERIVED_SOURCE.source_kind,
+                "adapter_version": _DERIVED_SOURCE.adapter_version,
+                "lineage": json.dumps(
+                    {
+                        "schema_version": "market.derived_source_lineage.v1",
+                        "authority": "QT deterministic market-state transforms",
+                    },
+                    sort_keys=True,
+                ),
+            },
+        ).scalar_one()
+    )
+
+
 def _assert_boundary(conn, *, execute: bool) -> None:
     required = [
         "market.fact_schemas",
@@ -858,11 +1054,20 @@ def _assert_boundary(conn, *, execute: bool) -> None:
     conn.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": _ADVISORY_LOCK_ID})
 
 
-def _migrate_family(conn, family: MigrationFamily, *, execute: bool) -> dict[str, Any]:
+def _migrate_family(
+    conn,
+    family: MigrationFamily,
+    *,
+    execute: bool,
+    derived_source_id: int,
+) -> dict[str, Any]:
     source_count = int(
         conn.execute(text(f"SELECT count(*) FROM {family.source_table}")).scalar_one()
     )
-    source_rows = conn.execute(text(family.select_sql)).mappings().all()
+    source_rows = conn.execute(
+        text(family.select_sql),
+        {"derived_source_id": int(derived_source_id)},
+    ).mappings().all()
     if len(source_rows) != source_count:
         raise RuntimeError(
             "canonical_fact_migration_orphaned_source_rows: "
@@ -967,6 +1172,9 @@ def main() -> int:
     try:
         with engine.begin() as conn:
             _assert_boundary(conn, execute=bool(args.execute))
+            derived_source_id = _resolve_derived_source_id(
+                conn, execute=bool(args.execute)
+            )
             selected = set(args.family or ())
             families = tuple(
                 family
@@ -974,7 +1182,12 @@ def main() -> int:
                 if not selected or family.name in selected
             )
             for family in families:
-                report = _migrate_family(conn, family, execute=bool(args.execute))
+                report = _migrate_family(
+                    conn,
+                    family,
+                    execute=bool(args.execute),
+                    derived_source_id=derived_source_id,
+                )
                 reports.append(report)
                 print(
                     "canonical_fact_migration_family "
