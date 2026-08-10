@@ -1,8 +1,9 @@
 # Canonical Fact Migration Validation
 
-Status: complete on a protected backup restore. The source database was not
-modified. The canonical migration, equivalence validation, runtime cutover,
-legacy deletion, and provider-disabled structured research replay all passed.
+Status: complete on both a protected backup restore and the source `quanttrad`
+deployment. The canonical migration, equivalence validation, hard cutover,
+legacy deletion, rebuilt-runtime startup, and provider-disabled structured
+research replay all passed.
 
 ## Validation target
 
@@ -30,7 +31,8 @@ manifest exactly:
 | `market.datasets` | 54 |
 | `market.dataset_series` | 105 |
 
-The source database `quanttrad` was not modified.
+The source database `quanttrad` was not modified during this restore-validation
+stage.
 
 ## Core transformation proof
 
@@ -112,9 +114,9 @@ Independent PostgreSQL aggregation after the committed write produced:
 | `market.trade_flow.v1` | 45,941 | 4,744 | 200,242 | 45,941 |
 
 The canonical total was 272,489 rows and 272,489 distinct canonical version
-IDs. The source `quanttrad` database was queried separately after validation
-and remained unchanged. The disposable database occupied 2,722 MB before it
-was dropped.
+IDs. The source `quanttrad` database was queried separately after this
+validation stage and remained unchanged. The disposable database occupied
+2,722 MB before it was dropped.
 
 ## Level 2 transformation proof
 
@@ -198,10 +200,12 @@ any old relation was removed.
 | **Total** | **283,795** |
 
 All 283,795 rows had distinct canonical version identities where required and
-matched their source family counts. The final database used 21 fact types and
-21 payload schemas from a 27-schema registered catalog. Six obsolete
-normalization schemas had zero facts, Dataset references, Check references, or
-Observation references and were explicitly skipped rather than fabricated.
+matched their source family counts. The final disposable database used 21 fact
+types and 21 payload schemas from a 27-schema registered catalog. The later
+source cutover registered 28 schemas, including `asset.reserve_state.v1`. Six
+obsolete normalization schemas had zero facts, Dataset references, Check
+references, or Observation references and were explicitly skipped rather than
+fabricated.
 
 The hard-cutover SQL
 `scripts/db/manual_migration_canonical_fact_hard_cutover_v1.sql`:
@@ -215,6 +219,62 @@ After cutover, startup rejects any remaining retired relation and never creates
 one. Static tests scan runtime source for all retired names. The repository has
 one canonical writer and one generalized frozen Fact read; no dual-write,
 fallback, compatibility flag, or legacy repository remains.
+
+## Source deployment cutover
+
+The source `quanttrad` deployment was cut over offline on 2026-08-09 CDT
+(2026-08-10 UTC), after the protected-restore proof above was complete.
+
+Immediately before source mutation:
+
+- the backup SHA-256 was rechecked as
+  `d9cd0a04eafbe1abe068ab9cb3e7313ac4482ac9873d580de3e6b7bee8104972`;
+- the source commit watermark (`283,825`), all recorded source-table counts,
+  54 Datasets, and 105 Dataset-series bindings matched the backup boundary;
+- the backend was stopped and PostgreSQL reported no other client backend;
+- the canonical schema migration was applied under exclusive access.
+
+The source migration then completed one validation-only pass, one execute pass,
+and a second execute pass. Every pass validated all 283,795 source rows. The
+second execute pass reported `inserted_rows=0` for every family. The guarded
+hard-cutover transaction rechecked all 15 parent-family counts plus both atomic
+Level 2 child-entry totals, dropped all 17 retired relations, verified their
+absence, and committed.
+
+Post-cutover source validation produced:
+
+| Evidence | Result |
+| --- | ---: |
+| Canonical rows | 283,795 |
+| Distinct canonical IDs | 283,795 |
+| Registered payload schemas | 28 |
+| Used payload schemas | 21 |
+| Schema orphans | 0 |
+| Malformed required-envelope rows | 0 |
+| Datasets | 54 |
+| Dataset-series bindings | 105 |
+| Gap-evidence rows | 165 |
+| Retired relations remaining | 0 |
+
+Two retained Coinbase Level 2 observations have external provider event clocks
+about one second ahead of QT acceptance. Their provider timestamps,
+`received_at`, `accepted_at`, and `known_at=platform_acceptance` were preserved
+exactly; they are source-clock anomalies, not causal rewrites. All receipt and
+acceptance constraints remain valid.
+
+The backend and TimescaleDB containers were rebuilt/recreated from the canonical
+branch. The named database volume retained the exact counts above. Startup
+reported the portal schema contract ready for the API, all five Indicator
+workers, and both research workers; OpenAPI returned HTTP 200 and the backend
+had zero restarts. No retired relation was recreated.
+
+Final verification used a fresh disposable PostgreSQL lifecycle:
+
+- 2,006 non-database tests passed;
+- all 30 database tests passed;
+- the database tests include migration idempotency, hard-cutover enforcement,
+  canonical scalar/structured reads, frozen replay, normalization source
+  witnesses, structured Indicator/Check evidence, and reporting paths.
 
 ## Frozen research proof
 

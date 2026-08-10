@@ -129,7 +129,12 @@ before considering any source-database replacement.
 This backup protects the pre-generalized-Fact state only. It does not justify a
 runtime compatibility path, dual writes, fallback reads, or a rollback-shaped
 new schema. The equivalence validator passed on the disposable restore before
-the superseded tables were removed there. The source database captured by this
-artifact was not modified during validation; any future cutover of that source
-must repeat checksum verification, offline migration, equivalence validation,
-and hard-cutover gates from the documented boundary.
+the superseded tables were removed there.
+
+The source database captured by this artifact remained unchanged during restore
+validation. It was subsequently cut over offline on 2026-08-09 CDT only after
+the checksum, source boundary, validation-only migration, execute migration,
+zero-insert idempotency pass, and transactional hard-cutover gates were repeated
+against the source. The artifact remains the rollback boundary. Recovery means
+restoring it into a new database and performing an explicitly approved database
+replacement; it does not mean reintroducing a legacy runtime path.
