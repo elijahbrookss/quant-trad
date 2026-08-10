@@ -134,6 +134,7 @@ class _StreamRepository:
 class _OperationsRepository:
     def __init__(self):
         self.last_action = None
+        self.idempotent_replay = False
 
     def fact_series_telemetry(self, *, series_ids):
         assert set(series_ids) == {11, 21, 22, 23, 24, 25}
@@ -158,6 +159,7 @@ class _OperationsRepository:
         return {
             "status": "failed" if error else "succeeded",
             "error": error,
+            "idempotent_replay": self.idempotent_replay,
         }
 
 
@@ -305,6 +307,32 @@ def test_mutation_precondition_failures_enter_the_audit_command_path():
     assert operations.last_action["precondition_error"].startswith(
         "collector_operation_confirmation_required"
     )
+
+
+def test_idempotent_operation_replay_does_not_claim_a_second_mutation():
+    operations = _OperationsRepository()
+    operations.idempotent_replay = True
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=operations,
+        stream_registry=CollectorAdapterRegistry((_StreamAdapter(),)),
+        clock=lambda: NOW,
+    )
+
+    result = service.execute_action(
+        request_id="request-1",
+        collector_kind=CollectorKind.CONTINUOUS_STREAM,
+        collector_id="coinbase-trades",
+        action=CollectorAction.RESTART,
+        requested_at=NOW,
+        actor_id="test-operator",
+        confirmation="continuous_stream:coinbase-trades:restart",
+        context={"surface": "test"},
+    )
+
+    assert result["operation"]["idempotent_replay"] is True
+    assert result["mutated"] is False
 
 
 def test_data_plane_snapshot_reuses_canonical_fleet_metrics():

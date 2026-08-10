@@ -275,6 +275,42 @@ def test_data_collectors_restart_is_audited_and_confirmed(monkeypatch) -> None:
     assert observed["body"]["requested_at"].endswith("+00:00")
 
 
+def test_data_collectors_probe_uses_the_read_only_canonical_action(monkeypatch) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response({"mutated": False})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "collectors",
+            "probe",
+            "scheduled_fact",
+            "collector-1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["method"] == "POST"
+    assert observed["path"] == (
+        "/api/market-data/operations/collectors/scheduled_fact/"
+        "collector-1/actions/health_probe"
+    )
+    assert observed["body"]["confirmation"] is None
+    assert observed["body"]["context"] == {
+        "surface": "qt",
+        "reason": "Manual collector health probe",
+    }
+
+
 def test_data_open_interest_latest_declares_decision_time_and_staleness(
     monkeypatch,
 ) -> None:

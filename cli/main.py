@@ -1443,6 +1443,15 @@ def _cmd_data_collectors_action(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_collectors_probe(args: argparse.Namespace) -> int:
+    args.collector_action = "health_probe"
+    args.confirm = False
+    args.request_id = None
+    args.actor_id = None
+    args.reason = "Manual collector health probe"
+    return _cmd_data_collectors_action(args)
+
+
 def _cmd_data_collectors_plane(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -3719,6 +3728,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_collectors_diagnose.add_argument("collector_id")
     data_collectors_diagnose.set_defaults(func=_cmd_data_collectors_diagnose)
+    data_collectors_probe = data_collectors_sub.add_parser(
+        "probe", help="Run a read-only collector health probe."
+    )
+    data_collectors_probe.add_argument("collector_kind", choices=collector_kinds)
+    data_collectors_probe.add_argument("collector_id")
+    data_collectors_probe.set_defaults(func=_cmd_data_collectors_probe)
     for inspect_surface in ("events", "gaps"):
         command = data_collectors_sub.add_parser(
             inspect_surface,

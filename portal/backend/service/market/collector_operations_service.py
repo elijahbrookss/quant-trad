@@ -1121,15 +1121,19 @@ class CollectorOperationsService:
             context=context,
             precondition_error=confirmation_error or registration_error,
         )
+        mutated = (
+            operation["status"] == "succeeded"
+            and not bool(operation.get("idempotent_replay"))
+        )
         resulting_collector = current
-        if operation["status"] == "succeeded":
+        if mutated:
             resulting_collector = self._find_collector(
                 collector_kind=kind, collector_id=collector_id
             )
         return {
             "schema_version": COLLECTOR_OPERATION_VERSION,
             "action": normalized_action.value,
-            "mutated": operation["status"] == "succeeded",
+            "mutated": mutated,
             "operation": operation,
             "collector": resulting_collector,
         }

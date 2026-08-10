@@ -17,6 +17,17 @@ class _FakeClient:
         self.calls.append((method, path, params, payload))
         if method == "GET" and path == "/api/health":
             return {"status": "ok"}
+        if (
+            method == "GET"
+            and path == "/api/market-data/operations/collectors/snapshot"
+        ):
+            return {"collectors": [], "attempt_limit": params["attempt_limit"]}
+        if method == "GET" and path == "/api/market-data/operations/data-plane":
+            return {"schema_version": "market.data_plane_operational.v1"}
+        if method == "GET" and path.startswith(
+            "/api/market-data/operations/collectors/scheduled_fact/collector-1"
+        ):
+            return {"path": path, "params": params}
         if method == "GET" and path == "/api/bots/run-contexts":
             return {"items": [{"bot_id": "bot-1"}]}
         if method == "GET" and path == "/api/bots/bot-1/run-context":
@@ -153,6 +164,11 @@ def test_mcp_initialize_and_tools_list_exclude_python_handlers(tmp_path):
         "replay_research_check",
         "create_observation_from_check",
         "get_research_trail",
+        "list_collectors",
+        "get_collector",
+        "diagnose_collector",
+        "probe_collector",
+        "operate_collector",
     }
     assert all("handler" not in tool for tool in tools["result"]["tools"])
     json.dumps(tools)
@@ -179,6 +195,81 @@ def test_mcp_resource_read_routes_to_backend_contracts(tmp_path):
     }
     assert ("GET", "/api/bots/run-contexts", None, None) in client.calls
     assert ("GET", "/api/reports/run-1/research-summary", None, None) in client.calls
+
+
+def test_mcp_collector_resources_use_the_canonical_operational_api(tmp_path):
+    client = _FakeClient()
+    server = _server(tmp_path, client=client)
+
+    fleet = server.read_resource(
+        "quanttrad://market-data/collectors?attempt_limit=7"
+    )
+    detail = server.read_resource(
+        "quanttrad://market-data/collectors/scheduled_fact/collector-1?limit=9"
+    )
+    diagnostics = server.read_resource(
+        "quanttrad://market-data/collectors/scheduled_fact/collector-1/diagnostics"
+    )
+
+    assert fleet["attempt_limit"] == 7
+    assert detail["params"] == {"limit": 9}
+    assert diagnostics["path"].endswith("/diagnostics")
+    assert diagnostics["params"] is None
+
+
+def test_mcp_collector_mutation_is_planned_guarded_and_routes_through_qt(tmp_path):
+    runner = _FakeCommandRunner()
+    server = _server(tmp_path, runner=runner)
+    arguments = {
+        "collector_kind": "scheduled_fact",
+        "collector_id": "collector-1",
+        "action": "restart",
+        "reason": "recover a stale collector",
+    }
+
+    planned = server.call_tool("operate_collector", arguments)
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool("operate_collector", {**arguments, "apply": True})
+    applied = server.call_tool(
+        "operate_collector",
+        {
+            **arguments,
+            "apply": True,
+            "confirm": True,
+            "request_id": "request-1",
+            "actor_id": "mcp:test-agent",
+        },
+    )
+    probed = server.call_tool(
+        "probe_collector",
+        {
+            "collector_kind": "scheduled_fact",
+            "collector_id": "collector-1",
+        },
+    )
+
+    assert planned["apply"] is False
+    assert applied["args"] == [
+        "data",
+        "collectors",
+        "restart",
+        "scheduled_fact",
+        "collector-1",
+        "--request-id",
+        "request-1",
+        "--actor-id",
+        "mcp:test-agent",
+        "--reason",
+        "recover a stale collector",
+        "--confirm",
+    ]
+    assert probed["args"] == [
+        "data",
+        "collectors",
+        "probe",
+        "scheduled_fact",
+        "collector-1",
+    ]
 
 
 def test_mcp_research_tools_share_api_contract_and_guard_writes(tmp_path):
