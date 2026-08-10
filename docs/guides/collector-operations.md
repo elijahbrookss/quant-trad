@@ -12,16 +12,26 @@ register schemas, run SQL, or authorize arbitrary acquisition.
 
 ## Fleet and market-data plane
 
-Open **Operations -> Market** in Frontend V2 for the fleet topology:
+Open **Operations -> Market** in Frontend V2 for the provider-first fleet:
 
 ```text
-Provider -> registered collector -> canonical Fact schemas -> Fact store
+Provider summary
+  -> one expanded, bounded collector page
+      -> exact collector detail and evidence
 ```
 
-The topology carries real throughput, freshness, reject, and gap evidence. The
-precise inventory beneath it exposes the backend lifecycle state and reason for
-every admitted collector. A separate warning reports durable definitions that
-the deployed code does not admit to the operational registry.
+Provider rows show explicit running, stopped, paused, and disabled counts;
+health is a separate value. Expand one provider to load its collectors, or use
+**All collectors** for bounded search and pagination. Only the provider summary
+uses a live stream, and it emits on material changes. Collector rows refresh
+only for the visible page. This keeps the default workload bounded as the fleet
+grows instead of opening one stream per collector.
+
+Throughput and freshness describe only collectors expected to run. An
+intentionally stopped collector shows its stable last-data date or no data,
+never a seconds counter that keeps worsening. **Attention only** means a real
+operator exception such as failed/delayed desired work or invalid
+registration; normal polling does not enter the attention feed.
 
 Use the CLI for the same contracts:
 
@@ -36,25 +46,30 @@ qt data collectors gaps scheduled_fact <collector_id> --limit 50
 Collector kinds are `scheduled_fact` and `continuous_stream`. Copy the exact
 kind and ID from `fleet`; do not infer identity from provider or subject labels.
 
-## Lifecycle
+## Lifecycle and health
 
-The backend owns lifecycle classification:
+The backend owns two separate operator dimensions.
 
-| State | Operator meaning |
+| Operational state | Operator meaning |
 | --- | --- |
-| `DISABLED` | The reviewed configuration gate is closed; no runtime action is authorized. |
-| `STOPPED` | Configured, explicitly desired stopped, and no live owner remains. |
-| `PAUSED` | Configured, explicitly desired paused, and no live owner remains. |
-| `STARTING` | Desired running while ownership/readiness is being established. |
-| `HEALTHY` | Worker, acquisition, persistence, validation, and freshness evidence agree. |
-| `DEGRADED` | Collection continues but quality/freshness evidence needs attention. |
-| `RETRYING` | A bounded retry or supervised restart delay is active. |
-| `RECOVERING` | Durable retained work is being reconciled before normal acquisition. |
-| `FAILED` | Desired work cannot proceed or a terminal invariant failed. |
-| `STOPPING` | Desired work was withdrawn and an owner is draining. |
+| `DISABLED` | The reviewed configuration gate is closed. |
+| `STOPPED` | Configured and intentionally stopped. |
+| `PAUSED` | Configured and intentionally paused. |
+| `RUNNING` | Expected to acquire canonical Facts. |
+| `STOPPING` | Desired work was withdrawn while ownership drains. |
 
-Frontend and clients must display `state_reason` rather than reclassifying a
-collector from heartbeat, freshness, or a single metric.
+| Health while running | Operator meaning |
+| --- | --- |
+| `HEALTHY` | Worker, acquisition, persistence, validation, and freshness agree. |
+| `DELAYED` | Collection is retrying, recovering, stale, or otherwise degraded. |
+| `FAILED` | Desired work has a terminal or active failure. |
+| `UNKNOWN` | There is not yet enough evidence to claim health. |
+| `NOT_APPLICABLE` | The collector is not expected to run. |
+
+The detailed runtime `actual_state` and `state_reason` remain available for
+diagnosis. Frontend and clients must display the backend-owned operational
+state and health rather than reclassifying a collector from heartbeat,
+freshness, or a single metric.
 
 ## Diagnose before changing state
 

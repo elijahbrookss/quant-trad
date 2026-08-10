@@ -23,8 +23,9 @@ the same contracts and durable evidence.
   `Fact` model with provenance and causal `known_at` semantics.
 - Collect Coinbase market state and Chainlink scalar or structured observations
   through provider-specific adapters that disappear after canonicalization.
-- Inspect registered scheduled collectors and continuous market-structure
-  streams, including their schedules, leases, attempts, gaps, and failures.
+- Monitor and safely operate registered collectors through a provider-first,
+  lazy-loading console with explicit lifecycle, health, gaps, diagnostics, and
+  recent canonical Facts.
 - Freeze exact, provider-free `Dataset` evidence for replay, backtests, Checks,
   and research.
 - Build Indicators over scalar and structured Facts without making research
@@ -117,7 +118,7 @@ If Python 3.12 is not your default interpreter, run
 
 | Surface | Address |
 | --- | --- |
-| Frontend V2 | <http://localhost:5173> |
+| Frontend V2 | <http://localhost:5174> |
 | Backend API | <http://localhost:8000> |
 | TimescaleDB / PostgreSQL | `localhost:15432` |
 | pgAdmin | <http://localhost:8080> |

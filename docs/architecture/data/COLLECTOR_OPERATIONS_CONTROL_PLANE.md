@@ -89,35 +89,34 @@ registered capabilities and safe actions
 
 The backend derives the row from one consistent database observation. Metrics
 carry their window and observed time. A missing component is `unknown` or
-`unavailable`, never zero or healthy.
+`unavailable`, never zero or healthy. Each row also exposes a presentation
+projection: `operational_state`, `health_status`, `needs_attention`, and a
+stable `attention_reason`.
 
-The fleet response also contains server-owned rollups and topology nodes/edges:
+The full fleet response remains available for exact tools and diagnostics. The
+Frontend V2 fleet uses `market.collector_provider_summary.v1`: one compact
+provider rollup with state counts, health, throughput, running-stream
+freshness, schema counts, and a bounded list of actionable exceptions. Its SSE
+endpoint evaluates periodically but emits only when the material summary
+changes. Collector rows are fetched in bounded pages only for the expanded
+provider or the explicit all-collector search.
 
-`provider -> collector -> payload schema -> canonical Fact store`
+## Lifecycle and health projection
 
-Edges may carry actual throughput, rejects, lag, and gap counts. The browser
-owns only layout and interaction.
+Operational state and health are separate backend-owned dimensions.
 
-## Lifecycle projection
+Operational state is `DISABLED`, `STOPPING`, `STOPPED`, `PAUSED`, or
+`RUNNING`. It represents configuration, operator intent, and whether active
+ownership is still draining. Health is meaningful only for `RUNNING`
+collectors and is `HEALTHY`, `DELAYED`, `FAILED`, or `UNKNOWN`.
+Non-running collectors report `NOT_APPLICABLE`; their age must not be rendered
+as continuously worsening freshness.
 
-Precedence is deterministic:
-
-1. configured gate closed -> `DISABLED`, retaining any registration error as
-   evidence but not claiming failed desired work;
-2. configured and desired non-running with a live owner -> `STOPPING`;
-3. configured and desired paused/stopped without an owner ->
-   `PAUSED`/`STOPPED`;
-4. configured definition that is not executable by the code-owned registry ->
-   `FAILED`;
-5. active durable recovery -> `RECOVERING`;
-6. desired running with terminal invariant/worker failure -> `FAILED`;
-7. scheduled retry or supervisor backoff -> `RETRYING`;
-8. ownership/readiness not yet established -> `STARTING`;
-9. current owner with quality/freshness trouble -> `DEGRADED`;
-10. all required evidence current -> `HEALTHY`.
-
-Every row includes the rule and evidence that selected its state. UI copy may
-summarize this reason but may not reclassify it.
+The detailed `actual_state` and `state_reason` remain diagnostic evidence for
+startup, retry, recovery, and degradation. They do not replace the simpler
+operational state/health projection. Frontends and clients render the backend
+projection and must not infer replacement semantics from heartbeat, freshness,
+or a single metric.
 
 ## Telemetry and events
 
@@ -187,7 +186,9 @@ or append a second audit row.
 
 The canonical surface is organized by collector identity:
 
-- fleet snapshot and change-only stream;
+- full fleet snapshot and change-only stream for exact tooling;
+- compact provider-summary snapshot and material-change stream;
+- bounded provider pages and a bounded all-collector search;
 - exact collector detail;
 - bounded facts, gaps, retries/errors, events, operations, and schemas;
 - diagnostics and health probe;
@@ -207,21 +208,27 @@ command.
 
 The collector console provides:
 
-- fleet state and provider grouping;
-- a real-telemetry topology view with a compact list alternative;
+- a provider-first fleet summary with explicit state counts and separate health;
+- lazy, paginated collector rows for one expanded provider at a time;
+- an all-collector search as a secondary precise inspection view;
 - an exact detail view for runtime, acquisition, data quality, event history,
   canonical Facts, diagnostics, and operation audit;
-- only backend-advertised actions, with confirmation for disruption or
-  recovery;
-- a market-data-plane view using backend aggregate metrics.
+- state-relevant primary actions, with probe, restart, and diagnostics in the
+  overflow surface;
+- backend aggregate metrics without frontend-only health calculations.
 
-Structured payloads are rendered generically from canonical Fact/schema
-contracts. Provider-specific diagnostic extensions may have a bounded typed
-renderer, but provider identity never selects generic lifecycle or actions.
+Structured payloads and raw evidence are available in an Advanced/Raw section.
+Provider-specific diagnostic extensions may have a bounded typed renderer, but
+provider identity never selects generic lifecycle or actions.
 
-The operator route is **Operations -> Market**. The fleet view renders the
-backend-provided provider/collector/schema/store topology and retains a compact
-inventory for exact inspection. The detail view keeps runtime, activity,
+The operator route is **Operations -> Market**. It does not subscribe to every
+collector. One provider-summary stream communicates material fleet changes;
+details refresh only while the selected page is visible. At 200 or more
+collectors, the default workload therefore remains proportional to the number
+of providers and the one bounded page the operator opens.
+
+The detail view keeps routine evidence out of the primary control surface,
+shows only actions valid for the current state, and keeps runtime, activity,
 Facts, data quality, diagnostics, configuration, and operation history behind
 one collector identity.
 

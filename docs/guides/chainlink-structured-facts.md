@@ -7,39 +7,34 @@ or grant trading authority.
 ## Prerequisites
 
 - Apply the canonical Fact store/data/hard-cutover migrations.
-- Register the canonical instrument `nxtassets-de000nxta018` with source identity
-  matching the reviewed manifest.
 - Set `CHAINLINK_ARBITRUM_RPC_URL` to a reviewed Arbitrum mainnet JSON-RPC
   endpoint in the worker environment. Do not place the endpoint or credentials
   in the manifest.
 - Keep `CHAINLINK_RPC_MIN_INTERVAL_SECONDS` at its default pacing or set a
   reviewed nonnegative override appropriate for the endpoint.
 
-## Create the definition
+## Install the definition
 
 Review
 `config/market-data/structured-facts/chainlink-nxtassets-btc-etp-reserves.json`,
-then create a disabled definition first:
+then install the checked-in definition:
 
 ```bash
-qt data collectors create-structured \
+qt data collector-definitions install-structured \
   --manifest-path config/market-data/structured-facts/chainlink-nxtassets-btc-etp-reserves.json \
   --binding-id nxtassets-btc-direct-etp-reserves
 ```
 
+The installer accepts only a checked-in structured-Fact manifest and
+automatically installs the exact research-only canonical subject declared by
+that manifest. It cannot accept arbitrary provider configuration.
+
 Inspect the stored definition, source, series, cadence, and staleness policy.
-Re-run with `--enabled` only after operational review:
-
-```bash
-qt data collectors create-structured \
-  --manifest-path config/market-data/structured-facts/chainlink-nxtassets-btc-etp-reserves.json \
-  --binding-id nxtassets-btc-direct-etp-reserves \
-  --enabled
-```
-
-The manifest being enabled means it is a valid reviewed binding; it does not
-start collection by itself. The collection definition is the explicit runtime
-authority.
+For a new reviewed installation, add `--enabled` to configure it with desired
+state `running`. If it was installed disabled first, enable it and then use the
+canonical collector `start` action shown by `qt data collectors fleet`.
+Operational state changes stay in the collector command path rather than the
+definition installer.
 
 ## Expected behavior
 
