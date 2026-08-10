@@ -1061,6 +1061,363 @@ _PAYLOAD_SCHEMAS = {
                 "close_price",
             ),
         ),
+        FactPayloadSchema(
+            schema_id="market.bbo.v1",
+            fact_type="market.bbo",
+            fields=(
+                FactPayloadField("bucket_end", FactPayloadKind.TIMESTAMP),
+                FactPayloadField(
+                    "product_definition_version_id", FactPayloadKind.STRING
+                ),
+                FactPayloadField("validity_interval_id", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "provider_size_unit",
+                    FactPayloadKind.STRING,
+                    enum=("base", "contracts"),
+                ),
+                FactPayloadField("source_state_hash", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "bid_price",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "bid_quantity",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "bid_base_quantity",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "ask_price",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "ask_quantity",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "ask_base_quantity",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "mid_price",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "spread",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "spread_bps",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField("input_fingerprint", FactPayloadKind.STRING),
+            ),
+            observation_time_field="bucket_start",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=("bucket_end", "mid_price", "spread_bps"),
+        ),
+        FactPayloadSchema(
+            schema_id="market.depth_band.v1",
+            fact_type="market.depth_observation",
+            fields=(
+                FactPayloadField("bucket_end", FactPayloadKind.TIMESTAMP),
+                FactPayloadField("validity_interval_id", FactPayloadKind.STRING),
+                FactPayloadField("source_state_hash", FactPayloadKind.STRING),
+                FactPayloadField("bbo_input_fingerprint", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "provider_size_unit",
+                    FactPayloadKind.STRING,
+                    enum=("base", "contracts"),
+                ),
+                FactPayloadField(
+                    "band_bps",
+                    FactPayloadKind.INTEGER,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "mid_price",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "bid_quantity", FactPayloadKind.DECIMAL, minimum=Decimal("0")
+                ),
+                FactPayloadField(
+                    "ask_quantity", FactPayloadKind.DECIMAL, minimum=Decimal("0")
+                ),
+                FactPayloadField(
+                    "bid_base_quantity",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "ask_base_quantity",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "bid_notional",
+                    FactPayloadKind.DECIMAL,
+                    nullable=True,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "ask_notional",
+                    FactPayloadKind.DECIMAL,
+                    nullable=True,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "imbalance", FactPayloadKind.DECIMAL, nullable=True
+                ),
+                FactPayloadField("input_fingerprint", FactPayloadKind.STRING),
+            ),
+            observation_time_field="bucket_start",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=("bucket_end", "band_bps", "imbalance"),
+        ),
+        FactPayloadSchema(
+            schema_id="market.trade_flow_feature.v1",
+            fact_type="market.trade_flow_feature",
+            fields=(
+                FactPayloadField("bucket_end", FactPayloadKind.TIMESTAMP),
+                FactPayloadField(
+                    "interval_seconds",
+                    FactPayloadKind.INTEGER,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField("aggregate_material_hash", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "aggregate_input_fingerprint", FactPayloadKind.STRING
+                ),
+                FactPayloadField(
+                    "trade_count",
+                    FactPayloadKind.INTEGER,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "quote_notional",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "aggressor_buy_base_volume",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "aggressor_sell_base_volume",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "aggressor_buy_notional",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "aggressor_sell_notional",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField("cvd_base", FactPayloadKind.DECIMAL),
+                FactPayloadField("cvd_notional", FactPayloadKind.DECIMAL),
+                FactPayloadField(
+                    "cvd_volume_share", FactPayloadKind.DECIMAL, nullable=True
+                ),
+                FactPayloadField("input_fingerprint", FactPayloadKind.STRING),
+            ),
+            observation_time_field="bucket_start",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=(
+                "bucket_end",
+                "trade_count",
+                "cvd_base",
+                "cvd_notional",
+                "cvd_volume_share",
+            ),
+        ),
+        FactPayloadSchema(
+            schema_id="market.futures_spot_basis.v1",
+            fact_type="market.futures_spot_relationship",
+            fields=(
+                FactPayloadField("mapping_id", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "futures_mid",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "spot_mid",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "futures_staleness_seconds",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "spot_staleness_seconds",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField("basis", FactPayloadKind.DECIMAL),
+                FactPayloadField("basis_bps", FactPayloadKind.DECIMAL),
+                FactPayloadField("input_fingerprint", FactPayloadKind.STRING),
+            ),
+            observation_time_field="effective_at",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=("futures_mid", "spot_mid", "basis", "basis_bps"),
+        ),
+        FactPayloadSchema(
+            schema_id="market.derivative_state.v1",
+            fact_type="market.derivative_state",
+            fields=(
+                FactPayloadField("instrument_id", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "oi_sample_time", FactPayloadKind.TIMESTAMP, nullable=True
+                ),
+                FactPayloadField(
+                    "oi_market_commit_seq",
+                    FactPayloadKind.INTEGER,
+                    nullable=True,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField("oi_value", FactPayloadKind.DECIMAL, nullable=True),
+                FactPayloadField(
+                    "oi_previous_value", FactPayloadKind.DECIMAL, nullable=True
+                ),
+                FactPayloadField(
+                    "oi_log_change", FactPayloadKind.DECIMAL, nullable=True
+                ),
+                FactPayloadField(
+                    "funding_sample_time", FactPayloadKind.TIMESTAMP, nullable=True
+                ),
+                FactPayloadField(
+                    "funding_market_commit_seq",
+                    FactPayloadKind.INTEGER,
+                    nullable=True,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "funding_rate", FactPayloadKind.DECIMAL, nullable=True
+                ),
+                FactPayloadField(
+                    "funding_time", FactPayloadKind.TIMESTAMP, nullable=True
+                ),
+                FactPayloadField(
+                    "funding_interval_seconds",
+                    FactPayloadKind.INTEGER,
+                    nullable=True,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "funding_semantics",
+                    FactPayloadKind.STRING,
+                    nullable=True,
+                    enum=("provider_reported",),
+                ),
+                FactPayloadField("input_fingerprint", FactPayloadKind.STRING),
+            ),
+            observation_time_field="effective_at",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=("oi_value", "oi_log_change", "funding_rate"),
+        ),
+        FactPayloadSchema(
+            schema_id="market.market_response.v1",
+            fact_type="market.market_response",
+            fields=(
+                FactPayloadField("bucket_start", FactPayloadKind.TIMESTAMP),
+                FactPayloadField("bucket_end", FactPayloadKind.TIMESTAMP),
+                FactPayloadField(
+                    "direction", FactPayloadKind.STRING, enum=("BUY", "SELL")
+                ),
+                FactPayloadField("validity_interval_id", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "aggressive_notional",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "signed_aggressive_notional", FactPayloadKind.DECIMAL
+                ),
+                FactPayloadField("response_bps", FactPayloadKind.DECIMAL),
+                FactPayloadField(
+                    "pre_depth_notional",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "consumed_depth_notional",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                    minimum_inclusive=False,
+                ),
+                FactPayloadField(
+                    "replenished_depth_notional",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "depth_replenishment",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField(
+                    "liquidity_adjusted_impact", FactPayloadKind.DECIMAL
+                ),
+                FactPayloadField(
+                    "price_response_per_flow", FactPayloadKind.DECIMAL
+                ),
+                FactPayloadField("input_fingerprint", FactPayloadKind.STRING),
+            ),
+            observation_time_field="effective_at",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=(
+                "direction",
+                "response_bps",
+                "depth_replenishment",
+                "liquidity_adjusted_impact",
+            ),
+        ),
     )
 }
 

@@ -136,7 +136,12 @@ The migration must register the real retained families, including:
 | `market.trade.v1` | structured trade | retains provider delivery/source position evidence |
 | `market.trade_flow.v1` | structured causal aggregate | retains coverage and completeness evidence |
 | `market.l2_book.v1` | atomic snapshot/update with strict ordered price-level entries | operational and not directly dataset-eligible; full state remains reconstructable from typed entries and raw archive evidence |
-| BBO/depth/flow/basis/derivative/response schemas | structured derived state | input fingerprints and source hashes retained |
+| `market.bbo.v1` | atomic best-bid/offer state | retains book validity, state hash, exact quantities, and input fingerprint |
+| `market.depth_band.v1` | one fixed-band depth observation | retains exact bid/ask depth, notional, imbalance, and book evidence |
+| `market.trade_flow_feature.v1` | derived flow/CVD feature | retains the aggregate witness and exact flow measures |
+| `market.futures_spot_basis.v1` | paired futures/spot state | retains exact mids, staleness, basis, and source witnesses |
+| `market.derivative_state.v1` | OI/funding state | keeps nullable source samples and causal commit watermarks explicit |
+| `market.market_response.v1` | structured flow/liquidity response | keeps direction, depth, replenishment, impact, and ordered source evidence atomic |
 | `market.normalized_feature.v1` | typed scalar/invalid feature | retains spec and input evidence |
 
 Chainlink SmartData/Proof-of-Reserve discovery will add only semantically proven

@@ -63,6 +63,50 @@ VALUES
     true
 ),
 (
+    'market.bbo.v1',
+    'market.bbo',
+    'afc70debd13b895d8c3368c06d4ed1bd7bcde432febb7d41a2ca39ee6341929b',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.bbo","fields":[{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"bucket_end","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"product_definition_version_id","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"validity_interval_id","nullable":false,"required":true},{"enum":["base","contracts"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"provider_size_unit","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"source_state_hash","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"bid_price","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"bid_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"bid_base_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"ask_price","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"ask_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"ask_base_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"mid_price","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"spread","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"spread_bps","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"input_fingerprint","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"bucket_start","query_fields":["bucket_end","mid_price","spread_bps"],"row_hash_version":"market.fact_row.v1","schema_id":"market.bbo.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'bucket_start',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["bucket_end","mid_price","spread_bps"]'::jsonb,
+    true
+),
+(
+    'market.depth_band.v1',
+    'market.depth_observation',
+    '2f280f5633f164a05fe75cf763402fe443a20ea372e36bffe78f6babee692613',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.depth_observation","fields":[{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"bucket_end","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"validity_interval_id","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"source_state_hash","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"bbo_input_fingerprint","nullable":false,"required":true},{"enum":["base","contracts"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"provider_size_unit","nullable":false,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"band_bps","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"mid_price","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"bid_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"ask_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"bid_base_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"ask_base_quantity","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"bid_notional","nullable":true,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"ask_notional","nullable":true,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"imbalance","nullable":true,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"input_fingerprint","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"bucket_start","query_fields":["bucket_end","band_bps","imbalance"],"row_hash_version":"market.fact_row.v1","schema_id":"market.depth_band.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'bucket_start',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["bucket_end","band_bps","imbalance"]'::jsonb,
+    true
+),
+(
+    'market.derivative_state.v1',
+    'market.derivative_state',
+    'c6bb58308ee8d7b48f970710a8360f8ec34406cec55b2d39067eec8f7f9141d4',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.derivative_state","fields":[{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"instrument_id","nullable":false,"required":true},{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"oi_sample_time","nullable":true,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"oi_market_commit_seq","nullable":true,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"oi_value","nullable":true,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"oi_previous_value","nullable":true,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"oi_log_change","nullable":true,"required":true},{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"funding_sample_time","nullable":true,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"funding_market_commit_seq","nullable":true,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"funding_rate","nullable":true,"required":true},{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"funding_time","nullable":true,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"funding_interval_seconds","nullable":true,"required":true},{"enum":["provider_reported"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"funding_semantics","nullable":true,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"input_fingerprint","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"effective_at","query_fields":["oi_value","oi_log_change","funding_rate"],"row_hash_version":"market.fact_row.v1","schema_id":"market.derivative_state.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'effective_at',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["oi_value","oi_log_change","funding_rate"]'::jsonb,
+    true
+),
+(
+    'market.futures_spot_basis.v1',
+    'market.futures_spot_relationship',
+    '376423926e804ba7e72cbdbcf60829978a964602ddf0fa1c1fab64dbb2695c34',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.futures_spot_relationship","fields":[{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"mapping_id","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"futures_mid","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"spot_mid","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"futures_staleness_seconds","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"spot_staleness_seconds","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"basis","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"basis_bps","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"input_fingerprint","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"effective_at","query_fields":["futures_mid","spot_mid","basis","basis_bps"],"row_hash_version":"market.fact_row.v1","schema_id":"market.futures_spot_basis.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'effective_at',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["futures_mid","spot_mid","basis","basis_bps"]'::jsonb,
+    true
+),
+(
     'market.l2_book.v1',
     'market.l2_book',
     'efdc9d85a0f927b9610ecd55267442aee5e2dca26c904fa3d1c5cf23f9870976',
@@ -72,6 +116,17 @@ VALUES
     'market.fact_row.v1',
     '["event_type","validity_interval_id","before_state_hash","after_state_hash","entry_count"]'::jsonb,
     false
+),
+(
+    'market.market_response.v1',
+    'market.market_response',
+    '71dc2ff5f6980d17b51677e56d9692c67b7af539ed001c8ce15e9c6577055f80',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.market_response","fields":[{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"bucket_start","nullable":false,"required":true},{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"bucket_end","nullable":false,"required":true},{"enum":["BUY","SELL"],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"direction","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"validity_interval_id","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"aggressive_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"signed_aggressive_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"response_bps","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"pre_depth_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":false,"name":"consumed_depth_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"replenished_depth_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"depth_replenishment","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"liquidity_adjusted_impact","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"price_response_per_flow","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"input_fingerprint","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"effective_at","query_fields":["direction","response_bps","depth_replenishment","liquidity_adjusted_impact"],"row_hash_version":"market.fact_row.v1","schema_id":"market.market_response.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'effective_at',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["direction","response_bps","depth_replenishment","liquidity_adjusted_impact"]'::jsonb,
+    true
 ),
 (
     'market.reference_price.v1',
@@ -115,6 +170,17 @@ VALUES
     'market.trade_flow_material_hash.v1',
     'market.fact_row.v1',
     '["bucket_end","trade_count","base_volume","quote_notional","cvd_delta","close_price"]'::jsonb,
+    true
+),
+(
+    'market.trade_flow_feature.v1',
+    'market.trade_flow_feature',
+    'aa0e40ce48f18d0cdb7c68fd06581502d55996ba4469e2d51f725596a6ee1a6e',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"market.trade_flow_feature","fields":[{"enum":[],"kind":"timestamp","minimum":null,"minimum_inclusive":true,"name":"bucket_end","nullable":false,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"interval_seconds","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"aggregate_material_hash","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"aggregate_input_fingerprint","nullable":false,"required":true},{"enum":[],"kind":"integer","minimum":"0","minimum_inclusive":false,"name":"trade_count","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"quote_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"aggressor_buy_base_volume","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"aggressor_sell_base_volume","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"aggressor_buy_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"aggressor_sell_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"cvd_base","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"cvd_notional","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":null,"minimum_inclusive":true,"name":"cvd_volume_share","nullable":true,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"input_fingerprint","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"bucket_start","query_fields":["bucket_end","trade_count","cvd_base","cvd_notional","cvd_volume_share"],"row_hash_version":"market.fact_row.v1","schema_id":"market.trade_flow_feature.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'bucket_start',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["bucket_end","trade_count","cvd_base","cvd_notional","cvd_volume_share"]'::jsonb,
     true
 )
 ON CONFLICT (schema_id) DO NOTHING;

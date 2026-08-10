@@ -138,6 +138,45 @@ def test_trade_and_trade_flow_payloads_are_provider_neutral_and_strict() -> None
         trade.normalize_payload({**normalized_trade, "provider_product_id": "BTC-PERP"})
 
 
+def test_derived_market_state_payload_contracts_are_registered_and_strict() -> None:
+    expected = {
+        "market.bbo.v1": "market.bbo",
+        "market.depth_band.v1": "market.depth_observation",
+        "market.trade_flow_feature.v1": "market.trade_flow_feature",
+        "market.futures_spot_basis.v1": "market.futures_spot_relationship",
+        "market.derivative_state.v1": "market.derivative_state",
+        "market.market_response.v1": "market.market_response",
+    }
+    assert {
+        schema_id: get_fact_payload_schema(schema_id).fact_type
+        for schema_id in expected
+    } == expected
+
+    bbo = get_fact_payload_schema("market.bbo.v1")
+    normalized = bbo.normalize_payload(
+        {
+            "bucket_end": _BASE + timedelta(seconds=1),
+            "product_definition_version_id": "coinbase.BTC-USD.v1",
+            "validity_interval_id": "book-validity-1",
+            "provider_size_unit": "base",
+            "source_state_hash": "a" * 64,
+            "bid_price": Decimal("117999.99"),
+            "bid_quantity": Decimal("0.5"),
+            "bid_base_quantity": Decimal("0.5"),
+            "ask_price": Decimal("118000.01"),
+            "ask_quantity": Decimal("0.4"),
+            "ask_base_quantity": Decimal("0.4"),
+            "mid_price": Decimal("118000"),
+            "spread": Decimal("0.02"),
+            "spread_bps": Decimal("0.001694915254237288135593220339"),
+            "input_fingerprint": "b" * 64,
+        }
+    )
+    assert normalized["mid_price"] == "118000"
+    with pytest.raises(ValueError, match="unexpected=provider"):
+        bbo.normalize_payload({**normalized, "provider": "coinbase"})
+
+
 def test_l2_payload_validates_every_atomic_entry() -> None:
     schema = get_fact_payload_schema("market.l2_book.v1")
     payload = {
