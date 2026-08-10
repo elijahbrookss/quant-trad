@@ -437,65 +437,6 @@ class MarketDataCollectorService:
         )
         return _public_row(row)
 
-    def list_definitions(
-        self, *, definition_id: Optional[str] = None
-    ) -> list[dict[str, Any]]:
-        return [
-            _public_row(row)
-            for row in self.collection_repo.list_definitions(
-                definition_id=definition_id
-            )
-        ]
-
-    def list_attempts(
-        self, *, definition_id: str, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        return [
-            _public_row(row)
-            for row in self.collection_repo.list_attempts(
-                definition_id=definition_id, limit=limit
-            )
-        ]
-
-    def collector_snapshot(self, *, attempt_limit: int = 5) -> dict[str, Any]:
-        definitions = self.list_definitions()
-        attempts = [
-            _public_row(row)
-            for row in self.collection_repo.list_recent_attempts(
-                limit_per_definition=attempt_limit
-            )
-        ]
-        grouped_attempts: dict[str, list[dict[str, Any]]] = {
-            str(definition["id"]): [] for definition in definitions
-        }
-        for attempt in attempts:
-            grouped_attempts.setdefault(str(attempt["definition_id"]), []).append(attempt)
-        workers = [
-            _public_row(row)
-            for row in self.collection_repo.list_worker_states()
-        ]
-        active_workers = [worker for worker in workers if bool(worker.get("alive"))]
-        observed_at = self.clock().astimezone(UTC).isoformat()
-        return {
-            "schema_version": "market_collector_snapshot.v1",
-            "observed_at": observed_at,
-            "worker_health": {
-                "status": "alive" if active_workers else "unavailable",
-                "active_count": len(active_workers),
-                "known_count": len(workers),
-                "observed_at": observed_at,
-            },
-            "workers": workers,
-            "collectors": [
-                {
-                    "definition": definition,
-                    "attempts": grouped_attempts.get(str(definition["id"]), []),
-                    "attempts_available": True,
-                }
-                for definition in definitions
-            ],
-        }
-
     def register_worker(self, **kwargs: Any) -> dict[str, Any]:
         return _public_row(self.collection_repo.register_worker(**kwargs))
 
@@ -504,11 +445,6 @@ class MarketDataCollectorService:
 
     def stop_worker(self, **kwargs: Any) -> None:
         self.collection_repo.stop_worker(**kwargs)
-
-    def set_enabled(self, definition_id: str, *, enabled: bool) -> dict[str, Any]:
-        return _public_row(
-            self.collection_repo.set_enabled(definition_id, enabled=enabled)
-        )
 
     def claim_due(
         self, *, owner_id: str, lease_seconds: float = 90.0
@@ -999,70 +935,6 @@ class MarketDataCollectorService:
             "attempt_id": claim.attempt_id,
             "scheduled_for": claim.scheduled_for.isoformat(),
             "provider_product_id": provider_product_id,
-        }
-
-    def fact_history(
-        self,
-        *,
-        definition_id: str,
-        hours: int = 24,
-        limit: int = 240,
-    ) -> dict[str, Any]:
-        """Return bounded canonical fact history for one collector definition."""
-
-        definitions = self.list_definitions(definition_id=definition_id)
-        if not definitions:
-            raise ValueError(
-                f"market_collection_definition_unknown: definition_id={definition_id}"
-            )
-        definition = definitions[0]
-        fact_type = str(definition.get("fact_type") or "")
-        bounded_hours = max(1, min(int(hours or 24), 24 * 7))
-        bounded_limit = max(1, min(int(limit or 240), 1000))
-        end = self.clock().astimezone(UTC)
-        start = end - timedelta(hours=bounded_hours)
-        records = self.store.read_facts(
-            series_id=int(definition["series_id"]), start=start, end=end
-        )
-
-        samples = []
-        for record in records[-bounded_limit:]:
-            fact = record.fact.to_dict()
-            fact = {
-                key: (
-                    value.astimezone(UTC).isoformat()
-                    if isinstance(value, datetime)
-                    else value
-                )
-                for key, value in fact.items()
-            }
-            samples.append(
-                {
-                    "series_id": record.series_id,
-                    "revision": record.revision,
-                    "market_commit_seq": record.market_commit_seq,
-                    "ingestion_run_id": record.ingestion_run_id,
-                    "source_identity_key": record.source_identity_key,
-                    "source": {
-                        "provider": record.source.provider,
-                        "venue": record.source.venue,
-                        "source_kind": record.source.source_kind,
-                        "adapter_version": record.source.adapter_version,
-                    },
-                    "provenance": dict(record.provenance),
-                    "fact": fact,
-                }
-            )
-        return {
-            "schema_version": "market_collector_fact_history.v1",
-            "definition_id": str(definition_id),
-            "series_id": int(definition["series_id"]),
-            "fact_type": fact_type,
-            "range_start": start.isoformat(),
-            "range_end": end.isoformat(),
-            "samples": samples,
-            "truncated": len(records) > bounded_limit,
-            "observed_at": end.isoformat(),
         }
 
     def latest_open_interest(

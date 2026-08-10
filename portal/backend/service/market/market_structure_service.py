@@ -117,7 +117,6 @@ from ..storage.repos.market_structure import (
     market_structure_repository,
 )
 from .instrument_service import get_instrument_record, resolve_or_create_instrument
-from .collector_safety import evaluate_collector_safety
 
 
 logger = logging.getLogger(__name__)
@@ -921,111 +920,6 @@ class MarketStructureService:
             "noop": outcome.noop_count,
             "max_commit_seq": outcome.max_commit_seq,
             "materialization_fingerprint": fingerprint,
-        }
-
-    def start_continuous_validation(
-        self,
-        *,
-        definition_id: str,
-        duration_seconds: float,
-        requested_by: str,
-        policy: Optional[Mapping[str, Any]] = None,
-    ) -> dict[str, Any]:
-        duration = float(duration_seconds)
-        if not 60 <= duration <= 7 * 24 * 3600:
-            raise ValueError(
-                "market_stream_validation_invalid: duration must be 60..604800 seconds"
-            )
-        runtime_policy = ContinuousStreamPolicy.from_mapping(policy)
-        stop_at = datetime.now(UTC) + timedelta(seconds=duration)
-        row = self.repository.configure_continuous_runtime(
-            definition_id=definition_id,
-            enabled=True,
-            mode="validation",
-            requested_by=requested_by,
-            policy=runtime_policy.to_dict(),
-            stop_at=stop_at,
-        )
-        return {
-            "schema_version": "market.continuous_collector_control.v1",
-            "definition_id": str(row["id"]),
-            "enabled": bool(row["enabled"]),
-            "mode": "validation",
-            "stop_at": stop_at.isoformat(),
-            "policy": runtime_policy.to_dict(),
-        }
-
-    def start_continuous(
-        self,
-        *,
-        definition_id: str,
-        requested_by: str,
-        policy: Optional[Mapping[str, Any]] = None,
-    ) -> dict[str, Any]:
-        definitions = self.repository.list_stream_definitions(
-            definition_id=definition_id
-        )
-        if len(definitions) != 1:
-            raise ValueError(
-                f"market_stream_definition_unknown: definition_id={definition_id}"
-            )
-        definition = definitions[0]
-        adapter_supported = (
-            str(definition.get("provider") or "").upper() == "COINBASE"
-            and tuple(definition.get("channels") or ())
-            == ("market_trades", "heartbeats")
-        )
-        qualification, safety = evaluate_collector_safety(
-            definition=definition,
-            repository=self.repository,
-            adapter_supported=adapter_supported,
-            storage_root=DEFAULT_STORAGE_ROOT,
-        )
-        if not qualification.qualified:
-            raise ValueError(
-                "market_stream_not_qualified: "
-                + ",".join(qualification.reasons)
-            )
-        runtime_policy = ContinuousStreamPolicy.from_mapping(policy)
-        row = self.repository.configure_continuous_runtime(
-            definition_id=definition_id,
-            enabled=True,
-            mode="continuous",
-            requested_by=requested_by,
-            policy=runtime_policy.to_dict(),
-        )
-        return {
-            "schema_version": "market.continuous_collector_control.v2",
-            "definition_id": str(row["id"]),
-            "enabled": bool(row["enabled"]),
-            "mode": "continuous",
-            "stop_at": None,
-            "policy": runtime_policy.to_dict(),
-            "qualification": qualification.to_dict(),
-            "safety": {
-                "severity": safety.severity,
-                "reasons": list(safety.reasons),
-            },
-        }
-
-    def stop_continuous(
-        self,
-        *,
-        definition_id: str,
-        requested_by: str,
-    ) -> dict[str, Any]:
-        row = self.repository.configure_continuous_runtime(
-            definition_id=definition_id,
-            enabled=False,
-            mode="stopped",
-            requested_by=requested_by,
-            policy={},
-        )
-        return {
-            "schema_version": "market.continuous_collector_control.v1",
-            "definition_id": str(row["id"]),
-            "enabled": bool(row["enabled"]),
-            "mode": "stopped",
         }
 
     def set_safety_halt(

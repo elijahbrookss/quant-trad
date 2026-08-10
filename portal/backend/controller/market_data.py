@@ -18,8 +18,6 @@ from pydantic import BaseModel, Field
 from core.settings import get_settings
 from data_providers.numeric_facts import NumericAcquisitionBudget
 from market_data.contracts import (
-    FUNDING_RATE_FACT_TYPE,
-    OPEN_INTEREST_FACT_TYPE,
     FundingRateRecord,
     OpenInterestRecord,
 )
@@ -48,25 +46,6 @@ from ..service.storage.repos.collector_operations import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def _collector_material(snapshot: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "collectors": snapshot.get("collectors", []),
-        "workers": snapshot.get("workers", []),
-        "worker_health": {
-            key: value
-            for key, value in dict(snapshot.get("worker_health") or {}).items()
-            if key != "observed_at"
-        },
-    }
-
-
-def _collector_fingerprint(snapshot: dict[str, Any]) -> str:
-    payload = json.dumps(
-        _collector_material(snapshot), sort_keys=True, separators=(",", ":"), default=str
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _operational_collector_fingerprint(snapshot: dict[str, Any]) -> str:
@@ -218,28 +197,6 @@ def _record_payload(
     }
 
 
-class CollectorCreateRequest(BaseModel):
-    instrument_id: str
-    provider_product_id: str
-    fact_type: str = OPEN_INTEREST_FACT_TYPE
-    poll_interval_seconds: int = 60
-    max_attempts: int = 3
-    minimum_spacing_seconds: float = 1.0
-    enabled: bool = False
-
-
-class CollectorToggleRequest(BaseModel):
-    enabled: bool
-
-
-class StructuredCollectorCreateRequest(BaseModel):
-    manifest_path: str
-    binding_id: str
-    max_attempts: int = 3
-    minimum_spacing_seconds: float = 1.0
-    enabled: bool = False
-
-
 class MarketNormalizationSpecInstallRequest(BaseModel):
     approved_by: str
 
@@ -332,21 +289,6 @@ class MarketStructureCaptureRequest(BaseModel):
     owner_id: Optional[str] = None
 
 
-class MarketStructureContinuousValidationRequest(BaseModel):
-    duration_seconds: float = 24 * 3600
-    requested_by: str
-    policy: Optional[dict[str, Any]] = None
-
-
-class MarketStructureContinuousStartRequest(BaseModel):
-    requested_by: str
-    policy: Optional[dict[str, Any]] = None
-
-
-class MarketStructureContinuousStopRequest(BaseModel):
-    requested_by: str
-
-
 class MarketCollectorSafetyRequest(BaseModel):
     request_id: str
     scope_type: str
@@ -379,137 +321,6 @@ class MarketStructureRetentionPinRequest(BaseModel):
     owner_id: str
     active: bool = True
     reason: str
-
-
-@router.post("/collectors")
-def create_collector(req: CollectorCreateRequest) -> dict[str, Any]:
-    creators = {
-        OPEN_INTEREST_FACT_TYPE: (
-            market_data_collector.create_coinbase_open_interest_definition
-        ),
-        FUNDING_RATE_FACT_TYPE: (
-            market_data_collector.create_coinbase_funding_rate_definition
-        ),
-    }
-    creator = creators.get(req.fact_type)
-    if creator is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "market_collection_handler_missing: supported fact types are "
-                f"{', '.join(sorted(creators))}"
-            ),
-        )
-    try:
-        definition = creator(
-            instrument_id=req.instrument_id,
-            provider_product_id=req.provider_product_id,
-            poll_interval_seconds=req.poll_interval_seconds,
-            max_attempts=req.max_attempts,
-            minimum_spacing_seconds=req.minimum_spacing_seconds,
-            enabled=req.enabled,
-        )
-    except (KeyError, ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "schema_version": "market_collection_definition_response.v1",
-        "definition": definition,
-    }
-
-
-@router.post("/collectors/structured")
-def create_structured_collector(
-    req: StructuredCollectorCreateRequest,
-) -> dict[str, Any]:
-    """Install a reviewed structured-fact poll without enabling it implicitly."""
-
-    try:
-        definition = market_data_collector.create_structured_fact_definition(
-            manifest_path=req.manifest_path,
-            binding_id=req.binding_id,
-            max_attempts=req.max_attempts,
-            minimum_spacing_seconds=req.minimum_spacing_seconds,
-            enabled=req.enabled,
-        )
-    except (KeyError, ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "schema_version": "market_collection_definition_response.v1",
-        "definition": definition,
-    }
-
-
-@router.get("/collectors")
-def list_collectors(definition_id: Optional[str] = None) -> dict[str, Any]:
-    return {
-        "schema_version": "market_collection_catalog.v1",
-        "definitions": market_data_collector.list_definitions(
-            definition_id=definition_id
-        ),
-    }
-
-
-@router.get("/collectors/snapshot")
-def get_collector_snapshot(
-    attempt_limit: int = Query(default=5, ge=1, le=100),
-) -> dict[str, Any]:
-    return market_data_collector.collector_snapshot(attempt_limit=attempt_limit)
-
-
-@router.get("/collectors/stream")
-async def stream_collectors(
-    attempt_limit: int = Query(default=5, ge=1, le=100),
-) -> StreamingResponse:
-    async def event_iterator():
-        event_id = 1
-        snapshot = market_data_collector.collector_snapshot(
-            attempt_limit=attempt_limit
-        )
-        fingerprint = _collector_fingerprint(snapshot)
-        yield _format_sse("snapshot", snapshot, event_id=event_id)
-        keepalive_ticks = 0
-        while True:
-            try:
-                await asyncio.sleep(2.0)
-                current = await asyncio.to_thread(
-                    market_data_collector.collector_snapshot,
-                    attempt_limit=attempt_limit,
-                )
-            except asyncio.CancelledError:
-                break
-            current_fingerprint = _collector_fingerprint(current)
-            if current_fingerprint != fingerprint:
-                event_id += 1
-                fingerprint = current_fingerprint
-                yield _format_sse("delta", current, event_id=event_id)
-                keepalive_ticks = 0
-                continue
-            keepalive_ticks += 1
-            if keepalive_ticks >= 8:
-                yield ": keepalive\n\n"
-                keepalive_ticks = 0
-
-    return StreamingResponse(
-        event_iterator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@router.post("/collectors/{definition_id}/enabled")
-def set_collector_enabled(
-    definition_id: str, req: CollectorToggleRequest
-) -> dict[str, Any]:
-    try:
-        definition = market_data_collector.set_enabled(
-            definition_id, enabled=req.enabled
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {
-        "schema_version": "market_collection_definition_response.v1",
-        "definition": definition,
-    }
 
 
 @router.get("/operations/collectors/snapshot")
@@ -664,39 +475,6 @@ def execute_operational_collector_action(
 @router.get("/operations/data-plane")
 def get_market_data_plane_operational_snapshot() -> dict[str, Any]:
     return collector_operations_service.data_plane_snapshot()
-
-
-@router.get("/collectors/{definition_id}/facts")
-def collector_fact_history(
-    definition_id: str,
-    hours: int = 24,
-    limit: int = 240,
-) -> dict[str, Any]:
-    try:
-        return market_data_collector.fact_history(
-            definition_id=definition_id,
-            hours=max(1, min(int(hours or 24), 24 * 7)),
-            limit=max(1, min(int(limit or 240), 1000)),
-        )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/collectors/{definition_id}/attempts")
-def list_collector_attempts(
-    definition_id: str, limit: int = 100
-) -> dict[str, Any]:
-    try:
-        attempts = market_data_collector.list_attempts(
-            definition_id=definition_id, limit=limit
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "schema_version": "market_collection_attempt_catalog.v1",
-        "definition_id": definition_id,
-        "attempts": attempts,
-    }
 
 
 @router.get("/open-interest/latest")
@@ -915,57 +693,6 @@ def capture_market_structure(
         if req.storage_root:
             kwargs["storage_root"] = Path(req.storage_root)
         return asyncio.run(market_structure_service.capture_bounded(**kwargs))
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post(
-    "/market-structure/definitions/{definition_id}/continuous/validate"
-)
-def validate_continuous_market_structure(
-    definition_id: str,
-    req: MarketStructureContinuousValidationRequest,
-) -> dict[str, Any]:
-    try:
-        return market_structure_service.start_continuous_validation(
-            definition_id=definition_id,
-            duration_seconds=req.duration_seconds,
-            requested_by=req.requested_by,
-            policy=req.policy,
-        )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post(
-    "/market-structure/definitions/{definition_id}/continuous/start"
-)
-def start_continuous_market_structure(
-    definition_id: str,
-    req: MarketStructureContinuousStartRequest,
-) -> dict[str, Any]:
-    try:
-        return market_structure_service.start_continuous(
-            definition_id=definition_id,
-            requested_by=req.requested_by,
-            policy=req.policy,
-        )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post(
-    "/market-structure/definitions/{definition_id}/continuous/stop"
-)
-def stop_continuous_market_structure(
-    definition_id: str,
-    req: MarketStructureContinuousStopRequest,
-) -> dict[str, Any]:
-    try:
-        return market_structure_service.stop_continuous(
-            definition_id=definition_id,
-            requested_by=req.requested_by,
-        )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

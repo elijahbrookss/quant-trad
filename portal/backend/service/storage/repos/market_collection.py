@@ -202,34 +202,6 @@ class PostgresMarketCollectionRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
-    def set_enabled(self, definition_id: str, *, enabled: bool) -> dict[str, Any]:
-        with db.session() as session:
-            row = session.execute(
-                text(
-                    """
-                    UPDATE market.collection_definitions
-                    SET enabled = :enabled,
-                        next_scheduled_at = CASE
-                            WHEN :enabled THEN LEAST(next_scheduled_at, now())
-                            ELSE next_scheduled_at
-                        END,
-                        available_at = CASE
-                            WHEN :enabled THEN LEAST(available_at, now())
-                            ELSE available_at
-                        END,
-                        updated_at = now()
-                    WHERE id = :definition_id
-                    RETURNING *
-                    """
-                ),
-                {"definition_id": str(definition_id), "enabled": bool(enabled)},
-            ).mappings().first()
-        if row is None:
-            raise ValueError(
-                f"market_collection_definition_unknown: definition_id={definition_id}"
-            )
-        return dict(row)
-
     def claim_due(
         self,
         *,

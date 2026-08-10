@@ -172,7 +172,7 @@ qt data coverage \
   --start <iso> \
   --end <iso>
 
-qt data collectors list
+qt data collectors fleet
 qt data series
 qt data prepare-backtest-dataset --help
 qt data freeze-dataset --help

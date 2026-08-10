@@ -17,31 +17,6 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def test_collector_snapshot_route_is_bounded_and_observed(monkeypatch) -> None:
-    observed = {}
-
-    def fake_snapshot(*, attempt_limit: int):
-        observed["attempt_limit"] = attempt_limit
-        return {
-            "schema_version": "market_collector_snapshot.v1",
-            "observed_at": "2026-08-02T12:00:00+00:00",
-            "worker_health": {"status": "alive"},
-            "workers": [],
-            "collectors": [],
-        }
-
-    monkeypatch.setattr(
-        controller.market_data_collector, "collector_snapshot", fake_snapshot
-    )
-    response = _client().get(
-        "/api/market-data/collectors/snapshot", params={"attempt_limit": 7}
-    )
-
-    assert response.status_code == 200
-    assert observed["attempt_limit"] == 7
-    assert response.json()["worker_health"]["status"] == "alive"
-
-
 def test_canonical_collector_fleet_route_projects_both_implementations(
     monkeypatch,
 ) -> None:
@@ -115,84 +90,44 @@ def test_canonical_collector_action_forwards_audited_operator_context(
     assert observed["context"] == {"surface": "collector-console"}
 
 
-def test_collector_fact_history_route_clamps_window_and_limit(monkeypatch) -> None:
-    observed = {}
+def test_retired_collector_mutation_routes_are_not_part_of_the_runtime_api() -> None:
+    paths = set(_client().app.openapi()["paths"])
 
-    def fake_fact_history(*, definition_id: str, hours: int, limit: int):
-        observed.update(
-            definition_id=definition_id,
-            hours=hours,
-            limit=limit,
-        )
-        return {
-            "schema_version": "market_collector_fact_history.v1",
-            "definition_id": definition_id,
-            "facts": [],
-        }
-
-    monkeypatch.setattr(
-        controller.market_data_collector, "fact_history", fake_fact_history
+    assert "/api/market-data/collectors" not in paths
+    assert "/api/market-data/collectors/structured" not in paths
+    assert "/api/market-data/collectors/{definition_id}/enabled" not in paths
+    assert (
+        "/api/market-data/market-structure/definitions/{definition_id}/continuous/start"
+        not in paths
     )
-    response = _client().get(
-        "/api/market-data/collectors/definition-a/facts",
-        params={"hours": 999, "limit": 9999},
+    assert (
+        "/api/market-data/market-structure/definitions/{definition_id}/continuous/stop"
+        not in paths
     )
 
-    assert response.status_code == 200
-    assert observed == {
-        "definition_id": "definition-a",
-        "hours": 168,
-        "limit": 1000,
-    }
 
-
-def test_structured_collector_route_never_enables_by_default(monkeypatch) -> None:
-    observed = {}
-
-    def fake_create(**kwargs):
-        observed.update(kwargs)
-        return {"id": "mcd_structured", "enabled": kwargs["enabled"]}
-
-    monkeypatch.setattr(
-        controller.market_data_collector,
-        "create_structured_fact_definition",
-        fake_create,
-    )
-    response = _client().post(
-        "/api/market-data/collectors/structured",
-        json={
-            "manifest_path": "config/market-data/structured.json",
-            "binding_id": "reserve-feed",
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["definition"]["enabled"] is False
-    assert observed == {
-        "manifest_path": "config/market-data/structured.json",
-        "binding_id": "reserve-feed",
-        "max_attempts": 3,
-        "minimum_spacing_seconds": 1.0,
-        "enabled": False,
-    }
-
-
-def test_collector_stream_fingerprint_ignores_observation_clock_only() -> None:
+def test_operational_collector_stream_fingerprint_ignores_observation_clock_only() -> None:
     first = {
         "observed_at": "2026-08-02T12:00:00+00:00",
-        "worker_health": {"status": "alive", "observed_at": "first"},
-        "workers": [{"worker_id": "worker-a", "heartbeat_at": "same"}],
+        "worker_fleet": {
+            "workers": [{"worker_id": "worker-a", "heartbeat_at": "same"}]
+        },
         "collectors": [],
     }
     second = {
         **first,
         "observed_at": "2026-08-02T12:00:02+00:00",
-        "worker_health": {"status": "alive", "observed_at": "second"},
-        "workers": [{"worker_id": "worker-a", "heartbeat_at": "same"}],
+        "worker_fleet": {
+            "workers": [{"worker_id": "worker-a", "heartbeat_at": "same"}]
+        },
     }
-    assert controller._collector_fingerprint(first) == controller._collector_fingerprint(second)
-    second["workers"][0]["heartbeat_at"] = "new"
-    assert controller._collector_fingerprint(first) != controller._collector_fingerprint(second)
+    assert controller._operational_collector_fingerprint(
+        first
+    ) == controller._operational_collector_fingerprint(second)
+    second["worker_fleet"]["workers"][0]["heartbeat_at"] = "new"
+    assert controller._operational_collector_fingerprint(
+        first
+    ) != controller._operational_collector_fingerprint(second)
 
 
 def test_market_structure_operator_snapshot_is_consolidated(monkeypatch) -> None:
@@ -477,7 +412,7 @@ def test_market_normalization_routes_preserve_causal_request(monkeypatch) -> Non
     assert observed["compare"]["known_at"].isoformat() == "2026-08-02T12:03:00+00:00"
 
 
-def test_continuous_collector_control_routes_are_non_blocking_and_typed(
+def test_collector_safety_and_historical_validation_evidence_remain_inspectable(
     monkeypatch,
 ) -> None:
     observed = {}
@@ -491,21 +426,6 @@ def test_continuous_collector_control_routes_are_non_blocking_and_typed(
 
     monkeypatch.setattr(
         controller.market_structure_service,
-        "start_continuous_validation",
-        record("validate", {"mode": "validation"}),
-    )
-    monkeypatch.setattr(
-        controller.market_structure_service,
-        "start_continuous",
-        record("start", {"mode": "continuous"}),
-    )
-    monkeypatch.setattr(
-        controller.market_structure_service,
-        "stop_continuous",
-        record("stop", {"mode": "stopped"}),
-    )
-    monkeypatch.setattr(
-        controller.market_structure_service,
         "set_safety_halt",
         record("halt", {"event_type": "halted"}),
     )
@@ -515,22 +435,6 @@ def test_continuous_collector_control_routes_are_non_blocking_and_typed(
         record("evidence", {"continuous_capture_completed": True}),
     )
     client = _client()
-    validate = client.post(
-        "/api/market-data/market-structure/definitions/definition-a/continuous/validate",
-        json={
-            "duration_seconds": 86400,
-            "requested_by": "operator-a",
-            "policy": {"max_inflight_segments": 3},
-        },
-    )
-    start = client.post(
-        "/api/market-data/market-structure/definitions/definition-a/continuous/start",
-        json={"requested_by": "operator-a", "policy": None},
-    )
-    stop = client.post(
-        "/api/market-data/market-structure/definitions/definition-a/continuous/stop",
-        json={"requested_by": "operator-a"},
-    )
     halt = client.post(
         "/api/market-data/market-structure/safety/halt",
         json={
@@ -546,14 +450,7 @@ def test_continuous_collector_control_routes_are_non_blocking_and_typed(
         "/api/market-data/market-structure/definitions/definition-a/continuous/validation/session-a"
     )
 
-    assert all(
-        response.status_code == 200
-        for response in (validate, start, stop, halt, evidence)
-    )
-    assert observed["validate"]["duration_seconds"] == 86400.0
-    assert observed["validate"]["policy"] == {"max_inflight_segments": 3}
-    assert observed["start"]["requested_by"] == "operator-a"
-    assert observed["stop"]["definition_id"] == "definition-a"
+    assert halt.status_code == evidence.status_code == 200
     assert observed["halt"]["scope_id"] == "definition-a"
     assert observed["halt"]["evidence"] is None
     assert observed["evidence"] == {

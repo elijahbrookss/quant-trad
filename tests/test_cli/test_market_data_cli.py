@@ -195,9 +195,39 @@ def test_backtest_start_sends_the_existing_dataset_identity(monkeypatch) -> None
     }
 
 
-def test_data_collectors_create_coinbase_oi_is_explicit_and_disabled_by_default(
-    monkeypatch,
-) -> None:
+def test_data_collectors_fleet_uses_canonical_operational_snapshot(monkeypatch) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        observed.update(
+            method=request.get_method(),
+            path=parsed.path,
+            query=urllib.parse.parse_qs(parsed.query),
+        )
+        return _Response({"collectors": []})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "collectors",
+            "fleet",
+            "--attempt-limit",
+            "7",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "GET",
+        "path": "/api/market-data/operations/collectors/snapshot",
+        "query": {"attempt_limit": ["7"]},
+    }
+
+
+def test_data_collectors_restart_is_audited_and_confirmed(monkeypatch) -> None:
     observed = {}
 
     def fake_urlopen(request, timeout):
@@ -206,7 +236,7 @@ def test_data_collectors_create_coinbase_oi_is_explicit_and_disabled_by_default(
             path=urllib.parse.urlparse(request.full_url).path,
             body=json.loads(request.data.decode("utf-8")),
         )
-        return _Response({"definition": {"id": "mcd_1", "enabled": False}})
+        return _Response({"operation": {"status": "succeeded"}})
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     exit_code = main(
@@ -214,72 +244,35 @@ def test_data_collectors_create_coinbase_oi_is_explicit_and_disabled_by_default(
             "--no-audit-log",
             "data",
             "collectors",
-            "create-coinbase-oi",
-            "--instrument-id",
-            "coinbase-btc-future",
-            "--provider-product-id",
-            "BIT-28NOV25-CDE",
+            "restart",
+            "continuous_stream",
+            "stream-1",
+            "--request-id",
+            "request-1",
+            "--actor-id",
+            "operator-1",
+            "--reason",
+            "recover stale worker",
+            "--confirm",
         ]
     )
 
     assert exit_code == 0
-    assert observed == {
-        "method": "POST",
-        "path": "/api/market-data/collectors",
-        "body": {
-            "instrument_id": "coinbase-btc-future",
-            "provider_product_id": "BIT-28NOV25-CDE",
-            "fact_type": "derivatives.open_interest",
-            "poll_interval_seconds": 60,
-            "max_attempts": 3,
-            "minimum_spacing_seconds": 1.0,
-            "enabled": False,
-        },
-    }
-
-
-def test_data_collectors_create_structured_is_manifest_bound_and_disabled(
-    monkeypatch,
-) -> None:
-    observed = {}
-
-    def fake_urlopen(request, timeout):
-        observed.update(
-            method=request.get_method(),
-            path=urllib.parse.urlparse(request.full_url).path,
-            body=json.loads(request.data.decode("utf-8")),
-        )
-        return _Response({"definition": {"id": "mcd_2", "enabled": False}})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    exit_code = main(
-        [
-            "--no-audit-log",
-            "data",
-            "collectors",
-            "create-structured",
-            "--manifest-path",
-            "config/market-data/structured-facts/chainlink-nxtassets-btc-etp-reserves.json",
-            "--binding-id",
-            "nxtassets-btc-direct-etp-reserves",
-        ]
+    assert observed["method"] == "POST"
+    assert observed["path"] == (
+        "/api/market-data/operations/collectors/continuous_stream/"
+        "stream-1/actions/restart"
     )
-
-    assert exit_code == 0
-    assert observed == {
-        "method": "POST",
-        "path": "/api/market-data/collectors/structured",
-        "body": {
-            "manifest_path": (
-                "config/market-data/structured-facts/"
-                "chainlink-nxtassets-btc-etp-reserves.json"
-            ),
-            "binding_id": "nxtassets-btc-direct-etp-reserves",
-            "max_attempts": 3,
-            "minimum_spacing_seconds": 1.0,
-            "enabled": False,
-        },
+    assert observed["body"]["request_id"] == "request-1"
+    assert observed["body"]["actor_id"] == "operator-1"
+    assert observed["body"]["confirmation"] == (
+        "continuous_stream:stream-1:restart"
+    )
+    assert observed["body"]["context"] == {
+        "surface": "qt",
+        "reason": "recover stale worker",
     }
+    assert observed["body"]["requested_at"].endswith("+00:00")
 
 
 def test_data_open_interest_latest_declares_decision_time_and_staleness(
@@ -322,46 +315,6 @@ def test_data_open_interest_latest_declares_decision_time_and_staleness(
             "max_staleness_seconds": ["120"],
             "required": ["false"],
         },
-    }
-
-
-def test_data_collectors_create_coinbase_funding_is_explicit(
-    monkeypatch,
-) -> None:
-    observed = {}
-
-    def fake_urlopen(request, timeout):
-        observed.update(
-            method=request.get_method(),
-            path=urllib.parse.urlparse(request.full_url).path,
-            body=json.loads(request.data.decode("utf-8")),
-        )
-        return _Response({"definition": {"id": "mcd_funding", "enabled": True}})
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    exit_code = main(
-        [
-            "--no-audit-log",
-            "data",
-            "collectors",
-            "create-coinbase-funding",
-            "--instrument-id",
-            "coinbase-eth-future",
-            "--provider-product-id",
-            "ETP-20DEC30-CDE",
-            "--enabled",
-        ]
-    )
-
-    assert exit_code == 0
-    assert observed["body"] == {
-        "instrument_id": "coinbase-eth-future",
-        "provider_product_id": "ETP-20DEC30-CDE",
-        "fact_type": "derivatives.funding_rate",
-        "poll_interval_seconds": 60,
-        "max_attempts": 3,
-        "minimum_spacing_seconds": 1.0,
-        "enabled": True,
     }
 
 
@@ -697,7 +650,7 @@ def test_market_structure_recent_reconciliation_is_bounded(monkeypatch) -> None:
     }
 
 
-def test_market_structure_continuous_controls_use_worker_owned_routes(monkeypatch) -> None:
+def test_market_structure_historical_continuous_evidence_is_read_only(monkeypatch) -> None:
     observed = []
 
     def fake_urlopen(request, timeout):
@@ -716,56 +669,16 @@ def test_market_structure_continuous_controls_use_worker_owned_routes(monkeypatc
             "--no-audit-log",
             "data",
             "market-structure",
-            "continuous-validate",
-            "definition-a",
-            "--duration",
-            "86400",
-            "--requested-by",
-            "operator-a",
-            "--policy-json",
-            '{"max_inflight_segments":3}',
-        ]
-    ) == 0
-    assert main(
-        [
-            "--no-audit-log",
-            "data",
-            "market-structure",
             "continuous-evidence",
             "definition-a",
             "session-a",
         ]
     ) == 0
-    assert main(
-        [
-            "--no-audit-log",
-            "data",
-            "market-structure",
-            "continuous-stop",
-            "definition-a",
-            "--requested-by",
-            "operator-a",
-        ]
-    ) == 0
     assert observed == [
-        {
-            "method": "POST",
-            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/validate",
-            "body": {
-                "duration_seconds": 86400.0,
-                "requested_by": "operator-a",
-                "policy": {"max_inflight_segments": 3},
-            },
-        },
         {
             "method": "GET",
             "path": "/api/market-data/market-structure/definitions/definition-a/continuous/validation/session-a",
             "body": None,
-        },
-        {
-            "method": "POST",
-            "path": "/api/market-data/market-structure/definitions/definition-a/continuous/stop",
-            "body": {"requested_by": "operator-a"},
         },
     ]
 
