@@ -86,6 +86,10 @@ export function OverviewRoom() {
   const fleet = collectorFeed.fleet || {}
   const states = fleet.operational_state_counts || {}
   const runningCollectors = Number(states.RUNNING || 0)
+  const nonCollectorAttention = attentionItems.filter((item) => item.kind !== 'collector').length
+  const attentionTotal = Number(fleet.attention_count || 0) + nonCollectorAttention
+  const displayedAttentionCount = Math.min(attentionItems.length, 3)
+  const hiddenAttentionCount = Math.max(0, attentionTotal - displayedAttentionCount)
   const marketDetail = fleet.attention_count
     ? `${fleet.attention_count} actionable exception${fleet.attention_count === 1 ? '' : 's'}`
     : `${fleet.accepted_last_minute || 0}/min · ${fleet.active_schema_count || 0} schemas`
@@ -119,7 +123,7 @@ export function OverviewRoom() {
       </div>
 
       <div className="qt2-summary-grid qt2-summary-grid-three">
-        <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? `Within ${ATTENTION_CONTRACT.lookbackHours} hours` : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} partial={attentionIssues.length > 0} />
+        <SummaryCard label="Attention" value={attentionTotal || 'Clear'} detail={attentionTotal ? `Within ${ATTENTION_CONTRACT.lookbackHours} hours` : 'No known actionable issues'} tone={attentionTotal ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionTotal} partial={attentionIssues.length > 0} />
         <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run instance' : 'Run instances currently owned'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={activeRunsFeed.loading && !projectedRuns.length} error={activeRunsFeed.error && !projectedRuns.length ? activeRunsFeed.error : null} partial={Boolean(activeRunsFeed.error)} />
         <SummaryCard label="Market data" value={runningCollectors ? `${runningCollectors} running` : 'Idle'} detail={marketDetail} tone={fleet.attention_count ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.providers.length} error={collectorFeed.error && !collectorFeed.providers.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
       </div>
@@ -132,7 +136,7 @@ export function OverviewRoom() {
           </div>
           <ComponentAvailability issues={attentionIssues} />
           {operationsLoading && !attentionItems.length ? <OperatorSkeleton rows={3} label="Loading attention evidence" /> : <AttentionRail items={attentionItems.slice(0, 3)} lookbackHours={ATTENTION_CONTRACT.lookbackHours} />}
-          {attentionItems.length > 3 ? <p className="qt2-dashboard-more">+{attentionItems.length - 3} more in Operations</p> : null}
+          {hiddenAttentionCount ? <p className="qt2-dashboard-more">+{hiddenAttentionCount} more in Operations</p> : null}
         </section>
 
         <section className="qt2-dashboard-panel">
