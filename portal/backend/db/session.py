@@ -106,6 +106,26 @@ _CANONICAL_FACT_REQUIRED_INDEXES = frozenset(
     }
 )
 _COLUMN_MIGRATION_GUIDANCE = {
+    ("market", "collection_definitions", "desired_state"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_generation"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_requested_at"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_requested_by"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_request_id"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "desired_state"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_generation"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_requested_at"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_requested_by"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_request_id"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
     ("market", "gap_evidence", "source_id"):
         "scripts/db/manual_migration_gap_source_identity_v1.sql",
     ("market", "dataset_series", "quality_evidence"):
@@ -495,6 +515,7 @@ class Database:
             "book_checkpoint_manifests",
             "book_quality_event_links",
             "dataset_archive_refs",
+            "collector_operation_events",
         ):
             trigger_name = f"trg_reject_mutation_{table_name}"
             conn.execute(

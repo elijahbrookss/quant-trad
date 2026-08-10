@@ -154,12 +154,21 @@ class MarketCollectionDefinitionRecord(Base):
             name="ck_market_collection_failures_nonnegative",
         ),
         CheckConstraint(
+            "desired_state IN ('running', 'stopped', 'paused')",
+            name="ck_market_collection_desired_state",
+        ),
+        CheckConstraint(
+            "control_generation >= 0",
+            name="ck_market_collection_control_generation_nonnegative",
+        ),
+        CheckConstraint(
             "((lease_owner IS NOT NULL AND lease_token_hash IS NOT NULL AND lease_expires_at IS NOT NULL) "
             "OR (lease_owner IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL))",
             name="ck_market_collection_lease_state",
         ),
         Index(
             "ix_market_collection_claimable",
+            "desired_state",
             "enabled",
             "next_scheduled_at",
             "available_at",
@@ -187,6 +196,15 @@ class MarketCollectionDefinitionRecord(Base):
     next_scheduled_at = Column(DateTime(timezone=True), nullable=False)
     available_at = Column(DateTime(timezone=True), nullable=False)
     consecutive_failures = Column(Integer, nullable=False, default=0, server_default="0")
+    desired_state = Column(
+        String(16), nullable=False, default="stopped", server_default="stopped"
+    )
+    control_generation = Column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    control_requested_at = Column(DateTime(timezone=True), nullable=True)
+    control_requested_by = Column(String(128), nullable=True)
+    control_request_id = Column(String(128), nullable=True)
     lease_owner = Column(String(128), nullable=True)
     lease_token_hash = Column(String(64), nullable=True)
     lease_generation = Column(BigInteger, nullable=False, default=0, server_default="0")
@@ -579,13 +597,27 @@ class MarketStreamDefinitionRecord(Base):
     __table_args__ = (
         UniqueConstraint("identity_key", name="uq_market_stream_definition_identity"),
         CheckConstraint("generation >= 1", name="ck_market_stream_definition_generation"),
+        CheckConstraint(
+            "desired_state IN ('running', 'stopped', 'paused')",
+            name="ck_market_stream_desired_state",
+        ),
+        CheckConstraint(
+            "control_generation >= 0",
+            name="ck_market_stream_control_generation_nonnegative",
+        ),
         CheckConstraint("max_spool_bytes > 0", name="ck_market_stream_definition_spool"),
         CheckConstraint("max_segment_bytes > 0", name="ck_market_stream_definition_segment"),
         CheckConstraint(
             "max_segment_bytes <= max_spool_bytes",
             name="ck_market_stream_definition_segment_within_spool",
         ),
-        Index("ix_market_stream_definition_enabled", "enabled", "provider", "venue"),
+        Index(
+            "ix_market_stream_definition_enabled",
+            "desired_state",
+            "enabled",
+            "provider",
+            "venue",
+        ),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
@@ -611,6 +643,15 @@ class MarketStreamDefinitionRecord(Base):
     max_spool_bytes = Column(BigInteger, nullable=False)
     max_segment_bytes = Column(BigInteger, nullable=False)
     generation = Column(BigInteger, nullable=False, default=1, server_default="1")
+    desired_state = Column(
+        String(16), nullable=False, default="stopped", server_default="stopped"
+    )
+    control_generation = Column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    control_requested_at = Column(DateTime(timezone=True), nullable=True)
+    control_requested_by = Column(String(128), nullable=True)
+    control_request_id = Column(String(128), nullable=True)
     config = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -655,6 +696,71 @@ class MarketCollectorSafetyEventRecord(Base):
     policy_hash = Column(String(64), nullable=False)
     evidence_hash = Column(String(64), nullable=False)
     evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketCollectorOperationRecord(Base):
+    """Immutable result of one canonical collector operator request."""
+
+    __tablename__ = "collector_operation_events"
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_market_collector_operation_request"),
+        CheckConstraint(
+            "collector_kind IN ('scheduled_fact', 'continuous_stream')",
+            name="ck_market_collector_operation_kind",
+        ),
+        CheckConstraint(
+            "action IN ('start', 'stop', 'restart', 'pause', 'resume', 'recover')",
+            name="ck_market_collector_operation_action",
+        ),
+        CheckConstraint(
+            "status IN ('succeeded', 'failed')",
+            name="ck_market_collector_operation_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(context) = 'object'",
+            name="ck_market_collector_operation_context_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(prior_state) = 'object'",
+            name="ck_market_collector_operation_prior_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(resulting_state) = 'object'",
+            name="ck_market_collector_operation_result_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'object'",
+            name="ck_market_collector_operation_evidence_object",
+        ),
+        Index(
+            "ix_market_collector_operation_collector_time",
+            "collector_id",
+            "requested_at",
+        ),
+        Index("ix_market_collector_operation_recorded", "recorded_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(64), primary_key=True)
+    request_id = Column(String(128), nullable=False)
+    collector_id = Column(String(64), nullable=False)
+    collector_kind = Column(String(32), nullable=False)
+    action = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False)
+    requested_at = Column(DateTime(timezone=True), nullable=False)
+    recorded_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    actor_id = Column(String(128), nullable=False)
+    context = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    prior_state = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    resulting_state = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    error = Column(Text, nullable=True)
 
 
 class MarketCollectorSafetyStateRecord(Base):
@@ -1384,8 +1490,10 @@ __all__ = [
     "MARKET_DATA_SCHEMA",
     "MarketCollectionAttemptRecord",
     "MarketCollectionDefinitionRecord",
+    "MarketCollectorOperationRecord",
     "MarketCollectorSafetyEventRecord",
     "MarketCollectorSafetyStateRecord",
+    "MarketCollectorWorkerStateRecord",
     "MarketDataIngestionRunRecord",
     "MarketDataSeriesRecord",
     "MarketDataSourceRecord",
