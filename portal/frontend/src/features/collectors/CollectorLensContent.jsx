@@ -39,6 +39,7 @@ function formatTime(value) {
 }
 
 function formatDuration(value) {
+  if (value === null || value === undefined || value === '') return 'Unavailable'
   const seconds = Number(value)
   if (!Number.isFinite(seconds)) return 'Unavailable'
   if (seconds < 60) return `${Math.round(seconds)}s`
@@ -47,6 +48,7 @@ function formatDuration(value) {
 }
 
 function formatCount(value) {
+  if (value === null || value === undefined || value === '') return 'Unavailable'
   return Number.isFinite(Number(value)) ? Number(value).toLocaleString() : 'Unavailable'
 }
 

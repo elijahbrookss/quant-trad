@@ -37,6 +37,13 @@ function lastDataLabel(value) {
     : `Last data ${parsed.toLocaleDateString()}`
 }
 
+function hasFiniteMetric(value) {
+  return value !== null
+    && value !== undefined
+    && value !== ''
+    && Number.isFinite(Number(value))
+}
+
 /** Render-only mapping. Lifecycle, health, and attention are backend-owned. */
 export function buildCollectorCardViewModel(collector, { nowEpochMs = Date.now() } = {}) {
   const state = String(collector?.operational_state || collector?.actual_state || 'UNKNOWN').toUpperCase()
@@ -61,7 +68,7 @@ export function buildCollectorCardViewModel(collector, { nowEpochMs = Date.now()
     tone: HEALTH_TONE[health] || 'slate',
     needsAttention: Boolean(collector?.needs_attention),
     evidenceAt: collector?.acquisition?.last_attempt_at || acceptedAt || heartbeatAt,
-    freshnessLabel: running && Number.isFinite(Number(freshness))
+    freshnessLabel: running && hasFiniteMetric(freshness)
       ? `${Math.round(Number(freshness))}s`
       : running
         ? 'Freshness unknown'

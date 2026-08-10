@@ -14,6 +14,7 @@ import { useCollectorPage } from './useCollectorsFeed.js'
 const PAGE_SIZE = 50
 
 function formatMetric(value, suffix = '') {
+  if (value === null || value === undefined || value === '') return '—'
   return Number.isFinite(Number(value))
     ? `${Number(value).toLocaleString()}${suffix}`
     : '—'
@@ -47,8 +48,10 @@ function providerCounts(provider) {
 }
 
 function providerFreshness(provider) {
-  const seconds = Number(provider.freshness_seconds)
-  if (Number.isFinite(seconds)) return `${Math.round(seconds)}s`
+  const value = provider.freshness_seconds
+  if (value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))) {
+    return `${Math.round(Number(value))}s`
+  }
   if (!Number(provider.operational_state_counts?.RUNNING || 0)) return '—'
   return 'Unknown'
 }

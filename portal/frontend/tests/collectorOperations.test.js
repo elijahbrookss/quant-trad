@@ -40,6 +40,13 @@ test('collector view model keeps backend operational state and health separate',
   assert.equal(vm.throughputLabel, '42/min')
 })
 
+test('missing running freshness is unknown rather than zero seconds', () => {
+  const vm = buildCollectorCardViewModel(collector({
+    acquisition: { last_accepted_fact_at: null, freshness_seconds: null },
+  }))
+  assert.equal(vm.freshnessLabel, 'Freshness unknown')
+})
+
 test('collector frontend uses one canonical operational adapter and no legacy health model', () => {
   const adapter = source(path.join('adapters', 'marketData.adapter.js'))
   const feed = source(path.join('features', 'collectors', 'useCollectorsFeed.js'))
