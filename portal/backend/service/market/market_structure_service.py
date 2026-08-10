@@ -369,6 +369,15 @@ class MarketStructureService:
                 )
                 for interval in (1, 60)
             }
+            flow_feature_series_ids = {
+                interval: market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+                    timeframe_seconds=interval,
+                    contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                )
+                for interval in (1, 60)
+            }
             contract = enrollment.product_contract
             self.repository.register_product_definition(
                 definition_version_id=contract.product_definition_version_id,
@@ -424,6 +433,10 @@ class MarketStructureService:
                         "aggregate_series_ids": {
                             str(key): value
                             for key, value in aggregate_series_ids.items()
+                        },
+                        "flow_feature_series_ids": {
+                            str(key): value
+                            for key, value in flow_feature_series_ids.items()
                         },
                         "collector_runtime": {
                             "schema_version": "market.collector_runtime.v2",

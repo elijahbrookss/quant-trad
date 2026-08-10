@@ -117,6 +117,8 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
     assert len(repository.definition_calls) == 6
     assert repository.definition_calls[:3] == repository.definition_calls[3:]
     for call in repository.definition_calls:
+        assert set(call["config"]["aggregate_series_ids"]) == {"1", "60"}
+        assert set(call["config"]["flow_feature_series_ids"]) == {"1", "60"}
         runtime = call["config"]["collector_runtime"]
         assert runtime == {
             "schema_version": "market.collector_runtime.v2",
@@ -125,6 +127,10 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
             "updated_by": "stream_enrollment_manifest",
             "reason": "declarative_enrollment",
         }
+    assert {
+        key[1]
+        for key in market_data_repository._series_ids
+    } >= {"market.trade_flow", "market.trade_flow_feature"}
 
 
 class _FakeStream:
