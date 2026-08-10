@@ -66,6 +66,47 @@ export function openCollectorOperationsStream({ attemptLimit = 5 } = {}) {
   )
 }
 
+export async function fetchCollectorProviderSummary() {
+  return request('/api/market-data/operations/collector-providers/snapshot')
+}
+
+export function openCollectorProviderSummaryStream() {
+  return openSse(
+    '/api/market-data/operations/collector-providers/stream',
+    { withCredentials: false, base: BASE },
+  )
+}
+
+export async function fetchProviderCollectors(
+  provider,
+  { query = '', attentionOnly = false, offset = 0, limit = 50 } = {},
+) {
+  if (!provider) throw new Error('Provider is required')
+  return request(
+    '/api/market-data/operations/collector-providers/'
+      + encodeURIComponent(provider)
+      + '/collectors'
+      + buildQuery({
+        query,
+        attention_only: attentionOnly,
+        offset,
+        limit,
+      }),
+  )
+}
+
+export async function searchCollectors({ query = '', attentionOnly = false, offset = 0, limit = 50 } = {}) {
+  return request(
+    '/api/market-data/operations/collector-search'
+      + buildQuery({
+        query,
+        attention_only: attentionOnly,
+        offset,
+        limit,
+      }),
+  )
+}
+
 export async function fetchCollectorOperationsDetail(collectorKind, collectorId, { limit = 100 } = {}) {
   return request(collectorPath(collectorKind, collectorId) + buildQuery({ limit }))
 }

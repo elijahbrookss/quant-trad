@@ -13,7 +13,6 @@ import {
   rankAttentionItems,
 } from '../../features/overview/buildOverviewViewModel.js'
 import { AttentionRail } from '../../features/overview/components/AttentionRail.jsx'
-import { TopResultCard } from '../../features/overview/components/TopResultCard.jsx'
 import { ActivityHeatmap } from '../../features/overview/components/ActivityHeatmap.jsx'
 import { OperatorErrorNotice, OperatorSkeleton } from '../components/OperatorErrorNotice.jsx'
 
@@ -23,12 +22,12 @@ function formatTime(value) {
   return Number.isNaN(parsed.getTime()) ? 'Evidence time unavailable' : parsed.toLocaleString()
 }
 
-function SummaryCard({ label, value, detail, tone = "neutral", to, loading = false, error = null, partial = false }) {
+function SummaryCard({ label, value, detail, tone = 'neutral', to, loading = false, error = null, partial = false }) {
   return (
-    <Link className={"qt2-summary-card is-" + (error || partial ? "warning" : tone)} to={to} aria-busy={loading}>
+    <Link className={'qt2-summary-card is-' + (error || partial ? 'warning' : tone)} to={to} aria-busy={loading}>
       <span>{label}</span>
-      {loading ? <div className="qt2-summary-skeleton qt2-skeleton" /> : <strong>{error ? "Unavailable" : value}</strong>}
-      <small>{error ? "Open the owning view for details" : partial ? `${detail} · Partial evidence` : detail}</small>
+      {loading ? <div className="qt2-summary-skeleton qt2-skeleton" /> : <strong>{error ? 'Unavailable' : value}</strong>}
+      <small>{error ? 'Open the owning view for details' : partial ? `${detail} · Partial evidence` : detail}</small>
     </Link>
   )
 }
@@ -37,22 +36,20 @@ function ComponentAvailability({ issues }) {
   if (!issues.length) return null
   return (
     <details className="qt2-component-availability">
-      <summary>{issues.length} evidence source{issues.length === 1 ? "" : "s"} unavailable</summary>
-      <div>
-        {issues.map(({ component, error }, index) => (
-          <section data-component={component} key={`${component}:${index}`}>
-            <span>{component}</span>
-            <OperatorErrorNotice error={error} compact />
-          </section>
-        ))}
-      </div>
+      <summary>{issues.length} evidence source{issues.length === 1 ? '' : 's'} unavailable</summary>
+      <div>{issues.map(({ component, error }, index) => (
+        <section data-component={component} key={`${component}:${index}`}>
+          <span>{component}</span>
+          <OperatorErrorNotice error={error} compact />
+        </section>
+      ))}</div>
     </details>
   )
 }
 
 function CurrentOperations({ operations }) {
   if (!operations.length) {
-    return <div className="qt2-dashboard-empty">No active run, in-flight collector attempt, or leased stream session is currently evidenced.</div>
+    return <div className="qt2-dashboard-empty">No active run is currently evidenced.</div>
   }
   return (
     <div className="qt2-dashboard-list">
@@ -69,42 +66,40 @@ function CurrentOperations({ operations }) {
 
 export function OverviewRoom() {
   const activeRunsFeed = useActiveRunsFeed()
-  const nowEpochMs = Date.now()
   const collectorFeed = useCollectorsFeed()
   const [activityType, setActivityType] = useState('backtests_completed')
   const researchFeed = useOverviewBacktestActivity(activityType)
   const projectedRuns = activeRunsFeed.runs
+  const nowEpochMs = Date.now()
 
   const attentionItems = useMemo(() => rankAttentionItems({
     runs: projectedRuns,
-    collectors: collectorFeed.collectors,
+    providerSummaries: collectorFeed.providers,
     researchItems: researchFeed.researchItems,
     nowEpochMs,
-  }), [projectedRuns, collectorFeed.collectors, researchFeed.researchItems, nowEpochMs])
-  const currentOperations = useMemo(() => buildCurrentOperations({
-    runs: projectedRuns,
-    collectors: collectorFeed.collectors,
-  }), [projectedRuns, collectorFeed.collectors])
-  const collectorSummary = useMemo(() => {
-    const enabled = collectorFeed.collectors.filter((collector) => collector.configured_state === 'enabled')
-    const healthy = enabled.filter((collector) => collector.actual_state === 'HEALTHY').length
-    const issues = enabled.filter((collector) => ['DEGRADED', 'FAILED', 'RETRYING'].includes(collector.actual_state)).length
-    return { enabled: enabled.length, healthy, issues }
-  }, [collectorFeed.collectors])
+  }), [projectedRuns, collectorFeed.providers, researchFeed.researchItems, nowEpochMs])
+  const currentOperations = useMemo(
+    () => buildCurrentOperations({ runs: projectedRuns }),
+    [projectedRuns],
+  )
   const activeRuns = currentOperations.filter((item) => ['run', 'backtest'].includes(item.kind)).length
-  const staleStreams = Number(collectorFeed.dataPlane?.stale_stream_count || 0)
+  const fleet = collectorFeed.fleet || {}
+  const states = fleet.operational_state_counts || {}
+  const runningCollectors = Number(states.RUNNING || 0)
+  const marketDetail = fleet.attention_count
+    ? `${fleet.attention_count} actionable exception${fleet.attention_count === 1 ? '' : 's'}`
+    : `${fleet.accepted_last_minute || 0}/min · ${fleet.active_schema_count || 0} schemas`
   const filter = ACTIVITY_FILTERS.find((item) => item.value === activityType)
+
   const currentOperationIssues = [
-    { component: "Active runs", error: activeRunsFeed.error },
-    { component: "Collector schedules", error: collectorFeed.error },
-    { component: "Collector live updates", error: collectorFeed.streamError },
+    { component: 'Active runs', error: activeRunsFeed.error },
   ].filter((issue) => issue.error)
   const attentionIssues = [
-    ...currentOperationIssues.filter((issue) => !issue.component.endsWith("live updates")),
-    ...researchFeed.errors.filter((issue) => issue.component === "Research attention"),
-  ]
-  const researchActivityIssues = researchFeed.errors.filter((issue) => issue.component === "Research activity")
-  const topResultIssues = researchFeed.errors.filter((issue) => issue.component === "Top result")
+    ...currentOperationIssues,
+    { component: 'Collector summaries', error: collectorFeed.error },
+    ...researchFeed.errors.filter((issue) => issue.component === 'Research attention'),
+  ].filter((issue) => issue.error)
+  const researchActivityIssues = researchFeed.errors.filter((issue) => issue.component === 'Research activity')
   const operationsLoading = activeRunsFeed.loading || collectorFeed.loading
 
   function refresh() {
@@ -123,11 +118,10 @@ export function OverviewRoom() {
         <button type="button" className="qt2-icon-button" onClick={refresh}><RefreshCcw size={14} />Refresh</button>
       </div>
 
-      <div className="qt2-summary-grid">
-        <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? "Within " + ATTENTION_CONTRACT.lookbackHours + " hours" : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} partial={attentionIssues.length > 0} />
+      <div className="qt2-summary-grid qt2-summary-grid-three">
+        <SummaryCard label="Attention" value={attentionItems.length || 'Clear'} detail={attentionItems.length ? `Within ${ATTENTION_CONTRACT.lookbackHours} hours` : 'No known actionable issues'} tone={attentionItems.length ? 'danger' : 'success'} to="/operations" loading={operationsLoading && !attentionItems.length} partial={attentionIssues.length > 0} />
         <SummaryCard label="Active runs" value={activeRuns} detail={activeRuns === 1 ? 'One live run instance' : 'Run instances currently owned'} tone={activeRuns ? 'info' : 'neutral'} to="/operations?tab=runs" loading={activeRunsFeed.loading && !projectedRuns.length} error={activeRunsFeed.error && !projectedRuns.length ? activeRunsFeed.error : null} partial={Boolean(activeRunsFeed.error)} />
-        <SummaryCard label="Collectors" value={collectorSummary.enabled ? `${collectorSummary.healthy}/${collectorSummary.enabled}` : 'None'} detail={collectorSummary.issues ? `${collectorSummary.issues} collector${collectorSummary.issues === 1 ? '' : 's'} need attention` : 'Canonical lifecycle evidence'} tone={collectorSummary.issues ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.collectors.length} error={collectorFeed.error && !collectorFeed.collectors.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
-        <SummaryCard label="Market data plane" value={collectorFeed.dataPlane?.active_schema_count ?? 'Unavailable'} detail={staleStreams ? `${staleStreams} stale stream${staleStreams === 1 ? '' : 's'}` : `${collectorFeed.dataPlane?.ingestion_rate_per_minute ?? 0} accepted facts/min`} tone={staleStreams ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.dataPlane} error={collectorFeed.error && !collectorFeed.dataPlane ? collectorFeed.error : null} partial={Boolean(collectorFeed.error)} />
+        <SummaryCard label="Market data" value={runningCollectors ? `${runningCollectors} running` : 'Idle'} detail={marketDetail} tone={fleet.attention_count ? 'warning' : 'success'} to="/operations?tab=market" loading={collectorFeed.loading && !collectorFeed.providers.length} error={collectorFeed.error && !collectorFeed.providers.length ? collectorFeed.error : null} partial={Boolean(collectorFeed.error || collectorFeed.streamError)} />
       </div>
 
       <div className="qt2-dashboard-grid">
@@ -143,30 +137,26 @@ export function OverviewRoom() {
 
         <section className="qt2-dashboard-panel">
           <div className="qt2-dashboard-panel-head">
-            <div><h2>Now</h2><p>Active evidence, not configured intent.</p></div>
+            <div><h2>Now</h2><p>Active run evidence, not routine collector polls.</p></div>
             <span>{currentOperations.length}</span>
           </div>
           <ComponentAvailability issues={currentOperationIssues} />
-          {operationsLoading && !currentOperations.length ? <OperatorSkeleton rows={4} label="Loading current operations" /> : <CurrentOperations operations={currentOperations} />}
+          {activeRunsFeed.loading && !currentOperations.length ? <OperatorSkeleton rows={4} label="Loading current operations" /> : <CurrentOperations operations={currentOperations} />}
         </section>
       </div>
 
-      <div className="qt2-dashboard-grid qt2-dashboard-grid-secondary">
-        <section className="qt2-dashboard-panel">
-          <div className="qt2-dashboard-panel-head">
-            <div><h2>Research activity</h2><p>{researchFeed.activity?.description || 'Persisted activity by UTC day.'}</p></div>
-            <select className="qt2-select" value={activityType} onChange={(event) => setActivityType(event.target.value)}>
-              {ACTIVITY_FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
-          </div>
-          <ComponentAvailability issues={researchActivityIssues} />
-          {researchFeed.loading && !researchFeed.activity ? <OperatorSkeleton rows={4} label="Loading research activity" /> : <ActivityHeatmap days={researchFeed.activity?.days || []} activityLabel={filter?.label || 'Persisted activity'} />}
-        </section>
-        <div className="qt2-component-boundary">
-          <ComponentAvailability issues={topResultIssues} />
-          {researchFeed.loading && !researchFeed.topResult ? <OperatorSkeleton rows={4} label="Loading top result" /> : <TopResultCard result={researchFeed.topResult} dataset={researchFeed.topResultDataset} />}
+      <section className="qt2-dashboard-panel qt2-research-activity-panel">
+        <div className="qt2-dashboard-panel-head">
+          <div><h2>Research activity</h2><p>{researchFeed.activity?.description || 'Persisted activity by UTC day.'}</p></div>
+          <select className="qt2-select" value={activityType} onChange={(event) => setActivityType(event.target.value)}>
+            {ACTIVITY_FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>
         </div>
-      </div>
+        <ComponentAvailability issues={researchActivityIssues} />
+        {researchFeed.activityLoading && !researchFeed.activity
+          ? <div className="qt2-deferred-shimmer" aria-label="Loading research activity"><span /><span /><span /></div>
+          : <ActivityHeatmap days={researchFeed.activity?.days || []} activityLabel={filter?.label || 'Persisted activity'} />}
+      </section>
     </div>
   )
 }

@@ -51,6 +51,7 @@ export function resolveGreeting(nowEpochMs = Date.now()) {
 export function rankAttentionItems({
   runs = [],
   collectors = [],
+  providerSummaries = [],
   postureRows = [],
   researchItems = [],
   nowEpochMs = Date.now(),
@@ -100,6 +101,21 @@ export function rankAttentionItems({
       evidenceAt: vm.evidenceAt,
       href: vm.route,
       state: { from: '/overview' },
+    })
+  })
+
+  providerSummaries.forEach((provider) => {
+    ;(provider.attention_collectors || []).forEach((collector) => {
+      addDeduplicated(items, {
+        id: `collector:${collector.collector_kind}:${collector.collector_id}`,
+        severity: collector.health_status === 'FAILED' ? 'critical' : 'warning',
+        kind: 'collector',
+        title: `${provider.provider} · ${collector.display_subject}`,
+        detail: String(collector.attention_reason || 'needs attention').replaceAll('_', ' '),
+        evidenceAt: collector.evidence_at,
+        href: `/operations/market/${encodeURIComponent(collector.collector_kind)}/${encodeURIComponent(collector.collector_id)}`,
+        state: { from: '/overview' },
+      })
     })
   })
 

@@ -280,7 +280,7 @@ export function FleetRoom() {
           <p className="qt2-sub">Find the thing first. Open the evidence only when you need it.</p>
         </div>
         <div className="qt2-head-actions">
-          <span className="qt2-observation-note">{tab === 'runs' ? (runView === 'current' ? (activeRunsFeed.hasReceivedSnapshot ? 'Active run stream live' : 'Active run stream connecting') : (hasReceivedSnapshot ? 'Run history ready' : 'Run history connecting')) : tab === 'market' ? 'Market snapshots + live deltas' : 'Bounded research inventory'}</span>
+          <span className="qt2-observation-note">{tab === 'runs' ? (runView === 'current' ? (activeRunsFeed.hasReceivedSnapshot ? 'Active run stream live' : 'Active run stream connecting') : (hasReceivedSnapshot ? 'Run history ready' : 'Run history connecting')) : tab === 'market' ? 'Provider summaries live · details lazy' : 'Bounded research inventory'}</span>
           <button type="button" className="qt2-icon-button" onClick={refresh}><RefreshCcw size={14} />Refresh</button>
         </div>
       </div>
@@ -321,7 +321,7 @@ export function FleetRoom() {
           <div className="qt2-market-inventory-stack">
             {collectorFeed.error ? <OperatorErrorNotice error={collectorFeed.error} compact /> : null}
             {collectorFeed.streamError ? <OperatorErrorNotice error={collectorFeed.streamError} compact /> : null}
-            {collectorFeed.loading && !collectorFeed.collectors.length
+            {collectorFeed.loading && !collectorFeed.providers.length
               ? <OperatorSkeleton rows={6} label="Loading canonical collector operations" />
               : <CollectorFleetConsole feed={collectorFeed} query={query} />}
           </div>

@@ -1,7 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 
-// extremely/really dark purple (in the middle)
-const DEFAULT_ACCENT = '#175a81ff'
+const DEFAULT_ACCENT = '#b6892d'
 
 const AccentColorContext = createContext({
   accentColor: DEFAULT_ACCENT,

@@ -16,6 +16,9 @@ function collector(overrides = {}) {
     collector_kind: 'continuous_stream',
     provider: 'COINBASE',
     actual_state: 'DEGRADED',
+    operational_state: 'RUNNING',
+    health_status: 'DELAYED',
+    needs_attention: true,
     desired_state: 'running',
     configured_state: 'enabled',
     subjects: [{ provider_product_id: 'BTC-USD' }],
@@ -28,9 +31,10 @@ function collector(overrides = {}) {
   }
 }
 
-test('collector view model renders backend lifecycle without deriving a replacement state', () => {
+test('collector view model keeps backend operational state and health separate', () => {
   const vm = buildCollectorCardViewModel(collector())
-  assert.equal(vm.state, 'DEGRADED')
+  assert.equal(vm.state, 'RUNNING')
+  assert.equal(vm.health, 'DELAYED')
   assert.equal(vm.needsAttention, true)
   assert.equal(vm.route, '/operations/market/continuous_stream/collector-1')
   assert.equal(vm.throughputLabel, '42/min')
@@ -40,10 +44,10 @@ test('collector frontend uses one canonical operational adapter and no legacy he
   const adapter = source(path.join('adapters', 'marketData.adapter.js'))
   const feed = source(path.join('features', 'collectors', 'useCollectorsFeed.js'))
   const lens = source(path.join('v2', 'rooms', 'CollectorLensRoom.jsx'))
-  assert.match(adapter, /operations\/collectors\/snapshot/)
-  assert.match(adapter, /operations\/collectors\/stream/)
-  assert.match(adapter, /operations\/data-plane/)
-  assert.match(feed, /backend owns lifecycle and health semantics/)
+  assert.match(adapter, /operations\/collector-providers\/snapshot/)
+  assert.match(adapter, /operations\/collector-providers\/stream/)
+  assert.match(adapter, /operations\/collector-search/)
+  assert.match(feed, /One lightweight provider-level stream/)
   assert.match(lens, /fetchCollectorOperationsDetail/)
   assert.match(lens, /executeCollectorAction/)
   assert.doesNotMatch(feed + lens, /deriveCollectorHealth|worker_health|next_scheduled_at/)

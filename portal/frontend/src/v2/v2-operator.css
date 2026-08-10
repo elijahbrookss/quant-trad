@@ -1395,3 +1395,446 @@
   .qt2-topology-store,
   .qt2-topology-row > .qt2-topology-arrow:last-of-type { display: none; }
 }
+
+
+/* Scalable provider-first collector operations. */
+.qt2-summary-grid-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.qt2-collector-view-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.qt2-collector-view-controls button,
+.qt2-collector-view-controls label,
+.qt2-collector-page-footer button {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid rgba(240, 236, 227, 0.09);
+  border-radius: 0.42rem;
+  background: rgba(240, 236, 227, 0.025);
+  padding: 0.38rem 0.58rem;
+  color: #aaa69e;
+  font-size: 0.58rem;
+}
+
+.qt2-collector-view-controls button.is-active {
+  border-color: var(--accent-alpha-40);
+  background: var(--accent-alpha-10);
+  color: var(--accent-text-strong);
+}
+
+.qt2-collector-view-controls input {
+  accent-color: var(--accent-base);
+}
+
+.qt2-provider-list,
+.qt2-all-collectors {
+  overflow: hidden;
+  border: 1px solid rgba(240, 236, 227, 0.075);
+  border-radius: 0.58rem;
+  background: rgba(7, 10, 14, 0.14);
+}
+
+.qt2-provider-group + .qt2-provider-group {
+  border-top: 1px solid rgba(240, 236, 227, 0.065);
+}
+
+.qt2-provider-summary {
+  display: grid;
+  width: 100%;
+  grid-template-columns: auto minmax(12rem, 1.6fr) auto repeat(3, minmax(6rem, 0.55fr)) minmax(4rem, auto);
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.78rem 0.85rem;
+  color: #a9a69f;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.qt2-provider-summary:hover,
+.qt2-provider-summary[aria-expanded="true"] {
+  background: rgba(240, 236, 227, 0.025);
+  color: var(--qt2-ivory);
+}
+
+.qt2-provider-name strong,
+.qt2-provider-name small,
+.qt2-provider-summary > span > small,
+.qt2-provider-summary > span > strong {
+  display: block;
+}
+
+.qt2-provider-name strong {
+  color: var(--qt2-ivory);
+  font-size: 0.72rem;
+}
+
+.qt2-provider-name small,
+.qt2-provider-summary > span > small {
+  margin-top: 0.12rem;
+  color: var(--qt2-muted);
+  font-size: 0.52rem;
+}
+
+.qt2-provider-summary > span > strong {
+  margin-top: 0.12rem;
+  color: #cbc7be;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+}
+
+.qt2-provider-attention,
+.qt2-provider-clear {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  padding: 0.28rem 0.45rem;
+  font-size: 0.54rem;
+}
+
+.qt2-provider-attention {
+  background: rgba(238, 154, 150, 0.08);
+  color: var(--qt2-danger);
+}
+
+.qt2-provider-clear {
+  color: #779684;
+}
+
+.qt2-provider-collectors {
+  border-top: 1px solid rgba(240, 236, 227, 0.055);
+  background: rgba(0, 0, 0, 0.1);
+  padding: 0.35rem 0.55rem 0.55rem 2.1rem;
+}
+
+.qt2-collector-rows {
+  display: grid;
+}
+
+.qt2-collector-row {
+  display: grid;
+  grid-template-columns: minmax(13rem, 1.7fr) repeat(4, minmax(6rem, 0.6fr)) minmax(8rem, 0.8fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 3.7rem;
+  border: 0;
+  border-bottom: 1px solid rgba(240, 236, 227, 0.05);
+  padding: 0.58rem 0.65rem;
+  color: #a7a39b;
+  transition: background 140ms ease;
+}
+
+.qt2-collector-row:last-child {
+  border-bottom: 0;
+}
+
+.qt2-collector-row:hover {
+  background: rgba(240, 236, 227, 0.027);
+}
+
+.qt2-collector-row > span > small,
+.qt2-collector-row > span > strong,
+.qt2-collector-row-name small,
+.qt2-collector-row-name strong {
+  display: block;
+}
+
+.qt2-collector-row > span > small {
+  color: var(--qt2-muted);
+  font-size: 0.49rem;
+}
+
+.qt2-collector-row > span > strong {
+  margin-top: 0.12rem;
+  color: #c7c3ba;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+}
+
+.qt2-collector-row-name strong {
+  overflow: hidden;
+  color: #dedad1;
+  font-size: 0.65rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt2-collector-row-name small {
+  overflow: hidden;
+  margin-top: 0.14rem;
+  color: var(--qt2-muted);
+  font-size: 0.51rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt2-collector-row-issue {
+  min-height: 1rem;
+}
+
+.qt2-collector-row-issue.is-visible {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: #d8b574;
+  font-size: 0.54rem;
+  text-transform: capitalize;
+}
+
+.qt2-health-na {
+  color: #6f7176;
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+}
+
+.qt2-provider-loading {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.6rem;
+}
+
+.qt2-provider-loading span {
+  display: block;
+  height: 2.8rem;
+  border-radius: 0.35rem;
+}
+
+.qt2-collector-page-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid rgba(240, 236, 227, 0.055);
+  padding: 0.55rem 0.65rem 0;
+  color: var(--qt2-muted);
+  font-size: 0.55rem;
+}
+
+.qt2-collector-page-footer > div {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.qt2-collector-page-footer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.qt2-collector-more-actions {
+  position: relative;
+  margin-left: auto;
+}
+
+.qt2-collector-more-actions > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+  border: 1px solid rgba(240, 236, 227, 0.09);
+  border-radius: 0.25rem;
+  padding: 0.35rem 0.52rem;
+  color: #b8b4aa;
+  font-size: 0.58rem;
+  list-style: none;
+}
+
+.qt2-collector-more-actions > summary::-webkit-details-marker {
+  display: none;
+}
+
+.qt2-collector-more-actions > div {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  display: grid;
+  min-width: 9.5rem;
+  gap: 0.25rem;
+  border: 1px solid rgba(240, 236, 227, 0.12);
+  border-radius: 0.48rem;
+  background: rgba(19, 21, 26, 0.92);
+  padding: 0.35rem;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(18px) saturate(130%);
+}
+
+.qt2-raw-details {
+  margin-top: 0.5rem;
+}
+
+.qt2-raw-details > summary {
+  cursor: pointer;
+  color: #98958d;
+  font-size: 0.54rem;
+}
+
+.qt2-raw-details .qt2-json-block {
+  margin-top: 0.4rem;
+}
+
+.qt2-research-activity-panel {
+  min-height: 13rem;
+}
+
+.qt2-deferred-shimmer {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+  min-height: 9rem;
+  align-items: end;
+}
+
+.qt2-deferred-shimmer span {
+  height: 65%;
+  border-radius: 0.45rem;
+  background: linear-gradient(100deg, rgba(240, 236, 227, 0.025) 20%, var(--accent-alpha-10) 48%, rgba(240, 236, 227, 0.025) 76%);
+  background-size: 220% 100%;
+  animation: qt2-shimmer 2.6s ease-in-out infinite;
+}
+
+/* Accent-driven glass is reserved for modal and lens surfaces. */
+.qt2-shell {
+  --qt2-brass: var(--accent-base);
+  background:
+    radial-gradient(circle at 84% -12%, rgb(var(--accent-rgb) / 0.07), transparent 31rem),
+    linear-gradient(145deg, #090a0d 0%, #0c0e12 54%, #090a0d 100%);
+}
+
+.qt2-brand-mark {
+  border-color: var(--accent-alpha-30);
+  background: linear-gradient(145deg, var(--accent-alpha-20), var(--accent-alpha-05));
+  color: var(--accent-text-strong);
+}
+
+.qt2-roomnav-btn.is-active {
+  border-color: var(--accent-alpha-20);
+  background: linear-gradient(90deg, var(--accent-alpha-15), var(--accent-alpha-05));
+  color: var(--accent-text-strong);
+}
+
+.qt2-glass-backdrop,
+.qt2-action-backdrop,
+.qt2-route-modal,
+.qt2-lens-backdrop {
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 22% 18%, var(--accent-alpha-10), transparent 34rem),
+    radial-gradient(circle at 78% 82%, rgb(var(--accent-rgb) / 0.06), transparent 30rem),
+    rgba(5, 7, 11, 0.34);
+  backdrop-filter: blur(10px) saturate(135%);
+}
+
+.qt2-glass-backdrop::before,
+.qt2-action-backdrop::before,
+.qt2-route-modal::before,
+.qt2-lens-backdrop::before {
+  position: absolute;
+  inset: -35%;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(112deg, transparent 0 4.5rem, rgb(var(--accent-rgb) / 0.045) 4.55rem 4.62rem, transparent 4.68rem 8.8rem);
+  content: '';
+  animation: qt2-glass-drift 22s ease-in-out infinite alternate;
+  mask-image: radial-gradient(circle at center, black, transparent 68%);
+}
+
+.qt2-glass-panel,
+.qt2-action-dialog,
+.qt2-route-modal-card,
+.qt2-lens-dialog {
+  position: relative;
+  z-index: 1;
+  background:
+    linear-gradient(145deg, rgba(29, 32, 39, 0.72), rgba(12, 15, 20, 0.58));
+  box-shadow:
+    0 34px 100px rgba(0, 0, 0, 0.46),
+    inset 0 1px rgba(255, 255, 255, 0.07),
+    inset 0 0 46px var(--accent-alpha-05);
+  backdrop-filter: blur(28px) saturate(145%);
+}
+
+.qt2-action-backdrop {
+  backdrop-filter: blur(9px) saturate(140%);
+}
+
+@keyframes qt2-glass-drift {
+  from { transform: translate3d(-2%, -1.5%, 0) rotate(-1deg); opacity: 0.55; }
+  to { transform: translate3d(2.5%, 1.5%, 0) rotate(1deg); opacity: 0.95; }
+}
+
+@keyframes qt2-shimmer {
+  0% { background-position: 140% 0; opacity: 0.55; }
+  55% { opacity: 0.95; }
+  100% { background-position: -120% 0; opacity: 0.55; }
+}
+
+.app-motion-reduced .qt2-glass-backdrop::before,
+.app-motion-reduced .qt2-action-backdrop::before,
+.app-motion-reduced .qt2-route-modal::before,
+.app-motion-reduced .qt2-lens-backdrop::before,
+.app-motion-reduced .qt2-deferred-shimmer span {
+  animation: none;
+}
+
+@media (max-width: 1050px) {
+  .qt2-summary-grid-three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .qt2-provider-summary {
+    grid-template-columns: auto minmax(12rem, 1fr) auto repeat(2, minmax(5rem, 0.5fr));
+  }
+
+  .qt2-provider-summary > span:nth-of-type(4),
+  .qt2-provider-summary > span:nth-of-type(5) {
+    display: none;
+  }
+
+  .qt2-collector-row {
+    grid-template-columns: minmax(12rem, 1.5fr) repeat(3, minmax(5rem, 0.6fr)) auto;
+  }
+
+  .qt2-collector-row > span:nth-of-type(5),
+  .qt2-collector-row-issue {
+    display: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .qt2-summary-grid-three {
+    grid-template-columns: 1fr;
+  }
+
+  .qt2-inventory-heading,
+  .qt2-collector-view-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .qt2-provider-summary {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .qt2-provider-summary > span:not(.qt2-provider-name):not(.qt2-provider-attention):not(.qt2-provider-clear) {
+    display: none;
+  }
+
+  .qt2-provider-collectors {
+    padding-left: 0.55rem;
+  }
+
+  .qt2-collector-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .qt2-collector-row > span:not(.qt2-collector-row-name):not(.qt2-collector-row-issue) {
+    display: none;
+  }
+}

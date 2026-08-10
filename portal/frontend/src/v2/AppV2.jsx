@@ -1,8 +1,9 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { Activity, LayoutDashboard, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { Activity, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Settings } from 'lucide-react'
 import { ChartStateProvider } from '../contexts/ChartStateContext.jsx'
 import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
+import { useAccentColor } from '../contexts/AccentColorContext.jsx'
 import { pingApi } from '../adapters/health.adapter.js'
 
 const OverviewRoom = lazy(() =>
@@ -19,6 +20,9 @@ const CollectorLensRoom = lazy(() =>
 )
 const ResearchEvidenceRoom = lazy(() =>
   import('./rooms/ResearchEvidenceRoom.jsx').then((module) => ({ default: module.ResearchEvidenceRoom })),
+)
+const GlobalSettingsModal = lazy(() =>
+  import('../components/GlobalSettingsModal.jsx').then((module) => ({ default: module.GlobalSettingsModal })),
 )
 
 const SIDEBAR_STORAGE_KEY = 'quanttrad.operator.sidebar.collapsed'
@@ -100,7 +104,9 @@ function RoomFallback({ label }) {
 
 function AppV2Shell() {
   const { settings } = usePortalSettings()
+  const { setAccentColor } = useAccentColor()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(initialSidebarCollapsed)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     try {
@@ -109,6 +115,10 @@ function AppV2Shell() {
       // Browser storage is optional; the in-memory preference still works.
     }
   }, [sidebarCollapsed])
+
+  useEffect(() => {
+    setAccentColor(settings.accentColor)
+  }, [setAccentColor, settings.accentColor])
   const motionClass = settings.motion === 'reduced' ? 'app-motion-reduced' : ''
 
   return (
@@ -124,6 +134,16 @@ function AppV2Shell() {
         <RoomNav collapsed={sidebarCollapsed} />
         <div className="qt2-sidebar-foot">
           <StatusPill />
+          <button
+            type="button"
+            className="qt2-sidebar-toggle"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Open appearance settings"
+            title="Appearance settings"
+          >
+            <Settings size={17} />
+            <span>Appearance</span>
+          </button>
           <button
             type="button"
             className="qt2-sidebar-toggle"
@@ -157,6 +177,9 @@ function AppV2Shell() {
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
       </main>
+      <Suspense fallback={null}>
+        <GlobalSettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      </Suspense>
     </div>
   )
 }

@@ -1,20 +1,19 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  fetchCollectorOperationsSnapshot,
-  fetchMarketDataPlaneSnapshot,
-  openCollectorOperationsStream,
+  fetchCollectorProviderSummary,
+  fetchProviderCollectors,
+  openCollectorProviderSummaryStream,
+  searchCollectors,
 } from '../../adapters/marketData.adapter.js'
 
-const ATTEMPTS_LIMIT = 5
+const PAGE_REFRESH_MS = 15_000
 
 /**
- * The backend owns lifecycle and health semantics. This hook only transports
- * complete canonical snapshots and preserves the last good snapshot while SSE
- * reconnects.
+ * One lightweight provider-level stream drives fleet awareness. Collector
+ * telemetry is fetched only for the provider or search page the operator opens.
  */
 export function useCollectorsFeed({ enabled = true } = {}) {
   const [snapshot, setSnapshot] = useState(null)
-  const [dataPlane, setDataPlane] = useState(null)
   const [streamStatus, setStreamStatus] = useState('connecting')
   const [streamError, setStreamError] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -30,7 +29,6 @@ export function useCollectorsFeed({ enabled = true } = {}) {
 
     let mounted = true
     let fallbackTimerId = null
-    let planeIntervalId = null
     let receivedStreamSnapshot = false
     setLoading(true)
 
@@ -43,20 +41,11 @@ export function useCollectorsFeed({ enabled = true } = {}) {
 
     async function loadSnapshot() {
       try {
-        applySnapshot(await fetchCollectorOperationsSnapshot({ attemptLimit: ATTEMPTS_LIMIT }))
+        applySnapshot(await fetchCollectorProviderSummary())
       } catch (err) {
         if (!mounted) return
-        setError(err?.message || 'Unable to load collector operations')
+        setError(err?.message || 'Unable to load collector provider summary')
         setLoading(false)
-      }
-    }
-
-    async function loadPlane() {
-      try {
-        const next = await fetchMarketDataPlaneSnapshot()
-        if (mounted) setDataPlane(next)
-      } catch (err) {
-        if (mounted) setError((current) => current || err?.message || 'Market-data-plane metrics unavailable')
       }
     }
 
@@ -68,11 +57,11 @@ export function useCollectorsFeed({ enabled = true } = {}) {
         setStreamError(null)
       } catch (err) {
         setStreamStatus('invalid')
-        setStreamError(err?.message || 'Live collector snapshot was invalid')
+        setStreamError(err?.message || 'Live provider summary was invalid')
       }
     }
 
-    const source = openCollectorOperationsStream({ attemptLimit: ATTEMPTS_LIMIT })
+    const source = openCollectorProviderSummaryStream()
     if (source) {
       source.addEventListener('snapshot', onStreamSnapshot)
       source.addEventListener('delta', onStreamSnapshot)
@@ -84,39 +73,29 @@ export function useCollectorsFeed({ enabled = true } = {}) {
       source.onerror = () => {
         if (!mounted) return
         setStreamStatus('reconnecting')
-        setStreamError('Live collector status is reconnecting; the last durable snapshot remains visible.')
+        setStreamError('Provider summaries are reconnecting; the last good view remains visible.')
       }
       fallbackTimerId = setTimeout(() => {
         if (!receivedStreamSnapshot) loadSnapshot()
       }, 4_000)
     } else {
       setStreamStatus('unavailable')
-      setStreamError('Live collector status is unavailable; use Refresh for a bounded snapshot.')
+      setStreamError('Live provider summaries are unavailable; use Refresh for a bounded snapshot.')
       loadSnapshot()
     }
 
-    loadPlane()
-    planeIntervalId = setInterval(loadPlane, 30_000)
-    if (refreshRevision > 0) {
-      loadSnapshot()
-      loadPlane()
-    }
+    if (refreshRevision > 0) loadSnapshot()
 
     return () => {
       mounted = false
       source?.close()
       if (fallbackTimerId) clearTimeout(fallbackTimerId)
-      if (planeIntervalId) clearInterval(planeIntervalId)
     }
   }, [enabled, refreshRevision])
 
   return {
     snapshot,
-    dataPlane,
-    collectors: Array.isArray(snapshot?.collectors) ? snapshot.collectors : [],
-    unregisteredDefinitions: Array.isArray(snapshot?.unregistered_definitions)
-      ? snapshot.unregistered_definitions
-      : [],
+    providers: Array.isArray(snapshot?.providers) ? snapshot.providers : [],
     fleet: snapshot?.fleet || null,
     workerFleet: snapshot?.worker_fleet || null,
     streamStatus,
@@ -124,6 +103,77 @@ export function useCollectorsFeed({ enabled = true } = {}) {
     loading,
     error,
     observedAt: snapshot?.observed_at || null,
+    refresh,
+  }
+}
+
+export function useCollectorPage({
+  provider = null,
+  query = '',
+  attentionOnly = false,
+  enabled = true,
+  offset = 0,
+  limit = 50,
+} = {}) {
+  const [page, setPage] = useState(null)
+  const [loading, setLoading] = useState(Boolean(enabled))
+  const [error, setError] = useState(null)
+  const [refreshRevision, setRefreshRevision] = useState(0)
+  const refresh = useCallback(() => setRefreshRevision((value) => value + 1), [])
+
+  useEffect(() => {
+    if (!enabled) {
+      setLoading(false)
+      return undefined
+    }
+
+    let mounted = true
+    let intervalId = null
+
+    async function load({ quiet = false } = {}) {
+      if (!quiet) setLoading(true)
+      try {
+        const next = provider
+          ? await fetchProviderCollectors(provider, {
+              query,
+              attentionOnly,
+              offset,
+              limit,
+            })
+          : await searchCollectors({
+              query,
+              attentionOnly,
+              offset,
+              limit,
+            })
+        if (mounted) {
+          setPage(next)
+          setError(null)
+        }
+      } catch (err) {
+        if (mounted) setError(err?.message || 'Collector page unavailable')
+      } finally {
+        if (mounted && !quiet) setLoading(false)
+      }
+    }
+
+    load()
+    intervalId = setInterval(() => {
+      if (document.visibilityState === 'visible') load({ quiet: true })
+    }, PAGE_REFRESH_MS)
+
+    return () => {
+      mounted = false
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [attentionOnly, enabled, limit, offset, provider, query, refreshRevision])
+
+  return {
+    page,
+    collectors: Array.isArray(page?.collectors) ? page.collectors : [],
+    total: Number(page?.total || 0),
+    loading,
+    error,
     refresh,
   }
 }
