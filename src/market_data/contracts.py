@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 from .fact_registry import get_fact_contract
 
@@ -1303,6 +1303,19 @@ class TypedFeatureRecord:
         object.__setattr__(self, "provenance_hash", provenance_hash)
         object.__setattr__(self, "quality", dict(self.quality))
 
+
+class CanonicalMarketDataRecord(Protocol):
+    """Structural record boundary for schema-registered canonical Facts.
+
+    ``canonical`` imports ``SourceIdentity`` from this module, so this protocol
+    keeps the shared consumer contract provider-neutral without introducing a
+    circular import.
+    """
+
+    fact: Any
+    market_commit_seq: int
+
+
 MarketDataRecord = (
     CandleRecord
     | OpenInterestRecord
@@ -1311,10 +1324,14 @@ MarketDataRecord = (
     | MarketTradeRecord
     | TradeFlowAggregateRecord
     | TypedFeatureRecord
+    | CanonicalMarketDataRecord
 )
 
 
 def _record_time(record: MarketDataRecord) -> datetime:
+    observation_time = getattr(record.fact, "observation_time", None)
+    if isinstance(observation_time, datetime):
+        return observation_time
     if isinstance(record, CandleRecord):
         return record.fact.open_time
     if isinstance(record, OpenInterestRecord):
