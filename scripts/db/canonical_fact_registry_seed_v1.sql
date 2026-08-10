@@ -8,6 +8,17 @@ INSERT INTO market.fact_schemas (
 )
 VALUES
 (
+    'asset.reserve_state.v1',
+    'asset.reserve_state',
+    'fa699e3e6fddd8b0a4c4429a5fe52702c262d88f81da72dacf430919625dc302',
+    $fact_contract${"additional_properties":false,"dataset_eligible":true,"fact_type":"asset.reserve_state","fields":[{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"report_id","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"reserve_asset","nullable":false,"required":true},{"enum":[],"kind":"decimal","minimum":"0","minimum_inclusive":true,"name":"reserve_quantity","nullable":false,"required":true},{"enum":[],"kind":"string","minimum":null,"minimum_inclusive":true,"name":"unit","nullable":false,"required":true}],"material_hash_version":"market.fact_material.v1","observation_time_field":"observation_time","query_fields":["report_id","reserve_asset","reserve_quantity"],"row_hash_version":"market.fact_row.v1","schema_id":"asset.reserve_state.v1","schema_version":"market.fact_payload_contract.v1"}$fact_contract$::jsonb,
+    'observation_time',
+    'market.fact_material.v1',
+    'market.fact_row.v1',
+    '["report_id","reserve_asset","reserve_quantity"]'::jsonb,
+    true
+),
+(
     'candle.ohlcv.v1',
     'candle.ohlcv',
     'ed8661f654b87d32fbf90ea36ac91094113ef1768570048fd617230cc45098dd',
