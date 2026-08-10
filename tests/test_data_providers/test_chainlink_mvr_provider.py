@@ -98,6 +98,9 @@ def test_production_mvr_manifest_pins_atomic_reserve_semantics() -> None:
     assert binding.adapter == chainlink.CHAINLINK_MVR_ADAPTER_ID
     assert binding.fact_type == "asset.reserve_state"
     assert binding.payload_schema_id == "asset.reserve_state.v1"
+    assert binding.canonical_instrument["id"] == (
+        "nxtassets-de000nxta018"
+    )
     assert binding.dimensions == {"reserve_asset": "BTC"}
     assert binding.config["expected_bundle_fields"] == [
         {"name": "ID", "type": "string", "decimals": 0},

@@ -249,9 +249,7 @@ class MarketDataCollectorService:
                 binding.instrument_id
             )
         except KeyError:
-            instrument_spec = dict(
-                binding.config.get("canonical_instrument") or {}
-            )
+            instrument_spec = dict(binding.canonical_instrument or {})
             if instrument_spec.get("id") != binding.instrument_id:
                 raise ValueError(
                     "market_collection_definition_invalid: reviewed canonical "
@@ -314,13 +312,15 @@ class MarketDataCollectorService:
         scheduled = datetime.fromtimestamp(
             epoch - (epoch % poll_interval), tz=UTC
         )
+        runtime_binding = asdict(binding)
+        runtime_binding.pop("canonical_instrument", None)
         config = {
             **identity,
             "adapter": binding.adapter,
             "manifest_id": manifest.id,
             "manifest_hash": manifest.manifest_hash,
             "manifest_path": manifest.path,
-            "structured_binding": asdict(binding),
+            "structured_binding": runtime_binding,
             "minimum_spacing_seconds": spacing,
             "retry_base_seconds": 2.0,
             "sample_time_method": "source_report_timestamp",

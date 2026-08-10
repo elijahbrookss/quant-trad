@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -12,7 +12,7 @@ from market_data.contracts import InstrumentRole
 from market_data.fact_registry import get_fact_contract, get_fact_payload_schema
 
 
-STRUCTURED_FACT_MANIFEST_VERSION = "market.structured_fact_sources.v1"
+STRUCTURED_FACT_MANIFEST_VERSION = "market.structured_fact_sources.v2"
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
@@ -41,6 +41,7 @@ class StructuredFactBinding:
     quality_policy: Mapping[str, Any]
     risk: Mapping[str, Any]
     config: Mapping[str, Any]
+    canonical_instrument: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -170,6 +171,9 @@ class StructuredFactBinding:
         )
         object.__setattr__(self, "risk", {key: str(value).strip() for key, value in risk.items()})
         object.__setattr__(self, "config", dict(self.config or {}))
+        object.__setattr__(
+            self, "canonical_instrument", dict(self.canonical_instrument or {})
+        )
 
 
 @dataclass(frozen=True)
@@ -228,6 +232,7 @@ def load_structured_fact_manifest(path: str | Path) -> StructuredFactManifest:
         "adapter",
         "instrument_id",
         "instrument_role",
+        "canonical_instrument",
         "fact_type",
         "payload_schema_id",
         "dimensions",
@@ -242,15 +247,22 @@ def load_structured_fact_manifest(path: str | Path) -> StructuredFactManifest:
     for raw in raw_bindings:
         if not isinstance(raw, dict) or set(raw) != required:
             raise ValueError(
-                "structured_fact_manifest_invalid: binding fields must match the v1 schema"
+                "structured_fact_manifest_invalid: binding fields must match the v2 schema"
             )
-        bindings.append(
-            StructuredFactBinding(
-                manifest_id=manifest_id,
-                manifest_hash=manifest_hash,
-                **raw,
-            )
+        binding = StructuredFactBinding(
+            manifest_id=manifest_id,
+            manifest_hash=manifest_hash,
+            **raw,
         )
+        if (
+            not binding.canonical_instrument
+            or binding.canonical_instrument.get("id") != binding.instrument_id
+        ):
+            raise ValueError(
+                "structured_fact_manifest_invalid: reviewed canonical instrument "
+                "metadata is required"
+            )
+        bindings.append(binding)
     ids = [binding.id for binding in bindings]
     if len(ids) != len(set(ids)):
         raise ValueError("structured_fact_manifest_invalid: duplicate binding id")

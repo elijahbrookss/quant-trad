@@ -291,6 +291,9 @@ def test_structured_definition_is_manifest_bound_and_disabled_by_default(
     assert captured["config"]["structured_binding"]["endpoint_ref"] == (
         "CHAINLINK_ARBITRUM_RPC_URL"
     )
+    runtime_binding = captured["config"]["structured_binding"]
+    assert "canonical_instrument" not in runtime_binding
+    assert "canonical_instrument" not in runtime_binding["config"]
     assert "endpoint" not in captured["config"]
 
 
