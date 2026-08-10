@@ -18,6 +18,10 @@ test('Overview is a compact dashboard rather than a numbered operational report'
   assert.match(overview, /Partial evidence/)
   assert.doesNotMatch(overview, /operationsErrors\.join|researchFeed\.errors\.join/)
   assert.doesNotMatch(overview, /qt2-step|function MarketPosture|function RecentOutcomes/)
+  assert.match(overview, /RoomLoadingFrame/)
+  assert.match(overview, /operationsLoading && !projectedRuns\.length && !collectorFeed\.providers\.length/)
+  const app = source(path.join('v2', 'AppV2.jsx'))
+  assert.match(app, /label === 'Overview'[\s\S]*RoomLoadingFrame/)
 })
 
 test('Operations uses three task domains, canonical collector operations, and cursor-backed run history', () => {

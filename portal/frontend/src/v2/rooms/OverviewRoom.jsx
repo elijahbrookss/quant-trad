@@ -15,6 +15,7 @@ import {
 import { AttentionRail } from '../../features/overview/components/AttentionRail.jsx'
 import { ActivityHeatmap } from '../../features/overview/components/ActivityHeatmap.jsx'
 import { OperatorErrorNotice, OperatorSkeleton } from '../components/OperatorErrorNotice.jsx'
+import { RoomLoadingFrame } from '../components/RoomLoadingFrame.jsx'
 
 function formatTime(value) {
   if (!value) return 'Evidence time unavailable'
@@ -110,6 +111,10 @@ export function OverviewRoom() {
     activeRunsFeed.refresh()
     collectorFeed.refresh()
     researchFeed.refresh()
+  }
+
+  if (operationsLoading && !projectedRuns.length && !collectorFeed.providers.length) {
+    return <RoomLoadingFrame room="Overview" />
   }
 
   return (

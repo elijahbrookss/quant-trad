@@ -5,6 +5,7 @@ import { ChartStateProvider } from '../contexts/ChartStateContext.jsx'
 import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from '../contexts/AccentColorContext.jsx'
 import { pingApi } from '../adapters/health.adapter.js'
+import { RoomLoadingFrame } from './components/RoomLoadingFrame.jsx'
 
 const OverviewRoom = lazy(() =>
   import('./rooms/OverviewRoom.jsx').then((module) => ({ default: module.OverviewRoom })),
@@ -99,6 +100,9 @@ function RoomNav({ collapsed }) {
 }
 
 function RoomFallback({ label }) {
+  if (label === 'Overview') {
+    return <RoomLoadingFrame room="Overview" />
+  }
   return <div className="qt2-room-loading">Loading {label}…</div>
 }
 
