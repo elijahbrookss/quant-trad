@@ -71,6 +71,40 @@ FIXTURE_PATH = (
     / "fixtures/providers/coinbase/market_structure_phase0/raw_frames.json.gz"
 )
 
+LEGACY_FACT_TABLES = (
+    "market.candle_versions",
+    "market.open_interest_versions",
+    "market.funding_rate_versions",
+    "market.numeric_fact_versions",
+    "market.market_trade_versions",
+    "market.trade_flow_aggregate_versions",
+    "market.l2_snapshot_versions",
+    "market.l2_snapshot_levels",
+    "market.l2_mutation_batches",
+    "market.l2_mutations",
+    "market.bbo_feature_versions",
+    "market.depth_feature_versions",
+    "market.trade_flow_feature_versions",
+    "market.futures_spot_relationship_versions",
+    "market.derivative_state_versions",
+    "market.market_response_feature_versions",
+    "market.normalized_feature_versions",
+)
+
+
+def _assert_legacy_fact_tables_absent() -> None:
+    with db.session() as session:
+        present = [
+            table_name
+            for table_name in LEGACY_FACT_TABLES
+            if session.execute(
+                text("SELECT to_regclass(:table_name)"),
+                {"table_name": table_name},
+            ).scalar_one_or_none()
+            is not None
+        ]
+    assert present == []
+
 
 def _btc_update_frame() -> str:
     with gzip.open(FIXTURE_PATH, "rt", encoding="utf-8") as handle:
@@ -492,23 +526,8 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
                 },
             ).all()
         )
-        legacy_trade_count = session.execute(
-            text(
-                "SELECT count(*) FROM market.market_trade_versions "
-                "WHERE series_id = :series_id"
-            ),
-            {"series_id": trade_series_id},
-        ).scalar_one()
-        legacy_flow_count = session.execute(
-            text(
-                "SELECT count(*) FROM market.trade_flow_aggregate_versions "
-                "WHERE series_id = :series_id"
-            ),
-            {"series_id": aggregate_series_id},
-        ).scalar_one()
     assert canonical_counts == {trade_series_id: 1, aggregate_series_id: 1}
-    assert legacy_trade_count == 0
-    assert legacy_flow_count == 0
+    _assert_legacy_fact_tables_absent()
 
     flow_feature = derive_trade_flow_feature(
         series_id=flow_feature_series_id,
@@ -542,15 +561,7 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
             ),
             {"series_id": flow_feature_series_id},
         ).scalar_one()
-        legacy_flow_feature_count = session.execute(
-            text(
-                "SELECT count(*) FROM market.trade_flow_feature_versions "
-                "WHERE series_id = :series_id"
-            ),
-            {"series_id": flow_feature_series_id},
-        ).scalar_one()
     assert canonical_flow_feature_count == 1
-    assert legacy_flow_feature_count == 0
 
     aggressive_spec = NormalizationSpec(
         feature_name=f"aggressive_buy_share_db_{token[:8]}",
@@ -605,15 +616,7 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
                 ),
             },
         ).scalar_one()
-        legacy_normalized_count = session.execute(
-            text(
-                "SELECT count(*) FROM market.normalized_feature_versions "
-                "WHERE series_id = :series_id"
-            ),
-            {"series_id": normalized_series_id},
-        ).scalar_one()
     assert canonical_normalized_count == 1
-    assert legacy_normalized_count == 0
 
     requests = [
         DatasetSeriesRequest(
@@ -1101,21 +1104,7 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
             ),
             {"series_ids": [bbo_series_id, depth_series_id]},
         ).scalar_one()
-        legacy_feature_count = session.execute(
-            text(
-                "SELECT "
-                "  (SELECT count(*) FROM market.bbo_feature_versions "
-                "   WHERE series_id = :bbo_series_id) + "
-                "  (SELECT count(*) FROM market.depth_feature_versions "
-                "   WHERE series_id = :depth_series_id)"
-            ),
-            {
-                "bbo_series_id": bbo_series_id,
-                "depth_series_id": depth_series_id,
-            },
-        ).scalar_one()
     assert canonical_feature_count == len(bbo_facts) + len(depth_facts)
-    assert legacy_feature_count == 0
     feature_start = bbo_facts[0].bucket_start
     feature_end = bbo_facts[-1].bucket_end
     stored_bbo = market_structure_repository.read_bbo_features(
@@ -1176,16 +1165,6 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
                 "component_ids": [snapshots[0].snapshot_id, batches[0].batch_id],
             },
         ).mappings().all()
-        legacy_parent_count = session.execute(
-            text(
-                "SELECT "
-                "  (SELECT count(*) FROM market.l2_snapshot_versions "
-                "   WHERE series_id = :series_id) + "
-                "  (SELECT count(*) FROM market.l2_mutation_batches "
-                "   WHERE series_id = :series_id)"
-            ),
-            {"series_id": claim.series_id},
-        ).scalar_one()
         reconstruction_epoch = session.execute(
             text(
                 "SELECT connection_epoch FROM market.book_reconstruction_state "
@@ -1206,7 +1185,6 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
     assert canonical_by_type["update"]["entry_count"] == len(
         batches[0].event.mutations
     )
-    assert legacy_parent_count == 0
     assert reconstruction_epoch == last_fact.position.connection_epoch
     quality_event_id = market_structure_repository.record_quality_event(
         claim,

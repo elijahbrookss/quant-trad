@@ -2009,7 +2009,7 @@ def test_candle_catalog_prefers_storage_continuity_over_run_gap_diagnostics(monk
     assert btc["gap_count"] == 0
     assert btc["missing_count"] == 0
     assert btc["continuity_status"] == "clean"
-    assert btc["storage_source"] == "market.candle_versions"
+    assert btc["storage_source"] == "market.fact_versions"
 
 
 def test_readiness_data_quality_unknown_when_candle_continuity_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:

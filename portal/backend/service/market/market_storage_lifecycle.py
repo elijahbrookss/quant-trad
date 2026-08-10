@@ -17,7 +17,6 @@ from market_data.archive import (
 )
 from core.market_storage_lifecycle import (
     MARKET_STORAGE_LIFECYCLE_POLICY_VERSION,
-    HotTablePolicy,
     MarketStorageLifecyclePolicy,
 )
 
@@ -49,15 +48,6 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _chunk_target_id(
-    table_name: str, range_start: datetime, range_end: datetime
-) -> str:
-    return (
-        f"market.{table_name}:"
-        f"{_utc(range_start).isoformat()}..{_utc(range_end).isoformat()}"
-    )
 
 
 class MarketStorageLifecycleService:
@@ -93,10 +83,8 @@ class MarketStorageLifecycleService:
             if policy.archive_expiration_enabled
             else []
         )
-        chunk_compressions, chunk_expirations = self._plan_hot_chunks(
-            policy=policy,
-            now=observed_at,
-        )
+        chunk_compressions: list[dict[str, Any]] = []
+        chunk_expirations: list[dict[str, Any]] = []
         actions = [
             *compactions,
             *archive_expirations,
@@ -363,140 +351,6 @@ class MarketStorageLifecycleService:
                 }
             )
         return planned
-
-    def _plan_hot_chunks(
-        self, *, policy: MarketStorageLifecyclePolicy, now: datetime
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        compressions: list[dict[str, Any]] = []
-        expirations: list[dict[str, Any]] = []
-        for table_policy in policy.hot_tables:
-            chunks = self.lifecycle_repository.list_hot_chunks(
-                table_name=table_policy.table_name
-            )
-            for chunk in chunks:
-                range_start = _utc(chunk["range_start"])
-                range_end = _utc(chunk["range_end"])
-                table_names = (
-                    table_policy.table_name,
-                    *(name for name, _ in table_policy.dependent_tables),
-                )
-                layout_blockers = self._dependent_layout_blockers(
-                    table_policy=table_policy,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-                pins = self.lifecycle_repository.list_dataset_chunk_pins(
-                    table_name=table_policy.table_name,
-                    range_start=range_start,
-                    range_end=range_end,
-                )
-                retention_due = bool(
-                    table_policy.retention_days is not None
-                    and range_end <= now - timedelta(days=table_policy.retention_days)
-                )
-                expiration_eligible = retention_due and not pins and not layout_blockers
-                target_id = _chunk_target_id(
-                    table_policy.table_name, range_start, range_end
-                )
-                if policy.hot_expiration_enabled and retention_due:
-                    blockers = list(layout_blockers)
-                    if pins:
-                        blockers.append("frozen_dataset_chunk_pin")
-                    operation_id = lifecycle_operation_id(
-                        action="chunk_expire",
-                        target_kind="hypertable_chunk",
-                        target_id=target_id,
-                        policy_version=MARKET_STORAGE_LIFECYCLE_POLICY_VERSION,
-                    )
-                    if not self.lifecycle_repository.operation_completed(
-                        operation_id=operation_id
-                    ):
-                        expirations.append(
-                            {
-                                "action": "chunk_expire",
-                                "operation_id": operation_id,
-                                "target_kind": "hypertable_chunk",
-                                "target_id": target_id,
-                                "eligible": not blockers,
-                                "blockers": blockers,
-                                "table_names": list(table_names),
-                                "pin_table_name": table_policy.table_name,
-                                "range_start": range_start.isoformat(),
-                                "range_end": range_end.isoformat(),
-                                "dataset_pins": [
-                                    {
-                                        "dataset_id": str(pin["dataset_id"]),
-                                        "series_id": int(pin["series_id"]),
-                                    }
-                                    for pin in pins
-                                ],
-                                "estimated_reclaim_bytes": int(
-                                    chunk.get("byte_count") or 0
-                                ),
-                            }
-                        )
-                compression_due = bool(
-                    range_end
-                    <= now - timedelta(days=table_policy.compression_after_days)
-                )
-                if (
-                    policy.hot_compression_enabled
-                    and compression_due
-                    and not bool(chunk["is_compressed"])
-                ):
-                    blockers = list(layout_blockers)
-                    if not bool(chunk["compression_enabled"]):
-                        blockers.append("timescale_compression_not_configured")
-                    if expiration_eligible:
-                        blockers.append("superseded_by_eligible_expiration")
-                    operation_id = lifecycle_operation_id(
-                        action="chunk_compress",
-                        target_kind="hypertable_chunk",
-                        target_id=target_id,
-                        policy_version=MARKET_STORAGE_LIFECYCLE_POLICY_VERSION,
-                    )
-                    if not self.lifecycle_repository.operation_completed(
-                        operation_id=operation_id
-                    ):
-                        compressions.append(
-                            {
-                                "action": "chunk_compress",
-                                "operation_id": operation_id,
-                                "target_kind": "hypertable_chunk",
-                                "target_id": target_id,
-                                "eligible": not blockers,
-                                "blockers": blockers,
-                                "table_names": list(table_names),
-                                "range_start": range_start.isoformat(),
-                                "range_end": range_end.isoformat(),
-                            }
-                        )
-        return (
-            compressions[: policy.max_chunk_operations_per_run],
-            expirations[: policy.max_chunk_operations_per_run],
-        )
-
-    def _dependent_layout_blockers(
-        self,
-        *,
-        table_policy: HotTablePolicy,
-        range_start: datetime,
-        range_end: datetime,
-    ) -> list[str]:
-        blockers: list[str] = []
-        for dependent_name, _ in table_policy.dependent_tables:
-            status = self.lifecycle_repository.dependent_chunk_status(
-                table_name=dependent_name,
-                range_start=range_start,
-                range_end=range_end,
-            )
-            if status is None:
-                blockers.append(f"dependent_hypertable_missing:{dependent_name}")
-            elif not bool(status["compression_enabled"]):
-                blockers.append(
-                    f"dependent_compression_not_configured:{dependent_name}"
-                )
-        return blockers
 
     def _execute_compaction(
         self,

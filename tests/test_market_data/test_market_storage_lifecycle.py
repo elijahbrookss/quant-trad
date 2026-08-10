@@ -69,9 +69,6 @@ class _LifecycleRepository:
             },
         ]
 
-    def list_hot_chunks(self, **_kwargs):
-        return []
-
     @contextmanager
     def lifecycle_lock(self, **_kwargs):
         self.lock_entered = True
@@ -139,23 +136,14 @@ def test_lifecycle_policy_rejects_unknown_or_unsafe_values() -> None:
         MarketStorageLifecyclePolicy.from_mapping({"interval_seconds": 10})
 
 
-def test_lifecycle_hot_windows_are_deployment_configurable() -> None:
-    policy = MarketStorageLifecyclePolicy.from_mapping(
-        {
-            "raw_trade_hot_days": 45,
-            "raw_l2_hot_days": 3,
-            "derived_hot_days": 120,
-        }
-    )
-    by_name = {table.table_name: table for table in policy.hot_tables}
-
-    assert by_name["market_trade_versions"].retention_days == 45
-    assert by_name["l2_snapshot_versions"].retention_days == 3
-    assert by_name["l2_mutation_batches"].retention_days == 3
-    assert by_name["trade_flow_aggregate_versions"].retention_days == 120
-    assert by_name["normalized_feature_versions"].retention_days == 120
-    assert by_name["candle_versions"].retention_days is None
-    assert policy.to_dict()["raw_trade_hot_days"] == 45
-
-    with pytest.raises(ValueError, match="raw_l2_hot_days must be >= 2"):
-        MarketStorageLifecyclePolicy.from_mapping({"raw_l2_hot_days": 1})
+def test_lifecycle_rejects_retired_legacy_fact_table_controls() -> None:
+    for field_name in (
+        "hot_compression_enabled",
+        "hot_expiration_enabled",
+        "raw_trade_hot_days",
+        "raw_l2_hot_days",
+        "derived_hot_days",
+        "max_chunk_operations_per_run",
+    ):
+        with pytest.raises(ValueError, match=f"unsupported fields={field_name}"):
+            MarketStorageLifecyclePolicy.from_mapping({field_name: 1})

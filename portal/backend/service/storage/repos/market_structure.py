@@ -3204,24 +3204,36 @@ class PostgresMarketStructureRepository:
                 text(
                     """
                     SELECT series_id, interval_seconds,
-                           count(*) FILTER (WHERE selected_revision = 1) AS bucket_count,
+                           count(*) AS bucket_count,
                            count(*) FILTER (
-                               WHERE selected_revision = 1 AND aggregate_complete
+                               WHERE aggregate_complete
                            ) AS complete_bucket_count,
                            count(*) FILTER (
-                               WHERE selected_revision = 1 AND NOT aggregate_complete
+                               WHERE NOT aggregate_complete
                            ) AS incomplete_bucket_count,
-                           max(bucket_end) FILTER (WHERE selected_revision = 1)
-                             AS latest_bucket_end
+                           max(bucket_end) AS latest_bucket_end
                     FROM (
-                        SELECT versions.*,
-                               row_number() OVER (
-                                   PARTITION BY series_id, interval_seconds,
-                                                bucket_start, aggregation_version
-                                   ORDER BY revision DESC, market_commit_seq DESC
-                               ) AS selected_revision
-                        FROM market.trade_flow_aggregate_versions AS versions
+                        SELECT DISTINCT ON (series_id, observation_key)
+                               series_id,
+                               (
+                                   provenance -> '_qt_trade_flow_evidence'
+                                   ->> 'interval_seconds'
+                               )::integer AS interval_seconds,
+                               COALESCE(
+                                   (
+                                       quality -> '_qt_trade_flow_quality'
+                                       ->> 'aggregate_complete'
+                                   )::boolean,
+                                   false
+                               ) AS aggregate_complete,
+                               market.canonical_fact_utc_timestamp(
+                                   payload ->> 'bucket_end'
+                               ) AS bucket_end
+                        FROM market.fact_versions
                         WHERE series_id = ANY(:series_ids)
+                          AND fact_type = 'market.trade_flow'
+                        ORDER BY series_id, observation_key, revision DESC,
+                                 market_commit_seq DESC
                     ) AS selected
                     GROUP BY series_id, interval_seconds
                     ORDER BY interval_seconds, series_id

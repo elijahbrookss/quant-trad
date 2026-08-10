@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +48,7 @@ from market_data.normalization import (
 
 
 _BASE = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+_REPO_ROOT = Path(__file__).parents[2]
 _COINBASE = SourceIdentity(
     provider="COINBASE",
     venue="COINBASE_DIRECT",
@@ -627,3 +629,63 @@ def test_record_can_preserve_a_schema_owned_historical_row_hash() -> None:
     assert record.row_hash == historical_hash
     assert record.fact_version_id is not None
     assert len(record.fact_version_id) == 44
+
+
+def test_runtime_cannot_reference_retired_fact_storage() -> None:
+    retired_relations = {
+        "candle_versions",
+        "open_interest_versions",
+        "funding_rate_versions",
+        "numeric_fact_versions",
+        "market_trade_versions",
+        "trade_flow_aggregate_versions",
+        "l2_snapshot_versions",
+        "l2_snapshot_levels",
+        "l2_mutation_batches",
+        "l2_mutations",
+        "bbo_feature_versions",
+        "depth_feature_versions",
+        "trade_flow_feature_versions",
+        "futures_spot_relationship_versions",
+        "derivative_state_versions",
+        "market_response_feature_versions",
+        "normalized_feature_versions",
+    }
+    runtime_files = [
+        *_REPO_ROOT.joinpath("src").rglob("*.py"),
+        *_REPO_ROOT.joinpath("portal", "backend", "service").rglob("*.py"),
+        _REPO_ROOT / "portal/backend/db/market_data_models.py",
+        _REPO_ROOT / "portal/backend/db/__init__.py",
+    ]
+    violations = {
+        str(path.relative_to(_REPO_ROOT)): sorted(
+            relation for relation in retired_relations if relation in path.read_text()
+        )
+        for path in runtime_files
+        if any(relation in path.read_text() for relation in retired_relations)
+    }
+    assert violations == {}
+
+    model_source = (
+        _REPO_ROOT / "portal/backend/db/market_data_models.py"
+    ).read_text()
+    retired_models = {
+        "MarketCandleVersionRecord",
+        "MarketOpenInterestVersionRecord",
+        "MarketFundingRateVersionRecord",
+        "MarketNumericFactVersionRecord",
+        "MarketTradeVersionRecord",
+        "MarketTradeFlowAggregateVersionRecord",
+        "MarketL2SnapshotVersionRecord",
+        "MarketL2SnapshotLevelRecord",
+        "MarketL2MutationBatchRecord",
+        "MarketL2MutationRecord",
+        "MarketBboFeatureVersionRecord",
+        "MarketDepthFeatureVersionRecord",
+        "MarketTradeFlowFeatureVersionRecord",
+        "MarketFuturesSpotRelationshipVersionRecord",
+        "MarketDerivativeStateVersionRecord",
+        "MarketResponseFeatureVersionRecord",
+        "MarketNormalizedFeatureVersionRecord",
+    }
+    assert sorted(name for name in retired_models if name in model_source) == []
