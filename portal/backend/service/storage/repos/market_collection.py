@@ -706,6 +706,7 @@ class PostgresMarketCollectionRepository:
                             AND workers.state NOT IN ('stopping', 'stopped')) AS alive,
                            now() AS observed_at
                     FROM market.collector_worker_state AS workers
+                    WHERE workers.expires_at > now() - interval '24 hours'
                     ORDER BY alive DESC, workers.heartbeat_at DESC, workers.worker_id
                     LIMIT :limit
                     """

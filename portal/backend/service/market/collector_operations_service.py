@@ -56,6 +56,11 @@ _SCHEDULED_ADAPTERS = {
     ),
 }
 _SCHEDULED_DEFINITION_VERSION = "market_collection_definition.v1"
+_CONTINUOUS_DEFINITION_VERSIONS = {
+    "market.stream_runtime_config.v1",
+    "market_structure_stream_config.v1",
+    "market_structure_l2_stream_config.v1",
+}
 _CONTINUOUS_DERIVED_SCHEMAS = (
     ("market.trade_flow", "market.trade_flow.v1", "aggregate_series_ids"),
     (
@@ -145,11 +150,26 @@ class CollectorOperationsService:
             reasons.append("adapter_fact_schema_mismatch")
         if config.get("schema_version") != _SCHEDULED_DEFINITION_VERSION:
             reasons.append("definition_schema_unsupported")
+        if not bool(definition.get("enabled")):
+            return CollectorConfiguredState.DISABLED, reasons
         if reasons:
             return CollectorConfiguredState.INVALID, reasons
-        if not bool(definition.get("enabled")):
-            return CollectorConfiguredState.DISABLED, []
         return CollectorConfiguredState.ENABLED, []
+
+    @staticmethod
+    def _is_operationally_registered(
+        definition: Mapping[str, Any], kind: CollectorKind
+    ) -> bool:
+        config_version = str(
+            dict(definition.get("config") or {}).get("schema_version") or ""
+        )
+        if kind == CollectorKind.SCHEDULED_FACT:
+            return (
+                str(definition.get("adapter_version") or "")
+                in _SCHEDULED_ADAPTERS
+                or config_version == _SCHEDULED_DEFINITION_VERSION
+            )
+        return config_version in _CONTINUOUS_DEFINITION_VERSIONS
 
     def _continuous_registration(
         self, definition: Mapping[str, Any]
@@ -171,10 +191,10 @@ class CollectorOperationsService:
             values = dict(config.get(key) or {})
             if not {"1", "60"}.issubset(values):
                 reasons.append(f"config_incomplete:{key}")
+        if not bool(definition.get("enabled")):
+            return CollectorConfiguredState.DISABLED, reasons
         if reasons:
             return CollectorConfiguredState.INVALID, reasons
-        if not bool(definition.get("enabled")):
-            return CollectorConfiguredState.DISABLED, []
         return CollectorConfiguredState.ENABLED, []
 
     @staticmethod
@@ -192,8 +212,6 @@ class CollectorOperationsService:
     ) -> CollectorActualState:
         if configured_state == CollectorConfiguredState.DISABLED:
             return CollectorActualState.DISABLED
-        if configured_state == CollectorConfiguredState.INVALID:
-            return CollectorActualState.FAILED
         if desired_state == CollectorDesiredState.STOPPED:
             return (
                 CollectorActualState.STOPPING
@@ -206,6 +224,8 @@ class CollectorOperationsService:
                 if active
                 else CollectorActualState.PAUSED
             )
+        if configured_state == CollectorConfiguredState.INVALID:
+            return CollectorActualState.FAILED
         if recovering:
             return CollectorActualState.RECOVERING
         if retrying:
@@ -219,6 +239,26 @@ class CollectorOperationsService:
         if freshness_ok is False:
             return CollectorActualState.DEGRADED
         return CollectorActualState.HEALTHY
+
+    @staticmethod
+    def _lifecycle_capabilities(
+        *,
+        configured_state: CollectorConfiguredState,
+        registration_errors: list[str],
+        desired_state: CollectorDesiredState,
+        active: bool,
+    ) -> list[str]:
+        """Expose only commands the canonical mutation path can safely honor."""
+
+        actions = ["health_probe"]
+        if registration_errors:
+            if active or desired_state != CollectorDesiredState.STOPPED:
+                actions.append("stop")
+            return actions
+        if configured_state != CollectorConfiguredState.ENABLED:
+            return actions
+        actions.extend(["start", "stop", "restart", "pause", "resume"])
+        return actions
 
     @staticmethod
     def _worker_projection(
@@ -426,14 +466,12 @@ class CollectorOperationsService:
                 "message": str(error) if error else None,
             },
             "capabilities": {
-                "actions": [
-                    "health_probe",
-                    "start",
-                    "stop",
-                    "restart",
-                    "pause",
-                    "resume",
-                ],
+                "actions": self._lifecycle_capabilities(
+                    configured_state=configured_state,
+                    registration_errors=registration_errors,
+                    desired_state=desired_state,
+                    active=active,
+                ),
                 "recovery": False,
                 "historical_acquisition": bool(
                     dict(definition.get("config") or {}).get("historical_acquisition")
@@ -545,14 +583,12 @@ class CollectorOperationsService:
                 "message": str(error) if error else None,
             },
             "capabilities": {
-                "actions": [
-                    "health_probe",
-                    "start",
-                    "stop",
-                    "restart",
-                    "pause",
-                    "resume",
-                ],
+                "actions": self._lifecycle_capabilities(
+                    configured_state=configured_state,
+                    registration_errors=registration_errors,
+                    desired_state=desired_state,
+                    active=active,
+                ),
                 "recovery": False,
                 "recovery_scope": None,
                 "historical_acquisition": False,
@@ -561,8 +597,39 @@ class CollectorOperationsService:
 
     def fleet_snapshot(self, *, attempt_limit: int = 5) -> dict[str, Any]:
         now = self.clock().astimezone(UTC)
-        scheduled = self.collection_repository.list_definitions()
-        continuous = self.stream_repository.list_stream_definitions()
+        stored_scheduled = self.collection_repository.list_definitions()
+        stored_continuous = self.stream_repository.list_stream_definitions()
+        scheduled = [
+            item
+            for item in stored_scheduled
+            if self._is_operationally_registered(
+                item, CollectorKind.SCHEDULED_FACT
+            )
+        ]
+        continuous = [
+            item
+            for item in stored_continuous
+            if self._is_operationally_registered(
+                item, CollectorKind.CONTINUOUS_STREAM
+            )
+        ]
+        unregistered = [
+            {
+                "collector_id": str(item["id"]),
+                "collector_kind": kind.value,
+                "provider": str(item.get("provider") or "").upper(),
+                "adapter_version": item.get("adapter_version"),
+                "config_schema_version": dict(item.get("config") or {}).get(
+                    "schema_version"
+                ),
+            }
+            for kind, definitions in (
+                (CollectorKind.SCHEDULED_FACT, stored_scheduled),
+                (CollectorKind.CONTINUOUS_STREAM, stored_continuous),
+            )
+            for item in definitions
+            if not self._is_operationally_registered(item, kind)
+        ]
         workers = self.collection_repository.list_worker_states()
         worker = self._latest_worker(workers)
         supervisor = self._continuous_snapshot(workers)
@@ -618,6 +685,7 @@ class CollectorOperationsService:
             "observed_at": now.isoformat(),
             "fleet": {
                 "collector_count": len(collectors),
+                "unregistered_definition_count": len(unregistered),
                 "configured_enabled_count": sum(
                     item["configured_state"] == CollectorConfiguredState.ENABLED.value
                     for item in collectors
@@ -634,6 +702,7 @@ class CollectorOperationsService:
                     for item in collectors
                 ),
             },
+            "unregistered_definitions": unregistered,
             "worker_fleet": {
                 "known_count": len(workers),
                 "alive_count": sum(bool(item.get("alive")) for item in workers),
@@ -760,7 +829,7 @@ class CollectorOperationsService:
         )
         collector = detail["collector"]
         boundaries: list[dict[str, Any]] = []
-        registration_ok = collector["configured_state"] != "invalid"
+        registration_ok = not collector["registration_errors"]
         boundaries.append(
             self._diagnostic_item(
                 CollectorDiagnosticBoundary.REGISTRATION,
@@ -1015,20 +1084,32 @@ class CollectorOperationsService:
         expected_confirmation = (
             f"{kind.value}:{collector_id}:{normalized_action.value}"
         )
+        confirmation_error = None
         if (
             normalized_action.requires_confirmation
             and confirmation != expected_confirmation
         ):
-            raise ValueError(
+            confirmation_error = (
                 "collector_operation_confirmation_required: "
                 f"confirmation={expected_confirmation}"
             )
-        current = self._find_collector(
-            collector_kind=kind, collector_id=collector_id
-        )
-        if current["configured_state"] == CollectorConfiguredState.INVALID.value:
-            raise ValueError(
-                "collector_operation_registration_invalid: inspect registration diagnostics"
+        try:
+            current = self._find_collector(
+                collector_kind=kind, collector_id=collector_id
+            )
+        except ValueError as exc:
+            if not str(exc).startswith("collector_unknown:"):
+                raise
+            current = None
+        registration_error = None
+        if (
+            current is not None
+            and current["registration_errors"]
+            and normalized_action != CollectorAction.STOP
+        ):
+            registration_error = (
+                "collector_operation_registration_invalid: "
+                "inspect registration diagnostics"
             )
         operation = self.operations_repository.apply_lifecycle_action(
             request_id=request_id,
@@ -1038,15 +1119,19 @@ class CollectorOperationsService:
             requested_at=requested_at,
             actor_id=actor_id,
             context=context,
+            precondition_error=confirmation_error or registration_error,
         )
+        resulting_collector = current
+        if operation["status"] == "succeeded":
+            resulting_collector = self._find_collector(
+                collector_kind=kind, collector_id=collector_id
+            )
         return {
             "schema_version": COLLECTOR_OPERATION_VERSION,
             "action": normalized_action.value,
             "mutated": operation["status"] == "succeeded",
             "operation": operation,
-            "collector": self._find_collector(
-                collector_kind=kind, collector_id=collector_id
-            ),
+            "collector": resulting_collector,
         }
 
     def event_catalog(

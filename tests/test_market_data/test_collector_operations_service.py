@@ -1,9 +1,11 @@
 from datetime import UTC, datetime, timedelta
 
 from market_data.collector_operations import (
+    CollectorAction,
     CollectorActualState,
     CollectorConfiguredState,
     CollectorDesiredState,
+    CollectorKind,
 )
 from portal.backend.service.market.collector_operations_service import (
     CollectorOperationsService,
@@ -119,6 +121,7 @@ class _StreamRepository:
                 "lease_generation": 8,
                 "expires_at": NOW + timedelta(seconds=30),
                 "config": {
+                    "schema_version": "market.stream_runtime_config.v1",
                     "product_definition_version_id": "product.v1",
                     "aggregate_series_ids": {"1": 22, "60": 23},
                     "flow_feature_series_ids": {"1": 24, "60": 25},
@@ -129,6 +132,9 @@ class _StreamRepository:
 
 
 class _OperationsRepository:
+    def __init__(self):
+        self.last_action = None
+
     def fact_series_telemetry(self, *, series_ids):
         assert set(series_ids) == {11, 21, 22, 23, 24, 25}
         return {
@@ -144,6 +150,14 @@ class _OperationsRepository:
                 "accepted_last_minute": 120,
                 "accepted_last_five_minutes": 600,
             },
+        }
+
+    def apply_lifecycle_action(self, **kwargs):
+        self.last_action = dict(kwargs)
+        error = kwargs.get("precondition_error")
+        return {
+            "status": "failed" if error else "succeeded",
+            "error": error,
         }
 
 
@@ -168,6 +182,7 @@ def test_fleet_snapshot_projects_both_collector_families_without_provider_ui_log
     snapshot = _service().fleet_snapshot()
 
     assert snapshot["fleet"]["collector_count"] == 2
+    assert snapshot["fleet"]["unregistered_definition_count"] == 0
     assert snapshot["fleet"]["accepted_last_minute"] == 121
     assert {item["collector_kind"] for item in snapshot["collectors"]} == {
         "scheduled_fact",
@@ -209,6 +224,17 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         freshness_ok=True,
     ) == CollectorActualState.DISABLED
     assert derive(
+        configured_state=CollectorConfiguredState.INVALID,
+        desired_state=CollectorDesiredState.STOPPED,
+        worker_alive=True,
+        active=False,
+        retrying=False,
+        recovering=False,
+        has_error=False,
+        has_accepted_fact=False,
+        freshness_ok=None,
+    ) == CollectorActualState.STOPPED
+    assert derive(
         configured_state=CollectorConfiguredState.ENABLED,
         desired_state=CollectorDesiredState.STOPPED,
         worker_alive=True,
@@ -230,6 +256,55 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         has_accepted_fact=True,
         freshness_ok=False,
     ) == CollectorActualState.RETRYING
+
+
+def test_disabled_registration_preserves_diagnostics_without_failing_the_fleet():
+    configured_state, errors = CollectorOperationsService._scheduled_registration(
+        {
+            "enabled": False,
+            "adapter_version": "retired.adapter.v1",
+            "fact_type": "unknown",
+            "contract_version": "unknown.v1",
+            "config": {},
+        }
+    )
+
+    assert configured_state == CollectorConfiguredState.DISABLED
+    assert errors == ["adapter_not_registered", "definition_schema_unsupported"]
+    assert CollectorOperationsService._lifecycle_capabilities(
+        configured_state=configured_state,
+        registration_errors=errors,
+        desired_state=CollectorDesiredState.STOPPED,
+        active=False,
+    ) == ["health_probe"]
+
+
+def test_mutation_precondition_failures_enter_the_audit_command_path():
+    operations = _OperationsRepository()
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=operations,
+        stream_registry=CollectorAdapterRegistry((_StreamAdapter(),)),
+        clock=lambda: NOW,
+    )
+
+    result = service.execute_action(
+        request_id="request-1",
+        collector_kind=CollectorKind.CONTINUOUS_STREAM,
+        collector_id="coinbase-trades",
+        action=CollectorAction.RESTART,
+        requested_at=NOW,
+        actor_id="test-operator",
+        confirmation="incorrect",
+        context={"surface": "test"},
+    )
+
+    assert result["mutated"] is False
+    assert result["operation"]["status"] == "failed"
+    assert operations.last_action["precondition_error"].startswith(
+        "collector_operation_confirmation_required"
+    )
 
 
 def test_data_plane_snapshot_reuses_canonical_fleet_metrics():

@@ -148,6 +148,7 @@ class PostgresCollectorOperationsRepository:
         requested_at: datetime,
         actor_id: str,
         context: Mapping[str, Any] | None = None,
+        precondition_error: str | None = None,
     ) -> dict[str, Any]:
         """Apply one desired-state transition and append its final result atomically."""
 
@@ -206,6 +207,8 @@ class PostgresCollectorOperationsRepository:
 
             if definition is None:
                 error = "collector_unknown"
+            elif precondition_error:
+                error = str(precondition_error)
             else:
                 target, force_generation, error = self._transition(
                     action=normalized_action,

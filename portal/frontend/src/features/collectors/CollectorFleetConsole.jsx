@@ -45,7 +45,7 @@ function PlaneMetrics({ feed }) {
     .filter(([state]) => ['DEGRADED', 'FAILED', 'RETRYING'].includes(state))
     .reduce((sum, [, count]) => sum + Number(count || 0), 0)
   const metrics = [
-    { label: 'Registered collectors', value: formatMetric(fleet.collector_count), detail: `${formatMetric(fleet.desired_running_count)} desired running` },
+    { label: 'Registered collectors', value: formatMetric(fleet.collector_count), detail: `${formatMetric(fleet.desired_running_count)} desired running · ${formatMetric(fleet.unregistered_definition_count)} non-operational definitions` },
     { label: 'Ingestion', value: formatMetric(plane.ingestion_rate_per_minute, '/min'), detail: 'Accepted canonical facts' },
     { label: 'Active schemas', value: formatMetric(plane.active_schema_count), detail: 'Typed and versioned' },
     { label: 'Needs attention', value: formatMetric(problemCount), detail: `${formatMetric(plane.stale_stream_count)} stale streams` },
@@ -128,6 +128,7 @@ export function CollectorFleetConsole({ feed, query = '' }) {
       <section className="qt2-plane-banner">
         <div><Server size={18} /><span><strong>{formatMetric(workerFleet.alive_count)} live workers</strong><small>{formatMetric(workerFleet.known_count)} known · supervisor {workerFleet.continuous_supervisor_state || 'unavailable'}</small></span></div>
         {workerFleet.split_ownership_risk ? <span className="is-warning"><AlertTriangle size={15} />Split ownership risk detected</span> : <span>Ownership projection coherent</span>}
+        {feed.unregisteredDefinitions?.length ? <span className="is-warning"><AlertTriangle size={15} />{feed.unregisteredDefinitions.length} durable definitions are not in the code-owned operational registry</span> : null}
         <span>Observed {feed.observedAt ? new Date(feed.observedAt).toLocaleTimeString() : 'unavailable'}</span>
       </section>
 

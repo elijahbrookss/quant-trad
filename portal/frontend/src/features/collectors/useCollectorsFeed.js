@@ -114,6 +114,9 @@ export function useCollectorsFeed({ enabled = true } = {}) {
     snapshot,
     dataPlane,
     collectors: Array.isArray(snapshot?.collectors) ? snapshot.collectors : [],
+    unregisteredDefinitions: Array.isArray(snapshot?.unregistered_definitions)
+      ? snapshot.unregistered_definitions
+      : [],
     fleet: snapshot?.fleet || null,
     workerFleet: snapshot?.worker_fleet || null,
     streamStatus,
