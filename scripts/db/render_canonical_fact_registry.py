@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from market_data.fact_registry import supported_fact_payload_schemas
+from market_data.fact_registry import supported_static_fact_payload_schemas
 
 
 def _sql_text(value: str) -> str:
@@ -16,7 +16,7 @@ def _sql_text(value: str) -> str:
 
 def render_registry_seed() -> str:
     rows: list[str] = []
-    for schema in supported_fact_payload_schemas():
+    for schema in supported_static_fact_payload_schemas():
         contract = json.dumps(
             schema.contract,
             sort_keys=True,

@@ -15,6 +15,11 @@ from market_data.contracts import (
 )
 from market_data.order_book import BookSourcePosition, L2EventFact, L2Mutation
 from market_data.market_state import BboFeatureFact, DepthFeatureFact
+from market_data.normalization import (
+    NormalizationFormula,
+    NormalizationSpec,
+    NormalizedFeatureFact,
+)
 from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
 
 
@@ -611,3 +616,66 @@ def test_book_feature_migration_preserves_typed_material_evidence() -> None:
     depth_payload = json.loads(str(depth_result.values["payload"]))
     assert depth_payload["band_bps"] == 5
     assert depth_payload["imbalance"] == "-0.2"
+
+
+def test_normalized_feature_migration_binds_payload_to_exact_spec() -> None:
+    spec = NormalizationSpec(
+        feature_name="funding_rate_bps_migration_fixture",
+        semantic_version="1.0.0",
+        input_fact_type="derivatives.funding_rate",
+        output_fact_type="market.normalized.funding_rate_bps_migration_fixture",
+        formula=NormalizationFormula.BASIS_POINTS,
+        units="basis_points",
+        window_seconds=None,
+        minimum_observations=0,
+        warmup_observations=0,
+    )
+    fact = NormalizedFeatureFact(
+        series_id=21,
+        spec_id=spec.spec_id,
+        spec_hash=spec.spec_hash,
+        effective_at=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+        known_at=datetime(2026, 8, 9, 12, 0, 1, tzinfo=_UTC),
+        value=Decimal("1.25"),
+        status="valid",
+        reason=None,
+        input_start=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+        input_end=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+        input_count=1,
+        input_watermark=30,
+        source_series_ids=(20,),
+        source_material_hashes=("f" * 64,),
+        input_fingerprint="1" * 64,
+    )
+    row = {
+        **_envelope(),
+        **spec.material(),
+        **fact.__dict__,
+        "id": "legacy-normalized-1",
+        "status": fact.status.value,
+        "material_hash": fact.material_hash,
+        "provenance_hash": "2" * 64,
+        "quality": {
+            "classification": "valid",
+            "valid": True,
+            "reason": None,
+            "input_count": 1,
+            "input_watermark": 30,
+        },
+    }
+
+    result = _MIGRATION["_normalized_feature"](row)
+
+    assert result.values["payload_schema_id"] == (
+        f"market.normalized_feature.v1/{spec.spec_id}"
+    )
+    payload = json.loads(str(result.values["payload"]))
+    assert payload["value"] == "1.25"
+    assert payload["units"] == "basis_points"
+    provenance = json.loads(str(result.values["provenance"]))
+    assert provenance["_qt_normalization_evidence"]["spec_hash"] == (
+        spec.spec_hash
+    )
+    assert provenance["_qt_normalization_evidence"][
+        "legacy_material_hash"
+    ] == fact.material_hash

@@ -15,6 +15,14 @@ from typing import Any, Mapping, Sequence
 
 NORMALIZED_FACT_PREFIX = "market.normalized."
 NORMALIZED_FACT_VERSION = "market.normalized_feature.v1"
+_NORMALIZED_SPEC_ID_PATTERN = re.compile(r"nsp_[0-9a-f]{31}")
+_NORMALIZED_STATUSES = (
+    "valid",
+    "insufficient_history",
+    "invalid_input",
+    "zero_denominator",
+    "zero_variance",
+)
 
 
 class FactPayloadKind(str, Enum):
@@ -419,9 +427,11 @@ class FactContract:
     ) -> None:
         actual_version = str(contract_version or "").strip()
         version_valid = actual_version == self.contract_version
-        payload_schema = globals().get("_PAYLOAD_SCHEMAS", {}).get(
-            actual_version.lower()
-        )
+        payload_schemas = {
+            **globals().get("_STATIC_PAYLOAD_SCHEMAS", {}),
+            **globals().get("_DYNAMIC_PAYLOAD_SCHEMAS", {}),
+        }
+        payload_schema = payload_schemas.get(actual_version.lower())
         if payload_schema is not None:
             version_valid = payload_schema.fact_type == self.fact_type
         if self.fact_type.startswith(NORMALIZED_FACT_PREFIX):
@@ -645,7 +655,7 @@ _CONTRACTS = {
 }
 
 
-_PAYLOAD_SCHEMAS = {
+_STATIC_PAYLOAD_SCHEMAS = {
     schema.schema_id: schema
     for schema in (
         FactPayloadSchema(
@@ -1420,6 +1430,100 @@ _PAYLOAD_SCHEMAS = {
         ),
     )
 }
+_DYNAMIC_PAYLOAD_SCHEMAS: dict[str, FactPayloadSchema] = {}
+
+
+def build_normalized_fact_payload_schema(
+    *,
+    spec_id: str,
+    fact_type: str,
+    units: str,
+) -> FactPayloadSchema:
+    """Build the immutable payload contract bound to one normalization spec."""
+
+    normalized_spec_id = str(spec_id or "").strip().lower()
+    normalized_fact_type = str(fact_type or "").strip().lower()
+    normalized_units = str(units or "").strip()
+    if _NORMALIZED_SPEC_ID_PATTERN.fullmatch(normalized_spec_id) is None:
+        raise ValueError(
+            "market_normalized_payload_schema_invalid: spec_id must use the "
+            "canonical 31-hex identity"
+        )
+    if not normalized_fact_type.startswith(NORMALIZED_FACT_PREFIX) or len(
+        normalized_fact_type
+    ) <= len(NORMALIZED_FACT_PREFIX):
+        raise ValueError(
+            "market_normalized_payload_schema_invalid: fact_type is not normalized"
+        )
+    if not normalized_units:
+        raise ValueError(
+            "market_normalized_payload_schema_invalid: units are required"
+        )
+    return FactPayloadSchema(
+        schema_id=f"{NORMALIZED_FACT_VERSION}/{normalized_spec_id}",
+        fact_type=normalized_fact_type,
+        fields=(
+            FactPayloadField("value", FactPayloadKind.DECIMAL, nullable=True),
+            FactPayloadField(
+                "status",
+                FactPayloadKind.STRING,
+                enum=_NORMALIZED_STATUSES,
+            ),
+            FactPayloadField(
+                "reason",
+                FactPayloadKind.STRING,
+                nullable=True,
+            ),
+            FactPayloadField(
+                "units",
+                FactPayloadKind.STRING,
+                enum=(normalized_units,),
+            ),
+            FactPayloadField("input_start", FactPayloadKind.TIMESTAMP),
+            FactPayloadField("input_end", FactPayloadKind.TIMESTAMP),
+            FactPayloadField(
+                "input_count",
+                FactPayloadKind.INTEGER,
+                minimum=Decimal("0"),
+                minimum_inclusive=False,
+            ),
+            FactPayloadField(
+                "input_watermark",
+                FactPayloadKind.INTEGER,
+                minimum=Decimal("0"),
+                minimum_inclusive=False,
+            ),
+            FactPayloadField("input_fingerprint", FactPayloadKind.STRING),
+        ),
+        observation_time_field="effective_at",
+        material_hash_version="market.fact_material.v1",
+        row_hash_version="market.fact_row.v1",
+        query_fields=("value", "status", "units"),
+    )
+
+
+def register_fact_payload_schema(schema: FactPayloadSchema) -> FactPayloadSchema:
+    """Register one process-local dynamic schema without permitting mutation."""
+
+    if not isinstance(schema, FactPayloadSchema):
+        raise TypeError("market_fact_payload_schema_invalid: schema is required")
+    static = _STATIC_PAYLOAD_SCHEMAS.get(schema.schema_id)
+    if static is not None:
+        if static != schema:
+            raise RuntimeError(
+                "market_fact_payload_schema_conflict: static schema differs "
+                f"schema_id={schema.schema_id}"
+            )
+        return static
+    existing = _DYNAMIC_PAYLOAD_SCHEMAS.get(schema.schema_id)
+    if existing is not None and existing != schema:
+        raise RuntimeError(
+            "market_fact_payload_schema_conflict: dynamic schema differs "
+            f"schema_id={schema.schema_id}"
+        )
+    if existing is None:
+        _DYNAMIC_PAYLOAD_SCHEMAS[schema.schema_id] = schema
+    return schema
 
 
 def get_fact_contract(fact_type: str) -> FactContract:
@@ -1448,7 +1552,9 @@ def supported_fact_contracts() -> tuple[FactContract, ...]:
 
 def get_fact_payload_schema(schema_id: str) -> FactPayloadSchema:
     normalized = str(schema_id or "").strip().lower()
-    schema = _PAYLOAD_SCHEMAS.get(normalized)
+    schema = _STATIC_PAYLOAD_SCHEMAS.get(normalized)
+    if schema is None:
+        schema = _DYNAMIC_PAYLOAD_SCHEMAS.get(normalized)
     if schema is None:
         raise ValueError(
             "market_fact_payload_schema_unsupported: "
@@ -1458,7 +1564,17 @@ def get_fact_payload_schema(schema_id: str) -> FactPayloadSchema:
 
 
 def supported_fact_payload_schemas() -> tuple[FactPayloadSchema, ...]:
-    return tuple(_PAYLOAD_SCHEMAS[key] for key in sorted(_PAYLOAD_SCHEMAS))
+    schemas = {**_STATIC_PAYLOAD_SCHEMAS, **_DYNAMIC_PAYLOAD_SCHEMAS}
+    return tuple(schemas[key] for key in sorted(schemas))
+
+
+def supported_static_fact_payload_schemas() -> tuple[FactPayloadSchema, ...]:
+    """Return repository-defined schemas, excluding spec-bound runtime schemas."""
+
+    return tuple(
+        _STATIC_PAYLOAD_SCHEMAS[key]
+        for key in sorted(_STATIC_PAYLOAD_SCHEMAS)
+    )
 
 
 __all__ = [
@@ -1468,8 +1584,11 @@ __all__ = [
     "FactPayloadSchema",
     "NORMALIZED_FACT_PREFIX",
     "NORMALIZED_FACT_VERSION",
+    "build_normalized_fact_payload_schema",
     "get_fact_contract",
     "get_fact_payload_schema",
+    "register_fact_payload_schema",
     "supported_fact_contracts",
     "supported_fact_payload_schemas",
+    "supported_static_fact_payload_schemas",
 ]

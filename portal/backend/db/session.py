@@ -8,7 +8,11 @@ from contextlib import contextmanager
 from typing import Dict, Iterator, Optional
 
 from core.settings import get_settings
-from market_data.fact_registry import supported_fact_payload_schemas
+from market_data.fact_registry import (
+    build_normalized_fact_payload_schema,
+    register_fact_payload_schema,
+    supported_static_fact_payload_schemas,
+)
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
@@ -907,12 +911,32 @@ class Database:
         }
         expected_registry = {
             schema.schema_id: (schema.fact_type, schema.contract_hash)
-            for schema in supported_fact_payload_schemas()
+            for schema in supported_static_fact_payload_schemas()
         }
+        normalized_specs = conn.execute(
+            text(
+                "SELECT id, output_fact_type, units "
+                "FROM market.normalization_specs "
+                "WHERE id ~ '^nsp_[0-9a-f]{31}$' "
+                "ORDER BY id"
+            )
+        ).mappings()
+        for spec in normalized_specs:
+            schema = register_fact_payload_schema(
+                build_normalized_fact_payload_schema(
+                    spec_id=str(spec["id"]),
+                    fact_type=str(spec["output_fact_type"]),
+                    units=str(spec["units"]),
+                )
+            )
+            expected_registry[schema.schema_id] = (
+                schema.fact_type,
+                schema.contract_hash,
+            )
         if stored_registry != expected_registry:
             raise RuntimeError(
                 "Canonical Fact schema registry differs from code. Stop all writers "
-                "and apply scripts/db/manual_migration_canonical_fact_store_v1.sql."
+                "and apply the canonical Fact store/data migration."
             )
         for table_name, trigger_name in (
             ("fact_schemas", "trg_reject_mutation_fact_schemas"),

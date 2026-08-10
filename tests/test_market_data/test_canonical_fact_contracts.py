@@ -12,18 +12,22 @@ from market_data.canonical_adapters import (
     canonicalize_bbo_feature,
     canonicalize_depth_feature,
     canonicalize_derivative_state_feature,
+    canonicalize_normalized_feature,
     canonicalize_response_feature,
     canonicalize_trade_flow_feature,
     decode_basis_feature_record,
     decode_bbo_feature_record,
     decode_depth_feature_record,
     decode_derivative_state_feature_record,
+    decode_normalized_feature_record,
     decode_response_feature_record,
     decode_trade_flow_feature_record,
 )
 from market_data.contracts import SourceIdentity
 from market_data.fact_registry import (
+    build_normalized_fact_payload_schema,
     get_fact_payload_schema,
+    register_fact_payload_schema,
     supported_fact_payload_schemas,
 )
 from market_data.market_state import (
@@ -35,6 +39,11 @@ from market_data.market_state import (
     TradeFlowFeatureFact,
 )
 from market_data.order_book import BookSourcePosition
+from market_data.normalization import (
+    NormalizationFormula,
+    NormalizationSpec,
+    NormalizedFeatureFact,
+)
 
 
 _BASE = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
@@ -410,6 +419,63 @@ def test_remaining_derived_features_round_trip_from_canonical_facts() -> None:
             )
         )
         assert decoded.fact == expected
+
+
+def test_normalized_feature_uses_one_spec_bound_canonical_schema() -> None:
+    spec = NormalizationSpec(
+        feature_name="funding_rate_bps_fixture",
+        semantic_version="1.0.0",
+        input_fact_type="derivatives.funding_rate",
+        output_fact_type="market.normalized.funding_rate_bps_fixture",
+        formula=NormalizationFormula.BASIS_POINTS,
+        units="basis_points",
+        window_seconds=None,
+        minimum_observations=0,
+        warmup_observations=0,
+    )
+    schema = register_fact_payload_schema(
+        build_normalized_fact_payload_schema(
+            spec_id=spec.spec_id,
+            fact_type=spec.output_fact_type,
+            units=spec.units,
+        )
+    )
+    fact = NormalizedFeatureFact(
+        series_id=71,
+        spec_id=spec.spec_id,
+        spec_hash=spec.spec_hash,
+        effective_at=_BASE,
+        known_at=_BASE + timedelta(seconds=1),
+        value=Decimal("1.25"),
+        status="valid",
+        reason=None,
+        input_start=_BASE,
+        input_end=_BASE,
+        input_count=1,
+        input_watermark=42,
+        source_series_ids=(31,),
+        source_material_hashes=("c" * 64,),
+        input_fingerprint="d" * 64,
+    )
+
+    canonical = canonicalize_normalized_feature(fact, spec=spec)
+    decoded = decode_normalized_feature_record(
+        CanonicalFactRecord(
+            series_id=fact.series_id,
+            source_id=1,
+            revision=1,
+            market_commit_seq=43,
+            fact=canonical,
+        )
+    )
+
+    assert schema.fact_type == spec.output_fact_type
+    assert canonical.payload_schema_id == (
+        f"market.normalized_feature.v1/{spec.spec_id}"
+    )
+    assert canonical.payload["units"] == "basis_points"
+    assert "source_series_ids" not in canonical.payload
+    assert decoded.fact == fact
 
 
 def test_l2_payload_validates_every_atomic_entry() -> None:

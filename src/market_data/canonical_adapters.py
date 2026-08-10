@@ -8,6 +8,11 @@ from typing import Any
 
 from .canonical import CanonicalFact, CanonicalFactRecord
 from .contracts import SourceIdentity, TypedFeatureRecord
+from .fact_registry import (
+    NORMALIZED_FACT_VERSION,
+    build_normalized_fact_payload_schema,
+    register_fact_payload_schema,
+)
 from .market_state import (
     BasisFeatureFact,
     BboFeatureFact,
@@ -22,6 +27,7 @@ from .order_book import (
     L2MutationBatchFact,
     L2SnapshotFact,
 )
+from .normalization import NormalizationSpec, NormalizedFeatureFact
 from .structure import (
     MarketTradeFact,
     MarketTradeRecord,
@@ -888,6 +894,110 @@ def canonicalize_response_feature(
     )
 
 
+def canonicalize_normalized_feature(
+    fact: NormalizedFeatureFact,
+    *,
+    spec: NormalizationSpec,
+    source: SourceIdentity = DERIVED_MARKET_STATE_SOURCE,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    """Translate one spec-bound normalized value into a canonical Fact."""
+
+    if fact.spec_id != spec.spec_id or fact.spec_hash != spec.spec_hash:
+        raise ValueError(
+            "market_normalized_canonicalization_invalid: spec identity differs"
+        )
+    schema = register_fact_payload_schema(
+        build_normalized_fact_payload_schema(
+            spec_id=spec.spec_id,
+            fact_type=spec.output_fact_type,
+            units=spec.units,
+        )
+    )
+    canonical_provenance = _derived_provenance(
+        provenance,
+        evidence_key="_qt_normalization_evidence",
+        evidence={
+            "spec_id": fact.spec_id,
+            "spec_hash": fact.spec_hash,
+            "source_series_ids": list(fact.source_series_ids),
+            "source_material_hashes": list(fact.source_material_hashes),
+            "legacy_material_hash": fact.material_hash,
+        },
+    )
+    canonical_quality = dict(
+        quality
+        or {
+            "classification": fact.status.value,
+            "valid": fact.value is not None,
+            "reason": fact.reason,
+            "input_count": fact.input_count,
+            "input_watermark": fact.input_watermark,
+        }
+    )
+    return CanonicalFact(
+        fact_type=spec.output_fact_type,
+        payload_schema_id=schema.schema_id,
+        observation_key=fact.effective_at.isoformat(),
+        observation_time=fact.effective_at,
+        observation_time_method="normalization_effective_time",
+        received_at=fact.known_at,
+        accepted_at=fact.known_at,
+        known_at=fact.known_at,
+        known_at_method="derived_input_watermark",
+        source=source,
+        transformation_id="market.normalization.canonicalization.v1",
+        external_event_group_key=fact.spec_id,
+        payload={
+            "value": fact.value,
+            "status": fact.status.value,
+            "reason": fact.reason,
+            "units": spec.units,
+            "input_start": fact.input_start,
+            "input_end": fact.input_end,
+            "input_count": fact.input_count,
+            "input_watermark": fact.input_watermark,
+            "input_fingerprint": fact.input_fingerprint,
+        },
+        provenance=canonical_provenance,
+        quality=canonical_quality,
+    )
+
+
+def decode_normalized_feature_record(
+    record: CanonicalFactRecord,
+) -> TypedFeatureRecord:
+    if not record.fact.payload_schema_id.startswith(
+        f"{NORMALIZED_FACT_VERSION}/nsp_"
+    ):
+        raise ValueError("market_normalized_decode_invalid: schema mismatch")
+    payload = record.fact.payload
+    evidence = _evidence_mapping(
+        record.fact.provenance,
+        key="_qt_normalization_evidence",
+        fact_version_id=str(record.fact_version_id),
+    )
+    fact = NormalizedFeatureFact(
+        series_id=record.series_id,
+        spec_id=evidence["spec_id"],
+        spec_hash=evidence["spec_hash"],
+        effective_at=record.fact.observation_time,
+        known_at=record.fact.known_at,
+        value=payload["value"],
+        status=payload["status"],
+        reason=payload["reason"],
+        input_start=_timestamp(payload["input_start"], field="input_start"),
+        input_end=_timestamp(payload["input_end"], field="input_end"),
+        input_count=payload["input_count"],
+        input_watermark=payload["input_watermark"],
+        source_series_ids=tuple(evidence["source_series_ids"]),
+        source_material_hashes=tuple(evidence["source_material_hashes"]),
+        input_fingerprint=payload["input_fingerprint"],
+    )
+    return _typed_feature_record(record, fact=fact, evidence=evidence)
+
+
 def decode_trade_flow_feature_record(
     record: CanonicalFactRecord,
 ) -> TypedFeatureRecord:
@@ -1201,6 +1311,7 @@ __all__ = [
     "canonicalize_l2_mutation_batch",
     "canonicalize_l2_snapshot",
     "canonicalize_market_trade",
+    "canonicalize_normalized_feature",
     "canonicalize_response_feature",
     "canonicalize_trade_flow",
     "canonicalize_trade_flow_feature",
@@ -1209,6 +1320,7 @@ __all__ = [
     "decode_depth_feature_record",
     "decode_derivative_state_feature_record",
     "decode_market_trade_record",
+    "decode_normalized_feature_record",
     "decode_response_feature_record",
     "decode_trade_flow_record",
     "decode_trade_flow_feature_record",

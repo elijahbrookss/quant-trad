@@ -28,6 +28,7 @@ from market_data.canonical_adapters import (
     canonicalize_l2_mutation_batch,
     canonicalize_l2_snapshot,
     canonicalize_market_trade,
+    canonicalize_normalized_feature,
     canonicalize_response_feature,
     canonicalize_trade_flow,
     canonicalize_trade_flow_feature,
@@ -40,6 +41,12 @@ from market_data.contracts import (
     OpenInterestFact,
     SourceIdentity,
 )
+from market_data.fact_registry import (
+    FactPayloadSchema,
+    build_normalized_fact_payload_schema,
+    register_fact_payload_schema,
+)
+from market_data.normalization import NormalizationSpec, NormalizedFeatureFact
 from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
 from market_data.market_state import (
     BasisFeatureFact,
@@ -939,6 +946,71 @@ def _response_feature(row: Mapping[str, Any]) -> MigrationRow:
     return _canonical_values(row=row, fact=canonical)
 
 
+def _normalization_spec(row: Mapping[str, Any]) -> NormalizationSpec:
+    return NormalizationSpec(
+        feature_name=str(row["feature_name"]),
+        semantic_version=str(row["semantic_version"]),
+        input_fact_type=str(row["input_fact_type"]),
+        output_fact_type=str(row["output_fact_type"]),
+        formula=str(row["formula"]),
+        units=str(row["units"]),
+        window_seconds=(
+            int(row["window_seconds"])
+            if row["window_seconds"] is not None
+            else None
+        ),
+        minimum_observations=int(row["minimum_observations"]),
+        warmup_observations=int(row["warmup_observations"]),
+        partition=str(row["partition"]),
+        missing_behavior=str(row["missing_behavior"]),
+        materialization_mode=str(row["materialization_mode"]),
+        parameters=dict(row["parameters"] or {}),
+    )
+
+
+def _normalized_feature(row: Mapping[str, Any]) -> MigrationRow:
+    spec = _normalization_spec(row)
+    if spec.spec_id != str(row["spec_id"]) or spec.spec_hash != str(
+        row["spec_hash"]
+    ):
+        raise RuntimeError(
+            "canonical_fact_migration_normalization_spec_mismatch: "
+            f"spec_id={row['spec_id']}"
+        )
+    legacy = NormalizedFeatureFact(
+        series_id=int(row["series_id"]),
+        spec_id=str(row["spec_id"]),
+        spec_hash=str(row["spec_hash"]),
+        effective_at=row["effective_at"],
+        known_at=row["known_at"],
+        value=row["value"],
+        status=str(row["status"]),
+        reason=row["reason"],
+        input_start=row["input_start"],
+        input_end=row["input_end"],
+        input_count=int(row["input_count"]),
+        input_watermark=int(row["input_watermark"]),
+        source_series_ids=tuple(int(value) for value in row["source_series_ids"]),
+        source_material_hashes=tuple(
+            str(value) for value in row["source_material_hashes"]
+        ),
+        input_fingerprint=str(row["input_fingerprint"]),
+    )
+    _assert_derived_material(
+        row, family="normalized_feature", material_hash=legacy.material_hash
+    )
+    canonical = canonicalize_normalized_feature(
+        legacy,
+        spec=spec,
+        source=_source(row),
+        provenance=_derived_provenance(
+            row, source_table="market.normalized_feature_versions"
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
 _SOURCE_JOIN = """
     JOIN market.ingestion_runs AS ingestion
       ON ingestion.id = fact.ingestion_run_id
@@ -969,6 +1041,109 @@ _DERIVED_SOURCE_COLUMNS = f"""
     '{_DERIVED_SOURCE.adapter_version}'::text AS source_adapter_version,
     NULL::text AS ingestion_run_id
 """
+
+
+def _register_normalized_schemas(conn, *, execute: bool) -> int:
+    rows = conn.execute(
+        text(
+            """
+            SELECT specs.*,
+                   (SELECT count(*)
+                    FROM market.normalized_feature_versions AS values
+                    WHERE values.spec_id = specs.id) AS materialized_ref_count,
+                   (SELECT count(*)
+                    FROM market.dataset_normalization_refs AS refs
+                    WHERE refs.spec_id = specs.id) AS dataset_ref_count
+            FROM market.normalization_specs AS specs
+            ORDER BY specs.id
+            """
+        )
+    ).mappings()
+    schemas: list[FactPayloadSchema] = []
+    for row in rows:
+        spec = _normalization_spec(row)
+        if spec.spec_hash != str(row["spec_hash"]):
+            raise RuntimeError(
+                "canonical_fact_migration_normalization_spec_hash_mismatch: "
+                f"spec_id={row['id']}"
+            )
+        if spec.spec_id != str(row["id"]):
+            reference_count = int(row["materialized_ref_count"]) + int(
+                row["dataset_ref_count"]
+            )
+            if reference_count:
+                raise RuntimeError(
+                    "canonical_fact_migration_legacy_normalization_spec_referenced: "
+                    f"spec_id={row['id']} references={reference_count}"
+                )
+            print(
+                "canonical_fact_migration_legacy_normalization_spec_skipped "
+                f"spec_id={row['id']} references=0",
+                flush=True,
+            )
+            continue
+        schemas.append(
+            register_fact_payload_schema(
+                build_normalized_fact_payload_schema(
+                    spec_id=spec.spec_id,
+                    fact_type=spec.output_fact_type,
+                    units=spec.units,
+                )
+            )
+        )
+    for schema in schemas:
+        if execute:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO market.fact_schemas (
+                        schema_id, fact_type, contract_hash, contract,
+                        observation_time_field, material_hash_version,
+                        row_hash_version, query_fields, dataset_eligible
+                    ) VALUES (
+                        :schema_id, :fact_type, :contract_hash,
+                        CAST(:contract AS jsonb), :observation_time_field,
+                        :material_hash_version, :row_hash_version,
+                        CAST(:query_fields AS jsonb), :dataset_eligible
+                    )
+                    ON CONFLICT (schema_id) DO NOTHING
+                    """
+                ),
+                {
+                    "schema_id": schema.schema_id,
+                    "fact_type": schema.fact_type,
+                    "contract_hash": schema.contract_hash,
+                    "contract": json.dumps(schema.contract, sort_keys=True),
+                    "observation_time_field": schema.observation_time_field,
+                    "material_hash_version": schema.material_hash_version,
+                    "row_hash_version": schema.row_hash_version,
+                    "query_fields": json.dumps(list(schema.query_fields)),
+                    "dataset_eligible": schema.dataset_eligible,
+                },
+            )
+        stored = conn.execute(
+            text(
+                "SELECT fact_type, contract_hash FROM market.fact_schemas "
+                "WHERE schema_id = :schema_id"
+            ),
+            {"schema_id": schema.schema_id},
+        ).mappings().first()
+        if stored is None:
+            if execute:
+                raise RuntimeError(
+                    "canonical_fact_migration_normalized_schema_missing: "
+                    f"schema_id={schema.schema_id}"
+                )
+            continue
+        if (
+            str(stored["fact_type"]) != schema.fact_type
+            or str(stored["contract_hash"]) != schema.contract_hash
+        ):
+            raise RuntimeError(
+                "canonical_fact_migration_normalized_schema_conflict: "
+                f"schema_id={schema.schema_id}"
+            )
+    return len(schemas)
 
 _FAMILIES = (
     MigrationFamily(
@@ -1130,6 +1305,21 @@ _FAMILIES = (
         "FROM market.market_response_feature_versions AS fact "
         "ORDER BY fact.series_id, fact.bucket_start, fact.direction, fact.revision",
         _response_feature,
+    ),
+    MigrationFamily(
+        "normalized_feature",
+        "market.normalized_feature_versions",
+        f"SELECT fact.*, specs.spec_hash, specs.feature_name, "
+        "specs.semantic_version, specs.input_fact_type, "
+        "specs.output_fact_type, specs.formula, specs.units, "
+        "specs.window_seconds, specs.minimum_observations, "
+        "specs.warmup_observations, specs.partition, "
+        "specs.missing_behavior, specs.materialization_mode, "
+        f"specs.parameters, {_DERIVED_SOURCE_COLUMNS} "
+        "FROM market.normalized_feature_versions AS fact "
+        "JOIN market.normalization_specs AS specs ON specs.id = fact.spec_id "
+        "ORDER BY fact.series_id, fact.effective_at, fact.revision",
+        _normalized_feature,
     ),
 )
 
@@ -1412,6 +1602,14 @@ def main() -> int:
             _assert_boundary(conn, execute=bool(args.execute))
             derived_source_id = _resolve_derived_source_id(
                 conn, execute=bool(args.execute)
+            )
+            normalized_schema_count = _register_normalized_schemas(
+                conn, execute=bool(args.execute)
+            )
+            print(
+                "canonical_fact_migration_normalized_schemas "
+                f"count={normalized_schema_count} written={bool(args.execute)}",
+                flush=True,
             )
             selected = set(args.family or ())
             families = tuple(
