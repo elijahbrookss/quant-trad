@@ -1539,16 +1539,10 @@ def _migrate_family(
                     f"""
                     SELECT {', '.join(_VALIDATION_COLUMNS)}
                     FROM market.fact_versions
-                    WHERE transformation_id = :transformation_id
+                    WHERE id = ANY(CAST(:ids AS varchar[]))
                     """
                 ),
-                {
-                    "transformation_id": str(
-                        migrated[0].values["transformation_id"]
-                    )
-                    if migrated
-                    else f"migration.{family.name}.empty.v1"
-                },
+                {"ids": ids},
             ).mappings()
         }
         expected: dict[str, tuple[Any, ...]] = {}
