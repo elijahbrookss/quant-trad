@@ -128,6 +128,8 @@ before considering any source-database replacement.
 
 This backup protects the pre-generalized-Fact state only. It does not justify a
 runtime compatibility path, dual writes, fallback reads, or a rollback-shaped
-new schema. No destructive removal of the superseded fact tables is permitted
-until the new migration's equivalence validator passes and this artifact still
-matches its recorded checksums.
+new schema. The equivalence validator passed on the disposable restore before
+the superseded tables were removed there. The source database captured by this
+artifact was not modified during validation; any future cutover of that source
+must repeat checksum verification, offline migration, equivalence validation,
+and hard-cutover gates from the documented boundary.

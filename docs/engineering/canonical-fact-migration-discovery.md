@@ -1,7 +1,10 @@
 # Canonical Fact Migration Discovery
 
-Status: discovery checkpoint complete; no generalized Fact schema or runtime
-cutover has been applied.
+Status: historical pre-cutover discovery checkpoint. The inventory below was
+completed before implementation and was the comparison boundary for the now
+completed canonical migration. See
+[`canonical-fact-migration-validation.md`](canonical-fact-migration-validation.md)
+for final results.
 
 Baseline: Git `77f4d41805031ad30cffd5b03983bdd09e76acba`, PostgreSQL 15.6,
 TimescaleDB 2.14.2, database `quanttrad`, inspected on 2026-08-09. The verified

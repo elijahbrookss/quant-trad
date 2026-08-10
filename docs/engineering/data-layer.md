@@ -139,6 +139,14 @@ and mutable/frozen delivery are wired, but the collector handlers do not imply
 historical backfill, aggregation, basis derivation, or that every strategy or
 indicator already declares those facts as inputs.
 
+For a structured provider observation, register an immutable payload schema and
+keep the external state atomic. Add a strict reviewed structured-fact manifest
+and provider decoder, then use the canonical source/series, writer, Dataset,
+runtime, and research paths. Chainlink MVR reserve collection follows this
+pattern; no downstream consumer branches on provider identity. If the source
+has no reliable bounded history, use the durable scheduled collector and state
+the activation boundary instead of fabricating a backfill.
+
 ## References
 
 - [Data boundary](../architecture/data/DATA_BOUNDARY.md)
@@ -148,6 +156,7 @@ indicator already declares those facts as inputs.
 - [Frozen backtest ADR](../architecture/decisions/0051-require-frozen-datasets-for-canonical-backtests.md)
 - [Typed collector ADR](../architecture/decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md)
 - [Chainlink numeric facts guide](../guides/chainlink-numeric-facts.md)
+- [Chainlink structured facts guide](../guides/chainlink-structured-facts.md)
 - [Coinbase OI collector guide](../guides/coinbase-open-interest-collector.md)
 - [Coinbase funding collector guide](../guides/coinbase-funding-rate-collector.md)
 - [Runtime contract](../contracts/platform/01_runtime_contract.md)

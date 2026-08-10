@@ -81,7 +81,7 @@ Only an explicit operation takes the separate acquisition path:
 
 ## Canonical Fact Contract
 
-`NumericFact` carries:
+At the acquisition boundary, the typed `NumericFact` projection carries:
 
 - exact normalized `value` and unchanged `raw_value`;
 - contract-owned `unit` and normalized `dimensions`;
@@ -113,7 +113,8 @@ captures source identity that can change under a reorg, including Chainlink
 phase/round, block hash, transaction hash and position, log position,
 confirmation block/hash, answer, and feed metadata.
 
-Repository ingest has three outcomes:
+Repository ingest canonicalizes that projection into the registered payload and
+one `CanonicalFact` envelope. It has three outcomes:
 
 - identical material for an existing event is an idempotent no-op;
 - changed material appends the next event revision and shared market commit
@@ -277,45 +278,37 @@ evaluation, reports, and repeated runs cannot construct a provider.
 
 ## Persistence And Migration Ownership
 
-The additive manual migration creates or extends only these numeric surfaces:
+Exact numeric observations now persist only in `market.fact_versions` under a
+registered payload schema. `market.series.dimensions`, `market.sources`,
+`market.ingestion_runs`, `market.gap_evidence`, the shared commit clock, and the
+frozen Dataset tables remain shared canonical infrastructure.
+`market.fact_acquisition_coverage` remains separate operational evidence for
+bounded historical acquisition. There is no provider-specific DSN or table.
 
-- `market.series.dimensions` and its object constraint;
-- `market.numeric_fact_versions` with unbounded numeric value, raw value,
-  event-revision primary key, causal fields, provenance, hashes, shared commit
-  clock indexes, and mutation-rejection trigger;
-- `market.fact_acquisition_coverage` with bounded lookup identity, status/range
-  constraints, evidence, and mutation-rejection trigger.
+`manual_migration_numeric_fact_store_v1.sql` and the retired
+`market.numeric_fact_versions` definition remain immutable migration history,
+not supported runtime architecture. The canonical migration transformed all
+8,016 retained numeric rows, validated exact values/raw text, event revisions,
+known-at, provenance, gaps, coverage links, and Dataset hashes, then deleted the
+old table during the hard cutover.
 
-It reuses `PG_DSN`, `market.sources`, `market.series`,
-`market.ingestion_runs`, `market.gap_evidence`, `market.fact_commit_seq`, and
-the existing frozen dataset tables. There is no provider-specific DSN or table.
-
-These new tables are an explicit-migration exception to generic startup DDL.
-Startup does not create or repair them. It fails with the migration path if the
-tables or dimensions column are absent; if the numeric-fact primary key,
-unbounded numeric type, required numeric-fact checks/indexes, required coverage
-indexes, or either immutable trigger are missing or drifted. The migration also
-owns the dimensions-object constraint, coverage keys/checks, and commit-clock
-defaults; startup does not currently re-derive every one of those definitions.
-Generic bootstrap behavior for all legacy/model-owned schema objects is
-unchanged.
+Startup validates the canonical registry/store and coverage relation. It fails
+loudly on missing or drifted schema and never recreates a retired fact table.
 
 ## OI And Funding Consolidation Status
 
-**`NUMERIC_FACT_CONSOLIDATION_DEFERRED`** is the current gate result.
-`derivatives.open_interest.v1` and `derivatives.funding_rate.v1` remain
-specialized facts because their Coinbase adapter and database rows already use
-binary floats and do not retain the original raw decimal strings. Funding
-interval is also row-scoped rather than part of its v1 series identity. Frozen
-v1 datasets pin the specialized series, revisions, commit scopes, ingestion
-provenance, row hashes, and material hashes; rerouting the same identity would
-change old evidence.
+Physical consolidation is complete. All retained
+`derivatives.open_interest.v1` and `derivatives.funding_rate.v1` rows live in
+the canonical Fact store, and the specialized tables are absent. Their v1
+payload schemas deliberately preserve accepted binary-float evidence and the
+historical material/hash algorithms. Typed OI/funding projections remain API
+conveniences over canonical records; they are not alternate persistence or
+fallback readers.
 
-A bounded v2 follow-up must preserve provider decimal text and exact values at
-the adapter boundary, make funding interval a series dimension, introduce new
-contract/series identities, migrate every explicit consumer, and prove existing
-v1 dataset IDs, hashes, and reads unchanged. It must not fabricate exact v2
-values from v1 floats. The specialized v1 tables remain immutable evidence.
+The v2 payload schemas are registered for a future source path that preserves
+provider decimal text and exact values. Existing v1 floats are never relabeled
+as exact. Moving an active provider to v2 requires an explicit series/schema
+change and consumer proof, not an in-place reinterpretation.
 
 ## Failure Contract
 

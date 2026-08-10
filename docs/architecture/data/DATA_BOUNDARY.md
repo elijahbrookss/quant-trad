@@ -275,16 +275,30 @@ range, is reused without constructing a provider. Partial/failed ranges remain
 gap evidence and cannot satisfy freeze. Corrections append; only a complete
 repair may invalidate a disappeared event.
 
-`market.numeric_fact_versions` and `market.fact_acquisition_coverage` are
-owned by `scripts/db/manual_migration_numeric_fact_store_v1.sql`. Startup does
-not create or repair them; it validates the migration compatibility subset
-detailed in the numeric-facts component and fails loud. Migration ownership
-also covers definitions that startup deliberately does not re-derive. This
-exception is scoped to the new numeric objects, while legacy bootstrap behavior
-remains unchanged. Dataset preparation may acquire missing numeric ranges only
-with explicit authority, then freezes the complete local revision chain through
-its commit watermark. Admission, execution, replay, and consumer reads stay
+Numeric observations persist in the same schema-registered
+`market.fact_versions` relation as every other canonical Fact.
+`market.fact_acquisition_coverage` remains separate operational evidence.
+`manual_migration_numeric_fact_store_v1.sql` is retained only as immutable
+migration lineage; `market.numeric_fact_versions` is absent after the canonical
+hard cutover. Dataset preparation may acquire missing numeric ranges only with
+explicit authority, then freezes the complete local revision chain through its
+commit watermark. Admission, execution, replay, and consumer reads stay
 provider-free.
+
+### Atomic Structured Provider Facts
+
+Structured observations use the same envelope and store. A schema-registered
+payload keeps intrinsically related fields in one revision, while provider
+addresses, raw responses, finality, transformation, and request evidence remain
+in provenance. The first implementation maps a Chainlink MVR Proof-of-Reserve
+bundle to `asset.reserve_state.v1`.
+
+MVR proxies expose latest state rather than arbitrary historical rounds, so the
+durable scheduled collector accumulates history from explicit activation
+forward. Its reviewed definition starts disabled, uses normal lease/retry/gap
+contracts, and never overwrites an earlier report. Dataset planning, freeze,
+Indicator execution, Check evidence, CLI/API/MCP reads, and replay operate on
+the canonical schema and do not contain Chainlink-specific interpretation.
 
 ## Consumer Requirements And Instrument Roles
 

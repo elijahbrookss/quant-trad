@@ -3,7 +3,7 @@ component: adr-schema-registered-canonical-facts
 subsystem: data
 layer: decision
 doc_type: adr
-status: proposed
+status: accepted
 tags:
   - adr
   - market-data
@@ -36,10 +36,15 @@ code_paths:
 
 ## Status
 
-Proposed on 2026-08-09. Accept this ADR only after the explicit database
-migration, complete reader/writer cutover, frozen replay proofs, and legacy
-storage deletion are enforced. Until then ADR 0061 describes the active narrow
-numeric-fact implementation.
+Accepted on 2026-08-09 after the offline migration and validation completed on
+a verified backup restore. All active readers and writers use canonical Fact
+storage, the 17 superseded version tables were deleted, static enforcement
+rejects their reintroduction, and provider-disabled structured replay was
+proved through Dataset, Indicator, and Check evidence.
+
+ADR 0061 remains the historical decision for exact scalar acquisition. Its
+provider authorization, finality, coverage, and gap rules still apply, but its
+retired scalar table is no longer an active persistence architecture.
 
 ## Context
 
@@ -203,6 +208,14 @@ verified backup available:
 Temporary validation relations may exist only inside the controlled migration
 window. The committed runtime must never support both old and new stores.
 
+The accepted cutover migrated and compared 283,795 legacy rows across candles,
+open interest, funding, exact numeric facts, trades, trade-flow aggregates,
+Level 2 parents, BBO/depth/flow features, futures/spot basis, derivative state,
+market response, and normalized features. Six unused normalization schemas had
+zero references and were explicitly excluded. The final validator then removed
+the 17 old version relations transactionally and proved canonical registry,
+series, payload, source, clock, hash, and child-count agreement.
+
 ## Consequences
 
 Adding a fact family requires an explicit schema, typed codec, semantic tests,
@@ -245,4 +258,6 @@ forbidden legacy-symbol/table scans, query-plan tests for declared indexes, and
 full repository/CLI/API/MCP regression tests.
 
 See [Generalized Fact Data Plane](../data/GENERALIZED_FACT_DATA_PLANE.md) and
-[Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md).
+[Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
+[Migration Validation](../../engineering/canonical-fact-migration-validation.md),
+and [Chainlink Structured Facts](../data/CHAINLINK_STRUCTURED_FACTS.md).

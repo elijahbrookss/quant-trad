@@ -38,18 +38,16 @@ code_paths:
 
 ## Status
 
-ADR 0063 is accepted and this is the active target contract. The canonical
-registry, envelope, selector, and store currently own candles, open interest,
-funding, exact numeric facts, market trades, trade-flow aggregates, and atomic
-Level 2 book observations, BBO, and depth bands. Trade, flow, snapshot,
-mutation, BBO, and depth writers no longer write their retired typed version
-tables. Level 2 validity intervals,
-reconstruction state, and checkpoints remain operational evidence around the
-canonical book Facts rather than alternate Fact stores. Flow features, basis,
-derivative state, response, and normalized features are still being migrated,
-so this campaign is not yet at
-its hard-cutover completion boundary. The migration discovery report records
-the pre-change surface.
+ADR 0063 is accepted and this is the active contract. The schema registry,
+canonical envelope, append-only `market.fact_versions` store, causal selector,
+Dataset freeze, and frozen read binding own every active market Fact family.
+The 17 superseded family version tables are absent after the hard cutover; no
+runtime dual write, fallback read, or compatibility flag remains.
+
+Level 2 validity intervals, reconstruction state, raw archives, checkpoints,
+acquisition coverage, and gap evidence remain typed operational evidence around
+canonical Facts. They are not alternate Fact stores. The migration discovery
+report is now a historical pre-cutover inventory.
 
 ## Boundary
 
@@ -131,9 +129,9 @@ The migration must register the real retained families, including:
 | --- | --- | --- |
 | `candle.ohlcv.v1` | structured OHLCV interval | preserves retained float evidence and v1 hashes |
 | `derivatives.open_interest.v1` | scalar quantity | preserves retained float evidence |
-| `derivatives.open_interest.v2` | exact scalar quantity plus raw value/unit | active post-cutover writer |
+| `derivatives.open_interest.v2` | exact scalar quantity plus raw value/unit | registered for sources that preserve exact provider text; not fabricated from v1 floats |
 | `derivatives.funding_rate.v1` | rate, funding time, interval, unit | preserves retained float evidence |
-| `derivatives.funding_rate.v2` | exact rate/raw rate, funding time, interval, unit | active post-cutover writer |
+| `derivatives.funding_rate.v2` | exact rate/raw rate, funding time, interval, unit | registered for sources that preserve exact provider text; not fabricated from v1 floats |
 | `market.reference_price.v1` | exact scalar/reference unit | migrates current Chainlink rows |
 | `market.trade.v1` | structured trade | retains provider delivery/source position evidence |
 | `market.trade_flow.v1` | structured causal aggregate | retains coverage and completeness evidence |
@@ -145,11 +143,13 @@ The migration must register the real retained families, including:
 | `market.derivative_state.v1` | OI/funding state | keeps nullable source samples and causal commit watermarks explicit |
 | `market.market_response.v1` | structured flow/liquidity response | keeps direction, depth, replenishment, impact, and ordered source evidence atomic |
 | `market.normalized_feature.v1` | typed scalar/invalid feature | retains spec and input evidence |
+| `asset.reserve_state.v1` | atomic reserve report | exact reserve quantity, reserve asset/unit, and report identity; attestation time remains the envelope observation time |
 
-Chainlink SmartData/Proof-of-Reserve discovery will add only semantically proven
-schemas. Likely candidates such as reserve state or NAV are not pre-approved by
-this list; their fields, units, clocks, revision/finality rules, and historical
-availability must come from current provider evidence.
+`asset.reserve_state.v1` is the first production structured-provider contract.
+It intentionally models only fields established by the selected feed. It does
+not add liability, NAV, collateralization, or supply fields that the source does
+not publish. Those meanings require separate schema versions backed by current
+provider evidence.
 
 ## Queryability
 
@@ -235,6 +235,14 @@ Provider capability determines the mode per fact family:
 Collectors never overwrite latest state. A new update or correction appends a
 Fact revision. No collector is enabled merely because a schema exists.
 
+Chainlink AggregatorV3 scalar feeds use practical bounded historical acquisition
+when archive RPC and phase history are available. Chainlink Multiple-Variable
+Response feeds expose only their latest bundle through the proxy contract; QT
+therefore classifies the selected reserve feed as current-only and accumulates
+history with the durable scheduled collector. The checked-in manifest is
+reviewed and enabled, but a collection definition is created disabled unless an
+operator explicitly passes `--enabled`.
+
 ## Consumer Rules
 
 - Dataset planners specify fact type/schema/dimensions and source policy, never
@@ -249,6 +257,38 @@ Fact revision. No collector is enabled merely because a schema exists.
 - Provider comparisons may inspect provenance explicitly, but provider identity
   cannot choose payload meaning.
 
+## Scalar And Structured Examples
+
+A scalar reference observation remains a typed payload:
+
+```json
+{
+  "fact_type": "market.reference_price",
+  "payload_schema_id": "market.reference_price.v1",
+  "payload": {"value": "118432.125", "raw_value": "118432125000", "unit": "USD"}
+}
+```
+
+One reserve report remains one atomic observation:
+
+```json
+{
+  "fact_type": "asset.reserve_state",
+  "payload_schema_id": "asset.reserve_state.v1",
+  "payload": {
+    "report_id": "DE000NXTA018",
+    "reserve_asset": "BTC",
+    "reserve_quantity": "514.32323119",
+    "unit": "BTC"
+  }
+}
+```
+
+The reserve payload contains no Chainlink address, chain ID, provider name, or
+RPC detail. Those values remain in source identity and versioned provenance.
+Frozen Dataset manifests pin the payload schema ID and contract hash, so the
+same record replays without the provider adapter or endpoint.
+
 ## Hard-Cutover Rule
 
 The migration may use temporary old/new comparison code only while writers are
@@ -258,5 +298,6 @@ Historical schema codecs remain because frozen evidence references versioned
 meaning; old physical storage does not.
 
 See [ADR 0063](../decisions/0063-use-schema-registered-canonical-facts.md),
+[Chainlink Structured Facts](CHAINLINK_STRUCTURED_FACTS.md),
 [Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
 and [Canonical Fact Migration Backup](../../engineering/canonical-fact-migration-backup.md).

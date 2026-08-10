@@ -88,4 +88,4 @@ respect.
 | [0060](0060-use-capability-native-research-and-collection-contracts.md) | Use capability-native research and collection contracts | Accepted |
 | [0061](0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md) | Use provider-neutral exact numeric facts and bounded acquisition | Accepted |
 | [0062](0062-use-frozen-bindings-for-durable-check-evidence.md) | Use frozen bindings for durable Check evidence | Accepted |
-| [0063](0063-use-schema-registered-canonical-facts.md) | Use schema-registered canonical Facts | Proposed |
+| [0063](0063-use-schema-registered-canonical-facts.md) | Use schema-registered canonical Facts | Accepted |

@@ -1,9 +1,8 @@
 # Canonical Fact Migration Validation
 
-Status: core facts, trades, trade-flow aggregates, and Level 2 snapshots and
-mutations validated on protected backup restores. Remaining derived structured
-families, dataset-hash equivalence, final runtime cutover, and legacy removal
-remain pending.
+Status: complete on a protected backup restore. The source database was not
+modified. The canonical migration, equivalence validation, runtime cutover,
+legacy deletion, and provider-disabled structured research replay all passed.
 
 ## Validation target
 
@@ -172,11 +171,92 @@ The restored database was 2,099,860,271 bytes after the L2-only canonical
 write; `market.fact_versions` occupied 37,257,216 bytes. This target remains
 disposable and does not alter source `quanttrad`.
 
-## Boundary
+## Final complete migration
 
-This checkpoint proves the four active core Fact families plus canonical
-trades, trade-flow aggregates, and atomic Level 2 book facts can be migrated
-without discarding retained semantics. It does not authorize deletion of the
-old relations. The remaining cutover validator must also reproduce frozen
-Dataset hashes, Check/Observation links, gaps/quality evidence, and every
-retained derived market-state family before legacy removal.
+The final offline run used the same verified backup on the disposable target
+`qt_canonical_l2_validate_20260809`. The migration validated each source row,
+inserted canonical Facts, reread them, and compared the complete envelope before
+any old relation was removed.
+
+| Canonical family | Rows |
+| --- | ---: |
+| Candles | 29,123 |
+| Open interest | 63,848 |
+| Funding | 28,281 |
+| Exact numeric / Chainlink scalar | 8,016 |
+| Trades | 97,280 |
+| Trade-flow aggregates | 45,941 |
+| L2 snapshots | 25 |
+| L2 mutations | 1,043 |
+| BBO | 77 |
+| Depth | 231 |
+| Trade-flow features | 9,852 |
+| Futures/spot basis | 16 |
+| Derivative state | 20 |
+| Market response | 1 |
+| Normalized features | 41 |
+| **Total** | **283,795** |
+
+All 283,795 rows had distinct canonical version identities where required and
+matched their source family counts. The final database used 21 fact types and
+21 payload schemas from a 27-schema registered catalog. Six obsolete
+normalization schemas had zero facts, Dataset references, Check references, or
+Observation references and were explicitly skipped rather than fabricated.
+
+The hard-cutover SQL
+`scripts/db/manual_migration_canonical_fact_hard_cutover_v1.sql`:
+
+1. asserts canonical/source exclusivity and expected per-table provenance;
+2. validates Level 2 parent and child totals;
+3. drops all 17 superseded fact-version relations in one transaction;
+4. verifies that every retired relation is absent before commit.
+
+After cutover, startup rejects any remaining retired relation and never creates
+one. Static tests scan runtime source for all retired names. The repository has
+one canonical writer and one generalized frozen Fact read; no dual-write,
+fallback, compatibility flag, or legacy repository remains.
+
+## Frozen research proof
+
+The isolated PostgreSQL proof writes one `asset.reserve_state.v1` observation,
+freezes it with an exact source binding, and verifies that the Dataset pins both
+the payload schema ID and contract hash. Network/provider access is replaced by
+a fail-fast trap during replay. The generalized runtime selector returns the
+same `CanonicalFactRecord`, the `reserve_state` Indicator derives the same
+provider-free quantity/context, and a versioned Check assertion produces the
+same evidence/result hash on replay.
+
+The existing durable Check service tests separately prove persistence,
+provider-disabled replay, tamper rejection, Observation eligibility, and the
+Check-to-Observation evidence link. Together these tests cover:
+
+```text
+Provider translation -> canonical Fact -> frozen Dataset
+  -> provider-disabled replay -> Indicator -> Check evidence -> Observation
+```
+
+Relevant tests are
+`tests/test_market_data/test_structured_fact_research_path_db.py`,
+`tests/test_indicators/test_reserve_state_runtime.py`, and
+`tests/test_portal/test_research_evidence_service.py`.
+
+## Operational migration procedure
+
+This migration is offline and destructive. Operators must:
+
+1. stop all backend, worker, collector, and runtime writers;
+2. verify the backup checksum and perform a disposable restore using the
+   TimescaleDB pre/post-restore procedure;
+3. apply `manual_migration_canonical_fact_store_v1.sql`;
+4. run `migrate_canonical_fact_data_v1.py` in validation-only mode;
+5. run the migration in execute mode, then repeat it to prove idempotency;
+6. compare every family count and semantic validation report;
+7. run `manual_migration_canonical_fact_hard_cutover_v1.sql` only after all
+   comparisons pass;
+8. start QT only after the canonical schema registry and legacy-absence checks
+   pass.
+
+Restoration instructions and the exact rollback artifact are in
+[`canonical-fact-migration-backup.md`](canonical-fact-migration-backup.md).
+The backup is operational protection only; it does not authorize reintroducing
+the retired runtime architecture.
