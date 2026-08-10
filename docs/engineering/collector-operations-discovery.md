@@ -13,6 +13,10 @@ campaign. It traces the current source at `52ebb6a`, the live PostgreSQL catalog
 and evidence as observed on 2026-08-10, the stopped collector container's final
 logs, the `qt`/HTTP/MCP surfaces, and Frontend V2.
 
+Implementation and live failure/recovery evidence are recorded separately in
+the [collector operations validation](collector-operations-validation.md). This
+document remains the immutable before-state audit.
+
 The collector control plane covers durable, registered market-data producers.
 It does not absorb every provider connection:
 
@@ -165,4 +169,3 @@ The final contract must preserve these existing authorities:
 - provider-specific probes remain typed diagnostic extensions;
 - canonical Fact and gap evidence remain the data truth;
 - explicit authorization continues to bound any acquisition or backfill.
-

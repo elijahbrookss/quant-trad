@@ -46,6 +46,12 @@ Collectors are implementation assets, not user-authored automation. Provider
 adapters, Fact schemas, subjects, cadence, safety policy, and recovery behavior
 must remain code- or reviewed-manifest-owned.
 
+Database rows are durable configuration/evidence, but do not define executable
+code. Historical integration-test and retired definitions may remain pinned by
+immutable Dataset/archive evidence. Treating every persisted row as an active
+collector would incorrectly grant those rows runtime authority and turn fleet
+health into a database-hygiene report.
+
 ## Decision
 
 QT will expose one `CollectorOperationsService` over every durable registered
@@ -115,6 +121,12 @@ may lay out topology and format values, but it may not derive collector health,
 join operational tables, interpret provider payloads, or create collector
 definitions.
 
+The code-owned registry is the operational admission boundary. A persisted
+definition is included only when the deployed runtime recognizes its kind,
+adapter, configuration version, provider binding, and produced schemas.
+Non-admitted durable rows remain countable and inspectable as migration/audit
+debt but are not projected as failed fleet members.
+
 ## Consequences
 
 Operators get one vocabulary and command path while the scheduled and streaming
@@ -125,6 +137,10 @@ flattening their evidence.
 Existing direct enable/disable and continuous start/stop controls must be moved
 to the canonical service and retired as public operational paths. Definition
 installation remains a separate code-reviewed/admin boundary.
+
+The CLI, MCP adapter, and Frontend V2 all invoke the same backend contract.
+Failed operation preconditions and successful mutations share one immutable
+audit ledger, and request IDs make retries safe without dual transitions.
 
 The schema change requires an explicit out-of-band migration with collector
 writers stopped. Existing configured intent is migrated once; there is no
@@ -145,4 +161,3 @@ runtime fallback from missing control fields.
 
 - [Collector operations discovery](../../engineering/collector-operations-discovery.md)
 - [Collector operations control plane](../data/COLLECTOR_OPERATIONS_CONTROL_PLANE.md)
-

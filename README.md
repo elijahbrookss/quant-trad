@@ -173,6 +173,10 @@ qt data coverage \
   --end <iso>
 
 qt data collectors fleet
+qt data collectors plane
+qt data collectors detail scheduled_fact <collector_id>
+qt data collectors diagnose scheduled_fact <collector_id>
+qt data collectors probe scheduled_fact <collector_id>
 qt data series
 qt data prepare-backtest-dataset --help
 qt data freeze-dataset --help
@@ -292,12 +296,13 @@ backend concerns.
 | Start here | [Getting started](docs/getting-started.md), [platform overview](docs/overview.md), [docs home](docs/index.md) |
 | Market-data boundary | [Data boundary](docs/architecture/data/DATA_BOUNDARY.md), [generalized Fact data plane](docs/architecture/data/GENERALIZED_FACT_DATA_PLANE.md) |
 | Canonical Facts and datasets | [Canonical Fact ADR](docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md), [numeric Facts and acquisition](docs/architecture/data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md) |
-| Collectors | [Collector operations](docs/architecture/data/COLLECTOR_OPERATIONS_CONTROL_PLANE.md), [continuous collector runtime](docs/architecture/data/CONTINUOUS_COLLECTOR_RUNTIME.md) |
+| Collectors | [Collector operations guide](docs/guides/collector-operations.md), [control-plane architecture](docs/architecture/data/COLLECTOR_OPERATIONS_CONTROL_PLANE.md), [continuous collector runtime](docs/architecture/data/CONTINUOUS_COLLECTOR_RUNTIME.md) |
 | Provider examples | [Chainlink structured Facts](docs/guides/chainlink-structured-facts.md), [Coinbase derivatives paper setup](docs/guides/coinbase-derivatives-paper-setup.md), [adding a provider](docs/guides/adding-a-provider.md) |
 | Research evidence | [Check evidence boundary](docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md), [research memory](docs/architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md) |
 | Runtime | [Runtime timeline](docs/concepts/runtime-timeline.md), [execution model](docs/concepts/execution-model.md), [strategies and signals](docs/concepts/strategies-and-signals.md) |
 | Inspection and reporting | [BotLens](docs/concepts/botlens.md), [reporting datasets](docs/concepts/reporting-datasets.md) |
 | Agent workflows | [Developer/audit workflow](docs/engineering/developer-audit-workflow.md), [MCP research server](docs/architecture/research-orchestration/MCP_RESEARCH_SERVER.md) |
+| Operational proof | [Collector operations validation](docs/engineering/collector-operations-validation.md) |
 | System contracts | [Architecture component index](docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md), [platform contracts](docs/contracts/README.md) |
 
 Contracts are the source of truth when code and explanatory documentation

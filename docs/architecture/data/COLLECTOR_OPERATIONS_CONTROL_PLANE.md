@@ -44,6 +44,14 @@ The service operates registered collectors. It does not register adapters,
 schemas, sources, subjects, credentials, or definitions. Those remain code and
 reviewed-manifest concerns.
 
+Persistence alone does not make a definition operational. The registry admits
+only definitions whose provider, adapter, configuration schema, Fact schemas,
+and runtime kind are recognized by the deployed code. Durable rows outside
+that registry are reported as `unregistered_definition_count` and omitted from
+fleet health rather than being mistaken for failed collectors. This keeps
+historical evidence visible without giving old test or retired definitions new
+runtime authority.
+
 ## Identity and configuration
 
 A canonical collector identity contains:
@@ -94,10 +102,13 @@ owns only layout and interaction.
 
 Precedence is deterministic:
 
-1. invalid/unregistered definition -> `FAILED`;
-2. configured gate closed -> `DISABLED`;
-3. desired non-running with live owner -> `STOPPING`;
-4. desired paused/stopped without owner -> `PAUSED`/`STOPPED`;
+1. configured gate closed -> `DISABLED`, retaining any registration error as
+   evidence but not claiming failed desired work;
+2. configured and desired non-running with a live owner -> `STOPPING`;
+3. configured and desired paused/stopped without an owner ->
+   `PAUSED`/`STOPPED`;
+4. configured definition that is not executable by the code-owned registry ->
+   `FAILED`;
 5. active durable recovery -> `RECOVERING`;
 6. desired running with terminal invariant/worker failure -> `FAILED`;
 7. scheduled retry or supervisor backoff -> `RETRYING`;
@@ -166,6 +177,12 @@ disabled or invalid definition exposes no start/recovery action. A safety latch
 blocks start/resume/restart until the separate acknowledgement contract is
 satisfied.
 
+Failed preconditions are audited too. An unknown collector, missing disruptive
+confirmation, invalid registration, or unsupported action appends a failed
+operation result with the unchanged prior/resulting state. Replaying the same
+request ID returns the original result and does not advance control generation
+or append a second audit row.
+
 ## API shape
 
 The canonical surface is organized by collector identity:
@@ -179,6 +196,12 @@ The canonical surface is organized by collector identity:
 
 Definition installation and bounded provider acquisition remain separate admin
 or acquisition routes. No frontend adapter imports them.
+
+The same surface is available through `qt data collectors ...` and
+`qt mcp serve`. MCP reads use `quanttrad://market-data/...` resources. MCP
+mutations are planned by default and require `apply=true`, `confirm=true`, a
+request ID, actor context, and reason before delegating to the canonical `qt`
+command.
 
 ## Frontend V2
 
@@ -196,6 +219,12 @@ Structured payloads are rendered generically from canonical Fact/schema
 contracts. Provider-specific diagnostic extensions may have a bounded typed
 renderer, but provider identity never selects generic lifecycle or actions.
 
+The operator route is **Operations -> Market**. The fleet view renders the
+backend-provided provider/collector/schema/store topology and retains a compact
+inventory for exact inspection. The detail view keeps runtime, activity,
+Facts, data quality, diagnostics, configuration, and operation history behind
+one collector identity.
+
 ## Operational migration
 
 The control columns and immutable operation table are introduced by an
@@ -206,4 +235,5 @@ missing-column fallback.
 
 See [ADR 0064](../decisions/0064-use-one-code-owned-collector-operations-contract.md)
 and the [discovery report](../../engineering/collector-operations-discovery.md).
-
+Operator commands, action guards, and failure procedures are documented in the
+[collector operations guide](../../guides/collector-operations.md).

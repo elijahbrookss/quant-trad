@@ -172,18 +172,22 @@ Operator surfaces are:
 
 ## Operator Lifecycle
 
-`qt data market-structure` exposes worker-owned controls:
+`qt data market-structure` retains code-reviewed setup, proof, and safety
+operations:
 
 - `continuous-validate` starts the implementation path for a bounded
   60-second to seven-day proof;
 - `continuous-evidence` derives proof status from canonical session, archive,
   mapping, quality, and coverage rows;
 - `enroll` applies a validated product/stream fleet manifest;
-- `continuous-start` performs system-derived qualification and starts with no
-  duration cap;
-- `continuous-stop` requests graceful drain and stop.
 - `safety-halt`, `safety-acknowledge`, and `safety-status` operate persistent
   global, fleet, and stream latches.
+
+Normal lifecycle control is provider-neutral and goes through
+`qt data collectors start|stop|restart|pause|resume`. The same operations are
+used by Frontend V2 and MCP, preserve request/actor/reason context, and append
+immutable operation evidence. No surface edits the stream adapter or runtime
+configuration while operating it.
 
 The BIP, ETP, and SLP trade enrollments are continuous: their runtime has no
 `stop_at`. A restart reconstructs desired tasks from the database and cannot
