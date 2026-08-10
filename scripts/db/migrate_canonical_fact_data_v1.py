@@ -21,12 +21,16 @@ from sqlalchemy import create_engine, text
 from market_data.canonical import CanonicalFact, build_fact_version_id
 from market_data.canonical_adapters import (
     DERIVED_MARKET_STATE_SOURCE,
+    canonicalize_basis_feature,
     canonicalize_bbo_feature,
     canonicalize_depth_feature,
+    canonicalize_derivative_state_feature,
     canonicalize_l2_mutation_batch,
     canonicalize_l2_snapshot,
     canonicalize_market_trade,
+    canonicalize_response_feature,
     canonicalize_trade_flow,
+    canonicalize_trade_flow_feature,
 )
 from market_data.contracts import (
     CandleFact,
@@ -37,7 +41,14 @@ from market_data.contracts import (
     SourceIdentity,
 )
 from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
-from market_data.market_state import BboFeatureFact, DepthFeatureFact
+from market_data.market_state import (
+    BasisFeatureFact,
+    BboFeatureFact,
+    DepthFeatureFact,
+    DerivativeStateFeatureFact,
+    ResponseFeatureFact,
+    TradeFlowFeatureFact,
+)
 from market_data.order_book import (
     BookSourcePosition,
     L2EventFact,
@@ -733,6 +744,201 @@ def _depth_feature(row: Mapping[str, Any]) -> MigrationRow:
     return _canonical_values(row=row, fact=canonical)
 
 
+def _derived_provenance(
+    row: Mapping[str, Any], *, source_table: str
+) -> dict[str, Any]:
+    return _migration_provenance(
+        row,
+        source_table=source_table,
+        extra={
+            "legacy_version_id": str(row["id"]),
+            "legacy_provenance_hash": str(row["provenance_hash"]),
+        },
+    )
+
+
+def _assert_derived_material(
+    row: Mapping[str, Any], *, family: str, material_hash: str
+) -> None:
+    if material_hash != str(row["material_hash"]):
+        raise RuntimeError(
+            "canonical_fact_migration_source_hash_mismatch: "
+            f"family={family} series_id={row['series_id']} id={row['id']}"
+        )
+
+
+def _trade_flow_feature(row: Mapping[str, Any]) -> MigrationRow:
+    legacy = TradeFlowFeatureFact(
+        series_id=int(row["series_id"]),
+        source_trade_flow_series_id=int(row["source_trade_flow_series_id"]),
+        interval_seconds=int(row["interval_seconds"]),
+        bucket_start=row["bucket_start"],
+        bucket_end=row["bucket_end"],
+        known_at=row["known_at"],
+        aggregate_material_hash=str(row["aggregate_material_hash"]),
+        aggregate_input_fingerprint=str(row["aggregate_input_fingerprint"]),
+        trade_count=int(row["trade_count"]),
+        quote_notional=row["quote_notional"],
+        aggressor_buy_base_volume=row["aggressor_buy_base_volume"],
+        aggressor_sell_base_volume=row["aggressor_sell_base_volume"],
+        aggressor_buy_notional=row["aggressor_buy_notional"],
+        aggressor_sell_notional=row["aggressor_sell_notional"],
+        cvd_base=row["cvd_base"],
+        cvd_notional=row["cvd_notional"],
+        cvd_volume_share=row["cvd_volume_share"],
+        input_fingerprint=str(row["input_fingerprint"]),
+    )
+    _assert_derived_material(
+        row, family="trade_flow_feature", material_hash=legacy.material_hash
+    )
+    canonical = canonicalize_trade_flow_feature(
+        legacy,
+        source=_source(row),
+        provenance=_derived_provenance(
+            row, source_table="market.trade_flow_feature_versions"
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
+def _basis_feature(row: Mapping[str, Any]) -> MigrationRow:
+    legacy = BasisFeatureFact(
+        mapping_id=str(row["mapping_id"]),
+        futures_series_id=int(row["futures_series_id"]),
+        series_id=int(row["series_id"]),
+        spot_series_id=int(row["spot_series_id"]),
+        effective_at=row["effective_at"],
+        known_at=row["known_at"],
+        futures_bbo_material_hash=str(row["futures_bbo_material_hash"]),
+        spot_bbo_material_hash=str(row["spot_bbo_material_hash"]),
+        futures_mid=row["futures_mid"],
+        spot_mid=row["spot_mid"],
+        futures_staleness_seconds=row["futures_staleness_seconds"],
+        spot_staleness_seconds=row["spot_staleness_seconds"],
+        basis=row["basis"],
+        basis_bps=row["basis_bps"],
+        input_fingerprint=str(row["input_fingerprint"]),
+    )
+    _assert_derived_material(
+        row, family="basis_feature", material_hash=legacy.material_hash
+    )
+    canonical = canonicalize_basis_feature(
+        legacy,
+        source=_source(row),
+        provenance=_derived_provenance(
+            row, source_table="market.futures_spot_relationship_versions"
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
+def _derivative_state_feature(row: Mapping[str, Any]) -> MigrationRow:
+    legacy = DerivativeStateFeatureFact(
+        instrument_id=str(row["instrument_id"]),
+        effective_at=row["effective_at"],
+        series_id=int(row["series_id"]),
+        known_at=row["known_at"],
+        oi_series_id=(
+            int(row["oi_series_id"])
+            if row["oi_series_id"] is not None
+            else None
+        ),
+        oi_sample_time=row["oi_sample_time"],
+        oi_market_commit_seq=(
+            int(row["oi_market_commit_seq"])
+            if row["oi_market_commit_seq"] is not None
+            else None
+        ),
+        oi_value=row["oi_value"],
+        oi_previous_value=row["oi_previous_value"],
+        oi_log_change=row["oi_log_change"],
+        funding_series_id=(
+            int(row["funding_series_id"])
+            if row["funding_series_id"] is not None
+            else None
+        ),
+        funding_sample_time=row["funding_sample_time"],
+        funding_market_commit_seq=(
+            int(row["funding_market_commit_seq"])
+            if row["funding_market_commit_seq"] is not None
+            else None
+        ),
+        funding_rate=row["funding_rate"],
+        funding_time=row["funding_time"],
+        funding_interval_seconds=(
+            int(row["funding_interval_seconds"])
+            if row["funding_interval_seconds"] is not None
+            else None
+        ),
+        funding_semantics=row["funding_semantics"],
+        input_fingerprint=str(row["input_fingerprint"]),
+    )
+    _assert_derived_material(
+        row, family="derivative_state", material_hash=legacy.material_hash
+    )
+    canonical = canonicalize_derivative_state_feature(
+        legacy,
+        source=_source(row),
+        provenance=_derived_provenance(
+            row, source_table="market.derivative_state_versions"
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
+def _response_feature(row: Mapping[str, Any]) -> MigrationRow:
+    positions = dict(row["source_positions"])
+    legacy = ResponseFeatureFact(
+        series_id=int(row["series_id"]),
+        bucket_start=row["bucket_start"],
+        source_flow_feature_series_id=int(
+            row["source_flow_feature_series_id"]
+        ),
+        source_l2_series_id=int(row["source_l2_series_id"]),
+        source_flow_material_hash=str(row["source_flow_material_hash"]),
+        pre_state_hash=str(row["pre_state_hash"]),
+        trough_state_hash=str(row["trough_state_hash"]),
+        post_state_hash=str(row["post_state_hash"]),
+        bucket_end=row["bucket_end"],
+        effective_at=row["effective_at"],
+        known_at=row["known_at"],
+        direction=str(row["direction"]),
+        first_trade_id=str(row["first_trade_id"]),
+        last_trade_id=str(row["last_trade_id"]),
+        first_trade_source_position=dict(positions["first_trade"]),
+        last_trade_source_position=dict(positions["last_trade"]),
+        pre_book_source_position=_book_position(dict(positions["pre_book"])),
+        trough_book_source_position=_book_position(dict(positions["trough_book"])),
+        post_book_source_position=_book_position(dict(positions["post_book"])),
+        validity_interval_id=str(row["validity_interval_id"]),
+        aggressive_notional=row["aggressive_notional"],
+        signed_aggressive_notional=row["signed_aggressive_notional"],
+        response_bps=row["response_bps"],
+        pre_depth_notional=row["pre_depth_notional"],
+        consumed_depth_notional=row["consumed_depth_notional"],
+        replenished_depth_notional=row["replenished_depth_notional"],
+        depth_replenishment=row["depth_replenishment"],
+        liquidity_adjusted_impact=row["liquidity_adjusted_impact"],
+        price_response_per_flow=row["price_response_per_flow"],
+        input_fingerprint=str(row["input_fingerprint"]),
+    )
+    _assert_derived_material(
+        row, family="response_feature", material_hash=legacy.material_hash
+    )
+    canonical = canonicalize_response_feature(
+        legacy,
+        source=_source(row),
+        provenance=_derived_provenance(
+            row, source_table="market.market_response_feature_versions"
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
 _SOURCE_JOIN = """
     JOIN market.ingestion_runs AS ingestion
       ON ingestion.id = fact.ingestion_run_id
@@ -892,6 +1098,38 @@ _FAMILIES = (
         "FROM market.depth_feature_versions AS fact "
         "ORDER BY fact.series_id, fact.bucket_start, fact.band_bps, fact.revision",
         _depth_feature,
+    ),
+    MigrationFamily(
+        "trade_flow_feature",
+        "market.trade_flow_feature_versions",
+        f"SELECT fact.*, {_DERIVED_SOURCE_COLUMNS} "
+        "FROM market.trade_flow_feature_versions AS fact "
+        "ORDER BY fact.series_id, fact.bucket_start, fact.revision",
+        _trade_flow_feature,
+    ),
+    MigrationFamily(
+        "basis_feature",
+        "market.futures_spot_relationship_versions",
+        f"SELECT fact.*, {_DERIVED_SOURCE_COLUMNS} "
+        "FROM market.futures_spot_relationship_versions AS fact "
+        "ORDER BY fact.series_id, fact.effective_at, fact.revision",
+        _basis_feature,
+    ),
+    MigrationFamily(
+        "derivative_state",
+        "market.derivative_state_versions",
+        f"SELECT fact.*, {_DERIVED_SOURCE_COLUMNS} "
+        "FROM market.derivative_state_versions AS fact "
+        "ORDER BY fact.series_id, fact.effective_at, fact.revision",
+        _derivative_state_feature,
+    ),
+    MigrationFamily(
+        "response_feature",
+        "market.market_response_feature_versions",
+        f"SELECT fact.*, {_DERIVED_SOURCE_COLUMNS} "
+        "FROM market.market_response_feature_versions AS fact "
+        "ORDER BY fact.series_id, fact.bucket_start, fact.direction, fact.revision",
+        _response_feature,
     ),
 )
 

@@ -8,7 +8,14 @@ from typing import Any
 
 from .canonical import CanonicalFact, CanonicalFactRecord
 from .contracts import SourceIdentity, TypedFeatureRecord
-from .market_state import BboFeatureFact, DepthFeatureFact
+from .market_state import (
+    BasisFeatureFact,
+    BboFeatureFact,
+    DepthFeatureFact,
+    DerivativeStateFeatureFact,
+    ResponseFeatureFact,
+    TradeFlowFeatureFact,
+)
 from .order_book import (
     BOOK_RECONSTRUCTION_VERSION,
     BookSourcePosition,
@@ -565,7 +572,7 @@ def canonicalize_depth_feature(
 def _typed_feature_record(
     record: CanonicalFactRecord,
     *,
-    fact: BboFeatureFact | DepthFeatureFact,
+    fact: Any,
     evidence: Mapping[str, Any],
 ) -> TypedFeatureRecord:
     if fact.material_hash != str(evidence["legacy_material_hash"]):
@@ -666,6 +673,377 @@ def decode_depth_feature_record(record: CanonicalFactRecord) -> TypedFeatureReco
         bid_notional=payload["bid_notional"],
         ask_notional=payload["ask_notional"],
         imbalance=payload["imbalance"],
+        input_fingerprint=payload["input_fingerprint"],
+    )
+    return _typed_feature_record(record, fact=fact, evidence=evidence)
+
+
+def canonicalize_trade_flow_feature(
+    fact: TradeFlowFeatureFact,
+    *,
+    source: SourceIdentity = DERIVED_MARKET_STATE_SOURCE,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    canonical_provenance = _derived_provenance(
+        provenance,
+        evidence_key="_qt_trade_flow_feature_evidence",
+        evidence={
+            "source_trade_flow_series_id": fact.source_trade_flow_series_id,
+            "legacy_material_hash": fact.material_hash,
+        },
+    )
+    return CanonicalFact(
+        fact_type="market.trade_flow_feature",
+        payload_schema_id="market.trade_flow_feature.v1",
+        observation_key=(
+            f"{fact.bucket_start.isoformat()}:{fact.interval_seconds}"
+        ),
+        observation_time=fact.bucket_start,
+        observation_time_method="derived_bucket_start",
+        received_at=fact.known_at,
+        accepted_at=fact.known_at,
+        known_at=fact.known_at,
+        known_at_method="derived_input_watermark",
+        source=source,
+        transformation_id="market.trade_flow_feature.canonicalization.v1",
+        external_event_key=fact.aggregate_material_hash,
+        payload={
+            "bucket_end": fact.bucket_end,
+            "interval_seconds": fact.interval_seconds,
+            "aggregate_material_hash": fact.aggregate_material_hash,
+            "aggregate_input_fingerprint": fact.aggregate_input_fingerprint,
+            "trade_count": fact.trade_count,
+            "quote_notional": fact.quote_notional,
+            "aggressor_buy_base_volume": fact.aggressor_buy_base_volume,
+            "aggressor_sell_base_volume": fact.aggressor_sell_base_volume,
+            "aggressor_buy_notional": fact.aggressor_buy_notional,
+            "aggressor_sell_notional": fact.aggressor_sell_notional,
+            "cvd_base": fact.cvd_base,
+            "cvd_notional": fact.cvd_notional,
+            "cvd_volume_share": fact.cvd_volume_share,
+            "input_fingerprint": fact.input_fingerprint,
+        },
+        provenance=canonical_provenance,
+        quality=dict(quality or {}),
+    )
+
+
+def canonicalize_basis_feature(
+    fact: BasisFeatureFact,
+    *,
+    source: SourceIdentity = DERIVED_MARKET_STATE_SOURCE,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    canonical_provenance = _derived_provenance(
+        provenance,
+        evidence_key="_qt_basis_evidence",
+        evidence={
+            "futures_series_id": fact.futures_series_id,
+            "spot_series_id": fact.spot_series_id,
+            "futures_bbo_material_hash": fact.futures_bbo_material_hash,
+            "spot_bbo_material_hash": fact.spot_bbo_material_hash,
+            "legacy_material_hash": fact.material_hash,
+        },
+    )
+    return CanonicalFact(
+        fact_type="market.futures_spot_relationship",
+        payload_schema_id="market.futures_spot_basis.v1",
+        observation_key=fact.effective_at.isoformat(),
+        observation_time=fact.effective_at,
+        observation_time_method="derived_effective_time",
+        received_at=fact.known_at,
+        accepted_at=fact.known_at,
+        known_at=fact.known_at,
+        known_at_method="derived_input_watermark",
+        source=source,
+        transformation_id="market.futures_spot_basis.canonicalization.v1",
+        external_event_key=fact.mapping_id,
+        payload={
+            "mapping_id": fact.mapping_id,
+            "futures_mid": fact.futures_mid,
+            "spot_mid": fact.spot_mid,
+            "futures_staleness_seconds": fact.futures_staleness_seconds,
+            "spot_staleness_seconds": fact.spot_staleness_seconds,
+            "basis": fact.basis,
+            "basis_bps": fact.basis_bps,
+            "input_fingerprint": fact.input_fingerprint,
+        },
+        provenance=canonical_provenance,
+        quality=dict(quality or {}),
+    )
+
+
+def canonicalize_derivative_state_feature(
+    fact: DerivativeStateFeatureFact,
+    *,
+    source: SourceIdentity = DERIVED_MARKET_STATE_SOURCE,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    canonical_provenance = _derived_provenance(
+        provenance,
+        evidence_key="_qt_derivative_state_evidence",
+        evidence={
+            "oi_series_id": fact.oi_series_id,
+            "funding_series_id": fact.funding_series_id,
+            "legacy_material_hash": fact.material_hash,
+        },
+    )
+    return CanonicalFact(
+        fact_type="market.derivative_state",
+        payload_schema_id="market.derivative_state.v1",
+        observation_key=fact.effective_at.isoformat(),
+        observation_time=fact.effective_at,
+        observation_time_method="derived_effective_time",
+        received_at=fact.known_at,
+        accepted_at=fact.known_at,
+        known_at=fact.known_at,
+        known_at_method="derived_input_watermark",
+        source=source,
+        transformation_id="market.derivative_state.canonicalization.v1",
+        external_event_group_key=fact.instrument_id,
+        payload={
+            "instrument_id": fact.instrument_id,
+            "oi_sample_time": fact.oi_sample_time,
+            "oi_market_commit_seq": fact.oi_market_commit_seq,
+            "oi_value": fact.oi_value,
+            "oi_previous_value": fact.oi_previous_value,
+            "oi_log_change": fact.oi_log_change,
+            "funding_sample_time": fact.funding_sample_time,
+            "funding_market_commit_seq": fact.funding_market_commit_seq,
+            "funding_rate": fact.funding_rate,
+            "funding_time": fact.funding_time,
+            "funding_interval_seconds": fact.funding_interval_seconds,
+            "funding_semantics": fact.funding_semantics,
+            "input_fingerprint": fact.input_fingerprint,
+        },
+        provenance=canonical_provenance,
+        quality=dict(quality or {}),
+    )
+
+
+def canonicalize_response_feature(
+    fact: ResponseFeatureFact,
+    *,
+    source: SourceIdentity = DERIVED_MARKET_STATE_SOURCE,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    canonical_provenance = _derived_provenance(
+        provenance,
+        evidence_key="_qt_response_evidence",
+        evidence={
+            "source_flow_feature_series_id": fact.source_flow_feature_series_id,
+            "source_l2_series_id": fact.source_l2_series_id,
+            "source_flow_material_hash": fact.source_flow_material_hash,
+            "pre_state_hash": fact.pre_state_hash,
+            "trough_state_hash": fact.trough_state_hash,
+            "post_state_hash": fact.post_state_hash,
+            "first_trade_id": fact.first_trade_id,
+            "last_trade_id": fact.last_trade_id,
+            "first_trade_source_position": dict(fact.first_trade_source_position),
+            "last_trade_source_position": dict(fact.last_trade_source_position),
+            "pre_book_source_position": fact.pre_book_source_position.material(),
+            "trough_book_source_position": fact.trough_book_source_position.material(),
+            "post_book_source_position": fact.post_book_source_position.material(),
+            "legacy_material_hash": fact.material_hash,
+        },
+    )
+    return CanonicalFact(
+        fact_type="market.market_response",
+        payload_schema_id="market.market_response.v1",
+        observation_key=(
+            f"{fact.bucket_start.isoformat()}:{fact.direction.value}"
+        ),
+        observation_time=fact.effective_at,
+        observation_time_method="derived_response_horizon",
+        received_at=fact.known_at,
+        accepted_at=fact.known_at,
+        known_at=fact.known_at,
+        known_at_method="derived_input_watermark",
+        source=source,
+        transformation_id="market.market_response.canonicalization.v1",
+        external_event_key=fact.source_flow_material_hash,
+        external_event_group_key=fact.validity_interval_id,
+        payload={
+            "bucket_start": fact.bucket_start,
+            "bucket_end": fact.bucket_end,
+            "direction": fact.direction.value,
+            "validity_interval_id": fact.validity_interval_id,
+            "aggressive_notional": fact.aggressive_notional,
+            "signed_aggressive_notional": fact.signed_aggressive_notional,
+            "response_bps": fact.response_bps,
+            "pre_depth_notional": fact.pre_depth_notional,
+            "consumed_depth_notional": fact.consumed_depth_notional,
+            "replenished_depth_notional": fact.replenished_depth_notional,
+            "depth_replenishment": fact.depth_replenishment,
+            "liquidity_adjusted_impact": fact.liquidity_adjusted_impact,
+            "price_response_per_flow": fact.price_response_per_flow,
+            "input_fingerprint": fact.input_fingerprint,
+        },
+        provenance=canonical_provenance,
+        quality=dict(quality or {}),
+    )
+
+
+def decode_trade_flow_feature_record(
+    record: CanonicalFactRecord,
+) -> TypedFeatureRecord:
+    if record.fact.payload_schema_id != "market.trade_flow_feature.v1":
+        raise ValueError("market_trade_flow_feature_decode_invalid: schema mismatch")
+    payload = record.fact.payload
+    evidence = _evidence_mapping(
+        record.fact.provenance,
+        key="_qt_trade_flow_feature_evidence",
+        fact_version_id=str(record.fact_version_id),
+    )
+    fact = TradeFlowFeatureFact(
+        series_id=record.series_id,
+        source_trade_flow_series_id=evidence["source_trade_flow_series_id"],
+        interval_seconds=payload["interval_seconds"],
+        bucket_start=record.fact.observation_time,
+        bucket_end=_timestamp(payload["bucket_end"], field="bucket_end"),
+        known_at=record.fact.known_at,
+        aggregate_material_hash=payload["aggregate_material_hash"],
+        aggregate_input_fingerprint=payload["aggregate_input_fingerprint"],
+        trade_count=payload["trade_count"],
+        quote_notional=payload["quote_notional"],
+        aggressor_buy_base_volume=payload["aggressor_buy_base_volume"],
+        aggressor_sell_base_volume=payload["aggressor_sell_base_volume"],
+        aggressor_buy_notional=payload["aggressor_buy_notional"],
+        aggressor_sell_notional=payload["aggressor_sell_notional"],
+        cvd_base=payload["cvd_base"],
+        cvd_notional=payload["cvd_notional"],
+        cvd_volume_share=payload["cvd_volume_share"],
+        input_fingerprint=payload["input_fingerprint"],
+    )
+    return _typed_feature_record(record, fact=fact, evidence=evidence)
+
+
+def decode_basis_feature_record(record: CanonicalFactRecord) -> TypedFeatureRecord:
+    if record.fact.payload_schema_id != "market.futures_spot_basis.v1":
+        raise ValueError("market_basis_decode_invalid: schema mismatch")
+    payload = record.fact.payload
+    evidence = _evidence_mapping(
+        record.fact.provenance,
+        key="_qt_basis_evidence",
+        fact_version_id=str(record.fact_version_id),
+    )
+    fact = BasisFeatureFact(
+        mapping_id=payload["mapping_id"],
+        futures_series_id=evidence["futures_series_id"],
+        series_id=record.series_id,
+        spot_series_id=evidence["spot_series_id"],
+        effective_at=record.fact.observation_time,
+        known_at=record.fact.known_at,
+        futures_bbo_material_hash=evidence["futures_bbo_material_hash"],
+        spot_bbo_material_hash=evidence["spot_bbo_material_hash"],
+        futures_mid=payload["futures_mid"],
+        spot_mid=payload["spot_mid"],
+        futures_staleness_seconds=payload["futures_staleness_seconds"],
+        spot_staleness_seconds=payload["spot_staleness_seconds"],
+        basis=payload["basis"],
+        basis_bps=payload["basis_bps"],
+        input_fingerprint=payload["input_fingerprint"],
+    )
+    return _typed_feature_record(record, fact=fact, evidence=evidence)
+
+
+def _optional_timestamp(value: Any, *, field: str) -> datetime | None:
+    return None if value is None else _timestamp(value, field=field)
+
+
+def decode_derivative_state_feature_record(
+    record: CanonicalFactRecord,
+) -> TypedFeatureRecord:
+    if record.fact.payload_schema_id != "market.derivative_state.v1":
+        raise ValueError("market_derivative_state_decode_invalid: schema mismatch")
+    payload = record.fact.payload
+    evidence = _evidence_mapping(
+        record.fact.provenance,
+        key="_qt_derivative_state_evidence",
+        fact_version_id=str(record.fact_version_id),
+    )
+    fact = DerivativeStateFeatureFact(
+        instrument_id=payload["instrument_id"],
+        effective_at=record.fact.observation_time,
+        series_id=record.series_id,
+        known_at=record.fact.known_at,
+        oi_series_id=evidence["oi_series_id"],
+        oi_sample_time=_optional_timestamp(
+            payload["oi_sample_time"], field="oi_sample_time"
+        ),
+        oi_market_commit_seq=payload["oi_market_commit_seq"],
+        oi_value=payload["oi_value"],
+        oi_previous_value=payload["oi_previous_value"],
+        oi_log_change=payload["oi_log_change"],
+        funding_series_id=evidence["funding_series_id"],
+        funding_sample_time=_optional_timestamp(
+            payload["funding_sample_time"], field="funding_sample_time"
+        ),
+        funding_market_commit_seq=payload["funding_market_commit_seq"],
+        funding_rate=payload["funding_rate"],
+        funding_time=_optional_timestamp(
+            payload["funding_time"], field="funding_time"
+        ),
+        funding_interval_seconds=payload["funding_interval_seconds"],
+        funding_semantics=payload["funding_semantics"],
+        input_fingerprint=payload["input_fingerprint"],
+    )
+    return _typed_feature_record(record, fact=fact, evidence=evidence)
+
+
+def decode_response_feature_record(
+    record: CanonicalFactRecord,
+) -> TypedFeatureRecord:
+    if record.fact.payload_schema_id != "market.market_response.v1":
+        raise ValueError("market_response_decode_invalid: schema mismatch")
+    payload = record.fact.payload
+    evidence = _evidence_mapping(
+        record.fact.provenance,
+        key="_qt_response_evidence",
+        fact_version_id=str(record.fact_version_id),
+    )
+    fact = ResponseFeatureFact(
+        series_id=record.series_id,
+        bucket_start=_timestamp(payload["bucket_start"], field="bucket_start"),
+        source_flow_feature_series_id=evidence[
+            "source_flow_feature_series_id"
+        ],
+        source_l2_series_id=evidence["source_l2_series_id"],
+        source_flow_material_hash=evidence["source_flow_material_hash"],
+        pre_state_hash=evidence["pre_state_hash"],
+        trough_state_hash=evidence["trough_state_hash"],
+        post_state_hash=evidence["post_state_hash"],
+        bucket_end=_timestamp(payload["bucket_end"], field="bucket_end"),
+        effective_at=record.fact.observation_time,
+        known_at=record.fact.known_at,
+        direction=payload["direction"],
+        first_trade_id=evidence["first_trade_id"],
+        last_trade_id=evidence["last_trade_id"],
+        first_trade_source_position=evidence["first_trade_source_position"],
+        last_trade_source_position=evidence["last_trade_source_position"],
+        pre_book_source_position=BookSourcePosition(
+            **evidence["pre_book_source_position"]
+        ),
+        trough_book_source_position=BookSourcePosition(
+            **evidence["trough_book_source_position"]
+        ),
+        post_book_source_position=BookSourcePosition(
+            **evidence["post_book_source_position"]
+        ),
+        validity_interval_id=payload["validity_interval_id"],
+        aggressive_notional=payload["aggressive_notional"],
+        signed_aggressive_notional=payload["signed_aggressive_notional"],
+        response_bps=payload["response_bps"],
+        pre_depth_notional=payload["pre_depth_notional"],
+        consumed_depth_notional=payload["consumed_depth_notional"],
+        replenished_depth_notional=payload["replenished_depth_notional"],
+        depth_replenishment=payload["depth_replenishment"],
+        liquidity_adjusted_impact=payload["liquidity_adjusted_impact"],
+        price_response_per_flow=payload["price_response_per_flow"],
         input_fingerprint=payload["input_fingerprint"],
     )
     return _typed_feature_record(record, fact=fact, evidence=evidence)
@@ -816,14 +1194,22 @@ def decode_trade_flow_record(
 
 __all__ = [
     "DERIVED_MARKET_STATE_SOURCE",
+    "canonicalize_basis_feature",
     "canonicalize_bbo_feature",
     "canonicalize_depth_feature",
+    "canonicalize_derivative_state_feature",
     "canonicalize_l2_mutation_batch",
     "canonicalize_l2_snapshot",
     "canonicalize_market_trade",
+    "canonicalize_response_feature",
     "canonicalize_trade_flow",
+    "canonicalize_trade_flow_feature",
+    "decode_basis_feature_record",
     "decode_bbo_feature_record",
     "decode_depth_feature_record",
+    "decode_derivative_state_feature_record",
     "decode_market_trade_record",
+    "decode_response_feature_record",
     "decode_trade_flow_record",
+    "decode_trade_flow_feature_record",
 ]

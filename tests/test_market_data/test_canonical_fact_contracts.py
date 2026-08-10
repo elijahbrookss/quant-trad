@@ -8,17 +8,32 @@ import pytest
 
 from market_data.canonical import CanonicalFact, CanonicalFactRecord
 from market_data.canonical_adapters import (
+    canonicalize_basis_feature,
     canonicalize_bbo_feature,
     canonicalize_depth_feature,
+    canonicalize_derivative_state_feature,
+    canonicalize_response_feature,
+    canonicalize_trade_flow_feature,
+    decode_basis_feature_record,
     decode_bbo_feature_record,
     decode_depth_feature_record,
+    decode_derivative_state_feature_record,
+    decode_response_feature_record,
+    decode_trade_flow_feature_record,
 )
 from market_data.contracts import SourceIdentity
 from market_data.fact_registry import (
     get_fact_payload_schema,
     supported_fact_payload_schemas,
 )
-from market_data.market_state import BboFeatureFact, DepthFeatureFact
+from market_data.market_state import (
+    BasisFeatureFact,
+    BboFeatureFact,
+    DepthFeatureFact,
+    DerivativeStateFeatureFact,
+    ResponseFeatureFact,
+    TradeFlowFeatureFact,
+)
 from market_data.order_book import BookSourcePosition
 
 
@@ -265,6 +280,136 @@ def test_book_features_round_trip_without_source_shape_in_payload() -> None:
             fact=canonical_depth,
         )
     ).fact == depth
+
+
+def test_remaining_derived_features_round_trip_from_canonical_facts() -> None:
+    bucket_end = _BASE + timedelta(seconds=1)
+    flow = TradeFlowFeatureFact(
+        series_id=61,
+        source_trade_flow_series_id=60,
+        interval_seconds=1,
+        bucket_start=_BASE,
+        bucket_end=bucket_end,
+        known_at=bucket_end,
+        aggregate_material_hash="1" * 64,
+        aggregate_input_fingerprint="2" * 64,
+        trade_count=2,
+        quote_notional=Decimal("300"),
+        aggressor_buy_base_volume=Decimal("2"),
+        aggressor_sell_base_volume=Decimal("1"),
+        aggressor_buy_notional=Decimal("200"),
+        aggressor_sell_notional=Decimal("100"),
+        cvd_base=Decimal("1"),
+        cvd_notional=Decimal("100"),
+        cvd_volume_share=Decimal("0.3333333333333333333333333333"),
+        input_fingerprint="3" * 64,
+    )
+    basis = BasisFeatureFact(
+        mapping_id="mapping-1",
+        futures_series_id=51,
+        series_id=62,
+        spot_series_id=52,
+        effective_at=bucket_end,
+        known_at=bucket_end,
+        futures_bbo_material_hash="4" * 64,
+        spot_bbo_material_hash="5" * 64,
+        futures_mid=Decimal("101"),
+        spot_mid=Decimal("100"),
+        futures_staleness_seconds=Decimal("0.1"),
+        spot_staleness_seconds=Decimal("0.2"),
+        basis=Decimal("1"),
+        basis_bps=Decimal("100"),
+        input_fingerprint="6" * 64,
+    )
+    derivative = DerivativeStateFeatureFact(
+        instrument_id="BTC-PERP",
+        effective_at=bucket_end,
+        series_id=63,
+        known_at=bucket_end,
+        oi_series_id=31,
+        oi_sample_time=_BASE,
+        oi_market_commit_seq=10,
+        oi_value=Decimal("1000"),
+        oi_previous_value=None,
+        oi_log_change=None,
+        funding_series_id=32,
+        funding_sample_time=_BASE,
+        funding_market_commit_seq=11,
+        funding_rate=Decimal("0.0001"),
+        funding_time=bucket_end,
+        funding_interval_seconds=3600,
+        funding_semantics="provider_reported",
+        input_fingerprint="7" * 64,
+    )
+    pre_position = BookSourcePosition(
+        definition_id="btc-l2",
+        session_id="session-1",
+        connection_epoch=0,
+        provider_product_id="BTC-USD",
+        provider_sequence_num=101,
+        receive_ordinal=7,
+        event_ordinal=0,
+    )
+    trough_position = replace(
+        pre_position, provider_sequence_num=102, receive_ordinal=8
+    )
+    post_position = replace(
+        pre_position, provider_sequence_num=103, receive_ordinal=9
+    )
+    response = ResponseFeatureFact(
+        series_id=64,
+        bucket_start=_BASE,
+        source_flow_feature_series_id=61,
+        source_l2_series_id=41,
+        source_flow_material_hash=flow.material_hash,
+        pre_state_hash="8" * 64,
+        trough_state_hash="9" * 64,
+        post_state_hash="a" * 64,
+        bucket_end=bucket_end,
+        effective_at=bucket_end + timedelta(seconds=1),
+        known_at=bucket_end + timedelta(seconds=1),
+        direction="BUY",
+        first_trade_id="trade-1",
+        last_trade_id="trade-2",
+        first_trade_source_position={"receive_ordinal": 7},
+        last_trade_source_position={"receive_ordinal": 8},
+        pre_book_source_position=pre_position,
+        trough_book_source_position=trough_position,
+        post_book_source_position=post_position,
+        validity_interval_id="validity-1",
+        aggressive_notional=Decimal("1000000"),
+        signed_aggressive_notional=Decimal("1000000"),
+        response_bps=Decimal("10"),
+        pre_depth_notional=Decimal("2000000"),
+        consumed_depth_notional=Decimal("1000000"),
+        replenished_depth_notional=Decimal("500000"),
+        depth_replenishment=Decimal("0.5"),
+        liquidity_adjusted_impact=Decimal("5"),
+        price_response_per_flow=Decimal("10"),
+        input_fingerprint="b" * 64,
+    )
+    cases = (
+        (flow, canonicalize_trade_flow_feature, decode_trade_flow_feature_record),
+        (basis, canonicalize_basis_feature, decode_basis_feature_record),
+        (
+            derivative,
+            canonicalize_derivative_state_feature,
+            decode_derivative_state_feature_record,
+        ),
+        (response, canonicalize_response_feature, decode_response_feature_record),
+    )
+    for commit_seq, (expected, canonicalizer, decoder) in enumerate(cases, start=1):
+        canonical = canonicalizer(expected, source=_COINBASE)
+        decoded = decoder(
+            CanonicalFactRecord(
+                series_id=expected.series_id,
+                source_id=1,
+                revision=1,
+                market_commit_seq=commit_seq,
+                fact=canonical,
+            )
+        )
+        assert decoded.fact == expected
 
 
 def test_l2_payload_validates_every_atomic_entry() -> None:
