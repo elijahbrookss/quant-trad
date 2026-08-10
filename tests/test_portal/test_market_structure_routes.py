@@ -130,6 +130,34 @@ def test_operational_collector_stream_fingerprint_ignores_observation_clock_only
     ) != controller._operational_collector_fingerprint(second)
 
 
+def test_provider_summary_stream_ignores_derived_freshness_age() -> None:
+    first = {
+        "observed_at": "2026-08-10T12:00:00+00:00",
+        "fleet": {"collector_count": 1},
+        "providers": [
+            {
+                "provider": "COINBASE",
+                "health_status": "HEALTHY",
+                "freshness_seconds": 10.0,
+                "last_accepted_fact_at": "2026-08-10T11:59:50+00:00",
+            }
+        ],
+    }
+    second = {
+        **first,
+        "observed_at": "2026-08-10T12:00:10+00:00",
+        "providers": [{**first["providers"][0], "freshness_seconds": 20.0}],
+    }
+
+    assert controller._provider_summary_fingerprint(
+        first
+    ) == controller._provider_summary_fingerprint(second)
+    second["providers"][0]["health_status"] = "DELAYED"
+    assert controller._provider_summary_fingerprint(
+        first
+    ) != controller._provider_summary_fingerprint(second)
+
+
 def test_market_structure_operator_snapshot_is_consolidated(monkeypatch) -> None:
     monkeypatch.setattr(
         controller.market_structure_repository,

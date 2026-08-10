@@ -58,6 +58,21 @@ def _operational_collector_fingerprint(snapshot: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _provider_summary_fingerprint(snapshot: dict[str, Any]) -> str:
+    """Ignore display-only clock age while retaining operational changes."""
+
+    material = dict(snapshot)
+    material["providers"] = [
+        {
+            key: value
+            for key, value in dict(provider).items()
+            if key != "freshness_seconds"
+        }
+        for provider in snapshot.get("providers") or []
+    ]
+    return _operational_collector_fingerprint(material)
+
+
 class CollectorOperationRequest(BaseModel):
     request_id: str
     actor_id: str
@@ -342,7 +357,7 @@ async def stream_collector_provider_summary() -> StreamingResponse:
     async def event_iterator():
         event_id = 1
         snapshot = collector_operations_service.provider_summary_snapshot()
-        fingerprint = _operational_collector_fingerprint(snapshot)
+        fingerprint = _provider_summary_fingerprint(snapshot)
         yield _format_sse("snapshot", snapshot, event_id=event_id)
         keepalive_ticks = 0
         while True:
@@ -353,7 +368,7 @@ async def stream_collector_provider_summary() -> StreamingResponse:
                 )
             except asyncio.CancelledError:
                 break
-            current_fingerprint = _operational_collector_fingerprint(current)
+            current_fingerprint = _provider_summary_fingerprint(current)
             if current_fingerprint != fingerprint:
                 event_id += 1
                 fingerprint = current_fingerprint
@@ -403,8 +418,6 @@ def search_operational_collectors(
         limit=limit,
     )
 
-@router.get("/operations/collectors/snapshot")
-
 @router.post("/definitions/install-structured")
 def install_structured_collector_definition(
     req: StructuredCollectorDefinitionInstallRequest,
@@ -437,6 +450,8 @@ def install_structured_collector_definition(
         "definition": definition,
     }
 
+
+@router.get("/operations/collectors/snapshot")
 def get_operational_collector_snapshot(
     attempt_limit: int = Query(default=5, ge=1, le=100),
 ) -> dict[str, Any]:
