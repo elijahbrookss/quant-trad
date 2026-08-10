@@ -53,6 +53,7 @@ test('collector action dialog requires an operator reason and sends the canonica
   const content = source(path.join('features', 'collectors', 'CollectorLensContent.jsx'))
   const room = source(path.join('v2', 'rooms', 'CollectorLensRoom.jsx'))
   assert.match(content, /Operator reason/)
+  assert.match(content, /health_probe: \{ label: 'Probe'/)
   assert.match(content, /disabled=\{busy \|\| !reason\.trim\(\)\}/)
   assert.match(room, /confirmation: `\$\{collectorKind\}:\$\{collectorId\}:\$\{action\}`/)
 })

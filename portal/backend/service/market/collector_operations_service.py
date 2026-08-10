@@ -426,7 +426,14 @@ class CollectorOperationsService:
                 "message": str(error) if error else None,
             },
             "capabilities": {
-                "actions": ["start", "stop", "restart", "pause", "resume"],
+                "actions": [
+                    "health_probe",
+                    "start",
+                    "stop",
+                    "restart",
+                    "pause",
+                    "resume",
+                ],
                 "recovery": False,
                 "historical_acquisition": bool(
                     dict(definition.get("config") or {}).get("historical_acquisition")
@@ -539,6 +546,7 @@ class CollectorOperationsService:
             },
             "capabilities": {
                 "actions": [
+                    "health_probe",
                     "start",
                     "stop",
                     "restart",

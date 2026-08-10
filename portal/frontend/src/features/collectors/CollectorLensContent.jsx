@@ -13,6 +13,7 @@ const TABS = [
 ]
 
 const ACTIONS = {
+  health_probe: { label: 'Probe', Icon: Stethoscope, probe: true },
   start: { label: 'Start', Icon: Play },
   stop: { label: 'Stop', Icon: Square, disruptive: true },
   restart: { label: 'Restart', Icon: RotateCcw, disruptive: true },
@@ -128,7 +129,8 @@ export function CollectorLensContent({ detail, diagnostics, events, gaps, diagno
   return <>
     <header className="qt2-collector-lens-head"><div><span>Market-data collector</span><div><h1>{subjects.map((subject) => subject.provider_product_id || subject.symbol || subject.instrument_id).filter(Boolean).join(', ') || collector.collector_id}</h1><Badge value={collector.actual_state} /></div><p>{collector.provider} · {collector.collector_kind.replaceAll('_', ' ')} · {schemas.map((schema) => schema.fact_type).join(', ')}</p></div><div><button type="button" className="qt2-button" onClick={onRefresh}><RefreshCcw size={14} />Refresh</button><button type="button" className="qt2-button" onClick={onClose}><X size={14} />Exit</button></div></header>
     <div className="qt2-collector-state-strip"><p>{COLLECTOR_STATE_COPY[collector.actual_state] || 'Lifecycle explanation unavailable.'}</p><span>desired {collector.desired_state} · configured {collector.configured_state}</span></div>
-    <div className="qt2-collector-actions" aria-label="Safe collector actions"><button type="button" onClick={onRunDiagnostics}><Stethoscope size={14} />Diagnose</button>{allowedActions.map((action) => { const spec = ACTIONS[action]; if (!spec) return null; const Icon = spec.Icon; return <button type="button" key={action} onClick={() => setPendingAction(action)} disabled={actionBusy}><Icon size={14} />{spec.label}</button> })}</div>
+    <div className="qt2-collector-actions" aria-label="Safe collector actions"><button type="button" onClick={onRunDiagnostics}><Stethoscope size={14} />Diagnose</button>{allowedActions.map((action) => { const spec = ACTIONS[action]; if (!spec) return null; const Icon = spec.Icon; return <button type="button" key={action} onClick={() => spec.probe ? onAction(action, 'operator health probe') : setPendingAction(action)} disabled={actionBusy}><Icon size={14} />{spec.label}</button> })}</div>
+    {actionError && !pendingAction ? <div className="qt2-collector-action-error"><OperatorErrorNotice error={actionError} compact /></div> : null}
     <nav className="qt2-lens-tabs" aria-label="Collector evidence sections">{TABS.map(([id, label]) => <button type="button" key={id} className={activeTab === id ? 'is-active' : ''} onClick={() => setActiveTab(id)}>{label}</button>)}</nav>
     <div className="qt2-collector-lens-body">
       {activeTab === 'runtime' ? <RuntimeTab collector={collector} /> : null}

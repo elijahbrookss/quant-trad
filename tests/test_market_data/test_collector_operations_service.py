@@ -187,6 +187,11 @@ def test_fleet_snapshot_projects_both_collector_families_without_provider_ui_log
         "market.trade_flow_feature",
     }
     assert stream["runtime"]["restart_count"] == 1
+    assert "health_probe" in stream["capabilities"]["actions"]
+    assert all(
+        "health_probe" in item["capabilities"]["actions"]
+        for item in snapshot["collectors"]
+    )
 
 
 def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():

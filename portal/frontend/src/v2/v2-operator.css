@@ -1286,6 +1286,7 @@
 .qt2-collector-actions button { display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid rgba(240, 236, 227, 0.09); border-radius: 0.25rem; background: rgba(240, 236, 227, 0.025); padding: 0.35rem 0.52rem; color: #b8b4aa; font-size: 0.58rem; }
 .qt2-collector-actions button:hover { border-color: rgba(184, 153, 90, 0.35); color: #e0d7c3; }
 .qt2-collector-actions button:disabled { cursor: not-allowed; opacity: 0.45; }
+.qt2-collector-action-error { border-bottom: 1px solid rgba(240, 236, 227, 0.055); padding: 0.45rem 1rem; }
 .qt2-collector-lens-body { min-height: 0; flex: 1; overflow: auto; padding: 0.9rem 1rem 1rem; }
 .qt2-collector-panel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.7rem; }
 .qt2-collector-panel { min-width: 0; overflow: hidden; border: 1px solid rgba(240, 236, 227, 0.08); border-radius: 0.48rem; background: rgba(7, 10, 14, 0.16); }
