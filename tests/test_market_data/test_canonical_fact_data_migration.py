@@ -13,6 +13,7 @@ from market_data.contracts import (
     OpenInterestFact,
     SourceIdentity,
 )
+from market_data.order_book import BookSourcePosition, L2EventFact, L2Mutation
 from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
 
 
@@ -347,3 +348,134 @@ def test_trade_flow_migration_preserves_material_and_quality_semantics() -> None
         "canonicalization_complete": True,
         "late_trade_count": 0,
     }
+
+
+def _l2_row(*, event_type: str) -> tuple[dict[str, object], L2EventFact]:
+    position = BookSourcePosition(
+        definition_id="stream-fixture",
+        session_id="session-fixture",
+        connection_epoch=1,
+        provider_product_id="BTC-USD",
+        provider_sequence_num=101,
+        receive_ordinal=7,
+        event_ordinal=0,
+    )
+    quantities = (Decimal("1.25"), Decimal("0"))
+    sides = ("bid", "ask")
+    mutations = tuple(
+        L2Mutation(
+            mutation_ordinal=ordinal,
+            side=side,
+            price=Decimal("118000") + ordinal,
+            new_quantity=quantities[ordinal],
+            provider_event_time=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+            provider_size_unit="base",
+        )
+        for ordinal, side in enumerate(sides)
+    )
+    event = L2EventFact(
+        event_type=event_type,
+        position=position,
+        product_definition_version_id="pdv_fixture",
+        mutations=mutations,
+        provider_message_time=datetime(2026, 8, 9, 12, 0, tzinfo=_UTC),
+        received_at=datetime(2026, 8, 9, 12, 0, 1, tzinfo=_UTC),
+        accepted_at=datetime(2026, 8, 9, 12, 0, 2, tzinfo=_UTC),
+        known_at=datetime(2026, 8, 9, 12, 0, 2, tzinfo=_UTC),
+        raw_record_id="raw-l2-fixture",
+    )
+    row: dict[str, object] = {
+        "id": f"l2-{event_type}-fixture",
+        "series_id": 21,
+        "revision": 1,
+        "market_commit_seq": 32,
+        "ingestion_run_id": None,
+        "definition_id": position.definition_id,
+        "session_id": position.session_id,
+        "connection_epoch": position.connection_epoch,
+        "provider_product_id": position.provider_product_id,
+        "product_definition_version_id": event.product_definition_version_id,
+        "provider_sequence_num": position.provider_sequence_num,
+        "receive_ordinal": position.receive_ordinal,
+        "event_ordinal": position.event_ordinal,
+        "effective_at": event.effective_at,
+        "provider_message_time": event.provider_message_time,
+        "received_at": event.received_at,
+        "accepted_at": event.accepted_at,
+        "known_at": event.known_at,
+        "event_material_hash": event.material_hash,
+        "raw_record_id": event.raw_record_id,
+        "validity_interval_id": "validity-fixture",
+        "provenance_hash": "e" * 64,
+        "quality": {"gap": False},
+        "entries": [
+            {
+                "ordinal": mutation.mutation_ordinal,
+                "side": mutation.side.value,
+                "price": str(mutation.price),
+                "quantity": str(mutation.new_quantity),
+                "provider_size_unit": mutation.provider_size_unit.value,
+                "provider_event_time": mutation.provider_event_time,
+            }
+            for mutation in mutations
+        ],
+        **_source_columns(),
+    }
+    return row, event
+
+
+def test_l2_migration_preserves_atomic_snapshot_and_mutation_entries() -> None:
+    snapshot_row, snapshot_event = _l2_row(event_type="snapshot")
+    snapshot_row["entries"][1]["quantity"] = "2.5"  # type: ignore[index]
+    snapshot_event = L2EventFact(
+        event_type="snapshot",
+        position=snapshot_event.position,
+        product_definition_version_id=snapshot_event.product_definition_version_id,
+        mutations=(
+            snapshot_event.mutations[0],
+            L2Mutation(
+                mutation_ordinal=1,
+                side="ask",
+                price=Decimal("118001"),
+                new_quantity=Decimal("2.5"),
+                provider_event_time=snapshot_event.effective_at,
+                provider_size_unit="base",
+            ),
+        ),
+        provider_message_time=snapshot_event.provider_message_time,
+        received_at=snapshot_event.received_at,
+        accepted_at=snapshot_event.accepted_at,
+        known_at=snapshot_event.known_at,
+        raw_record_id=snapshot_event.raw_record_id,
+    )
+    snapshot_row["event_material_hash"] = snapshot_event.material_hash
+    snapshot_row["level_count"] = 2
+    snapshot_row["state_hash"] = "f" * 64
+
+    snapshot = _MIGRATION["_l2_snapshot"](snapshot_row)
+
+    snapshot_payload = json.loads(str(snapshot.values["payload"]))
+    assert snapshot.values["payload_schema_id"] == "market.l2_book.v1"
+    assert snapshot_payload["event_type"] == "snapshot"
+    assert snapshot_payload["entry_count"] == 2
+    assert snapshot_payload["entries"][1]["quantity"] == "2.5"
+    assert snapshot.values["external_event_component_key"] == snapshot_row["id"]
+
+    mutation_row, mutation_event = _l2_row(event_type="update")
+    mutation_row.update(
+        {
+            "mutation_count": 2,
+            "before_state_hash": "1" * 64,
+            "after_state_hash": "2" * 64,
+            "unknown_zero_delete_count": 1,
+        }
+    )
+    assert mutation_row["event_material_hash"] == mutation_event.material_hash
+
+    mutation = _MIGRATION["_l2_mutation"](mutation_row)
+
+    mutation_payload = json.loads(str(mutation.values["payload"]))
+    assert mutation_payload["event_type"] == "update"
+    assert mutation_payload["before_state_hash"] == "1" * 64
+    assert mutation_payload["entries"][1]["quantity"] == "0"
+    assert mutation_payload["unknown_zero_delete_count"] == 1

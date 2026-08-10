@@ -1,9 +1,9 @@
 # Canonical Fact Migration Validation
 
-Status: core facts plus canonical trades and trade-flow aggregates validated on
-the protected backup; remaining L2/derived structured families,
-dataset-hash equivalence, final runtime cutover, and legacy removal remain
-pending.
+Status: core facts, trades, trade-flow aggregates, and Level 2 snapshots and
+mutations validated on protected backup restores. Remaining derived structured
+families, dataset-hash equivalence, final runtime cutover, and legacy removal
+remain pending.
 
 ## Validation target
 
@@ -117,11 +117,50 @@ IDs. The source `quanttrad` database was queried separately after validation
 and remained unchanged. The disposable database occupied 2,722 MB before it
 was dropped.
 
+## Level 2 transformation proof
+
+The protected backup was restored again into the isolated database
+`qt_canonical_l2_validate_20260809`. Its Level 2 source counts matched the
+recorded boundary exactly:
+
+| Source relation | Rows |
+| --- | ---: |
+| `market.l2_snapshot_versions` | 25 |
+| `market.l2_snapshot_levels` | 941,816 |
+| `market.l2_mutation_batches` | 1,043 |
+| `market.l2_mutations` | 11,244 |
+
+The migration completed a validation-only pass, a write-and-full-column-
+comparison pass, and a second execute pass with `inserted_rows=0`. Independent
+SQL then proved 1,068 canonical parent rows, 1,068 distinct IDs and observation
+keys, 941,816 strict snapshot entries, and 11,244 strict mutation entries.
+`jsonb_array_length(entries)` matched every parent `entry_count`. Parent commit
+sequence, external/platform clocks, state hashes, event hashes, validity IDs,
+raw-record IDs, source positions, and entry counts produced zero mismatches.
+
+Snapshots preserve the complete canonical book state in deterministic
+bid-then-ask price order. Their retained provider-event material hash remains
+separate evidence because the historical child table intentionally stored book
+order rather than provider delivery order. Mutation batches retain and verify
+their original mutation ordinal and event material hash exactly. This does not
+claim that sorted snapshot state can recreate provider delivery order; the raw
+archive reference remains authoritative for that evidence.
+
+Two of 1,043 mutation batches had provider event timestamps ahead of QT
+`known_at`, with maximum skew 945.058 ms. All retained rows satisfied
+`accepted_at >= received_at` and receipt-based `known_at >= accepted_at`.
+Canonical validation therefore keeps those platform causal constraints while
+allowing external clocks to lead QT's clock. No clock was rewritten.
+
+The restored database was 2,099,860,271 bytes after the L2-only canonical
+write; `market.fact_versions` occupied 37,257,216 bytes. This target remains
+disposable and does not alter source `quanttrad`.
+
 ## Boundary
 
-This checkpoint proves the four active core Fact families plus canonical trades
-and trade-flow aggregates can be migrated losslessly. It does not authorize
-deletion of the old relations. The remaining cutover validator must also
-reproduce frozen Dataset hashes, Check/Observation links, gaps/quality
-evidence, L2 book facts, and every retained derived market-state family before
-legacy removal.
+This checkpoint proves the four active core Fact families plus canonical
+trades, trade-flow aggregates, and atomic Level 2 book facts can be migrated
+without discarding retained semantics. It does not authorize deletion of the
+old relations. The remaining cutover validator must also reproduce frozen
+Dataset hashes, Check/Observation links, gaps/quality evidence, and every
+retained derived market-state family before legacy removal.

@@ -173,14 +173,6 @@ class CanonicalFact:
             if self.received_at is not None
             else None
         )
-        if known_at < observation_time:
-            raise ValueError(
-                "canonical_fact_invalid: known_at precedes observation_time"
-            )
-        if source_published_at is not None and known_at < source_published_at:
-            raise ValueError(
-                "canonical_fact_invalid: known_at precedes source publication"
-            )
         if received_at is not None and accepted_at < received_at:
             raise ValueError(
                 "canonical_fact_invalid: accepted_at precedes received_at"

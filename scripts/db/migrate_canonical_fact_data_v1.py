@@ -20,6 +20,8 @@ from sqlalchemy import create_engine, text
 
 from market_data.canonical import CanonicalFact, build_fact_version_id
 from market_data.canonical_adapters import (
+    canonicalize_l2_mutation_batch,
+    canonicalize_l2_snapshot,
     canonicalize_market_trade,
     canonicalize_trade_flow,
 )
@@ -32,6 +34,13 @@ from market_data.contracts import (
     SourceIdentity,
 )
 from market_data.structure import MarketTradeFact, TradeFlowAggregateFact
+from market_data.order_book import (
+    BookSourcePosition,
+    L2EventFact,
+    L2Mutation,
+    L2MutationBatchFact,
+    L2SnapshotFact,
+)
 
 
 _ADVISORY_LOCK_ID = 9_021_011
@@ -488,6 +497,129 @@ def _trade_flow(row: Mapping[str, Any]) -> MigrationRow:
     )
 
 
+def _l2_event(
+    row: Mapping[str, Any],
+    *,
+    event_type: str,
+) -> L2EventFact:
+    entries = tuple(
+        L2Mutation(
+            mutation_ordinal=int(entry["ordinal"]),
+            side=str(entry["side"]),
+            price=str(entry["price"]),
+            new_quantity=str(entry["quantity"]),
+            provider_event_time=entry["provider_event_time"],
+            provider_size_unit=str(entry["provider_size_unit"]),
+        )
+        for entry in list(row["entries"] or [])
+    )
+    event = L2EventFact(
+        event_type=event_type,
+        position=BookSourcePosition(
+            definition_id=str(row["definition_id"]),
+            session_id=str(row["session_id"]),
+            connection_epoch=int(row["connection_epoch"]),
+            provider_product_id=str(row["provider_product_id"]),
+            provider_sequence_num=row["provider_sequence_num"],
+            receive_ordinal=int(row["receive_ordinal"]),
+            event_ordinal=int(row["event_ordinal"]),
+        ),
+        product_definition_version_id=str(
+            row["product_definition_version_id"]
+        ),
+        mutations=entries,
+        provider_message_time=row["provider_message_time"],
+        received_at=row["received_at"],
+        accepted_at=row["accepted_at"],
+        known_at=row["known_at"],
+        raw_record_id=str(row["raw_record_id"]),
+    )
+    expected_count = int(
+        row["level_count"]
+        if event_type == "snapshot"
+        else row["mutation_count"]
+    )
+    if (
+        len(entries) != expected_count
+        or event.effective_at != row["effective_at"]
+        or (
+            event_type == "update"
+            and event.material_hash != str(row["event_material_hash"])
+        )
+    ):
+        raise RuntimeError(
+            "canonical_fact_migration_source_hash_mismatch: "
+            f"family=l2_{event_type} series_id={row['series_id']} "
+            f"event_id={row['id']}"
+        )
+    return event
+
+
+def _l2_snapshot(row: Mapping[str, Any]) -> MigrationRow:
+    event = _l2_event(row, event_type="snapshot")
+    bids = tuple(
+        (mutation.price, mutation.new_quantity)
+        for mutation in event.mutations
+        if mutation.side.value == "bid"
+    )
+    asks = tuple(
+        (mutation.price, mutation.new_quantity)
+        for mutation in event.mutations
+        if mutation.side.value == "ask"
+    )
+    legacy = L2SnapshotFact(
+        snapshot_id=str(row["id"]),
+        series_id=int(row["series_id"]),
+        event=event,
+        validity_interval_id=str(row["validity_interval_id"]),
+        state_hash=str(row["state_hash"]),
+        bids=bids,
+        asks=asks,
+    )
+    canonical = canonicalize_l2_snapshot(
+        legacy,
+        source=_source(row),
+        provenance=_migration_provenance(
+            row,
+            source_table="market.l2_snapshot_versions",
+            extra={
+                "legacy_version_id": str(row["id"]),
+                "legacy_provenance_hash": str(row["provenance_hash"]),
+            },
+        ),
+        quality=dict(row["quality"] or {}),
+        retained_event_material_hash=str(row["event_material_hash"]),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
+def _l2_mutation(row: Mapping[str, Any]) -> MigrationRow:
+    event = _l2_event(row, event_type="update")
+    legacy = L2MutationBatchFact(
+        batch_id=str(row["id"]),
+        series_id=int(row["series_id"]),
+        event=event,
+        validity_interval_id=str(row["validity_interval_id"]),
+        before_state_hash=str(row["before_state_hash"]),
+        after_state_hash=str(row["after_state_hash"]),
+        unknown_zero_delete_count=int(row["unknown_zero_delete_count"]),
+    )
+    canonical = canonicalize_l2_mutation_batch(
+        legacy,
+        source=_source(row),
+        provenance=_migration_provenance(
+            row,
+            source_table="market.l2_mutation_batches",
+            extra={
+                "legacy_version_id": str(row["id"]),
+                "legacy_provenance_hash": str(row["provenance_hash"]),
+            },
+        ),
+        quality=dict(row["quality"] or {}),
+    )
+    return _canonical_values(row=row, fact=canonical)
+
+
 _SOURCE_JOIN = """
     JOIN market.ingestion_runs AS ingestion
       ON ingestion.id = fact.ingestion_run_id
@@ -566,6 +698,62 @@ _FAMILIES = (
         "JOIN market.sources AS source ON source.id = origin.source_id "
         "ORDER BY fact.series_id, fact.bucket_start, fact.revision",
         _trade_flow,
+    ),
+    MigrationFamily(
+        "l2_snapshot",
+        "market.l2_snapshot_versions",
+        f"SELECT fact.*, 1 AS revision, stream.source_id, "
+        f"{_SOURCE_IDENTITY_COLUMNS}, NULL::text AS ingestion_run_id, "
+        "children.entries "
+        "FROM market.l2_snapshot_versions AS fact "
+        "JOIN market.stream_definitions AS stream "
+        "  ON stream.id = fact.definition_id "
+        "JOIN market.sources AS source ON source.id = stream.source_id "
+        "JOIN LATERAL ("
+        "    SELECT jsonb_agg("
+        "        jsonb_build_object("
+        "            'ordinal', level.level_ordinal, "
+        "            'side', level.side, "
+        "            'price', level.price::text, "
+        "            'quantity', level.quantity::text, "
+        "            'provider_size_unit', level.provider_size_unit, "
+        "            'provider_event_time', level.provider_event_time"
+        "        ) ORDER BY level.level_ordinal"
+        "    ) AS entries "
+        "    FROM market.l2_snapshot_levels AS level "
+        "    WHERE level.snapshot_version_id = fact.id "
+        "      AND level.snapshot_effective_at = fact.effective_at"
+        ") AS children ON children.entries IS NOT NULL "
+        "ORDER BY fact.series_id, fact.effective_at, fact.id",
+        _l2_snapshot,
+    ),
+    MigrationFamily(
+        "l2_mutation",
+        "market.l2_mutation_batches",
+        f"SELECT fact.*, 1 AS revision, stream.source_id, "
+        f"{_SOURCE_IDENTITY_COLUMNS}, NULL::text AS ingestion_run_id, "
+        "children.entries "
+        "FROM market.l2_mutation_batches AS fact "
+        "JOIN market.stream_definitions AS stream "
+        "  ON stream.id = fact.definition_id "
+        "JOIN market.sources AS source ON source.id = stream.source_id "
+        "JOIN LATERAL ("
+        "    SELECT jsonb_agg("
+        "        jsonb_build_object("
+        "            'ordinal', mutation.mutation_ordinal, "
+        "            'side', mutation.side, "
+        "            'price', mutation.price::text, "
+        "            'quantity', mutation.new_quantity::text, "
+        "            'provider_size_unit', mutation.provider_size_unit, "
+        "            'provider_event_time', mutation.provider_event_time"
+        "        ) ORDER BY mutation.mutation_ordinal"
+        "    ) AS entries "
+        "    FROM market.l2_mutations AS mutation "
+        "    WHERE mutation.batch_id = fact.id "
+        "      AND mutation.batch_effective_at = fact.effective_at"
+        ") AS children ON children.entries IS NOT NULL "
+        "ORDER BY fact.series_id, fact.effective_at, fact.id",
+        _l2_mutation,
     ),
 )
 
@@ -760,6 +948,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="write and commit canonical rows; default is validation-only",
     )
+    parser.add_argument(
+        "--family",
+        action="append",
+        choices=tuple(family.name for family in _FAMILIES),
+        help="validate or migrate only the named family; repeat as needed",
+    )
     return parser.parse_args()
 
 
@@ -773,7 +967,13 @@ def main() -> int:
     try:
         with engine.begin() as conn:
             _assert_boundary(conn, execute=bool(args.execute))
-            for family in _FAMILIES:
+            selected = set(args.family or ())
+            families = tuple(
+                family
+                for family in _FAMILIES
+                if not selected or family.name in selected
+            )
+            for family in families:
                 report = _migrate_family(conn, family, execute=bool(args.execute))
                 reports.append(report)
                 print(

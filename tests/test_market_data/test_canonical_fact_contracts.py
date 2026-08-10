@@ -252,8 +252,12 @@ def test_provider_identity_changes_provenance_not_canonical_payload_meaning() ->
 def test_canonical_envelope_enforces_schema_and_causal_clocks() -> None:
     with pytest.raises(ValueError, match="fact type and payload schema disagree"):
         _funding_fact(fact_type="market.reference_price")
-    with pytest.raises(ValueError, match="known_at precedes observation_time"):
-        _funding_fact(known_at=_BASE - timedelta(seconds=1))
+    clock_skewed = _funding_fact(
+        observation_time=_BASE + timedelta(seconds=3),
+        source_published_at=_BASE + timedelta(seconds=3),
+    )
+    assert clock_skewed.known_at < clock_skewed.observation_time
+    assert clock_skewed.known_at < clock_skewed.source_published_at
     with pytest.raises(ValueError, match="accepted_at precedes received_at"):
         _funding_fact(
             received_at=_BASE + timedelta(seconds=2),

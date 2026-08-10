@@ -7,6 +7,11 @@ from typing import Any
 
 from .canonical import CanonicalFact, CanonicalFactRecord
 from .contracts import SourceIdentity
+from .order_book import (
+    BOOK_RECONSTRUCTION_VERSION,
+    L2MutationBatchFact,
+    L2SnapshotFact,
+)
 from .structure import (
     MarketTradeFact,
     MarketTradeRecord,
@@ -192,6 +197,218 @@ def canonicalize_trade_flow(
     return canonical
 
 
+def _l2_observation_key(fact: L2SnapshotFact | L2MutationBatchFact) -> str:
+    position = fact.event.position
+    return (
+        f"{position.definition_id}:{position.session_id}:"
+        f"{position.connection_epoch}:{position.receive_ordinal}:"
+        f"{position.event_ordinal}"
+    )
+
+
+def _l2_provenance(
+    fact: L2SnapshotFact | L2MutationBatchFact,
+    *,
+    provenance: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    canonical_provenance = dict(provenance or {})
+    if "_qt_l2_evidence" in canonical_provenance:
+        raise ValueError("market_l2_canonicalization_invalid: reserved provenance key")
+    position = fact.event.position
+    canonical_provenance["_qt_l2_evidence"] = {
+        "definition_id": position.definition_id,
+        "session_id": position.session_id,
+        "connection_epoch": position.connection_epoch,
+        "provider_product_id": position.provider_product_id,
+        "provider_sequence_num": position.provider_sequence_num,
+        "receive_ordinal": position.receive_ordinal,
+        "event_ordinal": position.event_ordinal,
+        "raw_record_id": fact.event.raw_record_id,
+    }
+    return canonical_provenance
+
+
+def _l2_entries(
+    fact: L2SnapshotFact | L2MutationBatchFact,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "ordinal": mutation.mutation_ordinal,
+            "side": mutation.side.value,
+            "price": mutation.price,
+            "quantity": mutation.new_quantity,
+            "provider_size_unit": mutation.provider_size_unit.value,
+            "provider_event_time": mutation.provider_event_time,
+        }
+        for mutation in fact.event.mutations
+    ]
+
+
+def _l2_snapshot_entries(fact: L2SnapshotFact) -> list[dict[str, Any]]:
+    mutation_by_level = {
+        (mutation.side.value, mutation.price): mutation
+        for mutation in fact.event.mutations
+    }
+    entries: list[dict[str, Any]] = []
+    for side, levels in (("bid", fact.bids), ("ask", fact.asks)):
+        for price, quantity in levels:
+            mutation = mutation_by_level[(side, price)]
+            entries.append(
+                {
+                    "ordinal": len(entries),
+                    "side": side,
+                    "price": price,
+                    "quantity": quantity,
+                    "provider_size_unit": mutation.provider_size_unit.value,
+                    "provider_event_time": mutation.provider_event_time,
+                }
+            )
+    return entries
+
+
+def _retained_hash(value: str, *, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError(
+            f"market_l2_canonicalization_invalid: {field} must be sha256"
+        )
+    return normalized
+
+
+def canonicalize_l2_snapshot(
+    fact: L2SnapshotFact,
+    *,
+    source: SourceIdentity,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+    retained_event_material_hash: str | None = None,
+) -> CanonicalFact:
+    """Keep one complete Level 2 snapshot as one strict atomic Fact."""
+
+    if fact.event.event_type.value != "snapshot":
+        raise ValueError(
+            "market_l2_snapshot_canonicalization_invalid: event type mismatch"
+        )
+    expected_levels = {
+        (side, price): quantity
+        for side, levels in (("bid", fact.bids), ("ask", fact.asks))
+        for price, quantity in levels
+    }
+    mutation_levels = {
+        (mutation.side.value, mutation.price): mutation.new_quantity
+        for mutation in fact.event.mutations
+    }
+    if (
+        expected_levels != mutation_levels
+        or len(mutation_levels) != len(fact.event.mutations)
+        or any(quantity <= 0 for quantity in mutation_levels.values())
+    ):
+        raise RuntimeError(
+            "market_l2_snapshot_canonicalization_corrupt: snapshot entries "
+            f"disagree snapshot_id={fact.snapshot_id}"
+        )
+    event_material_hash = (
+        _retained_hash(
+            retained_event_material_hash,
+            field="retained_event_material_hash",
+        )
+        if retained_event_material_hash is not None
+        else fact.event.material_hash
+    )
+    entries = _l2_snapshot_entries(fact)
+    return CanonicalFact(
+        fact_type="market.l2_book",
+        payload_schema_id="market.l2_book.v1",
+        observation_key=_l2_observation_key(fact),
+        observation_time=fact.event.effective_at,
+        observation_time_method="provider_event_time_max",
+        source_published_at=fact.event.provider_message_time,
+        received_at=fact.event.received_at,
+        accepted_at=fact.event.accepted_at,
+        known_at=fact.event.known_at,
+        known_at_method="platform_acceptance",
+        source=source,
+        transformation_id="market.l2_snapshot.canonicalization.v1",
+        external_event_key=(
+            str(fact.event.position.provider_sequence_num)
+            if fact.event.position.provider_sequence_num is not None
+            else fact.event.raw_record_id
+        ),
+        external_event_group_key=fact.event.position.provider_product_id,
+        external_event_component_key=fact.snapshot_id,
+        payload={
+            "event_type": "snapshot",
+            "product_definition_version_id": (
+                fact.event.product_definition_version_id
+            ),
+            "validity_interval_id": fact.validity_interval_id,
+            "reconstruction_version": BOOK_RECONSTRUCTION_VERSION,
+            "before_state_hash": None,
+            "after_state_hash": fact.state_hash,
+            "event_material_hash": event_material_hash,
+            "entry_count": len(entries),
+            "unknown_zero_delete_count": 0,
+            "entries": entries,
+        },
+        provenance=_l2_provenance(fact, provenance=provenance),
+        quality=dict(quality or {}),
+    )
+
+
+def canonicalize_l2_mutation_batch(
+    fact: L2MutationBatchFact,
+    *,
+    source: SourceIdentity,
+    provenance: Mapping[str, Any] | None = None,
+    quality: Mapping[str, Any] | None = None,
+) -> CanonicalFact:
+    """Keep one ordered absolute-update event as one strict atomic Fact."""
+
+    if fact.event.event_type.value != "update":
+        raise ValueError(
+            "market_l2_mutation_canonicalization_invalid: event type mismatch"
+        )
+    return CanonicalFact(
+        fact_type="market.l2_book",
+        payload_schema_id="market.l2_book.v1",
+        observation_key=_l2_observation_key(fact),
+        observation_time=fact.event.effective_at,
+        observation_time_method="provider_event_time_max",
+        source_published_at=fact.event.provider_message_time,
+        received_at=fact.event.received_at,
+        accepted_at=fact.event.accepted_at,
+        known_at=fact.event.known_at,
+        known_at_method="platform_acceptance",
+        source=source,
+        transformation_id="market.l2_mutation.canonicalization.v1",
+        external_event_key=(
+            str(fact.event.position.provider_sequence_num)
+            if fact.event.position.provider_sequence_num is not None
+            else fact.event.raw_record_id
+        ),
+        external_event_group_key=fact.event.position.provider_product_id,
+        external_event_component_key=fact.batch_id,
+        payload={
+            "event_type": "update",
+            "product_definition_version_id": (
+                fact.event.product_definition_version_id
+            ),
+            "validity_interval_id": fact.validity_interval_id,
+            "reconstruction_version": BOOK_RECONSTRUCTION_VERSION,
+            "before_state_hash": fact.before_state_hash,
+            "after_state_hash": fact.after_state_hash,
+            "event_material_hash": fact.event.material_hash,
+            "entry_count": len(fact.event.mutations),
+            "unknown_zero_delete_count": fact.unknown_zero_delete_count,
+            "entries": _l2_entries(fact),
+        },
+        provenance=_l2_provenance(fact, provenance=provenance),
+        quality=dict(quality or {}),
+    )
+
+
 def decode_market_trade_record(record: CanonicalFactRecord) -> MarketTradeRecord:
     if record.fact.payload_schema_id != "market.trade.v1":
         raise ValueError(
@@ -336,6 +553,8 @@ def decode_trade_flow_record(
 
 
 __all__ = [
+    "canonicalize_l2_mutation_batch",
+    "canonicalize_l2_snapshot",
     "canonicalize_market_trade",
     "canonicalize_trade_flow",
     "decode_market_trade_record",

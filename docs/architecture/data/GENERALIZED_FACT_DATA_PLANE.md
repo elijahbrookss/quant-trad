@@ -199,6 +199,10 @@ finality/revision evidence, and the transformation applied.
 Known-at is never reconstructed from an unrelated payload time. Missing clocks
 remain missing with an explicit method/limitation. Funding time, attestation
 time, valuation time, and source publication remain separate semantic fields.
+Provider observation/publication clocks may lead QT's clock because of bounded
+clock skew. QT therefore enforces `accepted_at >= received_at` and receipt-based
+`known_at >= accepted_at`, but does not fabricate a causal ordering between an
+external clock and `known_at`; the original values and skew remain evidence.
 
 Gap evidence remains an append-only interval relation linked to series/source
 and detection watermark. Gaps are frozen beside facts. Absence is not encoded

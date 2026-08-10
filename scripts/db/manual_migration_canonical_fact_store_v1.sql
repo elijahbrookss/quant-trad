@@ -303,10 +303,6 @@ CREATE TABLE IF NOT EXISTS market.fact_versions (
     CONSTRAINT ck_market_fact_known_method CHECK (known_at_method <> ''),
     CONSTRAINT ck_market_fact_transformation CHECK (transformation_id <> ''),
     CONSTRAINT ck_market_fact_state CHECK (state IN ('active', 'invalidated')),
-    CONSTRAINT ck_market_fact_known_after_observation
-        CHECK (known_at >= observation_time),
-    CONSTRAINT ck_market_fact_known_after_publication
-        CHECK (source_published_at IS NULL OR known_at >= source_published_at),
     CONSTRAINT ck_market_fact_acceptance_after_receipt
         CHECK (received_at IS NULL OR accepted_at >= received_at),
     CONSTRAINT ck_market_fact_receipt_known_after_acceptance
@@ -337,6 +333,13 @@ CREATE TABLE IF NOT EXISTS market.fact_versions (
     CONSTRAINT ck_market_fact_row_hash
         CHECK (row_hash ~ '^[0-9a-f]{64}$')
 );
+
+-- Provider clocks can lead QT's clock. Causality is enforced on QT receipt,
+-- acceptance, and known-at clocks; it is not inferred from external clocks.
+ALTER TABLE market.fact_versions
+    DROP CONSTRAINT IF EXISTS ck_market_fact_known_after_observation;
+ALTER TABLE market.fact_versions
+    DROP CONSTRAINT IF EXISTS ck_market_fact_known_after_publication;
 
 CREATE INDEX IF NOT EXISTS ix_market_fact_series_time_revision
     ON market.fact_versions
