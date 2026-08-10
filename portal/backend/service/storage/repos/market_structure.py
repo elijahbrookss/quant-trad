@@ -387,12 +387,13 @@ class PostgresMarketStructureRepository:
                             id, identity_key, source_id, series_id, provider, venue,
                             provider_product_id, channels, auth_mode, contract_version,
                             enabled, max_spool_bytes,
-                            max_segment_bytes, generation, config
+                            max_segment_bytes, generation, desired_state, config
                         ) VALUES (
                             :id, :identity_key, :source_id, :series_id, :provider,
                             :venue, :product_id, CAST(:channels AS jsonb), :auth_mode,
                             :contract_version, :enabled,
-                            :max_spool_bytes, :max_segment_bytes, 1, CAST(:config AS jsonb)
+                            :max_spool_bytes, :max_segment_bytes, 1, :desired_state,
+                            CAST(:config AS jsonb)
                         )
                         """
                     ),
@@ -410,13 +411,14 @@ class PostgresMarketStructureRepository:
                         "enabled": insert_enabled,
                         "max_spool_bytes": spool_bytes,
                         "max_segment_bytes": segment_bytes,
+                        "desired_state": "running" if insert_enabled else "stopped",
                         "config": _json(config),
                     },
                 )
             else:
                 next_config = dict(config or {})
                 existing_config = dict(existing["config"] or {})
-                for operational_key in ("collector_runtime",):
+                for operational_key in ("runtime_policy",):
                     if (
                         operational_key in existing_config
                         and operational_key not in next_config
@@ -476,11 +478,19 @@ class PostgresMarketStructureRepository:
                     f"""
                     SELECT definitions.*, series.instrument_id,
                            series.fact_type AS series_fact_type,
+                           series.timeframe_seconds,
+                           sources.source_kind,
+                           sources.adapter_version,
+                           instruments.symbol AS instrument_symbol,
+                           instruments.instrument_type AS instrument_type,
                            leases.owner_id, leases.lease_generation,
                            leases.heartbeat_at, leases.expires_at,
                            CASE WHEN leases.expires_at > now() THEN true ELSE false END AS lease_current
                     FROM market.stream_definitions AS definitions
                     JOIN market.series AS series ON series.id = definitions.series_id
+                    JOIN market.sources AS sources ON sources.id = definitions.source_id
+                    JOIN portal_instruments AS instruments
+                      ON instruments.id = series.instrument_id
                     LEFT JOIN market.stream_lease_state AS leases
                       ON leases.definition_id = definitions.id
                     {predicate}
@@ -852,6 +862,10 @@ class PostgresMarketStructureRepository:
             if not bounded and not bool(definition["enabled"]):
                 raise ValueError(
                     "market_stream_not_enabled: continuous collection requires an enabled definition"
+                )
+            if not bounded and str(definition["desired_state"]) != "running":
+                raise ValueError(
+                    "market_stream_not_desired_running: continuous collection requires desired_state=running"
                 )
             if requested_session_id is not None:
                 resumable = session.execute(

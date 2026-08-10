@@ -438,13 +438,9 @@ class MarketStructureService:
                             str(key): value
                             for key, value in flow_feature_series_ids.items()
                         },
-                        "collector_runtime": {
-                            "schema_version": "market.collector_runtime.v2",
-                            "mode": "continuous" if enrollment.continuous else "stopped",
-                            "stop_at": None,
-                            "updated_by": "stream_enrollment_manifest",
-                            "reason": "declarative_enrollment",
-                        },
+                        "runtime_policy": ContinuousStreamPolicy.from_mapping(
+                            None
+                        ).to_dict(),
                     },
                 )
             )

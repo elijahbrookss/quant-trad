@@ -5,6 +5,9 @@ from market_data.collector_operations import (
     CollectorDiagnosticBoundary,
     CollectorKind,
 )
+from portal.backend.service.storage.repos.collector_operations import (
+    PostgresCollectorOperationsRepository,
+)
 
 
 def test_collector_lifecycle_vocabulary_is_closed_and_provider_neutral():
@@ -54,3 +57,51 @@ def test_collector_diagnostic_boundaries_stop_provider_logic_at_backend():
         "freshness",
         "gaps_recovery",
     }
+
+
+def test_collector_lifecycle_transitions_keep_configuration_code_owned():
+    transition = PostgresCollectorOperationsRepository._transition
+
+    target, force_generation, error = transition(
+        action=CollectorAction.START,
+        configured_enabled=True,
+        desired_state=CollectorDesiredState.STOPPED,
+    )
+    assert (target, force_generation, error) == (
+        CollectorDesiredState.RUNNING,
+        False,
+        None,
+    )
+
+    target, force_generation, error = transition(
+        action=CollectorAction.RESTART,
+        configured_enabled=True,
+        desired_state=CollectorDesiredState.RUNNING,
+    )
+    assert (target, force_generation, error) == (
+        CollectorDesiredState.RUNNING,
+        True,
+        None,
+    )
+
+    target, force_generation, error = transition(
+        action=CollectorAction.RESUME,
+        configured_enabled=False,
+        desired_state=CollectorDesiredState.PAUSED,
+    )
+    assert target == CollectorDesiredState.PAUSED
+    assert force_generation is False
+    assert error == "collector_configured_disabled"
+
+
+def test_collector_recovery_cannot_bypass_a_registered_capability_handler():
+    target, force_generation, error = (
+        PostgresCollectorOperationsRepository._transition(
+            action=CollectorAction.RECOVER,
+            configured_enabled=True,
+            desired_state=CollectorDesiredState.RUNNING,
+        )
+    )
+    assert target == CollectorDesiredState.RUNNING
+    assert force_generation is False
+    assert error == "collector_recovery_requires_capability_handler"

@@ -120,10 +120,12 @@ class PostgresMarketCollectionRepository:
                     """
                     INSERT INTO market.collection_definitions (
                         id, source_id, series_id, enabled, poll_interval_seconds,
-                        max_attempts, next_scheduled_at, available_at, config
+                        max_attempts, next_scheduled_at, available_at,
+                        desired_state, config
                     ) VALUES (
                         :id, :source_id, :series_id, :enabled, :interval,
-                        :max_attempts, :scheduled, :scheduled, CAST(:config AS jsonb)
+                        :max_attempts, :scheduled, :scheduled, :desired_state,
+                        CAST(:config AS jsonb)
                     )
                     ON CONFLICT (source_id, series_id) DO UPDATE
                     SET enabled = EXCLUDED.enabled,
@@ -142,6 +144,7 @@ class PostgresMarketCollectionRepository:
                     "interval": interval,
                     "max_attempts": attempts,
                     "scheduled": scheduled,
+                    "desired_state": "running" if enabled else "stopped",
                     "config": _json(config),
                 },
             ).mappings().one()
@@ -254,6 +257,7 @@ class PostgresMarketCollectionRepository:
                     JOIN market.sources AS sources ON sources.id = definitions.source_id
                     JOIN market.series AS series ON series.id = definitions.series_id
                     WHERE definitions.enabled IS TRUE
+                      AND definitions.desired_state = 'running'
                       AND (:definition_id IS NULL OR definitions.id = :definition_id)
                       AND definitions.next_scheduled_at <= :now
                       AND definitions.available_at <= :now

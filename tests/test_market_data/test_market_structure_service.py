@@ -119,14 +119,9 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
     for call in repository.definition_calls:
         assert set(call["config"]["aggregate_series_ids"]) == {"1", "60"}
         assert set(call["config"]["flow_feature_series_ids"]) == {"1", "60"}
-        runtime = call["config"]["collector_runtime"]
-        assert runtime == {
-            "schema_version": "market.collector_runtime.v2",
-            "mode": "continuous",
-            "stop_at": None,
-            "updated_by": "stream_enrollment_manifest",
-            "reason": "declarative_enrollment",
-        }
+        assert call["config"]["runtime_policy"]["lease_seconds"] == 90.0
+        assert call["config"]["runtime_policy"]["heartbeat_seconds"] == 10.0
+        assert "collector_runtime" not in call["config"]
     assert {
         key[1]
         for key in market_data_repository._series_ids

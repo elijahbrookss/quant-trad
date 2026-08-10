@@ -93,7 +93,7 @@ WHERE sources.id = definitions.source_id
 UPDATE market.stream_definitions AS definitions
 SET desired_state = CASE
         WHEN definitions.enabled
-         AND definitions.provider = 'coinbase'
+         AND upper(definitions.provider) = 'COINBASE'
          AND sources.adapter_version = 'coinbase_advanced_trade.market_trades.v1'
          AND jsonb_typeof(definitions.channels) = 'array'
          AND definitions.channels @> '["market_trades", "heartbeats"]'::jsonb

@@ -160,10 +160,7 @@ class ContinuousMarketStructureCollector:
                 "continuous_collector_adapter_unavailable: "
                 f"definition_id={definition_id} channels={definition['channels']}"
             )
-        runtime = dict(definition.get("config") or {}).get("collector_runtime")
-        policy_payload = (
-            dict(runtime).get("policy") if isinstance(runtime, Mapping) else None
-        )
+        policy_payload = dict(definition.get("config") or {}).get("runtime_policy")
         policy = ContinuousStreamPolicy.from_mapping(
             policy_payload if isinstance(policy_payload, Mapping) else None
         )
