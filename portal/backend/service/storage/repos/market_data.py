@@ -204,6 +204,7 @@ def _canonical_to_candle_record(row: Mapping[str, Any]) -> CandleRecord:
         source=record.fact.source,
         provenance=_source_provenance(record.fact),
         fact=fact,
+        canonical_material_hash=record.fact.material_hash,
     )
 
 
@@ -232,6 +233,7 @@ def _canonical_to_open_interest_record(
         source=record.fact.source,
         provenance=_source_provenance(record.fact),
         fact=fact,
+        canonical_material_hash=record.fact.material_hash,
     )
 
 
@@ -262,6 +264,7 @@ def _canonical_to_funding_rate_record(
         source=record.fact.source,
         provenance=_source_provenance(record.fact),
         fact=fact,
+        canonical_material_hash=record.fact.material_hash,
     )
 
 
@@ -313,6 +316,7 @@ def _canonical_to_numeric_record(row: Mapping[str, Any]) -> NumericFactRecord:
         source=record.fact.source,
         provenance=_source_provenance(record.fact),
         fact=fact,
+        canonical_material_hash=record.fact.material_hash,
     )
 
 
@@ -2234,7 +2238,6 @@ class PostgresMarketDataRepository:
             )
         return [_canonical_row_to_record(row) for row in rows]
 
-    @staticmethod
     def read_candles(
         self,
         *,
@@ -2257,7 +2260,6 @@ class PostgresMarketDataRepository:
             )
         return [_canonical_to_candle_record(row) for row in rows]
 
-    @staticmethod
     def read_open_interest(
         self,
         *,
@@ -2280,7 +2282,6 @@ class PostgresMarketDataRepository:
             )
         return [_canonical_to_open_interest_record(row) for row in rows]
 
-    @staticmethod
     def read_funding_rates(
         self,
         *,
@@ -2303,7 +2304,6 @@ class PostgresMarketDataRepository:
             )
         return [_canonical_to_funding_rate_record(row) for row in rows]
 
-    @staticmethod
     def read_numeric_facts(
         self,
         *,
