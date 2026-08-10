@@ -399,3 +399,21 @@ def test_stopped_collectors_have_no_health_claim_or_irrelevant_actions():
         desired_state=CollectorDesiredState.STOPPED,
         active=False,
     ) == ["health_probe", "start"]
+
+
+def test_disabled_registration_errors_remain_visible_without_false_attention():
+    collector = {
+        "configured_state": "disabled",
+        "desired_state": "stopped",
+        "actual_state": "DISABLED",
+        "registration_errors": ["adapter_not_registered"],
+        "error": {"active": False},
+    }
+
+    CollectorOperationsService._attach_operator_projection(collector)
+
+    assert collector["operational_state"] == "DISABLED"
+    assert collector["health_status"] == "NOT_APPLICABLE"
+    assert collector["needs_attention"] is False
+    assert collector["attention_reason"] is None
+    assert collector["registration_errors"] == ["adapter_not_registered"]

@@ -297,10 +297,10 @@ class CollectorOperationsService:
         operational_state = cls._operational_state(collector)
         health_status = cls._health_status(collector, operational_state)
         attention_reason = None
-        if collector.get("registration_errors"):
-            attention_reason = "registration_invalid"
-        elif operational_state == CollectorOperationalState.RUNNING:
-            if health_status == CollectorHealthStatus.FAILED:
+        if operational_state == CollectorOperationalState.RUNNING:
+            if collector.get("registration_errors"):
+                attention_reason = "registration_invalid"
+            elif health_status == CollectorHealthStatus.FAILED:
                 attention_reason = "acquisition_failed"
             elif health_status == CollectorHealthStatus.DELAYED:
                 attention_reason = "acquisition_delayed"
