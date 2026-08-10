@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,7 +12,9 @@ import pytest
 from data_providers.facts import (
     ProviderFundingRateSnapshot,
     ProviderOpenInterestSnapshot,
+    ProviderReserveStateSnapshot,
 )
+from data_providers.structured_facts import load_structured_fact_manifest
 from market_data.contracts import (
     FUNDING_RATE_FACT_TYPE,
     FUNDING_RATE_FACT_VERSION,
@@ -21,6 +26,14 @@ from portal.backend.service.storage.repos.market_collection import CollectionCla
 
 UTC = timezone.utc
 SCHEDULED = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+_ROOT = Path(__file__).resolve().parents[2]
+_STRUCTURED_MANIFEST = (
+    _ROOT
+    / "config"
+    / "market-data"
+    / "structured-facts"
+    / "chainlink-nxtassets-btc-etp-reserves.json"
+)
 
 
 def _claim(**changes: Any) -> CollectionClaim:
@@ -79,6 +92,7 @@ class _Store:
     def __init__(self) -> None:
         self.ingestions: list[dict[str, Any]] = []
         self.gaps: list[dict[str, Any]] = []
+        self.existing: list[Any] = []
 
     def ingest_open_interest(self, **kwargs: Any) -> IngestionOutcome:
         self.ingestions.append(dict(kwargs))
@@ -100,6 +114,27 @@ class _Store:
             corrected_count=0,
             noop_count=0,
             max_commit_seq=42,
+        )
+
+    def read_facts(self, **_kwargs: Any) -> list[Any]:
+        return list(self.existing)
+
+    def ingest_facts(self, **kwargs: Any) -> IngestionOutcome:
+        self.ingestions.append(dict(kwargs))
+        fact = list(kwargs["facts"])[0]
+        exists = any(
+            record.fact.observation_key == fact.observation_key
+            for record in self.existing
+        )
+        if not exists:
+            self.existing.append(SimpleNamespace(fact=fact))
+        return IngestionOutcome(
+            ingestion_run_id=str(kwargs["ingestion_run_id"]),
+            requested_count=1,
+            inserted_count=0 if exists else 1,
+            corrected_count=0,
+            noop_count=1 if exists else 0,
+            max_commit_seq=43,
         )
 
     def record_gap_evidence(self, **kwargs: Any) -> str:
@@ -166,7 +201,7 @@ def test_fact_history_is_bounded_and_uses_canonical_typed_store() -> None:
             super().__init__()
             self.reads = []
 
-        def read_open_interest(self, **kwargs: Any):
+        def read_facts(self, **kwargs: Any):
             self.reads.append(kwargs)
             return [
                 SimpleNamespace(
@@ -206,6 +241,158 @@ def test_fact_history_is_bounded_and_uses_canonical_typed_store() -> None:
     assert result["samples"][0]["fact"]["value"] == 42.0
     assert result["samples"][0]["source"]["provider"] == "COINBASE"
     assert store.reads[0]["start"] == SCHEDULED - timedelta(days=7)
+
+
+def test_structured_collector_appends_updates_and_reuses_identical_report() -> None:
+    binding = load_structured_fact_manifest(_STRUCTURED_MANIFEST).binding(
+        "nxtassets-btc-direct-etp-reserves"
+    )
+    observation_time = SCHEDULED - timedelta(hours=1)
+    snapshot = ProviderReserveStateSnapshot(
+        subject_id="DE000NXTA018",
+        report_id="DE000NXTA018",
+        reserve_asset="BTC",
+        reserve_quantity=Decimal("514.32323119"),
+        raw_reserve_quantity="51432323119",
+        observation_time=observation_time,
+        received_at=SCHEDULED + timedelta(seconds=2),
+        response_hash="c" * 64,
+        source_path="evm://42161/proxy/latestBundle",
+        source_event_key="feed:report:bundle",
+        metadata={
+            "age_seconds_at_receipt": 3602,
+            "bundle": "0x1234",
+            "confirmed_head_block": 9980,
+        },
+    )
+
+    class Provider:
+        def fetch_reserve_state(self, actual_binding):
+            assert actual_binding == binding
+            return snapshot
+
+    config = {
+        "adapter": binding.adapter,
+        "manifest_hash": binding.manifest_hash,
+        "structured_binding": asdict(binding),
+        "minimum_spacing_seconds": 1.0,
+        "retry_base_seconds": 2.0,
+    }
+    claim = _claim(
+        poll_interval_seconds=3600,
+        provider="CHAINLINK",
+        venue="ARBITRUM_MAINNET",
+        source_kind="public_evm_contract",
+        adapter_version=binding.adapter,
+        instrument_id=binding.instrument_id,
+        fact_type="asset.reserve_state",
+        contract_version="asset.reserve_state.v1",
+        config=config,
+    )
+    repo = _CollectionRepo()
+    store = _Store()
+    service = MarketDataCollectorService(
+        collection_repo=repo,
+        store=store,
+        structured_provider_builder=lambda actual_binding: Provider(),
+        clock=lambda: SCHEDULED + timedelta(seconds=3),
+        sleeper=lambda _seconds: None,
+    )
+
+    first = service.collect(claim)
+    second = service.collect(
+        _claim(
+            attempt_id="mca_test_second",
+            scheduled_for=SCHEDULED + timedelta(hours=1),
+            lease_expires_at=SCHEDULED + timedelta(hours=1, seconds=90),
+            poll_interval_seconds=3600,
+            provider="CHAINLINK",
+            venue="ARBITRUM_MAINNET",
+            source_kind="public_evm_contract",
+            adapter_version=binding.adapter,
+            instrument_id=binding.instrument_id,
+            fact_type="asset.reserve_state",
+            contract_version="asset.reserve_state.v1",
+            config=config,
+        )
+    )
+
+    first_fact = store.ingestions[0]["facts"][0]
+    second_fact = store.ingestions[1]["facts"][0]
+    assert first["outcome"]["inserted_count"] == 1
+    assert second["outcome"]["noop_count"] == 1
+    assert first_fact is second_fact
+    assert first_fact.payload == {
+        "report_id": "DE000NXTA018",
+        "reserve_asset": "BTC",
+        "reserve_quantity": "514.32323119",
+        "unit": "BTC",
+    }
+    assert first_fact.known_at == SCHEDULED + timedelta(seconds=3)
+    assert first_fact.observation_time == observation_time
+    assert first_fact.provenance["provider_observation"]["bundle"] == "0x1234"
+    assert store.ingestions[0]["allow_corrections"] is False
+    assert store.ingestions[0]["collection_fence"] == claim.fence()
+
+
+def test_structured_definition_is_manifest_bound_and_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class DefinitionRepo:
+        def upsert_definition(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {
+                "id": kwargs["definition_id"],
+                "source_id": kwargs["source_id"],
+                "series_id": kwargs["series_id"],
+                "enabled": kwargs["enabled"],
+                "config": dict(kwargs["config"]),
+            }
+
+    class DefinitionStore:
+        def register_source(self, identity, **kwargs: Any) -> int:
+            captured["source"] = identity
+            captured["lineage"] = kwargs["lineage"]
+            return 71
+
+        def register_series(self, **kwargs: Any) -> int:
+            captured["series"] = kwargs
+            return 72
+
+    monkeypatch.setattr(
+        "portal.backend.service.market.collector_service.instrument_service.get_instrument_record",
+        lambda _instrument_id: {
+            "datasource": "CHAINLINK",
+            "exchange": "ARBITRUM_MAINNET",
+        },
+    )
+    service = MarketDataCollectorService(
+        collection_repo=DefinitionRepo(),
+        store=DefinitionStore(),
+        clock=lambda: SCHEDULED,
+    )
+
+    result = service.create_structured_fact_definition(
+        manifest_path=str(_STRUCTURED_MANIFEST),
+        binding_id="nxtassets-btc-direct-etp-reserves",
+    )
+
+    assert result["enabled"] is False
+    assert captured["poll_interval_seconds"] == 3600
+    assert captured["source"].provider == "CHAINLINK"
+    assert captured["series"] == {
+        "instrument_id": "nxtassets-de000nxta018",
+        "fact_type": "asset.reserve_state",
+        "timeframe_seconds": None,
+        "contract_version": "asset.reserve_state.v1",
+        "dimensions": {"reserve_asset": "BTC"},
+    }
+    assert captured["config"]["structured_binding"]["endpoint_ref"] == (
+        "CHAINLINK_ARBITRUM_RPC_URL"
+    )
+    assert "endpoint" not in captured["config"]
 
 
 def test_collection_accepts_one_fenced_known_at_open_interest_fact() -> None:

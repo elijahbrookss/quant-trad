@@ -208,6 +208,14 @@ class CollectorToggleRequest(BaseModel):
     enabled: bool
 
 
+class StructuredCollectorCreateRequest(BaseModel):
+    manifest_path: str
+    binding_id: str
+    max_attempts: int = 3
+    minimum_spacing_seconds: float = 1.0
+    enabled: bool = False
+
+
 class MarketNormalizationSpecInstallRequest(BaseModel):
     approved_by: str
 
@@ -373,6 +381,28 @@ def create_collector(req: CollectorCreateRequest) -> dict[str, Any]:
             instrument_id=req.instrument_id,
             provider_product_id=req.provider_product_id,
             poll_interval_seconds=req.poll_interval_seconds,
+            max_attempts=req.max_attempts,
+            minimum_spacing_seconds=req.minimum_spacing_seconds,
+            enabled=req.enabled,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "schema_version": "market_collection_definition_response.v1",
+        "definition": definition,
+    }
+
+
+@router.post("/collectors/structured")
+def create_structured_collector(
+    req: StructuredCollectorCreateRequest,
+) -> dict[str, Any]:
+    """Install a reviewed structured-fact poll without enabling it implicitly."""
+
+    try:
+        definition = market_data_collector.create_structured_fact_definition(
+            manifest_path=req.manifest_path,
+            binding_id=req.binding_id,
             max_attempts=req.max_attempts,
             minimum_spacing_seconds=req.minimum_spacing_seconds,
             enabled=req.enabled,

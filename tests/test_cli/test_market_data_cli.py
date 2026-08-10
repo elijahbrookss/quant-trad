@@ -238,6 +238,50 @@ def test_data_collectors_create_coinbase_oi_is_explicit_and_disabled_by_default(
     }
 
 
+def test_data_collectors_create_structured_is_manifest_bound_and_disabled(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response({"definition": {"id": "mcd_2", "enabled": False}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "collectors",
+            "create-structured",
+            "--manifest-path",
+            "config/market-data/structured-facts/chainlink-nxtassets-btc-etp-reserves.json",
+            "--binding-id",
+            "nxtassets-btc-direct-etp-reserves",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/market-data/collectors/structured",
+        "body": {
+            "manifest_path": (
+                "config/market-data/structured-facts/"
+                "chainlink-nxtassets-btc-etp-reserves.json"
+            ),
+            "binding_id": "nxtassets-btc-direct-etp-reserves",
+            "max_attempts": 3,
+            "minimum_spacing_seconds": 1.0,
+            "enabled": False,
+        },
+    }
+
+
 def test_data_open_interest_latest_declares_decision_time_and_staleness(
     monkeypatch,
 ) -> None:

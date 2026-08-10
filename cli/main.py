@@ -1377,6 +1377,23 @@ def _cmd_data_collectors_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_collectors_create_structured(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/collectors/structured",
+            payload={
+                "manifest_path": args.manifest_path,
+                "binding_id": args.binding_id,
+                "max_attempts": args.max_attempts,
+                "minimum_spacing_seconds": args.minimum_spacing_seconds,
+                "enabled": bool(args.enabled),
+            },
+        )
+    )
+    return 0
+
+
 def _cmd_data_collectors_list(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -3737,6 +3754,20 @@ def build_parser() -> argparse.ArgumentParser:
     data_collectors_funding.set_defaults(
         func=_cmd_data_collectors_create,
         fact_type="derivatives.funding_rate",
+    )
+    data_collectors_structured = data_collectors_sub.add_parser(
+        "create-structured",
+        help="Create a reviewed structured-fact poll from a versioned manifest.",
+    )
+    data_collectors_structured.add_argument("--manifest-path", required=True)
+    data_collectors_structured.add_argument("--binding-id", required=True)
+    data_collectors_structured.add_argument("--max-attempts", type=int, default=3)
+    data_collectors_structured.add_argument(
+        "--minimum-spacing-seconds", type=float, default=1.0
+    )
+    data_collectors_structured.add_argument("--enabled", action="store_true")
+    data_collectors_structured.set_defaults(
+        func=_cmd_data_collectors_create_structured
     )
     data_collectors_list = data_collectors_sub.add_parser(
         "list", help="Inspect definitions, schedules, leases, and failures."

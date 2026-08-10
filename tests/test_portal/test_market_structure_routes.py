@@ -73,6 +73,37 @@ def test_collector_fact_history_route_clamps_window_and_limit(monkeypatch) -> No
     }
 
 
+def test_structured_collector_route_never_enables_by_default(monkeypatch) -> None:
+    observed = {}
+
+    def fake_create(**kwargs):
+        observed.update(kwargs)
+        return {"id": "mcd_structured", "enabled": kwargs["enabled"]}
+
+    monkeypatch.setattr(
+        controller.market_data_collector,
+        "create_structured_fact_definition",
+        fake_create,
+    )
+    response = _client().post(
+        "/api/market-data/collectors/structured",
+        json={
+            "manifest_path": "config/market-data/structured.json",
+            "binding_id": "reserve-feed",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["definition"]["enabled"] is False
+    assert observed == {
+        "manifest_path": "config/market-data/structured.json",
+        "binding_id": "reserve-feed",
+        "max_attempts": 3,
+        "minimum_spacing_seconds": 1.0,
+        "enabled": False,
+    }
+
+
 def test_collector_stream_fingerprint_ignores_observation_clock_only() -> None:
     first = {
         "observed_at": "2026-08-02T12:00:00+00:00",
