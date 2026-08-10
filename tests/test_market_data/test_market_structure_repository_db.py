@@ -591,6 +591,29 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
     )
     assert len(normalized_before) == 1
     assert normalized_before[0].fact.source_series_ids == (flow_feature_series_id,)
+    with db.session() as session:
+        canonical_normalized_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.fact_versions "
+                "WHERE series_id = :series_id "
+                "  AND payload_schema_id = :payload_schema_id"
+            ),
+            {
+                "series_id": normalized_series_id,
+                "payload_schema_id": (
+                    f"market.normalized_feature.v1/{aggressive_spec.spec_id}"
+                ),
+            },
+        ).scalar_one()
+        legacy_normalized_count = session.execute(
+            text(
+                "SELECT count(*) FROM market.normalized_feature_versions "
+                "WHERE series_id = :series_id"
+            ),
+            {"series_id": normalized_series_id},
+        ).scalar_one()
+    assert canonical_normalized_count == 1
+    assert legacy_normalized_count == 0
 
     requests = [
         DatasetSeriesRequest(

@@ -47,7 +47,11 @@ from market_data.contracts import (
     build_typed_feature_material_hash,
     record_effective_time,
 )
-from market_data.fact_registry import get_fact_contract, get_fact_payload_schema
+from market_data.fact_registry import (
+    NORMALIZED_FACT_VERSION,
+    get_fact_contract,
+    get_fact_payload_schema,
+)
 from market_data.store import FrozenDataset, IngestionOutcome
 from market_data.structure import (
     MARKET_TRADE_FACT_TYPE,
@@ -1051,8 +1055,7 @@ class PostgresMarketDataRepository:
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.funding_rate_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.numeric_fact_versions), 0),
                         COALESCE((SELECT MAX(market_commit_seq) FROM market.market_trade_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_aggregate_versions), 0),
-                        COALESCE((SELECT MAX(market_commit_seq) FROM market.normalized_feature_versions), 0)
+                        COALESCE((SELECT MAX(market_commit_seq) FROM market.trade_flow_aggregate_versions), 0)
                     )
                     """
                 )
@@ -1236,19 +1239,18 @@ class PostgresMarketDataRepository:
                                    market_commit_seq
                             FROM market.fact_versions
                             WHERE series_id = series.id
-                              AND payload_schema_id IN (
-                                  'market.bbo.v1',
-                                  'market.depth_band.v1',
-                                  'market.trade_flow_feature.v1',
-                                  'market.futures_spot_basis.v1',
-                                  'market.derivative_state.v1',
-                                  'market.market_response.v1'
+                              AND (
+                                  payload_schema_id IN (
+                                      'market.bbo.v1',
+                                      'market.depth_band.v1',
+                                      'market.trade_flow_feature.v1',
+                                      'market.futures_spot_basis.v1',
+                                      'market.derivative_state.v1',
+                                      'market.market_response.v1'
+                                  )
+                                  OR payload_schema_id LIKE
+                                      'market.normalized_feature.v1/%'
                               )
-                            UNION ALL
-                            SELECT jsonb_build_array(effective_at, spec_id),
-                                   effective_at, market_commit_seq
-                            FROM market.normalized_feature_versions
-                            WHERE series_id = series.id
                         ) AS typed_feature_rows
                     ) AS typed_features ON TRUE
                     {where_sql}
@@ -4110,6 +4112,7 @@ class PostgresMarketDataRepository:
         if (
             registered_payload is not None
             and contract_version not in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS
+            and not contract_version.startswith(f"{NORMALIZED_FACT_VERSION}/")
         ):
             return list(
                 self.read_facts(
