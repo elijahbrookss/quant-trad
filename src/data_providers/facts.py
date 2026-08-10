@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import math
 from typing import Any, Mapping, Optional
 
@@ -153,4 +154,100 @@ class ProviderFundingRateSnapshot:
         object.__setattr__(self, "metadata", dict(self.metadata or {}))
 
 
-__all__ = ["ProviderFundingRateSnapshot", "ProviderOpenInterestSnapshot"]
+@dataclass(frozen=True)
+class ProviderReserveStateSnapshot:
+    """One atomic reserve report before canonical QT identity is assigned."""
+
+    subject_id: str
+    report_id: str
+    reserve_asset: str
+    reserve_quantity: Decimal | int | str
+    raw_reserve_quantity: str
+    observation_time: datetime
+    received_at: datetime
+    response_hash: str
+    source_path: str
+    source_event_key: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        subject_id = str(self.subject_id or "").strip()
+        report_id = str(self.report_id or "").strip()
+        reserve_asset = str(self.reserve_asset or "").strip().upper()
+        raw_quantity = str(self.raw_reserve_quantity or "").strip()
+        source_path = str(self.source_path or "").strip()
+        source_event_key = str(self.source_event_key or "").strip()
+        response_hash = str(self.response_hash or "").strip().lower()
+        if not all(
+            (
+                subject_id,
+                report_id,
+                reserve_asset,
+                raw_quantity,
+                source_path,
+                source_event_key,
+            )
+        ):
+            raise ValueError("provider_reserve_state_invalid: identity is incomplete")
+        if len(response_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in response_hash
+        ):
+            raise ValueError(
+                "provider_reserve_state_invalid: response_hash must be SHA-256 hex"
+            )
+        if isinstance(self.reserve_quantity, (bool, float)):
+            raise ValueError(
+                "provider_reserve_state_invalid: reserve quantity must be exact"
+            )
+        try:
+            quantity = (
+                self.reserve_quantity
+                if isinstance(self.reserve_quantity, Decimal)
+                else Decimal(str(self.reserve_quantity))
+            )
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError(
+                "provider_reserve_state_invalid: reserve quantity must be exact"
+            ) from exc
+        if not quantity.is_finite() or quantity < 0:
+            raise ValueError(
+                "provider_reserve_state_invalid: reserve quantity must be finite and nonnegative"
+            )
+        observation_time = self.observation_time
+        received_at = self.received_at
+        for field_name, value in (
+            ("observation_time", observation_time),
+            ("received_at", received_at),
+        ):
+            if not isinstance(value, datetime):
+                raise ValueError(
+                    f"provider_reserve_state_invalid: {field_name} must be datetime"
+                )
+        if observation_time.tzinfo is None:
+            observation_time = observation_time.replace(tzinfo=timezone.utc)
+        if received_at.tzinfo is None:
+            received_at = received_at.replace(tzinfo=timezone.utc)
+        observation_time = observation_time.astimezone(timezone.utc)
+        received_at = received_at.astimezone(timezone.utc)
+        if observation_time > received_at:
+            raise ValueError(
+                "provider_reserve_state_invalid: observation cannot follow receipt"
+            )
+        object.__setattr__(self, "subject_id", subject_id)
+        object.__setattr__(self, "report_id", report_id)
+        object.__setattr__(self, "reserve_asset", reserve_asset)
+        object.__setattr__(self, "reserve_quantity", Decimal(0) if quantity.is_zero() else quantity)
+        object.__setattr__(self, "raw_reserve_quantity", raw_quantity)
+        object.__setattr__(self, "observation_time", observation_time)
+        object.__setattr__(self, "received_at", received_at)
+        object.__setattr__(self, "response_hash", response_hash)
+        object.__setattr__(self, "source_path", source_path)
+        object.__setattr__(self, "source_event_key", source_event_key)
+        object.__setattr__(self, "metadata", dict(self.metadata or {}))
+
+
+__all__ = [
+    "ProviderFundingRateSnapshot",
+    "ProviderOpenInterestSnapshot",
+    "ProviderReserveStateSnapshot",
+]

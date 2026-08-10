@@ -1,0 +1,63 @@
+{
+  "schema_version": "market.structured_fact_sources.v1",
+  "id": "chainlink-nxtassets-btc-etp-reserves",
+  "enabled": true,
+  "bindings": [
+    {
+      "id": "nxtassets-btc-direct-etp-reserves",
+      "enabled": true,
+      "adapter": "chainlink_mvr_bundle.v1",
+      "instrument_id": "nxtassets-de000nxta018",
+      "instrument_role": "explicit",
+      "fact_type": "asset.reserve_state",
+      "payload_schema_id": "asset.reserve_state.v1",
+      "dimensions": {
+        "reserve_asset": "BTC"
+      },
+      "endpoint_ref": "CHAINLINK_ARBITRUM_RPC_URL",
+      "source": {
+        "provider": "CHAINLINK",
+        "venue": "ARBITRUM_MAINNET",
+        "source_kind": "public_evm_contract",
+        "adapter_version": "chainlink_mvr_bundle.v1"
+      },
+      "schedule": {
+        "expected_update_interval_seconds": 43200,
+        "poll_interval_seconds": 3600
+      },
+      "quality_policy": {
+        "max_staleness_seconds": 259200,
+        "stale_behavior": "gap"
+      },
+      "risk": {
+        "official_catalog_url": "https://data.chain.link/feeds/arbitrum/mainnet/nxtassets-btc-etp-por",
+        "market_risk_tier": "research_only_third_party_report",
+        "deprecation_status": "not_marked_deprecated",
+        "verified_at": "2026-08-09"
+      },
+      "config": {
+        "chain_id": 42161,
+        "network": "arbitrum-mainnet",
+        "proxy_address": "0xf5eA763bbFc7968A27b28bc612a8B89fCF9E0069",
+        "feed_id": "0x02000001050700030000000000000000",
+        "expected_description": "nxtAssets Bitcoin Direct ETP Proof of Reserves (DE000NXTA018)",
+        "expected_version": 7,
+        "confirmations": 20,
+        "subject_id": "DE000NXTA018",
+        "reserve_asset": "BTC",
+        "expected_bundle_fields": [
+          {
+            "name": "ID",
+            "type": "string",
+            "decimals": 0
+          },
+          {
+            "name": "TotalReserve",
+            "type": "uint256",
+            "decimals": 8
+          }
+        ]
+      }
+    }
+  ]
+}

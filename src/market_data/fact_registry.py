@@ -645,6 +645,17 @@ _CONTRACTS = {
         minimum_value=Decimal("0"),
         minimum_inclusive=True,
     ),
+    "asset.reserve_state": FactContract(
+        "asset.reserve_state",
+        "asset.reserve_state.v1",
+        "forbidden",
+        "none",
+        "observation_time",
+        subject_type="instrument",
+        required_dimensions=("reserve_asset",),
+        series_identity_dimensions=("reserve_asset",),
+        uppercase_dimensions=("reserve_asset",),
+    ),
     "market.market_response": FactContract(
         "market.market_response",
         "market.market_response.v1",
@@ -799,6 +810,24 @@ _STATIC_PAYLOAD_SCHEMAS = {
             material_hash_version="numeric_fact_material_hash.v1",
             row_hash_version="market.reserve_balance.v1",
             query_fields=("value",),
+        ),
+        FactPayloadSchema(
+            schema_id="asset.reserve_state.v1",
+            fact_type="asset.reserve_state",
+            fields=(
+                FactPayloadField("report_id", FactPayloadKind.STRING),
+                FactPayloadField("reserve_asset", FactPayloadKind.STRING),
+                FactPayloadField(
+                    "reserve_quantity",
+                    FactPayloadKind.DECIMAL,
+                    minimum=Decimal("0"),
+                ),
+                FactPayloadField("unit", FactPayloadKind.STRING),
+            ),
+            observation_time_field="observation_time",
+            material_hash_version="market.fact_material.v1",
+            row_hash_version="market.fact_row.v1",
+            query_fields=("report_id", "reserve_asset", "reserve_quantity"),
         ),
         FactPayloadSchema(
             schema_id="market.l2_book.v1",
