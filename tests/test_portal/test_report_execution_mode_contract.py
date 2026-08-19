@@ -341,7 +341,7 @@ def test_metric_explanation_reads_portfolio_metrics(monkeypatch) -> None:
 def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         contract.report_data,
-        "list_runs",
+        "list_report_catalog_candidates",
         lambda **_kwargs: [
             {
                 "run_id": "run-1",
@@ -353,26 +353,18 @@ def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
                 "status": "completed",
                 "ended_at": "2026-01-02T00:00:00Z",
                 "summary": {"net_pnl": 1.0, "total_trades": 1},
-                "config_snapshot": {"execution_mode": "full"},
             }
         ],
     )
     monkeypatch.setattr(
         contract.report_data,
-        "get_result_readiness",
-        lambda *_args, **_kwargs: {
-            "dataset_ready": True,
-            "results_ready": True,
-            "safe_to_compare": True,
-            "reason": "ready",
-            "dataset_status": "ready",
-            "export_status": "available",
-        },
+        "list_report_catalog_details",
+        lambda _run_ids: {"run-1": {"execution_mode": "full"}},
     )
     monkeypatch.setattr(
         contract.report_data,
-        "get_report_materialization_status",
-        lambda _run_id: {"status": "not_built", "contract_version": "run_report.v2"},
+        "list_report_materialization_statuses",
+        lambda _run_ids: {"run-1": {}},
     )
 
     payload = contract.list_report_summaries()
