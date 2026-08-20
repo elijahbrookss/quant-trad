@@ -103,14 +103,6 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
         ("market_data_lifecycle", "archive_expiration_enabled"),
     ),
     (
-        "QT_MARKET_DATA_LIFECYCLE_HOT_COMPRESSION_ENABLED",
-        ("market_data_lifecycle", "hot_compression_enabled"),
-    ),
-    (
-        "QT_MARKET_DATA_LIFECYCLE_HOT_EXPIRATION_ENABLED",
-        ("market_data_lifecycle", "hot_expiration_enabled"),
-    ),
-    (
         "QT_MARKET_DATA_LIFECYCLE_RAW_TRADE_ARCHIVE_DAYS",
         ("market_data_lifecycle", "raw_trade_archive_days"),
     ),
@@ -121,18 +113,6 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     (
         "QT_MARKET_DATA_LIFECYCLE_BOOK_CHECKPOINT_ARCHIVE_DAYS",
         ("market_data_lifecycle", "book_checkpoint_archive_days"),
-    ),
-    (
-        "QT_MARKET_DATA_LIFECYCLE_RAW_TRADE_HOT_DAYS",
-        ("market_data_lifecycle", "raw_trade_hot_days"),
-    ),
-    (
-        "QT_MARKET_DATA_LIFECYCLE_RAW_L2_HOT_DAYS",
-        ("market_data_lifecycle", "raw_l2_hot_days"),
-    ),
-    (
-        "QT_MARKET_DATA_LIFECYCLE_DERIVED_HOT_DAYS",
-        ("market_data_lifecycle", "derived_hot_days"),
     ),
     (
         "QT_MARKET_DATA_LIFECYCLE_COMPACTED_SOURCE_GRACE_HOURS",
@@ -157,10 +137,6 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     (
         "QT_MARKET_DATA_LIFECYCLE_MAX_ARCHIVE_EXPIRATIONS_PER_RUN",
         ("market_data_lifecycle", "max_archive_expirations_per_run"),
-    ),
-    (
-        "QT_MARKET_DATA_LIFECYCLE_MAX_CHUNK_OPERATIONS_PER_RUN",
-        ("market_data_lifecycle", "max_chunk_operations_per_run"),
     ),
     ("QT_BOT_RUNTIME_MODE", ("bot_runtime", "mode")),
     ("QT_BOT_RUNTIME_TARGET", ("bot_runtime", "target")),

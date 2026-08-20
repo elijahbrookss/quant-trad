@@ -59,19 +59,22 @@ def get_candle_storage_summary(
             text(
                 """
                 WITH visible AS (
-                    SELECT DISTINCT ON (versions.candle_open_time)
-                        versions.candle_open_time, versions.open, versions.high,
-                        versions.low, versions.close
+                    SELECT DISTINCT ON (versions.observation_key)
+                        versions.observation_time AS candle_open_time,
+                        (versions.payload ->> 'open')::double precision AS open,
+                        (versions.payload ->> 'high')::double precision AS high,
+                        (versions.payload ->> 'low')::double precision AS low,
+                        (versions.payload ->> 'close')::double precision AS close
                     FROM market.series AS series
-                    JOIN market.candle_versions AS versions
+                    JOIN market.fact_versions AS versions
                       ON versions.series_id = series.id
                     WHERE series.instrument_id = :instrument_id
                       AND series.fact_type = :fact_type
                       AND series.contract_version = :contract_version
                       AND series.timeframe_seconds = :timeframe_seconds
-                      AND versions.candle_open_time >= :start_at
-                      AND versions.candle_open_time < :end_at
-                    ORDER BY versions.candle_open_time, versions.revision DESC
+                      AND versions.observation_time >= :start_at
+                      AND versions.observation_time < :end_at
+                    ORDER BY versions.observation_key, versions.revision DESC
                 ),
                 ordered AS (
                     SELECT *, lag(candle_open_time) OVER (ORDER BY candle_open_time) AS previous_time
@@ -234,10 +237,10 @@ def list_candles_for_series(
         "limit": normalized_limit,
     }
     if start_at is not None:
-        predicates.append("versions.candle_open_time >= :start_at")
+        predicates.append("versions.observation_time >= :start_at")
         params["start_at"] = start_at
     if end_at is not None:
-        predicates.append("versions.candle_open_time < :end_at")
+        predicates.append("versions.observation_time < :end_at")
         params["end_at"] = end_at
     window_sql = " AND ".join(predicates)
     if window_sql:
@@ -248,19 +251,23 @@ def list_candles_for_series(
             text(
                 f"""
                 WITH visible AS (
-                    SELECT DISTINCT ON (versions.candle_open_time)
-                        versions.candle_open_time, versions.open, versions.high,
-                        versions.low, versions.close, versions.volume, versions.revision,
-                        versions.market_commit_seq
+                    SELECT DISTINCT ON (versions.observation_key)
+                        versions.observation_time AS candle_open_time,
+                        (versions.payload ->> 'open')::double precision AS open,
+                        (versions.payload ->> 'high')::double precision AS high,
+                        (versions.payload ->> 'low')::double precision AS low,
+                        (versions.payload ->> 'close')::double precision AS close,
+                        (versions.payload ->> 'volume')::double precision AS volume,
+                        versions.revision, versions.market_commit_seq
                     FROM market.series AS series
-                    JOIN market.candle_versions AS versions
+                    JOIN market.fact_versions AS versions
                       ON versions.series_id = series.id
                     WHERE series.instrument_id = :instrument_id
                       AND series.fact_type = :fact_type
                       AND series.contract_version = :contract_version
                       AND series.timeframe_seconds = :timeframe_seconds
                       {window_sql}
-                    ORDER BY versions.candle_open_time, versions.revision DESC
+                    ORDER BY versions.observation_key, versions.revision DESC
                 )
                 SELECT * FROM visible
                 ORDER BY candle_open_time {order_sql}
@@ -358,15 +365,19 @@ def list_candles_for_series_windows(
                     FROM requested
                     CROSS JOIN series_match
                     JOIN LATERAL (
-                        SELECT DISTINCT ON (versions.candle_open_time)
-                            versions.candle_open_time, versions.open, versions.high,
-                            versions.low, versions.close, versions.volume,
+                        SELECT DISTINCT ON (versions.observation_key)
+                            versions.observation_time AS candle_open_time,
+                            (versions.payload ->> 'open')::double precision AS open,
+                            (versions.payload ->> 'high')::double precision AS high,
+                            (versions.payload ->> 'low')::double precision AS low,
+                            (versions.payload ->> 'close')::double precision AS close,
+                            (versions.payload ->> 'volume')::double precision AS volume,
                             versions.revision, versions.market_commit_seq
-                        FROM market.candle_versions AS versions
+                        FROM market.fact_versions AS versions
                         WHERE versions.series_id = series_match.id
-                          AND versions.candle_open_time >= requested.start_at
-                          AND versions.candle_open_time < requested.end_at
-                        ORDER BY versions.candle_open_time, versions.revision DESC
+                          AND versions.observation_time >= requested.start_at
+                          AND versions.observation_time < requested.end_at
+                        ORDER BY versions.observation_key, versions.revision DESC
                         LIMIT requested.row_limit
                     ) AS visible ON TRUE
                     ORDER BY requested.ordinal, visible.candle_open_time
@@ -481,15 +492,20 @@ def read_frozen_dataset_candles(
             text(
                 f"""
                 WITH visible AS (
-                    SELECT DISTINCT ON (candle_open_time)
-                        candle_open_time, open, high, low, close, volume, revision,
-                        market_commit_seq
-                    FROM market.candle_versions
+                    SELECT DISTINCT ON (observation_key)
+                        observation_time AS candle_open_time,
+                        (payload ->> 'open')::double precision AS open,
+                        (payload ->> 'high')::double precision AS high,
+                        (payload ->> 'low')::double precision AS low,
+                        (payload ->> 'close')::double precision AS close,
+                        (payload ->> 'volume')::double precision AS volume,
+                        revision, market_commit_seq
+                    FROM market.fact_versions
                     WHERE series_id = :series_id
                       AND market_commit_seq <= :max_commit_seq
-                      AND candle_open_time >= :start_at
-                      AND candle_open_time < :end_at
-                    ORDER BY candle_open_time, revision DESC
+                      AND observation_time >= :start_at
+                      AND observation_time < :end_at
+                    ORDER BY observation_key, revision DESC
                 )
                 SELECT * FROM visible
                 ORDER BY candle_open_time {order_sql}

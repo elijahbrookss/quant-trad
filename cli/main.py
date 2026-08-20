@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import time
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
@@ -1359,52 +1361,120 @@ def _cmd_data_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_data_collectors_create(args: argparse.Namespace) -> int:
-    payload = {
-        "instrument_id": args.instrument_id,
-        "provider_product_id": args.provider_product_id,
-        "fact_type": args.fact_type,
-        "poll_interval_seconds": args.poll_interval_seconds,
-        "max_attempts": args.max_attempts,
-        "minimum_spacing_seconds": args.minimum_spacing_seconds,
-        "enabled": bool(args.enabled),
-    }
-    _print_json(
-        _client(args).request_json(
-            "POST", "/api/market-data/collectors", payload=payload
-        )
-    )
-    return 0
-
-
-def _cmd_data_collectors_list(args: argparse.Namespace) -> int:
-    _print_json(
-        _client(args).request_json(
-            "GET",
-            "/api/market-data/collectors",
-            params={"definition_id": args.definition_id},
-        )
-    )
-    return 0
-
-
-def _cmd_data_collectors_toggle(args: argparse.Namespace) -> int:
+def _cmd_data_collector_definitions_install_structured(
+    args: argparse.Namespace,
+) -> int:
     _print_json(
         _client(args).request_json(
             "POST",
-            f"/api/market-data/collectors/{quote(args.definition_id, safe='')}/enabled",
-            payload={"enabled": bool(args.enabled)},
+            "/api/market-data/definitions/install-structured",
+            payload={
+                "manifest_path": args.manifest_path,
+                "binding_id": args.binding_id,
+                "enabled": bool(args.enabled),
+                "max_attempts": args.max_attempts,
+                "minimum_spacing_seconds": args.minimum_spacing_seconds,
+            },
         )
     )
     return 0
 
 
-def _cmd_data_collectors_attempts(args: argparse.Namespace) -> int:
+def _cmd_data_collectors_fleet(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
             "GET",
-            f"/api/market-data/collectors/{quote(args.definition_id, safe='')}/attempts",
+            "/api/market-data/operations/collectors/snapshot",
+            params={"attempt_limit": args.attempt_limit},
+        )
+    )
+    return 0
+
+
+def _collector_operation_path(args: argparse.Namespace, suffix: str = "") -> str:
+    base = (
+        "/api/market-data/operations/collectors/"
+        f"{quote(args.collector_kind, safe='')}/"
+        f"{quote(args.collector_id, safe='')}"
+    )
+    return base + suffix
+
+
+def _cmd_data_collectors_detail(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            _collector_operation_path(args),
             params={"limit": args.limit},
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_inspect(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            _collector_operation_path(args, f"/{args.inspect_surface}"),
+            params={"limit": args.limit},
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_diagnose(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            _collector_operation_path(args, "/diagnostics"),
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_action(args: argparse.Namespace) -> int:
+    confirmation = (
+        f"{args.collector_kind}:{args.collector_id}:{args.collector_action}"
+        if bool(args.confirm)
+        else None
+    )
+    actor_id = str(
+        args.actor_id
+        or os.environ.get("QT_ACTOR_ID")
+        or f"qt:{getpass.getuser()}"
+    )
+    payload = {
+        "request_id": args.request_id or f"qt-{uuid.uuid4().hex}",
+        "actor_id": actor_id,
+        "requested_at": datetime.now(UTC).isoformat(),
+        "confirmation": confirmation,
+        "context": {"surface": "qt", "reason": args.reason},
+    }
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            _collector_operation_path(
+                args, f"/actions/{args.collector_action}"
+            ),
+            payload=payload,
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_probe(args: argparse.Namespace) -> int:
+    args.collector_action = "health_probe"
+    args.confirm = False
+    args.request_id = None
+    args.actor_id = None
+    args.reason = "Manual collector health probe"
+    return _cmd_data_collectors_action(args)
+
+
+def _cmd_data_collectors_plane(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", "/api/market-data/operations/data-plane"
         )
     )
     return 0
@@ -1582,56 +1652,6 @@ def _cmd_data_market_structure_capture(args: argparse.Namespace) -> int:
                 "storage_root": args.storage_root,
                 "owner_id": args.owner_id,
             },
-        )
-    )
-    return 0
-
-
-def _cmd_data_market_structure_continuous_validate(
-    args: argparse.Namespace,
-) -> int:
-    _print_json(
-        _client(args).request_json(
-            "POST",
-            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/validate",
-            payload={
-                "duration_seconds": args.duration,
-                "requested_by": args.requested_by,
-                "policy": _read_json_object_arg(
-                    args.policy_json, label="--policy-json"
-                )
-                or None,
-            },
-        )
-    )
-    return 0
-
-
-def _cmd_data_market_structure_continuous_start(
-    args: argparse.Namespace,
-) -> int:
-    _print_json(
-        _client(args).request_json(
-            "POST",
-            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/start",
-            payload={
-                "requested_by": args.requested_by,
-                "policy": _read_json_object_arg(
-                    args.policy_json, label="--policy-json"
-                )
-                or None,
-            },
-        )
-    )
-    return 0
-
-
-def _cmd_data_market_structure_continuous_stop(args: argparse.Namespace) -> int:
-    _print_json(
-        _client(args).request_json(
-            "POST",
-            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/stop",
-            payload={"requested_by": args.requested_by},
         )
     )
     return 0
@@ -3696,65 +3716,95 @@ def build_parser() -> argparse.ArgumentParser:
     data_dataset.add_argument("dataset_id")
     data_dataset.set_defaults(func=_cmd_data_dataset)
 
+    data_collector_definitions = data_sub.add_parser(
+        "collector-definitions",
+        help="Install code-reviewed collector definitions; lifecycle remains separate.",
+    )
+    data_collector_definitions_sub = data_collector_definitions.add_subparsers(
+        dest="data_collector_definitions_command", required=True
+    )
+    install_structured = data_collector_definitions_sub.add_parser(
+        "install-structured",
+        help="Install one binding from a checked-in structured Fact manifest.",
+    )
+    install_structured.add_argument("--manifest-path", required=True)
+    install_structured.add_argument("--binding-id", required=True)
+    install_structured.add_argument("--enabled", action="store_true")
+    install_structured.add_argument("--max-attempts", type=int, default=3)
+    install_structured.add_argument(
+        "--minimum-spacing-seconds", type=float, default=1.0
+    )
+    install_structured.set_defaults(
+        func=_cmd_data_collector_definitions_install_structured
+    )
     data_collectors = data_sub.add_parser(
-        "collectors", help="Manage bounded market-fact collection definitions."
+        "collectors", help="Inspect and safely operate registered collectors."
     )
     data_collectors_sub = data_collectors.add_subparsers(
         dest="data_collectors_command", required=True
     )
-    data_collectors_create = data_collectors_sub.add_parser(
-        "create-coinbase-oi",
-        help="Create or update a Coinbase venue-specific open-interest poll.",
+    data_collectors_fleet = data_collectors_sub.add_parser(
+        "fleet", help="Inspect the canonical collector fleet snapshot."
     )
-    data_collectors_create.add_argument("--instrument-id", required=True)
-    data_collectors_create.add_argument("--provider-product-id", required=True)
-    data_collectors_create.add_argument(
-        "--poll-interval-seconds", type=int, default=60
+    data_collectors_fleet.add_argument("--attempt-limit", type=int, default=5)
+    data_collectors_fleet.set_defaults(func=_cmd_data_collectors_fleet)
+    data_collectors_plane = data_collectors_sub.add_parser(
+        "plane", help="Inspect aggregate market-data-plane readiness."
     )
-    data_collectors_create.add_argument("--max-attempts", type=int, default=3)
-    data_collectors_create.add_argument(
-        "--minimum-spacing-seconds", type=float, default=1.0
+    data_collectors_plane.set_defaults(func=_cmd_data_collectors_plane)
+    collector_kinds = ("scheduled_fact", "continuous_stream")
+    data_collectors_detail = data_collectors_sub.add_parser(
+        "detail", help="Inspect runtime, acquisition, facts, gaps, and configuration."
     )
-    data_collectors_create.add_argument("--enabled", action="store_true")
-    data_collectors_create.set_defaults(
-        func=_cmd_data_collectors_create,
-        fact_type="derivatives.open_interest",
+    data_collectors_detail.add_argument("collector_kind", choices=collector_kinds)
+    data_collectors_detail.add_argument("collector_id")
+    data_collectors_detail.add_argument("--limit", type=int, default=100)
+    data_collectors_detail.set_defaults(func=_cmd_data_collectors_detail)
+    data_collectors_diagnose = data_collectors_sub.add_parser(
+        "diagnose", help="Diagnose likely collector failure boundaries."
     )
-    data_collectors_funding = data_collectors_sub.add_parser(
-        "create-coinbase-funding",
-        help="Create or update a Coinbase venue-specific funding-rate poll.",
+    data_collectors_diagnose.add_argument(
+        "collector_kind", choices=collector_kinds
     )
-    data_collectors_funding.add_argument("--instrument-id", required=True)
-    data_collectors_funding.add_argument("--provider-product-id", required=True)
-    data_collectors_funding.add_argument(
-        "--poll-interval-seconds", type=int, default=60
+    data_collectors_diagnose.add_argument("collector_id")
+    data_collectors_diagnose.set_defaults(func=_cmd_data_collectors_diagnose)
+    data_collectors_probe = data_collectors_sub.add_parser(
+        "probe", help="Run a read-only collector health probe."
     )
-    data_collectors_funding.add_argument("--max-attempts", type=int, default=3)
-    data_collectors_funding.add_argument(
-        "--minimum-spacing-seconds", type=float, default=1.0
-    )
-    data_collectors_funding.add_argument("--enabled", action="store_true")
-    data_collectors_funding.set_defaults(
-        func=_cmd_data_collectors_create,
-        fact_type="derivatives.funding_rate",
-    )
-    data_collectors_list = data_collectors_sub.add_parser(
-        "list", help="Inspect definitions, schedules, leases, and failures."
-    )
-    data_collectors_list.add_argument("--definition-id")
-    data_collectors_list.set_defaults(func=_cmd_data_collectors_list)
-    for name, enabled in (("enable", True), ("disable", False)):
+    data_collectors_probe.add_argument("collector_kind", choices=collector_kinds)
+    data_collectors_probe.add_argument("collector_id")
+    data_collectors_probe.set_defaults(func=_cmd_data_collectors_probe)
+    for inspect_surface in ("events", "gaps"):
         command = data_collectors_sub.add_parser(
-            name, help=f"{name.title()} one collection definition."
+            inspect_surface,
+            help=f"Inspect collector {inspect_surface} evidence.",
         )
-        command.add_argument("definition_id")
-        command.set_defaults(func=_cmd_data_collectors_toggle, enabled=enabled)
-    data_collectors_attempts = data_collectors_sub.add_parser(
-        "attempts", help="Inspect auditable collection attempts."
-    )
-    data_collectors_attempts.add_argument("definition_id")
-    data_collectors_attempts.add_argument("--limit", type=int, default=100)
-    data_collectors_attempts.set_defaults(func=_cmd_data_collectors_attempts)
+        command.add_argument("collector_kind", choices=collector_kinds)
+        command.add_argument("collector_id")
+        command.add_argument("--limit", type=int, default=100)
+        command.set_defaults(
+            func=_cmd_data_collectors_inspect,
+            inspect_surface=inspect_surface,
+        )
+    for collector_action in ("start", "stop", "restart", "pause", "resume"):
+        command = data_collectors_sub.add_parser(
+            collector_action,
+            help=f"Request an audited collector {collector_action}.",
+        )
+        command.add_argument("collector_kind", choices=collector_kinds)
+        command.add_argument("collector_id")
+        command.add_argument("--request-id")
+        command.add_argument("--actor-id")
+        command.add_argument("--reason", required=True)
+        command.add_argument(
+            "--confirm",
+            action="store_true",
+            help="Confirm disruptive stop or restart operations.",
+        )
+        command.set_defaults(
+            func=_cmd_data_collectors_action,
+            collector_action=collector_action,
+        )
 
     data_oi_latest = data_sub.add_parser(
         "open-interest-latest",
@@ -3903,44 +3953,6 @@ def build_parser() -> argparse.ArgumentParser:
     data_market_structure_capture.add_argument("--storage-root")
     data_market_structure_capture.add_argument("--owner-id")
     data_market_structure_capture.set_defaults(func=_cmd_data_market_structure_capture)
-    data_market_structure_continuous_validate = data_market_structure_sub.add_parser(
-        "continuous-validate",
-        help="Start a worker-owned bounded validation run (up to seven days).",
-    )
-    data_market_structure_continuous_validate.add_argument("definition_id")
-    data_market_structure_continuous_validate.add_argument(
-        "--duration", type=float, default=24 * 3600
-    )
-    data_market_structure_continuous_validate.add_argument(
-        "--requested-by", required=True
-    )
-    data_market_structure_continuous_validate.add_argument("--policy-json")
-    data_market_structure_continuous_validate.set_defaults(
-        func=_cmd_data_market_structure_continuous_validate
-    )
-    data_market_structure_continuous_start = data_market_structure_sub.add_parser(
-        "continuous-start",
-        help="Start a system-qualified worker-owned continuous stream.",
-    )
-    data_market_structure_continuous_start.add_argument("definition_id")
-    data_market_structure_continuous_start.add_argument(
-        "--requested-by", required=True
-    )
-    data_market_structure_continuous_start.add_argument("--policy-json")
-    data_market_structure_continuous_start.set_defaults(
-        func=_cmd_data_market_structure_continuous_start
-    )
-    data_market_structure_continuous_stop = data_market_structure_sub.add_parser(
-        "continuous-stop",
-        help="Request a graceful stop after draining durable projection work.",
-    )
-    data_market_structure_continuous_stop.add_argument("definition_id")
-    data_market_structure_continuous_stop.add_argument(
-        "--requested-by", required=True
-    )
-    data_market_structure_continuous_stop.set_defaults(
-        func=_cmd_data_market_structure_continuous_stop
-    )
     for safety_action in ("halt", "acknowledge"):
         safety_parser = data_market_structure_sub.add_parser(
             f"safety-{safety_action}",

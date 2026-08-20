@@ -17,11 +17,7 @@ class _Repository:
 
     def list_stream_definitions(self):
         runtime = {
-            "collector_runtime": {
-                "mode": "continuous",
-                "stop_at": None,
-                "policy": {},
-            },
+            "runtime_policy": {},
             "fleet_id": "test-fleet",
             "product_definition_version_id": "test.product.v1",
             "safety_policy": {
@@ -40,6 +36,8 @@ class _Repository:
             {
                 "id": "supported",
                 "enabled": True,
+                "desired_state": "running",
+                "control_generation": 1,
                 "provider": "TEST",
                 "channels": ("trades",),
                 "max_spool_bytes": 1024,
@@ -48,6 +46,8 @@ class _Repository:
             {
                 "id": "unsupported",
                 "enabled": True,
+                "desired_state": "running",
+                "control_generation": 1,
                 "provider": "UNKNOWN",
                 "channels": ("future",),
                 "max_spool_bytes": 1024,
@@ -74,7 +74,14 @@ class _Repository:
         self.safety_events.append(kwargs)
         return kwargs
 
-    def configure_continuous_runtime(self, **kwargs):
+
+
+class _OperationsRepository:
+    def __init__(self):
+        self.actions = []
+
+    def apply_lifecycle_action(self, **kwargs):
+        self.actions.append(kwargs)
         return kwargs
 
 
@@ -98,9 +105,11 @@ class _Adapter:
 
 
 def test_supervisor_quarantines_unsupported_definition_without_stopping_others() -> None:
+    operations = _OperationsRepository()
     supervisor = ContinuousCollectorSupervisor(
         owner_id="test-worker",
         repository=_Repository(),
+        operations_repository=operations,
         registry=CollectorAdapterRegistry((_Adapter(),)),
         poll_seconds=0.02,
     )
@@ -118,10 +127,13 @@ def test_supervisor_quarantines_unsupported_definition_without_stopping_others()
     try:
         assert snapshot["state"] == "running"
         assert snapshot["tasks"]["supported"]["adapter_id"] == "test.trades.v1"
+        assert snapshot["tasks"]["supported"]["control_generation"] == 1
         assert "collector_safety_not_qualified" in snapshot["errors"]["unsupported"]
     finally:
         supervisor.stop(timeout_seconds=2.0)
     assert supervisor.snapshot()["state"] == "stopped"
+    assert operations.actions[0]["collector_id"] == "unsupported"
+    assert operations.actions[0]["action"].value == "pause"
 
 
 def test_registry_rejects_ambiguous_adapter_matches() -> None:

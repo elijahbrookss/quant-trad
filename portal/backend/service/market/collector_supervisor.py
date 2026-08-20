@@ -12,9 +12,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Mapping, Protocol, Sequence
 
+from market_data.collector_operations import CollectorAction, CollectorKind
+
 from ..storage.repos.market_structure import (
     PostgresMarketStructureRepository,
     market_structure_repository,
+)
+from ..storage.repos.collector_operations import (
+    PostgresCollectorOperationsRepository,
+    collector_operations_repository,
 )
 from .continuous_stream_collector import (
     ContinuousMarketStructureCollector,
@@ -119,8 +125,7 @@ class CollectorAdapterRegistry:
 class _TaskState:
     definition_id: str
     adapter_id: str
-    mode: str
-    stop_at: datetime | None
+    control_generation: int
     stop_event: threading.Event
     task: asyncio.Task
     started_at: datetime
@@ -136,11 +141,15 @@ class ContinuousCollectorSupervisor:
         *,
         owner_id: str,
         repository: PostgresMarketStructureRepository = market_structure_repository,
+        operations_repository: PostgresCollectorOperationsRepository = (
+            collector_operations_repository
+        ),
         registry: CollectorAdapterRegistry | None = None,
         poll_seconds: float = 2.0,
     ) -> None:
         self.owner_id = str(owner_id)
         self.repository = repository
+        self.operations_repository = operations_repository
         self.registry = registry or CollectorAdapterRegistry(
             (MarketStructureTradeAdapter(),)
         )
@@ -193,9 +202,8 @@ class ContinuousCollectorSupervisor:
         payload = {
             definition_id: {
                 "adapter_id": item.adapter_id,
-                "mode": item.mode,
+                "control_generation": item.control_generation,
                 "started_at": item.started_at.isoformat(),
-                "stop_at": item.stop_at.isoformat() if item.stop_at else None,
                 "restart_count": item.restart_count,
                 "last_error": item.last_error,
                 "done": item.task.done(),
@@ -233,27 +241,12 @@ class ContinuousCollectorSupervisor:
                 str(item["id"]): item for item in definitions
             }
             now = datetime.now(UTC)
-            desired: dict[str, tuple[Mapping[str, Any], str, datetime | None]] = {}
+            desired: dict[str, tuple[Mapping[str, Any], int]] = {}
             completed_this_pass: set[str] = set()
             for definition_id, definition in definitions_by_id.items():
-                if not bool(definition.get("enabled")):
-                    continue
-                config = dict(definition.get("config") or {})
-                runtime = config.get("collector_runtime")
-                if not isinstance(runtime, Mapping):
-                    continue
-                mode = str(runtime.get("mode") or "").lower()
-                if mode not in {"validation", "continuous"}:
-                    continue
-                raw_stop = runtime.get("stop_at")
-                stop_at = (
-                    datetime.fromisoformat(str(raw_stop).replace("Z", "+00:00"))
-                    if raw_stop
-                    else None
-                )
-                if stop_at is not None and stop_at.tzinfo is None:
-                    stop_at = stop_at.replace(tzinfo=UTC)
-                if stop_at is not None and now >= stop_at:
+                if not bool(definition.get("enabled")) or str(
+                    definition.get("desired_state") or ""
+                ) != "running":
                     continue
                 adapter_supported = True
                 try:
@@ -303,71 +296,82 @@ class ContinuousCollectorSupervisor:
                             policy_hash=qualification.policy_hash,
                             evidence=safety.evidence,
                         )
-                        self.repository.configure_continuous_runtime(
-                            definition_id=definition_id,
-                            enabled=False,
-                            mode="safety_halted",
-                            requested_by=f"supervisor:{self.owner_id}",
-                            policy={"policy_hash": qualification.policy_hash},
+                        self.operations_repository.apply_lifecycle_action(
+                            request_id=f"auto-pause:{request_digest}",
+                            collector_id=definition_id,
+                            collector_kind=CollectorKind.CONTINUOUS_STREAM,
+                            action=CollectorAction.PAUSE,
+                            requested_at=now,
+                            actor_id=f"supervisor:{self.owner_id}",
+                            context={
+                                "reason": "collector_safety_not_qualified",
+                                "policy_hash": qualification.policy_hash,
+                                "evidence": safety.evidence,
+                            },
                         )
                     task_errors[definition_id] = (
                         "collector_safety_not_qualified: "
                         + ",".join(qualification.reasons)
                     )
                     continue
-                desired[definition_id] = (definition, mode, stop_at)
+                desired[definition_id] = (
+                    definition,
+                    int(definition.get("control_generation") or 0),
+                )
 
             for definition_id, state in list(tasks.items()):
                 desired_item = desired.get(definition_id)
                 changed = bool(
                     desired_item is not None
-                    and (
-                        desired_item[1] != state.mode
-                        or desired_item[2] != state.stop_at
-                    )
+                    and desired_item[1] != state.control_generation
                 )
-                if desired_item is None or changed or self._stop.is_set():
+                expected_stop = bool(
+                    desired_item is None or changed or self._stop.is_set()
+                )
+                if expected_stop:
                     state.stop_event.set()
                 if not state.task.done():
                     continue
                 completed_this_pass.add(definition_id)
                 try:
                     result = state.task.result()
-                    logger.info(
-                        "continuous_collector_task_stopped | definition_id=%s "
-                        "adapter_id=%s mode=%s result=%s",
-                        definition_id,
-                        state.adapter_id,
-                        state.mode,
-                        dict(result),
-                    )
-                    if state.mode == "validation":
-                        self.repository.configure_continuous_runtime(
-                            definition_id=definition_id,
-                            enabled=False,
-                            mode="stopped",
-                            requested_by=f"supervisor:{self.owner_id}",
-                            policy={},
+                    if expected_stop:
+                        logger.info(
+                            "continuous_collector_task_stopped | definition_id=%s "
+                            "adapter_id=%s control_generation=%s result=%s",
+                            definition_id,
+                            state.adapter_id,
+                            state.control_generation,
+                            dict(result),
+                        )
+                    else:
+                        state.last_error = "continuous_collector_stopped_unexpectedly"
+                        task_errors[definition_id] = state.last_error
+                        count = restart_count.get(definition_id, 0) + 1
+                        restart_count[definition_id] = count
+                        restart_after[definition_id] = (
+                            time.monotonic()
+                            + min(60.0, float(2 ** min(count, 6)))
+                        )
+                        logger.error(
+                            "continuous_collector_task_stopped_unexpectedly | "
+                            "definition_id=%s adapter_id=%s restart_count=%s result=%s",
+                            definition_id,
+                            state.adapter_id,
+                            count,
+                            dict(result),
                         )
                 except Exception as exc:
                     state.last_error = f"{type(exc).__name__}: {exc}"
                     task_errors[definition_id] = state.last_error
-                    logger.error(
-                        "continuous_collector_task_failed | definition_id=%s "
-                        "adapter_id=%s mode=%s restart_count=%s error=%s",
-                        definition_id,
-                        state.adapter_id,
-                        state.mode,
-                        state.restart_count,
-                        exc,
-                    )
-                    if state.mode == "validation":
-                        self.repository.configure_continuous_runtime(
-                            definition_id=definition_id,
-                            enabled=False,
-                            mode="stopped",
-                            requested_by=f"supervisor:{self.owner_id}",
-                            policy={},
+                    if expected_stop:
+                        logger.warning(
+                            "continuous_collector_task_stop_failed | definition_id=%s "
+                            "adapter_id=%s control_generation=%s error=%s",
+                            definition_id,
+                            state.adapter_id,
+                            state.control_generation,
+                            exc,
                         )
                     else:
                         count = restart_count.get(definition_id, 0) + 1
@@ -375,9 +379,18 @@ class ContinuousCollectorSupervisor:
                         restart_after[definition_id] = (
                             time.monotonic() + min(60.0, float(2 ** min(count, 6)))
                         )
+                        logger.error(
+                            "continuous_collector_task_failed | definition_id=%s "
+                            "adapter_id=%s control_generation=%s restart_count=%s error=%s",
+                            definition_id,
+                            state.adapter_id,
+                            state.control_generation,
+                            count,
+                            exc,
+                        )
                 del tasks[definition_id]
 
-            for definition_id, (definition, mode, stop_at) in desired.items():
+            for definition_id, (definition, control_generation) in desired.items():
                 if definition_id in tasks or definition_id in completed_this_pass:
                     continue
                 if time.monotonic() < restart_after.get(definition_id, 0.0):
@@ -389,9 +402,9 @@ class ContinuousCollectorSupervisor:
                     restart_after[definition_id] = time.monotonic() + 30.0
                     logger.error(
                         "continuous_collector_definition_rejected | "
-                        "definition_id=%s mode=%s error=%s",
+                        "definition_id=%s control_generation=%s error=%s",
                         definition_id,
-                        mode,
+                        control_generation,
                         exc,
                     )
                     continue
@@ -401,22 +414,16 @@ class ContinuousCollectorSupervisor:
                     adapter.run(
                         definition_id=definition_id,
                         owner_id=f"{self.owner_id}:{definition_id}",
-                        stop_requested=lambda event=stop_event, deadline=stop_at: (
-                            self._stop.is_set()
-                            or event.is_set()
-                            or (
-                                deadline is not None
-                                and datetime.now(UTC) >= deadline
-                            )
+                        stop_requested=lambda event=stop_event: (
+                            self._stop.is_set() or event.is_set()
                         ),
-                        bounded_validation=(mode == "validation"),
+                        bounded_validation=False,
                     )
                 )
                 tasks[definition_id] = _TaskState(
                     definition_id=definition_id,
                     adapter_id=adapter.adapter_id,
-                    mode=mode,
-                    stop_at=stop_at,
+                    control_generation=control_generation,
                     stop_event=stop_event,
                     task=task,
                     started_at=datetime.now(UTC),
@@ -424,11 +431,10 @@ class ContinuousCollectorSupervisor:
                 )
                 logger.info(
                     "continuous_collector_task_started | definition_id=%s "
-                    "adapter_id=%s mode=%s stop_at=%s",
+                    "adapter_id=%s control_generation=%s",
                     definition_id,
                     adapter.adapter_id,
-                    mode,
-                    stop_at.isoformat() if stop_at else None,
+                    control_generation,
                 )
             self._publish_snapshot(
                 state="running", tasks=tasks, errors=task_errors

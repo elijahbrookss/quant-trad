@@ -130,364 +130,6 @@ class MarketDataIngestionRunRecord(Base):
     error = Column(Text, nullable=True)
 
 
-class MarketCandleVersionRecord(Base):
-    """Append-only versions of one logical closed candle."""
-
-    __tablename__ = "candle_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "series_id",
-            "candle_open_time",
-            "revision",
-            name="pk_market_candle_versions",
-        ),
-        CheckConstraint("revision > 0", name="ck_market_candle_revision_positive"),
-        CheckConstraint(
-            "candle_close_time > candle_open_time",
-            name="ck_market_candle_time_order",
-        ),
-        CheckConstraint("high >= low", name="ck_market_candle_high_low"),
-        CheckConstraint(
-            "high >= open AND high >= close",
-            name="ck_market_candle_high_bounds",
-        ),
-        CheckConstraint(
-            "low <= open AND low <= close",
-            name="ck_market_candle_low_bounds",
-        ),
-        CheckConstraint("volume IS NULL OR volume >= 0", name="ck_market_candle_volume"),
-        CheckConstraint(
-            "trade_count IS NULL OR trade_count >= 0",
-            name="ck_market_candle_trade_count",
-        ),
-        CheckConstraint(
-            "known_at >= candle_close_time",
-            name="ck_market_candle_known_after_close",
-        ),
-        CheckConstraint(
-            "source_published_at IS NULL OR known_at >= source_published_at",
-            name="ck_market_candle_known_after_publication",
-        ),
-        CheckConstraint(
-            "received_at IS NULL OR (known_at >= received_at AND accepted_at >= received_at)",
-            name="ck_market_candle_receipt_order",
-        ),
-        Index(
-            "ix_market_candle_versions_series_time_revision",
-            "series_id",
-            text("candle_open_time DESC"),
-            text("revision DESC"),
-        ),
-        Index(
-            "ix_market_candle_versions_series_commit",
-            "series_id",
-            "market_commit_seq",
-        ),
-        Index("ix_market_candle_versions_series_known", "series_id", "known_at"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    candle_open_time = Column(DateTime(timezone=True), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    ingestion_run_id = Column(
-        String(64),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    candle_close_time = Column(DateTime(timezone=True), nullable=False)
-    open = Column(Float, nullable=False)
-    high = Column(Float, nullable=False)
-    low = Column(Float, nullable=False)
-    close = Column(Float, nullable=False)
-    volume = Column(Float, nullable=True)
-    trade_count = Column(BigInteger, nullable=True)
-    source_published_at = Column(DateTime(timezone=True), nullable=True)
-    received_at = Column(DateTime(timezone=True), nullable=True)
-    accepted_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    known_at_method = Column(String(64), nullable=False)
-    provenance = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-    row_hash = Column(String(64), nullable=False)
-
-
-class MarketOpenInterestVersionRecord(Base):
-    """Append-only scheduled observations of venue-specific open interest."""
-
-    __tablename__ = "open_interest_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "series_id",
-            "sample_time",
-            "revision",
-            name="pk_market_open_interest_versions",
-        ),
-        CheckConstraint(
-            "revision > 0", name="ck_market_open_interest_revision_positive"
-        ),
-        CheckConstraint(
-            "open_interest >= 0", name="ck_market_open_interest_nonnegative"
-        ),
-        CheckConstraint(
-            "known_at >= sample_time",
-            name="ck_market_open_interest_known_after_schedule",
-        ),
-        CheckConstraint(
-            "source_published_at IS NULL OR known_at >= source_published_at",
-            name="ck_market_open_interest_known_after_publication",
-        ),
-        CheckConstraint(
-            "received_at IS NULL OR (known_at >= received_at AND accepted_at >= received_at)",
-            name="ck_market_open_interest_receipt_order",
-        ),
-        Index(
-            "ix_market_open_interest_series_time_revision",
-            "series_id",
-            text("sample_time DESC"),
-            text("revision DESC"),
-        ),
-        Index(
-            "ix_market_open_interest_series_commit",
-            "series_id",
-            "market_commit_seq",
-        ),
-        Index(
-            "ix_market_open_interest_series_known", "series_id", "known_at"
-        ),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    sample_time = Column(DateTime(timezone=True), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    ingestion_run_id = Column(
-        String(64),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    open_interest = Column(Float, nullable=False)
-    unit = Column(String(32), nullable=False)
-    sample_time_method = Column(String(64), nullable=False)
-    source_published_at = Column(DateTime(timezone=True), nullable=True)
-    received_at = Column(DateTime(timezone=True), nullable=True)
-    accepted_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    known_at_method = Column(String(64), nullable=False)
-    provenance = Column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
-    row_hash = Column(String(64), nullable=False)
-
-
-class MarketFundingRateVersionRecord(Base):
-    """Append-only scheduled observations of perpetual funding rates."""
-
-    __tablename__ = "funding_rate_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "series_id",
-            "sample_time",
-            "revision",
-            name="pk_market_funding_rate_versions",
-        ),
-        CheckConstraint(
-            "revision > 0", name="ck_market_funding_rate_revision_positive"
-        ),
-        CheckConstraint(
-            "funding_interval_seconds > 0",
-            name="ck_market_funding_rate_interval_positive",
-        ),
-        CheckConstraint(
-            "known_at >= sample_time",
-            name="ck_market_funding_rate_known_after_schedule",
-        ),
-        CheckConstraint(
-            "source_published_at IS NULL OR known_at >= source_published_at",
-            name="ck_market_funding_rate_known_after_publication",
-        ),
-        CheckConstraint(
-            "received_at IS NULL OR (known_at >= received_at AND accepted_at >= received_at)",
-            name="ck_market_funding_rate_receipt_order",
-        ),
-        Index(
-            "ix_market_funding_rate_series_time_revision",
-            "series_id",
-            text("sample_time DESC"),
-            text("revision DESC"),
-        ),
-        Index(
-            "ix_market_funding_rate_series_commit",
-            "series_id",
-            "market_commit_seq",
-        ),
-        Index(
-            "ix_market_funding_rate_series_known", "series_id", "known_at"
-        ),
-        Index(
-            "ix_market_funding_rate_series_funding_time",
-            "series_id",
-            "funding_time",
-        ),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    sample_time = Column(DateTime(timezone=True), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    ingestion_run_id = Column(
-        String(64),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    funding_rate = Column(Float, nullable=False)
-    funding_time = Column(DateTime(timezone=True), nullable=False)
-    funding_interval_seconds = Column(Integer, nullable=False)
-    unit = Column(String(32), nullable=False)
-    sample_time_method = Column(String(64), nullable=False)
-    source_published_at = Column(DateTime(timezone=True), nullable=True)
-    received_at = Column(DateTime(timezone=True), nullable=True)
-    accepted_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    known_at_method = Column(String(64), nullable=False)
-    provenance = Column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
-    row_hash = Column(String(64), nullable=False)
-
-
-class MarketNumericFactVersionRecord(Base):
-    """One append-only exact-decimal revision keyed by a logical source event."""
-
-    __tablename__ = "numeric_fact_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "series_id",
-            "source_event_key",
-            "revision",
-            name="pk_market_numeric_fact_versions",
-        ),
-        CheckConstraint("revision > 0", name="ck_market_numeric_fact_revision_positive"),
-        CheckConstraint("fact_type <> ''", name="ck_market_numeric_fact_type"),
-        CheckConstraint("contract_version <> ''", name="ck_market_numeric_fact_contract"),
-        CheckConstraint("raw_value <> ''", name="ck_market_numeric_fact_raw_value"),
-        CheckConstraint("unit <> ''", name="ck_market_numeric_fact_unit"),
-        CheckConstraint(
-            "jsonb_typeof(dimensions) = 'object'",
-            name="ck_market_numeric_fact_dimensions_object",
-        ),
-        CheckConstraint(
-            "state IN ('active', 'invalidated')",
-            name="ck_market_numeric_fact_state",
-        ),
-        CheckConstraint(
-            "known_at >= effective_at",
-            name="ck_market_numeric_fact_known_after_effective",
-        ),
-        CheckConstraint(
-            "source_published_at IS NULL OR known_at >= source_published_at",
-            name="ck_market_numeric_fact_known_after_publication",
-        ),
-        CheckConstraint(
-            "received_at IS NULL OR accepted_at >= received_at",
-            name="ck_market_numeric_fact_acceptance_after_receipt",
-        ),
-        CheckConstraint(
-            "source_event_material_hash ~ '^[0-9a-f]{64}$'",
-            name="ck_market_numeric_fact_source_material_hash",
-        ),
-        CheckConstraint(
-            "row_hash ~ '^[0-9a-f]{64}$'",
-            name="ck_market_numeric_fact_row_hash",
-        ),
-        Index(
-            "ix_market_numeric_fact_series_time_revision",
-            "series_id",
-            text("effective_at DESC"),
-            text("revision DESC"),
-        ),
-        Index(
-            "ix_market_numeric_fact_series_commit",
-            "series_id",
-            "market_commit_seq",
-        ),
-        Index("ix_market_numeric_fact_series_known", "series_id", "known_at"),
-        Index(
-            "ix_market_numeric_fact_event_group",
-            "series_id",
-            "source_event_group_key",
-        ),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    source_event_key = Column(String(512), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    ingestion_run_id = Column(
-        String(64),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    fact_type = Column(String(64), nullable=False)
-    contract_version = Column(String(64), nullable=False)
-    numeric_value = Column(Numeric(), nullable=False)
-    raw_value = Column(Text, nullable=False)
-    unit = Column(String(64), nullable=False)
-    dimensions = Column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
-    effective_at = Column(DateTime(timezone=True), nullable=False)
-    effective_at_method = Column(String(64), nullable=False)
-    source_published_at = Column(DateTime(timezone=True), nullable=True)
-    received_at = Column(DateTime(timezone=True), nullable=True)
-    accepted_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    known_at_method = Column(String(64), nullable=False)
-    source_event_group_key = Column(String(512), nullable=True)
-    source_event_component_key = Column(String(256), nullable=True)
-    state = Column(String(16), nullable=False)
-    source_event_material_hash = Column(String(64), nullable=False)
-    provenance = Column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
-    row_hash = Column(String(64), nullable=False)
-
-
 class MarketCollectionDefinitionRecord(Base):
     """Mutable scheduler state for one provider/fact/series polling definition."""
 
@@ -512,12 +154,21 @@ class MarketCollectionDefinitionRecord(Base):
             name="ck_market_collection_failures_nonnegative",
         ),
         CheckConstraint(
+            "desired_state IN ('running', 'stopped', 'paused')",
+            name="ck_market_collection_desired_state",
+        ),
+        CheckConstraint(
+            "control_generation >= 0",
+            name="ck_market_collection_control_generation_nonnegative",
+        ),
+        CheckConstraint(
             "((lease_owner IS NOT NULL AND lease_token_hash IS NOT NULL AND lease_expires_at IS NOT NULL) "
             "OR (lease_owner IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL))",
             name="ck_market_collection_lease_state",
         ),
         Index(
             "ix_market_collection_claimable",
+            "desired_state",
             "enabled",
             "next_scheduled_at",
             "available_at",
@@ -545,6 +196,15 @@ class MarketCollectionDefinitionRecord(Base):
     next_scheduled_at = Column(DateTime(timezone=True), nullable=False)
     available_at = Column(DateTime(timezone=True), nullable=False)
     consecutive_failures = Column(Integer, nullable=False, default=0, server_default="0")
+    desired_state = Column(
+        String(16), nullable=False, default="stopped", server_default="stopped"
+    )
+    control_generation = Column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    control_requested_at = Column(DateTime(timezone=True), nullable=True)
+    control_requested_by = Column(String(128), nullable=True)
+    control_request_id = Column(String(128), nullable=True)
     lease_owner = Column(String(128), nullable=True)
     lease_token_hash = Column(String(64), nullable=True)
     lease_generation = Column(BigInteger, nullable=False, default=0, server_default="0")
@@ -800,6 +460,10 @@ class MarketDatasetSeriesRecord(Base):
         CheckConstraint("range_end > range_start", name="ck_market_dataset_series_range"),
         CheckConstraint("max_commit_seq >= 0", name="ck_market_dataset_series_commit_seq"),
         CheckConstraint("row_count >= 0", name="ck_market_dataset_series_row_count"),
+        CheckConstraint(
+            "jsonb_typeof(payload_schemas) = 'array'",
+            name="ck_market_dataset_series_payload_schemas_array",
+        ),
         Index("ix_market_dataset_series_series", "series_id", "range_start", "range_end"),
         {"schema": MARKET_DATA_SCHEMA},
     )
@@ -824,6 +488,9 @@ class MarketDatasetSeriesRecord(Base):
     quality_hash = Column(String(64), nullable=False)
     quality_summary = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     quality_evidence = Column(JSONB, nullable=True)
+    payload_schemas = Column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
 
 
 class MarketProductDefinitionVersionRecord(Base):
@@ -930,13 +597,27 @@ class MarketStreamDefinitionRecord(Base):
     __table_args__ = (
         UniqueConstraint("identity_key", name="uq_market_stream_definition_identity"),
         CheckConstraint("generation >= 1", name="ck_market_stream_definition_generation"),
+        CheckConstraint(
+            "desired_state IN ('running', 'stopped', 'paused')",
+            name="ck_market_stream_desired_state",
+        ),
+        CheckConstraint(
+            "control_generation >= 0",
+            name="ck_market_stream_control_generation_nonnegative",
+        ),
         CheckConstraint("max_spool_bytes > 0", name="ck_market_stream_definition_spool"),
         CheckConstraint("max_segment_bytes > 0", name="ck_market_stream_definition_segment"),
         CheckConstraint(
             "max_segment_bytes <= max_spool_bytes",
             name="ck_market_stream_definition_segment_within_spool",
         ),
-        Index("ix_market_stream_definition_enabled", "enabled", "provider", "venue"),
+        Index(
+            "ix_market_stream_definition_enabled",
+            "desired_state",
+            "enabled",
+            "provider",
+            "venue",
+        ),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
@@ -962,6 +643,15 @@ class MarketStreamDefinitionRecord(Base):
     max_spool_bytes = Column(BigInteger, nullable=False)
     max_segment_bytes = Column(BigInteger, nullable=False)
     generation = Column(BigInteger, nullable=False, default=1, server_default="1")
+    desired_state = Column(
+        String(16), nullable=False, default="stopped", server_default="stopped"
+    )
+    control_generation = Column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    control_requested_at = Column(DateTime(timezone=True), nullable=True)
+    control_requested_by = Column(String(128), nullable=True)
+    control_request_id = Column(String(128), nullable=True)
     config = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -1006,6 +696,71 @@ class MarketCollectorSafetyEventRecord(Base):
     policy_hash = Column(String(64), nullable=False)
     evidence_hash = Column(String(64), nullable=False)
     evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+
+
+class MarketCollectorOperationRecord(Base):
+    """Immutable result of one canonical collector operator request."""
+
+    __tablename__ = "collector_operation_events"
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_market_collector_operation_request"),
+        CheckConstraint(
+            "collector_kind IN ('scheduled_fact', 'continuous_stream')",
+            name="ck_market_collector_operation_kind",
+        ),
+        CheckConstraint(
+            "action IN ('start', 'stop', 'restart', 'pause', 'resume', 'recover')",
+            name="ck_market_collector_operation_action",
+        ),
+        CheckConstraint(
+            "status IN ('succeeded', 'failed')",
+            name="ck_market_collector_operation_status",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(context) = 'object'",
+            name="ck_market_collector_operation_context_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(prior_state) = 'object'",
+            name="ck_market_collector_operation_prior_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(resulting_state) = 'object'",
+            name="ck_market_collector_operation_result_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(evidence) = 'object'",
+            name="ck_market_collector_operation_evidence_object",
+        ),
+        Index(
+            "ix_market_collector_operation_collector_time",
+            "collector_id",
+            "requested_at",
+        ),
+        Index("ix_market_collector_operation_recorded", "recorded_at"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(64), primary_key=True)
+    request_id = Column(String(128), nullable=False)
+    collector_id = Column(String(64), nullable=False)
+    collector_kind = Column(String(32), nullable=False)
+    action = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False)
+    requested_at = Column(DateTime(timezone=True), nullable=False)
+    recorded_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    actor_id = Column(String(128), nullable=False)
+    context = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    prior_state = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    resulting_state = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    evidence = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    error = Column(Text, nullable=True)
 
 
 class MarketCollectorSafetyStateRecord(Base):
@@ -1458,358 +1213,6 @@ class MarketTradeIdentityRecord(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class MarketTradeVersionRecord(Base):
-    """Append-only provider trade revisions with causal source positions."""
-
-    __tablename__ = "market_trade_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "provider_event_time", name="pk_market_trade_versions"),
-        UniqueConstraint(
-            "source_id",
-            "provider_product_id",
-            "provider_trade_id",
-            "provider_event_time",
-            "revision",
-            name="uq_market_trade_version",
-        ),
-        CheckConstraint("revision > 0", name="ck_market_trade_revision"),
-        CheckConstraint("price > 0", name="ck_market_trade_price"),
-        CheckConstraint("provider_size > 0", name="ck_market_trade_provider_size"),
-        CheckConstraint("known_at >= accepted_at AND accepted_at >= received_at", name="ck_market_trade_causal_times"),
-        Index("ix_market_trade_product_time", "provider_product_id", "provider_event_time"),
-        Index("ix_market_trade_series_known", "series_id", "known_at"),
-        Index("ix_market_trade_series_commit", "series_id", "market_commit_seq"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    source_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.sources.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    provider_product_id = Column(String(128), nullable=False)
-    provider_trade_id = Column(String(128), nullable=False)
-    delivery_kind = Column(String(16), nullable=False)
-    price = Column(Numeric(38, 18), nullable=False)
-    provider_size = Column(Numeric(38, 18), nullable=False)
-    provider_size_unit = Column(String(32), nullable=False)
-    maker_side = Column(String(8), nullable=False)
-    aggressor_side = Column(String(8), nullable=True)
-    aggressor_transform_version = Column(String(64), nullable=True)
-    contract_quantity = Column(Numeric(38, 18), nullable=True)
-    base_quantity = Column(Numeric(38, 18), nullable=True)
-    quote_notional = Column(Numeric(38, 18), nullable=True)
-    base_currency = Column(String(32), nullable=False)
-    quote_currency = Column(String(32), nullable=False)
-    product_definition_version_id = Column(
-        String(128),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.product_definition_versions.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    provider_event_time = Column(DateTime(timezone=True), nullable=False)
-    provider_message_time = Column(DateTime(timezone=True), nullable=True)
-    received_at = Column(DateTime(timezone=True), nullable=False)
-    accepted_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    provider_sequence_num = Column(BigInteger, nullable=True)
-    connection_epoch = Column(Integer, nullable=False)
-    receive_ordinal = Column(BigInteger, nullable=False)
-    event_ordinal = Column(Integer, nullable=False)
-    trade_ordinal = Column(Integer, nullable=False)
-    raw_record_id = Column(String(80), nullable=False)
-    coverage_interval_id = Column(String(128), nullable=True)
-    material_hash = Column(String(64), nullable=False)
-    row_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketTradeFlowAggregateVersionRecord(Base):
-    """Append-only one-second or one-minute causal trade-flow bucket."""
-
-    __tablename__ = "trade_flow_aggregate_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_trade_flow_versions"),
-        UniqueConstraint(
-            "series_id",
-            "interval_seconds",
-            "bucket_start",
-            "aggregation_version",
-            "revision",
-            name="uq_market_trade_flow_revision",
-        ),
-        CheckConstraint("interval_seconds IN (1, 60)", name="ck_market_trade_flow_interval"),
-        CheckConstraint("revision > 0", name="ck_market_trade_flow_revision"),
-        CheckConstraint("bucket_end > bucket_start", name="ck_market_trade_flow_range"),
-        CheckConstraint("trade_count >= 0", name="ck_market_trade_flow_count"),
-        Index("ix_market_trade_flow_series_time", "series_id", "interval_seconds", "bucket_start"),
-        Index("ix_market_trade_flow_series_known", "series_id", "known_at"),
-        Index("ix_market_trade_flow_series_commit", "series_id", "market_commit_seq"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    interval_seconds = Column(Integer, nullable=False)
-    bucket_start = Column(DateTime(timezone=True), nullable=False)
-    bucket_end = Column(DateTime(timezone=True), nullable=False)
-    aggregation_version = Column(String(64), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    trade_count = Column(BigInteger, nullable=False)
-    maker_buy_count = Column(BigInteger, nullable=False)
-    maker_sell_count = Column(BigInteger, nullable=False)
-    aggressor_buy_count = Column(BigInteger, nullable=True)
-    aggressor_sell_count = Column(BigInteger, nullable=True)
-    contract_volume = Column(Numeric(38, 18), nullable=True)
-    base_volume = Column(Numeric(38, 18), nullable=True)
-    quote_notional = Column(Numeric(38, 18), nullable=True)
-    maker_buy_base_volume = Column(Numeric(38, 18), nullable=True)
-    maker_sell_base_volume = Column(Numeric(38, 18), nullable=True)
-    aggressor_buy_base_volume = Column(Numeric(38, 18), nullable=True)
-    aggressor_sell_base_volume = Column(Numeric(38, 18), nullable=True)
-    cvd_delta = Column(Numeric(38, 18), nullable=True)
-    cvd_unit = Column(String(32), nullable=True)
-    open_price = Column(Numeric(38, 18), nullable=True)
-    high_price = Column(Numeric(38, 18), nullable=True)
-    low_price = Column(Numeric(38, 18), nullable=True)
-    close_price = Column(Numeric(38, 18), nullable=True)
-    first_trade_id = Column(String(128), nullable=True)
-    last_trade_id = Column(String(128), nullable=True)
-    first_receive_ordinal = Column(BigInteger, nullable=True)
-    last_receive_ordinal = Column(BigInteger, nullable=True)
-    coverage_interval_id = Column(String(128), nullable=True)
-    coverage_revision = Column(Integer, nullable=True)
-    aggregate_complete = Column(Boolean, nullable=False)
-    archive_complete = Column(Boolean, nullable=False)
-    canonicalization_complete = Column(Boolean, nullable=False)
-    late_trade_count = Column(BigInteger, nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketL2SnapshotVersionRecord(Base):
-    """One accepted complete aggregated-book snapshot event."""
-
-    __tablename__ = "l2_snapshot_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "effective_at", name="pk_market_l2_snapshot_versions"),
-        UniqueConstraint(
-            "definition_id",
-            "session_id",
-            "connection_epoch",
-            "receive_ordinal",
-            "event_ordinal",
-            "effective_at",
-            name="uq_market_l2_snapshot_source_position",
-        ),
-        CheckConstraint("connection_epoch >= 0", name="ck_market_l2_snapshot_epoch"),
-        CheckConstraint("receive_ordinal > 0", name="ck_market_l2_snapshot_receive"),
-        CheckConstraint("event_ordinal >= 0", name="ck_market_l2_snapshot_event"),
-        CheckConstraint("level_count > 0", name="ck_market_l2_snapshot_levels"),
-        CheckConstraint(
-            "known_at >= accepted_at AND accepted_at >= received_at",
-            name="ck_market_l2_snapshot_causal_times",
-        ),
-        Index("ix_market_l2_snapshot_series_time", "series_id", "effective_at"),
-        Index("ix_market_l2_snapshot_series_commit", "series_id", "market_commit_seq"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    definition_id = Column(
-        String(64),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.stream_definitions.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    session_id = Column(String(64), nullable=False)
-    connection_epoch = Column(Integer, nullable=False)
-    provider_product_id = Column(String(128), nullable=False)
-    product_definition_version_id = Column(
-        String(128),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.product_definition_versions.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    provider_sequence_num = Column(BigInteger, nullable=True)
-    receive_ordinal = Column(BigInteger, nullable=False)
-    event_ordinal = Column(Integer, nullable=False)
-    effective_at = Column(DateTime(timezone=True), nullable=False)
-    provider_message_time = Column(DateTime(timezone=True), nullable=True)
-    received_at = Column(DateTime(timezone=True), nullable=False)
-    accepted_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    level_count = Column(BigInteger, nullable=False)
-    state_hash = Column(String(64), nullable=False)
-    event_material_hash = Column(String(64), nullable=False)
-    raw_record_id = Column(String(80), nullable=False)
-    validity_interval_id = Column(String(128), nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketL2SnapshotLevelRecord(Base):
-    """One typed absolute side/price quantity in an accepted snapshot."""
-
-    __tablename__ = "l2_snapshot_levels"
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "snapshot_version_id",
-            "snapshot_effective_at",
-            "side",
-            "price",
-            name="pk_market_l2_snapshot_level",
-        ),
-        CheckConstraint("side IN ('bid', 'ask')", name="ck_market_l2_snapshot_level_side"),
-        CheckConstraint("price > 0", name="ck_market_l2_snapshot_level_price"),
-        CheckConstraint("quantity > 0", name="ck_market_l2_snapshot_level_quantity"),
-        Index("ix_market_l2_snapshot_level_order", "snapshot_version_id", "side", "price"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    snapshot_version_id = Column(String(128), nullable=False)
-    snapshot_effective_at = Column(DateTime(timezone=True), nullable=False)
-    side = Column(String(8), nullable=False)
-    price = Column(Numeric(38, 18), nullable=False)
-    quantity = Column(Numeric(38, 18), nullable=False)
-    provider_size_unit = Column(String(32), nullable=False)
-    provider_event_time = Column(DateTime(timezone=True), nullable=False)
-    level_ordinal = Column(BigInteger, nullable=False)
-
-
-class MarketL2MutationBatchRecord(Base):
-    """One accepted atomic provider Level 2 update event."""
-
-    __tablename__ = "l2_mutation_batches"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "effective_at", name="pk_market_l2_mutation_batches"),
-        UniqueConstraint(
-            "definition_id",
-            "session_id",
-            "connection_epoch",
-            "receive_ordinal",
-            "event_ordinal",
-            "effective_at",
-            name="uq_market_l2_mutation_source_position",
-        ),
-        CheckConstraint("mutation_count > 0", name="ck_market_l2_mutation_count"),
-        CheckConstraint("unknown_zero_delete_count >= 0", name="ck_market_l2_unknown_delete"),
-        CheckConstraint(
-            "known_at >= accepted_at AND accepted_at >= received_at",
-            name="ck_market_l2_mutation_causal_times",
-        ),
-        Index("ix_market_l2_mutation_series_time", "series_id", "effective_at"),
-        Index("ix_market_l2_mutation_series_commit", "series_id", "market_commit_seq"),
-        Index(
-            "ix_market_l2_mutation_session_position",
-            "session_id",
-            "connection_epoch",
-            "receive_ordinal",
-            "event_ordinal",
-        ),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    definition_id = Column(
-        String(64),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.stream_definitions.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    session_id = Column(String(64), nullable=False)
-    connection_epoch = Column(Integer, nullable=False)
-    provider_product_id = Column(String(128), nullable=False)
-    product_definition_version_id = Column(String(128), nullable=False)
-    provider_sequence_num = Column(BigInteger, nullable=True)
-    receive_ordinal = Column(BigInteger, nullable=False)
-    event_ordinal = Column(Integer, nullable=False)
-    effective_at = Column(DateTime(timezone=True), nullable=False)
-    provider_message_time = Column(DateTime(timezone=True), nullable=True)
-    received_at = Column(DateTime(timezone=True), nullable=False)
-    accepted_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    mutation_count = Column(BigInteger, nullable=False)
-    before_state_hash = Column(String(64), nullable=False)
-    after_state_hash = Column(String(64), nullable=False)
-    event_material_hash = Column(String(64), nullable=False)
-    raw_record_id = Column(String(80), nullable=False)
-    validity_interval_id = Column(String(128), nullable=False)
-    unknown_zero_delete_count = Column(BigInteger, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketL2MutationRecord(Base):
-    """One ordered absolute side/price mutation in a provider event."""
-
-    __tablename__ = "l2_mutations"
-    __table_args__ = (
-        PrimaryKeyConstraint(
-            "batch_id",
-            "batch_effective_at",
-            "mutation_ordinal",
-            name="pk_market_l2_mutation",
-        ),
-        CheckConstraint("mutation_ordinal >= 0", name="ck_market_l2_mutation_ordinal"),
-        CheckConstraint("side IN ('bid', 'ask')", name="ck_market_l2_mutation_side"),
-        CheckConstraint("price > 0", name="ck_market_l2_mutation_price"),
-        CheckConstraint("new_quantity >= 0", name="ck_market_l2_mutation_quantity"),
-        Index("ix_market_l2_mutation_level", "batch_id", "side", "price"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    batch_id = Column(String(128), nullable=False)
-    batch_effective_at = Column(DateTime(timezone=True), nullable=False)
-    mutation_ordinal = Column(Integer, nullable=False)
-    side = Column(String(8), nullable=False)
-    price = Column(Numeric(38, 18), nullable=False)
-    new_quantity = Column(Numeric(38, 18), nullable=False)
-    provider_size_unit = Column(String(32), nullable=False)
-    provider_event_time = Column(DateTime(timezone=True), nullable=False)
-
-
 class MarketBookValidityIntervalVersionRecord(Base):
     """Opening or closing revision of one reconstructable book interval."""
 
@@ -1958,262 +1361,6 @@ class MarketBookReconstructionStateRecord(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class MarketBboFeatureVersionRecord(Base):
-    """Append-only causal one-second BBO, spread, and midpoint fact."""
-
-    __tablename__ = "bbo_feature_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_bbo_feature_versions"),
-        UniqueConstraint("series_id", "bucket_start", "revision", name="uq_market_bbo_feature_revision"),
-        CheckConstraint("revision > 0", name="ck_market_bbo_feature_revision"),
-        CheckConstraint("bucket_end > bucket_start", name="ck_market_bbo_feature_range"),
-        CheckConstraint("bid_price > 0 AND ask_price > bid_price", name="ck_market_bbo_feature_prices"),
-        Index("ix_market_bbo_feature_series_time", "series_id", "bucket_start"),
-        Index("ix_market_bbo_feature_series_known", "series_id", "known_at"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    source_l2_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
-    bucket_start = Column(DateTime(timezone=True), nullable=False)
-    bucket_end = Column(DateTime(timezone=True), nullable=False)
-    source_effective_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    source_position = Column(JSONB, nullable=False)
-    validity_interval_id = Column(String(128), nullable=False)
-    product_definition_version_id = Column(String(128), ForeignKey(f"{MARKET_DATA_SCHEMA}.product_definition_versions.id", ondelete="RESTRICT"), nullable=False)
-    provider_size_unit = Column(String(32), nullable=False)
-    source_state_hash = Column(String(64), nullable=False)
-    bid_price = Column(Numeric(38, 18), nullable=False)
-    bid_quantity = Column(Numeric(78, 38), nullable=False)
-    bid_base_quantity = Column(Numeric(78, 38), nullable=False)
-    ask_price = Column(Numeric(38, 18), nullable=False)
-    ask_quantity = Column(Numeric(78, 38), nullable=False)
-    ask_base_quantity = Column(Numeric(78, 38), nullable=False)
-    mid_price = Column(Numeric(38, 18), nullable=False)
-    spread = Column(Numeric(38, 18), nullable=False)
-    spread_bps = Column(Numeric(78, 38), nullable=False)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketDepthFeatureVersionRecord(Base):
-    """Append-only one-second depth and bounded imbalance fact."""
-
-    __tablename__ = "depth_feature_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_depth_feature_versions"),
-        UniqueConstraint("series_id", "bucket_start", "band_bps", "revision", name="uq_market_depth_feature_revision"),
-        CheckConstraint("revision > 0", name="ck_market_depth_feature_revision"),
-        CheckConstraint("band_bps IN (5, 10, 25)", name="ck_market_depth_feature_band"),
-        CheckConstraint("imbalance IS NULL OR (imbalance >= -1 AND imbalance <= 1)", name="ck_market_depth_feature_imbalance"),
-        Index("ix_market_depth_feature_series_time", "series_id", "bucket_start"),
-        Index("ix_market_depth_feature_series_known", "series_id", "known_at"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    source_l2_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
-    bucket_start = Column(DateTime(timezone=True), nullable=False)
-    bucket_end = Column(DateTime(timezone=True), nullable=False)
-    source_effective_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    source_position = Column(JSONB, nullable=False)
-    validity_interval_id = Column(String(128), nullable=False)
-    source_state_hash = Column(String(64), nullable=False)
-    bbo_input_fingerprint = Column(String(64), nullable=False)
-    provider_size_unit = Column(String(32), nullable=False)
-    band_bps = Column(Integer, nullable=False)
-    mid_price = Column(Numeric(38, 18), nullable=False)
-    bid_quantity = Column(Numeric(78, 38), nullable=False)
-    ask_quantity = Column(Numeric(78, 38), nullable=False)
-    bid_base_quantity = Column(Numeric(78, 38), nullable=False)
-    ask_base_quantity = Column(Numeric(78, 38), nullable=False)
-    bid_notional = Column(Numeric(78, 38), nullable=True)
-    ask_notional = Column(Numeric(78, 38), nullable=True)
-    imbalance = Column(Numeric(78, 38), nullable=True)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketTradeFlowFeatureVersionRecord(Base):
-    """Append-only enriched complete trade-flow feature bucket."""
-
-    __tablename__ = "trade_flow_feature_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_trade_flow_feature_versions"),
-        UniqueConstraint("series_id", "interval_seconds", "bucket_start", "revision", name="uq_market_trade_flow_feature_revision"),
-        CheckConstraint("revision > 0", name="ck_market_trade_flow_feature_revision"),
-        CheckConstraint("interval_seconds IN (1, 60)", name="ck_market_trade_flow_feature_interval"),
-        CheckConstraint("trade_count > 0", name="ck_market_trade_flow_feature_count"),
-        CheckConstraint("cvd_volume_share IS NULL OR (cvd_volume_share >= -1 AND cvd_volume_share <= 1)", name="ck_market_trade_flow_feature_share"),
-        Index("ix_market_trade_flow_feature_series_time", "series_id", "bucket_start"),
-        Index("ix_market_trade_flow_feature_series_known", "series_id", "known_at"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    source_trade_flow_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
-    interval_seconds = Column(Integer, nullable=False)
-    bucket_start = Column(DateTime(timezone=True), nullable=False)
-    bucket_end = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    aggregate_material_hash = Column(String(64), nullable=False)
-    aggregate_input_fingerprint = Column(String(64), nullable=False)
-    trade_count = Column(BigInteger, nullable=False)
-    quote_notional = Column(Numeric(78, 38), nullable=False)
-    aggressor_buy_base_volume = Column(Numeric(78, 38), nullable=False)
-    aggressor_sell_base_volume = Column(Numeric(78, 38), nullable=False)
-    aggressor_buy_notional = Column(Numeric(78, 38), nullable=False)
-    aggressor_sell_notional = Column(Numeric(78, 38), nullable=False)
-    cvd_base = Column(Numeric(78, 38), nullable=False)
-    cvd_notional = Column(Numeric(78, 38), nullable=False)
-    cvd_volume_share = Column(Numeric(78, 38), nullable=True)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketFuturesSpotRelationshipVersionRecord(Base):
-    """Append-only causally aligned futures/spot basis fact."""
-
-    __tablename__ = "futures_spot_relationship_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "effective_at", name="pk_market_futures_spot_versions"),
-        UniqueConstraint("series_id", "effective_at", "revision", name="uq_market_futures_spot_revision"),
-        CheckConstraint("revision > 0", name="ck_market_futures_spot_revision"),
-        CheckConstraint("futures_mid > 0 AND spot_mid > 0", name="ck_market_futures_spot_mid"),
-        CheckConstraint("futures_staleness_seconds >= 0 AND spot_staleness_seconds >= 0", name="ck_market_futures_spot_staleness"),
-        Index("ix_market_futures_spot_series_time", "series_id", "effective_at"),
-        Index("ix_market_futures_spot_series_known", "series_id", "known_at"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
-    mapping_id = Column(String(128), nullable=False)
-    futures_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    spot_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    effective_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    futures_bbo_material_hash = Column(String(64), nullable=False)
-    spot_bbo_material_hash = Column(String(64), nullable=False)
-    futures_mid = Column(Numeric(38, 18), nullable=False)
-    spot_mid = Column(Numeric(38, 18), nullable=False)
-    futures_staleness_seconds = Column(Numeric(38, 18), nullable=False)
-    spot_staleness_seconds = Column(Numeric(38, 18), nullable=False)
-    basis = Column(Numeric(38, 18), nullable=False)
-    basis_bps = Column(Numeric(78, 38), nullable=False)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketDerivativeStateVersionRecord(Base):
-    """Append-only one-minute OI/funding relationship fact."""
-
-    __tablename__ = "derivative_state_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "effective_at", name="pk_market_derivative_state_versions"),
-        UniqueConstraint("series_id", "effective_at", "revision", name="uq_market_derivative_state_revision"),
-        CheckConstraint("revision > 0", name="ck_market_derivative_state_revision"),
-        Index("ix_market_derivative_state_series_time", "series_id", "effective_at"),
-        Index("ix_market_derivative_state_series_known", "series_id", "known_at"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
-    instrument_id = Column(String(64), ForeignKey("portal_instruments.id", ondelete="RESTRICT"), nullable=False)
-    effective_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    oi_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=True)
-    oi_sample_time = Column(DateTime(timezone=True), nullable=True)
-    oi_market_commit_seq = Column(BigInteger, nullable=True)
-    oi_value = Column(Numeric(78, 38), nullable=True)
-    oi_previous_value = Column(Numeric(78, 38), nullable=True)
-    oi_log_change = Column(Numeric(78, 38), nullable=True)
-    funding_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=True)
-    funding_sample_time = Column(DateTime(timezone=True), nullable=True)
-    funding_market_commit_seq = Column(BigInteger, nullable=True)
-    funding_rate = Column(Numeric(78, 38), nullable=True)
-    funding_time = Column(DateTime(timezone=True), nullable=True)
-    funding_interval_seconds = Column(Integer, nullable=True)
-    funding_semantics = Column(String(32), nullable=True)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
-class MarketResponseFeatureVersionRecord(Base):
-    """Append-only directional depth replenishment and price-response fact."""
-
-    __tablename__ = "market_response_feature_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "bucket_start", name="pk_market_response_feature_versions"),
-        UniqueConstraint("series_id", "bucket_start", "direction", "revision", name="uq_market_response_feature_revision"),
-        CheckConstraint("revision > 0", name="ck_market_response_feature_revision"),
-        CheckConstraint("direction IN ('BUY', 'SELL')", name="ck_market_response_feature_direction"),
-        CheckConstraint("aggressive_notional > 0 AND pre_depth_notional > 0 AND consumed_depth_notional > 0", name="ck_market_response_feature_positive"),
-        Index("ix_market_response_feature_series_time", "series_id", "bucket_start"),
-        Index("ix_market_response_feature_series_known", "series_id", "known_at"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    source_flow_feature_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    source_l2_series_id = Column(BigInteger, ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"), nullable=False)
-    source_flow_material_hash = Column(String(64), nullable=False)
-    pre_state_hash = Column(String(64), nullable=False)
-    trough_state_hash = Column(String(64), nullable=False)
-    post_state_hash = Column(String(64), nullable=False)
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(BigInteger, nullable=False, server_default=text("nextval('market.fact_commit_seq'::regclass)"))
-    bucket_start = Column(DateTime(timezone=True), nullable=False)
-    bucket_end = Column(DateTime(timezone=True), nullable=False)
-    effective_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    direction = Column(String(8), nullable=False)
-    first_trade_id = Column(String(128), nullable=False)
-    last_trade_id = Column(String(128), nullable=False)
-    source_positions = Column(JSONB, nullable=False)
-    validity_interval_id = Column(String(128), nullable=False)
-    aggressive_notional = Column(Numeric(78, 38), nullable=False)
-    signed_aggressive_notional = Column(Numeric(78, 38), nullable=False)
-    response_bps = Column(Numeric(78, 38), nullable=False)
-    pre_depth_notional = Column(Numeric(78, 38), nullable=False)
-    consumed_depth_notional = Column(Numeric(78, 38), nullable=False)
-    replenished_depth_notional = Column(Numeric(78, 38), nullable=False)
-    depth_replenishment = Column(Numeric(78, 38), nullable=False)
-    liquidity_adjusted_impact = Column(Numeric(78, 38), nullable=False)
-    price_response_per_flow = Column(Numeric(78, 38), nullable=False)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-
-
 class MarketNormalizationSpecRecord(Base):
     """Immutable executable causal normalization specification."""
 
@@ -2258,74 +1405,6 @@ class MarketNormalizationSpecRecord(Base):
     approved_by = Column(String(128), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     approved_at = Column(DateTime(timezone=True), nullable=True)
-
-
-class MarketNormalizedFeatureVersionRecord(Base):
-    """Append-only normalized value or explicit causal unavailability revision."""
-
-    __tablename__ = "normalized_feature_versions"
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "effective_at", name="pk_market_normalized_feature_versions"),
-        UniqueConstraint(
-            "series_id",
-            "spec_id",
-            "effective_at",
-            "revision",
-            name="uq_market_normalized_feature_revision",
-        ),
-        CheckConstraint("revision > 0", name="ck_market_normalized_feature_revision"),
-        CheckConstraint("input_count > 0", name="ck_market_normalized_input_count"),
-        CheckConstraint("input_watermark > 0", name="ck_market_normalized_watermark"),
-        CheckConstraint("input_end >= input_start", name="ck_market_normalized_input_range"),
-        CheckConstraint("effective_at >= input_end", name="ck_market_normalized_effective"),
-        CheckConstraint("known_at >= effective_at", name="ck_market_normalized_known"),
-        CheckConstraint(
-            "status IN ('valid', 'insufficient_history', 'invalid_input', 'zero_denominator', 'zero_variance')",
-            name="ck_market_normalized_status",
-        ),
-        CheckConstraint(
-            "(status = 'valid' AND value IS NOT NULL) OR (status <> 'valid' AND value IS NULL)",
-            name="ck_market_normalized_value_status",
-        ),
-        Index("ix_market_normalized_series_time", "series_id", "effective_at"),
-        Index("ix_market_normalized_series_known", "series_id", "known_at"),
-        Index("ix_market_normalized_spec_time", "spec_id", "effective_at"),
-        Index("ix_market_normalized_series_commit", "series_id", "market_commit_seq"),
-        {"schema": MARKET_DATA_SCHEMA},
-    )
-
-    id = Column(String(128), nullable=False)
-    series_id = Column(
-        BigInteger,
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    spec_id = Column(
-        String(64),
-        ForeignKey(f"{MARKET_DATA_SCHEMA}.normalization_specs.id", ondelete="RESTRICT"),
-        nullable=False,
-    )
-    revision = Column(Integer, nullable=False)
-    market_commit_seq = Column(
-        BigInteger,
-        nullable=False,
-        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
-    )
-    effective_at = Column(DateTime(timezone=True), nullable=False)
-    known_at = Column(DateTime(timezone=True), nullable=False)
-    value = Column(Numeric(78, 38), nullable=True)
-    status = Column(String(32), nullable=False)
-    reason = Column(Text, nullable=True)
-    input_start = Column(DateTime(timezone=True), nullable=False)
-    input_end = Column(DateTime(timezone=True), nullable=False)
-    input_count = Column(Integer, nullable=False)
-    input_watermark = Column(BigInteger, nullable=False)
-    source_series_ids = Column(JSONB, nullable=False)
-    source_material_hashes = Column(JSONB, nullable=False)
-    input_fingerprint = Column(String(64), nullable=False)
-    material_hash = Column(String(64), nullable=False)
-    provenance_hash = Column(String(64), nullable=False)
-    quality = Column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
 
 
 class MarketDatasetNormalizationRefRecord(Base):
@@ -2409,17 +1488,12 @@ class MarketDatasetArchiveRefRecord(Base):
 
 __all__ = [
     "MARKET_DATA_SCHEMA",
-    "MarketBboFeatureVersionRecord",
-    "MarketDepthFeatureVersionRecord",
-    "MarketDerivativeStateVersionRecord",
-    "MarketFuturesSpotRelationshipVersionRecord",
-    "MarketResponseFeatureVersionRecord",
-    "MarketTradeFlowFeatureVersionRecord",
-    "MarketCandleVersionRecord",
     "MarketCollectionAttemptRecord",
     "MarketCollectionDefinitionRecord",
+    "MarketCollectorOperationRecord",
     "MarketCollectorSafetyEventRecord",
     "MarketCollectorSafetyStateRecord",
+    "MarketCollectorWorkerStateRecord",
     "MarketDataIngestionRunRecord",
     "MarketDataSeriesRecord",
     "MarketDataSourceRecord",
@@ -2427,11 +1501,8 @@ __all__ = [
     "MarketDatasetSeriesRecord",
     "MarketDatasetNormalizationRefRecord",
     "MarketNormalizationSpecRecord",
-    "MarketNormalizedFeatureVersionRecord",
     "MarketGapEvidenceRecord",
     "MarketFactAcquisitionCoverageRecord",
-    "MarketNumericFactVersionRecord",
-    "MarketOpenInterestVersionRecord",
     "MarketProviderRateBudgetRecord",
     "MarketDatasetArchiveRefRecord",
     "MarketArchiveRetentionPinVersionRecord",
@@ -2441,10 +1512,6 @@ __all__ = [
     "MarketBookQualityEventLinkRecord",
     "MarketBookReconstructionStateRecord",
     "MarketBookValidityIntervalVersionRecord",
-    "MarketL2MutationBatchRecord",
-    "MarketL2MutationRecord",
-    "MarketL2SnapshotLevelRecord",
-    "MarketL2SnapshotVersionRecord",
     "MarketProductDefinitionVersionRecord",
     "MarketRawArchiveManifestRecord",
     "MarketRawArchiveCompactionSourceRecord",
@@ -2455,7 +1522,5 @@ __all__ = [
     "MarketStreamLeaseStateRecord",
     "MarketStreamQualityEventRecord",
     "MarketStreamSessionEventRecord",
-    "MarketTradeFlowAggregateVersionRecord",
     "MarketTradeIdentityRecord",
-    "MarketTradeVersionRecord",
 ]

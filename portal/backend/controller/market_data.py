@@ -13,13 +13,11 @@ from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from core.settings import get_settings
 from data_providers.numeric_facts import NumericAcquisitionBudget
 from market_data.contracts import (
-    FUNDING_RATE_FACT_TYPE,
-    OPEN_INTEREST_FACT_TYPE,
     FundingRateRecord,
     OpenInterestRecord,
 )
@@ -27,6 +25,9 @@ from ..service.market.normalization_service import market_normalization_service
 from market_data.requirements import UnavailableMarketData
 
 from ..service.market.collector_service import market_data_collector
+from ..service.market.collector_operations_service import (
+    collector_operations_service,
+)
 from ..service.market.market_storage_lifecycle import market_storage_lifecycle_service
 from ..service.market.market_structure_service import market_structure_service
 from ..service.market.numeric_fact_acquisition import (
@@ -38,29 +39,46 @@ from ..service.storage.repos.market_lifecycle import (
     market_storage_lifecycle_repository,
 )
 from ..service.storage.repos.market_structure import market_structure_repository
+from ..service.storage.repos.collector_operations import (
+    CollectorOperationRequestConflict,
+)
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _collector_material(snapshot: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "collectors": snapshot.get("collectors", []),
-        "workers": snapshot.get("workers", []),
-        "worker_health": {
-            key: value
-            for key, value in dict(snapshot.get("worker_health") or {}).items()
-            if key != "observed_at"
-        },
+def _operational_collector_fingerprint(snapshot: dict[str, Any]) -> str:
+    material = {
+        key: value for key, value in snapshot.items() if key != "observed_at"
     }
-
-
-def _collector_fingerprint(snapshot: dict[str, Any]) -> str:
     payload = json.dumps(
-        _collector_material(snapshot), sort_keys=True, separators=(",", ":"), default=str
+        material, sort_keys=True, separators=(",", ":"), default=str
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _provider_summary_fingerprint(snapshot: dict[str, Any]) -> str:
+    """Ignore display-only clock age while retaining operational changes."""
+
+    material = dict(snapshot)
+    material["providers"] = [
+        {
+            key: value
+            for key, value in dict(provider).items()
+            if key != "freshness_seconds"
+        }
+        for provider in snapshot.get("providers") or []
+    ]
+    return _operational_collector_fingerprint(material)
+
+
+class CollectorOperationRequest(BaseModel):
+    request_id: str
+    actor_id: str
+    requested_at: datetime
+    confirmation: Optional[str] = None
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 _market_structure_component_errors: dict[str, str] = {}
@@ -194,20 +212,6 @@ def _record_payload(
     }
 
 
-class CollectorCreateRequest(BaseModel):
-    instrument_id: str
-    provider_product_id: str
-    fact_type: str = OPEN_INTEREST_FACT_TYPE
-    poll_interval_seconds: int = 60
-    max_attempts: int = 3
-    minimum_spacing_seconds: float = 1.0
-    enabled: bool = False
-
-
-class CollectorToggleRequest(BaseModel):
-    enabled: bool
-
-
 class MarketNormalizationSpecInstallRequest(BaseModel):
     approved_by: str
 
@@ -226,6 +230,14 @@ class NumericFactAcquisitionRequest(BaseModel):
     max_blocks: int
     max_retries: int = 2
     repair: bool = False
+
+
+class StructuredCollectorDefinitionInstallRequest(BaseModel):
+    manifest_path: str
+    binding_id: str
+    enabled: bool = False
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    minimum_spacing_seconds: float = Field(default=1.0, ge=0)
 
 
 @router.post("/numeric-facts/acquire")
@@ -300,21 +312,6 @@ class MarketStructureCaptureRequest(BaseModel):
     owner_id: Optional[str] = None
 
 
-class MarketStructureContinuousValidationRequest(BaseModel):
-    duration_seconds: float = 24 * 3600
-    requested_by: str
-    policy: Optional[dict[str, Any]] = None
-
-
-class MarketStructureContinuousStartRequest(BaseModel):
-    requested_by: str
-    policy: Optional[dict[str, Any]] = None
-
-
-class MarketStructureContinuousStopRequest(BaseModel):
-    requested_by: str
-
-
 class MarketCollectorSafetyRequest(BaseModel):
     request_id: str
     scope_type: str
@@ -349,30 +346,99 @@ class MarketStructureRetentionPinRequest(BaseModel):
     reason: str
 
 
-@router.post("/collectors")
-def create_collector(req: CollectorCreateRequest) -> dict[str, Any]:
-    creators = {
-        OPEN_INTEREST_FACT_TYPE: (
-            market_data_collector.create_coinbase_open_interest_definition
-        ),
-        FUNDING_RATE_FACT_TYPE: (
-            market_data_collector.create_coinbase_funding_rate_definition
-        ),
-    }
-    creator = creators.get(req.fact_type)
-    if creator is None:
+
+@router.get("/operations/collector-providers/snapshot")
+def get_collector_provider_summary() -> dict[str, Any]:
+    return collector_operations_service.provider_summary_snapshot()
+
+
+@router.get("/operations/collector-providers/stream")
+async def stream_collector_provider_summary() -> StreamingResponse:
+    async def event_iterator():
+        event_id = 1
+        snapshot = collector_operations_service.provider_summary_snapshot()
+        fingerprint = _provider_summary_fingerprint(snapshot)
+        yield _format_sse("snapshot", snapshot, event_id=event_id)
+        keepalive_ticks = 0
+        while True:
+            try:
+                await asyncio.sleep(10.0)
+                current = await asyncio.to_thread(
+                    collector_operations_service.provider_summary_snapshot
+                )
+            except asyncio.CancelledError:
+                break
+            current_fingerprint = _provider_summary_fingerprint(current)
+            if current_fingerprint != fingerprint:
+                event_id += 1
+                fingerprint = current_fingerprint
+                yield _format_sse("delta", current, event_id=event_id)
+                keepalive_ticks = 0
+                continue
+            keepalive_ticks += 1
+            if keepalive_ticks >= 3:
+                yield ": keepalive\n\n"
+                keepalive_ticks = 0
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/operations/collector-providers/{provider}/collectors")
+def get_provider_collector_page(
+    provider: str,
+    query: Optional[str] = None,
+    attention_only: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    return collector_operations_service.collector_page(
+        provider=provider,
+        query=query,
+        attention_only=attention_only,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.get("/operations/collector-search")
+def search_operational_collectors(
+    query: Optional[str] = None,
+    attention_only: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    return collector_operations_service.collector_page(
+        query=query,
+        attention_only=attention_only,
+        offset=offset,
+        limit=limit,
+    )
+
+@router.post("/definitions/install-structured")
+def install_structured_collector_definition(
+    req: StructuredCollectorDefinitionInstallRequest,
+) -> dict[str, Any]:
+    repository_root = Path(__file__).resolve().parents[3]
+    manifest_root = (
+        repository_root / "config" / "market-data" / "structured-facts"
+    ).resolve()
+    candidate = Path(req.manifest_path)
+    manifest_path = (
+        candidate if candidate.is_absolute() else repository_root / candidate
+    ).resolve()
+    if manifest_path.parent != manifest_root:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "market_collection_handler_missing: supported fact types are "
-                f"{', '.join(sorted(creators))}"
-            ),
+            detail="collector_definition_install_forbidden: checked-in structured manifest required",
         )
     try:
-        definition = creator(
-            instrument_id=req.instrument_id,
-            provider_product_id=req.provider_product_id,
-            poll_interval_seconds=req.poll_interval_seconds,
+        definition = market_data_collector.create_structured_fact_definition(
+            manifest_path=str(manifest_path),
+            binding_id=req.binding_id,
             max_attempts=req.max_attempts,
             minimum_spacing_seconds=req.minimum_spacing_seconds,
             enabled=req.enabled,
@@ -380,50 +446,42 @@ def create_collector(req: CollectorCreateRequest) -> dict[str, Any]:
     except (KeyError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
-        "schema_version": "market_collection_definition_response.v1",
+        "schema_version": "market.collector_definition_install.v1",
         "definition": definition,
     }
 
 
-@router.get("/collectors")
-def list_collectors(definition_id: Optional[str] = None) -> dict[str, Any]:
-    return {
-        "schema_version": "market_collection_catalog.v1",
-        "definitions": market_data_collector.list_definitions(
-            definition_id=definition_id
-        ),
-    }
-
-
-@router.get("/collectors/snapshot")
-def get_collector_snapshot(
+@router.get("/operations/collectors/snapshot")
+def get_operational_collector_snapshot(
     attempt_limit: int = Query(default=5, ge=1, le=100),
 ) -> dict[str, Any]:
-    return market_data_collector.collector_snapshot(attempt_limit=attempt_limit)
+    return collector_operations_service.fleet_snapshot(
+        attempt_limit=attempt_limit
+    )
 
 
-@router.get("/collectors/stream")
-async def stream_collectors(
+@router.get("/operations/collectors/stream")
+async def stream_operational_collectors(
     attempt_limit: int = Query(default=5, ge=1, le=100),
 ) -> StreamingResponse:
     async def event_iterator():
         event_id = 1
-        snapshot = market_data_collector.collector_snapshot(
+        snapshot = collector_operations_service.fleet_snapshot(
             attempt_limit=attempt_limit
         )
-        fingerprint = _collector_fingerprint(snapshot)
+        fingerprint = _operational_collector_fingerprint(snapshot)
         yield _format_sse("snapshot", snapshot, event_id=event_id)
         keepalive_ticks = 0
         while True:
             try:
                 await asyncio.sleep(2.0)
                 current = await asyncio.to_thread(
-                    market_data_collector.collector_snapshot,
+                    collector_operations_service.fleet_snapshot,
                     attempt_limit=attempt_limit,
                 )
             except asyncio.CancelledError:
                 break
-            current_fingerprint = _collector_fingerprint(current)
+            current_fingerprint = _operational_collector_fingerprint(current)
             if current_fingerprint != fingerprint:
                 event_id += 1
                 fingerprint = current_fingerprint
@@ -442,53 +500,109 @@ async def stream_collectors(
     )
 
 
-@router.post("/collectors/{definition_id}/enabled")
-def set_collector_enabled(
-    definition_id: str, req: CollectorToggleRequest
+@router.get("/operations/collectors/{collector_kind}/{collector_id}")
+def get_operational_collector_detail(
+    collector_kind: str,
+    collector_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
     try:
-        definition = market_data_collector.set_enabled(
-            definition_id, enabled=req.enabled
+        return collector_operations_service.detail(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            limit=limit,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {
-        "schema_version": "market_collection_definition_response.v1",
-        "definition": definition,
-    }
 
 
-@router.get("/collectors/{definition_id}/facts")
-def collector_fact_history(
-    definition_id: str,
-    hours: int = 24,
-    limit: int = 240,
+@router.get("/operations/collectors/{collector_kind}/{collector_id}/diagnostics")
+def diagnose_operational_collector(
+    collector_kind: str,
+    collector_id: str,
 ) -> dict[str, Any]:
     try:
-        return market_data_collector.fact_history(
-            definition_id=definition_id,
-            hours=max(1, min(int(hours or 24), 24 * 7)),
-            limit=max(1, min(int(limit or 240), 1000)),
-        )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/collectors/{definition_id}/attempts")
-def list_collector_attempts(
-    definition_id: str, limit: int = 100
-) -> dict[str, Any]:
-    try:
-        attempts = market_data_collector.list_attempts(
-            definition_id=definition_id, limit=limit
+        return collector_operations_service.diagnose(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "schema_version": "market_collection_attempt_catalog.v1",
-        "definition_id": definition_id,
-        "attempts": attempts,
-    }
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/operations/collectors/{collector_kind}/{collector_id}/events")
+def get_operational_collector_events(
+    collector_kind: str,
+    collector_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return collector_operations_service.event_catalog(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/operations/collectors/{collector_kind}/{collector_id}/gaps")
+def get_operational_collector_gaps(
+    collector_kind: str,
+    collector_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return collector_operations_service.gap_catalog(
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/operations/collectors/{collector_kind}/{collector_id}/actions/{action}"
+)
+def execute_operational_collector_action(
+    collector_kind: str,
+    collector_id: str,
+    action: str,
+    req: CollectorOperationRequest,
+) -> dict[str, Any]:
+    try:
+        result = collector_operations_service.execute_action(
+            request_id=req.request_id,
+            collector_kind=collector_kind,
+            collector_id=collector_id,
+            action=action,
+            requested_at=req.requested_at,
+            actor_id=req.actor_id,
+            confirmation=req.confirmation,
+            context=req.context,
+        )
+    except CollectorOperationRequestConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = (
+            409
+            if "confirmation_required" in detail
+            or "request_conflict" in detail
+            else 404
+            if "collector_unknown" in detail
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+    if result.get("operation", {}).get("status") == "failed":
+        raise HTTPException(status_code=409, detail=result)
+    return result
+
+
+@router.get("/operations/data-plane")
+def get_market_data_plane_operational_snapshot() -> dict[str, Any]:
+    return collector_operations_service.data_plane_snapshot()
 
 
 @router.get("/open-interest/latest")
@@ -707,57 +821,6 @@ def capture_market_structure(
         if req.storage_root:
             kwargs["storage_root"] = Path(req.storage_root)
         return asyncio.run(market_structure_service.capture_bounded(**kwargs))
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post(
-    "/market-structure/definitions/{definition_id}/continuous/validate"
-)
-def validate_continuous_market_structure(
-    definition_id: str,
-    req: MarketStructureContinuousValidationRequest,
-) -> dict[str, Any]:
-    try:
-        return market_structure_service.start_continuous_validation(
-            definition_id=definition_id,
-            duration_seconds=req.duration_seconds,
-            requested_by=req.requested_by,
-            policy=req.policy,
-        )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post(
-    "/market-structure/definitions/{definition_id}/continuous/start"
-)
-def start_continuous_market_structure(
-    definition_id: str,
-    req: MarketStructureContinuousStartRequest,
-) -> dict[str, Any]:
-    try:
-        return market_structure_service.start_continuous(
-            definition_id=definition_id,
-            requested_by=req.requested_by,
-            policy=req.policy,
-        )
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post(
-    "/market-structure/definitions/{definition_id}/continuous/stop"
-)
-def stop_continuous_market_structure(
-    definition_id: str,
-    req: MarketStructureContinuousStopRequest,
-) -> dict[str, Any]:
-    try:
-        return market_structure_service.stop_continuous(
-            definition_id=definition_id,
-            requested_by=req.requested_by,
-        )
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

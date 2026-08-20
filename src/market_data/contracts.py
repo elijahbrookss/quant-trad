@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 from .fact_registry import get_fact_contract
 
@@ -153,6 +153,17 @@ def _stable_hash(payload: Mapping[str, Any]) -> str:
         dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _optional_sha256(value: Optional[str], *, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    digest = str(value).strip().lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError(f"{field} must be sha256")
+    return digest
 
 
 @dataclass(frozen=True)
@@ -594,6 +605,7 @@ class NumericFactRecord:
     source: SourceIdentity
     provenance: Mapping[str, Any]
     fact: NumericFact
+    canonical_material_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if int(self.series_id) <= 0:
@@ -618,6 +630,14 @@ class NumericFactRecord:
         object.__setattr__(self, "ingestion_run_id", ingestion_run_id)
         object.__setattr__(self, "source_identity_key", source_identity_key)
         object.__setattr__(self, "provenance", dict(self.provenance or {}))
+        object.__setattr__(
+            self,
+            "canonical_material_hash",
+            _optional_sha256(
+                self.canonical_material_hash,
+                field="numeric_fact_record_invalid: canonical_material_hash",
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -781,6 +801,7 @@ class CandleRecord:
     source: SourceIdentity
     provenance: Mapping[str, Any]
     fact: CandleFact
+    canonical_material_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if int(self.series_id) <= 0:
@@ -801,6 +822,14 @@ class CandleRecord:
         object.__setattr__(self, "ingestion_run_id", ingestion_run_id)
         object.__setattr__(self, "source_identity_key", source_identity_key)
         object.__setattr__(self, "provenance", dict(self.provenance or {}))
+        object.__setattr__(
+            self,
+            "canonical_material_hash",
+            _optional_sha256(
+                self.canonical_material_hash,
+                field="candle_record_invalid: canonical_material_hash",
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -930,6 +959,7 @@ class OpenInterestRecord:
     source: SourceIdentity
     provenance: Mapping[str, Any]
     fact: OpenInterestFact
+    canonical_material_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if int(self.series_id) <= 0:
@@ -956,6 +986,14 @@ class OpenInterestRecord:
         object.__setattr__(self, "ingestion_run_id", ingestion_run_id)
         object.__setattr__(self, "source_identity_key", source_identity_key)
         object.__setattr__(self, "provenance", dict(self.provenance or {}))
+        object.__setattr__(
+            self,
+            "canonical_material_hash",
+            _optional_sha256(
+                self.canonical_material_hash,
+                field="open_interest_record_invalid: canonical_material_hash",
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -1113,6 +1151,7 @@ class FundingRateRecord:
     source: SourceIdentity
     provenance: Mapping[str, Any]
     fact: FundingRateFact
+    canonical_material_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if int(self.series_id) <= 0:
@@ -1139,6 +1178,14 @@ class FundingRateRecord:
         object.__setattr__(self, "ingestion_run_id", ingestion_run_id)
         object.__setattr__(self, "source_identity_key", source_identity_key)
         object.__setattr__(self, "provenance", dict(self.provenance or {}))
+        object.__setattr__(
+            self,
+            "canonical_material_hash",
+            _optional_sha256(
+                self.canonical_material_hash,
+                field="funding_rate_record_invalid: canonical_material_hash",
+            ),
+        )
 
 
 def build_candle_material_hash(
@@ -1303,6 +1350,19 @@ class TypedFeatureRecord:
         object.__setattr__(self, "provenance_hash", provenance_hash)
         object.__setattr__(self, "quality", dict(self.quality))
 
+
+class CanonicalMarketDataRecord(Protocol):
+    """Structural record boundary for schema-registered canonical Facts.
+
+    ``canonical`` imports ``SourceIdentity`` from this module, so this protocol
+    keeps the shared consumer contract provider-neutral without introducing a
+    circular import.
+    """
+
+    fact: Any
+    market_commit_seq: int
+
+
 MarketDataRecord = (
     CandleRecord
     | OpenInterestRecord
@@ -1311,10 +1371,14 @@ MarketDataRecord = (
     | MarketTradeRecord
     | TradeFlowAggregateRecord
     | TypedFeatureRecord
+    | CanonicalMarketDataRecord
 )
 
 
 def _record_time(record: MarketDataRecord) -> datetime:
+    observation_time = getattr(record.fact, "observation_time", None)
+    if isinstance(observation_time, datetime):
+        return observation_time
     if isinstance(record, CandleRecord):
         return record.fact.open_time
     if isinstance(record, OpenInterestRecord):

@@ -22,7 +22,8 @@ from portal.backend.db.models import (
 
 _EXPLICIT_MIGRATION_TABLES = frozenset(
     {
-        ("market", "numeric_fact_versions"),
+        ("market", "fact_schemas"),
+        ("market", "fact_versions"),
         ("market", "fact_acquisition_coverage"),
     }
 )
@@ -74,7 +75,9 @@ class _Inspector:
         for schema, table_name in _EXPLICIT_MIGRATION_TABLES:
             if table_name not in self.tables.get(schema, set()):
                 continue
-            table = Base.metadata.tables[f"{schema}.{table_name}"]
+            table = Base.metadata.tables.get(f"{schema}.{table_name}")
+            if table is None:
+                continue
             self.indexes.setdefault((schema, table_name), set()).update(
                 str(index.name)
                 for index in table.indexes
@@ -229,11 +232,25 @@ class _Engine:
         yield self.connection
 
 
-def _database_with_fake_engine(monkeypatch, inspector: _Inspector) -> tuple[db_session.Database, _Connection]:
+def _database_with_fake_engine(
+    monkeypatch,
+    inspector: _Inspector,
+    *,
+    canonical_ready: bool = True,
+) -> tuple[db_session.Database, _Connection]:
+    if canonical_ready:
+        inspector.schemas.add("market")
+        inspector.tables.setdefault("market", set()).update(
+            {"fact_schemas", "fact_versions"}
+        )
     connection = _Connection(inspector)
     monkeypatch.setattr(db_session, "inspect", lambda _conn: inspector)
     database = db_session.Database("postgresql+psycopg2://test:test@localhost/test")
     database._engine = _Engine(connection)
+    # Canonical Fact tables are migration-owned SQL relations rather than ORM
+    # metadata. Their full contract is covered by migration/DB tests; these
+    # metadata-bootstrap tests isolate the remaining bootstrap behavior.
+    monkeypatch.setattr(database, "_assert_canonical_fact_migration", lambda _conn: None)
     return database, connection
 
 
@@ -272,17 +289,20 @@ def test_database_ready_log_redacts_dsn(monkeypatch, caplog) -> None:
     assert "postgresql+psycopg2://redacted:***@tsdb:5432/quanttrad?token=redacted" in messages
 
 
-def test_bootstrap_fresh_database_requires_explicit_numeric_migration_without_runtime_ddl(
+def test_bootstrap_fresh_database_requires_explicit_acquisition_migration_without_runtime_ddl(
     monkeypatch,
 ) -> None:
     inspector = _Inspector()
-    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+    database, connection = _database_with_fake_engine(
+        monkeypatch,
+        inspector,
+        canonical_ready=False,
+    )
 
     with pytest.raises(RuntimeError) as exc_info:
         database._bootstrap_schema_contract()
 
     message = str(exc_info.value)
-    assert "market.numeric_fact_versions" in message
     assert "market.fact_acquisition_coverage" in message
     assert "scripts/db/manual_migration_numeric_fact_store_v1.sql" in message
 
@@ -298,9 +318,7 @@ def test_bootstrap_fresh_database_requires_explicit_numeric_migration_without_ru
     }
     assert created_tables.isdisjoint(_EXPLICIT_MIGRATION_TABLES)
     assert created_indexes.isdisjoint(_EXPLICIT_MIGRATION_TABLES)
-
-
-def test_bootstrap_migrated_numeric_schema_passes_and_creates_other_objects(
+def test_bootstrap_migrated_acquisition_schema_passes_and_creates_other_objects(
     monkeypatch,
 ) -> None:
     inspector = _Inspector(
@@ -356,6 +374,24 @@ def test_bootstrap_fails_loud_when_retired_lifecycle_tables_exist(monkeypatch) -
         database._bootstrap_schema_contract()
 
     created_tables = [statement for statement in connection.executed if isinstance(statement, CreateTable)]
+    assert created_tables == []
+
+
+def test_bootstrap_fails_loud_when_legacy_fact_table_exists(monkeypatch) -> None:
+    inspector = _Inspector(
+        schemas={"public", "market"},
+        tables=[("market", "candle_versions")],
+    )
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+
+    with pytest.raises(RuntimeError, match="Legacy market-data tables remain active"):
+        database._bootstrap_schema_contract()
+
+    created_tables = [
+        statement
+        for statement in connection.executed
+        if isinstance(statement, CreateTable)
+    ]
     assert created_tables == []
 
 

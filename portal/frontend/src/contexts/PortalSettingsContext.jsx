@@ -22,7 +22,7 @@ function readDefaultLogLevel() {
 }
 
 const DEFAULT_SETTINGS = {
-  accentColor: '#175a81',
+  accentColor: '#b6892d',
   landingPage: '/quantlab',
   sidebarCollapsed: true,
   uiDensity: 'compact',

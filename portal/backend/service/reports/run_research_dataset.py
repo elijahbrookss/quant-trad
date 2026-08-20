@@ -1192,7 +1192,7 @@ def _prefetch_excursion_candles(
                 continue
             metadata = {
                 "status": "available",
-                "source": "market.candle_versions",
+                "source": "market.fact_versions",
                 "source_timeframe": timeframe,
                 "candle_count": len(normalized),
                 "caveats": [],
@@ -5639,7 +5639,7 @@ def _candle_catalog(
                 "continuity_status": continuity_status,
                 "candle_snapshot": _mapping(fact.get("candle_snapshot")),
                 "available_resolutions": available_resolutions,
-                "storage_source": "market.candle_versions" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
+                "storage_source": "market.fact_versions" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
                 "series_key": series_key,
             }
         )

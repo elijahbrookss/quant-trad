@@ -53,7 +53,7 @@ test('v2 UI surface never imports bot-mutation adapter functions', () => {
 
 test('v2 primary navigation is bounded to Overview and Operations', () => {
   const app = source(path.join('v2', 'AppV2.jsx'))
-  const roomBlock = app.slice(app.indexOf('const ROOMS'), app.indexOf('function LegacyCollectorRedirect'))
+  const roomBlock = app.slice(app.indexOf('const ROOMS'), app.indexOf('function initialSidebarCollapsed'))
   assert.match(roomBlock, /Overview/)
   assert.match(roomBlock, /Operations/)
   assert.match(app, /qt2-sidebar-toggle/)
@@ -61,11 +61,10 @@ test('v2 primary navigation is bounded to Overview and Operations', () => {
   assert.doesNotMatch(roomBlock, /Fleet|Studio|Research|Reports/)
 })
 
-test('v2 registers exact run and evidence routes and redirects legacy mutation-oriented surfaces', () => {
+test('v2 registers exact run, canonical collector, and research evidence routes', () => {
   const app = source(path.join('v2', 'AppV2.jsx'))
   assert.ok(app.includes('path="/operations/runs/:runId"'))
-  assert.ok(app.includes('path="/operations/market/:definitionId"'))
-  assert.ok(app.includes('path="/operations/collectors/:definitionId"'))
+  assert.ok(app.includes('path="/operations/market/:collectorKind/:collectorId"'))
   assert.ok(app.includes('path="/operations/research/:itemId"'))
   assert.ok(app.includes('path="/fleet"'))
   assert.ok(app.includes('path="/studio/*"'))
@@ -93,11 +92,12 @@ test('Overview never polls the mutation-bearing watchdog endpoint or generates s
   assert.doesNotMatch(overview, /openai|chat|completion|generateSummary/i)
 })
 
-test('market and research adapters used by v2 expose GET-only read requests', () => {
-  for (const adapter of ['marketData.adapter.js', 'research.adapter.js']) {
-    const content = source(path.join('adapters', adapter))
-    assert.doesNotMatch(content, /method:\s*['"](?:POST|PUT|PATCH|DELETE)['"]/)
-  }
+test('v2 market mutations use only the audited canonical collector action path', () => {
+  const research = source(path.join('adapters', 'research.adapter.js'))
+  assert.doesNotMatch(research, /method:\s*['"](?:POST|PUT|PATCH|DELETE)['"]/)
   const market = source(path.join('adapters', 'marketData.adapter.js'))
-  assert.doesNotMatch(market, /collectors\/\$\{[^}]+\}\/enabled/)
+  assert.match(market, /\/api\/market-data\/operations\/collectors\//)
+  assert.match(market, /'\/actions\/' \+ encodeURIComponent\(action\)/)
+  assert.equal((market.match(/method: 'POST'/g) || []).length, 1)
+  assert.doesNotMatch(market, /\/api\/market-data\/collectors\/(?:snapshot|stream)|\/enabled/)
 })

@@ -8,6 +8,11 @@ from contextlib import contextmanager
 from typing import Dict, Iterator, Optional
 
 from core.settings import get_settings
+from market_data.fact_registry import (
+    build_normalized_fact_payload_schema,
+    register_fact_payload_schema,
+    supported_static_fact_payload_schemas,
+)
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
@@ -58,47 +63,76 @@ _LEGACY_MARKET_DATA_TABLES = (
     "public.market_candles_raw",
     "public.derivatives_market_state",
     "public.portal_candle_closures",
+    "market.candle_versions",
+    "market.open_interest_versions",
+    "market.funding_rate_versions",
+    "market.numeric_fact_versions",
+    "market.market_trade_versions",
+    "market.trade_flow_aggregate_versions",
+    "market.l2_snapshot_versions",
+    "market.l2_snapshot_levels",
+    "market.l2_mutation_batches",
+    "market.l2_mutations",
+    "market.bbo_feature_versions",
+    "market.depth_feature_versions",
+    "market.trade_flow_feature_versions",
+    "market.futures_spot_relationship_versions",
+    "market.derivative_state_versions",
+    "market.market_response_feature_versions",
+    "market.normalized_feature_versions",
 )
-_CANONICAL_MARKET_DATA_TABLE = "market.candle_versions"
+_CANONICAL_MARKET_DATA_TABLE = "market.fact_versions"
 _EXPLICIT_MIGRATION_TABLES = frozenset(
     {
-        ("market", "numeric_fact_versions"),
         ("market", "fact_acquisition_coverage"),
-    }
-)
-_NUMERIC_FACT_REQUIRED_INDEXES = frozenset(
-    {
-        "ix_market_numeric_fact_series_time_revision",
-        "ix_market_numeric_fact_series_commit",
-        "ix_market_numeric_fact_series_known",
-        "ix_market_numeric_fact_event_group",
     }
 )
 _NUMERIC_COVERAGE_REQUIRED_INDEXES = frozenset(
     {"ix_market_fact_acquisition_coverage_lookup"}
 )
+_CANONICAL_FACT_REQUIRED_INDEXES = frozenset(
+    {
+        "ix_market_fact_series_time_revision",
+        "ix_market_fact_series_commit",
+        "ix_market_fact_series_known",
+        "ix_market_fact_schema_time",
+        "ix_market_fact_source_time",
+        "ix_market_fact_external_group",
+        "ix_market_fact_payload_gin",
+        "ix_market_fact_provenance_gin",
+        "ix_market_fact_exact_value",
+        "ix_market_fact_exact_rate",
+        "ix_market_fact_funding_time",
+    }
+)
 _COLUMN_MIGRATION_GUIDANCE = {
+    ("market", "collection_definitions", "desired_state"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_generation"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_requested_at"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_requested_by"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "collection_definitions", "control_request_id"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "desired_state"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_generation"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_requested_at"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_requested_by"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
+    ("market", "stream_definitions", "control_request_id"):
+        "scripts/db/manual_migration_collector_operations_v1.sql",
     ("market", "gap_evidence", "source_id"):
         "scripts/db/manual_migration_gap_source_identity_v1.sql",
     ("market", "dataset_series", "quality_evidence"):
         "scripts/db/manual_migration_dataset_quality_evidence_v1.sql",
+    ("market", "dataset_series", "payload_schemas"):
+        "scripts/db/manual_migration_canonical_fact_store_v1.sql",
 }
-_NUMERIC_FACT_REQUIRED_CONSTRAINTS = frozenset(
-    {
-        "ck_market_numeric_fact_revision_positive",
-        "ck_market_numeric_fact_type",
-        "ck_market_numeric_fact_contract",
-        "ck_market_numeric_fact_raw_value",
-        "ck_market_numeric_fact_unit",
-        "ck_market_numeric_fact_dimensions_object",
-        "ck_market_numeric_fact_state",
-        "ck_market_numeric_fact_known_after_effective",
-        "ck_market_numeric_fact_known_after_publication",
-        "ck_market_numeric_fact_acceptance_after_receipt",
-        "ck_market_numeric_fact_source_material_hash",
-        "ck_market_numeric_fact_row_hash",
-    }
-)
 
 _ASYNC_JOB_RUNNING_CLAIM_DEFINITION = (
     "status='running'andlock_ownerisnotnullandlocked_atisnotnull"
@@ -304,7 +338,8 @@ class Database:
             self._assert_market_commit_clock(conn, existing_only=True)
             self._assert_retired_tables_absent(conn)
             self._create_missing_tables(conn)
-            self._assert_numeric_fact_migration(conn)
+            self._assert_fact_acquisition_migration(conn)
+            self._assert_canonical_fact_migration(conn)
             self._ensure_market_data_hypertables(conn)
             self._assert_market_commit_clock(conn, existing_only=False)
             self._assert_columns(conn)
@@ -376,8 +411,8 @@ class Database:
         raise RuntimeError(
             "Legacy market-data tables remain active: "
             f"{', '.join(legacy_present)}. Stop backend and paper writers, then run "
-            "scripts/db/manual_migration_market_data_v2_hard_cutover.sql. "
-            "The canonical service will not start with dual candle ownership."
+            "scripts/db/manual_migration_canonical_fact_hard_cutover_v1.sql. "
+            "The canonical service will not start with dual Fact ownership."
         )
 
     def _ensure_market_data_commit_sequence(self, conn) -> None:
@@ -389,21 +424,7 @@ class Database:
         """Reject per-table identity clocks before heterogeneous facts can start."""
 
         for table_name in (
-            "candle_versions",
-            "open_interest_versions",
-            "funding_rate_versions",
-            "numeric_fact_versions",
-            "market_trade_versions",
-            "trade_flow_aggregate_versions",
-            "l2_snapshot_versions",
-            "l2_mutation_batches",
-            "bbo_feature_versions",
-            "depth_feature_versions",
-            "trade_flow_feature_versions",
-            "futures_spot_relationship_versions",
-            "derivative_state_versions",
-            "market_response_feature_versions",
-            "normalized_feature_versions",
+            "fact_versions",
         ):
             table_ref = f"market.{table_name}"
             existing = conn.execute(
@@ -439,7 +460,7 @@ class Database:
                 )
 
     def _ensure_market_data_hypertables(self, conn) -> None:
-        """Require TimescaleDB and make typed time-series fact tables hypertables."""
+        """Require TimescaleDB for retained market projections and evidence."""
 
         extension_version = conn.execute(
             text("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'")
@@ -449,46 +470,6 @@ class Database:
                 "TimescaleDB is required for canonical market-data storage. "
                 "Install the extension before starting the backend."
             )
-        for table_name, time_column in (
-            ("candle_versions", "candle_open_time"),
-            ("open_interest_versions", "sample_time"),
-            ("funding_rate_versions", "sample_time"),
-            ("market_trade_versions", "provider_event_time"),
-            ("trade_flow_aggregate_versions", "bucket_start"),
-            ("l2_snapshot_versions", "effective_at"),
-            ("l2_mutation_batches", "effective_at"),
-            ("bbo_feature_versions", "bucket_start"),
-            ("depth_feature_versions", "bucket_start"),
-            ("trade_flow_feature_versions", "bucket_start"),
-            ("futures_spot_relationship_versions", "effective_at"),
-            ("derivative_state_versions", "effective_at"),
-            ("normalized_feature_versions", "effective_at"),
-            ("market_response_feature_versions", "bucket_start"),
-        ):
-            conn.execute(
-                text(
-                    "SELECT create_hypertable("
-                    f"'market.{table_name}', "
-                    f"by_range('{time_column}'), "
-                    "if_not_exists => TRUE, "
-                    "migrate_data => TRUE"
-                    ")"
-                )
-            )
-            is_hypertable = conn.execute(
-                text(
-                    "SELECT EXISTS ("
-                    "SELECT 1 FROM timescaledb_information.hypertables "
-                    "WHERE hypertable_schema = 'market' "
-                    "AND hypertable_name = :table_name"
-                    ")"
-                ),
-                {"table_name": table_name},
-            ).scalar_one()
-            if not bool(is_hypertable):
-                raise RuntimeError(
-                    f"Canonical table market.{table_name} was not created as a hypertable."
-                )
 
     def _ensure_market_data_immutability(self, conn) -> None:
         """Protect append-only facts and frozen datasets from in-place mutation."""
@@ -511,9 +492,8 @@ class Database:
         for table_name in (
             "sources",
             "series",
-            "candle_versions",
-            "open_interest_versions",
-            "funding_rate_versions",
+            "fact_schemas",
+            "fact_versions",
             "gap_evidence",
             "datasets",
             "dataset_series",
@@ -529,25 +509,13 @@ class Database:
             "stream_coverage_interval_versions",
             "stream_quality_events",
             "market_trade_identities",
-            "market_trade_versions",
-            "trade_flow_aggregate_versions",
-            "l2_snapshot_versions",
-            "l2_snapshot_levels",
-            "l2_mutation_batches",
-            "l2_mutations",
-            "bbo_feature_versions",
-            "depth_feature_versions",
-            "trade_flow_feature_versions",
-            "futures_spot_relationship_versions",
             "normalization_specs",
-            "normalized_feature_versions",
             "dataset_normalization_refs",
-            "derivative_state_versions",
-            "market_response_feature_versions",
             "book_validity_interval_versions",
             "book_checkpoint_manifests",
             "book_quality_event_links",
             "dataset_archive_refs",
+            "collector_operation_events",
         ):
             trigger_name = f"trg_reject_mutation_{table_name}"
             conn.execute(
@@ -696,30 +664,19 @@ class Database:
                 )
                 existing.add(index_name)
 
-    def _assert_numeric_fact_migration(self, conn) -> None:
-        """Validate migration-owned numeric objects without issuing startup DDL."""
+    def _assert_fact_acquisition_migration(self, conn) -> None:
+        """Validate migration-owned acquisition coverage without startup DDL."""
 
-        missing_tables = [
-            f"{schema}.{name}"
-            for schema, name in sorted(_EXPLICIT_MIGRATION_TABLES)
-            if conn.execute(
-                text("SELECT to_regclass(:table_ref)"),
-                {"table_ref": f"{schema}.{name}"},
-            ).scalar_one_or_none()
-            is None
-        ]
-        if missing_tables:
-            logger.error(
-                "portal_db_numeric_fact_migration_missing | tables=%s",
-                ",".join(missing_tables),
-            )
+        if conn.execute(
+            text("SELECT to_regclass(:table_ref)"),
+            {"table_ref": "market.fact_acquisition_coverage"},
+        ).scalar_one_or_none() is None:
             raise RuntimeError(
-                "Migration-owned numeric fact schema is missing: "
-                f"{', '.join(missing_tables)}. Stop backend, collector, worker, "
-                "and paper processes, then run "
+                "Migration-owned acquisition coverage table "
+                "'market.fact_acquisition_coverage' is missing. Stop "
+                "backend, collector, worker, and paper processes, then run "
                 "scripts/db/manual_migration_numeric_fact_store_v1.sql."
             )
-
         inspector = inspect(conn)
         series_columns = {
             str(column["name"])
@@ -730,64 +687,6 @@ class Database:
                 "Table 'market.series' is missing migration-owned column dimensions. "
                 "Run scripts/db/manual_migration_numeric_fact_store_v1.sql."
             )
-
-        primary_key = inspector.get_pk_constraint(
-            "numeric_fact_versions", schema="market"
-        )
-        primary_columns = tuple(primary_key.get("constrained_columns") or ())
-        if primary_columns != ("series_id", "source_event_key", "revision"):
-            raise RuntimeError(
-                "Table 'market.numeric_fact_versions' must use canonical primary "
-                "key (series_id, source_event_key, revision). Run "
-                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
-            )
-
-        numeric_type = conn.execute(
-            text(
-                """
-                SELECT format_type(attribute.atttypid, attribute.atttypmod)
-                FROM pg_attribute AS attribute
-                WHERE attribute.attrelid = 'market.numeric_fact_versions'::regclass
-                  AND attribute.attname = 'numeric_value'
-                  AND NOT attribute.attisdropped
-                """
-            )
-        ).scalar_one()
-        if str(numeric_type) != "numeric":
-            raise RuntimeError(
-                "Table 'market.numeric_fact_versions.numeric_value' must use "
-                "unbounded numeric. Run "
-                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
-            )
-
-        constraints = {
-            str(item.get("name") or "")
-            for item in inspector.get_check_constraints(
-                "numeric_fact_versions", schema="market"
-            )
-        }
-        missing_constraints = sorted(_NUMERIC_FACT_REQUIRED_CONSTRAINTS - constraints)
-        if missing_constraints:
-            raise RuntimeError(
-                "Table 'market.numeric_fact_versions' is missing required "
-                f"constraints: {', '.join(missing_constraints)}. Run "
-                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
-            )
-
-        numeric_indexes = {
-            str(item.get("name") or "")
-            for item in inspector.get_indexes(
-                "numeric_fact_versions", schema="market"
-            )
-        }
-        missing_indexes = sorted(_NUMERIC_FACT_REQUIRED_INDEXES - numeric_indexes)
-        if missing_indexes:
-            raise RuntimeError(
-                "Table 'market.numeric_fact_versions' is missing required "
-                f"indexes: {', '.join(missing_indexes)}. Run "
-                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
-            )
-
         coverage_indexes = {
             str(item.get("name") or "")
             for item in inspector.get_indexes(
@@ -803,15 +702,123 @@ class Database:
                 f"indexes: {', '.join(missing_coverage_indexes)}. Run "
                 "scripts/db/manual_migration_numeric_fact_store_v1.sql."
             )
+        trigger_name = "trg_reject_mutation_fact_acquisition_coverage"
+        exists = conn.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_trigger
+                    WHERE tgname = :trigger_name
+                      AND tgrelid =
+                          'market.fact_acquisition_coverage'::regclass
+                      AND NOT tgisinternal
+                )
+                """
+            ),
+            {"trigger_name": trigger_name},
+        ).scalar_one()
+        if not bool(exists):
+            raise RuntimeError(
+                "Table 'market.fact_acquisition_coverage' is missing immutable "
+                f"trigger '{trigger_name}'. Run "
+                "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+            )
 
-        for table_name in ("numeric_fact_versions", "fact_acquisition_coverage"):
-            trigger_name = f"trg_reject_mutation_{table_name}"
+    def _assert_canonical_fact_migration(self, conn) -> None:
+        """Require the explicit generalized Fact schema and code registry."""
+
+        for table_name in ("fact_schemas", "fact_versions"):
+            if conn.execute(
+                text("SELECT to_regclass(:table_ref)"),
+                {"table_ref": f"market.{table_name}"},
+            ).scalar_one_or_none() is None:
+                raise RuntimeError(
+                    "Canonical Fact schema is missing table "
+                    f"market.{table_name}. Stop backend, collectors, workers, "
+                    "and paper runtimes, then run "
+                    "scripts/db/manual_migration_canonical_fact_store_v1.sql."
+                )
+
+        inspector = inspect(conn)
+        primary_key = inspector.get_pk_constraint("fact_versions", schema="market")
+        if tuple(primary_key.get("constrained_columns") or ()) != ("id",):
+            raise RuntimeError(
+                "Table 'market.fact_versions' must use canonical primary key (id). "
+                "Run scripts/db/manual_migration_canonical_fact_store_v1.sql."
+            )
+        indexes = {
+            str(item.get("name") or "")
+            for item in inspector.get_indexes("fact_versions", schema="market")
+        }
+        missing_indexes = sorted(_CANONICAL_FACT_REQUIRED_INDEXES - indexes)
+        if missing_indexes:
+            raise RuntimeError(
+                "Table 'market.fact_versions' is missing required indexes: "
+                f"{', '.join(missing_indexes)}. Run "
+                "scripts/db/manual_migration_canonical_fact_store_v1.sql."
+            )
+        dataset_columns = {
+            str(column["name"])
+            for column in inspector.get_columns("dataset_series", schema="market")
+        }
+        if "payload_schemas" not in dataset_columns:
+            raise RuntimeError(
+                "Table 'market.dataset_series' is missing payload_schemas. Run "
+                "scripts/db/manual_migration_canonical_fact_store_v1.sql."
+            )
+
+        stored_registry = {
+            str(row["schema_id"]): (
+                str(row["fact_type"]),
+                str(row["contract_hash"]),
+            )
+            for row in conn.execute(
+                text(
+                    "SELECT schema_id, fact_type, contract_hash "
+                    "FROM market.fact_schemas"
+                )
+            ).mappings()
+        }
+        expected_registry = {
+            schema.schema_id: (schema.fact_type, schema.contract_hash)
+            for schema in supported_static_fact_payload_schemas()
+        }
+        normalized_specs = conn.execute(
+            text(
+                "SELECT id, output_fact_type, units "
+                "FROM market.normalization_specs "
+                "WHERE id ~ '^nsp_[0-9a-f]{31}$' "
+                "ORDER BY id"
+            )
+        ).mappings()
+        for spec in normalized_specs:
+            schema = register_fact_payload_schema(
+                build_normalized_fact_payload_schema(
+                    spec_id=str(spec["id"]),
+                    fact_type=str(spec["output_fact_type"]),
+                    units=str(spec["units"]),
+                )
+            )
+            expected_registry[schema.schema_id] = (
+                schema.fact_type,
+                schema.contract_hash,
+            )
+        if stored_registry != expected_registry:
+            raise RuntimeError(
+                "Canonical Fact schema registry differs from code. Stop all writers "
+                "and apply the canonical Fact store/data migration."
+            )
+        for table_name, trigger_name in (
+            ("fact_schemas", "trg_reject_mutation_fact_schemas"),
+            ("fact_versions", "trg_reject_mutation_fact_versions"),
+            ("fact_versions", "trg_assert_fact_version_valid"),
+        ):
             exists = conn.execute(
                 text(
                     """
                     SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_trigger
+                        SELECT 1 FROM pg_trigger
                         WHERE tgname = :trigger_name
                           AND tgrelid = CAST(:table_ref AS regclass)
                           AND NOT tgisinternal
@@ -825,9 +832,9 @@ class Database:
             ).scalar_one()
             if not bool(exists):
                 raise RuntimeError(
-                    f"Table 'market.{table_name}' is missing immutable trigger "
+                    f"Table 'market.{table_name}' is missing trigger "
                     f"'{trigger_name}'. Run "
-                    "scripts/db/manual_migration_numeric_fact_store_v1.sql."
+                    "scripts/db/manual_migration_canonical_fact_store_v1.sql."
                 )
 
     def _assert_required_constraints(self, conn) -> None:

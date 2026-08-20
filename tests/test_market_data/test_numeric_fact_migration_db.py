@@ -251,5 +251,20 @@ def test_numeric_fact_store_migration_is_explicit_idempotent_and_validated() -> 
 
     db.reset_connection_state()
     db.dsn = dsn
+    assert not db.ensure_schema()
+    assert "Legacy market-data tables remain active" in str(db.last_error)
+
+    # The numeric store is immutable migration history, not a supported
+    # runtime compatibility path. Remove it before returning the shared
+    # disposable database to the final canonical state.
+    db.reset_connection_state()
+    engine = create_engine(dsn, future=True)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE market.numeric_fact_versions"))
+    finally:
+        engine.dispose()
+
+    db.dsn = dsn
     assert db.ensure_schema(), repr(db.last_error)
     db.reset_connection_state()

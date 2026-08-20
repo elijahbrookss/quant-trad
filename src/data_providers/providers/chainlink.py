@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,6 +21,8 @@ from data_providers.numeric_facts import (
     ProviderNumericGap,
     ProviderNumericObservation,
 )
+from data_providers.facts import ProviderReserveStateSnapshot
+from data_providers.structured_facts import StructuredFactBinding
 from market_data.fact_registry import get_fact_contract
 
 
@@ -26,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 CHAINLINK_ADAPTER_ID = "chainlink_aggregator_v3.v1"
 CHAINLINK_INTERFACE_VERSION = "chainlink.aggregator_v3.v1"
+CHAINLINK_MVR_ADAPTER_ID = "chainlink_mvr_bundle.v1"
+CHAINLINK_MVR_INTERFACE_VERSION = "chainlink.bundle_aggregator_proxy.v1"
 _DECIMALS = "0x313ce567"
 _DESCRIPTION = "0x7284e416"
 _VERSION = "0x54fd4d50"
@@ -38,6 +44,9 @@ _ANSWER_UPDATED_TOPIC = (
     "0x0559884fd3a460db3073b7fc896cc779"
     "86f16e378210ded43186175bf646fc5f"
 )
+_LATEST_BUNDLE = "0x9198274f"
+_BUNDLE_DECIMALS = "0x9d91348d"
+_LATEST_BUNDLE_TIMESTAMP = "0xa3d610cc"
 
 
 class ChainlinkProviderError(NumericFactProviderError):
@@ -382,6 +391,64 @@ def _string_result(value: str) -> str:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ChainlinkRpcError("chainlink_abi_invalid: string encoding") from exc
+
+
+def _bytes_result(value: str) -> bytes:
+    offset = _uint_word(value, 0)
+    try:
+        raw = bytes.fromhex(str(value)[2:])
+    except ValueError as exc:
+        raise ChainlinkRpcError("chainlink_abi_invalid: malformed bytes result") from exc
+    if offset % 32 or offset + 32 > len(raw):
+        raise ChainlinkRpcError("chainlink_abi_invalid: bytes offset")
+    length = int.from_bytes(raw[offset : offset + 32], "big")
+    data = raw[offset + 32 : offset + 32 + length]
+    if len(data) != length:
+        raise ChainlinkRpcError("chainlink_abi_invalid: bytes length")
+    return data
+
+
+def _uint8_array_result(value: str) -> tuple[int, ...]:
+    offset = _uint_word(value, 0)
+    try:
+        raw = bytes.fromhex(str(value)[2:])
+    except ValueError as exc:
+        raise ChainlinkRpcError("chainlink_abi_invalid: malformed array result") from exc
+    if offset % 32 or offset + 32 > len(raw):
+        raise ChainlinkRpcError("chainlink_abi_invalid: array offset")
+    length = int.from_bytes(raw[offset : offset + 32], "big")
+    if length > 256 or offset + 32 + (length * 32) > len(raw):
+        raise ChainlinkRpcError("chainlink_abi_invalid: array length")
+    values = tuple(
+        int.from_bytes(raw[offset + 32 + index * 32 : offset + 64 + index * 32], "big")
+        for index in range(length)
+    )
+    if any(value > 255 for value in values):
+        raise ChainlinkRpcError("chainlink_abi_invalid: uint8 array value")
+    return values
+
+
+def _string_uint256_bundle(value: bytes) -> tuple[str, int]:
+    if len(value) < 96 or len(value) % 32:
+        raise ChainlinkRpcError("chainlink_mvr_bundle_invalid: tuple length")
+    offset = int.from_bytes(value[:32], "big")
+    quantity = int.from_bytes(value[32:64], "big")
+    if offset != 64 or offset + 32 > len(value):
+        raise ChainlinkRpcError("chainlink_mvr_bundle_invalid: string offset")
+    length = int.from_bytes(value[offset : offset + 32], "big")
+    data = value[offset + 32 : offset + 32 + length]
+    if len(data) != length:
+        raise ChainlinkRpcError("chainlink_mvr_bundle_invalid: string length")
+    expected_length = offset + 32 + ((length + 31) // 32) * 32
+    if expected_length != len(value):
+        raise ChainlinkRpcError("chainlink_mvr_bundle_invalid: trailing tuple material")
+    try:
+        report_id = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ChainlinkRpcError("chainlink_mvr_bundle_invalid: string encoding") from exc
+    if not report_id:
+        raise ChainlinkRpcError("chainlink_mvr_bundle_invalid: empty report ID")
+    return report_id, quantity
 
 
 def _encode_uint(selector: str, value: int) -> str:
@@ -1256,13 +1323,312 @@ class ChainlinkAggregatorV3Provider:
         )
 
 
+@dataclass(frozen=True)
+class _ChainlinkMvrReserveConfig:
+    chain_id: int
+    network: str
+    proxy_address: str
+    feed_id: str
+    expected_description: str
+    expected_version: int
+    confirmations: int
+    subject_id: str
+    reserve_asset: str
+    field_decimals: tuple[int, int]
+    max_staleness_seconds: int
+
+    @classmethod
+    def from_binding(
+        cls, binding: StructuredFactBinding
+    ) -> "_ChainlinkMvrReserveConfig":
+        if binding.adapter != CHAINLINK_MVR_ADAPTER_ID:
+            raise ValueError(
+                f"chainlink_mvr_binding_invalid: adapter={binding.adapter}"
+            )
+        expected_keys = {
+            "chain_id",
+            "network",
+            "proxy_address",
+            "feed_id",
+            "expected_description",
+            "expected_version",
+            "confirmations",
+            "subject_id",
+            "reserve_asset",
+            "expected_bundle_fields",
+        }
+        config = dict(binding.config)
+        if set(config) != expected_keys:
+            raise ValueError(
+                "chainlink_mvr_binding_invalid: config fields must match the reserve v1 schema"
+            )
+        integer_fields: dict[str, int] = {}
+        for field_name in ("chain_id", "expected_version", "confirmations"):
+            value = config[field_name]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"chainlink_mvr_binding_invalid: {field_name} must be integer"
+                )
+            integer_fields[field_name] = value
+        if (
+            integer_fields["chain_id"] <= 0
+            or integer_fields["expected_version"] <= 0
+            or integer_fields["confirmations"] < 0
+        ):
+            raise ValueError("chainlink_mvr_binding_invalid: numeric config")
+        network = str(config["network"] or "").strip().lower()
+        description = str(config["expected_description"] or "").strip()
+        subject_id = str(config["subject_id"] or "").strip()
+        reserve_asset = str(config["reserve_asset"] or "").strip().upper()
+        if not all((network, description, subject_id, reserve_asset)):
+            raise ValueError("chainlink_mvr_binding_invalid: semantic identity")
+        if binding.dimensions != {"reserve_asset": reserve_asset}:
+            raise ValueError(
+                "chainlink_mvr_binding_invalid: reserve asset disagrees with series dimensions"
+            )
+        feed_id = str(config["feed_id"] or "").strip().lower()
+        if (
+            len(feed_id) != 34
+            or not feed_id.startswith("0x")
+            or any(character not in "0123456789abcdef" for character in feed_id[2:])
+        ):
+            raise ValueError("chainlink_mvr_binding_invalid: feed_id must be bytes16 hex")
+        fields = config["expected_bundle_fields"]
+        if not isinstance(fields, list) or len(fields) != 2:
+            raise ValueError(
+                "chainlink_mvr_binding_invalid: reserve bundle requires two fields"
+            )
+        normalized_fields: list[dict[str, Any]] = []
+        for field in fields:
+            if not isinstance(field, Mapping) or set(field) != {
+                "name",
+                "type",
+                "decimals",
+            }:
+                raise ValueError(
+                    "chainlink_mvr_binding_invalid: bundle field schema"
+                )
+            normalized_fields.append(dict(field))
+        expected_layout = (
+            ("ID", "string", 0),
+            ("TotalReserve", "uint256", normalized_fields[1]["decimals"]),
+        )
+        actual_layout = tuple(
+            (field["name"], field["type"], field["decimals"])
+            for field in normalized_fields
+        )
+        if actual_layout != expected_layout:
+            raise ValueError(
+                "chainlink_mvr_binding_invalid: expected (ID:string, TotalReserve:uint256)"
+            )
+        reserve_decimals = normalized_fields[1]["decimals"]
+        if (
+            isinstance(reserve_decimals, bool)
+            or not isinstance(reserve_decimals, int)
+            or not 0 <= reserve_decimals <= 77
+        ):
+            raise ValueError("chainlink_mvr_binding_invalid: reserve decimals")
+        return cls(
+            chain_id=integer_fields["chain_id"],
+            network=network,
+            proxy_address=_address(config["proxy_address"]),
+            feed_id=feed_id,
+            expected_description=description,
+            expected_version=integer_fields["expected_version"],
+            confirmations=integer_fields["confirmations"],
+            subject_id=subject_id,
+            reserve_asset=reserve_asset,
+            field_decimals=(0, reserve_decimals),
+            max_staleness_seconds=int(
+                binding.quality_policy["max_staleness_seconds"]
+            ),
+        )
+
+
+class ChainlinkMvrReserveProvider:
+    """Read the latest two-field MVR reserve bundle at a finalized EVM head."""
+
+    adapter_id = CHAINLINK_MVR_ADAPTER_ID
+
+    def __init__(self, transport: JsonRpcTransport, *, endpoint_ref: str) -> None:
+        endpoint_ref = str(endpoint_ref or "").strip()
+        if not endpoint_ref:
+            raise ValueError("chainlink_mvr_rpc_invalid: endpoint_ref is required")
+        self._transport = transport
+        self._endpoint_ref = endpoint_ref
+
+    def _call(self, method: str, params: Sequence[Any]) -> Any:
+        return self._transport.call(method, params)
+
+    def _eth_call(self, *, address: str, data: str, block: str) -> str:
+        return str(
+            self._call(
+                "eth_call",
+                [{"to": _address(address), "data": data}, block],
+            )
+        )
+
+    def fetch_reserve_state(
+        self, binding: StructuredFactBinding
+    ) -> ProviderReserveStateSnapshot:
+        config = _ChainlinkMvrReserveConfig.from_binding(binding)
+        chain_id = _hex_int(self._call("eth_chainId", []))
+        if chain_id != config.chain_id:
+            raise ChainlinkProviderError(
+                "chainlink_mvr_chain_mismatch: "
+                f"expected={config.chain_id} actual={chain_id}"
+            )
+        head = _hex_int(self._call("eth_blockNumber", []))
+        confirmed_head = head - config.confirmations
+        if confirmed_head < 0:
+            raise ChainlinkProviderError(
+                "chainlink_mvr_finality_unavailable: confirmed head is negative"
+            )
+        block_tag = hex(confirmed_head)
+        block = self._call("eth_getBlockByNumber", [block_tag, False])
+        if not isinstance(block, Mapping):
+            raise ChainlinkProviderError(
+                f"chainlink_mvr_block_unavailable: block={confirmed_head}"
+            )
+        confirmed_head_hash = _hash32(
+            block.get("hash"), field_name="confirmed_head_hash"
+        )
+        confirmed_head_time = _datetime_from_epoch(_hex_int(block.get("timestamp")))
+        description = _string_result(
+            self._eth_call(
+                address=config.proxy_address,
+                data=_DESCRIPTION,
+                block=block_tag,
+            )
+        )
+        version = _uint_word(
+            self._eth_call(
+                address=config.proxy_address,
+                data=_VERSION,
+                block=block_tag,
+            )
+        )
+        aggregator = _address_word(
+            self._eth_call(
+                address=config.proxy_address,
+                data=_AGGREGATOR,
+                block=block_tag,
+            )
+        )
+        decimals = _uint8_array_result(
+            self._eth_call(
+                address=config.proxy_address,
+                data=_BUNDLE_DECIMALS,
+                block=block_tag,
+            )
+        )
+        report_timestamp = _uint_word(
+            self._eth_call(
+                address=config.proxy_address,
+                data=_LATEST_BUNDLE_TIMESTAMP,
+                block=block_tag,
+            )
+        )
+        bundle = _bytes_result(
+            self._eth_call(
+                address=config.proxy_address,
+                data=_LATEST_BUNDLE,
+                block=block_tag,
+            )
+        )
+        if (
+            description != config.expected_description
+            or version != config.expected_version
+            or decimals != config.field_decimals
+        ):
+            raise ChainlinkProviderError(
+                "chainlink_mvr_feed_mismatch: "
+                f"proxy={config.proxy_address} description={description!r} "
+                f"version={version} decimals={decimals}"
+            )
+        report_id, raw_quantity = _string_uint256_bundle(bundle)
+        if report_id != config.subject_id:
+            raise ChainlinkProviderError(
+                "chainlink_mvr_subject_mismatch: "
+                f"expected={config.subject_id} actual={report_id}"
+            )
+        observation_time = _datetime_from_epoch(report_timestamp)
+        received_at = datetime.now(timezone.utc)
+        if observation_time > confirmed_head_time or observation_time > received_at:
+            raise ChainlinkProviderError(
+                "chainlink_mvr_timestamp_invalid: report follows confirmed observation"
+            )
+        age_seconds = int((received_at - observation_time).total_seconds())
+        if age_seconds > config.max_staleness_seconds:
+            raise ChainlinkProviderError(
+                "chainlink_mvr_report_stale: "
+                f"age_seconds={age_seconds} "
+                f"max_staleness_seconds={config.max_staleness_seconds}"
+            )
+        bundle_hex = f"0x{bundle.hex()}"
+        bundle_hash = hashlib.sha256(bundle).hexdigest()
+        response_material = {
+            "schema_version": "chainlink.mvr_response.v1",
+            "chain_id": chain_id,
+            "proxy_address": config.proxy_address,
+            "feed_id": config.feed_id,
+            "aggregator": aggregator,
+            "description": description,
+            "version": version,
+            "bundle_decimals": list(decimals),
+            "report_timestamp": report_timestamp,
+            "bundle": bundle_hex,
+        }
+        response_hash = hashlib.sha256(
+            json.dumps(
+                response_material,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return ProviderReserveStateSnapshot(
+            subject_id=config.subject_id,
+            report_id=report_id,
+            reserve_asset=config.reserve_asset,
+            reserve_quantity=Decimal(raw_quantity).scaleb(-decimals[1]),
+            raw_reserve_quantity=str(raw_quantity),
+            observation_time=observation_time,
+            received_at=received_at,
+            response_hash=response_hash,
+            source_path=(
+                f"evm://{config.chain_id}/{config.proxy_address}/latestBundle"
+            ),
+            source_event_key=(
+                f"{config.feed_id}:{report_timestamp}:{bundle_hash}"
+            ),
+            metadata={
+                **response_material,
+                "interface_version": CHAINLINK_MVR_INTERFACE_VERSION,
+                "network": config.network,
+                "endpoint_ref": self._endpoint_ref,
+                "head_block": head,
+                "confirmed_head_block": confirmed_head,
+                "confirmed_head_hash": confirmed_head_hash,
+                "confirmed_head_time": confirmed_head_time.isoformat(),
+                "confirmations": config.confirmations,
+                "bundle_hash": bundle_hash,
+                "raw_reserve_quantity": str(raw_quantity),
+                "age_seconds_at_receipt": age_seconds,
+            },
+        )
+
+
 __all__ = [
     "CHAINLINK_ADAPTER_ID",
     "CHAINLINK_INTERFACE_VERSION",
+    "CHAINLINK_MVR_ADAPTER_ID",
+    "CHAINLINK_MVR_INTERFACE_VERSION",
     "ChainlinkAggregatorV3Provider",
     "ChainlinkBudgetExceeded",
     "ChainlinkProviderError",
     "ChainlinkRpcError",
+    "ChainlinkMvrReserveProvider",
     "HttpJsonRpcTransport",
     "JsonRpcTransport",
 ]

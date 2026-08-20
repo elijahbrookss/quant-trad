@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -12,9 +13,20 @@ from typing import Any, Callable, Mapping, Optional
 from data_providers.facts import (
     ProviderFundingRateSnapshot,
     ProviderOpenInterestSnapshot,
+    ProviderReserveStateSnapshot,
 )
 from data_providers.providers.factory import get_provider
+from data_providers.providers.chainlink import (
+    CHAINLINK_MVR_ADAPTER_ID,
+    ChainlinkMvrReserveProvider,
+    HttpJsonRpcTransport,
+)
 from data_providers.registry import FeatureAuth, feature_contract
+from data_providers.structured_facts import (
+    StructuredFactBinding,
+    load_structured_fact_manifest,
+)
+from market_data.canonical import CanonicalFact
 from market_data.contracts import (
     FUNDING_RATE_FACT_TYPE,
     FUNDING_RATE_FACT_VERSION,
@@ -40,6 +52,8 @@ from . import instrument_service
 
 COINBASE_OI_ADAPTER_VERSION = "coinbase_advanced_trade.open_interest.public_poll.v1"
 COINBASE_FUNDING_ADAPTER_VERSION = "coinbase_advanced_trade.funding_rate.public_poll.v1"
+RESERVE_STATE_FACT_TYPE = "asset.reserve_state"
+RESERVE_STATE_FACT_VERSION = "asset.reserve_state.v1"
 COLLECTOR_DEFINITION_VERSION = "market_collection_definition.v1"
 COLLECTOR_RESULT_VERSION = "market_collection_result.v1"
 
@@ -81,6 +95,9 @@ class MarketDataCollectorService:
         clock: Callable[[], datetime] = _utcnow,
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        structured_provider_builder: Optional[
+            Callable[[StructuredFactBinding], Any]
+        ] = None,
     ) -> None:
         self.collection_repo = collection_repo
         self.store = store
@@ -88,6 +105,53 @@ class MarketDataCollectorService:
         self.clock = clock
         self.sleeper = sleeper
         self.monotonic = monotonic
+        self.structured_provider_builder = (
+            structured_provider_builder or self._build_structured_provider
+        )
+
+    @staticmethod
+    def _build_structured_provider(binding: StructuredFactBinding) -> Any:
+        endpoint = str(os.environ.get(binding.endpoint_ref) or "").strip()
+        if not endpoint:
+            raise RuntimeError(
+                "structured_fact_endpoint_missing: "
+                f"binding={binding.id} endpoint_ref={binding.endpoint_ref}"
+            )
+        pacing_raw = str(
+            os.environ.get("CHAINLINK_RPC_MIN_INTERVAL_SECONDS", "0.5")
+        ).strip()
+        try:
+            pacing_seconds = float(pacing_raw)
+        except ValueError as exc:
+            raise RuntimeError(
+                "structured_fact_provider_config_invalid: "
+                "CHAINLINK_RPC_MIN_INTERVAL_SECONDS must be numeric"
+            ) from exc
+        if binding.adapter == CHAINLINK_MVR_ADAPTER_ID:
+            return ChainlinkMvrReserveProvider(
+                HttpJsonRpcTransport(
+                    endpoint,
+                    min_request_interval_seconds=pacing_seconds,
+                ),
+                endpoint_ref=binding.endpoint_ref,
+            )
+        raise ValueError(
+            f"structured_fact_provider_unsupported: adapter={binding.adapter}"
+        )
+
+    @staticmethod
+    def _structured_binding(config: Mapping[str, Any]) -> StructuredFactBinding:
+        raw = config.get("structured_binding")
+        if not isinstance(raw, Mapping):
+            raise RuntimeError(
+                "market_collection_definition_invalid: structured binding is missing"
+            )
+        binding = StructuredFactBinding(**dict(raw))
+        if binding.manifest_hash != str(config.get("manifest_hash") or ""):
+            raise RuntimeError(
+                "market_collection_definition_invalid: structured manifest hash disagreement"
+            )
+        return binding
 
     def create_coinbase_open_interest_definition(
         self,
@@ -147,6 +211,132 @@ class MarketDataCollectorService:
                 "provider_funding_time_semantics": "unspecified",
             },
         )
+
+    def create_structured_fact_definition(
+        self,
+        *,
+        manifest_path: str,
+        binding_id: str,
+        max_attempts: int = 3,
+        minimum_spacing_seconds: float = 1.0,
+        enabled: bool = False,
+    ) -> dict[str, Any]:
+        """Register an explicitly reviewed structured-provider polling binding."""
+
+        manifest = load_structured_fact_manifest(manifest_path)
+        binding = manifest.binding(binding_id)
+        if (
+            binding.adapter != CHAINLINK_MVR_ADAPTER_ID
+            or binding.fact_type != RESERVE_STATE_FACT_TYPE
+            or binding.payload_schema_id != RESERVE_STATE_FACT_VERSION
+        ):
+            raise ValueError(
+                "market_collection_definition_invalid: unsupported structured binding"
+            )
+        attempts = int(max_attempts)
+        spacing = float(minimum_spacing_seconds)
+        poll_interval = int(binding.schedule["poll_interval_seconds"])
+        if attempts < 1 or attempts > 10:
+            raise ValueError(
+                "market_collection_definition_invalid: max_attempts must be between 1 and 10"
+            )
+        if spacing < 0 or spacing > poll_interval:
+            raise ValueError(
+                "market_collection_definition_invalid: provider spacing is outside poll interval"
+            )
+        try:
+            instrument = instrument_service.get_instrument_record(
+                binding.instrument_id
+            )
+        except KeyError:
+            instrument_spec = dict(binding.canonical_instrument or {})
+            if instrument_spec.get("id") != binding.instrument_id:
+                raise ValueError(
+                    "market_collection_definition_invalid: reviewed canonical "
+                    "instrument metadata is required"
+                )
+            instrument = (
+                instrument_service.install_code_owned_research_instrument(
+                    instrument_spec
+                )
+            )
+        provider_id = str(instrument.get("datasource") or "").strip().upper()
+        venue_id = str(instrument.get("exchange") or "").strip().upper()
+        if (
+            provider_id != str(binding.source["provider"]).upper()
+            or venue_id != str(binding.source["venue"]).upper()
+        ):
+            raise ValueError(
+                "market_collection_definition_invalid: structured binding source "
+                f"disagrees with instrument_id={binding.instrument_id}"
+            )
+        source = SourceIdentity(
+            provider=str(binding.source["provider"]),
+            venue=str(binding.source["venue"]),
+            source_kind=str(binding.source["source_kind"]),
+            adapter_version=str(binding.source["adapter_version"]),
+        )
+        source_id = self.store.register_source(
+            source,
+            lineage={
+                "schema_version": "market.structured_fact_source_lineage.v1",
+                "acquisition": "scheduled_poll",
+                "manifest_id": manifest.id,
+                "manifest_hash": manifest.manifest_hash,
+                "binding_id": binding.id,
+                "adapter": binding.adapter,
+                "endpoint_ref": binding.endpoint_ref,
+                "schedule": dict(binding.schedule),
+                "quality_policy": dict(binding.quality_policy),
+                "risk": dict(binding.risk),
+            },
+        )
+        series_id = self.store.register_series(
+            instrument_id=binding.instrument_id,
+            fact_type=binding.fact_type,
+            timeframe_seconds=None,
+            contract_version=binding.payload_schema_id,
+            dimensions=binding.dimensions,
+        )
+        identity = {
+            "schema_version": COLLECTOR_DEFINITION_VERSION,
+            "source_identity_key": source.identity_key,
+            "instrument_id": binding.instrument_id,
+            "fact_type": binding.fact_type,
+            "contract_version": binding.payload_schema_id,
+            "binding_id": binding.id,
+        }
+        definition_id = f"mcd_{_stable_hash(identity)[:32]}"
+        now = self.clock().astimezone(UTC)
+        epoch = int(now.timestamp())
+        scheduled = datetime.fromtimestamp(
+            epoch - (epoch % poll_interval), tz=UTC
+        )
+        runtime_binding = asdict(binding)
+        runtime_binding.pop("canonical_instrument", None)
+        config = {
+            **identity,
+            "adapter": binding.adapter,
+            "manifest_id": manifest.id,
+            "manifest_hash": manifest.manifest_hash,
+            "manifest_path": manifest.path,
+            "structured_binding": runtime_binding,
+            "minimum_spacing_seconds": spacing,
+            "retry_base_seconds": 2.0,
+            "sample_time_method": "source_report_timestamp",
+            "known_at_method": "platform_acceptance",
+        }
+        row = self.collection_repo.upsert_definition(
+            definition_id=definition_id,
+            source_id=source_id,
+            series_id=series_id,
+            poll_interval_seconds=poll_interval,
+            max_attempts=attempts,
+            enabled=bool(enabled),
+            config=config,
+            next_scheduled_at=scheduled,
+        )
+        return _public_row(row)
 
     def _create_coinbase_definition(
         self,
@@ -264,65 +454,6 @@ class MarketDataCollectorService:
         )
         return _public_row(row)
 
-    def list_definitions(
-        self, *, definition_id: Optional[str] = None
-    ) -> list[dict[str, Any]]:
-        return [
-            _public_row(row)
-            for row in self.collection_repo.list_definitions(
-                definition_id=definition_id
-            )
-        ]
-
-    def list_attempts(
-        self, *, definition_id: str, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        return [
-            _public_row(row)
-            for row in self.collection_repo.list_attempts(
-                definition_id=definition_id, limit=limit
-            )
-        ]
-
-    def collector_snapshot(self, *, attempt_limit: int = 5) -> dict[str, Any]:
-        definitions = self.list_definitions()
-        attempts = [
-            _public_row(row)
-            for row in self.collection_repo.list_recent_attempts(
-                limit_per_definition=attempt_limit
-            )
-        ]
-        grouped_attempts: dict[str, list[dict[str, Any]]] = {
-            str(definition["id"]): [] for definition in definitions
-        }
-        for attempt in attempts:
-            grouped_attempts.setdefault(str(attempt["definition_id"]), []).append(attempt)
-        workers = [
-            _public_row(row)
-            for row in self.collection_repo.list_worker_states()
-        ]
-        active_workers = [worker for worker in workers if bool(worker.get("alive"))]
-        observed_at = self.clock().astimezone(UTC).isoformat()
-        return {
-            "schema_version": "market_collector_snapshot.v1",
-            "observed_at": observed_at,
-            "worker_health": {
-                "status": "alive" if active_workers else "unavailable",
-                "active_count": len(active_workers),
-                "known_count": len(workers),
-                "observed_at": observed_at,
-            },
-            "workers": workers,
-            "collectors": [
-                {
-                    "definition": definition,
-                    "attempts": grouped_attempts.get(str(definition["id"]), []),
-                    "attempts_available": True,
-                }
-                for definition in definitions
-            ],
-        }
-
     def register_worker(self, **kwargs: Any) -> dict[str, Any]:
         return _public_row(self.collection_repo.register_worker(**kwargs))
 
@@ -331,11 +462,6 @@ class MarketDataCollectorService:
 
     def stop_worker(self, **kwargs: Any) -> None:
         self.collection_repo.stop_worker(**kwargs)
-
-    def set_enabled(self, definition_id: str, *, enabled: bool) -> dict[str, Any]:
-        return _public_row(
-            self.collection_repo.set_enabled(definition_id, enabled=enabled)
-        )
 
     def claim_due(
         self, *, owner_id: str, lease_seconds: float = 90.0
@@ -383,6 +509,12 @@ class MarketDataCollectorService:
                 FUNDING_RATE_FACT_TYPE,
                 FUNDING_RATE_FACT_VERSION,
             ): self._collect_funding_rate,
+            (
+                "CHAINLINK",
+                "ARBITRUM_MAINNET",
+                RESERVE_STATE_FACT_TYPE,
+                RESERVE_STATE_FACT_VERSION,
+            ): self._collect_reserve_state,
         }
         handler_key = (
             claim.provider.upper(),
@@ -435,7 +567,11 @@ class MarketDataCollectorService:
             self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
             timing["stage"] = "provider_factory"
             stage_started = self.monotonic()
-            provider = self.provider_factory(claim.provider, venue=claim.venue)
+            if str(claim.config.get("adapter") or "") == CHAINLINK_MVR_ADAPTER_ID:
+                binding = self._structured_binding(claim.config)
+                provider = self.structured_provider_builder(binding)
+            else:
+                provider = self.provider_factory(claim.provider, venue=claim.venue)
             timing["timings_ms"]["provider_factory"] = round(
                 (self.monotonic() - stage_started) * 1000.0, 3
             )
@@ -667,6 +803,144 @@ class MarketDataCollectorService:
         )
         return fact, outcome, snapshot
 
+    def _collect_reserve_state(
+        self,
+        claim: CollectionClaim,
+        provider: Any,
+        lease_seconds: float,
+        timing: dict[str, Any],
+    ) -> tuple[CanonicalFact, Any, ProviderReserveStateSnapshot]:
+        binding = self._structured_binding(claim.config)
+        fetch = getattr(provider, "fetch_reserve_state", None)
+        if not callable(fetch):
+            raise RuntimeError(
+                "market_collection_provider_capability_missing: fetch_reserve_state"
+            )
+        timing["stage"] = "provider_request"
+        stage_started = self.monotonic()
+        snapshot = fetch(binding)
+        timing["timings_ms"]["provider_request"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "provider_contract_validation"
+        stage_started = self.monotonic()
+        if not isinstance(snapshot, ProviderReserveStateSnapshot):
+            raise RuntimeError(
+                "market_collection_provider_contract_invalid: "
+                "expected normalized reserve-state snapshot"
+            )
+        if (
+            snapshot.subject_id != str(binding.config["subject_id"])
+            or snapshot.reserve_asset != str(binding.dimensions["reserve_asset"])
+        ):
+            raise RuntimeError(
+                "market_collection_provider_contract_invalid: reserve subject disagreement"
+            )
+        timing["timings_ms"]["provider_contract_validation"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "canonical_normalization"
+        stage_started = self.monotonic()
+        accepted_at = max(self.clock().astimezone(UTC), snapshot.received_at)
+        source = SourceIdentity(
+            provider=str(binding.source["provider"]),
+            venue=str(binding.source["venue"]),
+            source_kind=str(binding.source["source_kind"]),
+            adapter_version=str(binding.source["adapter_version"]),
+        )
+        fact = CanonicalFact(
+            fact_type=binding.fact_type,
+            payload_schema_id=binding.payload_schema_id,
+            observation_key=snapshot.source_event_key,
+            observation_time=snapshot.observation_time,
+            observation_time_method="source_report_timestamp",
+            source_published_at=snapshot.observation_time,
+            received_at=snapshot.received_at,
+            accepted_at=accepted_at,
+            known_at=accepted_at,
+            known_at_method="platform_acceptance",
+            source=source,
+            transformation_id="chainlink_mvr_reserve_state.v1",
+            external_event_key=snapshot.source_event_key,
+            external_event_group_key=str(binding.config["feed_id"]),
+            payload={
+                "report_id": snapshot.report_id,
+                "reserve_asset": snapshot.reserve_asset,
+                "reserve_quantity": snapshot.reserve_quantity,
+                "unit": snapshot.reserve_asset,
+            },
+            provenance={
+                "schema_version": "market.structured_fact_provenance.v1",
+                "manifest_id": binding.manifest_id,
+                "manifest_hash": binding.manifest_hash,
+                "binding_id": binding.id,
+                "source_path": snapshot.source_path,
+                "response_hash": snapshot.response_hash,
+                "provider_observation": dict(snapshot.metadata),
+            },
+            quality={
+                "schema_version": "market.structured_fact_quality.v1",
+                "expected_update_interval_seconds": int(
+                    binding.schedule["expected_update_interval_seconds"]
+                ),
+                "max_staleness_seconds": int(
+                    binding.quality_policy["max_staleness_seconds"]
+                ),
+                "age_seconds_at_receipt": int(
+                    snapshot.metadata["age_seconds_at_receipt"]
+                ),
+                "gap": False,
+            },
+        )
+        existing = self.store.read_facts(
+            series_id=claim.series_id,
+            start=snapshot.observation_time,
+            end=snapshot.observation_time + timedelta(microseconds=1),
+            source_identity_keys=(source.identity_key,),
+        )
+        matching = [
+            record
+            for record in existing
+            if record.fact.observation_key == fact.observation_key
+        ]
+        if len(matching) > 1:
+            raise RuntimeError(
+                "market_collection_existing_fact_ambiguous: "
+                f"observation_key={fact.observation_key}"
+            )
+        if matching:
+            if matching[0].fact.material_hash != fact.material_hash:
+                raise RuntimeError(
+                    "market_collection_existing_fact_conflict: "
+                    f"observation_key={fact.observation_key}"
+                )
+            fact = matching[0].fact
+        timing["timings_ms"]["canonical_normalization"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "lease_heartbeat"
+        stage_started = self.monotonic()
+        self.collection_repo.heartbeat(claim, lease_seconds=lease_seconds)
+        timing["timings_ms"]["lease_heartbeat"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        timing["stage"] = "persistence"
+        stage_started = self.monotonic()
+        outcome = self.store.ingest_facts(
+            series_id=claim.series_id,
+            source_id=claim.source_id,
+            facts=[fact],
+            request=self._ingestion_request(claim, snapshot.subject_id),
+            source_revision=snapshot.response_hash,
+            ingestion_run_id=claim.attempt_id,
+            allow_corrections=False,
+            collection_fence=claim.fence(),
+        )
+        timing["timings_ms"]["persistence"] = round(
+            (self.monotonic() - stage_started) * 1000.0, 3
+        )
+        return fact, outcome, snapshot
+
     @staticmethod
     def _ingestion_request(
         claim: CollectionClaim, provider_product_id: str
@@ -678,79 +952,6 @@ class MarketDataCollectorService:
             "attempt_id": claim.attempt_id,
             "scheduled_for": claim.scheduled_for.isoformat(),
             "provider_product_id": provider_product_id,
-        }
-
-    def fact_history(
-        self,
-        *,
-        definition_id: str,
-        hours: int = 24,
-        limit: int = 240,
-    ) -> dict[str, Any]:
-        """Return bounded canonical fact history for one collector definition."""
-
-        definitions = self.list_definitions(definition_id=definition_id)
-        if not definitions:
-            raise ValueError(
-                f"market_collection_definition_unknown: definition_id={definition_id}"
-            )
-        definition = definitions[0]
-        fact_type = str(definition.get("fact_type") or "")
-        bounded_hours = max(1, min(int(hours or 24), 24 * 7))
-        bounded_limit = max(1, min(int(limit or 240), 1000))
-        end = self.clock().astimezone(UTC)
-        start = end - timedelta(hours=bounded_hours)
-        if fact_type == OPEN_INTEREST_FACT_TYPE:
-            records = self.store.read_open_interest(
-                series_id=int(definition["series_id"]), start=start, end=end
-            )
-        elif fact_type == FUNDING_RATE_FACT_TYPE:
-            records = self.store.read_funding_rates(
-                series_id=int(definition["series_id"]), start=start, end=end
-            )
-        else:
-            raise ValueError(
-                f"market_collection_fact_history_unsupported: fact_type={fact_type}"
-            )
-
-        samples = []
-        for record in records[-bounded_limit:]:
-            fact = record.fact.to_dict()
-            fact = {
-                key: (
-                    value.astimezone(UTC).isoformat()
-                    if isinstance(value, datetime)
-                    else value
-                )
-                for key, value in fact.items()
-            }
-            samples.append(
-                {
-                    "series_id": record.series_id,
-                    "revision": record.revision,
-                    "market_commit_seq": record.market_commit_seq,
-                    "ingestion_run_id": record.ingestion_run_id,
-                    "source_identity_key": record.source_identity_key,
-                    "source": {
-                        "provider": record.source.provider,
-                        "venue": record.source.venue,
-                        "source_kind": record.source.source_kind,
-                        "adapter_version": record.source.adapter_version,
-                    },
-                    "provenance": dict(record.provenance),
-                    "fact": fact,
-                }
-            )
-        return {
-            "schema_version": "market_collector_fact_history.v1",
-            "definition_id": str(definition_id),
-            "series_id": int(definition["series_id"]),
-            "fact_type": fact_type,
-            "range_start": start.isoformat(),
-            "range_end": end.isoformat(),
-            "samples": samples,
-            "truncated": len(records) > bounded_limit,
-            "observed_at": end.isoformat(),
         }
 
     def latest_open_interest(

@@ -1,244 +1,331 @@
-import { useState } from 'react'
-import { RefreshCcw, X } from 'lucide-react'
-import { formatRelativeTime } from '../bots/state/botRuntimeStatus.js'
-import { deriveCollectorHealth, COLLECTOR_HEALTH_COPY } from './collectorHealth.js'
+import { useMemo, useState } from 'react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  MoreHorizontal,
+  Pause,
+  Play,
+  RefreshCcw,
+  RotateCcw,
+  Square,
+  Stethoscope,
+  X,
+} from 'lucide-react'
 import { OperatorErrorNotice } from '../../v2/components/OperatorErrorNotice.jsx'
+import { COLLECTOR_STATE_COPY } from './buildCollectorCardViewModel.js'
 
-const STATUS_TONE_CLASS = {
-  healthy: 'border-emerald-400/60 bg-emerald-400/15 text-emerald-100',
-  failed: 'border-rose-500/50 bg-rose-500/10 text-rose-200',
-  offline: 'border-rose-500/50 bg-rose-500/10 text-rose-200',
-  stalled: 'border-rose-500/50 bg-rose-500/10 text-rose-200',
-  disabled: 'border-white/10 bg-white/5 text-slate-200',
-  overdue: 'border-rose-500/50 bg-rose-500/10 text-rose-200',
-  stale: 'border-amber-500/45 bg-amber-500/10 text-amber-200',
-  unknown: 'border-white/10 bg-white/5 text-slate-200',
+const TABS = [
+  ['runtime', 'Runtime'],
+  ['activity', 'Activity'],
+  ['facts', 'Facts'],
+  ['quality', 'Data quality'],
+  ['diagnostics', 'Diagnostics'],
+  ['configuration', 'Configuration'],
+]
+
+const ACTIONS = {
+  health_probe: { label: 'Probe', Icon: Stethoscope, probe: true },
+  start: { label: 'Start', Icon: Play },
+  stop: { label: 'Stop', Icon: Square, disruptive: true },
+  restart: { label: 'Restart', Icon: RotateCcw, disruptive: true },
+  pause: { label: 'Pause', Icon: Pause },
+  resume: { label: 'Resume', Icon: Play },
 }
 
-const STATUS_LABEL = {
-  healthy: 'On schedule',
-  failed: 'Latest attempt failed',
-  offline: 'Worker offline',
-  stalled: 'Attempt stalled',
-  disabled: 'Scheduler disabled',
-  overdue: 'Overdue',
-  stale: 'Stale',
-  unknown: 'Unknown',
+function formatTime(value) {
+  if (!value) return 'Unavailable'
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString()
 }
 
-function ReadoutRow({ label, value }) {
+function formatDuration(value) {
+  if (value === null || value === undefined || value === '') return 'Unavailable'
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds)) return 'Unavailable'
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`
+  return `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`
+}
+
+function formatCount(value) {
+  if (value === null || value === undefined || value === '') return 'Unavailable'
+  return Number.isFinite(Number(value)) ? Number(value).toLocaleString() : 'Unavailable'
+}
+
+function tone(value) {
+  const normalized = String(value || '').toUpperCase()
+  if (['HEALTHY', 'PASS', 'SUCCEEDED'].includes(normalized)) return 'success'
+  if (['FAILED', 'FAIL'].includes(normalized)) return 'danger'
+  if (['DELAYED', 'DEGRADED', 'RETRYING', 'RECOVERING', 'WARNING'].includes(normalized)) return 'warning'
+  if (['STARTING', 'RUNNING'].includes(normalized)) return 'info'
+  return 'neutral'
+}
+
+function Badge({ value }) {
+  if (value === 'NOT_APPLICABLE') return <span className="qt2-health-na">—</span>
+  return <span className={'qt2-evidence-state is-' + tone(value)}>{value || 'UNKNOWN'}</span>
+}
+
+function Panel({ title, aside, children, wide = false }) {
   return (
-    <div className="flex items-center justify-between gap-4 px-4 py-3">
-      <span className="text-xs font-medium text-slate-500">{label}</span>
-      <span className="max-w-[60%] text-right text-sm text-slate-200">{value ?? '—'}</span>
-    </div>
-  )
-}
-
-function ReadoutPanel({ title, children }) {
-  return (
-    <section className="qt-ops-console overflow-hidden">
-      <header className="border-b border-white/8 px-4 py-3">
-        <p className="text-sm font-semibold text-slate-100">{title}</p>
-      </header>
-      <div className="divide-y divide-white/6">{children}</div>
+    <section className={'qt2-collector-panel' + (wide ? ' is-wide' : '')}>
+      <header><h2>{title}</h2>{aside}</header>
+      <div>{children}</div>
     </section>
   )
 }
 
-function FactHistoryPanel({ history }) {
-  const samples = Array.isArray(history?.samples) ? history.samples : []
-  const values = samples.map((sample) => Number(sample?.fact?.value)).filter(Number.isFinite)
-  const minimum = values.length ? Math.min(...values) : null
-  const maximum = values.length ? Math.max(...values) : null
-  const span = Math.max((maximum ?? 0) - (minimum ?? 0), 1e-12)
-  const points = values.map((value, index) => {
-    const x = values.length <= 1 ? 50 : (index / (values.length - 1)) * 100
-    const y = 44 - ((value - minimum) / span) * 38
-    return x.toFixed(2) + "," + y.toFixed(2)
-  }).join(" ")
-  const latest = samples[samples.length - 1] || null
+function Readout({ label, value, mono = false }) {
+  return <div className="qt2-collector-readout"><dt>{label}</dt><dd className={mono ? 'qt-mono' : ''}>{value ?? 'Unavailable'}</dd></div>
+}
+
+function JsonBlock({ value }) {
+  return <pre className="qt2-json-block">{JSON.stringify(value ?? null, null, 2)}</pre>
+}
+
+function RawDetails({ value, label = 'Advanced / Raw' }) {
+  return <details className="qt2-raw-details"><summary>{label}</summary><JsonBlock value={value} /></details>
+}
+
+function Empty({ children }) {
+  return <div className="qt2-empty">{children}</div>
+}
+
+function ActionDialog({ collector, action, busy, error, onCancel, onConfirm }) {
+  const spec = ACTIONS[action]
+  const [reason, setReason] = useState('')
+  if (!spec) return null
   return (
-    <ReadoutPanel title="Canonical fact history · last 24 hours">
-      {samples.length ? (
-        <div className="qt2-fact-chart">
-          <svg viewBox="0 0 100 48" preserveAspectRatio="none" role="img" aria-label="Canonical fact value history">
-            <polyline points={points} fill="none" vectorEffect="non-scaling-stroke" />
-          </svg>
-          <div><span><small>Latest</small><strong>{latest?.fact?.value ?? "—"} {latest?.fact?.unit || ""}</strong></span><span><small>Range</small><strong>{minimum?.toLocaleString()} – {maximum?.toLocaleString()}</strong></span><span><small>Samples</small><strong>{samples.length}{history?.truncated ? "+" : ""}</strong></span></div>
-        </div>
-      ) : <div className="px-4 py-8 text-sm text-slate-500">No canonical facts were persisted in this bounded window.</div>}
-      {latest ? <><ReadoutRow label="Latest sample" value={latest.fact?.sample_time} /><ReadoutRow label="Known at" value={latest.fact?.known_at} /><ReadoutRow label="Provider" value={latest.source?.provider} /><ReadoutRow label="Revision" value={latest.revision} /></> : null}
-    </ReadoutPanel>
+    <div className="qt2-action-backdrop" role="presentation">
+      <section className="qt2-action-dialog" role="dialog" aria-modal="true" aria-labelledby="collector-action-title">
+        <header>
+          <div><span>Audited collector action</span><h2 id="collector-action-title">{spec.label} {collector.collector_id}</h2></div>
+          <button type="button" onClick={onCancel} aria-label="Cancel action"><X size={17} /></button>
+        </header>
+        {spec.disruptive
+          ? <p className="qt2-action-warning"><AlertTriangle size={17} />This action interrupts acquisition through the canonical lifecycle path.</p>
+          : <p>The desired state will change through the canonical backend command path.</p>}
+        <label>Operator reason<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why is this action being taken?" /></label>
+        <dl>
+          <Readout label="Collector" value={`${collector.collector_kind}:${collector.collector_id}`} mono />
+          <Readout label="Prior state" value={collector.operational_state || collector.actual_state} />
+          <Readout label="Prior health" value={collector.health_status} />
+        </dl>
+        {error ? <OperatorErrorNotice error={error} compact /> : null}
+        <footer>
+          <button type="button" className="qt2-button" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className={'qt2-button ' + (spec.disruptive ? 'qt2-button-danger' : 'qt2-button-primary')} onClick={() => onConfirm(reason)} disabled={busy || !reason.trim()}>
+            {busy ? 'Recording action…' : `Confirm ${spec.label.toLowerCase()}`}
+          </button>
+        </footer>
+      </section>
+    </div>
   )
 }
 
-function AttemptLatencyPanel({ attempts }) {
-  const rows = attempts.slice(0, 16).reverse().map((attempt) => {
-    const started = Date.parse(attempt?.started_at || "")
-    const finished = Date.parse(attempt?.finished_at || "")
-    const totalMs = Number.isFinite(started) && Number.isFinite(finished) ? Math.max(0, finished - started) : 0
-    const providerMs = Number(attempt?.evidence?.timings_ms?.provider_request || 0)
-    return { attempt, totalMs, providerMs }
-  })
-  const maximum = Math.max(...rows.map((row) => row.totalMs), 1)
-  const average = rows.length ? rows.reduce((sum, row) => sum + row.totalMs, 0) / rows.length : 0
+function RuntimeTab({ collector }) {
+  const running = collector.operational_state === 'RUNNING'
   return (
-    <ReadoutPanel title="Collection latency · recent attempts">
-      {rows.length ? <div className="qt2-latency-chart">
-        <div className="qt2-latency-bars">{rows.map(({ attempt, totalMs, providerMs }) => <span key={attempt.id} className={attempt.status === "succeeded" ? "is-success" : "is-failure"} style={{ height: Math.max(8, (totalMs / maximum) * 100) + "%" }} title={attempt.status + " · " + totalMs.toFixed(0) + "ms total · " + (providerMs ? providerMs.toFixed(0) + "ms provider" : "provider timing unavailable")} />)}</div>
-        <div className="qt2-latency-summary"><span><small>Average</small><strong>{average.toFixed(0)}ms</strong></span><span><small>Slowest</small><strong>{maximum.toFixed(0)}ms</strong></span><span><small>Provider split</small><strong>{rows.some((row) => row.providerMs > 0) ? "Reported" : "Awaiting upgraded worker"}</strong></span></div>
-      </div> : <div className="px-4 py-8 text-sm text-slate-500">No attempt timing evidence is available.</div>}
-    </ReadoutPanel>
+    <div className="qt2-collector-panel-grid">
+      <Panel title="Lifecycle"><dl>
+        <Readout label="State" value={collector.operational_state || collector.actual_state} />
+        <Readout label="Health" value={collector.health_status} />
+        <Readout label="Desired state" value={collector.desired_state} />
+        <Readout label="Configured state" value={collector.configured_state} />
+        <Readout label="Control generation" value={collector.control_generation} />
+        <Readout label="Restart count" value={collector.runtime?.restart_count} />
+      </dl></Panel>
+      <Panel title="Worker"><dl>
+        <Readout label="Identity" value={collector.worker?.identity} mono />
+        <Readout label="State" value={collector.worker?.state} />
+        <Readout label="Heartbeat" value={formatTime(collector.worker?.heartbeat_at)} />
+        <Readout label="Heartbeat age" value={formatDuration(collector.worker?.heartbeat_age_seconds)} />
+        <Readout label="Uptime" value={formatDuration(collector.worker?.uptime_seconds)} />
+        <Readout label="Lease owner" value={collector.runtime?.lease_owner} mono />
+      </dl></Panel>
+      <Panel title="Acquisition"><dl>
+        <Readout label="Provider" value={`${collector.provider} · ${collector.venue}`} />
+        <Readout label="Trigger" value={collector.acquisition?.trigger || (collector.acquisition?.cadence_seconds ? `every ${collector.acquisition.cadence_seconds}s` : null)} />
+        <Readout label="Last provider success" value={formatTime(collector.acquisition?.last_provider_success_at)} />
+        <Readout label="Last accepted fact" value={formatTime(collector.acquisition?.last_accepted_fact_at)} />
+        <Readout label="Freshness" value={running ? formatDuration(collector.acquisition?.freshness_seconds) : '—'} />
+      </dl></Panel>
+      <Panel title="Delivery"><dl>
+        <Readout label="Accepted · 1 minute" value={running ? formatCount(collector.throughput?.accepted_last_minute) : '—'} />
+        <Readout label="Accepted · 5 minutes" value={running ? formatCount(collector.throughput?.accepted_last_five_minutes) : '—'} />
+        <Readout label="Recent rejects" value={formatCount(collector.throughput?.rejected_recent)} />
+        <Readout label="Retry active" value={collector.retry?.active ? 'Yes' : 'No'} />
+        {collector.error?.message ? <Readout label="Active error" value={collector.error.message} /> : null}
+      </dl></Panel>
+    </div>
   )
 }
 
-/**
- * Market Lens reads durable definition, worker, attempt, and typed-fact evidence.
- * Refresh is explicit; process liveness comes from the worker heartbeat projection.
- */
-export function CollectorLensContent({ definition, attempts, factHistory, attemptsError, factsError, onClose, onRefresh, nowEpochMs = Date.now() }) {
-  const health = deriveCollectorHealth(definition, attempts, nowEpochMs)
-  const toneClass = STATUS_TONE_CLASS[health.status] || STATUS_TONE_CLASS.unknown
-  const [activeTab, setActiveTab] = useState('status')
-  const samples = Array.isArray(factHistory?.samples) ? factHistory.samples : []
-  const revisedSamples = samples.filter((sample) => Number(sample?.revision || 0) > 1).length
-  const missingProvenance = samples.filter((sample) => !sample?.source?.provider || !sample?.source_identity_key).length
-  const failedAttempts = attempts.filter((attempt) => attempt?.status === 'failed').length
-
+function ActivityTab({ events, operations }) {
+  const rows = useMemo(() => [...(events?.events || [])], [events])
   return (
-    <>
-      <header className="border-b border-white/8 px-4 py-3 sm:px-5">
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-          <div className="min-w-0">
-            <p className="text-xs font-semibold text-slate-400">Market Lens</p>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <h1 className="text-[1.4rem] font-semibold tracking-[0.01em] text-slate-50">
-                {definition?.instrument_symbol || definition?.instrument_id || 'Market evidence'}
-              </h1>
-              <span className={`inline-flex items-center gap-1.5 rounded-[3px] border px-2.5 py-1 text-sm font-semibold ${toneClass}`}>
-                {STATUS_LABEL[health.status] || 'Unknown'}
-              </span>
-            </div>
-            <p className="mt-2 text-sm text-slate-300">
-              {definition?.provider} · {definition?.config?.provider_product_id || definition?.instrument_id} · {definition?.fact_type}
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={onRefresh}
-              className="inline-flex items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:border-white/16 hover:bg-black/40 hover:text-slate-100"
-            >
-              <RefreshCcw className="size-3.5" />
-              Refresh
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex items-center gap-1.5 rounded-[3px] border border-white/10 bg-black/25 px-3 py-2 text-sm font-semibold text-slate-300 transition hover:border-white/16 hover:bg-black/40 hover:text-slate-100"
-            >
-              <X className="size-3.5" />
-              Exit Lens
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <div className="flex flex-wrap gap-2 border-b border-white/8 px-4 py-3 text-sm text-slate-300 sm:px-5">
-        {COLLECTOR_HEALTH_COPY[health.status]}
-        {' · '}{health.workerAlive ? 'Worker heartbeat current' : health.workerLivenessKnown ? 'Worker heartbeat expired' : 'Worker heartbeat unavailable'}
-      </div>
-
-      <nav className="qt2-lens-tabs" aria-label="Market Lens sections">
-        {[
-          ['status', 'Status'],
-          ['facts', 'Facts'],
-          ['attempts', 'Attempts'],
-          ['quality', 'Quality'],
-        ].map(([id, label]) => <button type="button" key={id} className={activeTab === id ? 'is-active' : ''} aria-pressed={activeTab === id} onClick={() => setActiveTab(id)}>{label}</button>)}
-      </nav>
-
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4 sm:px-5">
-        <div className="grid gap-4 xl:grid-cols-2">
-          {activeTab === 'status' ? <>
-          <ReadoutPanel title="Definition">
-            <ReadoutRow label="Provider" value={definition?.provider} />
-            <ReadoutRow label="Venue" value={definition?.venue} />
-            <ReadoutRow label="Instrument" value={definition?.instrument_id} />
-            <ReadoutRow label="Fact type" value={definition?.fact_type} />
-            <ReadoutRow label="Poll interval" value={definition?.poll_interval_seconds ? `${definition.poll_interval_seconds}s` : '—'} />
-            <ReadoutRow label="Max attempts" value={definition?.max_attempts} />
-            <ReadoutRow label="Scheduler enabled" value={health.schedulerEnabled ? 'Yes' : 'No'} />
-          </ReadoutPanel>
-
-          <ReadoutPanel title="Health facts">
-            <ReadoutRow label="Last attempt" value={health.lastAttemptAt ? `${formatRelativeTime(health.lastAttemptAt, { nowEpochMs }) || health.lastAttemptAt} (${health.lastAttemptStatus})` : 'none recorded'} />
-            <ReadoutRow label="Last success" value={health.lastSuccessAt ? formatRelativeTime(health.lastSuccessAt, { nowEpochMs }) || health.lastSuccessAt : 'none recorded'} />
-            <ReadoutRow label="Next expected" value={health.nextExpectedAt ? formatRelativeTime(health.nextExpectedAt, { nowEpochMs }) || health.nextExpectedAt : '—'} />
-            <ReadoutRow label="Overdue" value={health.overdue ? 'Yes' : 'No'} />
-            <ReadoutRow label="Stale" value={health.stale ? 'Yes' : 'No'} />
-          </ReadoutPanel>
-          <div className="xl:col-span-2"><AttemptLatencyPanel attempts={attempts} /></div>
-          </> : null}
-
-          {activeTab === 'facts' ? <div className="xl:col-span-2">
-            {factsError ? <OperatorErrorNotice error={factsError} /> : null}
-            <FactHistoryPanel history={factHistory} />
-          </div> : null}
-
-          {activeTab === 'attempts' ? <>
-          {attemptsError ? <div className="xl:col-span-2"><OperatorErrorNotice error={attemptsError} /></div> : null}
-          <div className="xl:col-span-2"><AttemptLatencyPanel attempts={attempts} /></div>
-          <section className="qt-ops-console overflow-hidden xl:col-span-2">
-            <header className="border-b border-white/8 px-4 py-3">
-              <p className="text-sm font-semibold text-slate-100">Recent attempts</p>
-            </header>
-            {attempts.length ? (
-              <div className="overflow-auto">
-                <table className="min-w-full text-left text-sm text-slate-200">
-                  <thead className="border-b border-white/8 bg-black/25 text-xs text-slate-500">
-                    <tr>
-                      <th className="px-4 py-3">Status</th>
-                      <th className="px-4 py-3">Started</th>
-                      <th className="px-4 py-3">Finished</th>
-                      <th className="px-4 py-3">Error</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/6">
-                    {attempts.map((attempt) => (
-                      <tr key={attempt.id}>
-                        <td className="qt-mono px-4 py-3">{attempt.status}</td>
-                        <td className="px-4 py-3">{formatRelativeTime(attempt.started_at, { nowEpochMs }) || attempt.started_at}</td>
-                        <td className="px-4 py-3">{attempt.finished_at ? formatRelativeTime(attempt.finished_at, { nowEpochMs }) || attempt.finished_at : '—'}</td>
-                        <td className="px-4 py-3 text-rose-300">{attempt.error || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="px-4 py-8 text-sm text-slate-500">No attempts recorded yet.</div>
-            )}
-          </section>
-          </> : null}
-
-          {activeTab === 'quality' ? <div className="xl:col-span-2">
-            {factsError ? <OperatorErrorNotice error={factsError} /> : null}
-            {attemptsError ? <OperatorErrorNotice error={attemptsError} /> : null}
-            <ReadoutPanel title="Evidence quality">
-              <ReadoutRow label="Worker heartbeat" value={health.workerAlive ? 'Current' : health.workerLivenessKnown ? 'Expired' : 'Unavailable'} />
-              <ReadoutRow label="Canonical samples in window" value={samples.length} />
-              <ReadoutRow label="Revised samples" value={revisedSamples} />
-              <ReadoutRow label="Missing provider provenance" value={missingProvenance} />
-              <ReadoutRow label="Failed recent attempts" value={failedAttempts} />
-              <ReadoutRow label="History window" value={factHistory?.truncated ? 'Truncated at bounded limit' : 'Complete for requested bounded read'} />
-              <ReadoutRow label="Gap catalog" value="Not exposed by this scheduled-fact lens" />
-            </ReadoutPanel>
-          </div> : null}
-        </div>
-      </div>
-    </>
+    <div className="qt2-collector-panel-grid">
+      <Panel title="Collector event timeline" aside={<span>{rows.length} events</span>} wide>
+        {rows.length ? <ol className="qt2-event-timeline">{rows.map((event, index) => (
+          <li key={`${event.occurred_at}:${event.event_type}:${index}`}>
+            <span className={'is-' + tone(event.status)} />
+            <div><strong>{event.event_type}</strong><small>{formatTime(event.occurred_at)}</small><p>{event.status || 'Evidence recorded'}</p></div>
+            <RawDetails value={event.evidence} label="Evidence" />
+          </li>
+        ))}</ol> : <Empty>No runtime or quality events are recorded.</Empty>}
+      </Panel>
+      <Panel title="Operator audit history" aside={<span>{operations.length} actions</span>} wide>
+        {operations.length ? <div className="qt2-audit-list">{operations.map((operation) => (
+          <article key={operation.id || operation.request_id}>
+            <span><Badge value={operation.status} /><strong>{operation.action}</strong></span>
+            <small>{formatTime(operation.requested_at)} · {operation.actor_id || 'actor unavailable'}</small>
+            <RawDetails value={operation} />
+          </article>
+        ))}</div> : <Empty>No operator mutations have been recorded.</Empty>}
+      </Panel>
+    </div>
   )
+}
+
+function FactsTab({ facts }) {
+  return (
+    <Panel title="Recent canonical Facts" aside={<span>{facts.length} facts</span>} wide>
+      {facts.length ? <div className="qt2-fact-records">{facts.map((fact) => (
+        <article key={fact.id || `${fact.series_id}:${fact.observation_key}:${fact.revision}`}>
+          <header><span><strong>{fact.fact_type}</strong><small>{fact.payload_schema_id}</small></span><Badge value={`r${fact.revision}`} /></header>
+          <dl>
+            <Readout label="Subject" value={fact.instrument_id} />
+            <Readout label="Observation time" value={formatTime(fact.observation_time)} />
+            <Readout label="Known at" value={formatTime(fact.known_at)} />
+            <Readout label="Provider" value={`${fact.provider} · ${fact.venue}`} />
+          </dl>
+          <RawDetails value={{ payload: fact.payload, provenance: fact.provenance, quality: fact.quality, transformation_id: fact.transformation_id }} />
+        </article>
+      ))}</div> : <Empty>No canonical facts are visible in this bounded read.</Empty>}
+    </Panel>
+  )
+}
+
+function QualityTab({ gaps, qualityEvents }) {
+  return (
+    <div className="qt2-collector-panel-grid">
+      <Panel title="Gap evidence" aside={<span>{gaps.length} records</span>} wide>
+        {gaps.length ? <div className="qt2-evidence-records">{gaps.map((gap, index) => (
+          <article key={gap.id || index}>
+            <span><strong>{gap.gap_type || gap.reason || 'Gap evidence'}</strong><small>{formatTime(gap.created_at)}</small></span>
+            <RawDetails value={gap} />
+          </article>
+        ))}</div> : <Empty>No recent gap evidence is recorded.</Empty>}
+      </Panel>
+      <Panel title="Quality and schema events" aside={<span>{qualityEvents.length} records</span>} wide>
+        {qualityEvents.length ? <div className="qt2-evidence-records">{qualityEvents.map((event, index) => (
+          <article key={event.id || index}>
+            <span><strong>{event.classification || 'Quality event'}</strong><small>{formatTime(event.detected_at)}</small></span>
+            <RawDetails value={event} />
+          </article>
+        ))}</div> : <Empty>No recent malformed, rejected, or schema-quality evidence is recorded.</Empty>}
+      </Panel>
+    </div>
+  )
+}
+
+function DiagnosticsTab({ diagnostics, error, onRefresh }) {
+  if (error) return <OperatorErrorNotice error={error} />
+  if (!diagnostics) return <Empty>Run diagnostics to inspect the collector boundaries.</Empty>
+  return (
+    <Panel title="Canonical boundary diagnostics" aside={<button type="button" className="qt2-button" onClick={onRefresh}><Stethoscope size={14} />Run again</button>} wide>
+      <div className="qt2-diagnostic-summary">
+        <span><small>Likely failing boundary</small><strong>{diagnostics.likely_failing_boundary || 'None'}</strong></span>
+        <span><small>Recommended action</small><strong>{diagnostics.recommended_action?.replaceAll('_', ' ') || 'No action'}</strong></span>
+      </div>
+      <div className="qt2-diagnostic-grid">{(diagnostics.boundaries || []).map((boundary) => (
+        <article key={boundary.boundary}>
+          <header>{boundary.status === 'pass' ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}<span><strong>{boundary.boundary.replaceAll('_', ' ')}</strong><Badge value={boundary.status} /></span></header>
+          <p>{boundary.summary}</p>
+          <RawDetails value={boundary.evidence} label="Structured evidence" />
+        </article>
+      ))}</div>
+    </Panel>
+  )
+}
+
+export function CollectorLensContent({
+  detail,
+  diagnostics,
+  events,
+  gaps,
+  diagnosticsError,
+  actionError,
+  actionBusy,
+  onClose,
+  onRefresh,
+  onRunDiagnostics,
+  onAction,
+}) {
+  const collector = detail.collector
+  const [activeTab, setActiveTab] = useState('runtime')
+  const [pendingAction, setPendingAction] = useState(null)
+  const schemas = collector.fact_schemas || []
+  const subjects = collector.subjects || []
+  const allowedActions = collector.capabilities?.actions || []
+  const primaryActions = allowedActions.filter((action) => !['health_probe', 'restart'].includes(action))
+  const advancedActions = allowedActions.filter((action) => ['health_probe', 'restart'].includes(action))
+
+  async function confirmAction(reason) {
+    const action = pendingAction
+    const succeeded = await onAction(action, reason)
+    if (succeeded) setPendingAction(null)
+  }
+
+  function runDiagnostics() {
+    setActiveTab('diagnostics')
+    onRunDiagnostics()
+  }
+
+  function actionButton(action) {
+    const spec = ACTIONS[action]
+    if (!spec) return null
+    const Icon = spec.Icon
+    return <button type="button" key={action} onClick={() => spec.probe ? onAction(action, 'operator health probe') : setPendingAction(action)} disabled={actionBusy}><Icon size={14} />{spec.label}</button>
+  }
+
+  return <>
+    <header className="qt2-collector-lens-head">
+      <div>
+        <span>Market-data collector</span>
+        <div>
+          <h1>{subjects.map((subject) => subject.provider_product_id || subject.symbol || subject.instrument_id).filter(Boolean).join(', ') || collector.collector_id}</h1>
+          <Badge value={collector.operational_state || collector.actual_state} />
+          <Badge value={collector.health_status} />
+        </div>
+        <p>{collector.provider} · {collector.collector_kind.replaceAll('_', ' ')} · {schemas.map((schema) => schema.fact_type).join(', ')}</p>
+      </div>
+      <div><button type="button" className="qt2-button" onClick={onRefresh}><RefreshCcw size={14} />Refresh</button><button type="button" className="qt2-button" onClick={onClose}><X size={14} />Exit</button></div>
+    </header>
+    <div className="qt2-collector-state-strip">
+      <p>{COLLECTOR_STATE_COPY[collector.operational_state] || 'Lifecycle explanation unavailable.'}</p>
+      <span>desired {collector.desired_state} · configured {collector.configured_state}</span>
+    </div>
+    <div className="qt2-collector-actions" aria-label="Safe collector actions">
+      {primaryActions.map(actionButton)}
+      <details className="qt2-collector-more-actions">
+        <summary><MoreHorizontal size={14} />More</summary>
+        <div>
+          <button type="button" onClick={runDiagnostics}><Stethoscope size={14} />Diagnostics</button>
+          {advancedActions.map(actionButton)}
+        </div>
+      </details>
+    </div>
+    {actionError && !pendingAction ? <div className="qt2-collector-action-error"><OperatorErrorNotice error={actionError} compact /></div> : null}
+    <nav className="qt2-lens-tabs" aria-label="Collector evidence sections">{TABS.map(([id, label]) => <button type="button" key={id} className={activeTab === id ? 'is-active' : ''} onClick={() => setActiveTab(id)}>{label}</button>)}</nav>
+    <div className="qt2-collector-lens-body">
+      {activeTab === 'runtime' ? <RuntimeTab collector={collector} /> : null}
+      {activeTab === 'activity' ? <ActivityTab events={events} operations={detail.operations || []} /> : null}
+      {activeTab === 'facts' ? <FactsTab facts={detail.recent_facts || []} /> : null}
+      {activeTab === 'quality' ? <QualityTab gaps={gaps?.gaps || detail.gaps || []} qualityEvents={gaps?.quality_events || detail.quality_events || []} /> : null}
+      {activeTab === 'diagnostics' ? <DiagnosticsTab diagnostics={diagnostics} error={diagnosticsError} onRefresh={runDiagnostics} /> : null}
+      {activeTab === 'configuration' ? <Panel title="Read-only code-owned configuration" wide><p className="qt2-panel-note">Collector creation, schemas, credentials, and material behavior remain code-reviewed concerns.</p><RawDetails value={detail.read_only_configuration} /></Panel> : null}
+    </div>
+    {pendingAction ? <ActionDialog collector={collector} action={pendingAction} busy={actionBusy} error={actionError} onCancel={() => setPendingAction(null)} onConfirm={confirmAction} /> : null}
+  </>
 }

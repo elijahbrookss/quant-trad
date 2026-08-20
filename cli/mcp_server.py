@@ -212,6 +212,43 @@ class QuantTradMcpServer:
         client = self._client_factory()
         if parts == ["health"]:
             return _ensure_object(client.request_json("GET", "/api/health"), "GET /api/health")
+        if parts == ["market-data", "collectors"]:
+            return _ensure_object(
+                client.request_json(
+                    "GET",
+                    "/api/market-data/operations/collectors/snapshot",
+                    params={"attempt_limit": _query_int(query, "attempt_limit", 5)},
+                ),
+                "GET collector fleet",
+            )
+        if parts == ["market-data", "plane"]:
+            return _ensure_object(
+                client.request_json(
+                    "GET", "/api/market-data/operations/data-plane"
+                ),
+                "GET market data plane",
+            )
+        if (
+            len(parts) in {4, 5}
+            and parts[:2] == ["market-data", "collectors"]
+        ):
+            kind = quote(parts[2], safe="")
+            collector_id = quote(parts[3], safe="")
+            suffix = f"/{parts[4]}" if len(parts) == 5 else ""
+            params = (
+                {"limit": _query_int(query, "limit", 100)}
+                if not suffix or suffix in {"/events", "/gaps"}
+                else None
+            )
+            return _ensure_object(
+                client.request_json(
+                    "GET",
+                    "/api/market-data/operations/collectors/"
+                    f"{kind}/{collector_id}{suffix}",
+                    params=params,
+                ),
+                f"GET collector {parts[3]}{suffix}",
+            )
         if parts == ["bots"]:
             return _ensure_object(client.request_json("GET", "/api/bots/run-contexts"), "GET /api/bots/run-contexts")
         if len(parts) == 2 and parts[0] == "bots":
@@ -355,6 +392,83 @@ class QuantTradMcpServer:
 
     def _tool_health_check(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return self.read_resource("quanttrad://health")
+
+    def _tool_list_collectors(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        attempt_limit = _optional_int(arguments, "attempt_limit", 5)
+        return self.read_resource(
+            f"quanttrad://market-data/collectors?attempt_limit={attempt_limit}"
+        )
+
+    def _collector_resource_uri(
+        self, arguments: dict[str, Any], *, suffix: str = ""
+    ) -> str:
+        kind = _required_str(arguments, "collector_kind")
+        collector_id = quote(_required_str(arguments, "collector_id"), safe="")
+        uri = f"quanttrad://market-data/collectors/{kind}/{collector_id}{suffix}"
+        if suffix in {"", "/events", "/gaps"}:
+            uri += f"?limit={_optional_int(arguments, 'limit', 100)}"
+        return uri
+
+    def _tool_get_collector(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self.read_resource(self._collector_resource_uri(arguments))
+
+    def _tool_diagnose_collector(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self.read_resource(
+            self._collector_resource_uri(arguments, suffix="/diagnostics")
+        )
+
+    def _tool_probe_collector(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(
+            [
+                "data",
+                "collectors",
+                "probe",
+                _required_str(arguments, "collector_kind"),
+                _required_str(arguments, "collector_id"),
+            ],
+            timeout_seconds=300.0,
+        )
+
+    def _tool_operate_collector(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        action = _required_str(arguments, "action")
+        if action not in {"start", "stop", "restart", "pause", "resume"}:
+            raise McpError("unsupported collector action", code=-32602)
+        kind = _required_str(arguments, "collector_kind")
+        collector_id = _required_str(arguments, "collector_id")
+        reason = _required_str(arguments, "reason")
+        apply = _optional_bool(arguments, "apply", False)
+        planned = {
+            "schema_version": "mcp_planned_mutation.v1",
+            "operation": "operate_collector",
+            "collector_kind": kind,
+            "collector_id": collector_id,
+            "action": action,
+            "reason": reason,
+            "apply": apply,
+        }
+        if not apply:
+            return planned
+        _require_confirm(arguments, "collector lifecycle actions mutate desired state")
+        request_id = _required_str(arguments, "request_id")
+        actor_id = _optional_str(arguments, "actor_id") or "mcp:agent"
+        command = [
+            "data",
+            "collectors",
+            action,
+            kind,
+            collector_id,
+            "--request-id",
+            request_id,
+            "--actor-id",
+            actor_id,
+            "--reason",
+            reason,
+        ]
+        if action in {"stop", "restart"}:
+            command.append("--confirm")
+        return self._command_runner.run(command, timeout_seconds=300.0)
 
     def _research_operations(self) -> ResearchOperations:
         return ResearchOperations(self._client_factory())
@@ -973,6 +1087,14 @@ class QuantTradMcpServer:
     def _resource_list(self) -> list[dict[str, str]]:
         return [
             _resource("quanttrad://health", "Backend health"),
+            _resource(
+                "quanttrad://market-data/collectors",
+                "Canonical collector fleet",
+            ),
+            _resource(
+                "quanttrad://market-data/plane",
+                "Market-data-plane readiness",
+            ),
             _resource("quanttrad://bots", "Bot run contexts"),
             _resource("quanttrad://strategies", "Strategies"),
             _resource("quanttrad://indicators", "Indicator instances"),
@@ -984,6 +1106,22 @@ class QuantTradMcpServer:
 
     def _resource_templates(self) -> list[dict[str, str]]:
         return [
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}?limit={limit}",
+                "Collector operational detail",
+            ),
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}/diagnostics",
+                "Collector diagnostics",
+            ),
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}/events?limit={limit}",
+                "Collector event history",
+            ),
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}/gaps?limit={limit}",
+                "Collector gap evidence",
+            ),
             _template("quanttrad://bots/{bot_id}", "Bot run context"),
             _template("quanttrad://bots/{bot_id}/runs?limit={limit}", "Bot recent runs"),
             _template("quanttrad://bots/{bot_id}/active-run", "Bot active run"),
@@ -1020,6 +1158,79 @@ class QuantTradMcpServer:
                 "description": "Read backend health through the Quant-Trad API.",
                 "inputSchema": _object_schema(),
                 "handler": self._tool_health_check,
+            },
+            "list_collectors": {
+                "description": "Read the canonical collector fleet and backend-owned lifecycle state.",
+                "inputSchema": _object_schema(
+                    {"attempt_limit": _integer_schema(default=5)}
+                ),
+                "handler": self._tool_list_collectors,
+            },
+            "get_collector": {
+                "description": "Inspect one collector's runtime, facts, gaps, events, and read-only configuration.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                        "limit": _integer_schema(default=100),
+                    },
+                    required=["collector_kind", "collector_id"],
+                ),
+                "handler": self._tool_get_collector,
+            },
+            "diagnose_collector": {
+                "description": "Diagnose collector boundaries and return structured evidence with a safe recommendation.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                    },
+                    required=["collector_kind", "collector_id"],
+                ),
+                "handler": self._tool_diagnose_collector,
+            },
+            "probe_collector": {
+                "description": "Run a read-only collector health probe through qt.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                    },
+                    required=["collector_kind", "collector_id"],
+                ),
+                "handler": self._tool_probe_collector,
+            },
+            "operate_collector": {
+                "description": "Plan or apply a safe audited lifecycle action to a code-registered collector. Apply requires apply=true, confirm=true, and request_id.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "stop", "restart", "pause", "resume"],
+                        },
+                        "reason": _string_schema(),
+                        "request_id": _string_schema(),
+                        "actor_id": _string_schema(),
+                        "apply": _boolean_schema(default=False),
+                        "confirm": _boolean_schema(default=False),
+                    },
+                    required=["collector_kind", "collector_id", "action", "reason"],
+                ),
+                "handler": self._tool_operate_collector,
             },
             "get_research_check_requirements": {
                 "description": "Resolve direct and transitive Check requirements without provider acquisition.",

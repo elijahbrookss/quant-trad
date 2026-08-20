@@ -51,7 +51,9 @@ def _utc(value: datetime, *, field: str) -> datetime:
 
 
 def _source_material_hash(record: Any) -> str:
-    material = getattr(record.fact, "material_hash", None)
+    material = getattr(record, "canonical_material_hash", None)
+    if material is None:
+        material = getattr(record.fact, "material_hash", None)
     if material is None:
         material = getattr(record.fact, "row_hash", None)
     digest = str(material or "").strip().lower()

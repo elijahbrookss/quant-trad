@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional, Protocol
 
+from .canonical import CanonicalFact, CanonicalFactRecord
 from .contracts import (
     CandleFact,
     CandleRecord,
@@ -86,6 +87,32 @@ class MarketDataStore(Protocol):
         contract_version: str,
         dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
+        ...
+
+    def read_facts(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        ...
+
+    def ingest_facts(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[CanonicalFact],
+        request: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
         ...
 
     def ingest_candles(

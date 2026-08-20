@@ -22,6 +22,7 @@ from ..storage.repos.instruments import (
     delete_instrument,
     find_instrument,
     get_instrument,
+    install_code_owned_instrument,
     load_instruments,
     upsert_instrument,
 )
@@ -321,6 +322,37 @@ def get_instrument_record(instrument_id: str) -> Dict[str, Any]:
     if not record:
         raise KeyError(f"Instrument {instrument_id} was not found")
     return _with_proxy_derivative_reference(record)
+
+def install_code_owned_research_instrument(
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Install an exact reviewed non-execution subject identity."""
+
+    required = {
+        "id",
+        "symbol",
+        "datasource",
+        "exchange",
+        "instrument_type",
+        "metadata",
+    }
+    if set(payload) != required:
+        raise ValueError(
+            "Code-owned research instrument fields must match the v1 contract"
+        )
+    if str(payload.get("instrument_type") or "") != "research_reference":
+        raise ValueError(
+            "Code-owned research instruments must be research_reference"
+        )
+    metadata = dict(payload.get("metadata") or {})
+    if set(metadata) != {"subject_kind", "subject_id", "research_only"}:
+        raise ValueError(
+            "Code-owned research instrument metadata is incomplete"
+        )
+    if metadata.get("research_only") is not True:
+        raise ValueError("Code-owned research instrument must be research only")
+    return install_code_owned_instrument(dict(payload))
+
 
 
 def create_instrument(**payload: object) -> Dict[str, Any]:

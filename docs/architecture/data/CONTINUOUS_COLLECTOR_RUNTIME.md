@@ -14,11 +14,14 @@ tags:
   - retention
   - timescaledb
 code_paths:
+  - src/data_providers/structured_facts.py
+  - src/data_providers/providers/chainlink.py
   - src/data_providers/streams/runtime.py
   - src/core/market_storage_lifecycle.py
   - src/market_data/archive.py
   - portal/backend/service/market/collector_supervisor.py
   - portal/backend/service/market/collector_safety.py
+  - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/continuous_stream_collector.py
   - portal/backend/service/market/market_storage_lifecycle.py
   - portal/backend/service/market/market_structure_service.py
@@ -44,11 +47,20 @@ daemon. Provider/domain implementations register adapters against explicit
 stream definitions; unsupported or ambiguous definitions fail loudly without
 stopping healthy collectors.
 
-The scheduled open-interest and funding collectors continue to use the same
-worker process and existing lease/attempt contracts. The first continuous
-adapter implements Coinbase `market_trades` plus `heartbeats`. Future trade,
-book, news, or alternate-provider adapters must register explicitly rather than
-adding provider switches to the supervisor.
+The scheduled open-interest, funding, and manifest-bound structured Fact
+collectors use the same worker process and lease/attempt contracts. The first
+structured adapter polls a Chainlink MVR reserve bundle and emits canonical
+`asset.reserve_state.v1`; it is not a separate Chainlink research subsystem.
+The first continuous adapter implements Coinbase `market_trades` plus
+`heartbeats`. Future trade, book, news, or alternate-provider adapters must
+register explicitly rather than adding provider switches to the supervisor.
+
+Scheduled structured definitions are installed disabled by default. Their
+manifest pins schema, subject, dimensions, provider mapping, endpoint
+environment reference, cadence, staleness, and adapter configuration. The
+normal scheduler owns restart, fencing, retries, attempt logs, and gap evidence.
+Repeated latest-state reads are idempotent; changed provider reports append new
+canonical observations and never overwrite history.
 
 Coinbase L2 currently has bounded capture, archive, reconstruction, checkpoint,
 and replay support, but no registered long-lived supervisor adapter. An L2
@@ -155,21 +167,27 @@ Operator surfaces are:
   is enabled;
 - `qt data market-structure lifecycle-events` for immutable deletion,
   compaction, compression, skip, and failure evidence.
+- `qt data collectors create-structured` for a reviewed scheduled structured
+  Fact definition; `--enabled` is required to grant collection authority.
 
 ## Operator Lifecycle
 
-`qt data market-structure` exposes worker-owned controls:
+`qt data market-structure` retains code-reviewed setup, proof, and safety
+operations:
 
 - `continuous-validate` starts the implementation path for a bounded
   60-second to seven-day proof;
 - `continuous-evidence` derives proof status from canonical session, archive,
   mapping, quality, and coverage rows;
 - `enroll` applies a validated product/stream fleet manifest;
-- `continuous-start` performs system-derived qualification and starts with no
-  duration cap;
-- `continuous-stop` requests graceful drain and stop.
 - `safety-halt`, `safety-acknowledge`, and `safety-status` operate persistent
   global, fleet, and stream latches.
+
+Normal lifecycle control is provider-neutral and goes through
+`qt data collectors start|stop|restart|pause|resume`. The same operations are
+used by Frontend V2 and MCP, preserve request/actor/reason context, and append
+immutable operation evidence. No surface edits the stream adapter or runtime
+configuration while operating it.
 
 The BIP, ETP, and SLP trade enrollments are continuous: their runtime has no
 `stop_at`. A restart reconstructs desired tasks from the database and cannot

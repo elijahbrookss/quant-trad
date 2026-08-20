@@ -69,6 +69,8 @@ The MCP server sits on top of the same contracts as the `qt` CLI:
   routes,
 - instrument tools delegate to `qt instruments ...`,
 - experiment tools delegate to `qt experiments ...`,
+- collector reads and actions delegate to `qt data collectors ...` and the
+  canonical Collector API,
 - controlled mutation tools call backend write routes only after explicit
   guardrails are satisfied.
 
@@ -103,6 +105,12 @@ state through `quanttrad://` URIs:
 - `quanttrad://instruments/{instrument_id}`
 - `quanttrad://instruments/{instrument_id}/runtime-profile?execution_semantics={execution_semantics}`
 - `quanttrad://providers`
+- `quanttrad://market-data/collectors`
+- `quanttrad://market-data/plane`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}/diagnostics`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}/events?limit={limit}`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}/gaps?limit={limit}`
 - `quanttrad://reports`
 - `quanttrad://reports/{run_id}/summary`
 - `quanttrad://reports/{run_id}/diagnostics`
@@ -146,6 +154,10 @@ Read tools:
 - `list_instruments`
 - `get_instrument`
 - `get_instrument_runtime_profile`
+- `list_collectors`
+- `get_collector`
+- `diagnose_collector`
+- `probe_collector`
 
 Indicator validation tools:
 
@@ -207,6 +219,7 @@ Controlled mutation tools:
 - `create_strategy_variant`
 - `update_strategy_variant`
 - `create_indicator`
+- `operate_collector`
 
 Actual run-starting or write operations require `confirm=true`. Tools that can
 be usefully previewed default to planned mutations with `apply=false`; applying
@@ -217,6 +230,13 @@ returns a planned mutation by default, and persists only when both `apply=true`
 and `confirm=true` are supplied. CLI indicator edits use the same guarded
 contract and require clone-first for strategy-bound parameter/dependency
 changes.
+
+`operate_collector` accepts only a registered lifecycle action and delegates to
+`qt data collectors`. It is a planned mutation unless `apply=true`; applying
+requires `confirm=true`, `request_id`, `actor_id`, and `reason`. The backend
+still checks collector capabilities and writes both successful and failed
+operation evidence. MCP cannot create collectors, edit credentials or runtime
+configuration, or request arbitrary acquisition.
 
 `prepare_instrument_matrix_experiment` follows the same guarded shape for
 mixed-instrument research. Dry runs return the solo strategy/bot mutations and

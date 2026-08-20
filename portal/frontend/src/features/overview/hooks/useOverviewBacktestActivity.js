@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import {
-  fetchReportActivity,
-  listReports,
-} from '../../../adapters/report.adapter.js'
+import { fetchReportActivity } from '../../../adapters/report.adapter.js'
 import {
   fetchResearchActivity,
   listResearchItems,
@@ -31,55 +28,13 @@ function activityRequest(activityType) {
   return fetchResearchActivity({ type: activityType, days: HEATMAP_DAYS })
 }
 
-function outcomeRows(reportItems, researchItems) {
-  const reports = reportItems.map((report) => ({
-    id: `run:${report.run_id}`,
-    kind: 'backtest',
-    title: report.strategy_name || report.bot_name || 'Backtest',
-    status: report.status,
-    occurredAt: report.completed_at,
-    detail: [
-      (report.symbols || []).join(', '),
-      report.timeframe,
-      report.summary?.net_pnl == null
-        ? null
-        : `Net P&L ${Number(report.summary.net_pnl).toFixed(2)}`,
-    ].filter(Boolean).join(' · '),
-    href: `/operations/runs/${report.run_id}`,
-    state: { run: report, from: '/overview' },
-  }))
-  const checks = researchItems
-    .filter((item) =>
-      item?.kind === 'research_check'
-      && ['tested', 'blocked'].includes(item?.status))
-    .map((item) => ({
-      id: `research:${item.id}`,
-      kind: 'check',
-      title: item.title || 'Research check',
-      status: item.status,
-      occurredAt: item.created_at,
-      detail: [item.symbol, item.timeframe, item.payload?.result?.recommendation]
-        .filter(Boolean)
-        .join(' · '),
-      href: `/operations/research/${item.id}`,
-      state: { item, from: '/overview' },
-    }))
-  return [...reports, ...checks]
-    .sort((left, right) =>
-      (Date.parse(right.occurredAt || '') || 0)
-      - (Date.parse(left.occurredAt || '') || 0))
-    .slice(0, 8)
-}
-
 export function useOverviewBacktestActivity(
   activityType = 'backtests_completed',
 ) {
-  const [topResult, setTopResult] = useState(null)
-  const [topResultDataset, setTopResultDataset] = useState(null)
   const [activity, setActivity] = useState(null)
-  const [outcomes, setOutcomes] = useState([])
   const [researchItems, setResearchItems] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [researchLoading, setResearchLoading] = useState(true)
+  const [activityLoading, setActivityLoading] = useState(true)
   const [errors, setErrors] = useState([])
   const [observedAt, setObservedAt] = useState(null)
   const [refreshRevision, setRefreshRevision] = useState(0)
@@ -87,65 +42,66 @@ export function useOverviewBacktestActivity(
 
   useEffect(() => {
     let mounted = true
-    async function load() {
-      setLoading(true)
-      const requests = await Promise.allSettled([
-        listReports({
-          type: 'backtest',
-          status: 'completed',
-          sort: 'net_pnl_desc',
-          limit: 1,
-        }),
-        listReports({
-          type: 'backtest',
-          status: 'completed',
-          limit: 8,
-        }),
-        listResearchItems({ limit: 40 }),
-        activityRequest(activityType),
-      ])
-      if (!mounted) return
-      const nextErrors = []
-      const top = requests[0].status === 'fulfilled'
-        ? requests[0].value?.items?.[0] || null
-        : null
-      if (requests[0].status === 'rejected') nextErrors.push({ component: 'Top result', error: requests[0].reason?.message || 'Top-result projection unavailable.' })
-      const recentReports = requests[1].status === 'fulfilled'
-        ? requests[1].value?.items || []
-        : []
-      if (requests[1].status === 'rejected') nextErrors.push({ component: 'Recent outcomes', error: requests[1].reason?.message || 'Recent backtests unavailable.' })
-      const nextResearchItems = requests[2].status === 'fulfilled'
-        ? requests[2].value
-        : []
-      if (requests[2].status === 'rejected') nextErrors.push({ component: 'Research attention', error: requests[2].reason?.message || 'Research memory unavailable.' })
-      const nextActivity = requests[3].status === 'fulfilled'
-        ? requests[3].value
-        : null
-      if (requests[3].status === 'rejected') nextErrors.push({ component: 'Research activity', error: requests[3].reason?.message || 'Activity aggregation unavailable.' })
+    let idleHandle = null
+    let timeoutHandle = null
 
-      if (!mounted) return
-      setTopResult(top)
-      setTopResultDataset(top?.dataset_identity || null)
-      setResearchItems(nextResearchItems)
-      setOutcomes(outcomeRows(recentReports, nextResearchItems))
-      setActivity(nextActivity)
-      setErrors(nextErrors)
-      setObservedAt(new Date().toISOString())
-      setLoading(false)
+    setResearchLoading(true)
+    setActivityLoading(true)
+    setErrors([])
+
+    listResearchItems({ limit: 40 })
+      .then((items) => {
+        if (mounted) setResearchItems(items)
+      })
+      .catch((error) => {
+        if (!mounted) return
+        setErrors((current) => [...current, {
+          component: 'Research attention',
+          error: error?.message || 'Research memory unavailable.',
+        }])
+      })
+      .finally(() => {
+        if (mounted) setResearchLoading(false)
+      })
+
+    async function loadActivity() {
+      try {
+        const next = await activityRequest(activityType)
+        if (mounted) setActivity(next)
+      } catch (error) {
+        if (mounted) {
+          setErrors((current) => [...current, {
+            component: 'Research activity',
+            error: error?.message || 'Activity aggregation unavailable.',
+          }])
+        }
+      } finally {
+        if (mounted) {
+          setActivityLoading(false)
+          setObservedAt(new Date().toISOString())
+        }
+      }
     }
-    load()
+
+    if ('requestIdleCallback' in window) {
+      idleHandle = window.requestIdleCallback(loadActivity, { timeout: 1_500 })
+    } else {
+      timeoutHandle = window.setTimeout(loadActivity, 300)
+    }
+
     return () => {
       mounted = false
+      if (idleHandle !== null) window.cancelIdleCallback(idleHandle)
+      if (timeoutHandle !== null) window.clearTimeout(timeoutHandle)
     }
   }, [activityType, refreshRevision])
 
   return {
-    topResult,
-    topResultDataset,
     activity,
-    outcomes,
     researchItems,
-    loading,
+    researchLoading,
+    activityLoading,
+    loading: researchLoading || activityLoading,
     errors,
     observedAt,
     refresh,

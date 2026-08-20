@@ -74,10 +74,15 @@ class _WorkerHeartbeat:
             state="starting",
             capabilities={
                 "fact_types": [
+                    "asset.reserve_state",
                     "derivatives.open_interest",
                     "derivatives.funding_rate",
                 ],
-                "collector_modes": ["scheduled", "continuous_stream"],
+                "collector_modes": [
+                    "scheduled",
+                    "scheduled_structured",
+                    "continuous_stream",
+                ],
                 "concurrency": 1,
             },
             context={"hostname": socket.gethostname(), "pid": os.getpid()},

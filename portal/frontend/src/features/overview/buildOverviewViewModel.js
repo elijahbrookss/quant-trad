@@ -8,7 +8,6 @@ export const ATTENTION_CONTRACT = Object.freeze({
 
 const ACTIVE_RUN_STATUSES = new Set(['starting', 'running', 'degraded', 'telemetry_degraded', 'paused'])
 const FAILED_RUN_STATUSES = new Set(['crashed', 'failed', 'failed_start', 'startup_failed'])
-const ACTIVE_ATTEMPT_STATUSES = new Set(['started', 'running', 'in_progress'])
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 }
 
 function toEpochMs(value) {
@@ -29,12 +28,6 @@ function evidenceTime(record) {
 function withinLookback(value, nowEpochMs, lookbackHours) {
   const epoch = toEpochMs(value)
   return epoch !== null && epoch >= nowEpochMs - lookbackHours * 3_600_000
-}
-
-function latestAttempt(attempts = []) {
-  return [...attempts].sort(
-    (left, right) => (toEpochMs(right?.started_at) || 0) - (toEpochMs(left?.started_at) || 0),
-  )[0] || null
 }
 
 function addDeduplicated(target, item) {
@@ -58,6 +51,7 @@ export function resolveGreeting(nowEpochMs = Date.now()) {
 export function rankAttentionItems({
   runs = [],
   collectors = [],
+  providerSummaries = [],
   postureRows = [],
   researchItems = [],
   nowEpochMs = Date.now(),
@@ -94,20 +88,34 @@ export function rankAttentionItems({
     }
   })
 
-  collectors.forEach(({ definition, attempts, attemptsAvailable = true, attemptsError }) => {
-    if (!definition?.enabled) return
-    const vm = buildCollectorCardViewModel(definition, attempts, { nowEpochMs })
-    if (vm.health.status === 'healthy') return
-    const severity = ['failed', 'overdue'].includes(vm.health.status) ? 'critical' : 'warning'
+  collectors.forEach((collector) => {
+    if (['HEALTHY', 'DISABLED', 'STOPPED', 'PAUSED'].includes(collector?.actual_state)) return
+    const vm = buildCollectorCardViewModel(collector, { nowEpochMs })
+    const severity = collector.actual_state === 'FAILED' ? 'critical' : 'warning'
     addDeduplicated(items, {
-      id: 'collector:' + definition.id,
+      id: `collector:${collector.collector_kind}:${collector.collector_id}`,
       severity,
       kind: 'collector',
-      title: vm.displayName,
-      detail: attemptsAvailable ? vm.statusDetail : attemptsError || 'Attempt history unavailable',
-      evidenceAt: vm.health.lastAttemptAt || definition.updated_at || definition.created_at,
-      href: '/operations/collectors/' + definition.id,
+      title: `${vm.providerLabel} · ${vm.displayName}`,
+      detail: `${collector.actual_state} · ${collector.error?.message || vm.stateCopy}`,
+      evidenceAt: vm.evidenceAt,
+      href: vm.route,
       state: { from: '/overview' },
+    })
+  })
+
+  providerSummaries.forEach((provider) => {
+    ;(provider.attention_collectors || []).forEach((collector) => {
+      addDeduplicated(items, {
+        id: `collector:${collector.collector_kind}:${collector.collector_id}`,
+        severity: collector.health_status === 'FAILED' ? 'critical' : 'warning',
+        kind: 'collector',
+        title: `${provider.provider} · ${collector.display_subject}`,
+        detail: String(collector.attention_reason || 'needs attention').replaceAll('_', ' '),
+        evidenceAt: collector.evidence_at,
+        href: `/operations/market/${encodeURIComponent(collector.collector_kind)}/${encodeURIComponent(collector.collector_id)}`,
+        state: { from: '/overview' },
+      })
     })
   })
 
@@ -155,7 +163,7 @@ export function rankAttentionItems({
   })
 }
 
-export function buildCurrentOperations({ runs = [], collectors = [], streamRows = [] } = {}) {
+export function buildCurrentOperations({ runs = [], collectors = [] } = {}) {
   const runRows = runs
     .filter((run) => ACTIVE_RUN_STATUSES.has(String(run?.lifecycle?.status || run?.status || '').toLowerCase()))
     .map((run) => ({
@@ -169,35 +177,22 @@ export function buildCurrentOperations({ runs = [], collectors = [], streamRows 
       state: { run, definition: run.definition, from: '/overview' },
     }))
 
-  const attemptRows = collectors.flatMap(({ definition, attempts = [] }) => {
-    const attempt = latestAttempt(attempts)
-    if (!attempt || !ACTIVE_ATTEMPT_STATUSES.has(String(attempt.status || '').toLowerCase()) || attempt.finished_at) return []
+  const collectorRows = collectors.flatMap((collector) => {
+    if (!collector?.runtime?.active) return []
+    const vm = buildCollectorCardViewModel(collector)
     return [{
-      id: 'attempt:' + attempt.id,
-      kind: 'collector attempt',
-      title: [definition?.provider, definition?.fact_type].filter(Boolean).join(' · ') || 'Collector attempt',
-      detail: definition?.instrument_id || 'Instrument unavailable',
-      status: attempt.status,
-      evidenceAt: attempt.started_at,
-      href: '/operations/collectors/' + definition.id,
+      id: `collector:${collector.collector_kind}:${collector.collector_id}`,
+      kind: 'collector',
+      title: `${collector.provider} · ${vm.displayName}`,
+      detail: vm.schemaLabel,
+      status: collector.actual_state,
+      evidenceAt: vm.evidenceAt,
+      href: vm.route,
       state: { from: '/overview' },
     }]
   })
 
-  const sessions = streamRows
-    .filter((row) => row.leaseCurrent)
-    .map((row) => ({
-      id: 'stream:' + row.id,
-      kind: 'stream session',
-      title: row.productId,
-      detail: (row.channels.join(' + ') || 'channels unavailable') + ' · ' + row.eventLabel,
-      status: row.eventType,
-      evidenceAt: row.occurredAt,
-      href: '/operations?tab=data-plane',
-      state: { from: '/overview' },
-    }))
-
-  return [...runRows, ...attemptRows, ...sessions].sort((left, right) => {
+  return [...runRows, ...collectorRows].sort((left, right) => {
     const recency = (toEpochMs(right.evidenceAt) || 0) - (toEpochMs(left.evidenceAt) || 0)
     return recency !== 0 ? recency : left.id.localeCompare(right.id)
   })

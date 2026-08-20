@@ -120,10 +120,12 @@ class PostgresMarketCollectionRepository:
                     """
                     INSERT INTO market.collection_definitions (
                         id, source_id, series_id, enabled, poll_interval_seconds,
-                        max_attempts, next_scheduled_at, available_at, config
+                        max_attempts, next_scheduled_at, available_at,
+                        desired_state, config
                     ) VALUES (
                         :id, :source_id, :series_id, :enabled, :interval,
-                        :max_attempts, :scheduled, :scheduled, CAST(:config AS jsonb)
+                        :max_attempts, :scheduled, :scheduled, :desired_state,
+                        CAST(:config AS jsonb)
                     )
                     ON CONFLICT (source_id, series_id) DO UPDATE
                     SET enabled = EXCLUDED.enabled,
@@ -142,6 +144,7 @@ class PostgresMarketCollectionRepository:
                     "interval": interval,
                     "max_attempts": attempts,
                     "scheduled": scheduled,
+                    "desired_state": "running" if enabled else "stopped",
                     "config": _json(config),
                 },
             ).mappings().one()
@@ -199,34 +202,6 @@ class PostgresMarketCollectionRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
-    def set_enabled(self, definition_id: str, *, enabled: bool) -> dict[str, Any]:
-        with db.session() as session:
-            row = session.execute(
-                text(
-                    """
-                    UPDATE market.collection_definitions
-                    SET enabled = :enabled,
-                        next_scheduled_at = CASE
-                            WHEN :enabled THEN LEAST(next_scheduled_at, now())
-                            ELSE next_scheduled_at
-                        END,
-                        available_at = CASE
-                            WHEN :enabled THEN LEAST(available_at, now())
-                            ELSE available_at
-                        END,
-                        updated_at = now()
-                    WHERE id = :definition_id
-                    RETURNING *
-                    """
-                ),
-                {"definition_id": str(definition_id), "enabled": bool(enabled)},
-            ).mappings().first()
-        if row is None:
-            raise ValueError(
-                f"market_collection_definition_unknown: definition_id={definition_id}"
-            )
-        return dict(row)
-
     def claim_due(
         self,
         *,
@@ -254,6 +229,7 @@ class PostgresMarketCollectionRepository:
                     JOIN market.sources AS sources ON sources.id = definitions.source_id
                     JOIN market.series AS series ON series.id = definitions.series_id
                     WHERE definitions.enabled IS TRUE
+                      AND definitions.desired_state = 'running'
                       AND (:definition_id IS NULL OR definitions.id = :definition_id)
                       AND definitions.next_scheduled_at <= :now
                       AND definitions.available_at <= :now
@@ -730,6 +706,7 @@ class PostgresMarketCollectionRepository:
                             AND workers.state NOT IN ('stopping', 'stopped')) AS alive,
                            now() AS observed_at
                     FROM market.collector_worker_state AS workers
+                    WHERE workers.expires_at > now() - interval '24 hours'
                     ORDER BY alive DESC, workers.heartbeat_at DESC, workers.worker_id
                     LIMIT :limit
                     """
