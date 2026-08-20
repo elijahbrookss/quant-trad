@@ -1,0 +1,28 @@
+flowchart LR
+    D[Causal strategy decision] --> R[Immutable CanonicalOrderRequest]
+    C[Phase 2A ResolvedExecutionContext] --> R
+    R --> A1[Attempt 1 requested]
+    A1 --> V[validated]
+    V --> AC[accepted]
+    AC --> O[open]
+    AC --> F[filled]
+    O --> PF[partially filled]
+    PF --> F
+    O --> X[canceled or expired or rejected]
+    PF --> X
+    O --> RP[replaced]
+    PF --> RP
+    RP --> A2[Replacement attempt for exact residual]
+    A2 --> V2[validated and accepted]
+    V2 --> F
+
+    PF --> CF[Canonical fill input]
+    F --> CF
+    CF --> ACC[Existing position wallet fee and PnL owners]
+    ACC --> EV[Runtime event ledger]
+    EV --> BL[BotLens projection]
+    EV --> RR[RunResearchDataset projection]
+
+    VP[Venue lifecycle mapping] -. terminology only .-> A1
+    L2[L2 walking queue and latency] -. deferred to Phase 3 .-> A1
+    LIVE[External submission] -. prohibited by ADR 0049 .-> A1

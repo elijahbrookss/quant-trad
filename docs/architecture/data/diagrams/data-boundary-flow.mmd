@@ -4,8 +4,9 @@ flowchart TD
     adapter["Acquisition-only adapter<br/>external anti-corruption"]
     credentials["Credential references"]
     api["External provider API"]
-    normalize["Feed intake<br/>validate closure + known-at"]
+    normalize["Typed fact intake<br/>normalize + validate known-at"]
     stream["Paper closed-candle stream"]
+    scheduler["Durable collector schedule<br/>lease + retry + pacing"]
     store["Canonical market store<br/>append-only revisions + gaps"]
     feed["Provider-free causal feed<br/>window + commit watermark"]
     dataset["Frozen dataset manifest<br/>material + provenance + quality"]
@@ -17,6 +18,7 @@ flowchart TD
     adapter <--> api
     adapter --> normalize
     stream --> normalize
+    scheduler --> adapter
     normalize --> store
     store --> feed
     store --> dataset
@@ -26,6 +28,6 @@ flowchart TD
     classDef boundary fill:#13251d,stroke:#34d399,color:#dcfce7
     classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
     classDef external fill:#1f2937,stroke:#94a3b8,color:#f8fafc
-    class request,registry,adapter,credentials,normalize,feed boundary
+    class request,registry,adapter,credentials,normalize,feed,scheduler boundary
     class stream,store,dataset,consumers truth
     class api external

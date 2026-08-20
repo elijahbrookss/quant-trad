@@ -38,6 +38,7 @@ class RuntimeEventName(str, Enum):
     DECISION_REJECTED = "DECISION_REJECTED"
     ENTRY_FILLED = "ENTRY_FILLED"
     EXIT_FILLED = "EXIT_FILLED"
+    ORDER_LIFECYCLE_CHANGED = "ORDER_LIFECYCLE_CHANGED"
     EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC = "execution_intrabar_fallback_pessimistic"
     WALLET_INITIALIZED = "WALLET_INITIALIZED"
     WALLET_DEPOSITED = "WALLET_DEPOSITED"
@@ -78,6 +79,7 @@ _EVENT_DEFAULT_CATEGORY: Dict[RuntimeEventName, RuntimeEventCategory] = {
     RuntimeEventName.DECISION_REJECTED: RuntimeEventCategory.DECISION,
     RuntimeEventName.ENTRY_FILLED: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.EXIT_FILLED: RuntimeEventCategory.OUTCOME,
+    RuntimeEventName.ORDER_LIFECYCLE_CHANGED: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.EXECUTION_INTRABAR_FALLBACK_PESSIMISTIC: RuntimeEventCategory.EXECUTION,
     RuntimeEventName.WALLET_INITIALIZED: RuntimeEventCategory.WALLET,
     RuntimeEventName.WALLET_DEPOSITED: RuntimeEventCategory.WALLET,
@@ -466,6 +468,37 @@ class EntryFilledContext(RuntimeEventContextBase):
     fee_type: Optional[str] = None
     fee_source: Optional[str] = None
     fee_version: Optional[str] = None
+    requested_price: Optional[float] = None
+    fill_price: Optional[float] = None
+    slippage_price: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    execution_model_version: Optional[str] = None
+    execution_assumption_manifest_hash: Optional[str] = None
+    passive_fill_policy: Optional[str] = None
+    execution_quality_ceiling: Optional[str] = None
+    economic_claim_intent: Optional[str] = None
+    fee_policy: Optional[str] = None
+    full_fill_assumption: Optional[bool] = None
+    market_slippage_bps: Optional[float] = None
+    stop_slippage_bps: Optional[float] = None
+    resolved_execution_context_hash: Optional[str] = None
+    instrument_execution_contract_hash: Optional[str] = None
+    venue_execution_profile_hash: Optional[str] = None
+    venue_execution_profile_id: Optional[str] = None
+    venue_execution_profile_version: Optional[str] = None
+    fee_schedule_hash: Optional[str] = None
+    fee_schedule_id: Optional[str] = None
+    fee_schedule_version: Optional[str] = None
+    fee_currency: Optional[str] = None
+    fee_rounding_mode: Optional[str] = None
+    fee_precision: Optional[int] = None
+    fee_tier: Optional[str] = None
+    execution_model_artifact_hash: Optional[str] = None
+    execution_model_artifact_id: Optional[str] = None
+    book_data_capability: Optional[str] = None
+    time_in_force: Optional[str] = None
+    post_only: Optional[bool] = None
+    book_execution_evidence: Mapping[str, Any] | None = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
     accounting_mode: Optional[str] = None
@@ -499,6 +532,54 @@ class EntryFilledContext(RuntimeEventContextBase):
         object.__setattr__(self, "fee_type", _optional_text(self.fee_type) or "taker")
         object.__setattr__(self, "fee_source", _optional_text(self.fee_source) or "template_or_instrument")
         object.__setattr__(self, "fee_version", _optional_text(self.fee_version))
+        for field_name in (
+            "requested_price",
+            "fill_price",
+            "slippage_price",
+            "slippage_bps",
+            "market_slippage_bps",
+            "stop_slippage_bps",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, float(value))
+        for field_name in (
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "passive_fill_policy",
+            "execution_quality_ceiling",
+            "economic_claim_intent",
+            "fee_policy",
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
+            "book_data_capability",
+            "time_in_force",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        if self.full_fill_assumption is not None and not isinstance(self.full_fill_assumption, bool):
+            raise ValueError("context.full_fill_assumption must be a boolean when provided")
+        if self.post_only is not None and not isinstance(self.post_only, bool):
+            raise ValueError("context.post_only must be a boolean when provided")
+        object.__setattr__(
+            self,
+            "book_execution_evidence",
+            _copy_mapping(self.book_execution_evidence),
+        )
+        if self.fee_precision is not None:
+            if isinstance(self.fee_precision, bool):
+                raise ValueError("context.fee_precision must be an integer when provided")
+            object.__setattr__(self, "fee_precision", int(self.fee_precision))
         reservation_id = self.reservation_id
         if reservation_id is not None and not str(reservation_id).strip():
             raise ValueError("context.reservation_id must be non-empty when provided")
@@ -510,6 +591,128 @@ class EntryFilledContext(RuntimeEventContextBase):
             object.__setattr__(self, "wallet_eval_seq", int(self.wallet_eval_seq))
         if self.position_commit_seq is not None:
             object.__setattr__(self, "position_commit_seq", int(self.position_commit_seq))
+
+
+_CANONICAL_ORDER_STATES = frozenset(
+    {
+        "requested",
+        "validated",
+        "accepted",
+        "open",
+        "partially_filled",
+        "filled",
+        "rejected",
+        "expired",
+        "canceled",
+        "replaced",
+    }
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class OrderLifecycleChangedContext(RuntimeEventContextBase):
+    """Durable projection of one canonical order lifecycle transition."""
+
+    order_request_id: str
+    order_request_manifest_hash: str
+    attempt_id: str
+    order_attempt_manifest_hash: str
+    order_event_seq: int
+    previous_state: Optional[str]
+    state: str
+    known_at: datetime
+    side: str
+    requested_qty: float
+    attempt_requested_qty: float
+    attempt_cumulative_filled_qty: float
+    attempt_remaining_qty: float
+    order_cumulative_filled_qty: float
+    order_remaining_qty: float
+    execution_context_hash: str
+    execution_policy_hash: str
+    order_lifecycle_replay_hash: str
+    trade_id: Optional[str] = None
+    signal_id: Optional[str] = None
+    decision_id: Optional[str] = None
+    source_sequence: Optional[int] = None
+    fill_id: Optional[str] = None
+    fill_qty: Optional[float] = None
+    fill_price: Optional[float] = None
+    fill_fee: Optional[float] = None
+    reason: Optional[str] = None
+    replacement_attempt_id: Optional[str] = None
+    venue_event_name: Optional[str] = None
+    book_execution_evidence: Mapping[str, Any] | None = None
+    event_subtype: str = "order_lifecycle"
+    category: RuntimeEventCategory = RuntimeEventCategory.EXECUTION
+    reason_code: Optional[ReasonCode] = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for field_name in (
+            "order_request_id",
+            "order_request_manifest_hash",
+            "attempt_id",
+            "order_attempt_manifest_hash",
+            "execution_context_hash",
+            "execution_policy_hash",
+            "order_lifecycle_replay_hash",
+        ):
+            object.__setattr__(self, field_name, _require_str({field_name: getattr(self, field_name)}, field_name))
+        if isinstance(self.order_event_seq, bool) or int(self.order_event_seq) <= 0:
+            raise ValueError("context.order_event_seq must be a positive integer")
+        object.__setattr__(self, "order_event_seq", int(self.order_event_seq))
+        previous_state = _optional_text(self.previous_state)
+        state = _require_str({"state": self.state}, "state").lower()
+        if previous_state is not None and previous_state.lower() not in _CANONICAL_ORDER_STATES:
+            raise ValueError("context.previous_state must be a canonical order state")
+        if state not in _CANONICAL_ORDER_STATES:
+            raise ValueError("context.state must be a canonical order state")
+        object.__setattr__(self, "previous_state", previous_state.lower() if previous_state else None)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "known_at", normalize_utc_datetime(self.known_at))
+        side = _require_str({"side": self.side}, "side").lower()
+        if side not in {"buy", "sell", "long", "short"}:
+            raise ValueError("context.side must be buy, sell, long, or short")
+        object.__setattr__(self, "side", side)
+        for field_name in (
+            "requested_qty",
+            "attempt_requested_qty",
+            "attempt_cumulative_filled_qty",
+            "attempt_remaining_qty",
+            "order_cumulative_filled_qty",
+            "order_remaining_qty",
+        ):
+            value = float(getattr(self, field_name))
+            if value < 0.0:
+                raise ValueError(f"context.{field_name} must be >= 0")
+            object.__setattr__(self, field_name, value)
+        if self.source_sequence is not None:
+            if isinstance(self.source_sequence, bool) or int(self.source_sequence) < 0:
+                raise ValueError("context.source_sequence must be a non-negative integer")
+            object.__setattr__(self, "source_sequence", int(self.source_sequence))
+        for field_name in (
+            "trade_id",
+            "signal_id",
+            "decision_id",
+            "fill_id",
+            "reason",
+            "replacement_attempt_id",
+            "venue_event_name",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        for field_name in ("fill_qty", "fill_price", "fill_fee"):
+            value = getattr(self, field_name)
+            if value is not None:
+                numeric = float(value)
+                if numeric < 0.0:
+                    raise ValueError(f"context.{field_name} must be >= 0")
+                object.__setattr__(self, field_name, numeric)
+        object.__setattr__(
+            self,
+            "book_execution_evidence",
+            _copy_mapping(self.book_execution_evidence),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -528,6 +731,37 @@ class ExitFilledContext(RuntimeEventContextBase):
     fee_type: Optional[str] = None
     fee_source: Optional[str] = None
     fee_version: Optional[str] = None
+    requested_price: Optional[float] = None
+    fill_price: Optional[float] = None
+    slippage_price: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    execution_model_version: Optional[str] = None
+    execution_assumption_manifest_hash: Optional[str] = None
+    passive_fill_policy: Optional[str] = None
+    execution_quality_ceiling: Optional[str] = None
+    economic_claim_intent: Optional[str] = None
+    fee_policy: Optional[str] = None
+    full_fill_assumption: Optional[bool] = None
+    market_slippage_bps: Optional[float] = None
+    stop_slippage_bps: Optional[float] = None
+    resolved_execution_context_hash: Optional[str] = None
+    instrument_execution_contract_hash: Optional[str] = None
+    venue_execution_profile_hash: Optional[str] = None
+    venue_execution_profile_id: Optional[str] = None
+    venue_execution_profile_version: Optional[str] = None
+    fee_schedule_hash: Optional[str] = None
+    fee_schedule_id: Optional[str] = None
+    fee_schedule_version: Optional[str] = None
+    fee_currency: Optional[str] = None
+    fee_rounding_mode: Optional[str] = None
+    fee_precision: Optional[int] = None
+    fee_tier: Optional[str] = None
+    execution_model_artifact_hash: Optional[str] = None
+    execution_model_artifact_id: Optional[str] = None
+    book_data_capability: Optional[str] = None
+    time_in_force: Optional[str] = None
+    post_only: Optional[bool] = None
+    book_execution_evidence: Mapping[str, Any] | None = None
     realized_pnl: Optional[float] = None
     base_currency: Optional[str] = None
     quote_currency: Optional[str] = None
@@ -566,6 +800,54 @@ class ExitFilledContext(RuntimeEventContextBase):
         object.__setattr__(self, "fee_type", _optional_text(self.fee_type) or "taker")
         object.__setattr__(self, "fee_source", _optional_text(self.fee_source) or "template_or_instrument")
         object.__setattr__(self, "fee_version", _optional_text(self.fee_version))
+        for field_name in (
+            "requested_price",
+            "fill_price",
+            "slippage_price",
+            "slippage_bps",
+            "market_slippage_bps",
+            "stop_slippage_bps",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, float(value))
+        for field_name in (
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "passive_fill_policy",
+            "execution_quality_ceiling",
+            "economic_claim_intent",
+            "fee_policy",
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
+            "book_data_capability",
+            "time_in_force",
+        ):
+            object.__setattr__(self, field_name, _optional_text(getattr(self, field_name)))
+        if self.full_fill_assumption is not None and not isinstance(self.full_fill_assumption, bool):
+            raise ValueError("context.full_fill_assumption must be a boolean when provided")
+        if self.post_only is not None and not isinstance(self.post_only, bool):
+            raise ValueError("context.post_only must be a boolean when provided")
+        object.__setattr__(
+            self,
+            "book_execution_evidence",
+            _copy_mapping(self.book_execution_evidence),
+        )
+        if self.fee_precision is not None:
+            if isinstance(self.fee_precision, bool):
+                raise ValueError("context.fee_precision must be an integer when provided")
+            object.__setattr__(self, "fee_precision", int(self.fee_precision))
         if self.realized_pnl is not None:
             object.__setattr__(self, "realized_pnl", float(self.realized_pnl))
         if self.event_impact_pnl is not None:
@@ -708,6 +990,7 @@ RuntimeEventContext = (
     | DecisionRejectedContext
     | EntryFilledContext
     | ExitFilledContext
+    | OrderLifecycleChangedContext
     | WalletInitializedContext
     | WalletDepositedContext
     | RuntimeErrorContext
@@ -722,6 +1005,7 @@ _CONTEXT_TYPE_BY_EVENT: Dict[RuntimeEventName, type[RuntimeEventContextBase]] = 
     RuntimeEventName.DECISION_REJECTED: DecisionRejectedContext,
     RuntimeEventName.ENTRY_FILLED: EntryFilledContext,
     RuntimeEventName.EXIT_FILLED: ExitFilledContext,
+    RuntimeEventName.ORDER_LIFECYCLE_CHANGED: OrderLifecycleChangedContext,
     RuntimeEventName.WALLET_INITIALIZED: WalletInitializedContext,
     RuntimeEventName.WALLET_DEPOSITED: WalletDepositedContext,
     RuntimeEventName.RUNTIME_ERROR: RuntimeErrorContext,
@@ -761,6 +1045,54 @@ def _runtime_common_context(data: Mapping[str, Any]) -> Dict[str, Any]:
         "parent_missing": bool(data.get("parent_missing", False)),
         "missing_parent_hint": _optional_text(data.get("missing_parent_hint")),
     }
+
+
+def _execution_evidence_from_dict(data: Mapping[str, Any]) -> Dict[str, Any]:
+    numeric_fields = (
+        "requested_price",
+        "fill_price",
+        "slippage_price",
+        "slippage_bps",
+        "market_slippage_bps",
+        "stop_slippage_bps",
+    )
+    text_fields = (
+        "execution_model_version",
+        "execution_assumption_manifest_hash",
+        "passive_fill_policy",
+        "execution_quality_ceiling",
+        "economic_claim_intent",
+        "fee_policy",
+        "resolved_execution_context_hash",
+        "instrument_execution_contract_hash",
+        "venue_execution_profile_hash",
+        "venue_execution_profile_id",
+        "venue_execution_profile_version",
+        "fee_schedule_hash",
+        "fee_schedule_id",
+        "fee_schedule_version",
+        "fee_currency",
+        "fee_rounding_mode",
+        "fee_tier",
+        "execution_model_artifact_hash",
+        "execution_model_artifact_id",
+        "book_data_capability",
+        "time_in_force",
+    )
+    result: Dict[str, Any] = {
+        field: float(data[field]) if data.get(field) is not None else None
+        for field in numeric_fields
+    }
+    result.update({field: _optional_text(data.get(field)) for field in text_fields})
+    result["full_fill_assumption"] = data.get("full_fill_assumption")
+    result["post_only"] = data.get("post_only")
+    result["fee_precision"] = (
+        int(data["fee_precision"]) if data.get("fee_precision") is not None else None
+    )
+    result["book_execution_evidence"] = _copy_mapping(
+        data.get("book_execution_evidence")
+    )
+    return result
 
 
 def _runtime_context_from_dict(
@@ -861,6 +1193,7 @@ def _runtime_context_from_dict(
             fee_type=_optional_text(data.get("fee_type")),
             fee_source=_optional_text(data.get("fee_source")),
             fee_version=_optional_text(data.get("fee_version")),
+            **_execution_evidence_from_dict(data),
             base_currency=_optional_text(data.get("base_currency")),
             quote_currency=_optional_text(data.get("quote_currency")),
             accounting_mode=_optional_text(data.get("accounting_mode")),
@@ -890,6 +1223,7 @@ def _runtime_context_from_dict(
             fee_type=_optional_text(data.get("fee_type")),
             fee_source=_optional_text(data.get("fee_source")),
             fee_version=_optional_text(data.get("fee_version")),
+            **_execution_evidence_from_dict(data),
             realized_pnl=(float(data.get("realized_pnl")) if data.get("realized_pnl") is not None else None),
             base_currency=_optional_text(data.get("base_currency")),
             quote_currency=_optional_text(data.get("quote_currency")),
@@ -906,6 +1240,49 @@ def _runtime_context_from_dict(
             event_subtype=_optional_text(data.get("event_subtype")) or str(data.get("exit_kind") or "close").lower(),
             category=category,
             reason_code=reason_code or ReasonCode.EXEC_EXIT_CLOSE,
+        )
+
+    if event_name == RuntimeEventName.ORDER_LIFECYCLE_CHANGED:
+        known_at = parse_optional_datetime(data.get("known_at"))
+        if known_at is None:
+            raise ValueError("context.known_at is required")
+        return OrderLifecycleChangedContext(
+            **common,
+            order_request_id=_require_str(data, "order_request_id"),
+            order_request_manifest_hash=_require_str(data, "order_request_manifest_hash"),
+            attempt_id=_require_str(data, "attempt_id"),
+            order_attempt_manifest_hash=_require_str(data, "order_attempt_manifest_hash"),
+            order_event_seq=int(data.get("order_event_seq") or 0),
+            previous_state=_optional_text(data.get("previous_state")),
+            state=_require_str(data, "state"),
+            known_at=known_at,
+            side=_require_str(data, "side"),
+            requested_qty=_require_numeric(data, "requested_qty"),
+            attempt_requested_qty=_require_numeric(data, "attempt_requested_qty"),
+            attempt_cumulative_filled_qty=_require_numeric(data, "attempt_cumulative_filled_qty"),
+            attempt_remaining_qty=_require_numeric(data, "attempt_remaining_qty"),
+            order_cumulative_filled_qty=_require_numeric(data, "order_cumulative_filled_qty"),
+            order_remaining_qty=_require_numeric(data, "order_remaining_qty"),
+            execution_context_hash=_require_str(data, "execution_context_hash"),
+            execution_policy_hash=_require_str(data, "execution_policy_hash"),
+            order_lifecycle_replay_hash=_require_str(data, "order_lifecycle_replay_hash"),
+            trade_id=_optional_text(data.get("trade_id")),
+            signal_id=_optional_text(data.get("signal_id")),
+            decision_id=_optional_text(data.get("decision_id")),
+            source_sequence=(int(data["source_sequence"]) if data.get("source_sequence") is not None else None),
+            fill_id=_optional_text(data.get("fill_id")),
+            fill_qty=(float(data["fill_qty"]) if data.get("fill_qty") is not None else None),
+            fill_price=(float(data["fill_price"]) if data.get("fill_price") is not None else None),
+            fill_fee=(float(data["fill_fee"]) if data.get("fill_fee") is not None else None),
+            reason=_optional_text(data.get("reason")),
+            replacement_attempt_id=_optional_text(data.get("replacement_attempt_id")),
+            venue_event_name=_optional_text(data.get("venue_event_name")),
+            book_execution_evidence=_copy_mapping(
+                data.get("book_execution_evidence")
+            ),
+            event_subtype=_optional_text(data.get("event_subtype")) or "order_lifecycle",
+            category=category,
+            reason_code=reason_code,
         )
 
     if event_name == RuntimeEventName.WALLET_INITIALIZED:
@@ -1030,6 +1407,7 @@ def new_runtime_event(
         RuntimeEventName.DECISION_REJECTED,
         RuntimeEventName.ENTRY_FILLED,
         RuntimeEventName.EXIT_FILLED,
+        RuntimeEventName.ORDER_LIFECYCLE_CHANGED,
     } and not resolved_parent_id and not allow_missing_parent:
         raise ValueError(f"parent_id is required for {event_name.value}")
 
@@ -1064,6 +1442,8 @@ def decision_trace_entry_from_runtime_event(event: RuntimeEvent) -> Optional[Dic
         event_subtype = "entry"
     elif event.event_name == RuntimeEventName.EXIT_FILLED:
         event_subtype = str(serialized_context.get("exit_kind") or "close").lower()
+    elif event.event_name == RuntimeEventName.ORDER_LIFECYCLE_CHANGED:
+        event_subtype = "order_lifecycle"
     elif event.event_name == RuntimeEventName.RUNTIME_ERROR:
         event_subtype = "runtime_error"
 
@@ -1108,6 +1488,7 @@ __all__ = [
     "ExecutionIntrabarFallbackContext",
     "ExitFilledContext",
     "ExitKind",
+    "OrderLifecycleChangedContext",
     "ReasonCode",
     "RuntimeBar",
     "RuntimeErrorContext",

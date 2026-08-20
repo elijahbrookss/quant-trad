@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import copy
+import logging
 from typing import Any
 
 import pytest
 
+from engines.bot_runtime.core.execution_assumptions import resolve_execution_assumptions
+from engines.bot_runtime.core.execution_context import (
+    build_execution_context_bundle,
+    execution_model_artifact_from_book_tape,
+    resolve_execution_context,
+)
+from engines.bot_runtime.core.execution_profile import compile_series_execution_profile
 from portal.backend.service.reports import report_data, run_research_dataset
 
 
@@ -35,6 +43,7 @@ class _ResearchDatasetStorage:
             tuple(key): [dict(row) for row in value]
             for key, value in (candles or {}).items()
         }
+        self.candle_window_calls: list[dict[str, Any]] = []
 
     def get_bot_run(self, run_id: str):
         return dict(self._run) if run_id == self._run.get("run_id") else None
@@ -76,6 +85,29 @@ class _ResearchDatasetStorage:
     ):
         _ = start, end, prefer_latest
         return [dict(row) for row in self._candles.get((instrument_id, timeframe), [])[: int(limit or 2000)]]
+
+    def list_candles_for_series_windows(
+        self,
+        *,
+        instrument_id: str,
+        timeframe: str,
+        windows,
+    ):
+        self.candle_window_calls.append(
+            {
+                "instrument_id": instrument_id,
+                "timeframe": timeframe,
+                "windows": [dict(window) for window in windows],
+            }
+        )
+        source = self._candles.get((instrument_id, timeframe), [])
+        return {
+            str(window["window_id"]): [
+                dict(row)
+                for row in source[: int(window.get("limit") or 2000)]
+            ]
+            for window in windows
+        }
 
     def list_bot_runtime_events(
         self,
@@ -236,6 +268,70 @@ def _event(seq: int, event_name: str, context: dict[str, Any], *, event_type: st
             },
         },
     }
+
+
+def test_execution_section_projects_order_lifecycle_residuals_and_fill_parent() -> None:
+    lifecycle_event = _event(
+        80,
+        "ORDER_LIFECYCLE_CHANGED",
+        {
+            "event_time": "2026-03-15T01:00:00Z",
+            "bar_time": "2026-03-15T01:00:00Z",
+            "known_at": "2026-03-15T01:00:00Z",
+            "trade_id": "trade-1",
+            "signal_id": "signal-1",
+            "decision_id": "decision-1",
+            "order_request_id": "order-1",
+            "order_request_manifest_hash": "request-hash",
+            "attempt_id": "attempt-1",
+            "order_attempt_manifest_hash": "attempt-hash",
+            "order_event_seq": 4,
+            "previous_state": "open",
+            "state": "partially_filled",
+            "side": "buy",
+            "requested_qty": 10.0,
+            "attempt_requested_qty": 10.0,
+            "attempt_cumulative_filled_qty": 4.0,
+            "attempt_remaining_qty": 6.0,
+            "order_cumulative_filled_qty": 4.0,
+            "order_remaining_qty": 6.0,
+            "execution_context_hash": "context-hash",
+            "execution_policy_hash": "policy-hash",
+            "order_lifecycle_replay_hash": "replay-prefix-hash",
+            "fill_id": "fill-1",
+            "fill_qty": 4.0,
+            "fill_price": 100.0,
+            "fill_fee": 0.04,
+            "venue_event_name": "open",
+        },
+    )
+    fill_event = _event(
+        81,
+        "ENTRY_FILLED",
+        {
+            "bar_time": "2026-03-15T01:00:00Z",
+            "trade_id": "trade-1",
+            "side": "buy",
+            "direction": "long",
+            "qty": 4.0,
+            "price": 100.0,
+            "notional": 400.0,
+            "fee_paid": 0.04,
+        },
+    )
+    fill_event["payload"]["parent_id"] = lifecycle_event["event_id"]
+
+    execution = run_research_dataset._execution_section(
+        run=_run(),
+        events=[lifecycle_event, fill_event],
+    )
+
+    assert execution["order_lifecycle"]["event_count"] == 1
+    assert execution["order_lifecycle"]["order_count"] == 1
+    assert execution["order_lifecycle"]["open_order_count"] == 1
+    assert execution["order_lifecycle"]["state_distribution"] == {"partially_filled": 1}
+    assert execution["order_lifecycle"]["latest_orders"][0]["order_remaining_qty"] == 6.0
+    assert execution["fills"][0]["order_lifecycle_event_id"] == lifecycle_event["event_id"]
 
 
 def _decision(seq: int, decision_id: str, state: str, *, trade_id: str | None = None, reason_code: str | None = None) -> dict[str, Any]:
@@ -529,7 +625,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, storage: _ResearchDatasetStorage) 
         "list_observability_events",
         "get_candle_storage_summary",
         "list_candle_provider_gap_evidence",
-        "list_candles_for_series",
+        "list_candles_for_series_windows",
     ):
         monkeypatch.setattr(run_research_dataset, name, getattr(storage, name))
     monkeypatch.setattr(report_data, "get_bot_run", storage.get_bot_run)
@@ -576,8 +672,12 @@ def _build(
     return run_research_dataset.build_run_research_dataset("run-1")
 
 
-def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: pytest.MonkeyPatch) -> None:
-    dataset = _build(monkeypatch)
+def test_dataset_builds_from_db_truth_without_artifact_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger=run_research_dataset.__name__):
+        dataset = _build(monkeypatch)
 
     assert dataset["readiness"]["dataset_ready"] is True
     assert dataset["readiness"]["results_ready"] is True
@@ -593,6 +693,23 @@ def test_dataset_builds_from_db_truth_without_artifact_directory(monkeypatch: py
     assert dataset["context"]["schema_version"] == "report_context.v1"
     assert dataset["candle_catalog"]["schema_version"] == "candle_catalog.v1"
     assert dataset["operational_health"]["schema_version"] == "operational_health.v1"
+    done_message = next(
+        message
+        for message in caplog.messages
+        if "run_research_dataset_build_done" in message
+    )
+    for field in (
+        "duration_ms=",
+        "source_load_ms=",
+        "trade_enrichment_ms=",
+        "readiness_ms=",
+        "wallet_accounting_ms=",
+        "observability_ms=",
+        "assembly_ms=",
+        "serialization_ms=",
+        "wallet_events=",
+    ):
+        assert field in done_message
 
 
 def test_runtime_step_timings_use_weighted_average_and_merged_histogram(
@@ -1030,6 +1147,99 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
     assert dataset["execution"]["execution_mode"] == "full"
     assert dataset["execution"]["slippage"]["total_slippage_cost"] == 0.0
     assert "per_fill_slippage_facts_unavailable" in dataset["readiness"]["caveats"]
+
+
+def test_dataset_certifies_x2_only_from_pinned_economic_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = copy.deepcopy(_run())
+    assumptions = resolve_execution_assumptions(
+        "selection",
+        {
+            "schema_version": "execution_assumptions.v1",
+            "model_version": "conservative_bar.v1",
+            "market_slippage_bps": 5.0,
+            "stop_slippage_bps": 10.0,
+            "passive_fill_policy": "strict_penetration",
+            "fee_policy": "instrument_resolved",
+            "full_fill_assumption": True,
+            "cost_stress_scenarios": [
+                {
+                    "id": "moderate",
+                    "additional_slippage_bps": 5.0,
+                    "fee_multiplier": 1.25,
+                }
+            ],
+        },
+        source="run_start_request",
+    ).to_dict()
+    run["config_snapshot"]["economic_claim_intent"] = "selection"
+    run["config_snapshot"]["execution_assumptions"] = assumptions
+    events = _events()
+    events.extend(
+        [
+            _event(
+                14,
+                "ENTRY_FILLED",
+                {
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 100.0,
+                    "fill_price": 100.05,
+                    "slippage_bps": 5.0,
+                    "fee_paid": 0.10,
+                    "fee_rate": 0.001,
+                    "fee_type": "taker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "execution_model_version": assumptions["model_version"],
+                    "execution_assumption_manifest_hash": assumptions["manifest_hash"],
+                    "economic_claim_intent": "selection",
+                    "full_fill_assumption": True,
+                },
+            ),
+            _event(
+                15,
+                "EXIT_FILLED",
+                {
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 110.0,
+                    "fill_price": 110.0,
+                    "slippage_bps": 0.0,
+                    "fee_paid": 0.11,
+                    "fee_rate": 0.001,
+                    "fee_type": "maker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "execution_model_version": assumptions["model_version"],
+                    "execution_assumption_manifest_hash": assumptions["manifest_hash"],
+                    "economic_claim_intent": "selection",
+                    "full_fill_assumption": True,
+                },
+            ),
+        ]
+    )
+
+    dataset = _build(monkeypatch, run=run, events=events)
+
+    assert dataset["execution"]["quality"]["execution_quality_class"] == "X2"
+    assert dataset["execution"]["quality"]["blocking_reasons"] == []
+    assert dataset["execution"]["quality"]["assumption_manifest_hash"] == assumptions["manifest_hash"]
+    assert dataset["execution"]["cost_stress"]["status"] == "available"
+    assert dataset["execution"]["cost_stress"]["scenario_count"] == 1
+    assert len(dataset["execution"]["cost_stress"]["evidence_hash"]) == 64
+    assert dataset["readiness"]["execution_quality_class"] == "X2"
+    assert dataset["readiness"]["scientific_quality_class"] == "S0"
+    assert dataset["readiness"]["promotion_eligibility"] == "ineligible"
+    assert "scientific_quality_below_S3" in dataset["readiness"]["promotion_blocking_reasons"]
+
+    events[-1]["payload"]["context"].pop("execution_assumption_manifest_hash")
+    downgraded = _build(monkeypatch, run=run, events=events)
+    assert downgraded["execution"]["quality"]["execution_quality_class"] == "X0"
+    assert "per_fill_execution_evidence_incomplete" in downgraded["execution"]["quality"]["blocking_reasons"]
     assert dataset["execution"]["intrabar_fallback_count"] == 2
     assert dataset["execution"]["fallback_reason_distribution"] == {
         "ambiguous_1m_candle": 1,
@@ -1037,6 +1247,344 @@ def test_dataset_includes_execution_mode_and_intrabar_fallback_summary(monkeypat
     }
     diagnostic_codes = {item["code"] for item in dataset["diagnostics"]["items"]}
     assert "intrabar_fallback_pessimistic" in diagnostic_codes
+
+
+def test_dataset_validates_execution_context_bundle_and_per_fill_component_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = copy.deepcopy(_run())
+    assumptions = resolve_execution_assumptions(
+        "selection",
+        {
+            "model_version": "conservative_bar.v1",
+            "market_slippage_bps": 5.0,
+            "stop_slippage_bps": 10.0,
+            "passive_fill_policy": "strict_penetration",
+            "fee_policy": "instrument_resolved",
+            "full_fill_assumption": True,
+            "cost_stress_scenarios": [
+                {"id": "moderate", "additional_slippage_bps": 5.0, "fee_multiplier": 1.25}
+            ],
+        },
+        source="run_start_request",
+    )
+    instrument = {
+        "id": "btc",
+        "symbol": "BTC",
+        "instrument_type": "spot",
+        "datasource": "fixture",
+        "exchange": "fixture-venue",
+        "tick_size": 0.01,
+        "contract_size": 1.0,
+        "tick_value": 0.01,
+        "base_currency": "BTC",
+        "quote_currency": "USD",
+        "min_order_size": 0.001,
+        "qty_step": 0.001,
+        "min_notional": 1.0,
+        "maker_fee_rate": 0.001,
+        "taker_fee_rate": 0.001,
+        "fee_source": "instrument_contract",
+        "fee_schedule_version": "fee-v1",
+    }
+    profile = compile_series_execution_profile(instrument)
+    context = resolve_execution_context(
+        profile,
+        assumptions,
+        instrument_payload=instrument,
+        source="backend_startup_resolution",
+    )
+    bundle = build_execution_context_bundle([context])
+    run["config_snapshot"]["economic_claim_intent"] = "selection"
+    run["config_snapshot"]["execution_assumptions"] = assumptions.to_dict()
+    run["config_snapshot"]["resolved_execution_context_bundle"] = bundle.to_dict()
+    evidence = {
+        **context.evidence_metadata(),
+        "execution_model_version": assumptions.model_version,
+        "execution_assumption_manifest_hash": assumptions.manifest_hash,
+        "economic_claim_intent": "selection",
+        "full_fill_assumption": True,
+        "time_in_force": "gtc",
+    }
+    events = _events()
+    events.extend(
+        [
+            _event(
+                14,
+                "ENTRY_FILLED",
+                {
+                    **evidence,
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 100.0,
+                    "fill_price": 100.05,
+                    "slippage_bps": 5.0,
+                    "fee_paid": 0.10,
+                    "fee_rate": 0.001,
+                    "fee_type": "taker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "post_only": False,
+                },
+            ),
+            _event(
+                15,
+                "EXIT_FILLED",
+                {
+                    **evidence,
+                    "trade_id": "trade-1",
+                    "symbol": "BTC",
+                    "qty": 1.0,
+                    "requested_price": 110.0,
+                    "fill_price": 110.0,
+                    "slippage_bps": 0.0,
+                    "fee_paid": 0.11,
+                    "fee_rate": 0.001,
+                    "fee_type": "maker",
+                    "fee_source": "instrument_contract",
+                    "fee_version": "fee-v1",
+                    "post_only": False,
+                },
+            ),
+        ]
+    )
+
+    dataset = _build(monkeypatch, run=run, events=events)
+
+    quality = dataset["execution"]["quality"]
+    assert quality["execution_quality_class"] == "X2"
+    assert quality["resolved_execution_context_status"] == "available"
+    assert quality["resolved_execution_context_bundle_hash"] == bundle.bundle_hash
+    assert quality["resolved_execution_context_evidence"]["contexts"][0]["context_hash"] == context.context_hash
+
+    events[-1]["payload"]["context"]["fee_schedule_hash"] = "0" * 64
+    downgraded = _build(monkeypatch, run=run, events=events)
+    assert downgraded["execution"]["quality"]["execution_quality_class"] == "X0"
+    assert "per_fill_execution_context_component_mismatch" in downgraded["execution"]["quality"]["blocking_reasons"]
+
+
+def test_dataset_certifies_x4_and_downgrades_deterministically_on_book_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = copy.deepcopy(_run())
+    assumptions = resolve_execution_assumptions(
+        "selection",
+        {
+            "model_version": "conservative_bar.v1",
+            "market_slippage_bps": 5.0,
+            "stop_slippage_bps": 10.0,
+            "passive_fill_policy": "strict_penetration",
+            "fee_policy": "instrument_resolved",
+            "full_fill_assumption": True,
+            "cost_stress_scenarios": [
+                {"id": "moderate", "additional_slippage_bps": 5.0, "fee_multiplier": 1.25}
+            ],
+        },
+        source="run_start_request",
+    )
+    instrument = {
+        "id": "btc",
+        "symbol": "BTC",
+        "instrument_type": "spot",
+        "datasource": "fixture",
+        "exchange": "fixture-venue",
+        "tick_size": 0.01,
+        "contract_size": 1.0,
+        "tick_value": 0.01,
+        "base_currency": "BTC",
+        "quote_currency": "USD",
+        "min_order_size": 0.001,
+        "qty_step": 0.001,
+        "min_notional": 1.0,
+        "maker_fee_rate": 0.001,
+        "taker_fee_rate": 0.001,
+        "fee_source": "instrument_contract",
+        "fee_schedule_version": "fee-v1",
+        "venue_execution_profile": {
+            "profile_id": "fixture-l2",
+            "version": "fixture-l2.v1",
+            "venue_id": "fixture-venue",
+            "supported_order_types": ["market", "limit_aggressive", "stop_market"],
+            "supported_time_in_force": ["gtc", "ioc", "fok"],
+            "post_only_supported": False,
+            "post_only_behavior": "reject_would_cross",
+            "liquidity_role_by_order_type": {
+                "market": "taker",
+                "limit_aggressive": "taker",
+                "stop_market": "taker",
+            },
+            "price_increment_policy": "reject",
+            "quantity_increment_policy": "reject",
+            "book_data_capability": "l2",
+            "lifecycle_event_mapping": {
+                state: state
+                for state in (
+                    "requested",
+                    "validated",
+                    "accepted",
+                    "open",
+                    "partially_filled",
+                    "filled",
+                    "canceled",
+                    "rejected",
+                    "expired",
+                    "replaced",
+                )
+            },
+            "external_order_submission_enabled": False,
+            "source": "fixture",
+        },
+    }
+    profile = compile_series_execution_profile(instrument)
+    context = resolve_execution_context(
+        profile,
+        assumptions,
+        instrument_payload=instrument,
+        execution_model_artifact=execution_model_artifact_from_book_tape(
+            assumptions,
+            source_capability="l2",
+        ),
+        source="backend_startup_resolution",
+    )
+    bundle = build_execution_context_bundle([context])
+    run["config_snapshot"]["economic_claim_intent"] = "selection"
+    run["config_snapshot"]["execution_assumptions"] = assumptions.to_dict()
+    run["config_snapshot"]["resolved_execution_context_bundle"] = bundle.to_dict()
+    book_evidence = {
+        "schema_version": "book_execution_evidence.v1",
+        "execution_model_version": context.model.version,
+        "execution_model_artifact_hash": context.model.artifact_hash,
+        "execution_quality_ceiling": "X4",
+        "execution_book_tape_id": "ebt_test",
+        "execution_book_tape_hash": "1" * 64,
+        "execution_book_replay_fingerprint": "2" * 64,
+        "execution_book_replay_certified": True,
+        "execution_book_source_capability": "l2",
+        "execution_book_snapshot_hash": "3" * 64,
+        "execution_book_state_hash": "4" * 64,
+        "execution_book_validity_interval_id": "validity-1",
+        "execution_book_source_reference": {
+            "definition_id": "definition-1",
+            "session_id": "session-1",
+            "connection_epoch": 0,
+            "source_product_id": "BTC-USD",
+            "source_sequence": 7,
+            "receive_ordinal": 7,
+            "event_ordinal": 0,
+        },
+        "execution_book_product_definition_version_id": "product.v1",
+        "execution_book_quantity_unit": "base",
+        "execution_book_effective_at": "2026-03-01T00:00:00Z",
+        "execution_book_known_at": "2026-03-01T00:00:00.001000Z",
+        "order_arrival_at": "2026-03-01T00:00:00.002000Z",
+        "arrival_latency_ms": 0,
+        "order_type": "market",
+        "side": "buy",
+        "time_in_force": "gtc",
+        "requested_qty": 1.0,
+        "reference_price": 101.0,
+        "best_bid": 100.0,
+        "best_ask": 101.0,
+        "spread": 1.0,
+        "eligible_visible_depth": 2.0,
+        "eligible_level_count": 1,
+        "fill_id": "book-fill-1",
+        "book_level_index": 1,
+        "book_side": "ask",
+        "visible_level_qty": 2.0,
+        "consumed_level_qty": 1.0,
+        "price_improvement": 0.0,
+        "limitations": ["aggregated_depth_only", "exact_queue_position_unavailable"],
+    }
+    context_evidence = {
+        **context.evidence_metadata(),
+        "execution_model_version": context.model.version,
+        "execution_assumption_manifest_hash": assumptions.manifest_hash,
+        "passive_fill_policy": assumptions.passive_fill_policy,
+        "economic_claim_intent": "selection",
+        "fee_policy": assumptions.fee_policy,
+        "full_fill_assumption": assumptions.full_fill_assumption,
+        "market_slippage_bps": assumptions.market_slippage_bps,
+        "stop_slippage_bps": assumptions.stop_slippage_bps,
+        "time_in_force": "gtc",
+        "post_only": False,
+    }
+    lifecycle_context = {
+        "known_at": book_evidence["order_arrival_at"],
+        "symbol": "BTC",
+        "instrument_id": "btc",
+        "order_request_id": "order-1",
+        "order_request_manifest_hash": "5" * 64,
+        "attempt_id": "attempt-1",
+        "order_attempt_manifest_hash": "6" * 64,
+        "order_event_seq": 4,
+        "previous_state": "accepted",
+        "state": "filled",
+        "side": "buy",
+        "requested_qty": 1.0,
+        "attempt_requested_qty": 1.0,
+        "attempt_cumulative_filled_qty": 1.0,
+        "attempt_remaining_qty": 0.0,
+        "order_cumulative_filled_qty": 1.0,
+        "order_remaining_qty": 0.0,
+        "execution_context_hash": context.context_hash,
+        "execution_policy_hash": "7" * 64,
+        "order_lifecycle_replay_hash": "8" * 64,
+        "source_sequence": 1,
+        "fill_id": "book-fill-1",
+        "fill_qty": 1.0,
+        "fill_price": 101.0,
+        "fill_fee": 0.101,
+        "book_execution_evidence": book_evidence,
+    }
+    fill_context = {
+        **context_evidence,
+        "trade_id": "trade-1",
+        "symbol": "BTC",
+        "instrument_id": "btc",
+        "qty": 1.0,
+        "requested_price": 101.0,
+        "fill_price": 101.0,
+        "slippage_bps": 0.0,
+        "fee_paid": 0.101,
+        "fee_rate": 0.001,
+        "fee_type": "taker",
+        "fee_source": "instrument_contract",
+        "fee_version": "fee-v1",
+        "book_execution_evidence": book_evidence,
+    }
+    events = [
+        *_events(),
+        _event(14, "ORDER_LIFECYCLE_CHANGED", lifecycle_context),
+        _event(15, "ENTRY_FILLED", fill_context),
+    ]
+
+    dataset = _build(monkeypatch, run=run, events=events)
+    quality = dataset["execution"]["quality"]
+    assert quality["execution_quality_class"] == "X4"
+    assert quality["blocking_reasons"] == []
+    assert quality["l2_execution_evidence"]["status"] == "available"
+    assert quality["l2_execution_evidence"]["tape_hashes"] == ["1" * 64]
+    assert dataset["execution"]["order_lifecycle"]["events"][0][
+        "book_execution_evidence"
+    ]["execution_book_snapshot_hash"] == "3" * 64
+
+    depth_breach = copy.deepcopy(events)
+    depth_breach[-2]["payload"]["context"]["book_execution_evidence"][
+        "visible_level_qty"
+    ] = 0.5
+    downgraded_x3 = _build(monkeypatch, run=run, events=depth_breach)
+    assert downgraded_x3["execution"]["quality"]["execution_quality_class"] == "X3"
+    assert "per_level_visible_depth_bound_invalid" in downgraded_x3["execution"]["quality"]["blocking_reasons"]
+
+    uncertified = copy.deepcopy(events)
+    uncertified[-2]["payload"]["context"]["book_execution_evidence"][
+        "execution_book_replay_certified"
+    ] = False
+    downgraded_x2 = _build(monkeypatch, run=run, events=uncertified)
+    assert downgraded_x2["execution"]["quality"]["execution_quality_class"] == "X2"
+    assert "execution_book_replay_uncertified" in downgraded_x2["execution"]["quality"]["blocking_reasons"]
 
 
 def test_dataset_enriches_trade_entry_risk_excursion_and_fallback_flags(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1100,6 +1648,109 @@ def test_dataset_enriches_trade_entry_risk_excursion_and_fallback_flags(monkeypa
     assert trade["intrabar_fallback_reasons"] == ["ambiguous_1m_candle"]
     assert trade["legs"][0]["excursion"]["mfe_ticks"] == pytest.approx(12.0)
     assert trade["legs"][0]["intrabar_fallback_within_leg"] is True
+
+
+def test_x5_passive_quality_requires_named_bounds_latency_and_limitations() -> None:
+    evidence = {
+        "schema_version": "book_execution_evidence.v1",
+        "passive_queue_schema_version": "passive_queue_evidence.v1",
+        "execution_model_artifact_hash": "a" * 64,
+        "execution_book_tape_hash": "b" * 64,
+        "execution_book_replay_fingerprint": "c" * 64,
+        "execution_book_replay_certified": True,
+        "execution_book_source_capability": "l2",
+        "execution_book_snapshot_hash": "d" * 64,
+        "order_arrival_at": "2026-03-01T00:00:00.050000Z",
+        "queue_evaluation_at": "2026-03-01T00:00:03.000000Z",
+        "latency_scenario_id": "arrival_50ms",
+        "latency_scenario_hash": "e" * 64,
+        "arrival_latency_ms": 50.0,
+        "queue_model_version": "passive_queue_bounds.v1",
+        "queue_policy_id": "tail-trades",
+        "queue_policy_hash": "f" * 64,
+        "queue_scenario": "TAIL_OBSERVED_TRADE_PROGRESS",
+        "initial_displayed_quantity_ahead": 2.0,
+        "observed_execution_quantity_at_price": 2.5,
+        "definitely_supported_total_fill_qty": 0.5,
+        "scenario_supported_total_fill_qty": 0.5,
+        "passive_fill_support": "definitely_supported",
+        "observed_trade_hashes": ["1" * 64],
+        "new_fill_qty": 0.5,
+        "limitations": [
+            "aggregated_depth_queue_bound",
+            "exact_queue_position_unavailable",
+        ],
+    }
+    execution = {
+        "order_lifecycle": {
+            "events": [
+                {
+                    "event_id": "event-1",
+                    "fill_id": "fill-1",
+                    "fill_qty": 0.5,
+                    "book_execution_evidence": evidence,
+                }
+            ]
+        }
+    }
+
+    assessment = run_research_dataset._passive_execution_quality_assessment(
+        execution=execution
+    )
+    assert assessment["status"] == "available"
+    assert assessment["policy_hashes"] == ["f" * 64]
+    assert assessment["queue_scenarios"] == ["TAIL_OBSERVED_TRADE_PROGRESS"]
+
+    undisclosed = copy.deepcopy(execution)
+    undisclosed["order_lifecycle"]["events"][0]["book_execution_evidence"][
+        "limitations"
+    ] = []
+    invalid = run_research_dataset._passive_execution_quality_assessment(
+        execution=undisclosed
+    )
+    assert invalid["status"] == "invalid"
+    assert "passive_queue_limitation_disclosure_missing" in invalid["blocking_reasons"]
+
+
+def test_excursion_candle_reads_scale_with_unique_series_not_trade_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def list_windows(*, instrument_id: str, timeframe: str, windows):
+        calls.append(
+            {
+                "instrument_id": instrument_id,
+                "timeframe": timeframe,
+                "windows": [dict(window) for window in windows],
+            }
+        )
+        return {str(window["window_id"]): [] for window in windows}
+
+    monkeypatch.setattr(
+        run_research_dataset,
+        "list_candles_for_series_windows",
+        list_windows,
+    )
+    trade = _trades()[0]
+    trades = [
+        {
+            **trade,
+            "trade_id": f"trade-{index}",
+            "instrument_id": "instrument-btc",
+            "timeframe": "1h",
+        }
+        for index in range(25)
+    ]
+
+    results = run_research_dataset._prefetch_excursion_candles(trades)
+
+    assert len(results) == 25
+    assert {(call["instrument_id"], call["timeframe"]) for call in calls} == {
+        ("instrument-btc", "1m"),
+        ("instrument-btc", "1h"),
+    }
+    assert all(len(call["windows"]) == 25 for call in calls)
 
 
 def test_dataset_includes_signals_and_trace_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1358,7 +2009,7 @@ def test_candle_catalog_prefers_storage_continuity_over_run_gap_diagnostics(monk
     assert btc["gap_count"] == 0
     assert btc["missing_count"] == 0
     assert btc["continuity_status"] == "clean"
-    assert btc["storage_source"] == "market.candle_versions"
+    assert btc["storage_source"] == "market.fact_versions"
 
 
 def test_readiness_data_quality_unknown_when_candle_continuity_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:

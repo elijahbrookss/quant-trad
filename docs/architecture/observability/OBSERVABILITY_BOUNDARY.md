@@ -19,11 +19,18 @@ code_paths:
   - portal/backend/service/bots/botlens_intake_router.py
   - portal/backend/service/bots/botlens_candle_continuity.py
   - portal/backend/service/bots/botlens_run_stream.py
+  - portal/backend/service/capacity_observability.py
+  - portal/backend/service/storage/repos/capacity.py
   - src/engines/bot_runtime/runtime/components/step_trace_buffer.py
   - src/engines/bot_runtime/runtime/components/step_trace_rollup.py
   - src/engines/bot_runtime/runtime/components/overlay_delta.py
+  - src/engines/bot_runtime/runtime/profiling.py
   - src/engines/bot_runtime/runtime/mixins/runtime_push_stream.py
   - portal/backend/service/storage/repos/observability.py
+  - portal/backend/service/storage/repos/market_collection.py
+  - portal/backend/service/market/collector_service.py
+  - portal/backend/workers/market_data_collector.py
+  - portal/backend/service/market/collector_supervisor.py
   - cli/logs.py
   - src/core/logger.py
   - src/utils/logging_utils.py
@@ -33,6 +40,8 @@ code_paths:
   - docker/promtail/config.yml
   - docker/loki/config.yml
   - docker/grafana
+  - scripts/reporting/docker_capacity_sampler.sh
+  - scripts/reporting/host_capacity_sampler.ps1
   - docs/architecture/observability/diagrams/observability-flow.mmd
 ---
 # Observability Boundary
@@ -136,6 +145,49 @@ Exporter write latency is itself observable through
 use these alongside storage `db_write_*` metrics; `db_write_ms` alone is not a
 complete database pressure signal.
 
+## Capacity Telemetry
+
+Capacity telemetry is a bounded diagnostic surface for storage-budget and
+resource planning. The backend records one database snapshot and one row per
+logical user relation every five minutes. Database snapshots include database
+size, connections, transaction and tuple counters, block cache counters,
+temporary-file pressure, deadlocks, WAL bytes, and sample-query cost. Relation
+snapshots include logical table/index/TOAST bytes, estimated live/dead rows, and
+PostgreSQL activity counters by schema and relation.
+
+TimescaleDB hypertables are measured as logical relations with
+`hypertable_detailed_size` and aggregate chunk activity. Internal chunks are
+excluded so Grafana does not double-count one hypertable as both a logical table
+and many implementation tables. Capacity rows are diagnostic rather than
+market or runtime truth, use the existing `PG_DSN`, and are deleted after the
+configured 30-day retention window.
+
+The observability-profile `docker-stats` sidecar emits numeric container CPU,
+memory, PID, and Docker engine-filesystem samples every 15 seconds through
+normal Docker stdout. Every filesystem sample declares its scope, authority,
+runtime kind, and whether physical host capacity is visible. Docker Desktop/WSL
+engine capacity is explicitly a virtual-guest sample, not host free space.
+Promtail and Loki retain that short-horizon operational stream; the sidecar does
+not post directly to Loki and does not add a second database.
+
+On Windows Docker Desktop, `host_capacity_sampler.ps1` optionally supplies the
+missing physical authority. It discovers Docker's configured WSL VHDX and its
+backing volume from Docker metadata rather than a drive literal, writes bounded
+daily NDJSON, and projects days to a configurable reserve from observed VHDX
+allocation growth. Promtail reads those files through the same Loki pipeline.
+On native Linux or cloud volumes, the engine/data-volume exporter can be
+authoritative directly. If the actual backing resource is not observable,
+capacity remains explicitly unavailable.
+
+Grafana provisions `QuantTrad Capacity & Database Growth`
+(`quanttrad-capacity-growth`). Its schema and relation variables support
+logical-table drilldown, while Loki panels show pressure that can grow before a
+market-structure segment publishes its archive and canonical facts. Separate
+panels show engine/guest storage, physical Docker backing-volume headroom, VHDX
+allocation growth, projected days to reserve, and discovery/authority state.
+Alert rules may consume these panels later, but alert thresholds are operator
+policy rather than trading truth.
+
 ## What Belongs Here
 
 - queue depth and drops,
@@ -154,6 +206,9 @@ complete database pressure signal.
 - control-plane telemetry flush status for runtime lifecycle and bootstrap
   messages,
 - storage write timing,
+- scheduled market-fact worker heartbeat/expiry and active-attempt scope,
+- bounded collector attempt stage timing for pacing, provider request,
+  normalization, validation, persistence, and total visibility lag,
 - projection failures,
 - continuity summaries,
 - lifecycle and startup timing.
@@ -189,15 +244,40 @@ complete database pressure signal.
   `botlens_runtime_facts` messages by run/series while preserving control-lane
   and material trade, wallet, and decision fact delivery. Coalescing is a live
   projection pressure valve only; canonical fact persistence remains the source
-  of durable truth.
+  of durable truth. Coalescing volume is retained as a source-budgeted metric,
+  not one durable event per superseded projection message, so diagnostic noise
+  cannot consume a run report's bounded event-evidence window.
 - Runtime step traces are aggregated in memory into compact profiler rollups
   before persistence. The hot path records timing samples, but the writer ships
   mergeable bucket rows instead of one payload per bar. Shutdown drains pending
   rollups; persist failures remain visible diagnostics.
+- Opt-in runtime profiles use `cProfile` for CPU call accounting and the process
+  peak resident set size for bounded memory context. The reported RSS is a
+  process-lifetime high-water mark, not allocation ownership for the profile
+  session. Continuous allocation tracing is excluded because its per-allocation
+  interception materially distorts backtest throughput and concurrent-capacity
+  measurements.
+- Successful canonical fact persistence and projection dispatch diagnostics are
+  sampled every 250 operations after the first sample. Exact counters and latest
+  latency remain available through metrics. Third-party WebSocket protocol
+  frame logging is held at WARN even when the application runs at DEBUG. Failure,
+  overflow, timeout, and lifecycle diagnostics are not sampled.
 - BotLens ingest routes projection batches before waiting on diagnostic durable
   writes. Persistence runs in bounded background batches and emits explicit
   errors on failure so API websocket receive loops are not held hostage by
   ordinary projection/debug storage pressure.
+- Telemetry transport loops remain event-loop cooperative on both sides of the
+  connection. The ingest WebSocket yields after every routed frame, while the
+  runtime emitter waits for cross-thread queue work with an `asyncio.Event`
+  instead of blocking its asyncio loop on a `threading.Condition`. This keeps
+  Uvicorn and client protocol ping/pong tasks schedulable under both sustained
+  backtest traffic and idle queue intervals. A blocking idle wait produces
+  deterministic 40-second code-1006 reconnect churn with the default
+  20-second ping interval and timeout.
+- Scheduled collector liveness is a mutable worker-state projection. Heartbeat
+  expiry means the process is not proven alive; it does not rewrite previously
+  accepted market facts. Attempt timing stays bounded inside the existing typed
+  attempt evidence instead of creating one durable metric row per stage.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
 - If Promtail/Loki are down while a short-lived bot container starts and exits,
   and the container is later removed, Loki cannot retroactively recover that

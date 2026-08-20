@@ -172,3 +172,20 @@ The new clocks create a path to remove or demote older ordering workarounds:
 - Timestamps prove known-at timing; clocks prove durable causal order.
 - Use the smallest clock that proves the replay claim.
 - Add clocks where state mutates independently, not everywhere data changes.
+
+## 2026-08-03 Replay Verification
+
+A retained pre-fix run proved why the clocks cannot be collapsed. Its overlay
+rows were durably present but crossed asynchronous persistence order: replay
+expected base overlay commit 59 and observed base 79 at overlay commit 80
+(`run_seq=823`). The run ledger was intact; the overlay commit chain was not.
+Accordingly, `run_seq` remains the cross-domain persistence spine while
+`overlay_commit_seq` remains overlay causality.
+
+The remediation fails closed at the smallest honest boundary. A gap creates
+typed overlay-invalid evidence and suppresses overlay geometry only. Frozen
+candles and independently valid decisions and trades remain inspectable. The
+runtime now emits recurring full-state overlay checkpoints every 20 commits and
+at terminal state, so a future checkpoint can establish a new replay base after
+an invalid interval. Existing immutable runs are not rewritten to manufacture
+continuity.

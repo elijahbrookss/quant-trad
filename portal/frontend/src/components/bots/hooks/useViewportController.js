@@ -92,7 +92,15 @@ const buildGhostPoints = (candles = [], segments = []) => {
   return ghostPoints
 }
 
-export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef, latestCandlesRef, debugRanges = false }) => {
+export const useViewportController = ({
+  chartRef,
+  levelSeriesRef,
+  barSpacingRef,
+  latestCandlesRef,
+  debugRanges = false,
+  onNearHistoryStart = null,
+  onNearHistoryEnd = null,
+}) => {
   const lockedRef = useRef(true)
   const animationActiveRef = useRef(false)
   const userOverrideUntilRef = useRef(0)
@@ -101,6 +109,10 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
   const preferredSpanBarsRef = useRef(DEFAULT_CAMERA_SPAN_BARS)
   const lastLogicalRangeRef = useRef(null)
   const interactionRef = useRef({ dragging: false, wheelUntil: 0 })
+  const nearHistoryTriggeredRef = useRef({ start: false, end: false })
+  const historyWindowRef = useRef({ first: null, last: null })
+  const onNearHistoryStartRef = useRef(onNearHistoryStart)
+  const onNearHistoryEndRef = useRef(onNearHistoryEnd)
   const logger = useMemo(() => createLogger('ViewportController'), [])
 
   const applyRange = useCallback((range, logicalRange) => {
@@ -118,6 +130,14 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
       }
     }
   }, [chartRef])
+
+  useEffect(() => {
+    onNearHistoryStartRef.current = onNearHistoryStart
+  }, [onNearHistoryStart])
+
+  useEffect(() => {
+    onNearHistoryEndRef.current = onNearHistoryEnd
+  }, [onNearHistoryEnd])
 
   const logIntent = useCallback((payload) => {
     if (!BOTLENS_DEBUG) return
@@ -143,6 +163,8 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
     lastOverlaySignatureRef.current = null
     preferredSpanBarsRef.current = clampBars(preferredSpanBars, 8, 480)
     lastLogicalRangeRef.current = null
+    nearHistoryTriggeredRef.current = { start: false, end: false }
+    historyWindowRef.current = { first: null, last: null }
     interactionRef.current = { dragging: false, wheelUntil: 0 }
   }, [])
 
@@ -283,6 +305,15 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
 
         if (interactionRef.current.dragging || now < Number(interactionRef.current.wheelUntil || 0)) {
           const candles = latestCandlesRef?.current || []
+          const firstCandleTime = Number(candles[0]?.time)
+          const lastCandleTime = Number(candles[candles.length - 1]?.time)
+          if (
+            firstCandleTime !== historyWindowRef.current.first
+            || lastCandleTime !== historyWindowRef.current.last
+          ) {
+            historyWindowRef.current = { first: firstCandleTime, last: lastCandleTime }
+            nearHistoryTriggeredRef.current = { start: false, end: false }
+          }
           const spacing = deriveSpacing(candles, barSpacingRef)
           const liveLogicalRange = computeFollowRange(candles, spacing, {
             lookbackBars: preferredSpanBarsRef.current,
@@ -290,6 +321,30 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
           }).logicalRange
           notifyUserInteraction(INTERACTION_SUPPRESS_MS)
           setLocked(isLogicalRangePinnedToLatest(logicalRange, liveLogicalRange))
+          const leftEdge = Number(logicalRange?.from)
+          const rightEdge = Number(logicalRange?.to)
+          const rightBoundary = Math.max(0, candles.length - 1)
+          if (Number.isFinite(leftEdge) && leftEdge <= 12 && !nearHistoryTriggeredRef.current.start) {
+            nearHistoryTriggeredRef.current.start = true
+            onNearHistoryStartRef.current?.()
+          } else if (Number.isFinite(leftEdge) && leftEdge > 24) {
+            nearHistoryTriggeredRef.current.start = false
+          }
+          if (
+            candles.length
+            && Number.isFinite(rightEdge)
+            && rightEdge >= rightBoundary - 12
+            && !nearHistoryTriggeredRef.current.end
+          ) {
+            nearHistoryTriggeredRef.current.end = true
+            onNearHistoryEndRef.current?.()
+          } else if (
+            candles.length
+            && Number.isFinite(rightEdge)
+            && rightEdge < rightBoundary - 24
+          ) {
+            nearHistoryTriggeredRef.current.end = false
+          }
         }
       }
       const handleTimeRangeChange = (timeRange) => {
@@ -340,7 +395,15 @@ export const useViewportController = ({ chartRef, levelSeriesRef, barSpacingRef,
         containerEl.removeEventListener('wheel', markWheel)
       }
     },
-    [barSpacingRef, chartRef, debugRanges, latestCandlesRef, logger, notifyUserInteraction, setLocked],
+    [
+      barSpacingRef,
+      chartRef,
+      debugRanges,
+      latestCandlesRef,
+      logger,
+      notifyUserInteraction,
+      setLocked,
+    ],
   )
 
   useEffect(() => {

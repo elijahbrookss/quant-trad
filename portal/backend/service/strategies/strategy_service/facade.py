@@ -1056,9 +1056,9 @@ class StrategyRegistry:
         )
         for inst_id in record.indicator_ids:
             try:
-                meta = deepcopy(get_instance_meta(inst_id))
+                get_instance_meta(inst_id)
             except KeyError:
-                meta = {}
+                pass
             # REMOVED: indicator_snapshots assignment - no longer storing snapshots
         self._sync_instruments(record)
         self._records[strategy_id] = record
@@ -1213,7 +1213,7 @@ class StrategyRegistry:
         if not inst_id:
             raise ValueError("Indicator id must be provided")
 
-        meta = deepcopy(get_instance_meta(inst_id))
+        get_instance_meta(inst_id)
 
         if inst_id not in record.indicator_ids:
             record.indicator_ids.append(inst_id)
@@ -1656,6 +1656,91 @@ def delete_strategy_variant(strategy_id: str, variant_id: str) -> None:
 
     get_strategy_variant(strategy_id, variant_id)
     storage_delete_strategy_variant(variant_id)
+
+
+def clone_strategy(
+    source_strategy_id: str,
+    *,
+    name: str,
+    symbols: Iterable[Any],
+    description: Optional[str] = None,
+    datasource: Optional[str] = None,
+    exchange: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Clone one Strategy while preserving rule and variant semantics.
+
+    The application boundary owns default-variant replacement so callers never
+    need to infer or recreate Strategy defaults.
+    """
+
+    source = _REGISTRY.get(source_strategy_id)
+    source_variants = list_strategy_variants(source_strategy_id)
+    created = create_strategy(
+        name,
+        symbols=symbols,
+        timeframe=source.timeframe,
+        description=description,
+        datasource=datasource if datasource is not None else source.datasource,
+        exchange=exchange if exchange is not None else source.exchange,
+        indicator_ids=source.indicator_ids,
+        atm_template_id=source.atm_template_id,
+        risk_config=source.risk_config,
+    )
+    target_id = str(created["id"])
+    for rule in sorted(
+        source.rules.values(), key=lambda row: (int(row.priority), str(row.id))
+    ):
+        create_rule(
+            target_id,
+            name=rule.name,
+            intent=rule.intent,
+            priority=rule.priority,
+            trigger=rule.trigger,
+            guards=rule.guards,
+            description=rule.description,
+            enabled=rule.enabled,
+        )
+
+    target_variants = list_strategy_variants(target_id)
+    target_default = next(
+        (row for row in target_variants if bool(row.get("is_default"))), None
+    )
+    if target_default is None:
+        raise RuntimeError("strategy_clone_default_variant_missing")
+    variant_id_by_source_id: dict[str, str] = {}
+    for source_variant in source_variants:
+        source_variant_id = str(source_variant.get("id") or "").strip()
+        payload = {
+            "name": str(source_variant.get("name") or "default"),
+            "description": source_variant.get("description"),
+            "output_filters": list(source_variant.get("output_filters") or []),
+            "is_default": bool(source_variant.get("is_default", False)),
+        }
+        if payload["is_default"]:
+            copied = update_strategy_variant(
+                target_id,
+                str(target_default["id"]),
+                **payload,
+            )
+        else:
+            copied = create_strategy_variant(target_id, **payload)
+        if source_variant_id:
+            variant_id_by_source_id[source_variant_id] = str(copied["id"])
+
+    cloned = get_strategy(target_id)
+    logger.info(
+        "strategy_cloned | source_strategy=%s strategy=%s rules=%s variants=%s",
+        source_strategy_id,
+        target_id,
+        len(source.rules),
+        len(source_variants),
+    )
+    return {
+        "schema_version": "strategy_clone.v1",
+        "source_strategy_id": source_strategy_id,
+        "strategy": cloned,
+        "variant_id_by_source_id": variant_id_by_source_id,
+    }
 
 
 def create_strategy(

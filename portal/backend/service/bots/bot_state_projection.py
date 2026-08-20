@@ -105,7 +105,10 @@ def _lease_projection(
 
 def _default_container_state(bot_id: str) -> Dict[str, Any]:
     return {
-        "name": DockerBotRunner.container_name_for(bot_id),
+        "name": DockerBotRunner.container_name_for(
+            bot_id,
+            run_id=str((lifecycle or {}).get("run_id") or "").strip() or None,
+        ),
         "status": "missing",
         "running": False,
         "id": None,

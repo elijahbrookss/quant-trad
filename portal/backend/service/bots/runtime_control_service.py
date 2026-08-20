@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
 
 from core.settings import get_settings
+from engines.bot_runtime.core.execution_assumptions import (
+    normalize_economic_claim_intent,
+    resolve_execution_assumptions,
+)
 
 from .botlens_lifecycle_bridge import emit_lifecycle_event
 from .bot_state_projection import project_bot_state
@@ -68,7 +72,10 @@ def _start_config_projection(bot: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     payload = dict(bot or {})
-    for key, value in dict(overrides or {}).items():
+    supplied = dict(overrides or {})
+    if "economic_claim_intent" not in supplied and not payload.get("economic_claim_intent"):
+        raise ValueError("economic_claim_intent is required for every new run")
+    for key, value in supplied.items():
         if value in (None, ""):
             continue
         if key == "execution_behavior":
@@ -87,8 +94,41 @@ def _apply_start_overrides(bot: Mapping[str, Any], overrides: Mapping[str, Any] 
             payload["market_data_stream_policy"] = normalize_market_data_stream_policy(
                 value if isinstance(value, Mapping) else {}
             )
+        elif key in {"economic_claim_intent", "execution_assumptions"}:
+            continue
         else:
             payload[key] = value
+    intent = normalize_economic_claim_intent(
+        supplied.get("economic_claim_intent") or payload.get("economic_claim_intent")
+    )
+    raw_assumptions = (
+        supplied.get("execution_assumptions")
+        if isinstance(supplied.get("execution_assumptions"), Mapping)
+        else payload.get("execution_assumptions")
+        if isinstance(payload.get("execution_assumptions"), Mapping)
+        else None
+    )
+    if "execution_assumptions" in supplied and supplied.get("execution_assumptions") is not None and not isinstance(
+        supplied.get("execution_assumptions"), Mapping
+    ):
+        raise ValueError("execution_assumptions must be an object")
+    assumption_source = "run_start_request"
+    supplied_manifest_hash = ""
+    if raw_assumptions:
+        supplied_manifest_hash = str(raw_assumptions.get("manifest_hash") or "").strip()
+        if supplied_manifest_hash:
+            assumption_source = str(raw_assumptions.get("source") or "").strip()
+            if not assumption_source:
+                raise ValueError("resolved execution_assumptions with manifest_hash require source")
+    resolved_assumptions = resolve_execution_assumptions(
+        intent,
+        raw_assumptions,
+        source=assumption_source,
+    )
+    if supplied_manifest_hash and supplied_manifest_hash != resolved_assumptions.manifest_hash:
+        raise ValueError("execution_assumption_manifest_hash_mismatch")
+    payload["economic_claim_intent"] = intent
+    payload["execution_assumptions"] = resolved_assumptions.to_dict()
     if "execution_behavior" not in payload:
         payload["execution_behavior"] = execution_behavior_from_bot(payload)
     if bool(payload.get("profile")) and str(payload.get("run_type") or "").strip().lower() != "backtest":
@@ -210,8 +250,9 @@ class BotRuntimeControlService:
         inspect_container: bool,
     ) -> Dict[str, Any]:
         bot_id = str(bot.get("id") or "").strip()
+        run_id = str((lifecycle or {}).get("run_id") or "").strip() or None
         default_state = {
-            "name": DockerBotRunner.container_name_for(bot_id),
+            "name": DockerBotRunner.container_name_for(bot_id, run_id=run_id),
             "status": "missing",
             "running": False,
             "id": None,
@@ -231,7 +272,7 @@ class BotRuntimeControlService:
         if not should_inspect:
             return default_state
         try:
-            return DockerBotRunner.inspect_bot_container(bot_id)
+            return DockerBotRunner.inspect_bot_container(bot_id, run_id=run_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("bot_container_inspect_failed | bot_id=%s | error=%s", bot_id, exc)
             return {**default_state, "status": "unknown", "error": str(exc)}
@@ -383,18 +424,23 @@ class BotRuntimeControlService:
             return []
         if runner is None:
             return active_runs
-        try:
-            container_state = DockerBotRunner.inspect_bot_container(bot_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("bot_active_run_reconcile_container_inspect_failed | bot_id=%s | error=%s", bot_id, exc)
-            return active_runs
         reconciled: set[str] = set()
-        container_running = bool(container_state.get("running"))
-        container_status = str(container_state.get("status") or "").strip().lower()
-        container_run_id = str(container_state.get("runtime_run_id") or "").strip()
         for run in active_runs:
             run_id = str(run.get("run_id") or "").strip()
             lifecycle = run.get("_lifecycle") if isinstance(run.get("_lifecycle"), Mapping) else {}
+            try:
+                container_state = DockerBotRunner.inspect_bot_container(bot_id, run_id=run_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "bot_active_run_reconcile_container_inspect_failed | bot_id=%s | run_id=%s | error=%s",
+                    bot_id,
+                    run_id,
+                    exc,
+                )
+                continue
+            container_running = bool(container_state.get("running"))
+            container_status = str(container_state.get("status") or "").strip().lower()
+            container_run_id = str(container_state.get("runtime_run_id") or "").strip()
             if container_running:
                 if container_run_id and container_run_id != run_id:
                     self._terminalize_active_run_from_container(
@@ -432,7 +478,7 @@ class BotRuntimeControlService:
         if not run_id:
             return
         try:
-            container_state = DockerBotRunner.inspect_bot_container(bot_id)
+            container_state = DockerBotRunner.inspect_bot_container(bot_id, run_id=run_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("bot_terminal_container_inspect_failed | bot_id=%s | run_id=%s | error=%s", bot_id, run_id, exc)
             return
@@ -480,31 +526,21 @@ class BotRuntimeControlService:
         runner = self._resolve_runner()
         active_runs = self._reconcile_active_runs_before_start(bot_id=bot_id, runner=runner, request_id=request_id)
         if active_runs:
-            active_run = active_runs[0]
-            active_run_id = str(active_run.get("run_id") or "").strip()
-            active_lifecycle = active_run.get("_lifecycle") if isinstance(active_run.get("_lifecycle"), Mapping) else {}
-            start_request = _run_start_request(active_run, active_lifecycle)
-            projected = self._project_bot_from_storage(stored_bot)
-            if start_request.get("request_id") == request_id and start_request.get("config_hash") == config_hash:
-                return _control_response(
-                    status="already_started",
-                    bot_id=bot_id,
-                    run_id=active_run_id,
-                    active_run_id=active_run_id,
-                    request_id=request_id,
-                    message="Start request is an idempotent retry for the active run.",
-                    bot=projected,
-                )
-            return _control_response(
-                status="conflict",
-                bot_id=bot_id,
-                run_id=None,
-                active_run_id=active_run_id,
-                request_id=request_id,
-                message="Bot already has an active run.",
-                reason_code="active_run_conflict",
-                bot=projected,
-            )
+            for active_run in active_runs:
+                active_run_id = str(active_run.get("run_id") or "").strip()
+                active_lifecycle = active_run.get("_lifecycle") if isinstance(active_run.get("_lifecycle"), Mapping) else {}
+                start_request = _run_start_request(active_run, active_lifecycle)
+                if start_request.get("request_id") == request_id and start_request.get("config_hash") == config_hash:
+                    projected = self._project_bot_from_storage(stored_bot, inspect_container=False)
+                    return _control_response(
+                        status="already_started",
+                        bot_id=bot_id,
+                        run_id=active_run_id,
+                        active_run_id=active_run_id,
+                        request_id=request_id,
+                        message="Start request is an idempotent retry for the active run.",
+                        bot=projected,
+                    )
 
         latest_run_id = storage.get_latest_bot_runtime_run_id(bot_id)
         if latest_run_id and runner is not None:
@@ -545,6 +581,10 @@ class BotRuntimeControlService:
         bot = self._config.get_bot(bot_id)
         projected = self._project_bot_from_storage(bot)
         self._broadcast("bot", {"bot": projected})
+        self._broadcast(
+            "active_runs_changed",
+            {"bot_id": bot_id, "run_id": ctx.run_id, "reason": "run_started"},
+        )
         return _control_response(
             status="started",
             bot_id=bot_id,
@@ -586,6 +626,19 @@ class BotRuntimeControlService:
         target_run_id = str(run_id or "").strip()
         if not target_run_id:
             active_runs = self._active_runs_for_bot(bot_id)
+            if len(active_runs) > 1:
+                bot = self._config.get_bot(bot_id)
+                projected = self._project_bot_from_storage(bot, inspect_container=False)
+                return _control_response(
+                    status="conflict",
+                    bot_id=bot_id,
+                    run_id=None,
+                    active_run_id=None,
+                    request_id=request_id,
+                    message="Multiple runs are active; cancel an exact run instance.",
+                    reason_code="run_id_required_multiple_active",
+                    bot=projected,
+                )
             target_run_id = str((active_runs[0] if active_runs else {}).get("run_id") or "").strip()
         if not target_run_id:
             target_run_id = str(storage.get_latest_bot_runtime_run_id(bot_id) or "").strip()
@@ -651,7 +704,12 @@ class BotRuntimeControlService:
         )
         self._stop_runner(runner, bot_id=bot_id, preserve_container=preserve_container, run_id=target_run_id)
         watchdog = self._watchdog_instance()
-        watchdog.unregister_bot(bot_id)
+        try:
+            watchdog.unregister_bot(bot_id, run_id=target_run_id)
+        except TypeError as exc:
+            if "run_id" not in str(exc):
+                raise
+            watchdog.unregister_bot(bot_id)
         try:
             storage.release_bot_run_lease(
                 bot_id=bot_id,
@@ -698,6 +756,10 @@ class BotRuntimeControlService:
         refreshed = self._config.get_bot(bot_id)
         projected = self._project_bot_from_storage(refreshed, inspect_container=True)
         self._broadcast("bot", {"bot": projected})
+        self._broadcast(
+            "active_runs_changed",
+            {"bot_id": bot_id, "run_id": target_run_id, "reason": "run_canceled"},
+        )
         return _control_response(
             status="canceled",
             bot_id=bot_id,

@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildTradeMarkerArtifacts } from '../src/components/bots/hooks/useTradeMarkers.js'
+import {
+  buildTradeMarkerArtifacts,
+  projectTradeEventToCandle,
+} from '../src/components/bots/hooks/useTradeMarkers.js'
+import { buildTradeFocusPulseMarkers } from '../src/components/bots/hooks/usePulseMarkers.js'
 
 const candles = [
   { time: 1_700_000_000, open: 100, high: 101, low: 99, close: 100 },
@@ -66,6 +70,64 @@ function openTrade(overrides = {}) {
   }
 }
 
+test('trade event projection is exact, containing-candle, or unavailable without nearest snapping', () => {
+  const first = candles[0].time
+  assert.deepEqual(projectTradeEventToCandle(first, candles), {
+    time: first,
+    originalTime: first,
+    projection: 'exact',
+  })
+  assert.deepEqual(projectTradeEventToCandle(first + 30, candles), {
+    time: first,
+    originalTime: first + 30,
+    projection: 'containing_candle',
+  })
+  assert.equal(projectTradeEventToCandle(first - 1, candles).projection, 'unavailable')
+  assert.equal(projectTradeEventToCandle(first + 181, candles).projection, 'unavailable')
+
+  const candlesWithGap = [candles[0], candles[1], { ...candles[2], time: first + 300 }]
+  assert.equal(projectTradeEventToCandle(first + 180, candlesWithGap).projection, 'unavailable')
+})
+
+test('between-bar markers use containing candle time while retaining stable evidence identity', () => {
+  const first = candles[0].time
+  const trade = closedTrade({
+    entry_time: new Date((first + 30) * 1000).toISOString(),
+    exit_time: new Date((first + 90) * 1000).toISOString(),
+    legs: [{
+      target_price: 104,
+      exit_time: new Date((first + 90) * 1000).toISOString(),
+      exit_price: 104,
+      status: 'target',
+      contracts: 1,
+    }],
+  })
+  const artifacts = buildTradeMarkerArtifacts([trade, trade], candleLookup(), candles)
+
+  assert.deepEqual(artifacts.markers.map((marker) => marker.time), [first, first + 60])
+  assert.equal(new Set(artifacts.markers.map((marker) => marker.id)).size, 2)
+  assert.equal(artifacts.markers.every((marker) => marker.time_projection === 'containing_candle'), true)
+  assert.deepEqual(artifacts.markers.map((marker) => marker.evidence_time), [first + 30, first + 90])
+})
+
+test('events outside the loaded candle window produce no fabricated marker', () => {
+  const first = candles[0].time
+  const trade = closedTrade({
+    entry_time: new Date((first - 60) * 1000).toISOString(),
+    exit_time: new Date((first + 240) * 1000).toISOString(),
+    legs: [{
+      exit_time: new Date((first + 240) * 1000).toISOString(),
+      exit_price: 104,
+      status: 'target',
+      contracts: 1,
+    }],
+  })
+  const artifacts = buildTradeMarkerArtifacts([trade], candleLookup(), candles)
+
+  assert.deepEqual(artifacts.markers, [])
+  assert.deepEqual(artifacts.tooltips, [])
+})
+
 test('closed trade artifacts keep markers and spans without persistent price lines', () => {
   const artifacts = buildTradeMarkerArtifacts([closedTrade()], candleLookup(), candles)
 
@@ -113,6 +175,31 @@ test('open trade artifacts render active entry, stop, and target price lines', (
   assert.equal(artifacts.priceLines.some((line) => line.source === 'active_trade_entry' && line.price === 100), true)
   assert.equal(artifacts.priceLines.some((line) => line.source === 'active_trade_sl' && line.price === 98), true)
   assert.equal(artifacts.priceLines.some((line) => line.source === 'active_trade_tp' && line.price === 106), true)
+})
+
+test('terminal inspection suppresses active levels while retaining and emphasizing historical evidence', () => {
+  const artifacts = buildTradeMarkerArtifacts([openTrade()], candleLookup(), candles, {
+    selectedTradeId: 'trade-1',
+    showActiveTradeLevels: false,
+  })
+
+  assert.deepEqual(artifacts.priceLines, [])
+  assert.equal(artifacts.markers.some((marker) => marker.kind === 'entry'), true)
+  assert.equal(artifacts.regions.length, 1)
+  assert.equal(artifacts.regions[0].border.width, 2)
+  assert.equal(artifacts.segments.length, 1)
+  assert.equal(artifacts.segments[0].lineWidth, 4)
+})
+
+test('completed trade focus pulse marks entry and exit and alternates emphasis', () => {
+  const compact = buildTradeFocusPulseMarkers(closedTrade(), candles, 0)
+  const expanded = buildTradeFocusPulseMarkers(closedTrade(), candles, 1)
+
+  assert.deepEqual(compact.map((marker) => marker.text), ['SELECTED ENTRY', 'SELECTED EXIT'])
+  assert.deepEqual(compact.map((marker) => marker.time), [candles[0].time, candles[1].time])
+  assert.equal(compact.every((marker) => marker.trade_id === 'trade-1'), true)
+  assert.equal(expanded.every((marker, index) => marker.size > compact[index].size), true)
+  assert.deepEqual(buildTradeFocusPulseMarkers(openTrade(), candles, 0), [])
 })
 
 test('open trade artifacts ignore zero-valued missing exit and target prices', () => {

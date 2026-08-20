@@ -9,12 +9,17 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from engines.bot_runtime.core.domain import StrategySignal
+from engines.bot_runtime.core.order_lifecycle import (
+    CanonicalOrderLifecycle,
+    CanonicalOrderLifecycleEvent,
+)
 from engines.bot_runtime.core.runtime_events import (
     DecisionAcceptedContext,
     DecisionRejectedContext,
     EntryFilledContext,
     ExitFilledContext,
     ExitKind,
+    OrderLifecycleChangedContext,
     ReasonCode,
     RuntimeBar,
     RuntimeErrorContext,
@@ -117,6 +122,59 @@ def _fill_currency_pair(
     return base_currency, quote_currency
 
 
+_EXECUTION_EVIDENCE_FIELDS = (
+    "requested_price",
+    "fill_price",
+    "slippage_price",
+    "slippage_bps",
+    "execution_model_version",
+    "execution_assumption_manifest_hash",
+    "passive_fill_policy",
+    "execution_quality_ceiling",
+    "economic_claim_intent",
+    "fee_policy",
+    "full_fill_assumption",
+    "market_slippage_bps",
+    "stop_slippage_bps",
+    "resolved_execution_context_hash",
+    "instrument_execution_contract_hash",
+    "venue_execution_profile_hash",
+    "venue_execution_profile_id",
+    "venue_execution_profile_version",
+    "fee_schedule_hash",
+    "fee_schedule_id",
+    "fee_schedule_version",
+    "fee_currency",
+    "fee_rounding_mode",
+    "fee_precision",
+    "fee_tier",
+    "execution_model_artifact_hash",
+    "execution_model_artifact_id",
+    "book_data_capability",
+    "time_in_force",
+    "post_only",
+)
+
+
+def _execution_evidence_fields(source: Mapping[str, Any]) -> Dict[str, Any]:
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), Mapping) else {}
+    result = {
+        key: metadata.get(key) if key in metadata else source.get(key)
+        for key in _EXECUTION_EVIDENCE_FIELDS
+        if key in metadata or key in source
+    }
+    candidate = metadata if (
+        str(metadata.get("schema_version") or "") == "book_execution_evidence.v1"
+        or metadata.get("execution_book_snapshot_hash") is not None
+    ) else source
+    if (
+        str(candidate.get("schema_version") or "") == "book_execution_evidence.v1"
+        or candidate.get("execution_book_snapshot_hash") is not None
+    ):
+        result["book_execution_evidence"] = dict(candidate)
+    return result
+
+
 class RuntimeEventsMixin:
     def _wallet_initialization_is_container_owned(self) -> bool:
         return str(self.config.get("wallet_initialization_owner") or "").strip().lower() == "container"
@@ -133,18 +191,32 @@ class RuntimeEventsMixin:
                 proxy_lock.acquire()
                 try:
                     if wallet_state is not None:
+                        try:
+                            wallet_snapshot = wallet_state.copy()
+                        except AttributeError:
+                            wallet_snapshot = dict(wallet_state)
                         return BaseWalletGateway._wallet_state_snapshot(
-                            BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_state))
+                            BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_snapshot))
                         )
-                    runtime_events = list(runtime_events_proxy)
+                    try:
+                        runtime_events = list(runtime_events_proxy[:])
+                    except TypeError:
+                        runtime_events = list(runtime_events_proxy)
                 finally:
                     proxy_lock.release()
             else:
                 if wallet_state is not None:
+                    try:
+                        wallet_snapshot = wallet_state.copy()
+                    except AttributeError:
+                        wallet_snapshot = dict(wallet_state)
                     return BaseWalletGateway._wallet_state_snapshot(
-                        BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_state))
+                        BaseWalletGateway._wallet_state_from_snapshot(dict(wallet_snapshot))
                     )
-                runtime_events = list(runtime_events_proxy)
+                try:
+                    runtime_events = list(runtime_events_proxy[:])
+                except TypeError:
+                    runtime_events = list(runtime_events_proxy)
             return BaseWalletGateway._wallet_state_snapshot(project_wallet_from_events(runtime_events))
         if self._run_context is None:
             return {}
@@ -286,6 +358,18 @@ class RuntimeEventsMixin:
         warning_id = str(entry.get("warning_id") or "").strip() or self._warning_identity(entry, context)
         entry["warning_id"] = warning_id
         entry["id"] = warning_id
+        material_fields = (
+            "warning_id",
+            "warning_type",
+            "severity",
+            "source",
+            "indicator_id",
+            "symbol_key",
+            "symbol",
+            "timeframe",
+            "title",
+            "message",
+        )
         with self._lock:
             warnings = list(self._warnings)
             match_index = next(
@@ -293,6 +377,7 @@ class RuntimeEventsMixin:
                 None,
             )
             if match_index is None:
+                material_changed = True
                 entry.setdefault("count", 1)
                 entry.setdefault("first_seen_at", entry.get("timestamp") or now_iso)
                 entry["last_seen_at"] = entry.get("timestamp") or now_iso
@@ -302,15 +387,20 @@ class RuntimeEventsMixin:
                 warnings.append(entry)
             else:
                 existing = dict(warnings.pop(match_index))
+                previous_material = tuple(existing.get(field) for field in material_fields)
                 existing.update(entry)
                 existing["count"] = int(existing.get("count") or 1) + 1
                 existing["first_seen_at"] = existing.get("first_seen_at") or existing.get("timestamp") or now_iso
                 existing["last_seen_at"] = entry.get("timestamp") or now_iso
                 existing["updated_at"] = existing["last_seen_at"]
+                material_changed = previous_material != tuple(
+                    existing.get(field) for field in material_fields
+                )
                 warnings.append(existing)
             self._warnings = deque(warnings, maxlen=self._warning_limit)
             self.state["warnings"] = list(self._warnings)
-            self._warning_revision = int(getattr(self, "_warning_revision", 0) or 0) + 1
+            if material_changed:
+                self._warning_revision = int(getattr(self, "_warning_revision", 0) or 0) + 1
 
     def warnings(self) -> List[Dict[str, object]]:
         """Return the current runtime warnings."""
@@ -448,9 +538,39 @@ class RuntimeEventsMixin:
             return event
         return None
 
+    def _find_order_lifecycle_event(
+        self,
+        *,
+        trade_id: Optional[str],
+        order_request_id: Optional[str] = None,
+        fill_id: Optional[str] = None,
+    ) -> Optional[RuntimeEvent]:
+        if not trade_id and not order_request_id and not fill_id:
+            return None
+        for event in self._runtime_events_reverse():
+            if event.event_name != RuntimeEventName.ORDER_LIFECYCLE_CHANGED:
+                continue
+            context = event.context
+            if trade_id and str(getattr(context, "trade_id", "") or "") != str(trade_id):
+                continue
+            if order_request_id and str(getattr(context, "order_request_id", "") or "") != str(order_request_id):
+                continue
+            if fill_id and str(getattr(context, "fill_id", "") or "") != str(fill_id):
+                continue
+            if not fill_id and str(getattr(context, "state", "") or "") != "filled":
+                continue
+            return event
+        return None
+
     def _persist_runtime_event(self, event: RuntimeEvent) -> None:
         if self._run_context is None:
             raise ValueError("run context is required for runtime event persistence")
+        for existing in self._runtime_events_reverse():
+            if existing.event_id != event.event_id:
+                continue
+            if existing.serialize() != event.serialize():
+                raise ValueError("runtime_event_identity_reused_with_different_material")
+            return
         serialized = event.serialize()
         shared_wallet_proxy = self.config.get("shared_wallet_proxy")
         seq = self._allocate_runtime_event_seq()
@@ -487,6 +607,7 @@ class RuntimeEventsMixin:
         context: Any,
         root_id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        event_id: Optional[str] = None,
         event_ts: Optional[datetime] = None,
     ) -> RuntimeEvent:
         if self._run_context is None:
@@ -497,6 +618,7 @@ class RuntimeEventsMixin:
             context=context,
             root_id=root_id,
             parent_id=parent_id,
+            event_id=event_id,
             event_ts=event_ts,
             allow_missing_parent=bool(getattr(context, "parent_missing", False)),
         )
@@ -738,6 +860,113 @@ class RuntimeEventsMixin:
             event_ts=candle.time,
         )
 
+    def _emit_order_lifecycle_event(
+        self,
+        *,
+        series: StrategySeries,
+        event: CanonicalOrderLifecycleEvent,
+        lifecycle: CanonicalOrderLifecycle,
+    ) -> RuntimeEvent:
+        """Publish one lifecycle transition through the canonical runtime stream."""
+
+        request = lifecycle.request
+        attempt = next(
+            (item for item in lifecycle.attempts if item.attempt_id == event.attempt_id),
+            None,
+        )
+        if attempt is None:
+            raise ValueError("order_lifecycle_event_attempt_manifest_missing")
+        event_time = _parse_runtime_iso(event.known_at)
+        request_time = _parse_runtime_iso(request.known_at)
+        if event_time is None or request_time is None:
+            raise ValueError("order lifecycle known_at values must be canonical timestamps")
+        correlation_id = self._bar_correlation_id(series, request_time)
+        decision_event = self._find_decision_event(
+            series=series,
+            correlation_id=correlation_id,
+            trade_id=request.trade_id,
+        )
+        signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
+        parent_event = decision_event or signal_event
+        missing_parent_hint = None
+        if parent_event is None:
+            missing_parent_hint = (
+                "decision or signal event missing for order lifecycle emission | "
+                f"request_id={request.request_id} correlation={correlation_id}"
+            )
+        return self._emit_runtime_event(
+            event_name=RuntimeEventName.ORDER_LIFECYCLE_CHANGED,
+            correlation_id=correlation_id,
+            context=OrderLifecycleChangedContext(
+                **self._runtime_context_base(
+                    series=series,
+                    bar_ts=event_time,
+                    parent_missing=parent_event is None,
+                    missing_parent_hint=missing_parent_hint,
+                ),
+                order_request_id=request.request_id,
+                order_request_manifest_hash=request.manifest_hash,
+                attempt_id=attempt.attempt_id,
+                order_attempt_manifest_hash=attempt.manifest_hash,
+                order_event_seq=event.order_event_seq,
+                previous_state=event.previous_state.value if event.previous_state is not None else None,
+                state=event.state.value,
+                known_at=event_time,
+                side=request.side,
+                requested_qty=request.requested_qty,
+                attempt_requested_qty=attempt.requested_qty,
+                attempt_cumulative_filled_qty=event.attempt_cumulative_filled_qty,
+                attempt_remaining_qty=event.attempt_remaining_qty,
+                order_cumulative_filled_qty=event.order_cumulative_filled_qty,
+                order_remaining_qty=event.order_remaining_qty,
+                execution_context_hash=event.execution_context_hash,
+                execution_policy_hash=event.execution_policy_hash,
+                order_lifecycle_replay_hash=lifecycle.replay_hash_at(event.order_event_seq),
+                trade_id=request.trade_id,
+                signal_id=request.signal_id,
+                decision_id=request.decision_id,
+                source_sequence=event.source_sequence,
+                fill_id=event.fill_id,
+                fill_qty=event.fill_qty,
+                fill_price=event.fill_price,
+                fill_fee=event.fill_fee,
+                reason=event.reason,
+                replacement_attempt_id=event.replacement_attempt_id,
+                venue_event_name=event.venue_event_name,
+                book_execution_evidence=(
+                    dict(event.metadata)
+                    if str(event.metadata.get("schema_version") or "")
+                    == "book_execution_evidence.v1"
+                    or event.metadata.get("execution_book_snapshot_hash") is not None
+                    else {}
+                ),
+            ),
+            root_id=parent_event.root_id if parent_event is not None else None,
+            parent_id=parent_event.event_id if parent_event is not None else None,
+            event_id=event.event_id,
+            event_ts=event_time,
+        )
+
+    def _drain_order_lifecycle_events(self, *, series: StrategySeries) -> int:
+        engine = getattr(series, "risk_engine", None)
+        if engine is None:
+            return 0
+        drain = getattr(engine, "drain_order_lifecycle_events", None)
+        lookup = getattr(engine, "order_lifecycle_for", None)
+        if not callable(drain) or not callable(lookup):
+            return 0
+        emitted = 0
+        for event in drain():
+            lifecycle = lookup(event.request_id)
+            if lifecycle is None:
+                raise ValueError(
+                    "order lifecycle event cannot be published without its replay authority "
+                    f"request_id={event.request_id}"
+                )
+            self._emit_order_lifecycle_event(series=series, event=event, lifecycle=lifecycle)
+            emitted += 1
+        return emitted
+
     def _emit_entry_filled_event(
         self,
         *,
@@ -748,12 +977,15 @@ class RuntimeEventsMixin:
     ) -> RuntimeEvent:
         trade_id = str(getattr(trade, "trade_id", "") or "")
         correlation_id = self._bar_correlation_id(series, candle.time)
+        lifecycle_event = self._find_order_lifecycle_event(trade_id=trade_id)
+        if lifecycle_event is not None:
+            correlation_id = lifecycle_event.correlation_id
         signal_event = self._find_signal_event(series=series, correlation_id=correlation_id)
         decision_event = self._find_decision_event(series=series, correlation_id=correlation_id, trade_id=trade_id)
         missing_bits: List[str] = []
-        if signal_event is None:
+        if lifecycle_event is None and signal_event is None:
             missing_bits.append(f"signal event missing | trade_id={trade_id} correlation={correlation_id}")
-        if decision_event is None:
+        if lifecycle_event is None and decision_event is None:
             missing_bits.append(f"decision event missing | trade_id={trade_id} correlation={correlation_id}")
         missing_parent_hint = "; ".join(missing_bits) if missing_bits else None
         qty = sum(max(getattr(leg, "contracts", 0.0), 0.0) for leg in getattr(trade, "legs", []))
@@ -874,17 +1106,26 @@ class RuntimeEventsMixin:
             wallet_eval_seq=wallet_fill_metadata.get("wallet_eval_seq"),
             position_commit_seq=wallet_fill_metadata.get("position_commit_seq"),
             reason_code=ReasonCode.EXEC_ENTRY_FILLED if not missing_parent_hint else ReasonCode.RUNTIME_PARENT_MISSING,
+            **_execution_evidence_fields(entry_outcome),
         )
         return self._emit_runtime_event(
             event_name=RuntimeEventName.ENTRY_FILLED,
             correlation_id=correlation_id,
             context=context,
             root_id=(
-                signal_event.root_id
+                lifecycle_event.root_id
+                if lifecycle_event is not None
+                else signal_event.root_id
                 if signal_event is not None
                 else (decision_event.root_id if decision_event is not None else None)
             ),
-            parent_id=decision_event.event_id if decision_event is not None else None,
+            parent_id=(
+                lifecycle_event.event_id
+                if lifecycle_event is not None
+                else decision_event.event_id
+                if decision_event is not None
+                else None
+            ),
             event_ts=trade.entry_time if hasattr(trade, "entry_time") else candle.time,
         )
 
@@ -896,11 +1137,16 @@ class RuntimeEventsMixin:
         event: Mapping[str, Any],
     ) -> RuntimeEvent:
         trade_id = str(event.get("trade_id") or "")
+        lifecycle_event = self._find_order_lifecycle_event(
+            trade_id=trade_id,
+            order_request_id=str(event.get("order_request_id") or "").strip() or None,
+            fill_id=str(event.get("order_fill_id") or "").strip() or None,
+        )
         entry_event = self._find_entry_event(trade_id=trade_id)
         decision_event = self._find_trade_decision_event(trade_id=trade_id)
         missing_parent_hint = None
-        if entry_event is None:
-            missing_parent_hint = f"entry event missing for exit fill | trade_id={trade_id}"
+        if lifecycle_event is None and entry_event is None:
+            missing_parent_hint = f"lifecycle and entry events missing for exit fill | trade_id={trade_id}"
         subtype = str(event.get("type") or "").lower()
         exit_kind = ExitKind.CLOSE
         reason = ReasonCode.EXEC_EXIT_CLOSE
@@ -1053,6 +1299,7 @@ class RuntimeEventsMixin:
             position_commit_seq=wallet_fill_metadata.get("position_commit_seq"),
             event_subtype=subtype,
             reason_code=exit_reason,
+            **_execution_evidence_fields(event),
         )
         return self._emit_runtime_event(
             event_name=RuntimeEventName.EXIT_FILLED,
@@ -1064,12 +1311,16 @@ class RuntimeEventsMixin:
             ),
             context=context,
             root_id=(
-                entry_event.root_id
+                lifecycle_event.root_id
+                if lifecycle_event is not None
+                else entry_event.root_id
                 if entry_event is not None
                 else (decision_event.root_id if decision_event is not None else None)
             ),
             parent_id=(
-                entry_event.event_id
+                lifecycle_event.event_id
+                if lifecycle_event is not None
+                else entry_event.event_id
                 if entry_event is not None
                 else (decision_event.event_id if decision_event is not None else None)
             ),
@@ -1232,6 +1483,20 @@ class RuntimeEventsMixin:
         warnings = self.warnings()
         execution_mode = self.execution_mode.value
         request_id = str(self.config.get("request_id") or self.config.get("_runtime_request_id") or "").strip() or None
+        order_lifecycle_traces: Dict[str, Dict[str, Any]] = {}
+        for state in self._series_states:
+            engine = getattr(getattr(state, "series", None), "risk_engine", None)
+            trace_builder = getattr(engine, "order_lifecycle_traces", None)
+            if not callable(trace_builder):
+                continue
+            for order_request_id, trace in trace_builder().items():
+                existing = order_lifecycle_traces.get(order_request_id)
+                if existing is not None and existing != trace:
+                    raise ValueError(
+                        "order_lifecycle_trace_diverged_across_series "
+                        f"request_id={order_request_id}"
+                    )
+                order_lifecycle_traces[order_request_id] = dict(trace)
         return {
             "run_id": self._run_context.run_id,
             "bot_id": self.bot_id,
@@ -1251,6 +1516,7 @@ class RuntimeEventsMixin:
             "performance_summary": performance_summary,
             "wallet_start": dict(self.config.get("wallet_config") or {}),
             "runtime_event_stream": runtime_event_stream,
+            "order_lifecycle_traces": dict(sorted(order_lifecycle_traces.items())),
             "warnings": warnings,
             "report_warnings": [
                 dict(entry)

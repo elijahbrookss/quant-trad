@@ -28,7 +28,9 @@ Public API (unchanged from caller perspective):
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
@@ -59,6 +61,48 @@ class BotTelemetryHub:
         self._run_stream = BotLensRunStream(ring_size=int(_BOTLENS_SETTINGS.ring_size))
         self._registry = ProjectorRegistry(run_stream=self._run_stream)
         self._router = IntakeRouter(registry=self._registry)
+        self._serving_loop: asyncio.AbstractEventLoop | None = None
+        self._serving_loop_lock = threading.Lock()
+
+    def bind_serving_loop(self) -> None:
+        """Bind cross-thread telemetry handoffs to the long-lived API loop."""
+
+        loop = asyncio.get_running_loop()
+        with self._serving_loop_lock:
+            current = self._serving_loop
+            if current is not None and current is not loop and current.is_running():
+                raise RuntimeError("botlens_telemetry_serving_loop_already_bound")
+            self._serving_loop = loop
+
+    def unbind_serving_loop(self) -> None:
+        with self._serving_loop_lock:
+            self._serving_loop = None
+
+    def submit_ingest_threadsafe(self, payload: Mapping[str, Any]) -> bool:
+        """Schedule persisted lifecycle evidence from a synchronous worker thread."""
+
+        with self._serving_loop_lock:
+            loop = self._serving_loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.ingest(dict(payload)), loop)
+        except RuntimeError:
+            return False
+
+        def _observe_result(completed) -> None:
+            try:
+                completed.result()
+            except Exception as exc:  # noqa: BLE001 - durable lifecycle truth remains authoritative.
+                logger.warning(
+                    "botlens_threadsafe_ingest_failed | run_id=%s | bot_id=%s | error=%s",
+                    payload.get("run_id"),
+                    payload.get("bot_id"),
+                    exc,
+                )
+
+        future.add_done_callback(_observe_result)
+        return True
 
     # ------------------------------------------------------------------
     # Ingest — called by the WebSocket ingest endpoint per message

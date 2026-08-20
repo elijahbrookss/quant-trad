@@ -32,6 +32,7 @@ from ..market.candle_service import (
     fetch_ohlcv_by_instrument,
     market_data_read_scope,
 )
+from ..market.runtime_market_data import RuntimeMarketDataResolver
 from ..market.instrument_service import get_instrument_record, resolve_instrument
 from ..reports.artifacts import build_run_artifact_bundle
 from ..storage.repos.runtime_events import (
@@ -126,7 +127,9 @@ def _record_bot_runtime_diagnostic_event(payload: Any) -> None:
 
 
 def build_bot_runtime_deps(
-    *, dataset_binding: Optional[Mapping[str, Any]] = None
+    *,
+    dataset_binding: Optional[Mapping[str, Any]] = None,
+    market_data_bindings: Optional[Mapping[str, Any]] = None,
 ) -> BotRuntimeDeps:
     """Build runtime dependencies, optionally bound to one frozen dataset."""
 
@@ -134,6 +137,10 @@ def build_bot_runtime_deps(
         normalize_backtest_dataset_binding(dataset_binding)
         if dataset_binding is not None
         else None
+    )
+    market_data_resolver = RuntimeMarketDataResolver(
+        dataset_binding=normalized_binding,
+        instrument_bindings=market_data_bindings,
     )
 
     def scoped(callable_: Callable[..., Any]) -> Callable[..., Any]:
@@ -270,6 +277,7 @@ def build_bot_runtime_deps(
         record_bot_run_steps_batch=record_bot_run_steps_batch,
         build_run_artifact_bundle=build_run_artifact_bundle,
         record_bot_runtime_diagnostic_event=_record_bot_runtime_diagnostic_event,
+        market_data_inputs_for_decision=market_data_resolver.resolve,
     )
 
 

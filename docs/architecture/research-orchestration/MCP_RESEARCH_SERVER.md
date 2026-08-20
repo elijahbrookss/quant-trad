@@ -69,6 +69,8 @@ The MCP server sits on top of the same contracts as the `qt` CLI:
   routes,
 - instrument tools delegate to `qt instruments ...`,
 - experiment tools delegate to `qt experiments ...`,
+- collector reads and actions delegate to `qt data collectors ...` and the
+  canonical Collector API,
 - controlled mutation tools call backend write routes only after explicit
   guardrails are satisfied.
 
@@ -103,11 +105,18 @@ state through `quanttrad://` URIs:
 - `quanttrad://instruments/{instrument_id}`
 - `quanttrad://instruments/{instrument_id}/runtime-profile?execution_semantics={execution_semantics}`
 - `quanttrad://providers`
+- `quanttrad://market-data/collectors`
+- `quanttrad://market-data/plane`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}/diagnostics`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}/events?limit={limit}`
+- `quanttrad://market-data/collectors/{collector_kind}/{collector_id}/gaps?limit={limit}`
 - `quanttrad://reports`
 - `quanttrad://reports/{run_id}/summary`
 - `quanttrad://reports/{run_id}/diagnostics`
 - `quanttrad://reports/{run_id}/metrics`
 - `quanttrad://reports/{run_id}/run-report-status`
+- `quanttrad://research/items/{item_id}/trail`
 - `quanttrad://experiments/{experiment_id}/state`
 - `quanttrad://experiments/{experiment_id}/summary`
 - `quanttrad://experiments/{experiment_id}/events?tail={tail}`
@@ -145,6 +154,10 @@ Read tools:
 - `list_instruments`
 - `get_instrument`
 - `get_instrument_runtime_profile`
+- `list_collectors`
+- `get_collector`
+- `diagnose_collector`
+- `probe_collector`
 
 Indicator validation tools:
 
@@ -161,6 +174,24 @@ assertions such as "ready by end" or minimum ready bars. Warmup bars are allowed
 to return `ready=false`; missing outputs are not. `check_data_coverage` calls
 `qt data coverage` to run the same pre-run candle coverage contract used by
 experiment planning against an explicit instrument/window.
+
+Canonical research tools:
+
+- `get_research_check_requirements`
+- `preview_research_check`
+- `prepare_research_check_evidence`
+- `run_research_check_evidence`
+- `dispatch_research_check_evidence`
+- `get_research_job_status`
+- `get_research_job_result`
+- `replay_research_check`
+- `create_observation_from_check`
+- `get_research_trail`
+
+These call the same `ResearchOperations` application contract as the CLI.
+MCP does not normalize a second request language, calculate features or hashes,
+or interpret a verdict. Dataset freeze, durable Check execution, and Observation
+creation require confirmation. Preview and requirements remain read-only.
 
 For wider scout-window planning, `qt instruments coverage-matrix` calls the
 backend instrument coverage matrix and combines instrument readiness with candle
@@ -188,6 +219,7 @@ Controlled mutation tools:
 - `create_strategy_variant`
 - `update_strategy_variant`
 - `create_indicator`
+- `operate_collector`
 
 Actual run-starting or write operations require `confirm=true`. Tools that can
 be usefully previewed default to planned mutations with `apply=false`; applying
@@ -198,6 +230,13 @@ returns a planned mutation by default, and persists only when both `apply=true`
 and `confirm=true` are supplied. CLI indicator edits use the same guarded
 contract and require clone-first for strategy-bound parameter/dependency
 changes.
+
+`operate_collector` accepts only a registered lifecycle action and delegates to
+`qt data collectors`. It is a planned mutation unless `apply=true`; applying
+requires `confirm=true`, `request_id`, `actor_id`, and `reason`. The backend
+still checks collector capabilities and writes both successful and failed
+operation evidence. MCP cannot create collectors, edit credentials or runtime
+configuration, or request arbitrary acquisition.
 
 `prepare_instrument_matrix_experiment` follows the same guarded shape for
 mixed-instrument research. Dry runs return the solo strategy/bot mutations and
@@ -222,8 +261,8 @@ rebuild reports or inspect runtime internals.
   exposed for agents should also have a matching `qt` command.
 - Indicator runtime validation must use the backend runtime graph and engine
   timeline, not MCP-side reconstruction.
-- Research checks must keep their evidence boundary explicit: raw source data,
-  persisted indicator runtime outputs, or completed report datasets.
+- Research preview is ephemeral; durable Check evidence requires a frozen
+  provider-free binding and the canonical Check/Indicator execution path.
 - Long-running experiment tools may block until the underlying `qt` command
   finishes or times out.
 - Mutations must fail loud when required IDs, confirmations, or allowed run
@@ -234,5 +273,6 @@ rebuild reports or inspect runtime internals.
 
 - Authentication is not modeled because the local backend has no auth boundary.
 - The server is stdio-only; no remote MCP transport is implemented.
-- Detached/background MCP orchestration is deferred. Long operations currently
-  rely on the same foreground `qt experiments` behavior as the CLI.
+- Detached experiment orchestration is deferred. Check evidence can dispatch to
+  the shared research-job store and is inspected through the same job
+  status/result contract as the CLI.

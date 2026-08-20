@@ -17,6 +17,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 import yaml
 from dotenv import load_dotenv
 
+from core.market_storage_lifecycle import MarketStorageLifecyclePolicy
+
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,9 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_OBSERVABILITY_PERSIST_PENDING_EVENTS_MAX", ("observability", "persist_pending_events_max")),
     ("QT_OBSERVABILITY_HIGH_VOLUME_METRIC_SAMPLE_EVERY", ("observability", "high_volume_metric_sample_every")),
     ("QT_OBSERVABILITY_HIGH_VOLUME_METRIC_MAX_LAG_MS", ("observability", "high_volume_metric_max_lag_ms")),
+    ("QT_OBSERVABILITY_CAPACITY_SAMPLE_ENABLED", ("observability", "capacity_sample_enabled")),
+    ("QT_OBSERVABILITY_CAPACITY_SAMPLE_INTERVAL_SECONDS", ("observability", "capacity_sample_interval_seconds")),
+    ("QT_OBSERVABILITY_CAPACITY_SAMPLE_RETENTION_DAYS", ("observability", "capacity_sample_retention_days")),
     ("QT_ASYNC_JOBS_RUNNING_TIMEOUT_SECONDS", ("async_jobs", "running_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_WAIT_TIMEOUT_SECONDS", ("async_jobs", "quantlab_job_wait_timeout_seconds")),
     ("QT_ASYNC_JOBS_QUANTLAB_JOB_POLL_INTERVAL_SECONDS", ("async_jobs", "quantlab_job_poll_interval_seconds")),
@@ -74,6 +79,65 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_WORKERS_RESEARCH_IDLE_SLEEP_SECONDS", ("workers", "research", "idle_sleep_seconds")),
     ("QT_WORKERS_RESEARCH_IDLE_SLEEP_MAX_SECONDS", ("workers", "research", "idle_sleep_max_seconds")),
     ("QT_WORKERS_RESEARCH_DB_WAIT_TIMEOUT_SECONDS", ("workers", "research", "db_wait_timeout_seconds")),
+    ("QT_WORKERS_COLLECTORS_PROCESSES", ("workers", "collectors", "processes")),
+    ("QT_WORKERS_COLLECTORS_INDEX", ("workers", "collectors", "index")),
+    ("QT_WORKERS_COLLECTORS_TOTAL", ("workers", "collectors", "total")),
+    ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_SECONDS", ("workers", "collectors", "idle_sleep_seconds")),
+    ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_MAX_SECONDS", ("workers", "collectors", "idle_sleep_max_seconds")),
+    ("QT_WORKERS_COLLECTORS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "collectors", "db_wait_timeout_seconds")),
+    ("QT_MARKET_DATA_LIFECYCLE_ENABLED", ("market_data_lifecycle", "enabled")),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED",
+        ("market_data_lifecycle", "execution_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS",
+        ("market_data_lifecycle", "interval_seconds"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_ARCHIVE_COMPACTION_ENABLED",
+        ("market_data_lifecycle", "archive_compaction_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_ARCHIVE_EXPIRATION_ENABLED",
+        ("market_data_lifecycle", "archive_expiration_enabled"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_RAW_TRADE_ARCHIVE_DAYS",
+        ("market_data_lifecycle", "raw_trade_archive_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_RAW_L2_ARCHIVE_DAYS",
+        ("market_data_lifecycle", "raw_l2_archive_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_BOOK_CHECKPOINT_ARCHIVE_DAYS",
+        ("market_data_lifecycle", "book_checkpoint_archive_days"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTED_SOURCE_GRACE_HOURS",
+        ("market_data_lifecycle", "compacted_source_grace_hours"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_AGE_MINUTES",
+        ("market_data_lifecycle", "compaction_min_age_minutes"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_OBJECTS",
+        ("market_data_lifecycle", "compaction_min_objects"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_COMPACTION_TARGET_BYTES",
+        ("market_data_lifecycle", "compaction_target_bytes"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_MAX_COMPACTION_GROUPS_PER_RUN",
+        ("market_data_lifecycle", "max_compaction_groups_per_run"),
+    ),
+    (
+        "QT_MARKET_DATA_LIFECYCLE_MAX_ARCHIVE_EXPIRATIONS_PER_RUN",
+        ("market_data_lifecycle", "max_archive_expirations_per_run"),
+    ),
     ("QT_BOT_RUNTIME_MODE", ("bot_runtime", "mode")),
     ("QT_BOT_RUNTIME_TARGET", ("bot_runtime", "target")),
     ("QT_BOT_RUNTIME_IMAGE", ("bot_runtime", "image")),
@@ -131,6 +195,7 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_BOT_RUNTIME_BOTLENS_MAX_DECISIONS", ("bot_runtime", "botlens", "max_decisions")),
     ("QT_BOT_RUNTIME_BOTLENS_MAX_WARNINGS", ("bot_runtime", "botlens", "max_warnings")),
     ("QT_BOT_RUNTIME_BOTLENS_RING_SIZE", ("bot_runtime", "botlens", "ring_size")),
+    ("QT_BOT_RUNTIME_BOTLENS_VIEWER_SEND_TIMEOUT_MS", ("bot_runtime", "botlens", "viewer_send_timeout_ms")),
     ("QT_BOT_RUNTIME_BOTLENS_INGEST_QUEUE_MAX", ("bot_runtime", "botlens", "ingest_queue_max")),
     ("QT_BOT_RUNTIME_BOTLENS_PERSIST_OBSERVER_CONTINUITY", ("bot_runtime", "botlens", "persist_observer_continuity")),
     ("QT_BOT_RUNTIME_STEP_TRACE_QUEUE_MAX", ("bot_runtime", "step_trace", "queue_max")),
@@ -418,6 +483,9 @@ class ObservabilitySettings:
     persist_pending_events_max: int
     high_volume_metric_sample_every: int
     high_volume_metric_max_lag_ms: int
+    capacity_sample_enabled: bool
+    capacity_sample_interval_seconds: int
+    capacity_sample_retention_days: int
 
 
 
@@ -450,6 +518,7 @@ class WorkerGroupSettings:
 class WorkersSettings:
     indicators: WorkerGroupSettings
     research: WorkerGroupSettings
+    collectors: WorkerGroupSettings
 
 
 @dataclass(frozen=True)
@@ -491,6 +560,7 @@ class BotlensSettings:
     max_decisions: int
     max_warnings: int
     ring_size: int
+    viewer_send_timeout_ms: int
     ingest_queue_max: int
     persist_observer_continuity: bool
 
@@ -656,6 +726,7 @@ class AppSettings:
     observability: ObservabilitySettings
     async_jobs: AsyncJobSettings
     workers: WorkersSettings
+    market_data_lifecycle: MarketStorageLifecyclePolicy
     bot_runtime: BotRuntimeSettings
     providers: ProviderSettings
     security: SecuritySettings
@@ -672,6 +743,8 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
     workers_payload = _coerce_mapping(payload.get("workers"))
     indicator_workers_payload = _coerce_mapping(workers_payload.get("indicators"))
     research_workers_payload = _coerce_mapping(workers_payload.get("research"))
+    collector_workers_payload = _coerce_mapping(workers_payload.get("collectors"))
+    market_data_lifecycle_payload = _coerce_mapping(payload.get("market_data_lifecycle"))
     bot_runtime_payload = _coerce_mapping(payload.get("bot_runtime"))
     snapshot_payload = _coerce_mapping(bot_runtime_payload.get("snapshot"))
     push_payload = _coerce_mapping(bot_runtime_payload.get("push"))
@@ -767,6 +840,15 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             high_volume_metric_max_lag_ms=_coerce_int(
                 observability_payload.get("high_volume_metric_max_lag_ms"), 5000, minimum=10
             ),
+            capacity_sample_enabled=_coerce_bool(
+                observability_payload.get("capacity_sample_enabled"), True
+            ),
+            capacity_sample_interval_seconds=_coerce_int(
+                observability_payload.get("capacity_sample_interval_seconds"), 300, minimum=30
+            ),
+            capacity_sample_retention_days=_coerce_int(
+                observability_payload.get("capacity_sample_retention_days"), 30, minimum=1
+            ),
         ),
         async_jobs=AsyncJobSettings(
             running_timeout_seconds=_coerce_float(async_jobs_payload.get("running_timeout_seconds"), 1800.0, minimum=0.0),
@@ -812,6 +894,23 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                     research_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
                 ),
             ),
+            collectors=WorkerGroupSettings(
+                processes=_coerce_int(collector_workers_payload.get("processes"), 1, minimum=1),
+                index=_coerce_int(collector_workers_payload.get("index"), 0, minimum=0),
+                total=_coerce_int(collector_workers_payload.get("total"), 1, minimum=1),
+                idle_sleep_seconds=_coerce_float(
+                    collector_workers_payload.get("idle_sleep_seconds"), 0.5, minimum=0.05
+                ),
+                idle_sleep_max_seconds=_coerce_float(
+                    collector_workers_payload.get("idle_sleep_max_seconds"), 5.0, minimum=0.05
+                ),
+                db_wait_timeout_seconds=_coerce_float(
+                    collector_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
+                ),
+            ),
+        ),
+        market_data_lifecycle=MarketStorageLifecyclePolicy.from_mapping(
+            market_data_lifecycle_payload
         ),
         bot_runtime=BotRuntimeSettings(
             mode=_coerce_str(bot_runtime_payload.get("mode"), "backtest"),
@@ -884,6 +983,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 max_decisions=_coerce_int(botlens_payload.get("max_decisions"), 600, minimum=100),
                 max_warnings=_coerce_int(botlens_payload.get("max_warnings"), 120, minimum=20),
                 ring_size=_coerce_int(botlens_payload.get("ring_size"), 8192, minimum=32),
+                viewer_send_timeout_ms=_coerce_int(botlens_payload.get("viewer_send_timeout_ms"), 1500, minimum=100),
                 ingest_queue_max=_coerce_int(botlens_payload.get("ingest_queue_max"), 4096, minimum=64),
                 persist_observer_continuity=_coerce_bool(
                     botlens_payload.get("persist_observer_continuity"), False
@@ -1040,10 +1140,10 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
             ),
             materialization=ReportMaterializationSettings(
                 terminal_auto_enqueue_enabled=_coerce_bool(
-                    report_materialization_payload.get("terminal_auto_enqueue_enabled"), False
+                    report_materialization_payload.get("terminal_auto_enqueue_enabled"), True
                 ),
                 terminal_auto_enqueue_delay_seconds=_coerce_float(
-                    report_materialization_payload.get("terminal_auto_enqueue_delay_seconds"), 0.0, minimum=0.0
+                    report_materialization_payload.get("terminal_auto_enqueue_delay_seconds"), 1.0, minimum=0.0
                 ),
             ),
         ),
@@ -1088,6 +1188,7 @@ __all__ = [
     "IbkrSettings",
     "LoggingSettings",
     "MarketDataStreamPolicySettings",
+    "MarketStorageLifecyclePolicy",
     "ObservabilitySettings",
     "ProviderRuntimeSettings",
     "ReportArtifactSettings",

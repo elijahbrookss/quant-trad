@@ -48,6 +48,9 @@ class SeriesExecutionState:
     indicator_overlays: Dict[str, RuntimeOverlay] = field(default_factory=dict)
     last_overlay_refresh_epoch: Optional[int] = None
     indicator_output_types: Dict[str, OutputType] = field(default_factory=dict)
+    indicator_market_data_requirements: Dict[str, tuple[Dict[str, Any], ...]] = field(
+        default_factory=dict
+    )
     overlay_runtime_metrics: Dict[str, float] = field(default_factory=dict)
     decision_evaluation_state: DecisionEvaluationState = field(default_factory=DecisionEvaluationState)
     decision_artifacts: Deque[Dict[str, Any]] = field(default_factory=lambda: deque(maxlen=2000))

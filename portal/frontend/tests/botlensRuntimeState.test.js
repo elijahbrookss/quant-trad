@@ -3,9 +3,12 @@ import assert from 'node:assert/strict'
 
 import {
   selectSelectedSymbolChartCandles,
+  selectSelectedSymbolChartTrades,
+  selectSelectedSymbolOverlays,
   selectSelectedSymbolState,
 } from '../src/features/bots/botlens/state/botlensRuntimeSelectors.js'
 import {
+  MAX_CHART_HISTORY_CANDLES,
   createInitialBotLensState,
   reduceBotLensState,
 } from '../src/features/bots/botlens/state/botlensRuntimeState.js'
@@ -334,14 +337,52 @@ test('chart retrieval stays out of base symbol state and composes at selector ti
       returned_start_time: '2025-12-31T23:59:00Z',
       returned_end_time: '2026-01-01T00:00:00Z',
     },
+    evidenceSource: { kind: 'frozen_dataset', dataset_id: 'mds-frozen' },
   })
 
   assert.equal(selectSelectedSymbolState(state).candles.length, 1)
   assert.equal(state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].candles.length, 1)
   assert.deepEqual(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].evidenceSource,
+    { kind: 'frozen_dataset', dataset_id: 'mds-frozen' },
+  )
+  assert.deepEqual(
     selectSelectedSymbolChartCandles(state).map((row) => row.time),
     [1767225540, 1767225600],
   )
+})
+
+test('valid candle and trade history becomes ready even when overlay evidence is incomplete', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartRequest',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+  })
+  assert.equal(state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].status, 'loading')
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 1767225540, open: 99, high: 102, low: 98, close: 101 }],
+    trades: [{ event_id: 'trade-1', trade_id: 'trade-1', event_ts: '2025-12-31T23:59:00Z' }],
+    overlays: [],
+    range: { has_more_before: true, has_more_after: false },
+    tradeEvidence: { complete_for_returned_candles: true, trade_count: 1 },
+    overlayEvidence: {
+      coverage: 'bounded',
+      complete_for_returned_candles: false,
+      reason_codes: ['overlay_timeline_gap_or_order_violation'],
+    },
+  })
+
+  const history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.equal(history.status, 'ready')
+  assert.equal(history.candles.length, 1)
+  assert.equal(selectSelectedSymbolChartTrades(state).length, 1)
+  assert.equal(history.tradeEvidence.complete_for_loaded_candles, true)
+  assert.equal(history.overlayEvidence.complete_for_loaded_candles, false)
 })
 
 test('chart retrieval ignores stale responses from a previous run after the session changes', () => {
@@ -384,4 +425,402 @@ test('warnings without canonical warning_id are dropped instead of aliased', () 
   })
 
   assert.deepEqual(state.runState.health.warnings, [])
+})
+
+
+test('chart history merges newest-first trade pages without reopening a closed trade', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 120, open: 100, high: 102, low: 99, close: 101 }],
+    trades: [{
+      trade_id: 'trade-1',
+      symbol_key: 'instrument-btc|1m',
+      trade_state: 'closed',
+      status: 'closed',
+      entry_time: '1970-01-01T00:01:00Z',
+      entry_price: 100,
+      exit_time: '1970-01-01T00:02:00Z',
+      exit_price: 101,
+      position_commit_seq: 2,
+    }],
+    tradeEvidence: { complete_for_returned_candles: true, trade_count: 1 },
+    overlayEvidence: { complete_for_returned_candles: false, coverage: 'live_viewport_only' },
+  })
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 60, open: 99, high: 101, low: 98, close: 100 }],
+    trades: [{
+      trade_id: 'trade-1',
+      symbol_key: 'instrument-btc|1m',
+      trade_state: 'open',
+      status: 'open',
+      entry_time: '1970-01-01T00:01:00Z',
+      entry_price: 100,
+      position_commit_seq: 1,
+    }],
+  })
+
+  const trades = selectSelectedSymbolChartTrades(state)
+  assert.equal(trades.length, 1)
+  assert.equal(trades[0].trade_state, 'closed')
+  assert.equal(trades[0].exit_time, '1970-01-01T00:02:00Z')
+  assert.equal(selectSelectedSymbolState(state).recent_trades.length, 0)
+  assert.equal(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].tradeEvidence.complete_for_returned_candles,
+    true,
+  )
+  assert.equal(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].overlayEvidence.coverage,
+    'live_viewport_only',
+  )
+})
+
+
+test('terminal BotLens uses bounded durable overlay pages while active runs prefer live projection', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 120, open: 100, high: 102, low: 99, close: 101 }],
+    overlays: [{ overlay_id: 'history:newest', detail_level: 'bounded_historical_render', payload: { markers: [{ time: 120, price: 101 }] } }],
+    range: { returned_start_time: '1970-01-01T00:02:00Z', returned_end_time: '1970-01-01T00:02:00Z' },
+    overlayEvidence: { complete_for_returned_candles: true, coverage: 'complete', fingerprint: 'page-newest' },
+  })
+
+  assert.equal(selectSelectedSymbolOverlays(state)[0].overlay_id, 'overlay-1')
+
+  state = {
+    ...state,
+    runState: {
+      ...state.runState,
+      lifecycle: { phase: 'completed', status: 'completed' },
+    },
+  }
+  assert.deepEqual(
+    selectSelectedSymbolOverlays(state).map((entry) => entry.overlay_id),
+    ['history:newest'],
+  )
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 60, open: 99, high: 101, low: 98, close: 100 }],
+    overlays: [{ overlay_id: 'history:older', detail_level: 'bounded_historical_render', payload: { markers: [{ time: 60, price: 100 }] } }],
+    range: { returned_start_time: '1970-01-01T00:01:00Z', returned_end_time: '1970-01-01T00:01:00Z' },
+    overlayEvidence: { complete_for_returned_candles: true, coverage: 'complete', fingerprint: 'page-older' },
+  })
+
+  assert.deepEqual(
+    selectSelectedSymbolOverlays(state).map((entry) => entry.overlay_id),
+    ['history:newest', 'history:older'],
+  )
+  assert.equal(
+    state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].overlayEvidence.complete_for_loaded_candles,
+    true,
+  )
+})
+
+
+test('chart history is a bounded sliding window and focused replacements discard unrelated history', () => {
+  let state = bootstrapState()
+  const recent = Array.from({ length: MAX_CHART_HISTORY_CANDLES + 200 }, (_, index) => ({
+    time: index + 10000,
+    open: 1,
+    high: 1,
+    low: 1,
+    close: 1,
+  }))
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: recent,
+    mergeMode: 'replace',
+    focusTime: '1970-01-01T03:00:00Z',
+    focusToken: 'trade-1:1',
+    focusTradeId: 'trade-1',
+  })
+  let history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.equal(history.candles.length, MAX_CHART_HISTORY_CANDLES)
+  assert.equal(history.candles.at(-1).time, recent.at(-1).time)
+  assert.equal(history.focusToken, 'trade-1:1')
+  assert.equal(history.focusTradeId, 'trade-1')
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 42, open: 2, high: 2, low: 2, close: 2 }],
+    mergeMode: 'replace',
+    focusTime: '1970-01-01T00:00:42Z',
+    focusToken: 'trade-2:1',
+    focusTradeId: 'trade-2',
+  })
+  history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.candles.map((row) => row.time), [42])
+  assert.equal(history.focusToken, 'trade-2:1')
+  assert.equal(history.focusTradeId, 'trade-2')
+})
+
+test('bidirectional chart pages preserve the combined loaded-window boundaries', () => {
+  let state = reduceBotLensState(bootstrapState(), {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 120, open: 1, high: 1, low: 1, close: 1 }],
+    range: { has_more_before: true, has_more_after: true },
+    mergeMode: 'replace',
+  })
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 180, open: 2, high: 2, low: 2, close: 2 }],
+    range: { has_more_before: true, has_more_after: false },
+    mergeMode: 'append',
+  })
+
+  let history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.candles.map((row) => row.time), [120, 180])
+  assert.equal(history.range.has_more_before, true)
+  assert.equal(history.range.has_more_after, false)
+  assert.equal(history.range.returned_start_time, 120)
+  assert.equal(history.range.returned_end_time, 180)
+
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 60, open: 3, high: 3, low: 3, close: 3 }],
+    range: { has_more_before: false, has_more_after: true },
+    mergeMode: 'prepend',
+  })
+
+  history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.candles.map((row) => row.time), [60, 120, 180])
+  assert.equal(history.range.has_more_before, false)
+  assert.equal(history.range.has_more_after, false)
+  assert.equal(history.range.returned_start_time, 60)
+  assert.equal(history.range.returned_end_time, 180)
+})
+
+test('chart history rejects stale success and failure actions by request identity', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartRequest',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 41,
+  })
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartRequest',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 42,
+  })
+  const afterStaleSuccess = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 41,
+    candles: [{ time: 60, open: 1, high: 1, low: 1, close: 1 }],
+    mergeMode: 'replace',
+  })
+  const afterStaleFailure = reduceBotLensState(afterStaleSuccess, {
+    type: 'retrieval/chartFailed',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 41,
+    error: 'stale failure',
+  })
+
+  assert.equal(afterStaleFailure.retrieval.chartHistoryBySymbol['instrument-btc|1m'].status, 'loading')
+  assert.equal(afterStaleFailure.retrieval.chartHistoryBySymbol['instrument-btc|1m'].candles, undefined)
+
+  const committed = reduceBotLensState(afterStaleFailure, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    requestId: 42,
+    candles: [{ time: 120, open: 2, high: 2, low: 2, close: 2 }],
+    mergeMode: 'prepend',
+  })
+  const history = committed.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.equal(history.status, 'ready')
+  assert.equal(history.requestId, 42)
+  assert.equal(history.lastUpdateMode, 'prepend')
+  assert.equal(history.lastUpdateToken, 42)
+})
+
+test('chart history retains only trades overlapping the bounded candle window', () => {
+  const state = reduceBotLensState(bootstrapState(), {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [
+      { time: 100, open: 1, high: 1, low: 1, close: 1 },
+      { time: 200, open: 1, high: 1, low: 1, close: 1 },
+    ],
+    trades: [
+      {
+        trade_id: 'active-before-window',
+        status: 'open',
+        entry_time: '1970-01-01T00:00:50Z',
+      },
+      {
+        trade_id: 'closed-before-window',
+        status: 'closed',
+        entry_time: '1970-01-01T00:00:50Z',
+        exit_time: '1970-01-01T00:01:30Z',
+      },
+      {
+        trade_id: 'inside-window',
+        status: 'closed',
+        entry_time: '1970-01-01T00:02:00Z',
+        exit_time: '1970-01-01T00:03:00Z',
+      },
+      {
+        trade_id: 'future-trade',
+        status: 'open',
+        entry_time: '1970-01-01T00:05:00Z',
+      },
+    ],
+    tradeEvidence: { complete_for_returned_candles: true, trade_count: 4 },
+    mergeMode: 'replace',
+  })
+
+  const history = state.retrieval.chartHistoryBySymbol['instrument-btc|1m']
+  assert.deepEqual(history.trades.map((trade) => trade.trade_id), [
+    'active-before-window',
+    'inside-window',
+  ])
+  assert.equal(history.tradeEvidence.loaded_trade_count, 2)
+})
+
+test('batched live messages preserve reducer ordering in one render action', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'live/messagesReceived',
+    messages: [
+      {
+        type: 'botlens_run_health_delta',
+        stream_session_id: 'stream-1',
+        scope_seq: 23,
+        stream_seq: 23,
+        payload: { health: { status: 'running', warning_count: 0, warnings: [] } },
+      },
+      {
+        type: 'botlens_run_health_delta',
+        stream_session_id: 'stream-1',
+        scope_seq: 24,
+        stream_seq: 24,
+        payload: { health: { status: 'degraded', warning_count: 1, warnings: [] } },
+      },
+    ],
+  })
+  assert.equal(state.runState.health.status, 'degraded')
+  assert.equal(state.live.lastStreamSeq, 24)
+})
+
+test('batched live messages coalesce growing symbol concerns without losing facts or cursor order', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'live/messagesReceived',
+    messages: [
+      {
+        type: 'botlens_symbol_candle_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 23,
+        stream_seq: 23,
+        payload: { candle: { time: 1767225660, open: 2, high: 3, low: 1, close: 2 } },
+      },
+      {
+        type: 'botlens_symbol_decision_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 24,
+        stream_seq: 24,
+        payload: { entries: [{ event_id: 'decision-24' }] },
+      },
+      {
+        type: 'botlens_symbol_candle_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 25,
+        stream_seq: 25,
+        payload: { candle: { time: 1767225720, open: 2, high: 4, low: 2, close: 3 } },
+      },
+    ],
+  })
+
+  const selected = selectSelectedSymbolState(state)
+  assert.deepEqual(selected.candles.slice(-2).map((candle) => candle.time), [1767225660, 1767225720])
+  assert.equal(selected.decisions.at(-1).event_id, 'decision-24')
+  assert.equal(state.live.lastStreamSeq, 25)
+  assert.equal(selected.live_cursors.scope_seq_by_concern.candles, 25)
+  assert.equal(selected.live_cursors.scope_seq_by_concern.decisions, 24)
+})
+
+test('batched live messages coalesce contiguous overlay commits without delaying geometry', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'live/messagesReceived',
+    messages: [
+      {
+        type: 'botlens_symbol_overlay_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 23,
+        stream_seq: 23,
+        payload: {
+          overlay_commit_seq: 1,
+          base_overlay_commit_seq: 0,
+          overlay_commit_seq_status: 'overlay_scoped',
+          checkpoint_kind: 'full_state',
+          ops: [{
+            op: 'upsert',
+            key: 'overlay-live',
+            overlay: {
+              overlay_id: 'overlay-live',
+              payload: { markers: [{ time: 1, price: 10 }] },
+            },
+          }],
+        },
+      },
+      {
+        type: 'botlens_symbol_overlay_delta',
+        symbol_key: 'instrument-btc|1m',
+        stream_session_id: 'stream-1',
+        scope_seq: 24,
+        stream_seq: 24,
+        payload: {
+          overlay_commit_seq: 2,
+          base_overlay_commit_seq: 1,
+          overlay_commit_seq_status: 'overlay_scoped',
+          ops: [{
+            op: 'patch',
+            key: 'overlay-live',
+            payload_patch: {
+              replace: { markers: [{ time: 2, price: 11 }] },
+            },
+          }],
+        },
+      },
+    ],
+  })
+
+  const selected = selectSelectedSymbolState(state)
+  const overlay = selected.overlays.find((entry) => entry.overlay_id === 'overlay-live')
+  assert.equal(overlay.payload.markers[0].time, 2)
+  assert.equal(selected.live_cursors.overlay_commit_seq, 2)
+  assert.equal(selected.live_cursors.scope_seq_by_concern.overlays, 24)
+  assert.equal(state.live.lastStreamSeq, 24)
 })

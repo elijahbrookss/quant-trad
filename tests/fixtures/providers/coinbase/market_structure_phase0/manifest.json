@@ -1,0 +1,155 @@
+{
+  "entries": [
+    {
+      "connection_epoch": 0,
+      "fixture_id": "bip_level2_snapshot",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 142925,
+      "raw_frame_sha256": "2ccb451f78b0b519d13f5aa8501e83eb297fe1620b2676cd8674d50c6456761c",
+      "receive_ordinal": 4,
+      "received_at": "2026-08-02T07:16:30.447538+00:00",
+      "requested_product_id": "BIP-20DEC30-CDE",
+      "stream_session_id": "5a3ab3962e7d48b89204508dc9889755",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "bip_level2_zero_delete",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 255,
+      "raw_frame_sha256": "4e2fb0a37d139beadcf3f2dd4363999048ba61b867c68eefe8c9d253e010ce28",
+      "receive_ordinal": 40,
+      "received_at": "2026-08-02T07:16:35.298964+00:00",
+      "requested_product_id": "BIP-20DEC30-CDE",
+      "stream_session_id": "5a3ab3962e7d48b89204508dc9889755",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "bip_market_trades_snapshot",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 13876,
+      "raw_frame_sha256": "f6894a8f01a6c78c51827063a7d41ba9668ca7bbdb8b9dec74335bb92f82fa9b",
+      "receive_ordinal": 2,
+      "received_at": "2026-08-02T07:16:30.443218+00:00",
+      "requested_product_id": "BIP-20DEC30-CDE",
+      "stream_session_id": "5a3ab3962e7d48b89204508dc9889755",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "bip_market_trades_update",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 267,
+      "raw_frame_sha256": "29c6307318de21992cfd37b41d2041346c73ff4f07c893b7f9b21dfcb79ac537",
+      "receive_ordinal": 341,
+      "received_at": "2026-08-02T07:18:02.601600+00:00",
+      "requested_product_id": "BIP-20DEC30-CDE",
+      "stream_session_id": "5a3ab3962e7d48b89204508dc9889755",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "bip_ticker",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 424,
+      "raw_frame_sha256": "29e0565b124551e256cae7bf89f1d38a7d4adf0ddd6d83f9640aa0acbae736ab",
+      "receive_ordinal": 6,
+      "received_at": "2026-08-02T07:16:30.471752+00:00",
+      "requested_product_id": "BIP-20DEC30-CDE",
+      "stream_session_id": "5a3ab3962e7d48b89204508dc9889755",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "btc_spot_level2_snapshot",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 4921999,
+      "raw_frame_sha256": "8263774b9df42dbf61aa0a8ce366b263275494b49bc254beecdabb74653eabea",
+      "receive_ordinal": 5,
+      "received_at": "2026-08-02T07:16:31.688745+00:00",
+      "requested_product_id": "BTC-USD",
+      "stream_session_id": "392232d7f59a4d5aaa54e5edf3738994",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "btc_spot_level2_zero_delete",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 794,
+      "raw_frame_sha256": "b2f51eedbab22a7a89e3753a7aaceff56b708d02f76c84fe1310e65819dd2543",
+      "receive_ordinal": 6,
+      "received_at": "2026-08-02T07:16:32.418940+00:00",
+      "requested_product_id": "BTC-USD",
+      "stream_session_id": "392232d7f59a4d5aaa54e5edf3738994",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "btc_spot_market_trades_snapshot",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 13882,
+      "raw_frame_sha256": "e362bc7771a439841ce21c5f7ecd8c0c9fdde5700989248851feb368b5374691",
+      "receive_ordinal": 2,
+      "received_at": "2026-08-02T07:16:31.526462+00:00",
+      "requested_product_id": "BTC-USD",
+      "stream_session_id": "392232d7f59a4d5aaa54e5edf3738994",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "btc_spot_market_trades_update",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 269,
+      "raw_frame_sha256": "740eba7d6f6f4f8fa5f0b5fc14e5ee50a6e8548dbf498efaa1e88742e3fab2cc",
+      "receive_ordinal": 30,
+      "received_at": "2026-08-02T07:16:32.425838+00:00",
+      "requested_product_id": "BTC-USD",
+      "stream_session_id": "392232d7f59a4d5aaa54e5edf3738994",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "btc_spot_ticker",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 454,
+      "raw_frame_sha256": "47a6eb6405125f0d2749988d79165e9e9d158451ae2a71c9180241ea6a9aeb1d",
+      "receive_ordinal": 9,
+      "received_at": "2026-08-02T07:16:32.421085+00:00",
+      "requested_product_id": "BTC-USD",
+      "stream_session_id": "392232d7f59a4d5aaa54e5edf3738994",
+      "venue": "COINBASE_DIRECT"
+    },
+    {
+      "connection_epoch": 0,
+      "fixture_id": "heartbeat",
+      "provider": "COINBASE",
+      "raw_frame_bytes": 203,
+      "raw_frame_sha256": "08e0a3e6c3794f9bf4f936a17c2721b40555ea8c77b132fa76fdabd1f9c80023",
+      "receive_ordinal": 9,
+      "received_at": "2026-08-02T07:16:30.607361+00:00",
+      "requested_product_id": "BIP-20DEC30-CDE",
+      "stream_session_id": "5a3ab3962e7d48b89204508dc9889755",
+      "venue": "COINBASE_DIRECT"
+    }
+  ],
+  "payload": {
+    "frame_count": 11,
+    "path": "raw_frames.json.gz",
+    "sha256": "64801686e8e9f48e59376c9c76fd6daf0273da45a881b368a4d2382c12ef3e3d",
+    "uncompressed_sha256": "52cd699858578dfe2262aaba566dcf45e937e3c55a331b4a7b3c512542d697d6"
+  },
+  "sanitization": {
+    "mode": "none_required_public_inbound_market_data",
+    "raw_frames_changed": false,
+    "sensitive_key_scan": "passed"
+  },
+  "schema_version": "coinbase_market_structure_fixture_manifest.v1",
+  "source": {
+    "archive_complete": false,
+    "auth_mode": "public",
+    "dataset_eligible": false,
+    "proof_report_schema_version": "coinbase_market_structure_proof.v1",
+    "proof_report_sha256": "7500a2b52dabf8399768cb0e8afd0e89084dbc0c2f9ae0cf503b3ed913255fe8"
+  }
+}

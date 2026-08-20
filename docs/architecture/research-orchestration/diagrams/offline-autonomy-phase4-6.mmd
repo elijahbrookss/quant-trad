@@ -1,0 +1,18 @@
+flowchart TD
+    O[Observation] --> H[Hypothesis]
+    H --> P[Immutable protocol]
+    P --> F[Budgeted experiment family]
+    F --> G[Typed strategy graphs]
+    G --> T[Train and validation trials]
+    T --> C[Frozen candidate]
+    C --> FC[Family closed]
+    FC --> HO[One-use sealed holdout]
+    HO --> SC[Scientific certificate S0-S4]
+    SC --> RC[RESEARCH_CERTIFIED]
+
+    T --> R[Rejected]
+    RC --> D[Research degraded]
+    R --> A[Archived]
+    D --> A
+
+    RC -. structurally denied .-> X[Shadow / paper / live / capital]

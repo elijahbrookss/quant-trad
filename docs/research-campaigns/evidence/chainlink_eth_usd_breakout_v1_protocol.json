@@ -1,0 +1,170 @@
+{
+  "artifact_kind": "research_study_protocol",
+  "campaign_id": "chainlink_eth_usd_breakout_v1",
+  "claim_scope": "exploration",
+  "external_trading_authority": false,
+  "locked_at": "2026-08-08T03:00:45.292707Z",
+  "locked_source_revision": "872edf8b6acd7542381a1aa48949098635b10b65",
+  "primary_question": "At the time of a breakout decision, does causally known Chainlink ETH/USD reference-price state improve the ability to distinguish successful breakouts from failed breakouts beyond existing venue-price, return, volatility, and breakout-structure information?",
+  "primary_null": "After controlling for existing venue and breakout information, causally available Chainlink ETH/USD features provide no meaningful incremental association with breakout outcomes.",
+  "population": {
+    "datasource": "COINBASE",
+    "exchange": "COINBASE_DIRECT",
+    "instrument_id": "d238523a-9bee-4366-bc43-b797311fbdf0",
+    "symbol": "ETH-USD",
+    "timeframe": "15m",
+    "candle_warmup_start": "2026-01-01T00:00:00Z",
+    "study_start": "2026-07-01T00:00:00Z",
+    "study_end_exclusive": "2026-08-01T00:00:00Z",
+    "outcome_tail_end_exclusive": "2026-08-01T06:00:00Z",
+    "selection_rationale": "No canonical ETH breakout report, observation, hypothesis, study, or candle series existed. The accepted raw Market Profile balance_breakout definition is applied without Chainlink inspection. The most recent complete calendar month is selected before RPC qualification; 15-minute bars balance event count with a bounded one-month Chainlink acquisition.",
+    "breakout_definition": {
+      "indicator_type": "market_profile",
+      "indicator_version": "v1",
+      "output": "balance_breakout",
+      "long_event": "balance_breakout_long",
+      "short_event": "balance_breakout_short",
+      "logic": "previous_location == inside_value and current_location transitions above_value or below_value",
+      "known_at": "event bar close",
+      "parameters": {
+        "bin_size": 0.25,
+        "breakout_confirm_bars": 2,
+        "days_back": 180,
+        "extend_value_area_to_chart_end": true,
+        "merge_threshold": 0.6,
+        "min_merge_sessions": 3,
+        "price_precision": 4,
+        "reclaim_max_bars": 6,
+        "retest_atr_period": 14,
+        "retest_hold_confirm_bars": 1,
+        "retest_max_bars": 6,
+        "retest_max_penetration_atr": 0.35,
+        "retest_min_acceptance_bars": 2,
+        "retest_min_excursion_atr": 1.0,
+        "retest_touch_tolerance_atr": 0.2,
+        "use_merged_value_areas": true
+      }
+    }
+  },
+  "chainlink_input": {
+    "series_kind": "reference_price",
+    "provider": "chainlink",
+    "network": "ethereum-mainnet",
+    "manifest_id": "chainlink-ethereum-eth-usd",
+    "acquisition_start": "2026-06-30T18:00:00Z",
+    "acquisition_end_exclusive": "2026-08-01T06:00:00Z",
+    "causal_join": "fact.known_at <= breakout_decision_time",
+    "primary_staleness_seconds": 21600,
+    "staleness_sensitivity_seconds": [10800, 43200],
+    "pre_event_window_seconds": 21600,
+    "features": [
+      "latest_known_chainlink_value",
+      "latest_known_chainlink_age_seconds",
+      "venue_minus_chainlink_basis_bps",
+      "most_recent_chainlink_update_direction",
+      "most_recent_chainlink_update_magnitude_bps",
+      "chainlink_update_agrees_with_breakout_direction",
+      "chainlink_update_count_6h",
+      "chainlink_aggregate_absolute_change_bps_6h"
+    ]
+  },
+  "controls": [
+    "direction_signed_venue_return_1_bar",
+    "direction_signed_venue_return_4_bars",
+    "direction_signed_venue_return_12_bars",
+    "atr_14_pct",
+    "breakout_distance_from_reference_bps",
+    "breakout_direction",
+    "volume_ratio_96_bars"
+  ],
+  "outcomes": {
+    "entry_lag_bars": 0,
+    "forward_bars": [4, 12, 24],
+    "primary_horizon_bars": 12,
+    "primary_binary_outcome": "direction_signed_forward_return_pct_at_12_bars > 0",
+    "continuous": [
+      "direction_signed_forward_return_pct",
+      "max_favorable_excursion_pct",
+      "max_adverse_excursion_pct"
+    ],
+    "invalidation": "first close within 24 bars that returns through the event VAH for long or VAL for short",
+    "time_to_invalidation_unit": "bars"
+  },
+  "eligibility": {
+    "include": [
+      "raw balance_breakout event known at a study-window bar close",
+      "complete 24-bar forward outcome window",
+      "complete baseline control history"
+    ],
+    "chainlink_primary_complete_case": "latest causally known value exists and age_seconds <= 21600",
+    "missing_data_policy": "Never future-fill. Baseline-versus-enriched comparison uses the same Chainlink-primary-complete events; missing and stale events remain counted and reported.",
+    "cluster_policy": "Retain all eligible raw breakouts but perform uncertainty resampling by UTC calendar-day blocks and report per-day concentration.",
+    "minimum_eligible_events": 60,
+    "minimum_events_per_outcome_class": 20,
+    "minimum_distinct_utc_days": 15,
+    "minimum_validation_events_per_fold": 10
+  },
+  "temporal_evaluation": {
+    "method": "three expanding calendar-time folds",
+    "purge_bars": 24,
+    "embargo_bars": 24,
+    "folds": [
+      {
+        "train_start": "2026-07-01T00:00:00Z",
+        "train_end_exclusive": "2026-07-15T00:00:00Z",
+        "validation_start": "2026-07-15T06:00:00Z",
+        "validation_end_exclusive": "2026-07-21T00:00:00Z"
+      },
+      {
+        "train_start": "2026-07-01T00:00:00Z",
+        "train_end_exclusive": "2026-07-21T00:00:00Z",
+        "validation_start": "2026-07-21T06:00:00Z",
+        "validation_end_exclusive": "2026-07-27T00:00:00Z"
+      },
+      {
+        "train_start": "2026-07-01T00:00:00Z",
+        "train_end_exclusive": "2026-07-27T00:00:00Z",
+        "validation_start": "2026-07-27T06:00:00Z",
+        "validation_end_exclusive": "2026-08-01T00:00:00Z"
+      }
+    ]
+  },
+  "statistical_methods": {
+    "baseline_model": "standardized L2 logistic regression with C=1.0 and fixed random_state=20260807",
+    "enriched_model": "the identical baseline model plus every predeclared Chainlink feature",
+    "primary_metric": "paired out-of-sample delta_log_loss = baseline_log_loss - enriched_log_loss",
+    "secondary_metrics": [
+      "paired delta_brier_score",
+      "paired delta_roc_auc when both classes are present",
+      "success rates by predeclared feature bins",
+      "direct effect sizes for 12-bar signed forward return"
+    ],
+    "uncertainty": "paired UTC-day block bootstrap with 2000 replicates, 95% percentile intervals, seed 20260807",
+    "multiple_comparison_method": "Holm adjustment across the eight predeclared direct Chainlink feature tests",
+    "feature_bins": "fixed pooled-sample quartiles with ties collapsed; no outcome-guided cut points"
+  },
+  "decision_rules": {
+    "minimum_primary_effect": 0.005,
+    "incremental_signal_supported": "All minimum sample rules pass; aggregate paired delta_log_loss >= 0.005; its 95% block-bootstrap lower bound is > 0; and delta_log_loss is positive in at least two of three valid temporal folds.",
+    "no_incremental_signal_found": "All minimum sample rules pass; the 95% block-bootstrap upper bound for paired delta_log_loss is < 0.005; and no direct Chainlink feature survives Holm adjustment with a practically material effect.",
+    "insufficient_evidence": "Any minimum sample rule fails, fewer than two temporal folds are valid, material causal coverage is missing, or uncertainty overlaps both the supported and negative-result regions.",
+    "research_labels": [
+      "INCREMENTAL_SIGNAL_SUPPORTED",
+      "NO_INCREMENTAL_SIGNAL_FOUND",
+      "INSUFFICIENT_EVIDENCE"
+    ]
+  },
+  "holdout_policy": "No sealed holdout is opened or claimed. This is exploratory S0/S1 report evidence only and cannot certify or promote a strategy.",
+  "replay_acceptance": {
+    "provider_disabled": true,
+    "required_equalities": [
+      "dataset_id",
+      "dataset_hash",
+      "material_hash",
+      "provenance_hash",
+      "selected_numeric_fact_rows",
+      "feature_matrix_hash",
+      "research_output_hash"
+    ]
+  }
+}

@@ -8,6 +8,9 @@ if [[ -z "$SUITE" ]]; then
 fi
 
 USE_DOCKER="${CI_USE_DOCKER:-0}"
+if [[ "$SUITE" == "db" ]]; then
+  USE_DOCKER=1
+fi
 COMPOSE_FILE="docker/docker-compose.test.yml"
 
 run_pytest_host() {
@@ -18,13 +21,23 @@ run_pytest_host() {
 
 run_pytest_docker() {
   local cmd="$1"
+  local source_revision
+  local source_tree_hash
   if ! command -v docker >/dev/null 2>&1; then
     echo "ci_runner_prereq_missing: docker CLI is required when CI_USE_DOCKER=1" >&2
     exit 127
   fi
+  source_revision="${SOURCE_REVISION:-$(git rev-parse HEAD)}"
+  source_tree_hash="${SOURCE_TREE_HASH:-$(python scripts/provenance/source_tree_hash.py --git-revision "$source_revision")}"
+  export SOURCE_REVISION="$source_revision"
+  export SOURCE_TREE_HASH="$source_tree_hash"
   docker compose -f "$COMPOSE_FILE" build test
-  docker compose -f "$COMPOSE_FILE" run --rm test bash -lc '
+  docker compose -f "$COMPOSE_FILE" run --rm \
+    -e SOURCE_REVISION="$source_revision" \
+    -e SOURCE_TREE_HASH="$source_tree_hash" \
+    test bash -lc '
     python -m pip install --upgrade pip &&
+    export PG_DSN="postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}" &&
     if [ ! -r "/app/scripts/wait-for-db.sh" ]; then
       echo "ci_runner_wait_script_missing_or_unreadable: path=/app/scripts/wait-for-db.sh" >&2
       exit 1
@@ -69,7 +82,7 @@ case "$SUITE" in
     run_suite "pytest -q"
     ;;
   db)
-    run_suite "RUN_DB_TESTS=1 pytest -q -m db"
+    run_suite "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db"
     ;;
   core)
     run_profiles core

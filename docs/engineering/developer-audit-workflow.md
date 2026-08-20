@@ -45,6 +45,13 @@ Common agent/tool workflow commands:
 - `qt indicators validate-config --type <type> --params-json '<json>'`
 - `qt indicators validate-runtime <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --interval <timeframe>`
 - `qt data coverage --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe>`
+- `qt research check requirements --request-json <request.json>`
+- `qt research check preview --request-json <request.json>`
+- `qt research check prepare --request-json <request.json> --freeze --created-by <actor> --dataset-name <name>`
+- `qt research check run --request-json <request.json> --dataset-id <dataset_id> [--dispatch]`
+- `qt research check replay <check_id>`
+- `qt research observe-from-check <check_id> --title <title> --body <body>`
+- `qt research trail <observation_or_check_id>`
 - `qt research check sweep --check-family <family> --indicator-id <indicator_id> --instrument-id <instrument_id> --start <iso> --end <iso> --timeframe <timeframe> --detector-json '<json>' --variant <id[:key=value]> --rank-by <metric.path> --rank-direction <asc|desc>`
 - `qt research check sweep ... --dispatch`
 - `qt research jobs status <job_id>`
@@ -56,6 +63,14 @@ Common agent/tool workflow commands:
 - `qt experiments resume <experiment_id>`
 - `qt experiments status <experiment_id>`
 - `qt experiments collect <experiment_id> --wait --export`
+
+For research calculations, use the sequence above. Preview is ephemeral and
+cannot support an evidence-bearing Observation. Preparation may acquire only
+when an explicitly authorized lower-level acquisition operation is requested;
+Check execution never acquires. Dataset freeze records known facts and gaps,
+while Indicator, Check, and Strategy/Backtest each own their readiness decision.
+Do not calculate features, joins, outcomes, statistics, pass gates, or evidence
+hashes in shell scripts, experiment orchestration, dossiers, or MCP handlers.
 
 MCP host command:
 
@@ -154,6 +169,24 @@ optional legacy frontend tests and build.
 For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component
 docs, refresh the index, and run `make sync-docs`.
+
+## Hard-Shutdown And Desktop UI Recovery
+
+After an unclean workstation shutdown, prove PostgreSQL readiness before
+restarting backend and collector processes. The backend supervisor starts API,
+indicator, and research workers together; starting that fanout while PostgreSQL
+is still in crash recovery produces connection-reset noise and can exaggerate
+cold-start latency. Use `pg_isready`, then restart the affected services once
+the database accepts connections. Do not treat the initial failed schema checks
+as application data corruption without independent evidence.
+
+Codex Desktop browser QA from a WSL checkout requires the desktop browser
+bridge to accept the workspace's WSL file URI. If the bridge rejects it with
+`sandboxCwd is not a local file URI`, continue API, contract, compilation, and
+live HTTP validation, but do not substitute an unapproved hidden browser and do
+not claim pixel or click-path verification. Reopen the repository through a
+supported Remote WSL/native path or repair the bridge before making an
+interactive-browser claim.
 
 ## Codex Audit Shape
 

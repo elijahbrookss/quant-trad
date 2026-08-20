@@ -92,3 +92,45 @@ def test_plain_spot_runtime_status_uses_spot_policy(monkeypatch):
     assert status["runtime_ready"] is True
     assert status["runtime_policy"] == "spot"
     assert status["execution_semantics"] == "spot"
+
+
+def test_runtime_status_keeps_public_provider_metadata_research_only_without_fees(monkeypatch):
+    monkeypatch.setattr(instrument_service, "load_instruments", lambda: [])
+    record = {
+        "id": "btc-perp",
+        "symbol": "BIP-20DEC30-CDE",
+        "datasource": "COINBASE",
+        "exchange": "COINBASE_DIRECT",
+        "instrument_type": "future",
+        "metadata": {
+            "instrument_fields": {
+                "tick_size": 5.0,
+                "contract_size": 0.01,
+                "tick_value": 0.05,
+                "min_order_size": 1.0,
+                "qty_step": 1.0,
+                "base_currency": "BTC",
+                "quote_currency": "USD",
+                "can_short": True,
+                "short_requires_borrow": False,
+                "has_funding": True,
+                "margin_rates": {
+                    "intraday": {"long_margin_rate": 0.1, "short_margin_rate": 0.1},
+                    "overnight": {"long_margin_rate": 0.2, "short_margin_rate": 0.2},
+                },
+            },
+            "provider_metadata": {
+                "fees": {
+                    "status": "not_requested",
+                    "maker_fee_rate": None,
+                    "taker_fee_rate": None,
+                }
+            },
+        },
+    }
+
+    status = instrument_runtime_status(record)
+
+    assert status["research_ready"] is True
+    assert status["runtime_ready"] is False
+    assert status["runtime_message"] == "Authenticated execution fee metadata has not been collected."

@@ -66,6 +66,29 @@ def _patch_run_context(
     )
 
 
+def test_tick_all_prunes_terminal_run_registrations_without_writing_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    watchdog = watchdog_module.BotWatchdog()
+    watchdog.register_bot("bot-1", run_id="run-terminal")
+    watchdog.register_bot("bot-1", run_id="run-active")
+    watchdog.register_bot("bot-2")
+    monkeypatch.setattr(
+        watchdog_module,
+        "list_active_bot_run_leases",
+        lambda: [_lease(bot_id="bot-1", run_id="run-active")],
+    )
+
+    watchdog.tick_all()
+
+    status = watchdog.status()
+    assert status["registered_bots"] == 1
+    assert status["registered_bot_ids"] == ["bot-1"]
+    assert status["registered_runs"] == [
+        {"bot_id": "bot-1", "run_id": "run-active"}
+    ]
+
+
 def test_verify_container_ownership_respects_startup_grace_for_missing_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -77,8 +100,8 @@ def test_verify_container_ownership_respects_startup_grace_for_missing_container
     monkeypatch.setattr(
         watchdog_module.DockerBotRunner,
         "inspect_bot_container",
-        lambda _bot_id: {
-            "name": "quant-trad-bots-bot-1",
+        lambda _bot_id, **_kwargs: {
+            "name": "quant-trad-bots-bot-1-run-1",
             "status": "missing",
             "running": False,
             "error": None,
@@ -87,7 +110,7 @@ def test_verify_container_ownership_respects_startup_grace_for_missing_container
     monkeypatch.setattr(
         watchdog_module,
         "mark_bot_crashed",
-        lambda bot_id, reason="", diagnostics=None: marked.append((bot_id, reason)) or True,
+        lambda bot_id, reason="", diagnostics=None, run_id=None: marked.append((bot_id, reason)) or True,
     )
 
     failed = watchdog.verify_container_ownership()
@@ -107,8 +130,8 @@ def test_verify_container_ownership_does_not_fail_new_run_for_old_exited_contain
     monkeypatch.setattr(
         watchdog_module.DockerBotRunner,
         "inspect_bot_container",
-        lambda _bot_id: {
-            "name": "quant-trad-bots-bot-1",
+        lambda _bot_id, **_kwargs: {
+            "name": "quant-trad-bots-bot-1-new-run",
             "status": "exited",
             "running": False,
             "runtime_run_id": "old-run",
@@ -118,7 +141,7 @@ def test_verify_container_ownership_does_not_fail_new_run_for_old_exited_contain
     monkeypatch.setattr(
         watchdog_module,
         "mark_bot_crashed",
-        lambda bot_id, reason="", diagnostics=None: marked.append((bot_id, reason)) or True,
+        lambda bot_id, reason="", diagnostics=None, run_id=None: marked.append((bot_id, reason)) or True,
     )
 
     failed = watchdog.verify_container_ownership()
@@ -140,8 +163,8 @@ def test_verify_container_ownership_marks_confirmed_owned_container_after_grace(
     monkeypatch.setattr(
         watchdog_module.DockerBotRunner,
         "inspect_bot_container",
-        lambda _bot_id: {
-            "name": "quant-trad-bots-bot-1",
+        lambda _bot_id, **_kwargs: {
+            "name": "quant-trad-bots-bot-1-run-1",
             "status": "exited",
             "running": False,
             "runtime_run_id": "run-1",
@@ -152,14 +175,14 @@ def test_verify_container_ownership_marks_confirmed_owned_container_after_grace(
     monkeypatch.setattr(
         watchdog_module,
         "mark_bot_crashed",
-        lambda bot_id, reason="", diagnostics=None: marked.append((bot_id, reason, dict(diagnostics or {}))) or True,
+        lambda bot_id, reason="", diagnostics=None, run_id=None: marked.append((bot_id, reason, dict(diagnostics or {}))) or True,
     )
 
     failed = watchdog.verify_container_ownership()
 
     assert failed == ["bot-1"]
     assert marked[0][0] == "bot-1"
-    assert marked[0][1] == "container_not_running:quant-trad-bots-bot-1"
+    assert marked[0][1] == "container_not_running:quant-trad-bots-bot-1-run-1"
     assert marked[0][2]["run_id"] == "run-1"
     assert marked[0][2]["run_lease"]["runner_id"] == "backend.quanttrad"
 
@@ -175,7 +198,7 @@ def test_verify_container_ownership_skips_expired_lease_for_stale_scan(
     monkeypatch.setattr(
         watchdog_module,
         "mark_bot_crashed",
-        lambda bot_id, reason="", diagnostics=None: marked.append((bot_id, reason)) or True,
+        lambda bot_id, reason="", diagnostics=None, run_id=None: marked.append((bot_id, reason)) or True,
     )
 
     failed = watchdog.verify_container_ownership()
@@ -218,7 +241,7 @@ def test_scan_expired_run_leases_persists_runner_diagnostics(monkeypatch: pytest
     monkeypatch.setattr(
         watchdog_module,
         "mark_bot_crashed",
-        lambda bot_id, reason="", diagnostics=None: marked.append((bot_id, reason, dict(diagnostics or {}))) or True,
+        lambda bot_id, reason="", diagnostics=None, run_id=None: marked.append((bot_id, reason, dict(diagnostics or {}))) or True,
     )
 
     crashed = watchdog.scan_expired_run_leases()
@@ -251,7 +274,7 @@ def test_recover_local_orphans_uses_expired_leases_for_this_runner(monkeypatch: 
     monkeypatch.setattr(
         watchdog_module,
         "mark_bot_crashed",
-        lambda bot_id, reason="", diagnostics=None: marked.append((bot_id, reason, dict(diagnostics or {}))) or True,
+        lambda bot_id, reason="", diagnostics=None, run_id=None: marked.append((bot_id, reason, dict(diagnostics or {}))) or True,
     )
 
     crashed = watchdog.recover_local_orphans()

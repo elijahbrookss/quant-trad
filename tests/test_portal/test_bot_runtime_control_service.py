@@ -60,6 +60,7 @@ class _FakeConfigService:
                 "snapshot_interval_ms": 1000,
                 "run_type": "backtest",
                 "dataset_id": "mds-test-1",
+                "economic_claim_intent": "exploration",
             }
         ]
 
@@ -263,7 +264,7 @@ def test_start_bot_same_request_id_returns_existing_run(monkeypatch):
     run_id = first["run_id"]
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
-        lambda _bot_id: {
+        lambda _bot_id, **_kwargs: {
             "status": "running",
             "running": True,
             "runtime_run_id": run_id,
@@ -325,6 +326,12 @@ def test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot
 
     assert run["run_type"] == "paper"
     assert run["config_snapshot"]["execution_behavior"] == "observe-only"
+    assert run["config_snapshot"]["economic_claim_intent"] == "exploration"
+    assumptions = run["config_snapshot"]["execution_assumptions"]
+    assert assumptions["economic_claim_intent"] == "exploration"
+    assert assumptions["schema_version"] == "execution_assumptions.v1"
+    assert len(assumptions["manifest_hash"]) == 64
+    assert run["config_snapshot"]["bot"]["execution_assumptions"] == assumptions
     assert run["config_snapshot"]["bot"]["execution_behavior"] == "observe-only"
     assert run["config_snapshot"]["bot"]["market_data_stream_policy"]["heartbeat_stale_seconds"] == 10.0
     assert "status" not in run["config_snapshot"]["bot"]
@@ -430,7 +437,7 @@ def test_stop_observe_only_paper_run_uses_docker_runner():
     assert "canceling" in phases
 
 
-def test_start_bot_different_request_while_active_returns_conflict(monkeypatch):
+def test_start_bot_different_request_creates_sibling_and_requires_exact_stop(monkeypatch):
     config = _FakeConfigService()
     stream = _FakeStreamManager()
     storage = _FakeStorage()
@@ -447,7 +454,7 @@ def test_start_bot_different_request_while_active_returns_conflict(monkeypatch):
     run_id = first["run_id"]
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
-        lambda _bot_id: {
+        lambda _bot_id, **_kwargs: {
             "status": "running",
             "running": True,
             "runtime_run_id": run_id,
@@ -457,10 +464,17 @@ def test_start_bot_different_request_while_active_returns_conflict(monkeypatch):
 
     second = service.start_bot("bot-1", request_id="req-start-2")
 
-    assert second["status"] == "conflict"
-    assert second["active_run_id"] == run_id
-    assert second["reason_code"] == "active_run_conflict"
-    assert len(runner.starts) == 1
+    assert second["status"] == "started"
+    assert second["run_id"] != run_id
+    assert second["active_run_id"] == second["run_id"]
+    assert len(runner.starts) == 2
+    assert runner.stops == []
+
+    ambiguous_stop = service.stop_bot("bot-1", request_id="cancel-without-run")
+
+    assert ambiguous_stop["status"] == "conflict"
+    assert ambiguous_stop["reason_code"] == "run_id_required_multiple_active"
+    assert ambiguous_stop["run_id"] is None
     assert runner.stops == []
 
 
@@ -486,7 +500,7 @@ def test_start_bot_after_terminal_run_starts_new_run(monkeypatch):
     }
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
-        lambda _bot_id: dict(container_state),
+        lambda _bot_id, **_kwargs: dict(container_state),
     )
     service.stop_bot("bot-1", run_id=first["run_id"], request_id="req-cancel-1")
     container_state.update({"status": "missing", "running": False, "runtime_run_id": None})
@@ -504,7 +518,7 @@ def test_concurrent_start_attempts_create_one_active_run(monkeypatch):
     storage = _FakeStorage()
     runner = _RecordingRunner(delay=0.01)
 
-    def _inspect(_bot_id):
+    def _inspect(_bot_id, **_kwargs):
         run_id = storage.get_latest_bot_runtime_run_id("bot-1")
         return {
             "status": "running" if run_id else "missing",
@@ -554,7 +568,7 @@ def test_stale_active_run_reconciles_before_new_start(monkeypatch):
     runner = _RecordingRunner()
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
-        lambda _bot_id: {"status": "missing", "running": False, "runtime_run_id": None, "exit_code": None},
+        lambda _bot_id, **_kwargs: {"status": "missing", "running": False, "runtime_run_id": None, "exit_code": None},
     )
     service = BotRuntimeControlService(
         config,
@@ -600,7 +614,7 @@ def test_active_run_container_exit_reconciles_to_terminal(monkeypatch, container
     runner = _RecordingRunner()
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
-        lambda _bot_id: dict(container_state),
+        lambda _bot_id, **_kwargs: dict(container_state),
     )
     service = BotRuntimeControlService(
         config,
@@ -664,8 +678,8 @@ def test_stop_bot_can_preserve_container_for_debugging(monkeypatch):
 
     monkeypatch.setattr(
         "portal.backend.service.bots.runtime_control_service.DockerBotRunner.inspect_bot_container",
-        lambda _bot_id: {
-            "name": "quant-trad-bots-bot-1",
+        lambda _bot_id, **_kwargs: {
+            "name": "quant-trad-bots-bot-1-run-1",
             "status": "exited",
             "running": False,
             "id": "container-1",

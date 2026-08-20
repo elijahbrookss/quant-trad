@@ -75,6 +75,12 @@ export async function listReports(params = {}) {
   return handleResponse(res)
 }
 
+export async function fetchReportActivity(params = {}) {
+  const query = buildQuery(params)
+  const res = await fetch(`${BASE}/api/reports/activity${query}`, { mode: 'cors' })
+  return handleResponse(res)
+}
+
 export async function getReport(runId, options = {}) {
   return getReportJson(`/api/reports/${runId}`, options)
 }
@@ -125,7 +131,12 @@ export async function getCandleCatalog(runId, options = {}) {
 }
 
 export async function getReportDiagnostics(runId, options = {}) {
-  return getReportJson(`/api/reports/${runId}/diagnostics`, options)
+  return getReportJson('/api/reports/' + runId + '/diagnostics', options)
+}
+
+export async function getReportDiagnosticsPage(runId, params = {}, options = {}) {
+  const query = buildQuery(params)
+  return getReportJson('/api/reports/' + runId + '/diagnostics' + query, options)
 }
 
 export async function getReportMetrics(runId, options = {}) {

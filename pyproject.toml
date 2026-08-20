@@ -29,6 +29,8 @@ include = [
     "market_data*",
     "overlays*",
     "portal*",
+    "research_governance*",
+    "research_science*",
     "risk*",
     "signals*",
     "strategies*",

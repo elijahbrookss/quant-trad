@@ -10,6 +10,9 @@ from typing import Any, Dict, Mapping, Protocol
 
 from core.settings import get_settings
 from engines.bot_runtime.strategy.models import Strategy
+from engines.bot_runtime.core.execution_context import ResolvedExecutionContextBundle
+from engines.bot_runtime.core.book_execution import ExecutionBookTapeBundle
+from engines.bot_runtime.core.passive_execution import PassiveQueuePolicy
 
 from ..provenance import RUNTIME_CONTRACT_VERSION, RUNTIME_STORAGE_SCHEMA_VERSION, source_revision
 from ..market.backtest_dataset_service import validate_backtest_dataset
@@ -69,6 +72,11 @@ def _bot_run_config_snapshot(bot: Mapping[str, Any]) -> Dict[str, Any]:
         "mode",
         "execution_mode",
         "execution_behavior",
+        "economic_claim_intent",
+        "execution_assumptions",
+        "resolved_execution_context_bundle",
+        "execution_book_tape_bundle",
+        "passive_queue_policy",
         "run_type",
         "playback_speed",
         "backtest_start",
@@ -180,12 +188,51 @@ class BotStartupOrchestrator:
             ctx.strategy_snapshot = strategy
             ctx.wallet_config = dict(artifacts.get("wallet_config") or {})
             ctx.runtime_readiness = dict(artifacts.get("runtime_readiness") or {})
+            raw_context_bundle = artifacts.get("resolved_execution_context_bundle")
+            if raw_context_bundle is not None:
+                if not isinstance(raw_context_bundle, Mapping):
+                    raise TypeError("startup artifacts resolved_execution_context_bundle must be a mapping")
+                context_bundle = ResolvedExecutionContextBundle.from_dict(raw_context_bundle)
+                ctx.bot_record["resolved_execution_context_bundle"] = context_bundle.to_dict()
+            else:
+                context_bundle = None
+            raw_book_bundle = artifacts.get("execution_book_tape_bundle")
+            if raw_book_bundle is not None:
+                if not isinstance(raw_book_bundle, Mapping):
+                    raise TypeError("startup artifacts execution_book_tape_bundle must be a mapping")
+                book_bundle = ExecutionBookTapeBundle.from_dict(raw_book_bundle)
+                ctx.bot_record["execution_book_tape_bundle"] = book_bundle.to_dict()
+            else:
+                book_bundle = None
+            raw_queue_policy = artifacts.get("passive_queue_policy")
+            if raw_queue_policy is not None:
+                if not isinstance(raw_queue_policy, Mapping):
+                    raise TypeError("startup artifacts passive_queue_policy must be a mapping")
+                queue_policy = PassiveQueuePolicy.from_dict(raw_queue_policy)
+                ctx.bot_record["passive_queue_policy"] = queue_policy.to_dict()
+            else:
+                queue_policy = None
             symbols = list(ctx.runtime_readiness.get("symbols") or [])
             ctx.runtime_dependency_metadata = {
                 "symbols": symbols,
                 "symbol_count": len(symbols),
                 "worker_count_planned": len(symbols),
                 "profiles": list(ctx.runtime_readiness.get("profiles") or []),
+                "resolved_execution_context_bundle_hash": (
+                    context_bundle.bundle_hash if context_bundle is not None else None
+                ),
+                "resolved_execution_context_count": (
+                    len(context_bundle.contexts) if context_bundle is not None else 0
+                ),
+                "execution_book_tape_bundle_hash": (
+                    book_bundle.bundle_hash if book_bundle is not None else None
+                ),
+                "execution_book_tape_count": (
+                    len(book_bundle.tapes) if book_bundle is not None else 0
+                ),
+                "passive_queue_policy_hash": (
+                    queue_policy.policy_hash if queue_policy is not None else None
+                ),
             }
             ctx.bot_record["wallet_config"] = dict(ctx.wallet_config)
 
@@ -256,7 +303,12 @@ class BotStartupOrchestrator:
                 message="Runtime container launched successfully.",
                 metadata={"container_id": ctx.container_id},
             )
-            self.watchdog.register_bot(ctx.bot_id)
+            try:
+                self.watchdog.register_bot(ctx.bot_id, run_id=ctx.run_id)
+            except TypeError as exc:
+                if "run_id" not in str(exc):
+                    raise
+                self.watchdog.register_bot(ctx.bot_id)
             self._record_phase(
                 ctx,
                 BotLifecyclePhase.AWAITING_CONTAINER_BOOT.value,
@@ -267,11 +319,16 @@ class BotStartupOrchestrator:
         except Exception as exc:  # noqa: BLE001
             if ctx.container_id:
                 try:
-                    self.runner.stop_bot(bot_id=ctx.bot_id)
+                    self.runner.stop_bot(bot_id=ctx.bot_id, run_id=ctx.run_id)
                 except Exception:  # noqa: BLE001
                     logger.exception("bot_startup_cleanup_stop_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
                 try:
-                    self.watchdog.unregister_bot(ctx.bot_id)
+                    try:
+                        self.watchdog.unregister_bot(ctx.bot_id, run_id=ctx.run_id)
+                    except TypeError as unregister_exc:
+                        if "run_id" not in str(unregister_exc):
+                            raise
+                        self.watchdog.unregister_bot(ctx.bot_id)
                 except Exception:  # noqa: BLE001
                     logger.exception("bot_startup_cleanup_watchdog_failed | bot_id=%s | run_id=%s", ctx.bot_id, ctx.run_id)
             self._persist_startup_failure(ctx, exc, traceback_text=traceback.format_exc())
@@ -375,6 +432,17 @@ class BotStartupOrchestrator:
             start_request_overrides["profile"] = True
         if execution_behavior:
             start_request_overrides["execution_behavior"] = execution_behavior
+        start_request_overrides["economic_claim_intent"] = ctx.bot_record.get("economic_claim_intent")
+        if isinstance(ctx.bot_record.get("execution_assumptions"), Mapping):
+            start_request_overrides["execution_assumptions"] = dict(ctx.bot_record["execution_assumptions"])
+        if isinstance(ctx.bot_record.get("execution_book_tape_bundle"), Mapping):
+            start_request_overrides["execution_book_tape_bundle"] = dict(
+                ctx.bot_record["execution_book_tape_bundle"]
+            )
+        if isinstance(ctx.bot_record.get("passive_queue_policy"), Mapping):
+            start_request_overrides["passive_queue_policy"] = dict(
+                ctx.bot_record["passive_queue_policy"]
+            )
         if duration_seconds is not None:
             start_request_overrides["duration_seconds"] = duration_seconds
         if isinstance(ctx.bot_record.get("market_data_stream_policy"), Mapping):
@@ -403,6 +471,17 @@ class BotStartupOrchestrator:
                 "config_snapshot": {
                     "execution_mode": execution_mode,
                     "execution_behavior": execution_behavior,
+                    "economic_claim_intent": ctx.bot_record.get("economic_claim_intent"),
+                    "execution_assumptions": dict(ctx.bot_record.get("execution_assumptions") or {}),
+                    "resolved_execution_context_bundle": dict(
+                        ctx.bot_record.get("resolved_execution_context_bundle") or {}
+                    ),
+                    "execution_book_tape_bundle": dict(
+                        ctx.bot_record.get("execution_book_tape_bundle") or {}
+                    ),
+                    "passive_queue_policy": dict(
+                        ctx.bot_record.get("passive_queue_policy") or {}
+                    ),
                     "dataset_binding": dict(ctx.dataset_binding),
                     "request_id": ctx.request_id or None,
                     "start_request": {

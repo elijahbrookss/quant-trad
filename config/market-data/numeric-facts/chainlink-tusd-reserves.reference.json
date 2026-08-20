@@ -1,0 +1,54 @@
+{
+  "schema_version": "market.numeric_fact_sources.v1",
+  "id": "chainlink-ethereum-mainnet-tusd-reserves-reference",
+  "enabled": false,
+  "bindings": [
+    {
+      "id": "tusd-reserves",
+      "enabled": false,
+      "adapter": "chainlink_aggregator_v3.v1",
+      "instrument_id": "TUSD",
+      "instrument_role": "primary",
+      "fact_type": "market.reserve_balance",
+      "contract_version": "market.reserve_balance.v1",
+      "unit": "USD",
+      "dimensions": {
+        "reserve_unit": "USD"
+      },
+      "endpoint_ref": "CHAINLINK_ETHEREUM_RPC_URL",
+      "source": {
+        "provider": "CHAINLINK",
+        "venue": "ETHEREUM_MAINNET",
+        "source_kind": "public_evm_contract",
+        "adapter_version": "chainlink_aggregator_v3.v1"
+      },
+      "schedule": {
+        "expected_update_interval_seconds": 86400,
+        "deviation_threshold_basis_points": 500
+      },
+      "quality_policy": {
+        "max_staleness_seconds": 172800,
+        "stale_behavior": "gap"
+      },
+      "risk": {
+        "official_catalog_url": "https://data.chain.link/feeds/ethereum/mainnet/tusd-por",
+        "market_risk_tier": "not_published",
+        "deprecation_status": "not_marked_deprecated",
+        "verified_at": "2026-08-07"
+      },
+      "config": {
+        "chain_id": 1,
+        "network": "ethereum-mainnet",
+        "proxy_address": "0xBE456fd14720C3aCCc30A2013Bffd782c9Cb75D5",
+        "deployment_block": 0,
+        "history_start": "2026-08-07T00:00:00Z",
+        "confirmations": 12,
+        "max_log_span": 2000,
+        "current_lookback_blocks": 50000,
+        "expected_decimals": 18,
+        "expected_description": "TUSD Reserves",
+        "expected_version": null
+      }
+    }
+  ]
+}

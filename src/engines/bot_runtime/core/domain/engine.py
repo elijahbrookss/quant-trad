@@ -17,14 +17,21 @@ from ..amount_constraints import normalize_qty_with_constraints
 from ..entry_execution import EntryExecutionCoordinator, PendingEntry
 from ..entry_settlement import EntrySettlement, EntrySettlementContext, EntrySettlementService
 from ..execution_adapter import ExecutionAdapter
+from ..execution_assumptions import ResolvedExecutionAssumptions, legacy_execution_assumptions
+from ..execution_context import ResolvedExecutionContext, resolve_execution_context
 from ..execution_intent import ExecutionIntent, LimitParams
 from ..execution_model import ExecutionModel
 from ..execution_plan import RuntimeStopAdjustment, compile_runtime_execution_plan
 from ..execution_profile import SeriesExecutionProfile, compile_series_execution_profile
 from ..execution_runtime import DeterministicExecutionModel
 from ..exit_settlement import ExitSettlement, ExitSettlementService
-from ..fees import FeeResolver, FeeSchedule, executed_fee, executed_notional
+from ..fees import FeeResolver, executed_fee, executed_notional
 from ..margin import calculate_max_qty_by_margin
+from ..order_lifecycle import (
+    CanonicalOrderLifecycle,
+    CanonicalOrderLifecycleEvent,
+    stable_order_identity,
+)
 from ..wallet import WalletLedger, trace_wallet_balance
 from ..wallet_gateway import WalletGateway
 from .models import (
@@ -63,6 +70,8 @@ class LadderRiskEngine:
         instrument: Optional[Dict[str, Any]] = None,
         execution_profile: Optional[SeriesExecutionProfile] = None,
         risk_config: Optional[Mapping[str, Any]] = None,
+        execution_assumptions: Optional[ResolvedExecutionAssumptions] = None,
+        execution_context: Optional[ResolvedExecutionContext] = None,
     ):
         provided_template = config or {}
         self.template = normalise_template(provided_template)
@@ -73,6 +82,30 @@ class LadderRiskEngine:
             self.instrument,
             risk_config=self.risk_config,
         )
+        self.execution_assumptions = execution_assumptions or legacy_execution_assumptions()
+        self.execution_context = (
+            execution_context
+            or self.execution_profile.execution_context
+            or resolve_execution_context(
+                self.execution_profile,
+                self.execution_assumptions,
+                instrument_payload=self.instrument,
+                source="legacy_direct_runtime_resolution",
+            )
+        )
+        if self.execution_context.model.assumption_manifest_hash != self.execution_assumptions.manifest_hash:
+            raise ValueError("execution_context_assumption_manifest_mismatch")
+        self.execution_profile = self.execution_profile.bind_execution_context(self.execution_context)
+        if self.execution_assumptions.requires_economic_evidence:
+            schedule = self.execution_context.fee_schedule
+            if not schedule.configured or schedule.source == "default_zero":
+                raise ValueError("economic_execution_fee_schedule_unresolved")
+            if (
+                schedule.maker_rate == 0.0
+                and schedule.taker_rate == 0.0
+                and not schedule.verified_zero
+            ):
+                raise ValueError("economic_execution_zero_fee_schedule_unverified")
         self._runtime_log_context = build_log_context(
             symbol=self.instrument.get("symbol"),
             datasource=self.instrument.get("datasource"),
@@ -138,24 +171,22 @@ class LadderRiskEngine:
         self.orders = self._orders_from_execution_plan()
         self.targets = [int(order.get("ticks") or 0) for order in self.orders]
         self.quote_currency = str(self.execution_profile.instrument.quote_currency or "USD").upper()
-        self.maker_fee = float(self.execution_profile.fees.maker_fee_rate)
-        self.taker_fee = float(self.execution_profile.fees.taker_fee_rate)
+        self.maker_fee = float(self.execution_context.fee_schedule.maker_rate)
+        self.taker_fee = float(self.execution_context.fee_schedule.taker_rate)
         self.execution_intent_model: ExecutionModel = DeterministicExecutionModel(
-            FeeResolver(
-                FeeSchedule(
-                    maker_rate=float(self.maker_fee or 0.0),
-                    taker_rate=float(self.taker_fee or 0.0),
-                    source=self.execution_profile.fees.source,
-                )
-            )
+            FeeResolver(self.execution_context.fee_schedule),
+            assumptions=self.execution_assumptions,
+            execution_context=self.execution_context,
         )
         self.entry_settlement: EntrySettlement = EntrySettlementService(self)
         self.exit_settlement: ExitSettlement = ExitSettlementService(None)
         self.entry_execution = EntryExecutionCoordinator(self)
+        self._order_lifecycle_events: List[CanonicalOrderLifecycleEvent] = []
+        self._order_lifecycle_replay: Dict[str, CanonicalOrderLifecycle] = {}
+        self._pending_entry_fills: List[LadderPosition] = []
         self.active_trade: Optional[LadderPosition] = None
         self.trades: List[LadderPosition] = []
         self.trade_revision: int = 0
-        self._trade_material_signature: Tuple[Any, ...] = self._trade_material_state_signature()
         self._trade_material_signature_map: Dict[str, Tuple[Any, ...]] = self._trade_material_signature_by_id()
         self._trade_change_log: List[Tuple[int, Tuple[str, ...]]] = []
         self._trade_change_log_max: int = 8192
@@ -174,6 +205,57 @@ class LadderRiskEngine:
     def set_runtime_context(self, **fields: Optional[object]) -> None:
         """Merge additional context fields into engine log context."""
         self._runtime_log_context = merge_log_context(self._runtime_log_context, build_log_context(**fields))
+        for identity_field in ("run_id", "bot_id", "strategy_id"):
+            value = fields.get(identity_field)
+            if value not in (None, ""):
+                setattr(self, identity_field, str(value))
+
+    def record_order_lifecycle(self, lifecycle: CanonicalOrderLifecycle, *, after_seq: int = 0) -> None:
+        """Queue immutable lifecycle facts for the runtime's canonical event owner."""
+
+        if not isinstance(lifecycle, CanonicalOrderLifecycle):
+            raise ValueError("record_order_lifecycle requires CanonicalOrderLifecycle")
+        request_id = lifecycle.request.request_id
+        existing = self._order_lifecycle_replay.get(request_id)
+        if existing is not None and existing.replay_hash != lifecycle.replay_hash:
+            existing_ids = {event.event_id for event in existing.events}
+            incoming_prefix = tuple(event for event in lifecycle.events if event.event_id in existing_ids)
+            if tuple(existing.events) != incoming_prefix:
+                raise ValueError("order_lifecycle_trace_diverged_for_request")
+        self._order_lifecycle_replay[request_id] = lifecycle
+        queued_ids = {event.event_id for event in self._order_lifecycle_events}
+        self._order_lifecycle_events.extend(
+            event
+            for event in lifecycle.events_after(after_seq)
+            if event.event_id not in queued_ids
+        )
+
+    def drain_order_lifecycle_events(self) -> List[CanonicalOrderLifecycleEvent]:
+        """Transfer queued lifecycle facts without changing their order."""
+
+        events = list(self._order_lifecycle_events)
+        self._order_lifecycle_events.clear()
+        return events
+
+    def order_lifecycle_traces(self) -> Dict[str, Dict[str, Any]]:
+        """Return replayable traces for artifacts and restart recovery."""
+
+        return {
+            request_id: lifecycle.to_dict()
+            for request_id, lifecycle in sorted(self._order_lifecycle_replay.items())
+        }
+
+    def order_lifecycle_for(self, request_id: str) -> Optional[CanonicalOrderLifecycle]:
+        """Return the in-memory replay authority for runtime publication."""
+
+        return self._order_lifecycle_replay.get(str(request_id))
+
+    def drain_pending_entry_fills(self) -> List[LadderPosition]:
+        """Transfer delayed entry fills to the runtime publication owner."""
+
+        fills = list(self._pending_entry_fills)
+        self._pending_entry_fills.clear()
+        return fills
 
     def runtime_log_context(self, **fields: Optional[object]) -> Dict[str, object]:
         """Build context for runtime-domain logs with stable engine fields."""
@@ -275,12 +357,18 @@ class LadderRiskEngine:
         ]
 
     @staticmethod
-    def _new_order_intent_id() -> str:
-        return str(uuid.uuid4())
+    def _new_order_intent_id(stable_seed: str) -> str:
+        seed = str(stable_seed or "").strip()
+        if not seed:
+            raise ValueError("stable order intent identity seed is required")
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"canonical_order_intent|{seed}"))
 
     @staticmethod
-    def _new_trade_id() -> str:
-        return str(uuid.uuid4())
+    def _new_trade_id(stable_seed: str) -> str:
+        seed = str(stable_seed or "").strip()
+        if not seed:
+            raise ValueError("stable trade identity seed is required")
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"canonical_trade|{seed}"))
 
     def _entry_request_id(self, candle: Candle, direction: str) -> str:
         bar_time = candle.time.isoformat() if getattr(candle, "time", None) is not None else ""
@@ -677,8 +765,8 @@ class LadderRiskEngine:
         if order_type == "limit_maker":
             limit_params = self._build_limit_params(candle, direction=direction, r_value=r_value)
 
-        order_intent_id = self._new_order_intent_id()
-        trade_id = self._new_trade_id()
+        order_intent_id = self._new_order_intent_id(entry_request_id)
+        trade_id = self._new_trade_id(entry_request_id)
         side = "buy" if direction == "long" else "sell"
         intent = ExecutionIntent(
             order_id=order_intent_id,
@@ -688,6 +776,8 @@ class LadderRiskEngine:
             order_type=order_type,
             requested_price=float(candle.close),
             contract_size=float(self.contract_size),
+            time_in_force="gtc",
+            post_only=order_type == "limit_maker",
             limit_params=limit_params,
             metadata={
                 "direction": direction,
@@ -725,6 +815,22 @@ class LadderRiskEngine:
         candle: Candle,
     ) -> EntryFill:
         fill_price = float(outcome.avg_fill_price or candle.close)
+        outcome_metadata = dict(outcome.metadata or {})
+        fill_id = str(
+            outcome_metadata.get("fill_id")
+            or outcome_metadata.get("order_fill_id")
+            or stable_order_identity(
+                "entry_fill",
+                {
+                    "order_intent_id": pending.order_intent_id,
+                    "trade_id": pending.trade_id,
+                    "fill_time": outcome.filled_at or outcome.updated_at,
+                    "filled_qty": outcome.filled_qty,
+                    "fill_price": fill_price,
+                    "fee_paid": outcome.fee_paid,
+                },
+            )
+        )
         return EntryFill(
             order_intent_id=str(pending.order_intent_id),
             trade_id=str(pending.trade_id),
@@ -746,6 +852,244 @@ class LadderRiskEngine:
             fee_source=str(outcome.fee_source or "template_or_instrument"),
             fee_version=outcome.fee_version,
             raw={"outcome": asdict(outcome)},
+            fill_id=fill_id,
+        )
+
+    @staticmethod
+    def _is_book_execution_fill(fill: EntryFill) -> bool:
+        raw = dict(fill.raw or {})
+        outcome = dict(raw.get("outcome") or {})
+        metadata = dict(outcome.get("metadata") or {})
+        return (
+            str(metadata.get("schema_version") or "") == "book_execution_evidence.v1"
+            or bool(metadata.get("execution_book_snapshot_hash"))
+        )
+
+    def _apply_incremental_entry_fill(
+        self,
+        *,
+        request: EntryRequest,
+        pending: PendingEntry,
+        fill: EntryFill,
+    ) -> EntryFillResult:
+        """Settle and apply one L2 price-level entry fill atomically."""
+
+        events: List[Dict[str, Any]] = []
+        settlement_payloads: List[Dict[str, Any]] = []
+        fill_id = str(fill.fill_id or "").strip()
+        if not fill_id:
+            raise ValueError("incremental entry fill_id is required")
+        existing = self.active_trade
+        if existing is None or str(existing.trade_id) != str(pending.trade_id):
+            existing = next(
+                (
+                    trade
+                    for trade in reversed(self.trades)
+                    if str(trade.trade_id) == str(pending.trade_id)
+                ),
+                None,
+            )
+        applied_ids = set(str(value) for value in getattr(pending, "applied_fill_ids", ()) or ())
+        if existing is not None:
+            applied_ids.update(
+                str(value)
+                for value in dict(existing.entry_outcome or {}).get("entry_fill_ids") or ()
+            )
+        if fill_id in applied_ids:
+            return EntryFillResult(
+                status="duplicate",
+                pending=pending if float(pending.remaining_qty or 0.0) > 1e-12 else None,
+                position=existing,
+                events=events,
+                settlement_payloads=settlement_payloads,
+            )
+        if fill.filled_qty <= 0 or fill.fill_price <= 0:
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=existing,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="ENTRY_FILL_EMPTY",
+                rejection_detail={"fill_id": fill_id, "filled_qty": fill.filled_qty},
+            )
+        if fill.candle is None or not fill.candle.is_complete():
+            return EntryFillResult(
+                status="rejected",
+                pending=None,
+                position=existing,
+                events=events,
+                settlement_payloads=settlement_payloads,
+                rejection_reason="ENTRY_CANDLE_MISSING",
+                rejection_detail={"fill_id": fill_id, "order_intent_id": pending.order_intent_id},
+            )
+        candle = Candle(
+            time=fill.candle.time,
+            open=float(fill.candle.open),
+            high=float(fill.candle.high),
+            low=float(fill.candle.low),
+            close=float(fill.candle.close),
+            atr=fill.candle.atr,
+            lookback_15=fill.candle.lookback_15,
+        )
+        prior_qty = float(pending.filled_qty or 0.0)
+        prior_notional = float(pending.filled_notional or 0.0)
+        filled_qty_total = prior_qty + float(fill.filled_qty)
+        if filled_qty_total > float(request.requested_qty) + 1e-12:
+            raise RuntimeError("incremental entry fill would overfill canonical request")
+        filled_notional_total = prior_notional + float(fill.filled_qty) * float(fill.fill_price)
+        fees_paid_total = float(pending.fees_paid or 0.0) + float(fill.fee_paid or 0.0)
+        remaining_qty = max(float(request.requested_qty) - filled_qty_total, 0.0)
+        avg_fill_price = filled_notional_total / filled_qty_total
+        stop_price = self._calculate_stop_price(avg_fill_price, pending.direction, pending.r_ticks)
+        fill_legs = self._build_legs(
+            candle,
+            pending.direction,
+            pending.r_ticks,
+            float(fill.filled_qty),
+            entry_price=avg_fill_price,
+            qty_raw=float(fill.filled_qty),
+            qty_final=float(fill.filled_qty),
+            order_intent_id=pending.order_intent_id,
+            side=pending.intent.side,
+            allow_subminimum=True,
+        )
+        if not fill_legs:
+            raise RuntimeError("incremental entry fill produced no canonical position legs")
+        base_currency, quote_currency = self._resolve_base_quote()
+        notional = executed_notional(
+            price=float(fill.fill_price),
+            quantity=float(fill.filled_qty),
+            contract_size=self.contract_size,
+        )
+        use_wallet_execution = bool(self.execution_adapter and self._wallet_gateway)
+        if use_wallet_execution:
+            settled = self.entry_settlement.apply_entry_fill(
+                EntrySettlementContext(
+                    side=pending.intent.side,
+                    filled_qty=float(fill.filled_qty),
+                    entry_price=float(fill.fill_price),
+                    notional=notional,
+                    fee_paid=float(fill.fee_paid or 0.0),
+                    trade_id=pending.trade_id,
+                    fill_id=fill_id,
+                    direction=pending.direction,
+                    qty_raw=float(fill.filled_qty),
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                )
+            )
+            if not settled:
+                return EntryFillResult(
+                    status="rejected",
+                    pending=None,
+                    position=existing,
+                    events=events,
+                    settlement_payloads=settlement_payloads,
+                    rejection_reason=self.last_rejection_reason or "ENTRY_SETTLEMENT_FAILED",
+                    rejection_detail=dict(self.last_rejection_detail or {}),
+                )
+        wallet_metadata = self.pop_wallet_fill_metadata(str(pending.trade_id))
+        raw_outcome = dict((fill.raw or {}).get("outcome") or {})
+        fill_evidence = {
+            "fill_id": fill_id,
+            "filled_qty": float(fill.filled_qty),
+            "fill_price": float(fill.fill_price),
+            "fee_paid": float(fill.fee_paid or 0.0),
+            "fee_role": fill.liquidity_role,
+            "fee_rate": fill.fee_rate,
+            "fee_source": fill.fee_source,
+            "fee_version": fill.fee_version,
+            "filled_at": fill.fill_time,
+            "metadata": dict(raw_outcome.get("metadata") or {}),
+        }
+        if existing is None:
+            runtime_stop_adjustments = self._build_stop_adjustments(fill_legs, pending.r_ticks)
+            breakeven_ticks = 0.0 if runtime_stop_adjustments else self._breakeven_threshold(fill_legs, pending.r_ticks)
+            position = self._build_position(
+                candle=candle,
+                entry_price=avg_fill_price,
+                stop_price=stop_price,
+                direction=pending.direction,
+                entry_order=asdict(pending.intent),
+                entry_outcome={
+                    **raw_outcome,
+                    "requested_qty": float(request.requested_qty),
+                    "filled_qty": filled_qty_total,
+                    "avg_fill_price": avg_fill_price,
+                    "fee_paid": fees_paid_total,
+                    "remaining_qty": remaining_qty,
+                    "entry_fill_ids": [fill_id],
+                    "entry_fills": [fill_evidence],
+                },
+                legs=fill_legs,
+                breakeven_ticks=breakeven_ticks,
+                trailing_activation_ticks=self._trailing_activation_ticks(fill_legs, pending.r_ticks),
+                trailing_distance_ticks=self._trailing_distance_ticks(pending.atr_at_entry),
+                fixed_horizon_bars=self._fixed_horizon_bars(),
+                runtime_stop_adjustments=runtime_stop_adjustments,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+                atr_at_entry=pending.atr_at_entry,
+                r_multiple_at_entry=pending.r_multiple_at_entry,
+                r_value=pending.r_value,
+                r_ticks=pending.r_ticks,
+                trade_id=pending.trade_id,
+                pre_entry_context=getattr(candle, "lookback_15", None),
+                use_wallet_execution=use_wallet_execution,
+                execution_profile=self.execution_profile,
+            )
+            position.apply_entry_fee(float(fill.fee_paid or 0.0))
+            position.wallet_fill_metadata = dict(wallet_metadata)
+            event_type = "entry_opened"
+        else:
+            position = existing
+            applied = position.apply_incremental_entry_fill(
+                fill_id=fill_id,
+                filled_qty=float(fill.filled_qty),
+                fill_price=float(fill.fill_price),
+                fee_paid=float(fill.fee_paid or 0.0),
+                stop_price=stop_price,
+                fill_legs=fill_legs,
+                fill_evidence=fill_evidence,
+                wallet_metadata=wallet_metadata,
+            )
+            if not applied:
+                return EntryFillResult(
+                    status="duplicate",
+                    pending=pending if remaining_qty > 1e-12 else None,
+                    position=position,
+                    events=events,
+                    settlement_payloads=settlement_payloads,
+                )
+            event_type = "entry_increased"
+        pending.filled_qty = filled_qty_total
+        pending.filled_notional = filled_notional_total
+        pending.fees_paid = fees_paid_total
+        pending.remaining_qty = remaining_qty
+        pending.applied_fill_ids = tuple([*getattr(pending, "applied_fill_ids", ()), fill_id])
+        events.append(
+            {
+                "type": event_type,
+                "trade_id": pending.trade_id,
+                "order_intent_id": pending.order_intent_id,
+                "fill_id": fill_id,
+                "fill_price": float(fill.fill_price),
+                "filled_qty": float(fill.filled_qty),
+                "cumulative_filled_qty": filled_qty_total,
+                "remaining_qty": remaining_qty,
+                "avg_fill_price": avg_fill_price,
+                "fee_paid": float(fill.fee_paid or 0.0),
+                "cumulative_fees_paid": fees_paid_total,
+                "direction": pending.direction,
+            }
+        )
+        return EntryFillResult(
+            status=("opened" if existing is None else "augmented") if remaining_qty <= 1e-12 else ("opened_partial" if existing is None else "augmented_partial"),
+            pending=pending if remaining_qty > 1e-12 else None,
+            position=position,
+            events=events,
+            settlement_payloads=settlement_payloads,
         )
 
     def apply_entry_fill(
@@ -757,6 +1101,13 @@ class LadderRiskEngine:
     ) -> EntryFillResult:
         events: List[Dict[str, Any]] = []
         settlement_payloads: List[Dict[str, Any]] = []
+
+        if pending is not None and self._is_book_execution_fill(fill):
+            return self._apply_incremental_entry_fill(
+                request=request,
+                pending=pending,
+                fill=fill,
+            )
 
         if fill.filled_qty <= 0:
             return EntryFillResult(
@@ -780,6 +1131,8 @@ class LadderRiskEngine:
                     order_type=request.order_type,
                     requested_price=request.requested_price,
                     contract_size=float(self.contract_size),
+                    time_in_force="gtc",
+                    post_only=request.order_type == "limit_maker",
                     limit_params=request.limit_params,
                     metadata={"direction": request.direction, "symbol": self.instrument.get("symbol")},
                 ),
@@ -885,6 +1238,16 @@ class LadderRiskEngine:
                     notional=notional,
                     fee_paid=fees_paid_total,
                     trade_id=pending.trade_id,
+                    fill_id=str(fill.fill_id or stable_order_identity(
+                        "entry_fill",
+                        {
+                            "order_intent_id": pending.order_intent_id,
+                            "trade_id": pending.trade_id,
+                            "filled_qty": filled_qty_total,
+                            "avg_fill_price": avg_fill_price,
+                            "fee_paid": fees_paid_total,
+                        },
+                    )),
                     direction=pending.direction,
                     qty_raw=pending.qty_raw,
                     base_currency=base_currency,
@@ -1207,15 +1570,18 @@ class LadderRiskEngine:
             contract_size=self.contract_size,
             maker_fee_rate=self.maker_fee,
             taker_fee_rate=self.taker_fee,
-            fee_source="template_or_instrument",
-            fee_version=None,
+            fee_source=self.execution_profile.fees.source,
+            fee_version=self.execution_profile.fees.version,
             quote_currency=self.quote_currency,
             short_requires_borrow=bool(self.short_requires_borrow),
             instrument=self.instrument if use_wallet_execution else None,
             execution_profile=execution_profile if use_wallet_execution else None,
+            execution_assumptions=self.execution_assumptions,
             signal_id=getattr(self, "last_signal_id", None),
             decision_id=getattr(self, "last_decision_id", None),
             strategy_id=str(self.strategy_id) if getattr(self, "strategy_id", None) else None,
+            run_id=str(self.run_id) if getattr(self, "run_id", None) else None,
+            bot_id=str(self.bot_id) if getattr(self, "bot_id", None) else None,
             bar_time=candle.time,
             atr_at_entry=atr_at_entry,
             r_multiple_at_entry=r_multiple_at_entry,
@@ -1527,6 +1893,7 @@ class LadderRiskEngine:
         qty_final: Optional[float] = None,
         order_intent_id: Optional[str] = None,
         side: Optional[str] = None,
+        allow_subminimum: bool = False,
     ) -> List[Leg]:
         """Build take-profit legs from template configuration.
 
@@ -1667,7 +2034,7 @@ class LadderRiskEngine:
             return []
 
         min_qty = self.min_qty
-        if min_qty not in (None, 0):
+        if min_qty not in (None, 0) and not allow_subminimum:
             for leg in legs:
                 if leg.contracts < float(min_qty):
                     return []
@@ -1690,12 +2057,14 @@ class LadderRiskEngine:
             )
             logger.warning(with_log_context("short_entry_rejected", context))
             return None
-        previous_signature = dict(self._trade_material_signature_map)
         self.active_trade = self.entry_execution.submit_entry(candle, direction)
         if self.active_trade is None:
             return None
         self.trades.append(self.active_trade)
-        self._bump_trade_revision_if_material_changed(previous_signature)
+        self._bump_trade_revision_if_material_changed(
+            {},
+            touched_trades=(self.active_trade,),
+        )
         return self.active_trade
 
     def step(
@@ -1704,18 +2073,31 @@ class LadderRiskEngine:
         *,
         same_bar_policy: SameBarResolutionPolicy | str = SameBarResolutionPolicy.PESSIMISTIC_STOP,
     ) -> List[Dict[str, Any]]:
-        previous_signature = dict(self._trade_material_signature_map)
-        if self.active_trade is None:
+        touched_trade = self.active_trade
+        previous_signature = self._cached_trade_material_signatures(
+            (touched_trade,) if touched_trade is not None else ()
+        )
+        if self.entry_execution.has_pending:
             new_trade = self.entry_execution.process_pending(candle)
             if new_trade:
-                self.active_trade = new_trade
-                self.trades.append(self.active_trade)
+                if self.active_trade is None:
+                    self.active_trade = new_trade
+                    self.trades.append(self.active_trade)
+                elif str(self.active_trade.trade_id) != str(new_trade.trade_id):
+                    raise RuntimeError("pending entry fill targeted a different active trade")
+                self._pending_entry_fills.append(new_trade)
+                touched_trade = new_trade
         if self.active_trade is None:
             return []
         events = self.active_trade.apply_bar(candle, same_bar_policy=same_bar_policy)
+        for lifecycle, after_seq in self.active_trade.drain_order_lifecycle_updates():
+            self.record_order_lifecycle(lifecycle, after_seq=after_seq)
         if not self.active_trade.is_active():
             self.active_trade = None
-        self._bump_trade_revision_if_material_changed(previous_signature)
+        self._bump_trade_revision_if_material_changed(
+            previous_signature,
+            touched_trades=(touched_trade,) if touched_trade is not None else (),
+        )
         return events
 
     def step_intrabar_candle(
@@ -1770,16 +2152,22 @@ class LadderRiskEngine:
         *,
         reason_code: str = "BACKTEST_END",
     ) -> List[Dict[str, Any]]:
-        previous_signature = dict(self._trade_material_signature_map)
         if self.active_trade is None:
             return []
-        events = self.active_trade.force_close_at_backtest_end(
+        touched_trade = self.active_trade
+        previous_signature = self._cached_trade_material_signatures((touched_trade,))
+        events = touched_trade.force_close_at_backtest_end(
             candle,
             reason_code=reason_code,
         )
+        for lifecycle, after_seq in touched_trade.drain_order_lifecycle_updates():
+            self.record_order_lifecycle(lifecycle, after_seq=after_seq)
         if self.active_trade is not None and not self.active_trade.is_active():
             self.active_trade = None
-        self._bump_trade_revision_if_material_changed(previous_signature)
+        self._bump_trade_revision_if_material_changed(
+            previous_signature,
+            touched_trades=(touched_trade,),
+        )
         return events
 
     def _bump_trade_revision(self, *, changed_trade_ids: Sequence[str] = ()) -> None:
@@ -1814,6 +2202,22 @@ class LadderRiskEngine:
             if not trade_id:
                 continue
             signatures[trade_id] = self._trade_material_signature_for_trade(trade)
+        return signatures
+
+    def _cached_trade_material_signatures(
+        self,
+        trades: Sequence[LadderPosition],
+    ) -> Dict[str, Tuple[Any, ...]]:
+        signatures: Dict[str, Tuple[Any, ...]] = {}
+        for trade in trades:
+            trade_id = str(getattr(trade, "trade_id", "") or "").strip()
+            if not trade_id:
+                continue
+            signature = self._trade_material_signature_map.get(trade_id)
+            if signature is None:
+                signature = self._trade_material_signature_for_trade(trade)
+                self._trade_material_signature_map[trade_id] = signature
+            signatures[trade_id] = signature
         return signatures
 
     def _trade_material_signature_for_trade(self, trade: LadderPosition) -> Tuple[Any, ...]:
@@ -1854,17 +2258,28 @@ class LadderRiskEngine:
     def _bump_trade_revision_if_material_changed(
         self,
         previous_signature: Tuple[Any, ...] | Mapping[str, Tuple[Any, ...]],
+        *,
+        touched_trades: Optional[Sequence[LadderPosition]] = None,
     ) -> bool:
-        current_signature = self._trade_material_state_signature()
-        current_signature_map = self._trade_material_signature_by_id()
-        self._trade_material_signature = current_signature
-        self._trade_material_signature_map = current_signature_map
+        touched_by_id: Dict[str, LadderPosition] = {}
+        if touched_trades is None:
+            current_signature_map = self._trade_material_signature_by_id()
+            self._trade_material_signature_map = current_signature_map
+        else:
+            current_signature_map = self._trade_material_signature_map
+            for trade in touched_trades:
+                trade_id = str(getattr(trade, "trade_id", "") or "").strip()
+                if not trade_id:
+                    continue
+                touched_by_id[trade_id] = trade
+                current_signature_map[trade_id] = self._trade_material_signature_for_trade(trade)
 
         def _advance_position_commit_seq(changed_trade_ids: Sequence[str]) -> None:
             changed = {str(trade_id) for trade_id in changed_trade_ids if str(trade_id).strip()}
             if not changed:
                 return
-            for trade in self.trades:
+            candidates = touched_by_id.values() if touched_by_id else self.trades
+            for trade in candidates:
                 trade_id = str(getattr(trade, "trade_id", "") or "").strip()
                 if trade_id not in changed:
                     continue
@@ -1873,9 +2288,14 @@ class LadderRiskEngine:
 
         if isinstance(previous_signature, Mapping):
             previous_signature_map = dict(previous_signature)
+            candidate_ids = (
+                set(previous_signature_map) | set(touched_by_id)
+                if touched_trades is not None
+                else set(previous_signature_map) | set(current_signature_map)
+            )
             changed_trade_ids = sorted(
                 trade_id
-                for trade_id in set(previous_signature_map) | set(current_signature_map)
+                for trade_id in candidate_ids
                 if previous_signature_map.get(trade_id) != current_signature_map.get(trade_id)
             )
             if not changed_trade_ids:
@@ -1884,6 +2304,11 @@ class LadderRiskEngine:
             self._bump_trade_revision(changed_trade_ids=changed_trade_ids)
             return True
 
+        current_signature = tuple(
+            current_signature_map.get(str(getattr(trade, "trade_id", "") or "").strip())
+            for trade in self.trades
+            if str(getattr(trade, "trade_id", "") or "").strip()
+        )
         if current_signature == previous_signature:
             return False
         changed_trade_ids = sorted(current_signature_map)

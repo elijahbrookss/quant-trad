@@ -54,6 +54,11 @@ class IntrabarManager:
         # NOTE: No eviction; multiprocessing/container-per-bot will duplicate work.
         # NOTE: Guarded by lock but not safe for concurrent mutation outside this instance.
         self._cache: Dict[str, List[Candle]] = {}
+        # Frozen backtest datasets have immutable series membership. Once the
+        # dataset authority proves that a requested intrabar series is absent,
+        # repeating the same lookup for every strategy bar cannot change the
+        # answer. Transient provider/read failures are deliberately excluded.
+        self._deterministic_unavailable: Dict[str, str] = {}
         self._snapshots: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
@@ -86,6 +91,24 @@ class IntrabarManager:
                 interval=interval,
                 complete=False,
                 fallback_reason="invalid_strategy_bar_window",
+            )
+        availability_key = self._intrabar_availability_key(series, interval)
+        with self._lock:
+            unavailable_reason = self._deterministic_unavailable.get(availability_key)
+        if unavailable_reason is not None:
+            _, _, expected_count = self._assess_completeness(
+                [],
+                start=start,
+                end=end,
+                interval_seconds=60,
+            )
+            return IntrabarSequence(
+                candles=[],
+                interval=interval,
+                complete=False,
+                fallback_reason=unavailable_reason,
+                expected_count=expected_count,
+                actual_count=0,
             )
         key = self._intrabar_cache_key(series, start, interval)
         cache_key_summary = f"{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{start.date().isoformat()}"
@@ -184,6 +207,7 @@ class IntrabarManager:
     def clear_cache(self) -> None:
         with self._lock:
             self._cache.clear()
+            self._deterministic_unavailable.clear()
             self._snapshots.clear()
 
     def clear_snapshot(self, series: Any) -> None:
@@ -201,6 +225,39 @@ class IntrabarManager:
         epoch = int(start.timestamp())
         strategy_key = self._strategy_key(series)
         return f"{strategy_key}:{getattr(series, 'symbol', '')}:{getattr(series, 'timeframe', '')}:{interval}:{epoch}"
+
+    def _intrabar_availability_key(self, series: Any, interval: str) -> str:
+        instrument = getattr(series, "instrument", None)
+        instrument_id = instrument.get("id") if isinstance(instrument, Mapping) else None
+        return ":".join(
+            (
+                self._strategy_key(series),
+                str(instrument_id or ""),
+                str(getattr(series, "symbol", "") or ""),
+                str(getattr(series, "timeframe", "") or ""),
+                str(getattr(series, "datasource", "") or ""),
+                str(getattr(series, "exchange", "") or ""),
+                interval,
+            )
+        )
+
+    @staticmethod
+    def _is_deterministic_dataset_series_absence(exc: BaseException) -> bool:
+        """Recognize only the frozen-dataset missing-series contract.
+
+        Provider errors and empty responses can recover, so they must remain
+        eligible for a later fetch. The bounded cause walk supports adapters
+        that preserve the typed error while adding context.
+        """
+
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if str(current).strip().startswith("backtest_dataset_series_missing:"):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
 
     def _assess_completeness(
         self,
@@ -254,6 +311,26 @@ class IntrabarManager:
                 exchange=series.exchange,
             )
         except Exception as exc:  # pragma: no cover - defensive logging
+            if self._is_deterministic_dataset_series_absence(exc):
+                availability_key = self._intrabar_availability_key(series, interval)
+                with self._lock:
+                    first_observation = availability_key not in self._deterministic_unavailable
+                    self._deterministic_unavailable[availability_key] = "intrabar_missing"
+                if first_observation:
+                    context = merge_log_context(
+                        series_log_context(series),
+                        build_log_context(
+                            bot_id=self.bot_id,
+                            interval=interval,
+                            reason="backtest_dataset_series_missing",
+                        ),
+                    )
+                    logger.info(
+                        with_log_context(
+                            "bot_runtime_intrabar_series_unavailable_cached",
+                            context,
+                        )
+                    )
             context = merge_log_context(
                 series_log_context(series),
                 build_log_context(

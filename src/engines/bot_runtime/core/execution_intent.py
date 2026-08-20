@@ -29,6 +29,8 @@ class ExecutionIntent:
     order_type: str
     requested_price: float
     contract_size: float = 1.0
+    time_in_force: str = "gtc"
+    post_only: bool = False
     limit_params: Optional[LimitParams] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 

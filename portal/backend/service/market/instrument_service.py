@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from data_providers.providers.factory import get_provider
 from data_providers.registry import normalize_provider_id, normalize_venue_id
+from engines.bot_runtime.core.execution_assumptions import legacy_execution_assumptions
+from engines.bot_runtime.core.execution_context import resolve_execution_context
 from engines.bot_runtime.core.execution_profile import (
     compile_series_execution_profile,
     normalize_execution_semantics,
@@ -20,6 +22,7 @@ from ..storage.repos.instruments import (
     delete_instrument,
     find_instrument,
     get_instrument,
+    install_code_owned_instrument,
     load_instruments,
     upsert_instrument,
 )
@@ -319,6 +322,37 @@ def get_instrument_record(instrument_id: str) -> Dict[str, Any]:
     if not record:
         raise KeyError(f"Instrument {instrument_id} was not found")
     return _with_proxy_derivative_reference(record)
+
+def install_code_owned_research_instrument(
+    payload: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Install an exact reviewed non-execution subject identity."""
+
+    required = {
+        "id",
+        "symbol",
+        "datasource",
+        "exchange",
+        "instrument_type",
+        "metadata",
+    }
+    if set(payload) != required:
+        raise ValueError(
+            "Code-owned research instrument fields must match the v1 contract"
+        )
+    if str(payload.get("instrument_type") or "") != "research_reference":
+        raise ValueError(
+            "Code-owned research instruments must be research_reference"
+        )
+    metadata = dict(payload.get("metadata") or {})
+    if set(metadata) != {"subject_kind", "subject_id", "research_only"}:
+        raise ValueError(
+            "Code-owned research instrument metadata is incomplete"
+        )
+    if metadata.get("research_only") is not True:
+        raise ValueError("Code-owned research instrument must be research only")
+    return install_code_owned_instrument(dict(payload))
+
 
 
 def create_instrument(**payload: object) -> Dict[str, Any]:
@@ -725,6 +759,13 @@ def instrument_runtime_profile(
         require_margin_accounting=resolved_execution_semantics in {"derivative", "proxy_derivative"},
         execution_semantics=resolved_execution_semantics,
     )
+    execution_context = resolve_execution_context(
+        profile,
+        legacy_execution_assumptions(),
+        instrument_payload=payload,
+        source="instrument_profile_preview",
+    )
+    profile = profile.bind_execution_context(execution_context)
     return {
         "schema_version": "instrument_runtime_profile.v1",
         "instrument_id": payload.get("id"),
@@ -732,6 +773,7 @@ def instrument_runtime_profile(
         "runtime_policy": _runtime_policy_from_execution_semantics(profile.instrument.execution_semantics),
         "runtime_policy_version": "instrument_runtime_policy.v1",
         "profile": profile.to_dict(),
+        "resolved_execution_context": execution_context.to_dict(),
     }
 
 
@@ -749,6 +791,27 @@ def instrument_runtime_status(record: Optional[Mapping[str, Any]]) -> Dict[str, 
 
     payload = _with_proxy_derivative_reference(record)
     execution_semantics = _execution_semantics_for_record(payload)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+    provider_metadata = (
+        metadata.get("provider_metadata")
+        if isinstance(metadata.get("provider_metadata"), Mapping)
+        else {}
+    )
+    fee_metadata = (
+        provider_metadata.get("fees")
+        if isinstance(provider_metadata.get("fees"), Mapping)
+        else {}
+    )
+    if fee_metadata.get("status") == "not_requested":
+        return {
+            "research_ready": True,
+            "runtime_ready": False,
+            "runtime_message": "Authenticated execution fee metadata has not been collected.",
+            "runtime_policy": _runtime_policy_from_execution_semantics(execution_semantics),
+            "runtime_policy_version": "instrument_runtime_policy.v1",
+            "execution_semantics": execution_semantics,
+        }
+
     try:
         profile_payload = instrument_runtime_profile(payload, execution_semantics=execution_semantics)
         profile = profile_payload["profile"]

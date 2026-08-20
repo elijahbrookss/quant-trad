@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildBotLensRuntimeViewModel } from '../src/features/bots/botlens/buildBotLensRuntimeViewModel.js'
+import { buildBotLensRuntimeViewModel, groupBotLensDiagnostics } from '../src/features/bots/botlens/buildBotLensRuntimeViewModel.js'
 import {
   selectActiveRunId,
   selectChartHistoryCacheCount,
@@ -250,7 +250,7 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   assert.equal(model.mode, 'ready')
   assert.equal(model.topBar.stats.find((row) => row.key === 'execution-mode'), undefined)
   assert.equal(model.topBar.stats.find((row) => row.key === 'phase'), undefined)
-  assert.equal(model.topBar.stats.find((row) => row.key === 'timeframe')?.value, '1M')
+  assert.equal(model.topBar.stats.find((row) => row.key === 'selected-symbol')?.value, 'BTC · 1m')
   assert.doesNotMatch(model.topBar.subtitle, /FULL/)
   assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'execution-mode')?.value, 'FULL (intrabar)')
   assert.equal(model.currentStatePanels.overview.runRows.find((row) => row.key === 'intrabar-path')?.value, 'Enabled')
@@ -263,6 +263,8 @@ test('runtime view model keeps current-state rows separate from retrieval-backed
   assert.equal(model.retrievalPanels.chart.chartContext.symbol, 'BTC')
   assert.equal(model.retrievalPanels.chart.chartKey, 'instrument-btc|1m')
   assert.equal(model.retrievalPanels.chart.chartContext.openTradeCount, 1)
+  assert.equal(model.retrievalPanels.chart.showActiveTradeLevels, true)
+  assert.equal(model.retrievalPanels.chart.followLatestCandles, true)
   assert.equal(model.retrievalPanels.chart.liveTrades.length, 1)
   assert.deepEqual(
     model.tabs.map((tab) => tab.key),
@@ -420,6 +422,91 @@ test('runtime view model merges signal decision and trade events into the decisi
   assert.equal(model.inspection.decisions.walletRows.find((row) => row.key === 'open-trades')?.value, '1')
   assert.equal(model.inspection.decisions.walletRows.find((row) => row.key === 'trade-events')?.value, '2')
   assert.equal(new Set(model.inspection.trades.recentTrades.map((row) => row.key)).size, 2)
+  assert.equal(model.tabs.find((tab) => tab.key === 'trades')?.badge, '2')
+})
+
+test('runtime view model exposes retained diagnostics separately from active warnings', () => {
+  const base = buildControllerLike(bootstrapState())
+  const diagnostic = {
+    event_id: 'diagnostic-1',
+    event_ts: '2026-01-01T00:04:00Z',
+    level: 'INFO',
+    diagnostic_code: 'candle_continuity_summary',
+    component: 'bot_runtime',
+    status: 'healthy',
+    message: 'Producer-owned terminal candle continuity (gaps=0, candles=8804).',
+    details: { gaps: 0, candle_count: 8804 },
+  }
+  const model = buildBotLensRuntimeViewModel({
+    ...base,
+    logs: [diagnostic],
+  })
+
+  assert.equal(model.inspection.diagnostics.entries.length, 1)
+  assert.equal(model.inspection.diagnostics.entries[0].code, 'Candle Continuity Summary')
+  assert.equal(model.inspection.diagnostics.entries[0].message, diagnostic.message)
+  assert.equal(model.inspection.diagnostics.entries[0].technical, diagnostic)
+  assert.equal(model.tabs.find((tab) => tab.key === 'diagnostics')?.badge, '2')
+})
+
+test('runtime view model merges and deduplicates cursor-replayed forensic evidence', () => {
+  const base = buildControllerLike(bootstrapState())
+  const model = buildBotLensRuntimeViewModel({
+    ...base,
+    forensicDocuments: [
+      {
+        document_id: 'decision-1',
+        cursor: { after_seq: 5, after_row_id: 11 },
+        truth: {
+          event_id: 'decision-1',
+          event_name: 'DECISION_EMITTED',
+          event_ts: '2026-01-01T00:01:00Z',
+          series_key: 'instrument-btc|1m',
+          context: {
+            decision_id: 'decision-1',
+            decision_state: 'rejected',
+            reason_code: 'risk_limit',
+            message: 'Risk limit blocked entry',
+            bar_time: '2026-01-01T00:01:00Z',
+          },
+        },
+      },
+      {
+        document_id: 'trade-close-1',
+        cursor: { after_seq: 6, after_row_id: 12 },
+        truth: {
+          event_id: 'trade-close-1',
+          event_name: 'TRADE_CLOSED',
+          event_ts: '2026-01-01T00:02:00Z',
+          series_key: 'instrument-btc|1m',
+          context: {
+            trade_id: 'trade-1',
+            trade_state: 'closed',
+            exit_price: 102,
+            trade_net_pnl: 2,
+            bar_time: '2026-01-01T00:02:00Z',
+          },
+        },
+      },
+    ],
+    forensicStatus: 'ready',
+    forensicHasMore: false,
+    forensicNextCursor: { afterSeq: 6, afterRowId: 12 },
+  })
+
+  const entries = model.inspection.decisions.entries
+  assert.equal(new Set(entries.map((entry) => entry.event_id)).size, entries.length)
+  assert.equal(entries.filter((entry) => entry.event_id === 'decision-1').length, 1)
+  assert.equal(
+    entries.find((entry) => entry.event_id === 'decision-1')?.reason_code,
+    'risk_limit',
+  )
+  assert.equal(model.inspection.decisions.hasMore, false)
+  assert.deepEqual(model.inspection.decisions.nextCursor, { afterSeq: 6, afterRowId: 12 })
+  assert.equal(
+    model.inspection.decisions.summaryRows.find((row) => row.key === 'rejected')?.value,
+    '1',
+  )
 })
 
 test('runtime view model suppresses generic ready notices in the top-level modal strip', () => {
@@ -444,4 +531,124 @@ test('runtime chart timer mode prefers paper/live run type over playback mode', 
   assert.equal(model.retrievalPanels.chart.chartContext.runMode.label, 'Paper')
   assert.equal(model.topBar.runMode.label, 'Paper')
   assert.doesNotMatch(model.topBar.subtitle, /Paper/)
+})
+
+test('runtime view model stops at unavailable evidence instead of rendering empty live panels', () => {
+  const state = createInitialBotLensState({ botId: 'bot-1' })
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(state, {
+    activeRunId: 'terminal-run',
+    runState: {
+      health: undefined,
+      openTradesIndex: undefined,
+      runMeta: undefined,
+      readiness: undefined,
+      lifecycle: undefined,
+      transportEligible: undefined,
+      symbolIndex: undefined,
+    },
+    runtimeStatus: 'idle',
+    statusMessage: 'Persisted BotLens symbol evidence is unavailable for this terminal run.',
+  }))
+
+  assert.equal(model.mode, 'unavailable')
+  assert.equal(model.topBar.stats.find((row) => row.key === 'last-event')?.value, '—')
+  assert.equal(model.notices[0]?.message, 'Persisted BotLens symbol evidence is unavailable for this terminal run.')
+})
+
+
+test('canonical diagnostic evidence is coalesced by severity source code and stable identity', () => {
+  const grouped = groupBotLensDiagnostics([
+    {
+      severity: 'warning',
+      source: 'storage_persistence',
+      code: 'db_write_slow',
+      message: 'slow write',
+      affected_identity: { series_key: 'btc|1h', details: { operation: 'persist', write_ms: 200 } },
+      timestamp: '2026-01-01T00:00:00Z',
+    },
+    {
+      severity: 'warning',
+      source: 'storage_persistence',
+      code: 'db_write_slow',
+      message: 'slow write',
+      affected_identity: { series_key: 'btc|1h', details: { operation: 'persist', write_ms: 900 } },
+      timestamp: '2026-01-01T00:01:00Z',
+    },
+  ])
+  assert.equal(grouped.length, 1)
+  assert.equal(grouped[0].count, 2)
+  assert.equal(grouped[0].technical.occurrences.length, 2)
+})
+
+test('terminal view model uses durable page totals instead of the bounded hot snapshot counts', () => {
+  const state = bootstrapState()
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(state, {
+    durableEvidence: {
+      decisions: {
+        items: [{ decision_id: 'decision-1', action: 'enter_long', accepted: true, bar_time: '2026-01-01T00:00:00Z' }],
+        total: 599,
+        offset: 0,
+        limit: 100,
+        status: 'ready',
+        error: null,
+      },
+      trades: {
+        items: [{ trade_id: 'trade-1', direction: 'long', entry_time: '2026-01-01T00:00:00Z', status: 'closed' }],
+        total: 508,
+        offset: 0,
+        limit: 100,
+        status: 'ready',
+        error: null,
+      },
+      diagnostics: {
+        items: [],
+        total: 63,
+        offset: 0,
+        limit: 100,
+        status: 'ready',
+        error: null,
+        summary: {},
+      },
+    },
+  }))
+  assert.equal(model.tabs.find((tab) => tab.key === 'decisions').badge, '599')
+  assert.equal(model.tabs.find((tab) => tab.key === 'trades').badge, '508')
+  assert.equal(model.inspection.decisions.rows.length, 1)
+  assert.equal(model.inspection.trades.recentTrades.length, 1)
+})
+
+test('terminal chart inspection disables active levels and resolves the focused completed trade', () => {
+  let state = bootstrapState()
+  state = reduceBotLensState(state, {
+    type: 'retrieval/chartSuccess',
+    runId: 'run-1',
+    symbolKey: 'instrument-btc|1m',
+    candles: [{ time: 1767225600, open: 100, high: 105, low: 99, close: 104 }],
+    trades: [{
+      trade_id: 'trade-focus',
+      status: 'closed',
+      entry_time: '2026-01-01T00:00:00Z',
+      entry_price: 100,
+      exit_time: '2026-01-01T00:01:00Z',
+      exit_price: 104,
+    }],
+    mergeMode: 'replace',
+    focusTime: '2026-01-01T00:00:00Z',
+    focusToken: 'trade:trade-focus:request-1',
+    focusTradeId: 'trade-focus',
+  })
+  const model = buildBotLensRuntimeViewModel(buildControllerLike(state, {
+    chartTrades: state.retrieval.chartHistoryBySymbol['instrument-btc|1m'].trades,
+    runState: {
+      ...state.runState,
+      readiness: { ...state.runState.readiness, run_live: false },
+      lifecycle: { phase: 'completed', status: 'completed' },
+      transportEligible: false,
+    },
+  }))
+
+  assert.equal(model.retrievalPanels.chart.showActiveTradeLevels, false)
+  assert.equal(model.retrievalPanels.chart.followLatestCandles, false)
+  assert.equal(model.retrievalPanels.chart.focusTradeId, 'trade-focus')
+  assert.equal(model.retrievalPanels.chart.focusedTrade?.trade_id, 'trade-focus')
 })

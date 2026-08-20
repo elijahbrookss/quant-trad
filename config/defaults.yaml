@@ -13,8 +13,10 @@ backend:
     - http://localhost
     - http://localhost:3000
     - http://localhost:5173
+    - http://localhost:5174
     - http://127.0.0.1
     - http://127.0.0.1:5173
+    - http://127.0.0.1:5174
 
 database:
   dsn: null
@@ -45,6 +47,9 @@ observability:
   persist_pending_events_max: 10000
   high_volume_metric_sample_every: 100
   high_volume_metric_max_lag_ms: 5000
+  capacity_sample_enabled: true
+  capacity_sample_interval_seconds: 300
+  capacity_sample_retention_days: 30
 
 async_jobs:
   running_timeout_seconds: 1800
@@ -68,6 +73,29 @@ workers:
     idle_sleep_seconds: 0.2
     idle_sleep_max_seconds: 2.0
     db_wait_timeout_seconds: 120
+  collectors:
+    processes: 1
+    index: 0
+    total: 1
+    idle_sleep_seconds: 0.5
+    idle_sleep_max_seconds: 5.0
+    db_wait_timeout_seconds: 120
+
+market_data_lifecycle:
+  enabled: true
+  execution_enabled: false
+  interval_seconds: 3600
+  archive_compaction_enabled: true
+  archive_expiration_enabled: true
+  raw_trade_archive_days: 400
+  raw_l2_archive_days: 90
+  book_checkpoint_archive_days: 90
+  compacted_source_grace_hours: 24
+  compaction_min_age_minutes: 15
+  compaction_min_objects: 2
+  compaction_target_bytes: 536870912
+  max_compaction_groups_per_run: 8
+  max_archive_expirations_per_run: 100
 
 bot_runtime:
   mode: backtest
@@ -121,6 +149,7 @@ bot_runtime:
     max_decisions: 600
     max_warnings: 120
     ring_size: 8192
+    viewer_send_timeout_ms: 1500
     ingest_queue_max: 4096
     persist_observer_continuity: false
   step_trace:
@@ -182,8 +211,8 @@ frontend:
 
 reports:
   materialization:
-    terminal_auto_enqueue_enabled: false
-    terminal_auto_enqueue_delay_seconds: 0
+    terminal_auto_enqueue_enabled: true
+    terminal_auto_enqueue_delay_seconds: 1
   artifacts:
     enabled: true
     root_dir: reports

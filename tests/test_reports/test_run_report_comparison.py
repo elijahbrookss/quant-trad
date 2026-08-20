@@ -153,6 +153,58 @@ def test_report_not_ready_blocks_without_materialized_artifact_read(monkeypatch:
     assert called["materialized"] == 0
 
 
+def test_minimum_execution_quality_blocks_lower_class_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    reports = {"left": _report("left"), "right": _report("right")}
+    reports["left"]["trust"]["execution_quality_class"] = "X1"
+    reports["right"]["trust"]["execution_quality_class"] = "X2"
+    monkeypatch.setattr(comparison, "report_materialization_status", lambda run_id, **_kwargs: _ready_status(run_id))
+    monkeypatch.setattr(comparison, "materialized_run_report", lambda run_id: reports[run_id])
+
+    result = comparison.compare_materialized_run_reports(
+        "left",
+        "right",
+        minimum_execution_quality_class="X2",
+    )
+
+    assert result.can_compare is False
+    assert result.blocked_reason == "left_execution_quality_below_X2"
+
+
+def test_minimum_x4_execution_quality_is_enforced_by_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports = {"left": _report("left"), "right": _report("right")}
+    reports["left"]["trust"]["execution_quality_class"] = "X4"
+    reports["right"]["trust"]["execution_quality_class"] = "X3"
+    monkeypatch.setattr(
+        comparison,
+        "report_materialization_status",
+        lambda run_id, **_kwargs: _ready_status(run_id),
+    )
+    monkeypatch.setattr(
+        comparison,
+        "materialized_run_report",
+        lambda run_id: reports[run_id],
+    )
+
+    blocked = comparison.compare_materialized_run_reports(
+        "left",
+        "right",
+        minimum_execution_quality_class="X4",
+    )
+    assert blocked.can_compare is False
+    assert blocked.blocked_reason == "right_execution_quality_below_X4"
+
+    reports["right"]["trust"]["execution_quality_class"] = "X4"
+    ready = comparison.compare_materialized_run_reports(
+        "left",
+        "right",
+        include_golden=False,
+        minimum_execution_quality_class="X4",
+    )
+    assert ready.can_compare is True
+
+
 def test_metric_validity_is_preserved_in_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
     reports = {
         "left": _report("left", sharpe=_metric(None, valid=False, reason="zero_return_stddev", unit="ratio")),
@@ -304,3 +356,23 @@ def test_golden_evidence_first_divergence_populates_fields(monkeypatch: pytest.M
     assert result.first_divergence.present is True
     assert result.first_divergence.source == "golden"
     assert result.first_divergence.decision_id == "decision-1"
+
+
+def test_execution_semantics_mismatch_is_descriptive_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    left = _report("left")
+    right = _report("right", semantic="semantic-b")
+    left["identity"]["execution_semantics"] = ["spot"]
+    right["identity"]["execution_semantics"] = ["proxy_derivative"]
+    reports = {"left": left, "right": right}
+    monkeypatch.setattr(comparison, "report_materialization_status", lambda run_id, **_kwargs: _ready_status(run_id))
+    monkeypatch.setattr(comparison, "materialized_run_report", lambda run_id: reports[run_id])
+
+    result = comparison.compare_materialized_run_reports("left", "right")
+
+    assert result.can_compare is True
+    assert result.semantic_eligibility.status == "incompatible"
+    assert result.semantic_eligibility.equivalent is False
+    assert "execution_semantics_mismatch" in result.semantic_eligibility.blockers
+    assert result.first_divergence.divergence_type == "execution_semantics_mismatch"
+    assert result.first_divergence.left_value == ["spot"]
+    assert result.first_divergence.right_value == ["proxy_derivative"]

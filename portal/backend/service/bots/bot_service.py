@@ -11,6 +11,7 @@ from ..market import candle_service
 from ..market.backtest_dataset_service import (
     prepare_backtest_dataset as prepare_backtest_dataset_material,
 )
+from ..storage.repos.run_leases import run_lease_is_active
 from .bot_state_projection import project_bot_state
 from .runner import DockerBotRunner
 from .runtime_composition import get_runtime_composition
@@ -19,6 +20,64 @@ from .startup_lifecycle import is_active_run_state, is_terminal_run_state
 logger = logging.getLogger(__name__)
 
 _WATCHDOG_CALLBACK_SET = False
+
+_RUN_PROJECTION_CONFIG_KEYS = frozenset(
+    {
+        "execution_mode",
+        "execution_behavior",
+        "request_id",
+        "start_request",
+        "date_range",
+        "symbols",
+        "timeframe",
+        "datasource",
+        "exchange",
+        "wallet_start",
+        "risk_settings",
+    }
+)
+
+
+def _compact_dataset_binding(value: Any) -> Dict[str, Any]:
+    binding = dict(value) if isinstance(value, Mapping) else {}
+    scalar_keys = (
+        "schema_version",
+        "dataset_contract_version",
+        "dataset_id",
+        "dataset_hash",
+        "max_commit_seq",
+        "strategy_id",
+        "strategy_hash",
+        "effective_strategy_config_hash",
+        "indicator_config_hash",
+        "execution_policy_hash",
+        "instrument_config_hash",
+        "execution_config_hash",
+        "evaluation_range",
+        "warmup_range",
+        "materialization_range",
+        "decision_range",
+        "quality",
+        "validation_status",
+    )
+    return {key: binding.get(key) for key in scalar_keys if binding.get(key) not in (None, "", [], {})}
+
+
+def _compact_run_projection(value: Mapping[str, Any] | None) -> Dict[str, Any]:
+    run = dict(value or {})
+    if not run:
+        return {}
+    config = dict(run.get("config_snapshot") or {}) if isinstance(run.get("config_snapshot"), Mapping) else {}
+    compact_config = {
+        key: config.get(key)
+        for key in _RUN_PROJECTION_CONFIG_KEYS
+        if config.get(key) not in (None, "", [], {})
+    }
+    binding = _compact_dataset_binding(config.get("dataset_binding"))
+    if binding:
+        compact_config["dataset_binding"] = binding
+    run["config_snapshot"] = compact_config
+    return run
 
 
 def _composition():
@@ -37,6 +96,17 @@ def _telemetry_hub():
     from .telemetry_stream import telemetry_hub
 
     return telemetry_hub
+
+
+def _durable_botlens_evidence(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    reader = getattr(_composition().storage, "list_botlens_run_evidence", None)
+    if not callable(reader):
+        return {}
+    return {
+        str(key): dict(value)
+        for key, value in dict(reader(run_ids) or {}).items()
+        if isinstance(value, Mapping)
+    }
 
 
 def ensure_watchdog_stream_bridge() -> None:
@@ -111,9 +181,12 @@ def _load_projection_inputs_batch(
     leases_by_id = dict(
         storage.list_bot_run_leases_by_run_ids(sorted(selected_run_ids)) or {}
     )
-    report_statuses = dict(
-        storage.list_report_materialization_statuses(sorted(selected_run_ids)) or {}
+    observation_reader = getattr(
+        storage,
+        "list_report_materialization_observations",
+        storage.list_report_materialization_statuses,
     )
+    report_statuses = dict(observation_reader(sorted(selected_run_ids)) or {})
     telemetry_hub = _telemetry_hub()
 
     result: Dict[
@@ -126,7 +199,7 @@ def _load_projection_inputs_batch(
             str((lifecycle or {}).get("run_id") or "").strip()
             or str((latest_runs_by_bot.get(bot_id) or {}).get("run_id") or "").strip()
         )
-        run = dict(runs_by_id.get(run_id) or latest_runs_by_bot.get(bot_id) or {}) if run_id else {}
+        run = _compact_run_projection(runs_by_id.get(run_id) or latest_runs_by_bot.get(bot_id)) if run_id else {}
         if run and run_id:
             try:
                 report_status = dict(report_statuses.get(run_id) or storage.get_report_materialization_status(run_id))
@@ -141,8 +214,9 @@ def _load_projection_inputs_batch(
 
 def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any] | None, *, inspect_container: bool) -> Dict[str, Any]:
     bot_id = str(bot.get("id") or "").strip()
+    run_id = str((lifecycle or {}).get("run_id") or "").strip() or None
     default_state = {
-        "name": DockerBotRunner.container_name_for(bot_id),
+        "name": DockerBotRunner.container_name_for(bot_id, run_id=run_id),
         "status": "missing",
         "running": False,
         "id": None,
@@ -162,7 +236,7 @@ def _container_state_for_bot(bot: Mapping[str, Any], lifecycle: Mapping[str, Any
     if not should_inspect:
         return default_state
     try:
-        return DockerBotRunner.inspect_bot_container(bot_id)
+        return DockerBotRunner.inspect_bot_container(bot_id, run_id=run_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("bot_container_inspect_failed | bot_id=%s | error=%s", bot_id, exc)
         return {**default_state, "status": "unknown", "error": str(exc)}
@@ -187,7 +261,11 @@ def _project_bots(bots: List[Mapping[str, Any]], *, inspect_container: bool = Tr
     for bot in bots:
         bot_id = str(bot.get("id") or "").strip()
         run, lifecycle, lease, run_snapshot = inputs_by_bot.get(bot_id, (None, None, None, None))
-        container_state = _container_state_for_bot(bot, lifecycle, inspect_container=inspect_container)
+        container_state = _container_state_for_bot(
+            bot,
+            lifecycle,
+            inspect_container=inspect_container,
+        )
         projected.append(
             project_bot_state(
                 bot,
@@ -202,7 +280,10 @@ def _project_bots(bots: List[Mapping[str, Any]], *, inspect_container: bool = Tr
 
 
 def list_bots() -> List[Dict[str, object]]:
-    return _project_bots(_composition().config_service.list_bots())
+    # Definition inventory is a hot read model. Docker supervision belongs to
+    # the watchdog; list reads use lifecycle/lease/projector observations and
+    # never shell out once per row.
+    return _project_bots(_composition().config_service.list_bots(), inspect_container=False)
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
@@ -387,10 +468,32 @@ def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
         raise KeyError(f"run {normalized_run_id!r} does not belong to bot {bot_id!r}")
     if not run and not lifecycle:
         raise KeyError(normalized_run_id)
-    status = _clean_text(lifecycle.get("status")) or "unknown"
+    run_snapshot = _telemetry_hub().get_run_snapshot(run_id=normalized_run_id)
+    runtime_health = (
+        _as_mapping(run_snapshot.health.to_dict())
+        if run_snapshot is not None
+        else {}
+    )
+    persisted_status = _clean_text(run.get("status"))
+    lifecycle_status = _clean_text(lifecycle.get("status"))
     phase = _clean_text(lifecycle.get("phase"))
+    status = (
+        persisted_status
+        if persisted_status and is_terminal_run_state(status=persisted_status)
+        else (
+            _clean_text(runtime_health.get("status"))
+            or lifecycle_status
+            or persisted_status
+            or "unknown"
+        )
+    )
     report_status = _report_status(normalized_run_id)
     terminal = is_terminal_run_state(status=status, phase=phase)
+    checkpoint_at = (
+        runtime_health.get("last_event_at")
+        or runtime_health.get("last_useful_progress_at")
+        or lifecycle.get("checkpoint_at")
+    )
     return {
         "schema_version": "bot_run_status.v1",
         "bot_id": bot_id,
@@ -399,9 +502,11 @@ def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
         "phase": phase,
         "terminal": terminal,
         "completed": status == "completed" or phase == "completed",
-        "active": is_active_run_state(status=status, phase=phase),
-        "checkpoint_at": lifecycle.get("checkpoint_at"),
-        "updated_at": lifecycle.get("updated_at") or run.get("updated_at"),
+        "active": not terminal and is_active_run_state(status=status, phase=phase),
+        "checkpoint_at": checkpoint_at,
+        "updated_at": checkpoint_at or lifecycle.get("updated_at") or run.get("updated_at"),
+        "progress": runtime_health.get("progress"),
+        "progress_unit": "fraction" if runtime_health.get("progress") is not None else None,
         "started_at": run.get("started_at"),
         "ended_at": run.get("ended_at"),
         "summary": _metric_subset(_as_mapping(run.get("summary"))),
@@ -459,7 +564,13 @@ def publish_projected_bot(bot_id: str, *, inspect_container: bool = True) -> Non
     _broadcast_bot_stream("bot", {"bot": projected})
 
 
-def publish_runtime_update(bot_id: str, runtime: Mapping[str, Any]) -> None:
+def publish_runtime_update(
+    bot_id: str,
+    runtime: Mapping[str, Any],
+    *,
+    run_id: str | None = None,
+) -> None:
+    normalized_run_id = str(run_id or runtime.get("run_id") or "").strip() or None
     _broadcast_bot_stream(
         "bot_runtime",
         {
@@ -467,6 +578,15 @@ def publish_runtime_update(bot_id: str, runtime: Mapping[str, Any]) -> None:
             "runtime": dict(runtime or {}),
         },
     )
+    if normalized_run_id:
+        _broadcast_bot_stream(
+            "run_runtime",
+            {
+                "bot_id": bot_id,
+                "run_id": normalized_run_id,
+                "runtime": dict(runtime or {}),
+            },
+        )
 
 
 def create_bot(name: str, **payload: object) -> Dict[str, object]:
@@ -539,6 +659,7 @@ def prepare_backtest_dataset(
     evaluation_end: str,
     acquire_missing: bool,
     created_by: str | None = None,
+    numeric_acquisition: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Resolve strategy requirements and freeze data without starting a run."""
 
@@ -557,6 +678,7 @@ def prepare_backtest_dataset(
         evaluation_end=evaluation_end,
         acquire_missing=bool(acquire_missing),
         created_by=created_by,
+        numeric_acquisition=numeric_acquisition,
     )
 
 
@@ -600,6 +722,207 @@ def get_bot(bot_id: str) -> Dict[str, object]:
     return _project_bot(_composition().config_service.get_bot(bot_id))
 
 
+def get_bot_run_inspection(run_id: str) -> Dict[str, Any]:
+    """Return one exact run with its definition, lifecycle, lease, and read models."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        raise ValueError("run_id is required")
+    run = _as_mapping(_composition().storage.get_bot_run(normalized_run_id))
+    if not run:
+        raise KeyError(normalized_run_id)
+    bot_id = _clean_text(run.get("bot_id"))
+    if not bot_id:
+        raise ValueError(f"bot_id missing for run_id={normalized_run_id}")
+    try:
+        bot = _as_mapping(_composition().config_service.get_bot(bot_id))
+        definition_available = True
+    except KeyError:
+        # Historical run identity remains inspectable even if its mutable
+        # definition is no longer present. The persisted run row is explicit
+        # fallback evidence, not a reconstruction of the missing definition.
+        bot = {}
+        definition_available = False
+    lifecycle = _as_mapping(
+        _composition().storage.get_bot_run_lifecycle(normalized_run_id)
+    )
+    lease = _as_mapping(
+        _composition().storage.get_bot_run_lease(normalized_run_id)
+    )
+    report_status = _report_status(normalized_run_id)
+    run_snapshot = _telemetry_hub().get_run_snapshot(run_id=normalized_run_id)
+    ledger_evidence = _durable_botlens_evidence([normalized_run_id]).get(normalized_run_id, {})
+    projection_available = run_snapshot is not None or bool(ledger_evidence)
+    runtime_health = (
+        _as_mapping(run_snapshot.health.to_dict())
+        if run_snapshot is not None
+        else {}
+    )
+    persisted_status = _clean_text(run.get("status")) or "unknown"
+    runtime_status = (
+        persisted_status
+        if is_terminal_run_state(
+            status=persisted_status,
+            phase=lifecycle.get("phase"),
+        )
+        else (
+            _clean_text(runtime_health.get("status"))
+            or _clean_text(lifecycle.get("status"))
+            or persisted_status
+        )
+    )
+    return {
+        "schema_version": "bot_run_inspection.v1",
+        "run": {
+            **dict(run),
+            "runtime_status": runtime_status,
+            "is_active": (
+                str(lifecycle.get("run_id") or "").strip() == normalized_run_id
+                and is_active_run_state(
+                    status=lifecycle.get("status"),
+                    phase=lifecycle.get("phase"),
+                )
+            ),
+            "lifecycle": dict(lifecycle),
+            "lease": dict(lease),
+            "projection": {
+                "available": projection_available,
+                "reason": None if projection_available else "durable_evidence_unavailable",
+                "source": (
+                    "hot_projection" if run_snapshot is not None else ledger_evidence.get("source")
+                ),
+                "known_at": runtime_health.get("last_event_at") or ledger_evidence.get("known_at"),
+                "seq": (
+                    int(run_snapshot.seq or 0)
+                    if run_snapshot is not None
+                    else ledger_evidence.get("max_seq")
+                ),
+                "event_count": ledger_evidence.get("event_count"),
+            },
+            "report_materialization": dict(report_status),
+        },
+        "definition": {
+            "available": definition_available,
+            "id": bot.get("id") or bot_id,
+            "name": bot.get("name") or run.get("bot_name"),
+            "strategy_id": bot.get("strategy_id") or run.get("strategy_id"),
+            "strategy_variant_id": bot.get("strategy_variant_id"),
+            "strategy_variant_name": bot.get("strategy_variant_name") or run.get("strategy_name"),
+            "run_type": bot.get("run_type") or run.get("run_type"),
+            "execution_mode": bot.get("execution_mode") or run.get("execution_mode"),
+        },
+        "observed_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _run_inventory_sort_at(run: Mapping[str, Any]) -> str:
+    return str(
+        run.get("started_at")
+        or run.get("updated_at")
+        or run.get("created_at")
+        or ""
+    )
+
+
+def list_bot_runs_inventory(
+    *,
+    limit: int = 100,
+    before_sort_at: str | None = None,
+    before_run_id: str | None = None,
+) -> Dict[str, Any]:
+    """Return one bounded global run window without per-definition fan-out."""
+
+    bounded_limit = max(1, min(int(limit or 100), 100))
+    rows = _composition().storage.list_bot_runs_page(
+        limit=bounded_limit + 1,
+        before_sort_at=before_sort_at,
+        before_run_id=before_run_id,
+    )
+    has_more = len(rows) > bounded_limit
+    selected = list(rows[:bounded_limit])
+    evidence_by_run = _durable_botlens_evidence(
+        [str(run.get("run_id") or "") for run in selected]
+    )
+    bot_ids = sorted(
+        {str(run.get("bot_id") or "").strip() for run in selected}
+        - {""}
+    )
+    lifecycles = _composition().storage.list_latest_bot_run_lifecycles(bot_ids)
+    projected_runs: list[Dict[str, Any]] = []
+    for run in selected:
+        compact_run = _compact_run_projection(run)
+        run_id = str(run.get("run_id") or "").strip()
+        bot_id = str(run.get("bot_id") or "").strip()
+        lifecycle = _as_mapping(lifecycles.get(bot_id))
+        summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
+        ledger_evidence = evidence_by_run.get(run_id, {})
+        botlens_available = summary_state is not None or bool(ledger_evidence)
+        runtime_payload = (
+            _as_mapping(summary_state.health.to_dict())
+            if summary_state is not None
+            else {}
+        )
+        persisted_status = str(run.get("status") or "unknown")
+        runtime_status = (
+            persisted_status
+            if is_terminal_run_state(status=persisted_status)
+            else str(
+                runtime_payload.get("status")
+                or (lifecycle.get("status") if lifecycle.get("run_id") == run_id else None)
+                or persisted_status
+            )
+        )
+        summary = dict(run.get("summary") or {})
+        if not summary and summary_state is not None:
+            total_trades = sum(
+                int((_as_mapping(item).get("stats") or {}).get("total_trades") or 0)
+                for item in summary_state.symbol_catalog.entries.values()
+            )
+            if total_trades > 0:
+                summary = {"total_trades": total_trades}
+        is_active = (
+            str(lifecycle.get("run_id") or "") == run_id
+            and is_active_run_state(
+                status=lifecycle.get("status"),
+                phase=lifecycle.get("phase"),
+            )
+        )
+        projected_runs.append(
+            {
+                **compact_run,
+                "is_active": is_active,
+                "runtime_status": runtime_status,
+                "botlens_available": botlens_available,
+                "botlens_reason": None if botlens_available else "durable_evidence_unavailable",
+                "botlens_source": (
+                    "hot_projection" if summary_state is not None else ledger_evidence.get("source")
+                ),
+                "last_snapshot_at": runtime_payload.get("last_event_at"),
+                "known_at": runtime_payload.get("last_event_at") or ledger_evidence.get("known_at"),
+                "seq": (
+                    int(summary_state.seq or 0)
+                    if summary_state is not None
+                    else ledger_evidence.get("max_seq")
+                ),
+                "summary": summary,
+            }
+        )
+    cursor_run = projected_runs[-1] if has_more and projected_runs else None
+    return {
+        "schema_version": "bot_run_inventory.v1",
+        "runs": projected_runs,
+        "next_cursor": (
+            {
+                "before_sort_at": _run_inventory_sort_at(cursor_run),
+                "before_run_id": cursor_run.get("run_id"),
+            }
+            if cursor_run is not None
+            else None
+        ),
+        "observed_at": datetime.now(UTC).isoformat(),
+    }
+
+
 def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
     current = get_bot(bot_id)
     active_run_id = str(current.get("active_run_id") or "").strip() or None
@@ -613,12 +936,18 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
 
     ordered = sorted(rows, key=_sort_key, reverse=True)
     selected = ordered[: max(1, int(limit or 25))]
+    evidence_by_run = _durable_botlens_evidence(
+        [str(run.get("run_id") or "") for run in selected]
+    )
     projected_runs: list[Dict[str, Any]] = []
     for run in selected:
+        compact_run = _compact_run_projection(run)
         run_id = str(run.get("run_id") or "").strip()
         if not run_id:
             continue
         summary_state = _telemetry_hub().get_run_snapshot(run_id=run_id)
+        ledger_evidence = evidence_by_run.get(run_id, {})
+        botlens_available = summary_state is not None or bool(ledger_evidence)
         runtime_payload = summary_state.health.to_dict() if summary_state is not None else {}
         persisted_status = str(run.get("status") or "")
         runtime_status = (
@@ -639,14 +968,21 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
                 summary = {"total_trades": total_trades}
         projected_runs.append(
             {
-                **dict(run),
+                **compact_run,
                 "is_active": run_id == active_run_id,
                 "runtime_status": runtime_status,
-                "botlens_available": summary_state is not None,
-                "botlens_reason": None if summary_state is not None else "snapshot_unavailable",
+                "botlens_available": botlens_available,
+                "botlens_reason": None if botlens_available else "durable_evidence_unavailable",
+                "botlens_source": (
+                    "hot_projection" if summary_state is not None else ledger_evidence.get("source")
+                ),
                 "last_snapshot_at": runtime_payload.get("last_event_at"),
-                "known_at": runtime_payload.get("last_event_at"),
-                "seq": int(summary_state.seq or 0) if summary_state is not None else None,
+                "known_at": runtime_payload.get("last_event_at") or ledger_evidence.get("known_at"),
+                "seq": (
+                    int(summary_state.seq or 0)
+                    if summary_state is not None
+                    else ledger_evidence.get("max_seq")
+                ),
                 "summary": summary,
             }
         )
@@ -657,8 +993,111 @@ def list_bot_runs_for_bot(bot_id: str, *, limit: int = 25) -> Dict[str, Any]:
     }
 
 
+def list_active_run_instances() -> List[Dict[str, Any]]:
+    """Return one compact hot projection per fresh active run lease."""
+
+    storage = _composition().storage
+    lease_reader = getattr(storage, "list_active_bot_run_leases", None)
+    lifecycle_reader = getattr(storage, "list_bot_run_lifecycles", None)
+    if not callable(lease_reader) or not callable(lifecycle_reader):
+        return []
+    leases = [
+        dict(lease)
+        for lease in lease_reader() or []
+        if isinstance(lease, Mapping) and run_lease_is_active(lease)
+    ]
+    run_ids = sorted(
+        {
+            str(lease.get("run_id") or "").strip()
+            for lease in leases
+            if str(lease.get("run_id") or "").strip()
+        }
+    )
+    if not run_ids:
+        return []
+    runs_by_id = dict(storage.list_bot_runs_by_ids(run_ids) or {})
+    lifecycles_by_id = dict(lifecycle_reader(run_ids) or {})
+    evidence_by_id = dict(storage.list_botlens_run_evidence(run_ids) or {})
+    definitions = {
+        str(bot.get("id") or "").strip(): dict(bot)
+        for bot in _composition().config_service.list_bots()
+        if str(bot.get("id") or "").strip()
+    }
+    leases_by_id = {
+        str(lease.get("run_id") or "").strip(): lease
+        for lease in leases
+    }
+    rows: List[Dict[str, Any]] = []
+    for run_id in run_ids:
+        run = _compact_run_projection(runs_by_id.get(run_id))
+        lifecycle = dict(lifecycles_by_id.get(run_id) or {})
+        if not run or not is_active_run_state(
+            status=lifecycle.get("status") or run.get("status"),
+            phase=lifecycle.get("phase"),
+        ):
+            continue
+        bot_id = str(run.get("bot_id") or lifecycle.get("bot_id") or "").strip()
+        snapshot = _telemetry_hub().get_run_snapshot(run_id=run_id)
+        runtime = dict(snapshot.health.to_dict()) if snapshot is not None else {}
+        status = str(
+            runtime.get("status")
+            or lifecycle.get("status")
+            or run.get("status")
+            or "starting"
+        ).strip().lower()
+        evidence = dict(evidence_by_id.get(run_id) or {})
+        projection_available = snapshot is not None or bool(evidence)
+        known_at = (
+            runtime.get("last_event_at")
+            or runtime.get("last_useful_progress_at")
+            or lifecycle.get("checkpoint_at")
+            or lifecycle.get("updated_at")
+            or run.get("updated_at")
+        )
+        rows.append(
+            {
+                **run,
+                "runtime_status": status,
+                "runtime": runtime,
+                "progress": runtime.get("progress"),
+                "progress_unit": "fraction" if runtime.get("progress") is not None else None,
+                "known_at": known_at,
+                "lifecycle": lifecycle,
+                "lease": leases_by_id.get(run_id) or {},
+                "liveness": {
+                    "state": "alive" if snapshot is not None else "awaiting_telemetry",
+                    "lease_fresh": True,
+                    "last_update_at": known_at,
+                },
+                "botlens_available": projection_available,
+                "botlens_reason": (
+                    None
+                    if projection_available
+                    else "BotLens will become available after the first projected runtime evidence."
+                ),
+                "is_active": True,
+                "definition": definitions.get(bot_id) or {},
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            str(row.get("started_at") or row.get("created_at") or ""),
+            str(row.get("run_id") or ""),
+        ),
+        reverse=True,
+    )
+    return rows
+
+
 def bots_stream():
-    return _composition().runtime_control_service.bots_stream()
+    return _composition().stream_manager.subscribe_all(list_bots)
+
+
+def active_runs_stream():
+    return _composition().stream_manager.subscribe_all(
+        list_active_run_instances,
+        snapshot_key="runs",
+    )
 
 
 def watchdog_status() -> Dict[str, Any]:

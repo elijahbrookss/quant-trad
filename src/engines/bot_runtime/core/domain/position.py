@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, Tuple, TYPE_CHECKING
 
 import risk as risk_math
 
@@ -16,13 +16,20 @@ from utils.log_context import build_log_context, with_log_context
 from ..execution import FillRejection, FillResult
 from ..execution_adapter import ExecutionAdapter
 from ..events import ExitSettlementPayload
-from ..execution_order import build_fill_order, execute_fill_order
+from ..execution_order import build_fill_order, execute_fill_order_with_lifecycle
 from ..execution_plan import RuntimeStopAdjustment
 from ..execution_policy import ExitExecutionPolicy, exit_policy_for, fee_rate_for_role, normalize_liquidity_role
 from ..execution_profile import SeriesExecutionProfile
+from ..execution_assumptions import ResolvedExecutionAssumptions
 from ..exit_settlement import ExitSettlement, ExitSettlementService
 from ..fees import executed_fee, executed_notional
 from ..margin import resolve_instrument_type, InstrumentType
+from ..order_lifecycle import (
+    CanonicalOrderLifecycle,
+    CanonicalOrderState,
+    TERMINAL_ORDER_STATES,
+    venue_lifecycle_event_name,
+)
 from ..wallet_gateway import WalletGateway
 from .models import Candle, Leg
 from .time_utils import isoformat
@@ -82,9 +89,12 @@ class LadderPosition:
     short_requires_borrow: bool = False
     instrument: Optional[Dict[str, Any]] = None  # For margin-based validation
     execution_profile: Optional[SeriesExecutionProfile] = None
+    execution_assumptions: Optional[ResolvedExecutionAssumptions] = None
     signal_id: Optional[str] = None
     decision_id: Optional[str] = None
     strategy_id: Optional[str] = None
+    run_id: Optional[str] = None
+    bot_id: Optional[str] = None
     bar_time: Optional[datetime] = None
     moved_to_breakeven: bool = False
     closed_at: Optional[datetime] = None
@@ -113,6 +123,8 @@ class LadderPosition:
     stop_adjustments: List[RuntimeStopAdjustment] = field(default_factory=list)
     close_reason: Optional[str] = None
     reason_code: Optional[str] = None
+    _order_lifecycles: Dict[str, CanonicalOrderLifecycle] = field(default_factory=dict, repr=False)
+    _order_lifecycle_updates: List[Tuple[CanonicalOrderLifecycle, int]] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
         self.best_price = self.entry_price
@@ -127,6 +139,76 @@ class LadderPosition:
             self.fees_paid += fee
             self._update_net()
 
+    def apply_incremental_entry_fill(
+        self,
+        *,
+        fill_id: str,
+        filled_qty: float,
+        fill_price: float,
+        fee_paid: float,
+        stop_price: float,
+        fill_legs: List[Leg],
+        fill_evidence: Mapping[str, Any],
+        wallet_metadata: Mapping[str, Any],
+    ) -> bool:
+        """Idempotently augment this canonical position for one entry fill."""
+
+        normalized_fill_id = str(fill_id or "").strip()
+        if not normalized_fill_id:
+            raise ValueError("incremental entry fill_id is required")
+        outcome = dict(self.entry_outcome or {})
+        applied_ids = [str(value) for value in outcome.get("entry_fill_ids") or ()]
+        if normalized_fill_id in applied_ids:
+            return False
+        if not self.is_active():
+            raise RuntimeError("incremental entry fill cannot augment a closed position")
+        quantity = float(filled_qty)
+        price = float(fill_price)
+        if not math.isfinite(quantity) or not math.isfinite(price) or quantity <= 0 or price <= 0:
+            raise ValueError("incremental entry fill quantity and price must be positive")
+        current_qty = sum(max(float(leg.contracts), 0.0) for leg in self.legs)
+        if current_qty <= 0:
+            raise RuntimeError("canonical position has no entry quantity to augment")
+        new_qty = current_qty + quantity
+        new_price = ((self.entry_price * current_qty) + (price * quantity)) / new_qty
+        self.entry_price = float(new_price)
+        self.stop_price = float(stop_price)
+        by_id = {str(leg.leg_id or leg.name): leg for leg in self.legs}
+        for added in fill_legs:
+            key = str(added.leg_id or added.name)
+            existing = by_id.get(key)
+            if existing is None:
+                self.legs.append(added)
+                by_id[key] = added
+                continue
+            existing.contracts = float(existing.contracts) + float(added.contracts)
+            if existing.status == "open":
+                existing.target_price = float(added.target_price)
+                existing.ticks = int(added.ticks)
+        applied_ids.append(normalized_fill_id)
+        fill_rows = [dict(row) for row in outcome.get("entry_fills") or () if isinstance(row, Mapping)]
+        fill_rows.append(dict(fill_evidence))
+        outcome.update(
+            {
+                "entry_fill_ids": applied_ids,
+                "entry_fills": fill_rows,
+                "filled_qty": new_qty,
+                "avg_fill_price": self.entry_price,
+                "fee_paid": float(outcome.get("fee_paid") or 0.0) + float(fee_paid or 0.0),
+                "remaining_qty": max(float(outcome.get("requested_qty") or new_qty) - new_qty, 0.0),
+            }
+        )
+        self.entry_outcome = outcome
+        self.apply_entry_fee(float(fee_paid or 0.0))
+        if wallet_metadata:
+            existing_wallet = dict(self.wallet_fill_metadata or {})
+            rows = [dict(row) for row in existing_wallet.get("entry_fills") or () if isinstance(row, Mapping)]
+            if not rows and existing_wallet:
+                rows.append(existing_wallet)
+            rows.append(dict(wallet_metadata))
+            self.wallet_fill_metadata = {"entry_fills": rows, "fill_count": len(rows)}
+        return True
+
     def _apply_fee_amount(self, fee: float) -> None:
         if fee:
             self.fees_paid += fee
@@ -139,7 +221,23 @@ class LadderPosition:
         side: str,
         *,
         policy: ExitExecutionPolicy,
+        order_key: str,
+        known_at: datetime,
+        leg_id: Optional[str] = None,
     ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
+        logical_key = str(order_key or "").strip()
+        if not logical_key:
+            raise ValueError("exit order_key is required")
+        lifecycle = self._order_lifecycles.get(logical_key)
+        if lifecycle is not None and lifecycle.snapshot().state in TERMINAL_ORDER_STATES:
+            retry_index = 2
+            retry_key = f"{logical_key}:retry:{retry_index}"
+            while retry_key in self._order_lifecycles:
+                retry_index += 1
+                retry_key = f"{logical_key}:retry:{retry_index}"
+            logical_key = retry_key
+            lifecycle = None
+        request_id = f"exit_order:{logical_key}"
         order = build_fill_order(
             side=side,
             requested_qty=contracts,
@@ -149,13 +247,85 @@ class LadderPosition:
             price_source=policy.price_source,
             maker_fee_rate=self.maker_fee_rate,
             taker_fee_rate=self.taker_fee_rate,
-            metadata={"trade_id": self.trade_id, "direction": self.direction},
+            fee_source=self.fee_source,
+            fee_version=self.fee_version,
+            execution_context=(
+                self.execution_profile.execution_context
+                if self.execution_profile is not None
+                else None
+            ),
+            metadata={
+                "run_id": self.run_id,
+                "bot_id": self.bot_id,
+                "strategy_id": self.strategy_id,
+                "instrument_id": (self.instrument or {}).get("id"),
+                "symbol": (self.instrument or {}).get("symbol"),
+                "trade_id": self.trade_id,
+                "leg_id": leg_id,
+                "direction": self.direction,
+                "known_at": isoformat(known_at),
+                "order_request_id": request_id,
+            },
         )
+        starting_seq = len(lifecycle.events) if lifecycle is not None else 0
         if self.execution_adapter:
-            return execute_fill_order(self.execution_adapter, order)
+            result = execute_fill_order_with_lifecycle(
+                self.execution_adapter,
+                order,
+                lifecycle=lifecycle,
+            )
+            self._order_lifecycles[logical_key] = result.lifecycle
+            self._order_lifecycle_updates.append((result.lifecycle, starting_seq))
+            return result.fill, result.rejection
         if not self.execution_model:
             return None, None
-        return execute_fill_order(self.execution_model, order)
+        result = execute_fill_order_with_lifecycle(
+            self.execution_model,
+            order,
+            lifecycle=lifecycle,
+        )
+        self._order_lifecycles[logical_key] = result.lifecycle
+        self._order_lifecycle_updates.append((result.lifecycle, starting_seq))
+        return result.fill, result.rejection
+
+    def drain_order_lifecycle_updates(self) -> List[Tuple[CanonicalOrderLifecycle, int]]:
+        """Transfer immutable lifecycle additions to the owning risk engine."""
+
+        updates = list(self._order_lifecycle_updates)
+        self._order_lifecycle_updates.clear()
+        return updates
+
+    def _cancel_other_open_leg_orders(
+        self,
+        *,
+        leg_id: Optional[str],
+        active_order_key: str,
+        known_at: datetime,
+        reason: str,
+    ) -> None:
+        leg_token = str(leg_id or "aggregate")
+        for key, lifecycle in list(self._order_lifecycles.items()):
+            if key == active_order_key or f":{leg_token}:" not in f":{key}:":
+                continue
+            snapshot = lifecycle.snapshot()
+            if snapshot.active_attempt_id is None or snapshot.state not in {
+                CanonicalOrderState.ACCEPTED,
+                CanonicalOrderState.OPEN,
+                CanonicalOrderState.PARTIALLY_FILLED,
+            }:
+                continue
+            starting_seq = len(lifecycle.events)
+            lifecycle.transition(
+                attempt_id=snapshot.active_attempt_id,
+                state=CanonicalOrderState.CANCELED,
+                known_at=known_at,
+                reason=reason,
+                venue_event_name=venue_lifecycle_event_name(
+                    self.execution_profile.execution_context if self.execution_profile is not None else None,
+                    CanonicalOrderState.CANCELED,
+                ),
+            )
+            self._order_lifecycle_updates.append((lifecycle, starting_seq))
 
     def _exit_settlement(self) -> ExitSettlement:
         if self.exit_settlement:
@@ -195,8 +365,16 @@ class LadderPosition:
                 continue
 
             # Check if target was hit based on direction
+            strict_penetration = bool(
+                self.execution_assumptions and self.execution_assumptions.uses_strict_penetration
+            )
             is_filled = (
-                candle.high >= leg.target_price if self.direction == "long"
+                candle.high > leg.target_price
+                if self.direction == "long" and strict_penetration
+                else candle.high >= leg.target_price
+                if self.direction == "long"
+                else candle.low < leg.target_price
+                if strict_penetration
                 else candle.low <= leg.target_price
             )
 
@@ -205,12 +383,16 @@ class LadderPosition:
 
             fill_result = None
             side = "sell" if self.direction == "long" else "buy"
+            order_key = f"{self.trade_id}:target:{leg.leg_id or leg.name}"
             if self._uses_wallet_execution():
                 fill_result, rejection = self._execute_spot_fill(
                     leg.target_price,
                     leg.contracts,
                     side=side,
                     policy=policy,
+                    order_key=order_key,
+                    known_at=candle.time,
+                    leg_id=leg.leg_id,
                 )
                 if rejection:
                     context = build_log_context(
@@ -254,14 +436,17 @@ class LadderPosition:
                     )
                     continue
             exit_price = fill_result.fill_price if fill_result else leg.target_price
-            exit_qty = fill_result.filled_qty if fill_result else leg.contracts
+            requested_exit_qty = float(leg.contracts)
+            exit_qty = fill_result.filled_qty if fill_result else requested_exit_qty
+            residual_qty = max(requested_exit_qty - float(exit_qty), 0.0)
+            fill_complete = residual_qty <= 1e-12
             pnl = self._pnl_for_exit(exit_price, exit_qty)
-            leg.status = "target"
-            leg.exit_price = exit_price
-            leg.exit_time = isoformat(candle.time)
-            leg.exit_created_at = isoformat(datetime.now(timezone.utc))
-            leg.contracts = exit_qty
-            leg.pnl = pnl
+            leg.status = "target" if fill_complete else "open"
+            leg.exit_price = exit_price if fill_complete else None
+            leg.exit_time = isoformat(candle.time) if fill_complete else None
+            leg.exit_created_at = isoformat(datetime.now(timezone.utc)) if fill_complete else None
+            leg.contracts = float(exit_qty) if fill_complete else residual_qty
+            leg.pnl = float(leg.pnl or 0.0) + pnl
             self._record_pnl(pnl)
             fee_value = (
                 float(fill_result.fee)
@@ -302,12 +487,33 @@ class LadderPosition:
                     "leg_id": leg.leg_id,
                     "trade_id": self.trade_id,
                     "price": round(exit_price, 4),
-                    "time": leg.exit_time,
+                    "time": isoformat(candle.time),
                     "pnl": round(pnl, 4),
                     "currency": self.quote_currency,
                     "contracts": exit_qty,
                     "ticks": leg.ticks,
                     "direction": self.direction,
+                    "order_request_id": (
+                        dict(fill_result.metadata or {}).get("order_request_id")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_attempt_id": (
+                        dict(fill_result.metadata or {}).get("order_attempt_id")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_fill_id": (
+                        dict(fill_result.metadata or {}).get("order_fill_id")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_lifecycle_state": (
+                        dict(fill_result.metadata or {}).get("order_lifecycle_state")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_remaining_qty": residual_qty,
                     "notional": notional,
                     "fee_paid": fee_value,
                     "fee_rate": fee_metadata["fee_rate"],
@@ -317,6 +523,7 @@ class LadderPosition:
                     "order_type": policy.order_type,
                     "price_source": policy.price_source,
                     "reason_code": policy.reason_code,
+                    **self._execution_evidence_for_fill(fill_result),
                     "settlement": settlement_payload,
                 }
             )
@@ -410,12 +617,22 @@ class LadderPosition:
                     continue
                 fill_result = None
                 side = "sell" if self.direction == "long" else "buy"
+                order_key = f"{self.trade_id}:stop:{leg.leg_id or leg.name}"
                 if self._uses_wallet_execution():
+                    self._cancel_other_open_leg_orders(
+                        leg_id=leg.leg_id,
+                        active_order_key=order_key,
+                        known_at=candle.time,
+                        reason="stop_order_superseded_resting_exit",
+                    )
                     fill_result, rejection = self._execute_spot_fill(
                         fill_reference_price,
                         leg.contracts,
                         side=side,
                         policy=execution_policy,
+                        order_key=order_key,
+                        known_at=candle.time,
+                        leg_id=leg.leg_id,
                     )
                     if rejection:
                         context = build_log_context(
@@ -454,15 +671,18 @@ class LadderPosition:
                 exit_price = (
                     fill_result.fill_price if fill_result else fill_reference_price
                 )
-                exit_qty = fill_result.filled_qty if fill_result else leg.contracts
+                requested_exit_qty = float(leg.contracts)
+                exit_qty = fill_result.filled_qty if fill_result else requested_exit_qty
+                residual_qty = max(requested_exit_qty - float(exit_qty), 0.0)
+                fill_complete = residual_qty <= 1e-12
                 fill_tick_distance = round(self._ticks_from_entry(exit_price), 4)
                 pnl = self._pnl_for_exit(exit_price, exit_qty)
-                leg.status = "stop"
-                leg.exit_price = exit_price
-                leg.exit_time = isoformat(candle.time)
-                leg.exit_created_at = isoformat(datetime.now(timezone.utc))
-                leg.contracts = exit_qty
-                leg.pnl = pnl
+                leg.status = "stop" if fill_complete else "open"
+                leg.exit_price = exit_price if fill_complete else None
+                leg.exit_time = isoformat(candle.time) if fill_complete else None
+                leg.exit_created_at = isoformat(datetime.now(timezone.utc)) if fill_complete else None
+                leg.contracts = float(exit_qty) if fill_complete else residual_qty
+                leg.pnl = float(leg.pnl or 0.0) + pnl
                 self._record_pnl(pnl)
                 fee_value = (
                     float(fill_result.fee)
@@ -499,7 +719,7 @@ class LadderPosition:
                         "type": "stop",
                         "trade_id": self.trade_id,
                         "price": round(exit_price, 4),
-                        "time": leg.exit_time,
+                        "time": isoformat(candle.time),
                         "currency": self.quote_currency,
                         "leg": leg.name,
                         "leg_id": leg.leg_id,
@@ -510,6 +730,27 @@ class LadderPosition:
                         "stop_trigger_ticks": trigger_tick_distance,
                         "gap_through": gap_through,
                         "direction": self.direction,
+                        "order_request_id": (
+                            dict(fill_result.metadata or {}).get("order_request_id")
+                            if fill_result is not None
+                            else None
+                        ),
+                        "order_attempt_id": (
+                            dict(fill_result.metadata or {}).get("order_attempt_id")
+                            if fill_result is not None
+                            else None
+                        ),
+                        "order_fill_id": (
+                            dict(fill_result.metadata or {}).get("order_fill_id")
+                            if fill_result is not None
+                            else None
+                        ),
+                        "order_lifecycle_state": (
+                            dict(fill_result.metadata or {}).get("order_lifecycle_state")
+                            if fill_result is not None
+                            else None
+                        ),
+                        "order_remaining_qty": residual_qty,
                         "notional": notional,
                         "fee_paid": fee_value,
                         "fee_rate": fee_metadata["fee_rate"],
@@ -519,6 +760,7 @@ class LadderPosition:
                         "order_type": execution_policy.order_type,
                         "price_source": execution_policy.price_source,
                         "reason_code": execution_policy.reason_code,
+                        **self._execution_evidence_for_fill(fill_result),
                         "settlement": settlement_payload,
                     }
                 )
@@ -573,9 +815,16 @@ class LadderPosition:
         for leg in self.legs:
             if leg.status != "open":
                 continue
-            if self.direction == "long" and candle.high >= leg.target_price:
+            strict_penetration = bool(
+                self.execution_assumptions and self.execution_assumptions.uses_strict_penetration
+            )
+            if self.direction == "long" and (
+                candle.high > leg.target_price if strict_penetration else candle.high >= leg.target_price
+            ):
                 return True
-            if self.direction == "short" and candle.low <= leg.target_price:
+            if self.direction == "short" and (
+                candle.low < leg.target_price if strict_penetration else candle.low <= leg.target_price
+            ):
                 return True
         return False
 
@@ -603,9 +852,16 @@ class LadderPosition:
         for leg in self.legs:
             if leg.status != "open":
                 continue
-            if self.direction == "long" and candle.open >= leg.target_price:
+            strict_penetration = bool(
+                self.execution_assumptions and self.execution_assumptions.uses_strict_penetration
+            )
+            if self.direction == "long" and (
+                candle.open > leg.target_price if strict_penetration else candle.open >= leg.target_price
+            ):
                 return True
-            if self.direction == "short" and candle.open <= leg.target_price:
+            if self.direction == "short" and (
+                candle.open < leg.target_price if strict_penetration else candle.open <= leg.target_price
+            ):
                 return True
         return False
 
@@ -735,12 +991,22 @@ class LadderPosition:
             if leg.status != "open":
                 continue
             fill_result = None
+            order_key = f"{self.trade_id}:{policy.exit_kind}:{leg.leg_id or leg.name}"
             if self._uses_wallet_execution():
+                self._cancel_other_open_leg_orders(
+                    leg_id=leg.leg_id,
+                    active_order_key=order_key,
+                    known_at=candle.time,
+                    reason=f"{policy.exit_kind}_superseded_resting_exit",
+                )
                 fill_result, rejection = self._execute_spot_fill(
                     exit_price_source,
                     leg.contracts,
                     side=side,
                     policy=policy,
+                    order_key=order_key,
+                    known_at=candle.time,
+                    leg_id=leg.leg_id,
                 )
                 if rejection:
                     context = build_log_context(
@@ -758,14 +1024,17 @@ class LadderPosition:
                     )
 
             exit_price = fill_result.fill_price if fill_result else exit_price_source
-            exit_qty = fill_result.filled_qty if fill_result else leg.contracts
+            requested_exit_qty = float(leg.contracts)
+            exit_qty = fill_result.filled_qty if fill_result else requested_exit_qty
+            residual_qty = max(requested_exit_qty - float(exit_qty), 0.0)
+            fill_complete = residual_qty <= 1e-12
             pnl = self._pnl_for_exit(exit_price, exit_qty)
-            leg.status = policy.event_type
-            leg.exit_price = exit_price
-            leg.exit_time = event_time
-            leg.exit_created_at = isoformat(datetime.now(timezone.utc))
-            leg.contracts = exit_qty
-            leg.pnl = pnl
+            leg.status = policy.event_type if fill_complete else "open"
+            leg.exit_price = exit_price if fill_complete else None
+            leg.exit_time = event_time if fill_complete else None
+            leg.exit_created_at = isoformat(datetime.now(timezone.utc)) if fill_complete else None
+            leg.contracts = float(exit_qty) if fill_complete else residual_qty
+            leg.pnl = float(leg.pnl or 0.0) + pnl
             self._record_pnl(pnl)
             fee_value = (
                 float(fill_result.fee)
@@ -810,6 +1079,27 @@ class LadderPosition:
                     "pnl": round(pnl, 4),
                     "ticks": round(self._ticks_from_entry(exit_price), 4),
                     "direction": self.direction,
+                    "order_request_id": (
+                        dict(fill_result.metadata or {}).get("order_request_id")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_attempt_id": (
+                        dict(fill_result.metadata or {}).get("order_attempt_id")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_fill_id": (
+                        dict(fill_result.metadata or {}).get("order_fill_id")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_lifecycle_state": (
+                        dict(fill_result.metadata or {}).get("order_lifecycle_state")
+                        if fill_result is not None
+                        else None
+                    ),
+                    "order_remaining_qty": residual_qty,
                     "notional": notional,
                     "fee_paid": fee_value,
                     "fee_rate": fee_metadata["fee_rate"],
@@ -820,6 +1110,7 @@ class LadderPosition:
                     "close_reason": policy.reason_code,
                     "order_type": policy.order_type,
                     "price_source": policy.price_source,
+                    **self._execution_evidence_for_fill(fill_result),
                     "settlement": settlement_payload,
                 }
             )
@@ -974,6 +1265,28 @@ class LadderPosition:
             "fee_source": str(fee_source or self.fee_source or "template_or_instrument"),
             "fee_version": fee_version if fee_version is not None else self.fee_version,
         }
+
+    @staticmethod
+    def _execution_evidence_for_fill(fill: Optional[FillResult]) -> Dict[str, Any]:
+        if fill is None or not isinstance(fill.metadata, Mapping):
+            return {}
+        metadata = dict(fill.metadata)
+        keys = (
+            "requested_price",
+            "fill_price",
+            "slippage_price",
+            "slippage_bps",
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "passive_fill_policy",
+            "execution_quality_ceiling",
+            "economic_claim_intent",
+            "fee_policy",
+            "full_fill_assumption",
+            "market_slippage_bps",
+            "stop_slippage_bps",
+        )
+        return {key: metadata.get(key) for key in keys if key in metadata}
 
     def _record_pnl(self, pnl: float) -> None:
         self.gross_pnl += pnl

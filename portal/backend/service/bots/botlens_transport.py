@@ -54,6 +54,10 @@ def _json_size_bytes(value: Any) -> int:
 
 def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     source = health_state if isinstance(health_state, Mapping) else {}
+    available_warnings = [
+        dict(entry) for entry in source.get("warnings", []) if isinstance(entry, Mapping)
+    ]
+    included_warnings = available_warnings[-_RUNTIME_WARNING_DETAIL_LIMIT:]
     warning_types = [
         str(entry).strip().lower()
         for entry in source.get("warning_types", [])
@@ -62,8 +66,14 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
     payload = {
         "status": str(source.get("status") or "").strip() or None,
         "phase": source.get("phase"),
-        "warning_count": int(source.get("warning_count") or 0),
-        "warnings": [dict(entry) for entry in source.get("warnings", []) if isinstance(entry, Mapping)],
+        "warning_count": max(int(source.get("warning_count") or 0), len(available_warnings)),
+        "warnings": included_warnings,
+        "warning_details": {
+            "ordering": "latest_tail",
+            "included": len(included_warnings),
+            "available": len(available_warnings),
+            "truncated": len(available_warnings) > len(included_warnings),
+        },
         "last_event_at": source.get("last_event_at"),
         "worker_count": int(source.get("worker_count") or 0),
         "active_workers": int(source.get("active_workers") or 0),
@@ -83,6 +93,9 @@ def _runtime_payload(health_state: Mapping[str, Any] | None) -> Dict[str, Any]:
         payload["last_useful_progress_at"] = source.get("last_useful_progress_at")
     if source.get("progress_state"):
         payload["progress_state"] = source.get("progress_state")
+    if source.get("progress") is not None:
+        payload["progress"] = source.get("progress")
+        payload["progress_unit"] = "fraction"
     if isinstance(source.get("degraded"), Mapping) and source.get("degraded"):
         payload["degraded"] = dict(source.get("degraded"))
     if isinstance(source.get("churn"), Mapping) and source.get("churn"):
@@ -130,6 +143,7 @@ def _symbol_overlay_cursor_payload(state: SymbolProjectionSnapshot) -> Dict[str,
     payload = {
         "overlay_commit_seq": overlay_commit_seq,
         "overlay_commit_seq_status": overlay_commit_seq_status,
+        "overlay_validity": state.overlays.validity_payload(),
         "overlay_projection": (
             dict(state.overlays.overlay_projection)
             if isinstance(state.overlays.overlay_projection, Mapping)
@@ -165,6 +179,33 @@ def _symbol_detail_payload(state: SymbolProjectionSnapshot, *, run_health: Mappi
     }
 
 
+_RUNTIME_WARNING_DETAIL_LIMIT = 16
+_SNAPSHOT_SIGNAL_LIMIT = 16
+_SNAPSHOT_DECISION_LIMIT = 16
+_SNAPSHOT_TRADE_LIMIT = 32
+_SNAPSHOT_LOG_LIMIT = 16
+_SNAPSHOT_OVERLAY_LIMIT = 160
+
+
+def _latest_tail(values: Any, limit: int) -> list[Dict[str, Any]]:
+    entries = tuple(values or ())
+    return [
+        dict(entry)
+        for entry in entries[-max(1, int(limit)):]
+        if isinstance(entry, Mapping)
+    ]
+
+
+def _evidence_window(values: Any, included: list[Dict[str, Any]]) -> Dict[str, Any]:
+    available = len(tuple(values or ()))
+    return {
+        "ordering": "latest_tail",
+        "included": len(included),
+        "available": available,
+        "truncated": available > len(included),
+    }
+
+
 def _symbol_current_payload(
     state: SymbolProjectionSnapshot,
     *,
@@ -175,6 +216,11 @@ def _symbol_current_payload(
         timeframe=state.identity.timeframe,
         series_key=state.symbol_key,
     ).to_dict()
+    signals = _latest_tail(state.signals.signals, _SNAPSHOT_SIGNAL_LIMIT)
+    decisions = _latest_tail(state.decisions.decisions, _SNAPSHOT_DECISION_LIMIT)
+    trades = _latest_tail(state.trades.trades, _SNAPSHOT_TRADE_LIMIT)
+    logs = _latest_tail(state.diagnostics.diagnostics, _SNAPSHOT_LOG_LIMIT)
+    overlays = _latest_tail(state.overlays.overlays, _SNAPSHOT_OVERLAY_LIMIT)
     return {
         **_symbol_overlay_cursor_payload(state),
         "candles": [dict(entry) for entry in state.candles.candles],
@@ -183,15 +229,46 @@ def _symbol_current_payload(
             if state.provisional_candle.provisional_candle is not None
             else None
         ),
-        "overlays": [dict(entry) for entry in state.overlays.overlays],
-        "signals": [dict(entry) for entry in state.signals.signals],
-        "decisions": [dict(entry) for entry in state.decisions.decisions],
-        "recent_trades": [dict(entry) for entry in state.trades.trades],
-        "logs": [dict(entry) for entry in state.diagnostics.diagnostics],
+        "overlays": overlays,
+        "signals": signals,
+        "decisions": decisions,
+        "recent_trades": trades,
+        "logs": logs,
+        "evidence_window": {
+            "signals": _evidence_window(state.signals.signals, signals),
+            "decisions": _evidence_window(state.decisions.decisions, decisions),
+            "recent_trades": _evidence_window(state.trades.trades, trades),
+            "logs": _evidence_window(state.diagnostics.diagnostics, logs),
+            "overlays": _evidence_window(state.overlays.overlays, overlays),
+        },
         "stats": dict(state.stats.stats),
         "runtime": _runtime_payload(run_health),
         "continuity": continuity,
     }
+
+
+def _catalog_series_identity(
+    *,
+    symbol_key: Any,
+    catalog_entry: Mapping[str, Any] | None,
+) -> tuple[str, Any, str, str]:
+    """Resolve routing identity without waiting for a projected symbol snapshot."""
+
+    entry = dict(catalog_entry or {})
+    normalized_symbol_key = normalize_series_key(
+        symbol_key or entry.get("symbol_key")
+    )
+    key_instrument_id, separator, key_timeframe = normalized_symbol_key.partition("|")
+    instrument_id = entry.get("instrument_id") or (
+        key_instrument_id if separator else None
+    )
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    timeframe = (
+        str(entry.get("timeframe") or (key_timeframe if separator else ""))
+        .strip()
+        .lower()
+    )
+    return normalized_symbol_key, instrument_id, symbol, timeframe
 
 
 def _run_catalog_entry_payload(
@@ -201,16 +278,17 @@ def _run_catalog_entry_payload(
     open_trades: Iterable[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     identity = dict(catalog_entry)
-    symbol_key = normalize_series_key(identity.get("symbol_key"))
-    symbol = str(identity.get("symbol") or "").strip().upper()
-    timeframe = str(identity.get("timeframe") or "").strip().lower()
+    symbol_key, instrument_id, symbol, timeframe = _catalog_series_identity(
+        symbol_key=identity.get("symbol_key"),
+        catalog_entry=identity,
+    )
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
     warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
         "identity": {
-            "instrument_id": identity.get("instrument_id"),
+            "instrument_id": instrument_id,
             "symbol": symbol or None,
             "timeframe": timeframe or None,
             "display_label": display_label(symbol=symbol, timeframe=timeframe, symbol_key=symbol_key),
@@ -247,15 +325,16 @@ def _live_symbol_summary_payload(
     open_trades: Iterable[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     identity = dict(catalog_entry)
-    symbol_key = normalize_series_key(identity.get("symbol_key"))
-    symbol = str(identity.get("symbol") or "").strip().upper()
-    timeframe = str(identity.get("timeframe") or "").strip().lower()
+    symbol_key, instrument_id, symbol, timeframe = _catalog_series_identity(
+        symbol_key=identity.get("symbol_key"),
+        catalog_entry=identity,
+    )
     open_trade_list = [dict(entry) for entry in open_trades if isinstance(entry, Mapping)]
     readiness = dict(identity.get("readiness") or {}) if isinstance(identity.get("readiness"), Mapping) else {}
     warning_summary = _symbol_warning_summary_payload(health_state=health_state, symbol_key=symbol_key)
     return {
         "symbol_key": symbol_key,
-        "instrument_id": identity.get("instrument_id"),
+        "instrument_id": instrument_id,
         "symbol": symbol or None,
         "timeframe": timeframe or None,
         "display_label": display_label(symbol=symbol, timeframe=timeframe, symbol_key=symbol_key),
@@ -285,13 +364,13 @@ def _symbol_identity_from_catalog_entry(
     symbol_key: str,
     catalog_entry: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
-    entry = dict(catalog_entry or {})
-    normalized_symbol_key = normalize_series_key(symbol_key or entry.get("symbol_key"))
-    symbol = str(entry.get("symbol") or "").strip().upper()
-    timeframe = str(entry.get("timeframe") or "").strip().lower()
+    normalized_symbol_key, instrument_id, symbol, timeframe = _catalog_series_identity(
+        symbol_key=symbol_key,
+        catalog_entry=catalog_entry,
+    )
     return {
         "symbol_key": normalized_symbol_key,
-        "instrument_id": entry.get("instrument_id"),
+        "instrument_id": instrument_id,
         "symbol": symbol or None,
         "timeframe": timeframe or None,
         "display_label": display_label(symbol=symbol, timeframe=timeframe, symbol_key=normalized_symbol_key),
@@ -313,8 +392,15 @@ def _selected_symbol_readiness_payload(
     )
     snapshot_ready = bool(symbol_state is not None and symbol_state.readiness.snapshot_ready)
     symbol_live = bool(
-        (symbol_state is not None and symbol_state.readiness.symbol_live)
-        or (catalog_entry.get("readiness", {}) if isinstance(catalog_entry.get("readiness"), Mapping) else {}).get("symbol_live")
+        run_live
+        and (
+            (symbol_state is not None and symbol_state.readiness.symbol_live)
+            or (
+                catalog_entry.get("readiness", {})
+                if isinstance(catalog_entry.get("readiness"), Mapping)
+                else {}
+            ).get("symbol_live")
+        )
     )
     return {
         "catalog_discovered": catalog_discovered,
@@ -744,6 +830,12 @@ class BotLensTransport:
                     "overlay_commit_seq": delta.overlay_ops.get("overlay_commit_seq"),
                     "base_overlay_commit_seq": delta.overlay_ops.get("base_overlay_commit_seq"),
                     "overlay_commit_seq_status": delta.overlay_ops.get("overlay_commit_seq_status"),
+                    "checkpoint_kind": delta.overlay_ops.get("checkpoint_kind"),
+                    "overlay_validity": (
+                        dict(delta.overlay_ops.get("overlay_validity"))
+                        if isinstance(delta.overlay_ops.get("overlay_validity"), Mapping)
+                        else None
+                    ),
                     "projection": (
                         dict(delta.overlay_ops.get("projection"))
                         if isinstance(delta.overlay_ops.get("projection"), Mapping)
@@ -929,7 +1021,14 @@ class BotLensTransport:
                         event_time=delta.event_time,
                         payload={
                             "upserts": [dict(entry) for entry in delta.upserts],
-                            "removals": [str(entry) for entry in delta.removals if str(entry).strip()],
+                            "removals": [
+                                {
+                                    "trade_id": str(entry),
+                                    "position_commit_seq": delta.removal_position_commit_seq.get(str(entry)),
+                                }
+                                for entry in delta.removals
+                                if str(entry).strip()
+                            ],
                         },
                     )
                 )

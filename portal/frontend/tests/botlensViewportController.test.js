@@ -6,7 +6,10 @@ import {
   computeFollowRange,
   isLogicalRangePinnedToLatest,
 } from '../src/components/bots/hooks/useViewportController.js'
-import { resolveCandleUpdateCameraIntent } from '../src/components/bots/chartCameraPolicy.js'
+import {
+  resolveCandleUpdateCameraIntent,
+  resolveCandleUpdateViewport,
+} from '../src/components/bots/chartCameraPolicy.js'
 
 function makeCandles(count = 200, start = 1_700_000_000, spacing = 60) {
   return Array.from({ length: count }, (_, index) => {
@@ -60,9 +63,11 @@ test('default follow range opens a stable wide inspection window', () => {
   assert.equal(Number(follow.logicalRange.to.toFixed(2)), 320.25)
 })
 
-test('camera policy follows only initial load and symbol reset, not live appends', () => {
+test('camera policy follows advancing live bars while historical updates remain fixed', () => {
   const previous = makeCandles(200)
   const appended = makeCandles(201)
+  const sliding = makeCandles(200, previous[0].time + 60)
+  const sameBar = [...previous.slice(0, -1), { ...previous.at(-1), close: 999 }]
   const reset = makeCandles(260, 1_800_000_000)
 
   assert.deepEqual(resolveCandleUpdateCameraIntent({ previous: [], next: previous }), {
@@ -70,8 +75,41 @@ test('camera policy follows only initial load and symbol reset, not live appends
     reason: 'initial-load',
   })
   assert.equal(resolveCandleUpdateCameraIntent({ previous, next: appended }), null)
+  assert.deepEqual(resolveCandleUpdateCameraIntent({ previous, next: appended, followLatest: true }), {
+    intent: 'FOLLOW_LATEST',
+    reason: 'live-bar-advance',
+  })
+  assert.deepEqual(resolveCandleUpdateCameraIntent({ previous, next: sliding, followLatest: true }), {
+    intent: 'FOLLOW_LATEST',
+    reason: 'live-bar-advance',
+  })
+  assert.equal(resolveCandleUpdateCameraIntent({ previous, next: sameBar, followLatest: true }), null)
   assert.deepEqual(resolveCandleUpdateCameraIntent({ previous, next: reset }), {
     intent: 'FOLLOW_LATEST',
     reason: 'series-reset',
   })
+})
+
+test('historical page merges preserve the visible time range and never follow latest', () => {
+  const previous = makeCandles(200)
+  const prepended = makeCandles(240, previous[0].time - 40 * 60)
+  const visibleRange = {
+    from: previous[8].time,
+    to: previous[88].time,
+  }
+
+  assert.equal(resolveCandleUpdateCameraIntent({
+    previous,
+    next: prepended,
+    updateMode: 'prepend',
+  }), null)
+  assert.deepEqual(resolveCandleUpdateViewport({ updateMode: 'prepend', visibleRange }), visibleRange)
+  assert.equal(resolveCandleUpdateCameraIntent({
+    previous,
+    next: prepended,
+    updateMode: 'append',
+    followLatest: true,
+  }), null)
+  assert.deepEqual(resolveCandleUpdateViewport({ updateMode: 'append', visibleRange }), visibleRange)
+  assert.equal(resolveCandleUpdateViewport({ updateMode: 'replace', visibleRange }), null)
 })

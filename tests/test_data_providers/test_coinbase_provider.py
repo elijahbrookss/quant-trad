@@ -10,10 +10,20 @@ from data_providers.providers.base import InstrumentType
 
 
 class FakeClient:
-    def __init__(self, *, product=None, candle_provider=None, transaction_summary=None):
+    def __init__(
+        self,
+        *,
+        product=None,
+        candle_provider=None,
+        transaction_summary=None,
+        product_book=None,
+        market_trades=None,
+    ):
         self.product = product
         self.candle_provider = candle_provider
         self.transaction_summary = transaction_summary
+        self.product_book = product_book
+        self.market_trades = market_trades
         self.calls = []
 
     def get_product(self, product_id, **kwargs):
@@ -21,6 +31,36 @@ class FakeClient:
         if self.product is None:
             raise Exception("product_not_found")
         return dict(self.product)
+
+    def get_public_product(self, product_id, **kwargs):
+        self.calls.append({"url_path": "/market/products", "product_id": product_id})
+        if self.product is None:
+            raise Exception("product_not_found")
+        return dict(self.product)
+
+    def get_product_book(self, product_id, limit=None, **kwargs):
+        self.calls.append(
+            {"url_path": "/product_book", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.product_book or {})
+
+    def get_public_product_book(self, product_id, limit=None, **kwargs):
+        self.calls.append(
+            {"url_path": "/market/product_book", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.product_book or {})
+
+    def get_market_trades(self, product_id, limit, **kwargs):
+        self.calls.append(
+            {"url_path": "/products/ticker", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.market_trades or {})
+
+    def get_public_market_trades(self, product_id, limit, **kwargs):
+        self.calls.append(
+            {"url_path": "/market/products/ticker", "product_id": product_id, "limit": limit}
+        )
+        return dict(self.market_trades or {})
 
     def get_candles(self, product_id, start, end, granularity, limit=None, **kwargs):
         self.calls.append(
@@ -37,6 +77,8 @@ class FakeClient:
             return {"candles": []}
         return {"candles": self.candle_provider({"start": start, "end": end, "granularity": granularity})}
 
+    def get_public_candles(self, product_id, start, end, granularity, limit=None, **kwargs):
+        return self.get_candles(product_id, start, end, granularity, limit=limit, **kwargs)
     def get_transaction_summary(self, **kwargs):
         self.calls.append({"url_path": "/transaction_summary", "params": kwargs})
         if self.transaction_summary is None:
@@ -47,7 +89,53 @@ class FakeClient:
 def _make_provider(fake_client):
     provider = coinbase_module.CoinbaseProvider()
     provider._client = fake_client
+    provider._public_client = fake_client
     return provider
+
+
+def test_build_websocket_jwt_uses_shared_provider_credentials(monkeypatch):
+    provider = coinbase_module.CoinbaseProvider()
+    observed = {}
+
+    monkeypatch.setattr(provider, "_resolve_credentials", lambda: ("key-name", "private-key"))
+    monkeypatch.setattr(
+        coinbase_module.jwt_generator,
+        "build_ws_jwt",
+        lambda key, secret: observed.update({"key": key, "secret": secret}) or "signed-token",
+    )
+
+    assert provider.build_websocket_jwt() == "signed-token"
+    assert observed == {"key": "key-name", "secret": "private-key"}
+
+
+@pytest.mark.parametrize(
+    ("auth_mode", "expected_paths"),
+    [
+        (
+            "public",
+            ["/market/products", "/market/product_book", "/market/products/ticker"],
+        ),
+        ("authenticated", ["/products", "/product_book", "/products/ticker"]),
+    ],
+)
+def test_market_structure_rest_proofs_use_explicit_auth_surface(auth_mode, expected_paths):
+    fake = FakeClient(
+        product={"product_id": "BIP-20DEC30-CDE"},
+        product_book={"pricebook": {"product_id": "BIP-20DEC30-CDE"}},
+        market_trades={"trades": [{"trade_id": "1"}]},
+    )
+    provider = _make_provider(fake)
+
+    assert provider.fetch_product_proof(
+        "BIP-20DEC30-CDE", auth_mode=auth_mode
+    )["product_id"] == "BIP-20DEC30-CDE"
+    assert provider.fetch_product_book_proof(
+        "BIP-20DEC30-CDE", auth_mode=auth_mode, limit=5
+    )["pricebook"]["product_id"] == "BIP-20DEC30-CDE"
+    assert provider.fetch_recent_market_trades_proof(
+        "BIP-20DEC30-CDE", auth_mode=auth_mode, limit=5
+    )["trades"][0]["trade_id"] == "1"
+    assert [call["url_path"] for call in fake.calls] == expected_paths
 
 
 def test_interval_mapping_supports_four_hour():
@@ -184,8 +272,9 @@ def test_get_instrument_metadata_spot_and_future():
     assert spot_meta.quote_currency == "USD"
     assert spot_meta.can_short is False
     assert spot_meta.min_order_size == 0.001
-    assert spot_meta.maker_fee_rate == 0.0001
-    assert spot_meta.taker_fee_rate == 0.0002
+    assert spot_meta.maker_fee_rate is None
+    assert spot_meta.taker_fee_rate is None
+    assert spot_meta.metadata["fees"]["status"] == "not_requested"
 
     future_meta = future.get_instrument_metadata("", "BTC-PERP")
     assert future_meta.tick_size == 0.5
@@ -195,14 +284,56 @@ def test_get_instrument_metadata_spot_and_future():
     assert future_meta.can_short is True
     assert future_meta.expiry_ts is not None
     assert future_meta.min_order_size == 0.01
-    assert future_meta.maker_fee_rate == 0.0001
-    assert future_meta.taker_fee_rate == 0.0002
+    assert future_meta.maker_fee_rate is None
+    assert future_meta.taker_fee_rate is None
+    assert future_meta.metadata["fees"]["status"] == "not_requested"
     assert future_meta.margin_rates is not None
     assert future_meta.margin_rates.get("intraday", {}).get("long_margin_rate") == "0.1000185"
     future_meta_payload = future_meta.metadata or {}
     future_details = future_meta_payload.get("future_product_details") or {}
     margin_rates = future_details.get("margin_rates") or {}
     assert margin_rates.get("intraday", {}).get("long_margin_rate") == "0.1000185"
+
+    fee_rates = future.get_account_fee_rates(product_type="FUTURE")
+    assert fee_rates == {
+        "maker_fee_rate": 0.0001,
+        "taker_fee_rate": 0.0002,
+    }
+
+
+
+def test_get_instrument_metadata_allows_public_research_without_private_fees(monkeypatch):
+    product = {
+        "product_id": "BIP-20DEC30-CDE",
+        "product_type": "FUTURE",
+        "price_increment": "5",
+        "base_currency_id": "",
+        "quote_currency_id": "USD",
+        "base_min_size": "1",
+        "future_product_details": {
+            "contract_size": "0.01",
+            "contract_root_unit": "BTC",
+            "contract_expiry": "2030-12-20T16:00:00Z",
+            "funding_rate": "-0.000002",
+        },
+    }
+    provider = coinbase_module.CoinbaseProvider()
+    provider._public_client = FakeClient(product=product)
+    monkeypatch.setattr(
+        provider,
+        "_ensure_client",
+        lambda: (_ for _ in ()).throw(RuntimeError("Coinbase credentials missing")),
+    )
+
+    metadata = provider.get_instrument_metadata("COINBASE_DIRECT", product["product_id"])
+
+    assert metadata.base_currency == "BTC"
+    assert metadata.quote_currency == "USD"
+    assert metadata.contract_size == 0.01
+    assert metadata.maker_fee_rate is None
+    assert metadata.taker_fee_rate is None
+    assert metadata.metadata["fees"]["status"] == "not_requested"
+
 
 
 def test_fetch_from_api_normalizes_candles_sorted():
@@ -264,3 +395,193 @@ def test_fetch_from_api_chunks_requests(monkeypatch):
     candle_calls = [call for call in fake_client.calls if call["url_path"] == "/candles"]
     assert len(candle_calls) > 1
     assert len(frame) == len(candle_calls)
+
+
+def test_fetch_from_api_normalizes_inclusive_page_end_to_half_open_range(monkeypatch):
+    def candle_provider(params):
+        return [
+            {
+                "start": str(params["start"]),
+                "open": "1",
+                "high": "1",
+                "low": "1",
+                "close": "1",
+                "volume": "1",
+            },
+            {
+                "start": str(params["end"]),
+                "open": "2",
+                "high": "2",
+                "low": "2",
+                "close": "2",
+                "volume": "1",
+            },
+        ]
+
+    fake_client = FakeClient(product={"product_id": "BTC-USD"}, candle_provider=candle_provider)
+    provider = _make_provider(fake_client)
+    monkeypatch.setattr(provider, "MAX_CANDLES_PER_REQUEST", 2)
+
+    start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    end = start + dt.timedelta(minutes=5)
+
+    frame = provider.fetch_from_api("BTC-USD", start, end, "1m")
+
+    assert frame["timestamp"].tolist() == [
+        pd.Timestamp("2024-01-01T00:00:00Z"),
+        pd.Timestamp("2024-01-01T00:01:00Z"),
+        pd.Timestamp("2024-01-01T00:02:00Z"),
+        pd.Timestamp("2024-01-01T00:03:00Z"),
+        pd.Timestamp("2024-01-01T00:04:00Z"),
+    ]
+    assert bool((frame["timestamp"] < pd.Timestamp(end)).all())
+
+
+def test_fetch_open_interest_normalizes_coinbase_future_snapshot():
+    provider = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "open_interest": "12345",
+                    "contract_code": "BIPZ30",
+                    "contract_root_unit": "BTC",
+                    "venue": "CDE",
+                },
+            }
+        )
+    )
+
+    snapshot = provider.fetch_open_interest("BIP-20DEC30-CDE")
+
+    assert snapshot.provider_product_id == "BIP-20DEC30-CDE"
+    assert snapshot.value == 12345.0
+    assert snapshot.unit == "contracts"
+    assert snapshot.provider_event_at is None
+    assert snapshot.source_path == "future_product_details.open_interest"
+    assert snapshot.metadata["provider_event_time_available"] is False
+
+
+def test_fetch_open_interest_rejects_non_future_missing_and_conflicting_values():
+    spot = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BTC-USD",
+                "product_type": "SPOT",
+                "open_interest": "10",
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="unsupported"):
+        spot.fetch_open_interest("BTC-USD")
+
+    missing = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="no open_interest"):
+        missing.fetch_open_interest("BIP-20DEC30-CDE")
+
+    conflict = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "open_interest": "11",
+                "future_product_details": {"open_interest": "12"},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="values disagree"):
+        conflict.fetch_open_interest("BIP-20DEC30-CDE")
+
+
+def test_fetch_funding_rate_normalizes_public_coinbase_future_snapshot():
+    provider = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "funding_rate": "-0.000002",
+                    "funding_time": "2026-08-02T02:00:00Z",
+                    "funding_interval": "3600s",
+                    "contract_code": "BIP",
+                    "contract_root_unit": "BTC",
+                    "venue": "CDE",
+                    "perpetual_details": {
+                        "funding_rate": "",
+                        "funding_time": None,
+                    },
+                },
+            }
+        )
+    )
+
+    snapshot = provider.fetch_funding_rate("BIP-20DEC30-CDE")
+
+    assert snapshot.provider_product_id == "BIP-20DEC30-CDE"
+    assert snapshot.rate == -0.000002
+    assert snapshot.funding_time == dt.datetime(
+        2026, 8, 2, 2, 0, tzinfo=dt.timezone.utc
+    )
+    assert snapshot.interval_seconds == 3600
+    assert snapshot.unit == "fraction"
+    assert snapshot.source_path == "future_product_details.funding_rate"
+    assert snapshot.metadata["funding_time_semantics"] == "provider_reported_unspecified"
+
+
+def test_fetch_funding_rate_rejects_missing_invalid_and_conflicting_fields():
+    missing = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="no funding_rate"):
+        missing.fetch_funding_rate("BIP-20DEC30-CDE")
+
+    invalid_interval = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "funding_rate": "0.0001",
+                    "funding_time": "2026-08-02T02:00:00Z",
+                    "funding_interval": "hourly",
+                },
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="funding_interval_invalid"):
+        invalid_interval.fetch_funding_rate("BIP-20DEC30-CDE")
+
+    conflict = _make_provider(
+        FakeClient(
+            product={
+                "product_id": "BIP-20DEC30-CDE",
+                "product_type": "FUTURE",
+                "future_product_details": {
+                    "funding_rate": "0.0001",
+                    "funding_time": "2026-08-02T02:00:00Z",
+                    "funding_interval": "3600s",
+                    "perpetual_details": {
+                        "funding_rate": "0.0002",
+                        "funding_time": "2026-08-02T02:00:00Z",
+                    },
+                },
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="funding_rate_conflict"):
+        conflict.fetch_funding_rate("BIP-20DEC30-CDE")

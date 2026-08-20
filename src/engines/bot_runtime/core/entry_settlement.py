@@ -25,6 +25,7 @@ class EntrySettlementContext:
     notional: float
     fee_paid: float
     trade_id: str
+    fill_id: str
     direction: str
     qty_raw: float
     base_currency: str
@@ -48,7 +49,10 @@ class EntrySettlementService:
         engine = self._engine
         if not (engine.execution_adapter and engine._wallet_gateway):
             return True
-        correlation_id = f"trade:{context.trade_id}"
+        fill_id = str(context.fill_id or "").strip()
+        if not fill_id:
+            raise ValueError("entry settlement fill_id is required")
+        correlation_id = f"trade:{context.trade_id}:entry_fill:{fill_id}"
         allowed, reason, payload = engine._wallet_gateway.can_apply(
             side=context.side,
             base_currency=context.base_currency,

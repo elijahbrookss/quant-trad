@@ -13,6 +13,8 @@ from ..core.execution import (
     SpotExecutionModel,
 )
 from ..core.execution_adapter import ExecutionAdapter
+from ..core.execution_assumptions import ResolvedExecutionAssumptions
+from ..core.execution_context import ResolvedExecutionContext
 from ..core.execution_order import FillOrder
 
 
@@ -31,6 +33,8 @@ class BacktestAdapter(ExecutionAdapter):
         max_qty: Optional[float] = None,
         amount_precision: Optional[int] = None,
         slippage_bps: float = 0.0,
+        assumptions: ResolvedExecutionAssumptions | None = None,
+        execution_context: ResolvedExecutionContext | None = None,
     ) -> None:
         if short_requires_borrow:
             self._model = SpotExecutionModel(
@@ -43,6 +47,8 @@ class BacktestAdapter(ExecutionAdapter):
                     precision=amount_precision,
                 ),
                 slippage_bps=slippage_bps,
+                assumptions=assumptions,
+                execution_context=execution_context,
             )
         else:
             self._model = DerivativesExecutionModel(
@@ -56,6 +62,8 @@ class BacktestAdapter(ExecutionAdapter):
                     precision=amount_precision,
                 ),
                 slippage_bps=slippage_bps,
+                assumptions=assumptions,
+                execution_context=execution_context,
             )
     def execute_order(
         self,

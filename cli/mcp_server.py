@@ -16,6 +16,7 @@ from cli.experiments.event_log import read_events
 from cli.experiments.plan_loader import plan_preview
 from cli.experiments.state_store import ExperimentStateStore, find_experiment_dir
 from cli.experiments.summarize import summarize_experiment
+from cli.research_operations import ResearchOperations
 
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -211,6 +212,43 @@ class QuantTradMcpServer:
         client = self._client_factory()
         if parts == ["health"]:
             return _ensure_object(client.request_json("GET", "/api/health"), "GET /api/health")
+        if parts == ["market-data", "collectors"]:
+            return _ensure_object(
+                client.request_json(
+                    "GET",
+                    "/api/market-data/operations/collectors/snapshot",
+                    params={"attempt_limit": _query_int(query, "attempt_limit", 5)},
+                ),
+                "GET collector fleet",
+            )
+        if parts == ["market-data", "plane"]:
+            return _ensure_object(
+                client.request_json(
+                    "GET", "/api/market-data/operations/data-plane"
+                ),
+                "GET market data plane",
+            )
+        if (
+            len(parts) in {4, 5}
+            and parts[:2] == ["market-data", "collectors"]
+        ):
+            kind = quote(parts[2], safe="")
+            collector_id = quote(parts[3], safe="")
+            suffix = f"/{parts[4]}" if len(parts) == 5 else ""
+            params = (
+                {"limit": _query_int(query, "limit", 100)}
+                if not suffix or suffix in {"/events", "/gaps"}
+                else None
+            )
+            return _ensure_object(
+                client.request_json(
+                    "GET",
+                    "/api/market-data/operations/collectors/"
+                    f"{kind}/{collector_id}{suffix}",
+                    params=params,
+                ),
+                f"GET collector {parts[3]}{suffix}",
+            )
         if parts == ["bots"]:
             return _ensure_object(client.request_json("GET", "/api/bots/run-contexts"), "GET /api/bots/run-contexts")
         if len(parts) == 2 and parts[0] == "bots":
@@ -294,6 +332,13 @@ class QuantTradMcpServer:
             )
         if len(parts) == 3 and parts[0] == "reports":
             return self._read_report_resource(client, parts[1], parts[2])
+        if (
+            len(parts) == 4
+            and parts[0] == "research"
+            and parts[1] == "items"
+            and parts[3] == "trail"
+        ):
+            return ResearchOperations(client).trail(parts[2])
         if len(parts) == 3 and parts[0] == "experiments" and parts[2] == "state":
             return self._read_experiment_state(parts[1])
         if len(parts) == 3 and parts[0] == "experiments" and parts[2] == "summary":
@@ -347,6 +392,184 @@ class QuantTradMcpServer:
 
     def _tool_health_check(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return self.read_resource("quanttrad://health")
+
+    def _tool_list_collectors(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        attempt_limit = _optional_int(arguments, "attempt_limit", 5)
+        return self.read_resource(
+            f"quanttrad://market-data/collectors?attempt_limit={attempt_limit}"
+        )
+
+    def _collector_resource_uri(
+        self, arguments: dict[str, Any], *, suffix: str = ""
+    ) -> str:
+        kind = _required_str(arguments, "collector_kind")
+        collector_id = quote(_required_str(arguments, "collector_id"), safe="")
+        uri = f"quanttrad://market-data/collectors/{kind}/{collector_id}{suffix}"
+        if suffix in {"", "/events", "/gaps"}:
+            uri += f"?limit={_optional_int(arguments, 'limit', 100)}"
+        return uri
+
+    def _tool_get_collector(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self.read_resource(self._collector_resource_uri(arguments))
+
+    def _tool_diagnose_collector(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self.read_resource(
+            self._collector_resource_uri(arguments, suffix="/diagnostics")
+        )
+
+    def _tool_probe_collector(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return self._command_runner.run(
+            [
+                "data",
+                "collectors",
+                "probe",
+                _required_str(arguments, "collector_kind"),
+                _required_str(arguments, "collector_id"),
+            ],
+            timeout_seconds=300.0,
+        )
+
+    def _tool_operate_collector(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        action = _required_str(arguments, "action")
+        if action not in {"start", "stop", "restart", "pause", "resume"}:
+            raise McpError("unsupported collector action", code=-32602)
+        kind = _required_str(arguments, "collector_kind")
+        collector_id = _required_str(arguments, "collector_id")
+        reason = _required_str(arguments, "reason")
+        apply = _optional_bool(arguments, "apply", False)
+        planned = {
+            "schema_version": "mcp_planned_mutation.v1",
+            "operation": "operate_collector",
+            "collector_kind": kind,
+            "collector_id": collector_id,
+            "action": action,
+            "reason": reason,
+            "apply": apply,
+        }
+        if not apply:
+            return planned
+        _require_confirm(arguments, "collector lifecycle actions mutate desired state")
+        request_id = _required_str(arguments, "request_id")
+        actor_id = _optional_str(arguments, "actor_id") or "mcp:agent"
+        command = [
+            "data",
+            "collectors",
+            action,
+            kind,
+            collector_id,
+            "--request-id",
+            request_id,
+            "--actor-id",
+            actor_id,
+            "--reason",
+            reason,
+        ]
+        if action in {"stop", "restart"}:
+            command.append("--confirm")
+        return self._command_runner.run(command, timeout_seconds=300.0)
+
+    def _research_operations(self) -> ResearchOperations:
+        return ResearchOperations(self._client_factory())
+
+    @staticmethod
+    def _research_request(arguments: dict[str, Any]) -> dict[str, Any]:
+        request = arguments.get("request")
+        if not isinstance(request, dict):
+            raise McpError("request must be an object", code=-32602)
+        return dict(request)
+
+    def _tool_get_research_check_requirements(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._research_operations().requirements(
+            self._research_request(arguments)
+        )
+
+    def _tool_preview_research_check(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._research_operations().preview(
+            self._research_request(arguments)
+        )
+
+    def _tool_prepare_research_check_evidence(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        freeze = _optional_bool(arguments, "freeze", False)
+        if freeze:
+            _require_confirm(
+                arguments, "freezing Check evidence creates an immutable Dataset"
+            )
+        return self._research_operations().prepare(
+            self._research_request(arguments),
+            freeze=freeze,
+            created_by=_optional_str(arguments, "created_by"),
+            dataset_name=_optional_str(arguments, "dataset_name"),
+        )
+
+    def _tool_run_research_check_evidence(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        _require_confirm(arguments, "running an evidence Check persists canonical evidence")
+        return self._research_operations().run_evidence(
+            self._research_request(arguments),
+            dataset_id=_optional_str(arguments, "dataset_id"),
+        )
+
+    def _tool_dispatch_research_check_evidence(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        _require_confirm(
+            arguments,
+            "dispatching an evidence Check may persist canonical evidence",
+        )
+        return self._research_operations().dispatch_evidence(
+            self._research_request(arguments),
+            dataset_id=_optional_str(arguments, "dataset_id"),
+        )
+
+    def _tool_get_research_job_status(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._research_operations().job_status(
+            _required_str(arguments, "job_id")
+        )
+
+    def _tool_get_research_job_result(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._research_operations().job_result(
+            _required_str(arguments, "job_id")
+        )
+
+    def _tool_replay_research_check(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._research_operations().replay(
+            _required_str(arguments, "check_id")
+        )
+
+    def _tool_create_observation_from_check(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        _require_confirm(
+            arguments, "creating an Observation persists a research record"
+        )
+        request = arguments.get("request") or {}
+        if not isinstance(request, dict):
+            raise McpError("request must be an object", code=-32602)
+        return self._research_operations().create_observation(
+            _required_str(arguments, "check_id"), request
+        )
+
+    def _tool_get_research_trail(
+        self, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._research_operations().trail(
+            _required_str(arguments, "item_id")
+        )
 
     def _tool_list_bots(self, _arguments: dict[str, Any]) -> dict[str, Any]:
         return self.read_resource("quanttrad://bots")
@@ -710,7 +933,17 @@ class QuantTradMcpServer:
             raise McpError("run_type must be one of backtest, sim_trade, paper, live", code=-32602)
         if run_type in {"paper", "live"} and not _optional_bool(arguments, "allow_non_backtest", False):
             raise McpError("paper/live runs require allow_non_backtest=true", code=-32602)
-        payload: dict[str, Any] = {"run_type": run_type}
+        economic_claim_intent = _required_str(arguments, "economic_claim_intent").lower()
+        if economic_claim_intent not in {"exploration", "economic", "selection", "promotion"}:
+            raise McpError("economic_claim_intent must be exploration, economic, selection, or promotion", code=-32602)
+        payload: dict[str, Any] = {
+            "run_type": run_type,
+            "economic_claim_intent": economic_claim_intent,
+        }
+        if arguments.get("execution_assumptions") is not None:
+            if not isinstance(arguments.get("execution_assumptions"), dict):
+                raise McpError("execution_assumptions must be an object", code=-32602)
+            payload["execution_assumptions"] = dict(arguments["execution_assumptions"])
         if run_type == "backtest":
             payload["dataset_id"] = _required_str(arguments, "dataset_id")
         for key in ("request_id", "execution_behavior", "duration_seconds", "market_data_stream_policy"):
@@ -854,6 +1087,14 @@ class QuantTradMcpServer:
     def _resource_list(self) -> list[dict[str, str]]:
         return [
             _resource("quanttrad://health", "Backend health"),
+            _resource(
+                "quanttrad://market-data/collectors",
+                "Canonical collector fleet",
+            ),
+            _resource(
+                "quanttrad://market-data/plane",
+                "Market-data-plane readiness",
+            ),
             _resource("quanttrad://bots", "Bot run contexts"),
             _resource("quanttrad://strategies", "Strategies"),
             _resource("quanttrad://indicators", "Indicator instances"),
@@ -865,6 +1106,22 @@ class QuantTradMcpServer:
 
     def _resource_templates(self) -> list[dict[str, str]]:
         return [
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}?limit={limit}",
+                "Collector operational detail",
+            ),
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}/diagnostics",
+                "Collector diagnostics",
+            ),
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}/events?limit={limit}",
+                "Collector event history",
+            ),
+            _template(
+                "quanttrad://market-data/collectors/{collector_kind}/{collector_id}/gaps?limit={limit}",
+                "Collector gap evidence",
+            ),
             _template("quanttrad://bots/{bot_id}", "Bot run context"),
             _template("quanttrad://bots/{bot_id}/runs?limit={limit}", "Bot recent runs"),
             _template("quanttrad://bots/{bot_id}/active-run", "Bot active run"),
@@ -886,6 +1143,10 @@ class QuantTradMcpServer:
             _template("quanttrad://reports/{run_id}/metrics", "Report metrics"),
             _template("quanttrad://reports/{run_id}/operational-health", "Report operational health"),
             _template("quanttrad://reports/{run_id}/run-report-status", "Run report materialization status"),
+            _template(
+                "quanttrad://research/items/{item_id}/trail",
+                "Canonical research evidence trail",
+            ),
             _template("quanttrad://experiments/{experiment_id}/state", "Local experiment suite state"),
             _template("quanttrad://experiments/{experiment_id}/summary", "Local experiment suite summary"),
             _template("quanttrad://experiments/{experiment_id}/events?tail={tail}", "Local experiment event log"),
@@ -897,6 +1158,171 @@ class QuantTradMcpServer:
                 "description": "Read backend health through the Quant-Trad API.",
                 "inputSchema": _object_schema(),
                 "handler": self._tool_health_check,
+            },
+            "list_collectors": {
+                "description": "Read the canonical collector fleet and backend-owned lifecycle state.",
+                "inputSchema": _object_schema(
+                    {"attempt_limit": _integer_schema(default=5)}
+                ),
+                "handler": self._tool_list_collectors,
+            },
+            "get_collector": {
+                "description": "Inspect one collector's runtime, facts, gaps, events, and read-only configuration.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                        "limit": _integer_schema(default=100),
+                    },
+                    required=["collector_kind", "collector_id"],
+                ),
+                "handler": self._tool_get_collector,
+            },
+            "diagnose_collector": {
+                "description": "Diagnose collector boundaries and return structured evidence with a safe recommendation.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                    },
+                    required=["collector_kind", "collector_id"],
+                ),
+                "handler": self._tool_diagnose_collector,
+            },
+            "probe_collector": {
+                "description": "Run a read-only collector health probe through qt.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                    },
+                    required=["collector_kind", "collector_id"],
+                ),
+                "handler": self._tool_probe_collector,
+            },
+            "operate_collector": {
+                "description": "Plan or apply a safe audited lifecycle action to a code-registered collector. Apply requires apply=true, confirm=true, and request_id.",
+                "inputSchema": _object_schema(
+                    {
+                        "collector_kind": {
+                            "type": "string",
+                            "enum": ["scheduled_fact", "continuous_stream"],
+                        },
+                        "collector_id": _string_schema(),
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "stop", "restart", "pause", "resume"],
+                        },
+                        "reason": _string_schema(),
+                        "request_id": _string_schema(),
+                        "actor_id": _string_schema(),
+                        "apply": _boolean_schema(default=False),
+                        "confirm": _boolean_schema(default=False),
+                    },
+                    required=["collector_kind", "collector_id", "action", "reason"],
+                ),
+                "handler": self._tool_operate_collector,
+            },
+            "get_research_check_requirements": {
+                "description": "Resolve direct and transitive Check requirements without provider acquisition.",
+                "inputSchema": _object_schema(
+                    {"request": _free_object_schema()}, required=["request"]
+                ),
+                "handler": self._tool_get_research_check_requirements,
+            },
+            "preview_research_check": {
+                "description": "Run an ephemeral watermark-pinned Check preview; it cannot support an evidence-bearing Observation.",
+                "inputSchema": _object_schema(
+                    {"request": _free_object_schema()}, required=["request"]
+                ),
+                "handler": self._tool_preview_research_check,
+            },
+            "prepare_research_check_evidence": {
+                "description": "Resolve evidence requirements and optionally freeze known facts and gaps. Freezing requires confirm=true.",
+                "inputSchema": _object_schema(
+                    {
+                        "request": _free_object_schema(),
+                        "freeze": _boolean_schema(default=False),
+                        "created_by": _string_schema(),
+                        "dataset_name": _string_schema(),
+                        "confirm": _boolean_schema(default=False),
+                    },
+                    required=["request"],
+                ),
+                "handler": self._tool_prepare_research_check_evidence,
+            },
+            "run_research_check_evidence": {
+                "description": "Run and persist a provider-free Check against immutable evidence. Requires confirm=true.",
+                "inputSchema": _object_schema(
+                    {
+                        "request": _free_object_schema(),
+                        "dataset_id": _string_schema(),
+                        "confirm": _boolean_schema(default=False),
+                    },
+                    required=["request"],
+                ),
+                "handler": self._tool_run_research_check_evidence,
+            },
+            "dispatch_research_check_evidence": {
+                "description": "Queue provider-free Check evidence execution. Requires confirm=true.",
+                "inputSchema": _object_schema(
+                    {
+                        "request": _free_object_schema(),
+                        "dataset_id": _string_schema(),
+                        "confirm": _boolean_schema(default=False),
+                    },
+                    required=["request"],
+                ),
+                "handler": self._tool_dispatch_research_check_evidence,
+            },
+            "get_research_job_status": {
+                "description": "Read the status of an asynchronous research operation.",
+                "inputSchema": _object_schema(
+                    {"job_id": _string_schema()}, required=["job_id"]
+                ),
+                "handler": self._tool_get_research_job_status,
+            },
+            "get_research_job_result": {
+                "description": "Read the canonical result of a completed asynchronous research operation.",
+                "inputSchema": _object_schema(
+                    {"job_id": _string_schema()}, required=["job_id"]
+                ),
+                "handler": self._tool_get_research_job_result,
+            },
+            "replay_research_check": {
+                "description": "Replay durable Check evidence and compare deterministic hashes.",
+                "inputSchema": _object_schema(
+                    {"check_id": _string_schema()}, required=["check_id"]
+                ),
+                "handler": self._tool_replay_research_check,
+            },
+            "create_observation_from_check": {
+                "description": "Create an evidence-bearing Observation from a verified durable Check. Requires confirm=true.",
+                "inputSchema": _object_schema(
+                    {
+                        "check_id": _string_schema(),
+                        "request": _free_object_schema(),
+                        "confirm": _boolean_schema(default=False),
+                    },
+                    required=["check_id"],
+                ),
+                "handler": self._tool_create_observation_from_check,
+            },
+            "get_research_trail": {
+                "description": "Inspect the canonical evidence trail for a research item.",
+                "inputSchema": _object_schema(
+                    {"item_id": _string_schema()}, required=["item_id"]
+                ),
+                "handler": self._tool_get_research_trail,
             },
             "list_bots": {
                 "description": "List bot run contexts.",
@@ -1243,7 +1669,7 @@ class QuantTradMcpServer:
                 "handler": self._tool_collect_experiment,
             },
             "start_bot_run": {
-                "description": "Start a bot run against explicit admission inputs. Backtests require dataset_id; paper/live require allow_non_backtest=true; all starts require confirm=true.",
+                "description": "Start a bot run against explicit admission inputs. economic_claim_intent is immutable for the run; economic or stronger claims require a versioned execution_assumptions object. Backtests require dataset_id; paper/live require allow_non_backtest=true; all starts require confirm=true.",
                 "inputSchema": _object_schema(
                     {
                         "bot_id": _string_schema(),
@@ -1251,12 +1677,14 @@ class QuantTradMcpServer:
                         "request_id": _string_schema(),
                         "run_type": {"type": "string", "enum": ["backtest", "sim_trade", "paper", "live"], "default": "backtest"},
                         "execution_behavior": {"type": "string", "enum": ["simulated", "observe-only"]},
+                        "economic_claim_intent": {"type": "string", "enum": ["exploration", "economic", "selection", "promotion"]},
+                        "execution_assumptions": _free_object_schema(),
                         "duration_seconds": _number_schema(),
                         "market_data_stream_policy": _free_object_schema(),
                         "allow_non_backtest": _boolean_schema(default=False),
                         "confirm": _boolean_schema(default=False),
                     },
-                    required=["bot_id"],
+                    required=["bot_id", "economic_claim_intent"],
                 ),
                 "handler": self._tool_start_bot_run,
             },

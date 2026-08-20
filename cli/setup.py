@@ -147,6 +147,33 @@ def _postgres_dsn(user: str, password: str, db: str) -> str:
     return f"postgresql+psycopg2://{encoded_user}:{encoded_password}@localhost:15432/{encoded_db}"
 
 
+def _local_pg_dsn_consistency(
+    pg_dsn: str,
+    *,
+    user: str,
+    password: str,
+    db: str,
+) -> bool | None:
+    if not user or not password or not db:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(pg_dsn)
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in {"postgresql", "postgresql+psycopg2"}:
+        return None
+    if str(parsed.hostname or "").lower() not in {"localhost", "127.0.0.1", "::1"}:
+        return None
+    if port != 15432:
+        return None
+    return (
+        urllib.parse.unquote(parsed.username or ""),
+        urllib.parse.unquote(parsed.password or ""),
+        urllib.parse.unquote(parsed.path.lstrip("/")),
+    ) == (user, password, db)
+
+
 def ensure_operator_env(repo_root: str | Path = REPO_ROOT) -> dict[str, Any]:
     root = Path(repo_root)
     path = root / "secrets.env"
@@ -181,6 +208,15 @@ def ensure_operator_env(repo_root: str | Path = REPO_ROOT) -> dict[str, Any]:
     pg_dsn = values.get("PG_DSN")
     if _placeholder(pg_dsn) or "replace-with" in str(pg_dsn or "") or "<" in str(pg_dsn or ""):
         pg_dsn = _postgres_dsn(user or "quanttrad", password or _safe_password(), db or "quanttrad")
+        if _set_env_line(lines, "PG_DSN", pg_dsn):
+            changes.append("PG_DSN")
+    elif _local_pg_dsn_consistency(
+        str(pg_dsn or ""),
+        user=str(user or ""),
+        password=str(password or ""),
+        db=str(db or ""),
+    ) is False:
+        pg_dsn = _postgres_dsn(str(user), str(password), str(db))
         if _set_env_line(lines, "PG_DSN", pg_dsn):
             changes.append("PG_DSN")
 
@@ -324,6 +360,31 @@ def _pg_dsn_check(values: Mapping[str, str]) -> SetupCheck:
             "failed",
             "PG_DSN must be a PostgreSQL SQLAlchemy DSN",
             remediation="Use the single PG_DSN persistence boundary.",
+        )
+    try:
+        _ = urllib.parse.urlsplit(pg_dsn).port
+    except ValueError:
+        return SetupCheck(
+            "pg_dsn",
+            "failed",
+            "PG_DSN is not a valid PostgreSQL URL",
+            remediation="Use the single PG_DSN persistence boundary.",
+        )
+    expected_user = str(values.get("POSTGRES_USER") or "").strip()
+    expected_password = str(values.get("POSTGRES_PASSWORD") or "")
+    expected_db = str(values.get("POSTGRES_DB") or "").strip()
+    consistency = _local_pg_dsn_consistency(
+        pg_dsn,
+        user=expected_user,
+        password=expected_password,
+        db=expected_db,
+    )
+    if consistency is False:
+        return SetupCheck(
+            "pg_dsn",
+            "failed",
+            "Local PG_DSN credentials do not match POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB",
+            remediation="Run `qt setup env` to align the single local PG_DSN.",
         )
     return SetupCheck("pg_dsn", "ok", "PG_DSN configured")
 

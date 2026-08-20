@@ -15,6 +15,7 @@ from ..service.reports.contract import (
     get_candidate_lifecycle_dataset as _get_candidate_lifecycle_dataset,
     get_candle_catalog as _get_candle_catalog,
     get_candle_dataset as _get_candle_dataset,
+    get_backtest_activity as _get_backtest_activity,
     get_context_dataset as _get_context_dataset,
     get_decision_dataset as _get_decision_dataset,
     get_decision_candle_window as _get_decision_candle_window,
@@ -51,6 +52,7 @@ from ..service.reports.schemas import (
     CandleCatalogResponse,
     CandleDatasetResponse,
     DatasetPageResponse,
+    ReportActivityResponse,
     ExportManifestResponse,
     MetricExplanationResponse,
     ReportCompareRequest,
@@ -92,6 +94,9 @@ async def list_reports(
     timeframe: Optional[str] = Query(None),
     started_after: Optional[str] = Query(None, alias="start"),
     started_before: Optional[str] = Query(None, alias="end"),
+    sort: Optional[str] = Query(
+        None, description="net_pnl_desc | sharpe_desc | total_return_desc — defaults to most-recently-completed."
+    ),
 ) -> Dict[str, Any]:
     """Return report list entries for completed runs."""
 
@@ -106,6 +111,7 @@ async def list_reports(
         search=search,
         start=started_after,
         end=started_before,
+        sort=sort,
     )
     logger.info(with_log_context("report_list_request", context))
     try:
@@ -121,12 +127,31 @@ async def list_reports(
             timeframe=timeframe,
             started_after=started_after,
             started_before=started_before,
+            sort=sort,
         )
         logger.info(with_log_context("report_list_success", context))
         return payload
     except Exception as exc:  # noqa: BLE001 - convert to API error
         logger.error(with_log_context("report_list_failed", context), exc_info=exc)
         raise HTTPException(500, "Report list query failed") from exc
+
+
+@router.get("/activity", response_model=ReportActivityResponse)
+async def get_report_activity(
+    type: str = Query("backtest", alias="type"),
+    days: int = Query(182, ge=1, le=366),
+) -> ReportActivityResponse:
+    """Return a day-bucketed, zero-filled completed-run count for an activity heatmap."""
+
+    context = build_log_context(run_type=type, days=days)
+    logger.info(with_log_context("report_activity_request", context))
+    try:
+        payload = await _run_report_task(_get_backtest_activity, run_type=type, days=days)
+        logger.info(with_log_context("report_activity_success", context))
+        return ReportActivityResponse.model_validate(payload)
+    except Exception as exc:  # noqa: BLE001 - convert to API error
+        logger.error(with_log_context("report_activity_failed", context), exc_info=exc)
+        raise HTTPException(500, "Report activity query failed") from exc
 
 
 @router.post("/compare", response_model=RunComparisonResultResponse)
@@ -156,6 +181,7 @@ async def compare_materialized_reports(
     right_run_id: str = Query(..., alias="right_run_id"),
     include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
     require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
+    minimum_execution_quality_class: str = Query("X0", pattern="^X[0-7]$"),
 ) -> RunComparisonDTO:
     """Compare two ready materialized RunReportDTO contract (`run_report.v2`) artifacts without building reports."""
 
@@ -168,6 +194,7 @@ async def compare_materialized_reports(
             right_run_id,
             include_golden=include_golden,
             require_golden=require_golden,
+            minimum_execution_quality_class=minimum_execution_quality_class,
         )
         logger.info(
             with_log_context(
@@ -195,6 +222,7 @@ async def compare_materialized_reports_summary(
     right_run_id: str = Query(..., alias="right_run_id"),
     include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
     require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
+    minimum_execution_quality_class: str = Query("X0", pattern="^X[0-7]$"),
 ) -> Dict[str, Any]:
     """Return a compact materialized report comparison for CLI/research workflows."""
 
@@ -207,6 +235,7 @@ async def compare_materialized_reports_summary(
             right_run_id,
             include_golden=include_golden,
             require_golden=require_golden,
+            minimum_execution_quality_class=minimum_execution_quality_class,
         )
         payload = _summarize_run_report_comparison(result)
         logger.info(
@@ -779,13 +808,23 @@ async def get_signal_candle_window(
 
 
 @router.get("/{run_id}/diagnostics", response_model=ReportDiagnosticsResponse)
-async def get_report_diagnostics(run_id: str) -> ReportDiagnosticsResponse:
+async def get_report_diagnostics(
+    run_id: str,
+    limit: Optional[int] = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+) -> ReportDiagnosticsResponse:
     """Return normalized report diagnostics for a run."""
 
-    context = build_log_context(run_id=run_id)
+    context = build_log_context(run_id=run_id, limit=limit, offset=offset)
     logger.info(with_log_context("report_diagnostics_request", context))
     try:
-        payload = await _run_report_task(_get_report_diagnostics, run_id)
+        payload = (
+            await _run_report_task(_get_report_diagnostics, run_id)
+            if limit is None
+            else await _run_report_task(
+                _get_report_diagnostics, run_id, limit=limit, offset=offset
+            )
+        )
         logger.info(with_log_context("report_diagnostics_success", context))
         return ReportDiagnosticsResponse.model_validate(payload)
     except KeyError as exc:

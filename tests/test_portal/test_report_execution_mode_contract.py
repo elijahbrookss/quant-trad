@@ -341,7 +341,7 @@ def test_metric_explanation_reads_portfolio_metrics(monkeypatch) -> None:
 def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         contract.report_data,
-        "list_runs",
+        "list_report_catalog_candidates",
         lambda **_kwargs: [
             {
                 "run_id": "run-1",
@@ -353,26 +353,18 @@ def test_list_report_summaries_exposes_execution_mode(monkeypatch) -> None:
                 "status": "completed",
                 "ended_at": "2026-01-02T00:00:00Z",
                 "summary": {"net_pnl": 1.0, "total_trades": 1},
-                "config_snapshot": {"execution_mode": "full"},
             }
         ],
     )
     monkeypatch.setattr(
         contract.report_data,
-        "get_result_readiness",
-        lambda *_args, **_kwargs: {
-            "dataset_ready": True,
-            "results_ready": True,
-            "safe_to_compare": True,
-            "reason": "ready",
-            "dataset_status": "ready",
-            "export_status": "available",
-        },
+        "list_report_catalog_details",
+        lambda _run_ids: {"run-1": {"execution_mode": "full"}},
     )
     monkeypatch.setattr(
         contract.report_data,
-        "get_report_materialization_status",
-        lambda _run_id: {"status": "not_built", "contract_version": "run_report.v2"},
+        "list_report_materialization_statuses",
+        lambda _run_ids: {"run-1": {}},
     )
 
     payload = contract.list_report_summaries()
@@ -492,6 +484,48 @@ def test_report_contract_reuses_dataset_build_for_burst(monkeypatch) -> None:
     assert calls["count"] == 1
 
 
+def test_report_contract_reuses_completed_dataset_only_while_durable_fingerprint_matches(monkeypatch) -> None:
+    calls = {"count": 0}
+    clock = {"now": 0.0}
+    source = {"fingerprint": "source-a", "status": "completed"}
+
+    def build(run_id: str) -> dict:
+        calls["count"] += 1
+        payload = _dataset()
+        payload["metadata"] = {**payload["metadata"], "run_id": run_id}
+        return payload
+
+    def fingerprint(_run_id: str) -> dict:
+        return {
+            "input_fingerprint": source["fingerprint"],
+            "input_fingerprint_payload": {"status": source["status"]},
+        }
+
+    monkeypatch.setattr(contract, "build_run_research_dataset", build)
+    monkeypatch.setattr(contract, "_CANONICAL_DATASET_BUILDER", build)
+    monkeypatch.setattr(contract.report_data, "compute_report_input_fingerprint", fingerprint)
+    monkeypatch.setattr(contract.time, "monotonic", lambda: clock["now"])
+    contract.clear_report_dataset_cache()
+
+    try:
+        contract.get_run_report_summary("run-cache-validated")
+        clock["now"] = 16.0
+        contract.get_report_sections("run-cache-validated")
+        assert calls["count"] == 1
+
+        source["fingerprint"] = "source-b"
+        clock["now"] = 17.0
+        contract.get_report_sections("run-cache-validated")
+        assert calls["count"] == 2
+
+        source["status"] = "running"
+        clock["now"] = 33.0
+        contract.get_report_sections("run-cache-validated")
+        assert calls["count"] == 3
+    finally:
+        contract.clear_report_dataset_cache()
+
+
 def test_run_report_builds_from_existing_dataset(monkeypatch) -> None:
     dataset = _run_report_dataset()
     _install_run_report_dataset(monkeypatch, dataset)
@@ -502,7 +536,7 @@ def test_run_report_builds_from_existing_dataset(monkeypatch) -> None:
     assert payload["identity"]["run_id"] == "run-1"
     assert payload["identity"]["dataset_id"] == "mds_test"
     assert payload["identity"]["dataset_hash"] == "dataset-hash"
-    assert payload["trust"]["research_status"] == "research_valid"
+    assert payload["trust"]["research_status"] == "reproducible"
     assert payload["performance"]["net_pnl"]["value"] == 14.0
     assert payload["behavior"]["total_decisions"] == 2
     assert payload["wallet"]["wallet_trace_complete"] is True

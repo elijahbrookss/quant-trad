@@ -9,7 +9,18 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from .contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, DATASET_IDENTITY_HASH_VERSION
+from .contracts import (
+    CANDLE_FACT_TYPE,
+    CANDLE_FACT_VERSION,
+    DATASET_IDENTITY_HASH_VERSION,
+    OPEN_INTEREST_FACT_TYPE,
+    OPEN_INTEREST_FACT_VERSION,
+)
+from .fact_registry import get_fact_contract
+from .frozen import (
+    bound_frozen_series_for_request,
+    build_frozen_market_data_read_binding,
+)
 
 
 BACKTEST_DATASET_BINDING_VERSION = "backtest_dataset_binding.v1"
@@ -34,6 +45,7 @@ _BACKTEST_EXECUTION_BOT_FIELDS = (
     "run_type",
     "bot_env",
     "execution_semantics",
+    "execution_book_tape_bundle",
 )
 
 
@@ -378,7 +390,7 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
             "backtest_dataset_binding_invalid: at least one bound series is required"
         )
     series: list[dict[str, Any]] = []
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, str, str, int | None]] = set()
     for raw in raw_series:
         if not isinstance(raw, Mapping):
             raise ValueError(
@@ -387,34 +399,50 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
         instrument_id = str(raw.get("instrument_id") or "").strip()
         fact_type = str(raw.get("fact_type") or "").strip().lower()
         contract_version = str(raw.get("contract_version") or "").strip()
-        if fact_type != CANDLE_FACT_TYPE or contract_version != CANDLE_FACT_VERSION:
+        try:
+            contract = get_fact_contract(fact_type)
+            contract.validate(contract_version=contract_version, timeframe_seconds=raw.get("timeframe_seconds"))
+            if not contract.dataset_eligible:
+                raise ValueError(
+                    f"fact type is not dataset eligible: {fact_type}"
+                )
+        except (TypeError, ValueError) as exc:
             raise ValueError(
                 "backtest_dataset_binding_invalid: unsupported fact contract "
                 f"{fact_type or '<missing>'}/{contract_version or '<missing>'}"
-            )
+            ) from exc
         try:
             series_id = int(raw.get("series_id"))
-            timeframe_seconds = int(raw.get("timeframe_seconds"))
             row_count = int(raw.get("row_count"))
             series_commit_seq = int(raw.get("max_commit_seq"))
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "backtest_dataset_binding_invalid: series numeric fields are malformed"
             ) from exc
+        raw_timeframe = raw.get("timeframe_seconds")
+        if raw_timeframe is None:
+            timeframe_seconds = None
+        else:
+            try:
+                timeframe_seconds = int(raw_timeframe)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "backtest_dataset_binding_invalid: timeframe is malformed"
+                ) from exc
+        contract.validate(contract_version=contract_version, timeframe_seconds=timeframe_seconds)
         if (
             not instrument_id
             or series_id <= 0
-            or timeframe_seconds <= 0
             or row_count <= 0
             or series_commit_seq <= 0
         ):
             raise ValueError(
                 "backtest_dataset_binding_invalid: series identity and counts must be positive"
             )
-        key = (instrument_id, timeframe_seconds)
+        key = (instrument_id, fact_type, contract_version, timeframe_seconds)
         if key in seen:
             raise ValueError(
-                "backtest_dataset_binding_invalid: duplicate instrument/timeframe series"
+                "backtest_dataset_binding_invalid: duplicate typed fact series"
             )
         seen.add(key)
         start = _utc(raw.get("range_start"), field="series.range_start")
@@ -461,9 +489,9 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
     bound_instrument_ids = {
         str(row["instrument_id"]) for row in execution_instruments
     }
-    if bound_instrument_ids != series_instrument_ids:
+    if not bound_instrument_ids.issubset(series_instrument_ids):
         raise ValueError(
-            "backtest_dataset_binding_invalid: execution instruments do not match bound series"
+            "backtest_dataset_binding_invalid: execution instruments are missing primary series"
         )
 
     windows: dict[str, tuple[datetime, datetime]] = {}
@@ -527,6 +555,31 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
             "backtest_dataset_binding_invalid: series watermark exceeds dataset watermark"
         )
 
+    ordered_series = sorted(
+        series,
+        key=lambda row: (
+            str(row["instrument_id"]),
+            str(row["fact_type"]),
+            int(row["timeframe_seconds"] or -1),
+            int(row["series_id"]),
+        ),
+    )
+    recorded_gaps = [
+        {"series_id": int(row["series_id"]), **dict(gap)}
+        for row in ordered_series
+        for gap in list(row.get("disclosed_gaps") or [])
+        if isinstance(gap, Mapping)
+    ]
+    frozen_read_binding = build_frozen_market_data_read_binding(
+        dataset_id=dataset_id,
+        dataset_hash=dataset_hash,
+        max_commit_seq=max_commit_seq,
+        series=ordered_series,
+        subjects=execution_instruments,
+        recorded_gaps=recorded_gaps,
+        quality=dict(quality),
+    )
+
     return {
         **dict(payload),
         "schema_version": BACKTEST_DATASET_BINDING_VERSION,
@@ -543,14 +596,8 @@ def normalize_backtest_dataset_binding(payload: Mapping[str, Any]) -> dict[str, 
         "instrument_config_hash": instrument_config_hash,
         **normalized_windows,
         "instruments": execution_instruments,
-        "series": sorted(
-            series,
-            key=lambda row: (
-                str(row["instrument_id"]),
-                int(row["timeframe_seconds"]),
-                int(row["series_id"]),
-            ),
-        ),
+        "series": ordered_series,
+        "frozen_market_data_read_binding": frozen_read_binding,
     }
 
 
@@ -612,44 +659,34 @@ def bound_series_for_request(
     binding: Mapping[str, Any],
     *,
     instrument_id: str,
-    timeframe_seconds: int,
+    timeframe_seconds: int | None,
     start: Any,
     end: Any,
+    fact_type: str = CANDLE_FACT_TYPE,
+    contract_version: str = CANDLE_FACT_VERSION,
 ) -> dict[str, Any]:
     """Resolve one exact bound series and reject all range expansion."""
 
     normalized = normalize_backtest_dataset_binding(binding)
-    instrument_id = str(instrument_id or "").strip()
-    timeframe_seconds = int(timeframe_seconds)
-    requested_start = _utc(start, field="requested_start")
-    requested_end = _utc(end, field="requested_end")
-    matches = [
-        row
-        for row in normalized["series"]
-        if row["instrument_id"] == instrument_id
-        and int(row["timeframe_seconds"]) == timeframe_seconds
-        and row["fact_type"] == CANDLE_FACT_TYPE
-        and row["contract_version"] == CANDLE_FACT_VERSION
-    ]
-    if len(matches) != 1:
-        raise ValueError(
-            "backtest_dataset_series_missing: dataset does not contain exactly one "
-            f"series for instrument_id={instrument_id} timeframe_seconds={timeframe_seconds}"
+    try:
+        return bound_frozen_series_for_request(
+            normalized["frozen_market_data_read_binding"],
+            instrument_id=instrument_id,
+            timeframe_seconds=timeframe_seconds,
+            start=start,
+            end=end,
+            fact_type=fact_type,
+            contract_version=contract_version,
         )
-    entry = dict(matches[0])
-    bound_start = _utc(entry["range_start"], field="bound_start")
-    bound_end = _utc(entry["range_end"], field="bound_end")
-    if requested_end <= requested_start:
-        raise ValueError(
-            "backtest_dataset_range_invalid: requested end must be after start"
-        )
-    if requested_start < bound_start or requested_end > bound_end:
-        raise ValueError(
-            "backtest_dataset_range_expansion_forbidden: requested "
-            f"[{iso_utc(requested_start)}, {iso_utc(requested_end)}) outside frozen "
-            f"[{iso_utc(bound_start)}, {iso_utc(bound_end)})"
-        )
-    return entry
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("frozen_market_data_series_missing"):
+            raise ValueError(message.replace("frozen_market_data", "backtest_dataset", 1)) from exc
+        if message.startswith("frozen_market_data_range_invalid"):
+            raise ValueError(message.replace("frozen_market_data", "backtest_dataset", 1)) from exc
+        if message.startswith("frozen_market_data_range_expansion_forbidden"):
+            raise ValueError(message.replace("frozen_market_data", "backtest_dataset", 1)) from exc
+        raise
 
 
 __all__ = [

@@ -32,5 +32,6 @@ class BotRuntimeDeps:
     append_botlens_canonical_fact_batch: Optional[Callable[..., Mapping[str, Any]]] = None
     append_botlens_canonical_fact_batches: Optional[Callable[..., Mapping[str, Any]]] = None
     record_bot_runtime_diagnostic_event: Optional[Callable[[Mapping[str, Any]], None]] = None
+    market_data_inputs_for_decision: Optional[Callable[..., Dict[str, Dict[str, Any]]]] = None
 
 __all__ = ["BotRuntimeDeps"]

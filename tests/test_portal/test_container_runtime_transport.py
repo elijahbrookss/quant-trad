@@ -650,6 +650,10 @@ def test_telemetry_runtime_fact_coalesce_key_excludes_material_facts() -> None:
         **visual_payload,
         "facts": [{"fact_type": "trade_opened", "trade": {"trade_id": "trade-1"}}],
     }
+    overlay_payload = {
+        **visual_payload,
+        "facts": [{"fact_type": "overlay_ops_emitted", "overlay_delta": {"overlay_commit_seq": 2}}],
+    }
 
     assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(visual_payload) == (
         "botlens_runtime_facts",
@@ -659,12 +663,14 @@ def test_telemetry_runtime_fact_coalesce_key_excludes_material_facts() -> None:
         "session-1",
     )
     assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(material_payload) is None
+    assert telemetry_mod.TelemetryEmitter._coalesce_key_for_payload(overlay_payload) is None
 
 
 def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytest.MonkeyPatch) -> None:
     send_gate = threading.Event()
     send_started = threading.Event()
     connections: list[_FakeAsyncWebSocket] = []
+    observer = MagicMock()
 
     def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
         assert open_timeout == 2
@@ -674,6 +680,7 @@ def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytes
         return ws
 
     monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+    monkeypatch.setattr(telemetry_mod, "_OBSERVER", observer)
 
     emitter = telemetry_mod.TelemetryEmitter(
         "ws://example.test/telemetry",
@@ -696,15 +703,33 @@ def test_telemetry_emitter_coalescing_preserves_inflight_head(monkeypatch: pytes
             "run_seq": 2,
             "facts": [{"fact_type": "runtime_state_observed", "runtime": {"status": "running", "progress_state": "progressing"}}],
         }
+        third_payload = {
+            **second_payload,
+            "run_seq": 3,
+        }
 
         assert emitter.send(first_payload)
         _wait_until(lambda: send_started.is_set() and len(connections) == 1)
         assert emitter.send(second_payload)
+        assert emitter.send(third_payload)
 
         send_gate.set()
         _wait_until(lambda: len(connections[0].sent) == 2)
 
-        assert [json.loads(message)["run_seq"] for message in connections[0].sent] == [1, 2]
+        assert [json.loads(message)["run_seq"] for message in connections[0].sent] == [1, 3]
+        observer.increment.assert_any_call(
+            "telemetry_messages_coalesced_total",
+            value=1,
+            bot_id="bot-1",
+            run_id="run-1",
+            series_key="instrument-btc|1m",
+            worker_id=None,
+            message_kind="botlens_runtime_facts",
+            queue_name="telemetry_emit_queue",
+        )
+        assert "telemetry_runtime_message_coalesced" not in {
+            call.args[0] for call in observer.event.call_args_list if call.args
+        }
     finally:
         send_gate.set()
         emitter.close()
@@ -740,6 +765,39 @@ def test_telemetry_emitter_reuses_single_websocket_for_multiple_messages(monkeyp
         emitter.close()
 
     assert connections[0].close_calls == 1
+
+
+def test_telemetry_emitter_idle_wait_keeps_protocol_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connections: list[_FakeAsyncWebSocket] = []
+    protocol_callback_serviced = threading.Event()
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        assert open_timeout == 2
+        assert close_timeout == 1
+        asyncio.get_running_loop().call_later(0.03, protocol_callback_serviced.set)
+        ws = _FakeAsyncWebSocket()
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+
+    emitter = telemetry_mod.TelemetryEmitter(
+        "ws://example.test/telemetry",
+        queue_max=8,
+        queue_timeout_ms=50,
+        retry_ms=25,
+    )
+    try:
+        assert emitter.send(
+            {"kind": "botlens_runtime_facts", "bot_id": "bot-1", "run_id": "run-1", "run_seq": 1}
+        )
+        _wait_until(lambda: len(connections) == 1 and len(connections[0].sent) == 1)
+
+        assert protocol_callback_serviced.wait(timeout=0.3)
+    finally:
+        emitter.close()
 
 
 def test_ephemeral_telemetry_uses_async_transport_inside_running_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1147,6 +1205,60 @@ def test_telemetry_emitter_close_flushes_control_lane(
         closer.join(timeout=2.0)
         assert not closer.is_alive()
         assert json.loads(connections[0].sent[0])["seq"] == 10
+    finally:
+        send_gate.set()
+        closer.join(timeout=2.0)
+
+
+def test_telemetry_emitter_close_flushes_material_general_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    send_gate = threading.Event()
+    connections: list[_FakeAsyncWebSocket] = []
+
+    def _connect(_url: str, *, open_timeout: int, close_timeout: int) -> _FakeAsyncWebSocket:
+        del open_timeout, close_timeout
+        ws = _FakeAsyncWebSocket(send_gate=send_gate)
+        connections.append(ws)
+        return ws
+
+    monkeypatch.setattr(telemetry_mod, "async_connect", _connect)
+    emitter = telemetry_mod.TelemetryEmitter(
+        "ws://example.test/telemetry",
+        queue_max=8,
+        queue_timeout_ms=50,
+        retry_ms=10,
+    )
+    assert emitter.send(
+        {
+            "kind": "botlens_runtime_facts",
+            "bot_id": "bot-1",
+            "run_id": "run-1",
+            "series_key": "instrument-btc|1m",
+            "facts": [
+                {
+                    "fact_type": "overlay_ops_emitted",
+                    "overlay_delta": {
+                        "overlay_commit_seq": 2,
+                        "base_overlay_commit_seq": 1,
+                        "overlay_commit_seq_status": "overlay_scoped",
+                        "ops": [],
+                    },
+                }
+            ],
+        }
+    )
+
+    closer = threading.Thread(target=emitter.close)
+    closer.start()
+    try:
+        _wait_until(lambda: len(connections) == 1)
+        assert closer.is_alive()
+        send_gate.set()
+        closer.join(timeout=2.0)
+        assert not closer.is_alive()
+        payload = json.loads(connections[0].sent[0])
+        assert payload["facts"][0]["fact_type"] == "overlay_ops_emitted"
     finally:
         send_gate.set()
         closer.join(timeout=2.0)

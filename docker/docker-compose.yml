@@ -1,5 +1,21 @@
 name: quant-trad
 
+x-market-data-lifecycle-environment: &market-data-lifecycle-environment
+  QT_MARKET_DATA_LIFECYCLE_ENABLED: "${QT_MARKET_DATA_LIFECYCLE_ENABLED:-true}"
+  QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED: "${QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED:-false}"
+  QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS: "${QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS:-3600}"
+  QT_MARKET_DATA_LIFECYCLE_ARCHIVE_COMPACTION_ENABLED: "${QT_MARKET_DATA_LIFECYCLE_ARCHIVE_COMPACTION_ENABLED:-true}"
+  QT_MARKET_DATA_LIFECYCLE_ARCHIVE_EXPIRATION_ENABLED: "${QT_MARKET_DATA_LIFECYCLE_ARCHIVE_EXPIRATION_ENABLED:-true}"
+  QT_MARKET_DATA_LIFECYCLE_RAW_TRADE_ARCHIVE_DAYS: "${QT_MARKET_DATA_LIFECYCLE_RAW_TRADE_ARCHIVE_DAYS:-400}"
+  QT_MARKET_DATA_LIFECYCLE_RAW_L2_ARCHIVE_DAYS: "${QT_MARKET_DATA_LIFECYCLE_RAW_L2_ARCHIVE_DAYS:-90}"
+  QT_MARKET_DATA_LIFECYCLE_BOOK_CHECKPOINT_ARCHIVE_DAYS: "${QT_MARKET_DATA_LIFECYCLE_BOOK_CHECKPOINT_ARCHIVE_DAYS:-90}"
+  QT_MARKET_DATA_LIFECYCLE_COMPACTED_SOURCE_GRACE_HOURS: "${QT_MARKET_DATA_LIFECYCLE_COMPACTED_SOURCE_GRACE_HOURS:-24}"
+  QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_AGE_MINUTES: "${QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_AGE_MINUTES:-15}"
+  QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_OBJECTS: "${QT_MARKET_DATA_LIFECYCLE_COMPACTION_MIN_OBJECTS:-2}"
+  QT_MARKET_DATA_LIFECYCLE_COMPACTION_TARGET_BYTES: "${QT_MARKET_DATA_LIFECYCLE_COMPACTION_TARGET_BYTES:-536870912}"
+  QT_MARKET_DATA_LIFECYCLE_MAX_COMPACTION_GROUPS_PER_RUN: "${QT_MARKET_DATA_LIFECYCLE_MAX_COMPACTION_GROUPS_PER_RUN:-8}"
+  QT_MARKET_DATA_LIFECYCLE_MAX_ARCHIVE_EXPIRATIONS_PER_RUN: "${QT_MARKET_DATA_LIFECYCLE_MAX_ARCHIVE_EXPIRATIONS_PER_RUN:-100}"
+
 services:
   frontend:
     profiles: [core]
@@ -15,6 +31,7 @@ services:
       - VITE_API_BASE_URL=/api
       - VITE_API_PROXY_TARGET=http://backend.quanttrad:8000
       - VITE_BOTLENS_DEBUG=true
+      - VITE_HMR_CLIENT_PORT=5173
     ports:
       - "5173:5173"
     volumes:
@@ -27,11 +44,41 @@ services:
         aliases:
           - frontend.quanttrad
 
+  frontend-v2:
+    profiles: [core]
+    build:
+      context: ..
+      dockerfile: portal/frontend/Dockerfile
+      target: dev
+    hostname: frontend-v2.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: frontend-v2
+    environment:
+      - VITE_API_BASE_URL=/api
+      - VITE_API_PROXY_TARGET=http://backend.quanttrad:8000
+      - VITE_BOTLENS_DEBUG=false
+      - VITE_HMR_CLIENT_PORT=5174
+    ports:
+      - "5174:5173"
+    volumes:
+      - ../portal/frontend/src:/app/src:ro
+      - ../portal/frontend/v2.html:/app/index.html:ro
+    depends_on:
+      - backend
+    networks:
+      quanttrad:
+        aliases:
+          - frontend-v2.quanttrad
+
   backend:
     profiles: [core]
     build:
       context: ..
       dockerfile: portal/backend/Dockerfile
+      args:
+        QT_SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required for image provenance}
+        QT_SOURCE_TREE_HASH: ${SOURCE_TREE_HASH:?SOURCE_TREE_HASH is required for image provenance}
     image: quanttrad-backend:dev
     hostname: backend.quanttrad
     labels:
@@ -40,6 +87,7 @@ services:
     env_file:
       - ../secrets.env
     environment:
+      <<: *market-data-lifecycle-environment
       PYTHONPATH: /app/src:/app
       QT_CONFIG_PROFILE: ${QT_CONFIG_PROFILE:-dev}
       QT_LOGGING_DEBUG: ${QT_LOGGING_DEBUG:-true}
@@ -47,6 +95,7 @@ services:
       QT_BOT_RUNTIME_IMAGE: ${QT_BOT_RUNTIME_IMAGE:-quanttrad-backend:dev}
       QT_BOT_RUNTIME_NETWORK: ${QT_BOT_RUNTIME_NETWORK:-quant-trad_quanttrad}
       SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required for run provenance}
+      SOURCE_TREE_HASH: ${SOURCE_TREE_HASH:?SOURCE_TREE_HASH is required for run provenance}
     ports:
       - "8000:8000"
     command:
@@ -58,10 +107,45 @@ services:
     volumes:
       - ../secrets.env:/app/secrets.env:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - market-structure-data:/app/logs/market-structure
     networks:
       quanttrad:
         aliases:
           - backend.quanttrad
+
+  market-data-collector:
+    profiles: [core]
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: portal/backend/Dockerfile
+      args:
+        QT_SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required for image provenance}
+        QT_SOURCE_TREE_HASH: ${SOURCE_TREE_HASH:?SOURCE_TREE_HASH is required for image provenance}
+    image: quanttrad-backend:dev
+    hostname: market-data-collector.quanttrad
+    labels:
+      loki.job: quanttrad
+      loki.service: market-data-collector
+    env_file:
+      - ../secrets.env
+    environment:
+      <<: *market-data-lifecycle-environment
+      PYTHONPATH: /app/src:/app
+      QT_CONFIG_PROFILE: ${QT_CONFIG_PROFILE:-dev}
+    command:
+      - /bin/bash
+      - -lc
+      - export PG_DSN="postgresql+psycopg2://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@tsdb:5432/$${POSTGRES_DB}" && python -m portal.backend.workers.market_data_collector
+    depends_on:
+      - tsdb
+    volumes:
+      - ../secrets.env:/app/secrets.env:ro
+      - market-structure-data:/app/logs/market-structure
+    networks:
+      quanttrad:
+        aliases:
+          - market-data-collector.quanttrad
 
   tsdb:
     profiles: [database]
@@ -160,6 +244,7 @@ services:
       - ./promtail/config.yml:/etc/promtail/config.yml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ../logs/host-capacity:/var/log/quanttrad-host-capacity:ro
     depends_on:
       - loki
     networks:
@@ -177,6 +262,25 @@ services:
       - "docker events --format '{{json .}}' --filter type=container --filter label=loki.job=quanttrad"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - quanttrad
+
+  docker-stats:
+    profiles: [observability]
+    image: docker:27-cli
+    labels:
+      loki.job: quanttrad
+      loki.service: docker-stats
+    environment:
+      QT_DOCKER_CAPACITY_INTERVAL_SECONDS: "${QT_DOCKER_CAPACITY_INTERVAL_SECONDS:-15}"
+      QT_DOCKER_STORAGE_MOUNT: /host-docker
+    command:
+      - /bin/sh
+      - /opt/quanttrad/docker_capacity_sampler.sh
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${QT_DOCKER_STORAGE_ROOT:-/var/lib/docker}:/host-docker:ro
+      - ../scripts/reporting/docker_capacity_sampler.sh:/opt/quanttrad/docker_capacity_sampler.sh:ro
     networks:
       - quanttrad
 
@@ -252,6 +356,7 @@ volumes:
   loki-data:
   ibkr-gateway-config:
   ibkr-gateway-logs:
+  market-structure-data:
 
 networks:
   quanttrad:

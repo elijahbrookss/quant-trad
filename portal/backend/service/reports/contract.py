@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Future
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+import math
 import statistics
 import threading
 import time
@@ -38,13 +39,29 @@ _COMPARABLE_SUMMARY_METRICS = (
     "accepted_decisions",
     "rejected_decisions",
 )
-_DATASET_CACHE_TTL_SECONDS = 15.0
-_DATASET_CACHE_MAX_ENTRIES = 32
+_DATASET_CACHE_BURST_TTL_SECONDS = 15.0
+_DATASET_CACHE_VALIDATED_TTL_SECONDS = 900.0
+_DATASET_CACHE_MAX_ENTRIES = 8
+_DATASET_CACHE_TERMINAL_STATUSES = frozenset(
+    {
+        "completed",
+        "degraded_terminal",
+        "failed",
+        "error",
+        "startup_failed",
+        "crashed",
+        "stopped",
+        "cancelled",
+        "canceled",
+    }
+)
 _DatasetBuilder = Callable[[str], Dict[str, Any]]
 _DatasetCacheKey = Tuple[str, _DatasetBuilder]
-_DATASET_CACHE: "OrderedDict[_DatasetCacheKey, Tuple[float, Dict[str, Any]]]" = OrderedDict()
+_DatasetCacheEntry = Tuple[float, Optional[str], Dict[str, Any]]
+_DATASET_CACHE: "OrderedDict[_DatasetCacheKey, _DatasetCacheEntry]" = OrderedDict()
 _DATASET_INFLIGHT: Dict[_DatasetCacheKey, Future] = {}
 _DATASET_CACHE_LOCK = threading.RLock()
+_CANONICAL_DATASET_BUILDER = build_run_research_dataset
 
 
 def _mapping(value: Any) -> Dict[str, Any]:
@@ -91,16 +108,36 @@ def _dataset_cache_key(run_id: str) -> _DatasetCacheKey:
     return (str(run_id), build_run_research_dataset)
 
 
-def _cached_dataset_unlocked(key: _DatasetCacheKey) -> Optional[Dict[str, Any]]:
+def _cache_entry_unlocked(key: _DatasetCacheKey) -> Optional[_DatasetCacheEntry]:
     entry = _DATASET_CACHE.get(key)
     if not entry:
         return None
-    stored_at, dataset = entry
-    if time.monotonic() - stored_at > _DATASET_CACHE_TTL_SECONDS:
+    stored_at, _input_fingerprint, _dataset_payload = entry
+    if time.monotonic() - stored_at > _DATASET_CACHE_VALIDATED_TTL_SECONDS:
         _DATASET_CACHE.pop(key, None)
         return None
-    _DATASET_CACHE.move_to_end(key)
-    return dataset
+    return entry
+
+
+def _canonical_terminal_input_fingerprint(run_id: str) -> Optional[str]:
+    if build_run_research_dataset is not _CANONICAL_DATASET_BUILDER:
+        return None
+    try:
+        state = report_data.compute_report_input_fingerprint(run_id)
+    except Exception as exc:  # noqa: BLE001 - retain the existing short burst cache when validation is unavailable.
+        logger.warning(
+            with_log_context(
+                "report_dataset_cache_fingerprint_unavailable",
+                build_log_context(run_id=run_id, error=str(exc)),
+            )
+        )
+        return None
+    payload = _mapping(state.get("input_fingerprint_payload"))
+    status = str(payload.get("status") or "").strip().lower()
+    fingerprint = str(state.get("input_fingerprint") or "").strip()
+    if status not in _DATASET_CACHE_TERMINAL_STATUSES or not fingerprint:
+        return None
+    return fingerprint
 
 
 def clear_report_dataset_cache(run_id: Optional[str] = None) -> None:
@@ -117,8 +154,13 @@ def clear_report_dataset_cache(run_id: Optional[str] = None) -> None:
                 _DATASET_CACHE.pop(key, None)
 
 
-def _store_dataset_unlocked(key: _DatasetCacheKey, dataset: Dict[str, Any]) -> None:
-    _DATASET_CACHE[key] = (time.monotonic(), dataset)
+def _store_dataset_unlocked(
+    key: _DatasetCacheKey,
+    dataset: Dict[str, Any],
+    *,
+    input_fingerprint: Optional[str],
+) -> None:
+    _DATASET_CACHE[key] = (time.monotonic(), input_fingerprint, dataset)
     _DATASET_CACHE.move_to_end(key)
     while len(_DATASET_CACHE) > _DATASET_CACHE_MAX_ENTRIES:
         _DATASET_CACHE.popitem(last=False)
@@ -126,11 +168,52 @@ def _store_dataset_unlocked(key: _DatasetCacheKey, dataset: Dict[str, Any]) -> N
 
 def _dataset(run_id: str) -> Dict[str, Any]:
     key = _dataset_cache_key(run_id)
+    validation_candidate: Optional[Tuple[float, str]] = None
     with _DATASET_CACHE_LOCK:
-        cached = _cached_dataset_unlocked(key)
-        if cached is not None:
-            logger.debug(with_log_context("report_dataset_cache_hit", build_log_context(run_id=run_id)))
-            return cached
+        entry = _cache_entry_unlocked(key)
+        if entry is not None:
+            stored_at, input_fingerprint, dataset = entry
+            age_seconds = max(time.monotonic() - stored_at, 0.0)
+            if age_seconds <= _DATASET_CACHE_BURST_TTL_SECONDS:
+                _DATASET_CACHE.move_to_end(key)
+                logger.debug(
+                    with_log_context(
+                        "report_dataset_cache_hit",
+                        build_log_context(run_id=run_id, validation="burst"),
+                    )
+                )
+                return dataset
+            if input_fingerprint:
+                validation_candidate = (stored_at, input_fingerprint)
+
+    if validation_candidate is not None:
+        current_fingerprint = _canonical_terminal_input_fingerprint(run_id)
+        with _DATASET_CACHE_LOCK:
+            entry = _cache_entry_unlocked(key)
+            if entry is not None and entry[0] == validation_candidate[0]:
+                if current_fingerprint and current_fingerprint == validation_candidate[1]:
+                    _DATASET_CACHE.move_to_end(key)
+                    logger.debug(
+                        with_log_context(
+                            "report_dataset_cache_hit",
+                            build_log_context(
+                                run_id=run_id,
+                                validation="durable_input_fingerprint",
+                            ),
+                        )
+                    )
+                    return entry[2]
+                _DATASET_CACHE.pop(key, None)
+
+    with _DATASET_CACHE_LOCK:
+        entry = _cache_entry_unlocked(key)
+        if entry is not None:
+            stored_at, _input_fingerprint, dataset = entry
+            if max(time.monotonic() - stored_at, 0.0) <= _DATASET_CACHE_BURST_TTL_SECONDS:
+                _DATASET_CACHE.move_to_end(key)
+                logger.debug(with_log_context("report_dataset_cache_hit", build_log_context(run_id=run_id)))
+                return dataset
+            _DATASET_CACHE.pop(key, None)
         future = _DATASET_INFLIGHT.get(key)
         if future is None:
             future = Future()
@@ -141,23 +224,85 @@ def _dataset(run_id: str) -> Dict[str, Any]:
 
     if not should_build:
         logger.debug(with_log_context("report_dataset_inflight_wait", build_log_context(run_id=run_id)))
-        return future.result()
+        wait_started = time.perf_counter()
+        dataset = future.result()
+        logger.debug(
+            with_log_context(
+                "report_dataset_inflight_wait_done",
+                build_log_context(
+                    run_id=run_id,
+                    wait_ms=round((time.perf_counter() - wait_started) * 1000.0, 3),
+                ),
+            )
+        )
+        return dataset
 
+    build_started = time.perf_counter()
     try:
         logger.debug(with_log_context("report_dataset_build_start", build_log_context(run_id=run_id)))
+        fingerprint_before_started = time.perf_counter()
+        input_fingerprint_before = _canonical_terminal_input_fingerprint(run_id)
+        fingerprint_before_seconds = time.perf_counter() - fingerprint_before_started
+        dataset_build_started = time.perf_counter()
         dataset = build_run_research_dataset(run_id)
+        dataset_build_seconds = time.perf_counter() - dataset_build_started
     except BaseException as exc:
         with _DATASET_CACHE_LOCK:
             _DATASET_INFLIGHT.pop(key, None)
             future.set_exception(exc)
         raise
 
+    fingerprint_after_started = time.perf_counter()
+    input_fingerprint_after = _canonical_terminal_input_fingerprint(run_id)
+    fingerprint_after_seconds = time.perf_counter() - fingerprint_after_started
+    validated_fingerprint = (
+        input_fingerprint_after
+        if input_fingerprint_before
+        and input_fingerprint_before == input_fingerprint_after
+        else None
+    )
     with _DATASET_CACHE_LOCK:
-        _store_dataset_unlocked(key, dataset)
+        _store_dataset_unlocked(
+            key,
+            dataset,
+            input_fingerprint=validated_fingerprint,
+        )
         _DATASET_INFLIGHT.pop(key, None)
         future.set_result(dataset)
-    logger.debug(with_log_context("report_dataset_build_done", build_log_context(run_id=run_id)))
+    logger.debug(
+        with_log_context(
+            "report_dataset_build_done",
+            build_log_context(
+                run_id=run_id,
+                duration_ms=round((time.perf_counter() - build_started) * 1000.0, 3),
+                dataset_build_ms=round(dataset_build_seconds * 1000.0, 3),
+                fingerprint_before_ms=round(fingerprint_before_seconds * 1000.0, 3),
+                fingerprint_after_ms=round(fingerprint_after_seconds * 1000.0, 3),
+                fingerprint_validated=bool(validated_fingerprint),
+            ),
+        )
+    )
     return dataset
+
+
+_REPORT_SORT_FIELDS = {
+    "net_pnl_desc": "net_pnl",
+    "sharpe_desc": "sharpe",
+    "total_return_desc": "total_return",
+}
+
+
+def _report_summary_field(entry: Mapping[str, Any], field: str) -> Any:
+    return _mapping(entry.get("summary")).get(field)
+
+
+def _report_numeric_sort_value(entry: Mapping[str, Any], field: str) -> Optional[float]:
+    raw = _report_summary_field(entry, field)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
 
 
 def list_report_summaries(
@@ -172,8 +317,15 @@ def list_report_summaries(
     timeframe: Optional[str] = None,
     started_after: Optional[str] = None,
     started_before: Optional[str] = None,
+    sort: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return lightweight report catalog rows from durable run metadata."""
+    """Return lightweight report catalog rows from durable run metadata.
+
+    ``sort`` accepts one of ``net_pnl_desc`` / ``sharpe_desc`` / ``total_return_desc``
+    (ranked descending by the named summary metric, missing values sorted last,
+    ties broken by most-recent-``ended_at`` then ``run_id`` for full determinism).
+    Omitted, it falls back to the existing most-recently-completed ordering.
+    """
 
     context = build_log_context(
         run_type=run_type,
@@ -186,9 +338,10 @@ def list_report_summaries(
         search=search,
         start=started_after,
         end=started_before,
+        sort=sort,
     )
     logger.debug(with_log_context("report_catalog_list_start", context))
-    runs = report_data.list_runs(
+    runs = report_data.list_report_catalog_candidates(
         run_type=run_type,
         status=status,
         bot_id=bot_id,
@@ -216,19 +369,48 @@ def list_report_summaries(
                 continue
         filtered.append(run)
 
-    filtered.sort(key=lambda entry: entry.get("ended_at") or "", reverse=True)
+    sort_field = _REPORT_SORT_FIELDS.get(str(sort or "").strip().lower())
+    if sort_field:
+        # Stable multi-pass sort, least-significant key first: tertiary (run_id desc),
+        # secondary (ended_at desc), then primary (summary field desc, None last).
+        filtered.sort(key=lambda entry: str(entry.get("run_id") or ""), reverse=True)
+        filtered.sort(key=lambda entry: str(entry.get("ended_at") or ""), reverse=True)
+        def metric_key(entry: Mapping[str, Any]) -> tuple[bool, float]:
+            value = _report_numeric_sort_value(entry, sort_field)
+            return (value is None, -(value or 0.0))
+
+        filtered.sort(key=metric_key)
+    else:
+        filtered.sort(key=lambda entry: entry.get("ended_at") or "", reverse=True)
     total = len(filtered)
     sliced = filtered[offset : offset + limit] if limit else filtered[offset:]
+    selected_run_ids = [str(run.get("run_id") or "") for run in sliced if str(run.get("run_id") or "")]
+    catalog_details = report_data.list_report_catalog_details(selected_run_ids)
+    materialization_statuses = report_data.list_report_materialization_statuses(selected_run_ids)
 
     items: List[Dict[str, Any]] = []
     for run in sliced:
         run_id = str(run.get("run_id") or "")
+        catalog_detail = _mapping(catalog_details.get(run_id))
+        symbols = [str(symbol) for symbol in (run.get("symbols") or [])]
         summary = _mapping(run.get("summary"))
-        readiness = report_data.get_result_readiness(
-            run_id,
-            financial_summary=summary or None,
+        dataset_id = str(catalog_detail.get("dataset_id") or "").strip() or None
+        dataset_hash = str(catalog_detail.get("dataset_hash") or run.get("data_snapshot_hash") or "").strip() or None
+        report_materialization = _mapping(materialization_statuses.get(run_id))
+        artifact_readiness = _mapping(report_materialization.get("artifact_readiness"))
+        materialized_ready = bool(
+            report_materialization.get("status") == "ready"
+            and report_materialization.get("can_view")
+            and report_materialization.get("freshness_verified")
         )
-        report_materialization = report_data.get_report_materialization_status(run_id)
+        dataset_ready = bool(
+            materialized_ready
+            and dataset_id
+            and dataset_hash
+            and artifact_readiness.get("dataset_ready")
+        )
+        results_ready = bool(materialized_ready and artifact_readiness.get("results_ready"))
+        safe_to_compare = bool(materialized_ready and artifact_readiness.get("safe_to_compare"))
         items.append(
             {
                 "schema_version": "run_report_summary_item.v1",
@@ -239,7 +421,11 @@ def list_report_summaries(
                 "strategy_name": run.get("strategy_name"),
                 "symbols": symbols,
                 "timeframe": run.get("timeframe"),
-                "execution_mode": _execution_mode_from_run(run),
+                "execution_mode": str(catalog_detail.get("execution_mode") or "fast").strip().lower(),
+                "dataset_identity": {
+                    "dataset_id": dataset_id,
+                    "dataset_hash": dataset_hash,
+                },
                 "simulated_window": {
                     "start": run.get("backtest_start"),
                     "end": run.get("backtest_end"),
@@ -258,17 +444,84 @@ def list_report_summaries(
                     "total_trades": summary.get("total_trades"),
                 },
                 "readiness": {
-                    "dataset_ready": bool(readiness.get("dataset_ready")),
-                    "results_ready": bool(readiness.get("results_ready")),
-                    "safe_to_compare": bool(readiness.get("safe_to_compare")),
-                    "reason": readiness.get("reason"),
-                    "dataset_status": readiness.get("dataset_status"),
+                    "dataset_ready": dataset_ready,
+                    "results_ready": results_ready,
+                    "safe_to_compare": safe_to_compare,
+                    "reason": (
+                        "report_freshness_unverified"
+                        if not report_materialization.get("freshness_verified")
+                        else artifact_readiness.get("reason")
+                        if safe_to_compare
+                        else report_materialization.get("stale_reason")
+                        or artifact_readiness.get("reason")
+                        or "report_not_materialized"
+                    ),
+                    "dataset_status": artifact_readiness.get("dataset_status") or (
+                        "ready" if dataset_ready else "blocked"
+                    ),
                 },
                 "report_materialization": report_materialization,
             }
         )
     logger.debug(with_log_context("report_catalog_list_done", context | {"items": len(items), "total": total}))
     return {"schema_version": "report_list.v1", "items": items, "total": total, "limit": limit, "offset": offset}
+
+
+_ACTIVITY_MAX_DAYS = 366
+
+
+def get_backtest_activity(*, run_type: str = "backtest", days: int = 182) -> Dict[str, Any]:
+    """Return a day-bucketed, zero-filled backtest completion count for an activity heatmap.
+
+    Bucketed by ``ended_at`` (completion date, not start date) at UTC day
+    boundaries. ``total`` per day is the count of *completed* runs that day;
+    ``by_status`` gives the full status breakdown for context. Every day in the
+    requested window is present, even with zero completions.
+    """
+
+    bounded_days = max(1, min(int(days or 182), _ACTIVITY_MAX_DAYS))
+    today = datetime.now(timezone.utc).date()
+    since_date = today - timedelta(days=bounded_days - 1)
+    since_dt = datetime(since_date.year, since_date.month, since_date.day)
+
+    context = build_log_context(run_type=run_type, days=bounded_days, since=since_date.isoformat())
+    logger.debug(with_log_context("report_activity_request", context))
+
+    rows = report_data.count_runs_by_day(run_type=run_type, status=None, since=since_dt)
+
+    by_day: Dict[date, Dict[str, int]] = defaultdict(dict)
+    for row in rows:
+        day_value = row.get("day")
+        day_date = day_value.date() if isinstance(day_value, datetime) else day_value
+        if not isinstance(day_date, date):
+            continue
+        by_day[day_date][str(row.get("status") or "")] = int(row.get("total") or 0)
+
+    days_payload: List[Dict[str, Any]] = []
+    cursor = since_date
+    while cursor <= today:
+        by_status = by_day.get(cursor, {})
+        days_payload.append(
+            {
+                "date": cursor.isoformat(),
+                "total": int(by_status.get("completed", 0)),
+                "by_status": by_status,
+            }
+        )
+        cursor += timedelta(days=1)
+
+    logger.debug(with_log_context("report_activity_done", context | {"days_returned": len(days_payload)}))
+    return {
+        "schema_version": "report_activity.v1",
+        "activity_type": "backtests_completed",
+        "run_type": run_type,
+        "qualifying_statuses": ["completed"],
+        "timestamp_field": "ended_at",
+        "timezone": "UTC",
+        "description": "Completed backtests by persisted ended_at UTC day.",
+        "since": since_date.isoformat(),
+        "days": days_payload,
+    }
 
 
 def get_run_research_dataset(run_id: str) -> Dict[str, Any]:
@@ -995,8 +1248,12 @@ def _candle_continuity_status(candle_gaps: Mapping[str, Any]) -> str:
 
 
 def _research_status(readiness: Mapping[str, Any]) -> str:
-    if str(readiness.get("golden_candidate_status") or "").strip().lower() == "certified":
-        return "research_valid"
+    reproducible = str(readiness.get("golden_candidate_status") or "").strip().lower() == "certified"
+    execution_class = str(readiness.get("execution_quality_class") or "X0").upper()
+    if reproducible and execution_class in {"X1", "X2", "X3", "X4", "X5", "X6", "X7"}:
+        return "reproducible_economic_evidence"
+    if reproducible:
+        return "reproducible"
     if readiness.get("results_ready") and readiness.get("safe_to_compare"):
         return "research_valid_with_caveats"
     if readiness.get("blocking_reasons") or readiness.get("golden_blocking_reasons"):
@@ -1042,6 +1299,12 @@ def _research_trust(dataset: Mapping[str, Any], events: Sequence[Mapping[str, An
         "golden_status": readiness.get("golden_candidate_status") or "not_available",
         "golden_candidate_status": readiness.get("golden_candidate_status") or "unknown",
         "research_status": _research_status(readiness),
+        "reproducibility_status": readiness.get("reproducibility_status") or "unknown",
+        "execution_quality_class": readiness.get("execution_quality_class") or "X0",
+        "scientific_quality_class": readiness.get("scientific_quality_class") or "S0",
+        "instrument_economics_class": readiness.get("instrument_economics_class") or "unknown",
+        "promotion_eligibility": readiness.get("promotion_eligibility") or "ineligible",
+        "promotion_blocking_reasons": list(readiness.get("promotion_blocking_reasons") or []),
         "readiness_status": readiness.get("results_status") or readiness.get("dataset_status") or "unknown",
         "readiness_blockers": list(readiness.get("blocking_reasons") or []) + list(readiness.get("golden_blocking_reasons") or []),
         "caveats": list(readiness.get("caveats") or []),
@@ -1334,6 +1597,25 @@ def _operational_diagnostics(dataset: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _run_report_identity(dataset: Mapping[str, Any]) -> Dict[str, Any]:
     metadata = _mapping(dataset.get("metadata"))
+    instrument_semantics = [
+        dict(row)
+        for row in metadata.get("instrument_semantics") or []
+        if isinstance(row, Mapping)
+    ]
+    source_instrument_types = sorted(
+        {
+            str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+            for row in instrument_semantics
+            if str(row.get("source_instrument_type") or row.get("instrument_type") or "").strip()
+        }
+    )
+    execution_semantics = sorted(
+        {
+            str(row.get("execution_semantics") or "").strip()
+            for row in instrument_semantics
+            if str(row.get("execution_semantics") or "").strip()
+        }
+    )
     return {
         "run_id": metadata.get("run_id"),
         "bot_id": metadata.get("bot_id"),
@@ -1349,6 +1631,9 @@ def _run_report_identity(dataset: Mapping[str, Any]) -> Dict[str, Any]:
         "timeframes": list(metadata.get("timeframes") or []),
         "provider": metadata.get("provider"),
         "exchange": metadata.get("exchange"),
+        "source_instrument_types": source_instrument_types,
+        "execution_semantics": execution_semantics,
+        "instrument_semantics": instrument_semantics,
         "simulated_window": _mapping(metadata.get("simulated_window")),
         "wall_clock_window": _mapping(metadata.get("wall_clock_window")),
         "starting_capital": metadata.get("starting_capital"),
@@ -1402,8 +1687,24 @@ def get_report_sections(run_id: str) -> Dict[str, Any]:
     return _mapping(_dataset(run_id).get("sections"))
 
 
-def get_report_diagnostics(run_id: str) -> Dict[str, Any]:
-    return _mapping(_dataset(run_id).get("diagnostics"))
+def get_report_diagnostics(
+    run_id: str,
+    *,
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    payload = _mapping(_dataset(run_id).get("diagnostics"))
+    if limit is None:
+        return payload
+    rows = [dict(row) for row in payload.get("items") or []]
+    bounded_limit = max(1, min(int(limit or 100), 1000))
+    bounded_offset = max(0, int(offset or 0))
+    return payload | {
+        "items": rows[bounded_offset : bounded_offset + bounded_limit],
+        "total": len(rows),
+        "limit": bounded_limit,
+        "offset": bounded_offset,
+    }
 
 
 def get_report_metrics(run_id: str) -> Dict[str, Any]:

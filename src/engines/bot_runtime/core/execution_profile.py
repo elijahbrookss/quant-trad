@@ -6,9 +6,12 @@ object so engine semantics do not depend on ad-hoc dictionary lookups.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+import math
+from dataclasses import dataclass, replace
 from copy import deepcopy
-from typing import Any, Iterable, Mapping, Optional, Protocol, Tuple
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional, Protocol, Tuple
 
 from risk import normalise_risk_config
 
@@ -21,6 +24,9 @@ from .margin import (
     extract_margin_rates,
     resolve_instrument_type,
 )
+
+if TYPE_CHECKING:
+    from .execution_context import ResolvedExecutionContext
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,9 @@ class ExecutionFeeContract:
     maker_fee_rate: float
     taker_fee_rate: float
     source: str
+    version: str
+    configured: bool
+    verified_zero: bool
 
 
 @dataclass(frozen=True)
@@ -113,6 +122,7 @@ class SeriesExecutionProfile:
     margin_rates: Optional[MarginRates]
     collateral_model: CollateralModel
     validated_for_runtime: bool
+    execution_context: Optional["ResolvedExecutionContext"] = None
 
     @property
     def accounting_mode(self) -> Optional[str]:
@@ -163,6 +173,9 @@ class SeriesExecutionProfile:
                 "maker_fee_rate": self.fees.maker_fee_rate,
                 "taker_fee_rate": self.fees.taker_fee_rate,
                 "source": self.fees.source,
+                "version": self.fees.version,
+                "configured": self.fees.configured,
+                "verified_zero": self.fees.verified_zero,
             },
             "risk": {
                 "base_risk_per_trade": self.risk.base_risk_per_trade,
@@ -172,7 +185,32 @@ class SeriesExecutionProfile:
             "accounting_mode": self.accounting_mode,
             "margin_calc_type": self.margin_calc_type,
             "validated_for_runtime": self.validated_for_runtime,
+            "resolved_execution_context": (
+                self.execution_context.to_dict() if self.execution_context is not None else None
+            ),
         }
+
+    def bind_execution_context(
+        self,
+        context: "ResolvedExecutionContext",
+    ) -> "SeriesExecutionProfile":
+        """Bind one pinned context while retaining the legacy profile surface."""
+
+        from .execution_context import instrument_execution_contract_from_profile
+
+        current_instrument = instrument_execution_contract_from_profile(self)
+        if current_instrument.contract_hash != context.instrument.contract_hash:
+            raise ValueError("series_execution_profile_instrument_contract_mismatch")
+        schedule = context.fee_schedule
+        fees = ExecutionFeeContract(
+            maker_fee_rate=float(schedule.maker_rate),
+            taker_fee_rate=float(schedule.taker_rate),
+            source=schedule.source,
+            version=str(schedule.version or schedule.schedule_hash),
+            configured=schedule.configured,
+            verified_zero=schedule.verified_zero,
+        )
+        return replace(self, fees=fees, execution_context=context)
 
 
 def normalize_runtime_instrument_type(value: Optional[object]) -> str:
@@ -335,16 +373,52 @@ def _field_value(mapping: Mapping[str, Any], key: str) -> Any:
     return value
 
 
+def _resolved_fee_rate(value: Any) -> tuple[float, bool]:
+    if value is None or isinstance(value, bool):
+        return 0.0, False
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0, False
+    if not math.isfinite(parsed):
+        return 0.0, False
+    return parsed, True
+
+
 def _execution_fees(execution_instrument: Mapping[str, Any]) -> ExecutionFeeContract:
-    maker = _coerce_float(_field_value(execution_instrument, "maker_fee_rate"), 0.0) or 0.0
-    taker = _coerce_float(_field_value(execution_instrument, "taker_fee_rate"), 0.0) or 0.0
-    source = "instrument"
-    if maker == 0.0 and taker == 0.0:
+    maker, maker_configured = _resolved_fee_rate(_field_value(execution_instrument, "maker_fee_rate"))
+    taker, taker_configured = _resolved_fee_rate(_field_value(execution_instrument, "taker_fee_rate"))
+    configured = maker_configured and taker_configured
+    source = str(_field_value(execution_instrument, "fee_source") or "instrument").strip()
+    raw_verified_zero = _field_value(execution_instrument, "fee_zero_verified")
+    if raw_verified_zero is not None and not isinstance(raw_verified_zero, bool):
+        configured = False
+    verified_zero = raw_verified_zero is True
+    if not configured:
         source = "default_zero"
+        verified_zero = False
+    explicit_version = str(_field_value(execution_instrument, "fee_schedule_version") or "").strip()
+    version_material = {
+        "schema_version": "execution_fee_contract.v1",
+        "instrument_id": execution_instrument.get("id"),
+        "symbol": execution_instrument.get("symbol"),
+        "exchange": execution_instrument.get("exchange"),
+        "maker_fee_rate": float(maker),
+        "taker_fee_rate": float(taker),
+        "source": source,
+        "configured": configured,
+        "verified_zero": verified_zero,
+    }
+    derived_hash = hashlib.sha256(
+        json.dumps(version_material, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:16]
     return ExecutionFeeContract(
         maker_fee_rate=float(maker),
         taker_fee_rate=float(taker),
         source=source,
+        version=explicit_version or f"execution_fee_contract.v1:{derived_hash}",
+        configured=configured,
+        verified_zero=verified_zero,
     )
 
 

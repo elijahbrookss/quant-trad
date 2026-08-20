@@ -1,4 +1,5 @@
 # routers/indicators.py
+import asyncio
 import logging
 from time import perf_counter
 from typing import Any, Dict, List, Optional
@@ -283,12 +284,12 @@ class IndicatorBulkDeleteRequest(BaseModel):
 
 # ===== Types =====
 @router.get("/types", response_model=List[str])
-async def list_indicator_types():
+def list_indicator_types():
     return list_types()
 
 
 @router.get("/types/{type_id}")
-async def get_indicator_type(type_id: str):
+def get_indicator_type(type_id: str):
     try:
         return get_type_details(type_id)
     except KeyError as e:
@@ -296,11 +297,11 @@ async def get_indicator_type(type_id: str):
 
 # ===== Instances =====
 @router.get("/", response_model=List[IndicatorInstanceOut])
-async def list_instances():
+def list_instances():
     return list_instances_meta()
 
 @router.post("/", response_model=IndicatorReadOut, status_code=201)
-async def create(body: IndicatorInstanceIn):
+def create(body: IndicatorInstanceIn):
     try:
         meta = create_instance(
             body.type,
@@ -318,7 +319,7 @@ async def create(body: IndicatorInstanceIn):
 
 
 @router.post("/validate-config", response_model=IndicatorReadOut)
-async def validate_config(body: IndicatorInstanceIn):
+def validate_config(body: IndicatorInstanceIn):
     try:
         meta = validate_instance_config(
             body.type,
@@ -336,7 +337,7 @@ async def validate_config(body: IndicatorInstanceIn):
 
 
 @router.put("/{inst_id}", response_model=IndicatorReadOut)
-async def update(inst_id: str, body: IndicatorInstanceIn):
+def update(inst_id: str, body: IndicatorInstanceIn):
     try:
         color_provided = "color" in body.__fields_set__
         color_palette_provided = "color_palette" in body.__fields_set__
@@ -377,7 +378,7 @@ async def update(inst_id: str, body: IndicatorInstanceIn):
         raise HTTPException(500, str(e))
 
 @router.get("/{inst_id}", response_model=IndicatorReadOut)
-async def get_one(inst_id: str):
+def get_one(inst_id: str):
     try:
         return _indicator_read(get_instance_meta(inst_id))
     except KeyError:
@@ -385,7 +386,7 @@ async def get_one(inst_id: str):
 
 
 @router.get("/{inst_id}/strategies")
-async def get_indicator_strategies(inst_id: str):
+def get_indicator_strategies(inst_id: str):
     try:
         get_instance_meta(inst_id)
     except KeyError:
@@ -394,7 +395,7 @@ async def get_indicator_strategies(inst_id: str):
 
 
 @router.post("/{inst_id}/runtime-validation")
-async def validate_runtime(inst_id: str, req: RuntimeValidationRequest):
+def validate_runtime(inst_id: str, req: RuntimeValidationRequest):
     t0 = perf_counter()
     try:
         logger.info(
@@ -493,7 +494,7 @@ async def validate_runtime(inst_id: str, req: RuntimeValidationRequest):
 
 
 @router.delete("/{inst_id}", status_code=204, response_class=Response)
-async def delete(inst_id: str) -> Response:
+def delete(inst_id: str) -> Response:
     try:
         delete_instance(inst_id)
     except KeyError:
@@ -505,7 +506,7 @@ async def delete(inst_id: str) -> Response:
 
 
 @router.post("/{inst_id}/duplicate", response_model=IndicatorReadOut)
-async def duplicate(inst_id: str, body: Optional[IndicatorDuplicateRequest] = None):
+def duplicate(inst_id: str, body: Optional[IndicatorDuplicateRequest] = None):
     try:
         return _indicator_read(duplicate_instance(inst_id, name=body.name if body else None))
     except KeyError:
@@ -513,7 +514,7 @@ async def duplicate(inst_id: str, body: Optional[IndicatorDuplicateRequest] = No
 
 
 @router.patch("/{inst_id}/enabled", response_model=IndicatorReadOut)
-async def toggle_enabled(inst_id: str, body: IndicatorToggleRequest):
+def toggle_enabled(inst_id: str, body: IndicatorToggleRequest):
     try:
         return _indicator_read(set_instance_enabled(inst_id, body.enabled))
     except KeyError:
@@ -521,14 +522,14 @@ async def toggle_enabled(inst_id: str, body: IndicatorToggleRequest):
 
 
 @router.post("/bulk/toggle", response_model=List[IndicatorInstanceOut])
-async def bulk_toggle(body: IndicatorBulkToggleRequest):
+def bulk_toggle(body: IndicatorBulkToggleRequest):
     if not body.ids:
         return []
     return bulk_set_enabled(body.ids, body.enabled)
 
 
 @router.post("/bulk/delete")
-async def bulk_delete(body: IndicatorBulkDeleteRequest):
+def bulk_delete(body: IndicatorBulkDeleteRequest):
     try:
         removed = bulk_delete_instances(body.ids or [])
         return {"deleted": removed}
@@ -561,7 +562,7 @@ async def overlays(inst_id: str, req: OverlayRequest):
             resolved_cursor_epoch,
             req.cursor_time,
         )
-        meta = get_instance_meta(inst_id)
+        meta = await asyncio.to_thread(get_instance_meta, inst_id)
         request_fingerprint = quantlab_request_fingerprint(
             job_type=JOB_TYPE_OVERLAYS,
             indicator_id=inst_id,
@@ -590,7 +591,8 @@ async def overlays(inst_id: str, req: OverlayRequest):
             "cursor_epoch": resolved_cursor_epoch,
         }
         partition_key = quantlab_partition_key(request_payload)
-        reusable = reuse_quantlab_job(
+        reusable = await asyncio.to_thread(
+            reuse_quantlab_job,
             job_type=JOB_TYPE_OVERLAYS,
             partition_key=partition_key,
             request_fingerprint=request_fingerprint,
@@ -617,7 +619,8 @@ async def overlays(inst_id: str, req: OverlayRequest):
         if reusable and reusable.get("id") and reusable.get("status") in {"queued", "running", "retry"}:
             job_id = str(reusable["id"])
         else:
-            job_id = enqueue_overlay_job(
+            job_id = await asyncio.to_thread(
+                enqueue_overlay_job,
                 inst_id=inst_id,
                 start=req.start,
                 end=req.end,
@@ -791,7 +794,7 @@ async def signals(inst_id: str, req: SignalRequest):
         effective_config = dict(req.config or {})
         output_names = normalise_signal_output_names(effective_config)
         event_keys = normalise_signal_event_keys(effective_config)
-        meta = get_instance_meta(inst_id)
+        meta = await asyncio.to_thread(get_instance_meta, inst_id)
         request_fingerprint = quantlab_request_fingerprint(
             job_type=JOB_TYPE_SIGNALS,
             indicator_id=inst_id,
@@ -817,7 +820,8 @@ async def signals(inst_id: str, req: SignalRequest):
             "config": dict(effective_config),
         }
         partition_key = quantlab_partition_key(request_payload)
-        reusable = reuse_quantlab_job(
+        reusable = await asyncio.to_thread(
+            reuse_quantlab_job,
             job_type=JOB_TYPE_SIGNALS,
             partition_key=partition_key,
             request_fingerprint=request_fingerprint,
@@ -846,7 +850,8 @@ async def signals(inst_id: str, req: SignalRequest):
         if reusable and reusable.get("id") and reusable.get("status") in {"queued", "running", "retry"}:
             job_id = str(reusable["id"])
         else:
-            job_id = enqueue_signal_job(
+            job_id = await asyncio.to_thread(
+                enqueue_signal_job,
                 inst_id=inst_id,
                 start=req.start,
                 end=req.end,

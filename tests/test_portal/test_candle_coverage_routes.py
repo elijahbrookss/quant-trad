@@ -244,3 +244,65 @@ def test_dataset_freeze_route_resolves_canonical_series_and_returns_hashes(
     assert response.json()["dataset_id"] == "mds_abc"
     assert observed["identity"]["contract_version"] == "candle.ohlcv.v1"
     assert observed["requests"][0].series_id == 7
+
+
+def test_dataset_freeze_route_accepts_exact_typed_series_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+
+    def fail_candle_resolution(**_kwargs):
+        raise AssertionError("typed series freeze must not resolve a candle")
+
+    def fake_freeze(requests, **kwargs):
+        observed["requests"] = requests
+        observed["freeze"] = kwargs
+        return SimpleNamespace(
+            dataset_id="mds_typed",
+            contract_version="market_dataset.v1",
+            name="normalization-proof",
+            purpose="validation",
+            metadata=kwargs["metadata"],
+            dataset_hash="typed",
+            max_commit_seq=99,
+            series=({"series_id": 94, "material_hash": "material"},),
+        )
+
+    monkeypatch.setattr(
+        candles_controller.market_data_repo,
+        "resolve_series_id",
+        fail_candle_resolution,
+    )
+    monkeypatch.setattr(
+        candles_controller.market_data_repo,
+        "freeze_dataset",
+        fake_freeze,
+    )
+    response = TestClient(app).post(
+        "/api/candles/datasets/freeze",
+        json={
+            "series": [
+                {
+                    "series_id": 94,
+                    "start": "2026-08-02T18:13:56Z",
+                    "end": "2026-08-02T18:14:25Z",
+                }
+            ],
+            "name": "normalization-proof",
+            "purpose": "validation",
+            "created_by": "operator",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["dataset_id"] == "mds_typed"
+    assert observed["requests"][0].series_id == 94
+    assert observed["freeze"]["metadata"]["resolved_requests"] == [
+        {
+            "series_id": 94,
+            "instrument_id": None,
+            "timeframe": None,
+            "start": "2026-08-02T18:13:56Z",
+            "end": "2026-08-02T18:14:25Z",
+        }
+    ]

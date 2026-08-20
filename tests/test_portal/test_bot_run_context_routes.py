@@ -63,7 +63,14 @@ def test_bot_run_context_routes_are_compact_contracts(monkeypatch: pytest.Monkey
 
     assert client.get("/api/bots/run-contexts").json()["schema_version"] == "bot_run_context_list.v1"
     assert client.get("/api/bots/bot-1/run-context").json()["schema_version"] == "bot_run_context.v1"
-    start = client.post("/api/bots/bot-1/runs/start", json={"request_id": "req-1"}).json()
+    assert client.post(
+        "/api/bots/bot-1/runs/start",
+        json={"request_id": "req-missing-intent"},
+    ).status_code == 422
+    start = client.post(
+        "/api/bots/bot-1/runs/start",
+        json={"request_id": "req-1", "economic_claim_intent": "exploration"},
+    ).json()
     assert start["schema_version"] == "bot_run_start.v1"
     assert start["request_id"] == "req-1"
     status = client.get("/api/bots/bot-1/runs/run-2/status").json()

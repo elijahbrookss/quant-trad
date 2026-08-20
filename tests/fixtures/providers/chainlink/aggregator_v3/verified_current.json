@@ -1,0 +1,31 @@
+{
+  "schema_version": "chainlink.aggregator_v3.verified_current.v1",
+  "observed_on": "2026-08-07",
+  "network": "ethereum-mainnet",
+  "observations": [
+    {
+      "binding_id": "eth-usd",
+      "proxy_address": "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419",
+      "aggregator_address": "0x7d4e742018fb52e48b08be73d041c18b21de6fb5",
+      "phase_id": 7,
+      "local_round_id": 32293,
+      "proxy_round_id": "129127208515966893605",
+      "decimals": 8,
+      "description": "ETH / USD",
+      "raw_answer": "191428523541",
+      "normalized_answer": "1914.28523541"
+    },
+    {
+      "binding_id": "tusd-reserves",
+      "proxy_address": "0xbe456fd14720c3accc30a2013bffd782c9cb75d5",
+      "aggregator_address": "0x1669a35da4e5a4e0e55d30b728e66be508e11de8",
+      "phase_id": 3,
+      "local_round_id": 759,
+      "proxy_round_id": "55340232221128655607",
+      "decimals": 18,
+      "description": "TUSD Reserves",
+      "raw_answer": "501928900880000000000000000",
+      "normalized_answer": "501928900.88"
+    }
+  ]
+}

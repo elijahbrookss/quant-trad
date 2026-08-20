@@ -1,0 +1,82 @@
+flowchart LR
+    subgraph Sources["Allowed and conditional sources"]
+        ATWS["Coinbase Advanced Trade WebSocket<br/>trades, L2, heartbeats"]
+        ATREST["Coinbase Advanced Trade REST<br/>products, recent trades/book, OI, funding"]
+        CDEWEB["Public CDE historical files<br/>(conditional proof only)"]
+    end
+
+    subgraph Acquisition["Fenced continuous acquisition"]
+        SUP["Stream supervisor<br/>lease + generation fence"]
+        WS["WebSocket session<br/>connection epoch + receive ordinal"]
+        SPOOL["Local block-storage spool/WAL<br/>assign raw/spool IDs + append + fsync"]
+    end
+
+    subgraph Archive["Immutable raw archive"]
+        OBJ["Object storage<br/>Parquet/ZSTD exact raw frames"]
+        MAN["PostgreSQL archive manifests<br/>checksums + content fingerprints"]
+        MAP["Manifest-to-record mappings<br/>archive-complete identity"]
+    end
+
+    subgraph Canonical["Typed canonical market store"]
+        PARSE["Deterministic parser + validator"]
+        TRADES["Trade revisions<br/>maker side + proven quantities"]
+        COVERAGE["Trade stream coverage intervals<br/>ordering + archive + canonicalization"]
+        L2["L2 snapshots + ordered absolute mutations"]
+        QUALITY["Session quality, gaps,<br/>invalidations, resynchronizations"]
+        BOOK["Book reconstruction<br/>validity intervals + state hashes"]
+        CHECK["Book checkpoints"]
+        OIFUND["Existing candles, OI, funding"]
+    end
+
+    subgraph Features["Reproducible derived facts"]
+        HOT["BBO, spread, depth,<br/>imbalance, flow, basis"]
+        SPECS["Immutable normalization specs"]
+        NORM["Causal normalized feature revisions"]
+    end
+
+    subgraph Dataset["Frozen and causal consumption"]
+        FREEZE["Dataset planner + freezer<br/>material / provenance / quality"]
+        FROZEN["Frozen dataset objects,<br/>spec refs, archive pins, fingerprints"]
+        RESEARCH["Research and observation studies"]
+        BACKTEST["Deterministic backtests"]
+        RUNTIME["Paper/live/runtime resolver<br/>engine snapshots only"]
+    end
+
+    ATWS --> SUP --> WS --> SPOOL
+    SPOOL --> OBJ --> MAN --> MAP
+    SPOOL --> PARSE
+    PARSE --> TRADES
+    PARSE --> COVERAGE
+    PARSE --> L2
+    PARSE --> QUALITY
+    MAP --> COVERAGE
+    QUALITY --> COVERAGE
+    ATREST --> OIFUND
+    ATREST --> PARSE
+    CDEWEB -. "only after Phase 0 admission" .-> OIFUND
+    L2 --> BOOK
+    QUALITY --> BOOK
+    BOOK --> CHECK
+    CHECK --> BOOK
+    BOOK --> HOT
+    TRADES --> HOT
+    COVERAGE --> HOT
+    OIFUND --> HOT
+    HOT --> NORM
+    SPECS --> NORM
+    TRADES --> FREEZE
+    COVERAGE --> FREEZE
+    L2 --> FREEZE
+    QUALITY --> FREEZE
+    OIFUND --> FREEZE
+    HOT --> FREEZE
+    NORM --> FREEZE
+    MAP --> FREEZE
+    FREEZE --> FROZEN
+    FROZEN --> RESEARCH
+    FROZEN --> BACKTEST
+    FROZEN --> RUNTIME
+    HOT --> RUNTIME
+    OIFUND --> RUNTIME
+
+    QUALITY -. "suppresses invalid book features" .-> HOT

@@ -89,6 +89,19 @@ Rules:
 - runtime transport may request those full overlay snapshots on a bounded
   projection cadence, diff them, and stream only changed overlay deltas
   downstream,
+- runtime transport must emit a bounded recurring full-state overlay checkpoint
+  and a terminal full-state checkpoint even when geometry is unchanged; these
+  checkpoints establish a new replay base and prove timeline progress but do
+  not create execution or strategy truth,
+- bounded overlay deltas may be retained as non-authoritative research context
+  for deterministic chart replay; gaps, cadence holes, missing terminal
+  checkpoints, and truncation must suppress any completeness claim,
+- an overlay clock gap invalidates only the overlay projection layer. Candles,
+  decisions, and trades with independently valid evidence remain available;
+  overlay features stay suppressed until a later full-state checkpoint
+  establishes a valid base,
+- trade-removal facts must retain the closing `position_commit_seq` as a
+  tombstone so a delayed open/update packet cannot resurrect a closed position,
 - every declared output must be returned every bar,
 - every declared overlay must be returned for every requested overlay snapshot
   bar,
@@ -181,6 +194,11 @@ transport handoffs may degrade, drop stale visual/debug work, and require a
 projection resync. They must not fail an otherwise valid run. Canonical runtime
 persistence remains strict: durable fact persistence overflow, writer failure,
 or terminal persistence drain timeout is a runtime failure.
+
+Trade snapshot/event persistence may run on one ordered background writer to
+keep database latency out of `apply_bar`, but it remains strict runtime
+persistence: accepted payloads may not be dropped or reordered, capacity is
+bounded, and successful terminal status requires a completed durable drain.
 
 Rules:
 

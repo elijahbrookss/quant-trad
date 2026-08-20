@@ -6,6 +6,8 @@ import json
 import os
 import sys
 import time
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
@@ -21,6 +23,7 @@ from .experiments.runner import ExperimentRunner
 from .experiments.state_store import ExperimentStateStore, find_experiment_dir
 from .experiments.summarize import summarize_experiment, write_experiment_summary
 from .logs import DEFAULT_LOKI_URL, LokiClient, doctor_log_payload, query_log_payload, run_log_payload
+from .research_operations import ResearchOperations
 from .setup import setup_doctor_payload, setup_env_payload
 
 
@@ -480,7 +483,9 @@ def _cmd_bots_update(args: argparse.Namespace) -> int:
 
 
 def _cmd_bots_start(args: argparse.Namespace) -> int:
-    body = {"request_id": args.request_id} if args.request_id else {}
+    body = {"economic_claim_intent": str(args.economic_claim_intent)}
+    if args.request_id:
+        body["request_id"] = args.request_id
     if getattr(args, "run_type", None):
         body["run_type"] = args.run_type
     if getattr(args, "dataset_id", None):
@@ -495,6 +500,11 @@ def _cmd_bots_start(args: argparse.Namespace) -> int:
         body["market_data_stream_policy"] = _read_json_object_arg(
             args.market_data_stream_policy_json,
             label="--market-data-stream-policy-json",
+        )
+    if getattr(args, "execution_assumptions_json", None):
+        body["execution_assumptions"] = _read_json_object_arg(
+            args.execution_assumptions_json,
+            label="--execution-assumptions-json",
         )
     _print_json(_client(args).request_json("POST", f"/api/bots/{args.bot_id}/runs/start", payload=body))
     return 0
@@ -1235,6 +1245,37 @@ def _cmd_data_ingest_candles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_data_acquire_numeric_facts(args: argparse.Namespace) -> int:
+    """Explicitly authorize one bounded manifest-driven numeric acquisition."""
+
+    if args.mode == "historical" and (not args.start or not args.end):
+        raise ValueError("--start and --end are required for historical mode")
+    if args.mode == "current" and (args.start or args.end or args.repair):
+        raise ValueError("current mode forbids --start, --end, and --repair")
+    payload = {
+        "manifest_path": args.manifest_path,
+        "binding_id": args.binding_id,
+        "mode": args.mode,
+        "start": args.start,
+        "end": args.end,
+        "allow_network": bool(args.allow_network),
+        "requested_by": args.requested_by,
+        "reason": args.reason,
+        "max_requests": args.max_requests,
+        "max_logs": args.max_logs,
+        "max_blocks": args.max_blocks,
+        "max_retries": args.max_retries,
+        "repair": bool(args.repair),
+    }
+    result = _client(args).request_json(
+        "POST",
+        "/api/market-data/numeric-facts/acquire",
+        payload=payload,
+    )
+    _print_json(result)
+    return 0 if bool(dict(result.get("result") or {}).get("complete")) else 1
+
+
 def _cmd_data_series(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -1250,12 +1291,23 @@ def _cmd_data_series(args: argparse.Namespace) -> int:
 def _cmd_data_prepare_backtest_dataset(args: argparse.Namespace) -> int:
     """Prepare and freeze source facts without starting execution."""
 
+    numeric_acquisition = _read_json_object_arg(
+        args.numeric_acquisition_json,
+        label="--numeric-acquisition-json",
+    )
+    if numeric_acquisition and not args.acquire_missing:
+        raise ValueError(
+            "--numeric-acquisition-json requires --acquire-missing; "
+            "dataset preparation never contacts providers implicitly"
+        )
     payload = {
         "evaluation_start": args.start,
         "evaluation_end": args.end,
         "acquire_missing": bool(args.acquire_missing),
         "created_by": args.created_by,
     }
+    if numeric_acquisition:
+        payload["numeric_acquisition"] = numeric_acquisition
     _print_json(
         _client(args).request_json(
             "POST",
@@ -1304,6 +1356,453 @@ def _cmd_data_dataset(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
             "GET", f"/api/candles/datasets/{quote(args.dataset_id, safe='')}"
+        )
+    )
+    return 0
+
+
+def _cmd_data_collector_definitions_install_structured(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/definitions/install-structured",
+            payload={
+                "manifest_path": args.manifest_path,
+                "binding_id": args.binding_id,
+                "enabled": bool(args.enabled),
+                "max_attempts": args.max_attempts,
+                "minimum_spacing_seconds": args.minimum_spacing_seconds,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_fleet(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/operations/collectors/snapshot",
+            params={"attempt_limit": args.attempt_limit},
+        )
+    )
+    return 0
+
+
+def _collector_operation_path(args: argparse.Namespace, suffix: str = "") -> str:
+    base = (
+        "/api/market-data/operations/collectors/"
+        f"{quote(args.collector_kind, safe='')}/"
+        f"{quote(args.collector_id, safe='')}"
+    )
+    return base + suffix
+
+
+def _cmd_data_collectors_detail(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            _collector_operation_path(args),
+            params={"limit": args.limit},
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_inspect(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            _collector_operation_path(args, f"/{args.inspect_surface}"),
+            params={"limit": args.limit},
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_diagnose(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            _collector_operation_path(args, "/diagnostics"),
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_action(args: argparse.Namespace) -> int:
+    confirmation = (
+        f"{args.collector_kind}:{args.collector_id}:{args.collector_action}"
+        if bool(args.confirm)
+        else None
+    )
+    actor_id = str(
+        args.actor_id
+        or os.environ.get("QT_ACTOR_ID")
+        or f"qt:{getpass.getuser()}"
+    )
+    payload = {
+        "request_id": args.request_id or f"qt-{uuid.uuid4().hex}",
+        "actor_id": actor_id,
+        "requested_at": datetime.now(UTC).isoformat(),
+        "confirmation": confirmation,
+        "context": {"surface": "qt", "reason": args.reason},
+    }
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            _collector_operation_path(
+                args, f"/actions/{args.collector_action}"
+            ),
+            payload=payload,
+        )
+    )
+    return 0
+
+
+def _cmd_data_collectors_probe(args: argparse.Namespace) -> int:
+    args.collector_action = "health_probe"
+    args.confirm = False
+    args.request_id = None
+    args.actor_id = None
+    args.reason = "Manual collector health probe"
+    return _cmd_data_collectors_action(args)
+
+
+def _cmd_data_collectors_plane(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", "/api/market-data/operations/data-plane"
+        )
+    )
+    return 0
+
+
+def _cmd_data_open_interest_latest(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/open-interest/latest",
+            params={
+                "instrument_id": args.instrument_id,
+                "decision_time": args.decision_time,
+                "max_staleness_seconds": args.max_staleness_seconds,
+                "required": not bool(args.optional),
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_funding_rate_latest(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/funding-rate/latest",
+            params={
+                "instrument_id": args.instrument_id,
+                "decision_time": args.decision_time,
+                "max_staleness_seconds": args.max_staleness_seconds,
+                "required": not bool(args.optional),
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_proof(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from .market_structure_proof import (
+        default_output_dir,
+        run_coinbase_market_structure_proof,
+    )
+
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else default_output_dir()
+    result = asyncio.run(
+        run_coinbase_market_structure_proof(
+            output_dir=output_dir,
+            product_ids=args.product_id or ("BIP-20DEC30-CDE", "BTC-USD"),
+            channels=args.channel or ("market_trades", "level2", "ticker"),
+            auth_mode=args.auth_mode,
+            duration_seconds=args.duration,
+            reconnect_interval_seconds=args.reconnect_interval,
+            sample_limit=args.sample_limit,
+            rest_limit=args.rest_limit,
+            max_annual_archive_gib=args.max_annual_archive_gib,
+        )
+    )
+    _print_json(result)
+    return 0 if result.get("status") == "completed" else 1
+
+
+def _cmd_data_market_structure_enroll(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/enrollments/apply",
+            payload={"manifest_path": args.manifest_path},
+        )
+    )
+    return 0
+
+
+
+def _cmd_data_market_structure_normalization_specs_install(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/normalization/specs/install",
+            payload={"approved_by": args.approved_by},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_normalization_specs(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", "/api/market-data/market-structure/normalization/specs"
+        )
+    )
+    return 0
+
+
+def _normalization_cli_payload(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "spec_id": args.spec_id,
+        "source_series_id": args.source_series_id,
+        "start": args.start,
+        "end": args.end,
+        "known_at": args.known_at,
+        "as_of_commit_seq": args.as_of_commit_seq,
+    }
+
+
+def _cmd_data_market_structure_normalize(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/normalization/materialize",
+            payload=_normalization_cli_payload(args),
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_normalization_compare(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/normalization/compare",
+            payload=_normalization_cli_payload(args),
+        )
+    )
+    return 0
+def _cmd_data_market_structure_definitions(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/definitions",
+            params={"definition_id": args.definition_id},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_sessions(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/sessions",
+            params={
+                "definition_id": args.definition_id,
+                "limit": args.limit,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_status(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/status",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_capture(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/capture",
+            payload={
+                "duration_seconds": args.duration,
+                "storage_root": args.storage_root,
+                "owner_id": args.owner_id,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_safety_change(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/safety/{args.safety_action}",
+            payload={
+                "request_id": args.request_id,
+                "scope_type": args.scope_type,
+                "scope_id": args.scope_id,
+                "requested_by": args.requested_by,
+                "reason": args.reason,
+                "policy_hash": args.policy_hash,
+                "evidence": _read_json_object_arg(args.evidence_json, label="--evidence-json") or None,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_safety_status(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/safety?limit={int(args.limit)}",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_continuous_evidence(
+    args: argparse.Namespace,
+) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/continuous/validation/{quote(args.session_id, safe='')}",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_replay(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/manifests/{quote(args.manifest_id, safe='')}/replay",
+            payload={"storage_root": args.storage_root},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_replay_book(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/sessions/{quote(args.session_id, safe='')}/replay-book",
+            payload={"storage_root": args.storage_root},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_compact(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/sessions/{quote(args.session_id, safe='')}/compact",
+            payload={
+                "source_manifest_ids": args.manifest_id,
+                "storage_root": args.storage_root,
+                "owner_id": args.owner_id,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_retention_pin(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/archive-retention/{quote(args.target_kind, safe='')}/{quote(args.target_id, safe='')}/pin",
+            payload={
+                "owner_kind": args.owner_kind,
+                "owner_id": args.owner_id,
+                "active": not args.release,
+                "reason": args.reason,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_retention_status(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            f"/api/market-data/market-structure/archive-retention/{quote(args.target_kind, safe='')}/{quote(args.target_id, safe='')}",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_lifecycle_plan(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/storage-lifecycle/plan",
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_lifecycle_run(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/market-structure/storage-lifecycle/run",
+            payload={
+                "execute": bool(args.execute),
+                "storage_root": args.storage_root,
+                "owner_id": args.owner_id,
+            },
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_lifecycle_events(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET",
+            "/api/market-data/market-structure/storage-lifecycle/events",
+            params={"limit": args.limit},
+        )
+    )
+    return 0
+
+
+def _cmd_data_market_structure_reconcile_recent(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            f"/api/market-data/market-structure/definitions/{quote(args.definition_id, safe='')}/reconcile-recent",
+            params={"limit": args.limit},
         )
     )
     return 0
@@ -1458,11 +1957,102 @@ def _research_check_request_base(args: argparse.Namespace, *, title: str, check_
 
 
 def _post_research_check(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    operations = ResearchOperations(_client(args))
+    mode = str(payload.get("mode") or "preview").strip().lower()
     if getattr(args, "dispatch", False):
-        result = _client(args).request_json("POST", "/api/research/jobs/checks/run", payload=payload)
+        if mode != "evidence":
+            raise ValueError(
+                "legacy typed Check dispatch is deprecated for preview; use "
+                "'qt research check run --request-json ... --dispatch' with an immutable input"
+            )
+        result = operations.dispatch_evidence(
+            payload, dataset_id=payload.get("dataset_id")
+        )
         _print_research_job_dispatch(result)
         return 0
-    _print_json(_client(args).request_json("POST", "/api/research/checks/run", payload=payload))
+    if mode == "evidence":
+        result = operations.run_evidence(
+            payload, dataset_id=payload.get("dataset_id")
+        )
+    else:
+        result = operations.preview(payload)
+    _print_json(result)
+    return 0
+
+
+def _canonical_research_request(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _read_json_object_arg(args.request_json, label="--request-json")
+    if not payload:
+        raise ValueError("--request-json is required")
+    return payload
+
+
+def _cmd_research_check_requirements(args: argparse.Namespace) -> int:
+    _print_json(
+        ResearchOperations(_client(args)).requirements(
+            _canonical_research_request(args)
+        )
+    )
+    return 0
+
+
+def _cmd_research_check_preview(args: argparse.Namespace) -> int:
+    _print_json(
+        ResearchOperations(_client(args)).preview(
+            _canonical_research_request(args)
+        )
+    )
+    return 0
+
+
+def _cmd_research_check_prepare(args: argparse.Namespace) -> int:
+    _print_json(
+        ResearchOperations(_client(args)).prepare(
+            _canonical_research_request(args),
+            freeze=bool(args.freeze),
+            created_by=args.created_by,
+            dataset_name=args.dataset_name,
+        )
+    )
+    return 0
+
+
+def _cmd_research_check_run(args: argparse.Namespace) -> int:
+    operations = ResearchOperations(_client(args))
+    request = _canonical_research_request(args)
+    if args.dispatch:
+        result = operations.dispatch_evidence(
+            request, dataset_id=args.dataset_id
+        )
+        _print_research_job_dispatch(result)
+    else:
+        _print_json(
+            operations.run_evidence(request, dataset_id=args.dataset_id)
+        )
+    return 0
+
+
+def _cmd_research_check_replay(args: argparse.Namespace) -> int:
+    _print_json(ResearchOperations(_client(args)).replay(args.check_id))
+    return 0
+
+
+def _cmd_research_observe_from_check(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(
+        args.request_json, label="--request-json"
+    )
+    for field in ("title", "body", "status"):
+        value = getattr(args, field, None)
+        if value is not None:
+            payload[field] = value
+    tags = list(getattr(args, "tag", None) or [])
+    if tags:
+        payload["tags"] = tags
+    _print_json(
+        ResearchOperations(_client(args)).create_observation(
+            args.check_id, payload
+        )
+    )
     return 0
 
 
@@ -1798,7 +2388,7 @@ def _print_research_job_status(payload: dict[str, Any], *, show_next: bool = Tru
 
 
 def _cmd_research_job_status(args: argparse.Namespace) -> int:
-    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}")
+    payload = ResearchOperations(_client(args)).job_status(args.job_id)
     if getattr(args, "json", False):
         _print_json(payload)
     else:
@@ -1807,7 +2397,7 @@ def _cmd_research_job_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_research_job_result(args: argparse.Namespace) -> int:
-    payload = _client(args).request_json("GET", f"/api/research/jobs/{args.job_id}/result")
+    payload = ResearchOperations(_client(args)).job_result(args.job_id)
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
     output_format = str(getattr(args, "format", "auto") or "auto")
     result_schema = str(result.get("schema_version") or "")
@@ -1872,7 +2462,7 @@ def _format_metric_value(value: Any) -> str:
 
 
 def _cmd_research_trail(args: argparse.Namespace) -> int:
-    _print_json(_client(args).request_json("GET", f"/api/research/items/{args.item_id}/trail"))
+    _print_json(ResearchOperations(_client(args)).trail(args.item_id))
     return 0
 
 
@@ -1887,6 +2477,42 @@ def _cmd_research_compare(args: argparse.Namespace) -> int:
             "GET",
             "/api/research/checks/compare",
             params={"left_check_id": args.left_check_id, "right_check_id": args.right_check_id},
+        )
+    )
+    return 0
+
+
+def _cmd_research_authority_post(args: argparse.Namespace) -> int:
+    payload = _read_json_object_arg(args.payload_json, label="--payload-json")
+    if not payload:
+        raise ValueError("--payload-json is required")
+    path = str(args.authority_path).format(**vars(args))
+    _print_json(_client(args).request_json("POST", path, payload=payload))
+    return 0
+
+
+def _cmd_research_authority_protocol_get(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", f"/api/research/authority/protocols/{args.protocol_id}"
+        )
+    )
+    return 0
+
+
+def _cmd_research_authority_family_evidence(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", f"/api/research/authority/families/{args.family_id}/evidence"
+        )
+    )
+    return 0
+
+
+def _cmd_research_governance_case_get(args: argparse.Namespace) -> int:
+    _print_json(
+        _client(args).request_json(
+            "GET", f"/api/research/governance/cases/{args.case_id}"
         )
     )
     return 0
@@ -2244,6 +2870,7 @@ def _start_experiment(args: argparse.Namespace, client: ApiClient) -> dict[str, 
     start_body: dict[str, Any] = {
         "run_type": "backtest",
         "dataset_id": args.dataset_id,
+        "economic_claim_intent": "exploration",
     }
     if bool(getattr(args, "profile", False)):
         start_body["profile"] = True
@@ -2435,12 +3062,10 @@ def _cmd_experiments_status(args: argparse.Namespace) -> int:
 
 def _cmd_experiments_watch(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + float(args.watch_timeout)
-    last_state: dict[str, Any] | None = None
     while True:
         state = _load_experiment_suite_state(args, args.ref)
         if state is None:
             raise ValueError(f"experiment suite state not found for {args.ref!r}")
-        last_state = state
         if args.print_each:
             _print_json(state)
         status = str(state.get("status") or "")
@@ -2492,18 +3117,38 @@ def _cmd_experiments_collect(args: argparse.Namespace) -> int:
 
 
 def _cmd_experiments_run_bot(args: argparse.Namespace) -> int:
+    compatibility = {
+        "status": "deprecated_alias",
+        "replacement": [
+            "qt experiments start-bot BOT_ID --dataset-id DATASET_ID",
+            "qt experiments collect REF --wait",
+        ],
+        "removal": "after the compatibility window",
+    }
+    if args.export and not args.wait:
+        _print_json({
+            "schema_version": "qt_cli_deprecation.v1",
+            "compatibility": compatibility,
+            "error": "--export requires --wait so the report is terminal before export",
+        })
+        return 2
+    if args.print_each:
+        _print_json(
+            {
+                "schema_version": "qt_cli_deprecation.v1",
+                "command": "qt experiments run-bot",
+                "compatibility": compatibility,
+            }
+        )
     client = _client(args)
     record = _start_experiment(args, client)
-    if args.export and not args.wait:
-        _print_json({**record, "error": "--export requires --wait so the report is terminal before export"})
-        return 2
     if args.wait:
         wait_code, result = _collect_experiment(args, client, record)
         if not args.print_each:
-            _print_json(result)
+            _print_json({**result, "compatibility": compatibility})
         return wait_code
     if not args.print_each:
-        _print_json(record)
+        _print_json({**record, "compatibility": compatibility})
     return 0
 
 
@@ -2627,10 +3272,24 @@ def build_parser() -> argparse.ArgumentParser:
     bots_start = bots_sub.add_parser("start", help="Start a bot run through the backend API.")
     bots_start.add_argument("bot_id")
     bots_start.add_argument("--request-id")
+    bots_start.add_argument(
+        "--economic-claim-intent",
+        choices=["exploration", "economic", "selection", "promotion"],
+        default="exploration",
+        help="Immutable economic interpretation for this run (default: exploration).",
+    )
+    bots_start.add_argument(
+        "--execution-assumptions-json",
+        help="Versioned execution_assumptions JSON object path, inline object, or '-'.",
+    )
     bots_start.add_argument("--run-type", choices=["backtest", "sim_trade", "paper", "live"])
     bots_start.add_argument("--execution-behavior", "--execution", choices=["simulated", "observe-only"], dest="execution_behavior")
     bots_start.add_argument("--dataset-id", help="Required immutable dataset identity for backtest runs.")
-    bots_start.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
+    bots_start.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable opt-in cProfile and process peak-RSS evidence for this backtest run.",
+    )
     bots_start.add_argument("--duration-seconds", type=float, help="Optional bounded duration for observe-only paper runs.")
     bots_start.add_argument(
         "--market-data-stream-policy-json",
@@ -2985,6 +3644,29 @@ def build_parser() -> argparse.ArgumentParser:
     data_ingest.add_argument("--timeframe", required=True)
     data_ingest.add_argument("--source-revision")
     data_ingest.set_defaults(func=_cmd_data_ingest_candles)
+    data_numeric = data_sub.add_parser(
+        "acquire-numeric-facts",
+        help=(
+            "Explicitly acquire one bounded manifest-driven numeric fact range; "
+            "no network access occurs without --allow-network."
+        ),
+    )
+    data_numeric.add_argument("--manifest-path", required=True)
+    data_numeric.add_argument("--binding-id", required=True)
+    data_numeric.add_argument(
+        "--mode", choices=["current", "historical"], required=True
+    )
+    data_numeric.add_argument("--start")
+    data_numeric.add_argument("--end")
+    data_numeric.add_argument("--allow-network", action="store_true")
+    data_numeric.add_argument("--requested-by", required=True)
+    data_numeric.add_argument("--reason", required=True)
+    data_numeric.add_argument("--max-requests", type=int, required=True)
+    data_numeric.add_argument("--max-logs", type=int, required=True)
+    data_numeric.add_argument("--max-blocks", type=int, required=True)
+    data_numeric.add_argument("--max-retries", type=int, default=2)
+    data_numeric.add_argument("--repair", action="store_true")
+    data_numeric.set_defaults(func=_cmd_data_acquire_numeric_facts)
     data_series = data_sub.add_parser(
         "series", help="Inspect canonical logical market-data series."
     )
@@ -2998,12 +3680,20 @@ def build_parser() -> argparse.ArgumentParser:
     data_prepare.add_argument("--start", required=True)
     data_prepare.add_argument("--end", required=True)
     data_prepare.add_argument("--acquire-missing", action="store_true")
+    data_prepare.add_argument(
+        "--numeric-acquisition-json",
+        help=(
+            "Path, inline object, or '-' containing explicit numeric source "
+            "bindings, network authorization, and request budget. Requires "
+            "--acquire-missing."
+        ),
+    )
     data_prepare.add_argument("--created-by")
     data_prepare.set_defaults(func=_cmd_data_prepare_backtest_dataset)
 
     data_freeze = data_sub.add_parser(
         "freeze-dataset",
-        help="Freeze exact candle facts, provenance, and quality evidence.",
+        help="Freeze exact typed market facts, provenance, and quality evidence.",
     )
     data_freeze.add_argument(
         "--request-json",
@@ -3025,6 +3715,378 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_dataset.add_argument("dataset_id")
     data_dataset.set_defaults(func=_cmd_data_dataset)
+
+    data_collector_definitions = data_sub.add_parser(
+        "collector-definitions",
+        help="Install code-reviewed collector definitions; lifecycle remains separate.",
+    )
+    data_collector_definitions_sub = data_collector_definitions.add_subparsers(
+        dest="data_collector_definitions_command", required=True
+    )
+    install_structured = data_collector_definitions_sub.add_parser(
+        "install-structured",
+        help="Install one binding from a checked-in structured Fact manifest.",
+    )
+    install_structured.add_argument("--manifest-path", required=True)
+    install_structured.add_argument("--binding-id", required=True)
+    install_structured.add_argument("--enabled", action="store_true")
+    install_structured.add_argument("--max-attempts", type=int, default=3)
+    install_structured.add_argument(
+        "--minimum-spacing-seconds", type=float, default=1.0
+    )
+    install_structured.set_defaults(
+        func=_cmd_data_collector_definitions_install_structured
+    )
+    data_collectors = data_sub.add_parser(
+        "collectors", help="Inspect and safely operate registered collectors."
+    )
+    data_collectors_sub = data_collectors.add_subparsers(
+        dest="data_collectors_command", required=True
+    )
+    data_collectors_fleet = data_collectors_sub.add_parser(
+        "fleet", help="Inspect the canonical collector fleet snapshot."
+    )
+    data_collectors_fleet.add_argument("--attempt-limit", type=int, default=5)
+    data_collectors_fleet.set_defaults(func=_cmd_data_collectors_fleet)
+    data_collectors_plane = data_collectors_sub.add_parser(
+        "plane", help="Inspect aggregate market-data-plane readiness."
+    )
+    data_collectors_plane.set_defaults(func=_cmd_data_collectors_plane)
+    collector_kinds = ("scheduled_fact", "continuous_stream")
+    data_collectors_detail = data_collectors_sub.add_parser(
+        "detail", help="Inspect runtime, acquisition, facts, gaps, and configuration."
+    )
+    data_collectors_detail.add_argument("collector_kind", choices=collector_kinds)
+    data_collectors_detail.add_argument("collector_id")
+    data_collectors_detail.add_argument("--limit", type=int, default=100)
+    data_collectors_detail.set_defaults(func=_cmd_data_collectors_detail)
+    data_collectors_diagnose = data_collectors_sub.add_parser(
+        "diagnose", help="Diagnose likely collector failure boundaries."
+    )
+    data_collectors_diagnose.add_argument(
+        "collector_kind", choices=collector_kinds
+    )
+    data_collectors_diagnose.add_argument("collector_id")
+    data_collectors_diagnose.set_defaults(func=_cmd_data_collectors_diagnose)
+    data_collectors_probe = data_collectors_sub.add_parser(
+        "probe", help="Run a read-only collector health probe."
+    )
+    data_collectors_probe.add_argument("collector_kind", choices=collector_kinds)
+    data_collectors_probe.add_argument("collector_id")
+    data_collectors_probe.set_defaults(func=_cmd_data_collectors_probe)
+    for inspect_surface in ("events", "gaps"):
+        command = data_collectors_sub.add_parser(
+            inspect_surface,
+            help=f"Inspect collector {inspect_surface} evidence.",
+        )
+        command.add_argument("collector_kind", choices=collector_kinds)
+        command.add_argument("collector_id")
+        command.add_argument("--limit", type=int, default=100)
+        command.set_defaults(
+            func=_cmd_data_collectors_inspect,
+            inspect_surface=inspect_surface,
+        )
+    for collector_action in ("start", "stop", "restart", "pause", "resume"):
+        command = data_collectors_sub.add_parser(
+            collector_action,
+            help=f"Request an audited collector {collector_action}.",
+        )
+        command.add_argument("collector_kind", choices=collector_kinds)
+        command.add_argument("collector_id")
+        command.add_argument("--request-id")
+        command.add_argument("--actor-id")
+        command.add_argument("--reason", required=True)
+        command.add_argument(
+            "--confirm",
+            action="store_true",
+            help="Confirm disruptive stop or restart operations.",
+        )
+        command.set_defaults(
+            func=_cmd_data_collectors_action,
+            collector_action=collector_action,
+        )
+
+    data_oi_latest = data_sub.add_parser(
+        "open-interest-latest",
+        help="Read latest causally known stored OI without provider fallback.",
+    )
+    data_oi_latest.add_argument("--instrument-id", required=True)
+    data_oi_latest.add_argument("--decision-time", required=True)
+    data_oi_latest.add_argument("--max-staleness-seconds", type=int, required=True)
+    data_oi_latest.add_argument("--optional", action="store_true")
+    data_oi_latest.set_defaults(func=_cmd_data_open_interest_latest)
+    data_funding_latest = data_sub.add_parser(
+        "funding-rate-latest",
+        help="Read latest causally known stored funding without provider fallback.",
+    )
+    data_funding_latest.add_argument("--instrument-id", required=True)
+    data_funding_latest.add_argument("--decision-time", required=True)
+    data_funding_latest.add_argument(
+        "--max-staleness-seconds", type=int, required=True
+    )
+    data_funding_latest.add_argument("--optional", action="store_true")
+    data_funding_latest.set_defaults(func=_cmd_data_funding_rate_latest)
+    data_market_structure_proof = data_sub.add_parser(
+        "market-structure-proof",
+        help="Capture bounded Coinbase trade/L2 proof evidence and capacity metrics locally.",
+    )
+    data_market_structure_proof.add_argument(
+        "--product-id",
+        action="append",
+        default=[],
+        help="Allowlisted provider product ID. Repeat; defaults to BIP/BTC-USD.",
+    )
+    data_market_structure_proof.add_argument(
+        "--channel",
+        action="append",
+        default=[],
+        choices=["market_trades", "level2", "ticker"],
+        help="Channel subscribed on each product proof connection. Repeat for multiple channels.",
+    )
+    data_market_structure_proof.add_argument(
+        "--auth-mode",
+        choices=["public", "authenticated"],
+        default="public",
+    )
+    data_market_structure_proof.add_argument(
+        "--duration",
+        type=float,
+        default=60.0,
+        help="Capture duration in seconds, from 1 through 86400.",
+    )
+    data_market_structure_proof.add_argument(
+        "--reconnect-interval",
+        type=float,
+        help="Deliberately reconnect each stream at this interval for reset/resnapshot proof.",
+    )
+    data_market_structure_proof.add_argument("--sample-limit", type=int, default=3)
+    data_market_structure_proof.add_argument("--rest-limit", type=int, default=20)
+    data_market_structure_proof.add_argument(
+        "--max-annual-archive-gib",
+        type=float,
+        help="Explicit operator-approved annual archive byte budget for this captured scope.",
+    )
+    data_market_structure_proof.add_argument(
+        "--output-dir",
+        help="Local proof output directory; defaults under logs/market-structure-proof/.",
+    )
+    data_market_structure_proof.set_defaults(func=_cmd_data_market_structure_proof)
+
+    data_market_structure = data_sub.add_parser(
+        "market-structure",
+        help="Configure, capture, inspect, and replay the bounded market-structure plane.",
+    )
+    data_market_structure_sub = data_market_structure.add_subparsers(
+        dest="data_market_structure_command",
+        required=True,
+    )
+    data_market_structure_enroll = data_market_structure_sub.add_parser(
+        "enroll",
+        help="Apply a validated product and stream enrollment manifest.",
+    )
+    data_market_structure_enroll.add_argument("--manifest-path")
+    data_market_structure_enroll.set_defaults(func=_cmd_data_market_structure_enroll)
+    data_normalization_specs_install = data_market_structure_sub.add_parser(
+        "normalization-specs-install",
+        help="Install the immutable approved normalization specs.",
+    )
+    data_normalization_specs_install.add_argument("--approved-by", required=True)
+    data_normalization_specs_install.set_defaults(
+        func=_cmd_data_market_structure_normalization_specs_install
+    )
+    data_normalization_specs = data_market_structure_sub.add_parser(
+        "normalization-specs",
+        help="List installed immutable normalization specs.",
+    )
+    data_normalization_specs.set_defaults(
+        func=_cmd_data_market_structure_normalization_specs
+    )
+    for command, help_text, handler in (
+        (
+            "normalize",
+            "Materialize one causal normalized series from canonical stored facts.",
+            _cmd_data_market_structure_normalize,
+        ),
+        (
+            "normalization-compare",
+            "Recompute and compare normalized facts with persisted revisions.",
+            _cmd_data_market_structure_normalization_compare,
+        ),
+    ):
+        normalization_parser = data_market_structure_sub.add_parser(
+            command, help=help_text
+        )
+        normalization_parser.add_argument("spec_id")
+        normalization_parser.add_argument("source_series_id", type=int)
+        normalization_parser.add_argument("--start", required=True)
+        normalization_parser.add_argument("--end", required=True)
+        normalization_parser.add_argument("--known-at", required=True)
+        normalization_parser.add_argument("--as-of-commit-seq", type=int)
+        normalization_parser.set_defaults(func=handler)
+    data_market_structure_definitions = data_market_structure_sub.add_parser(
+        "definitions",
+        help="Inspect stream definitions, runtime state, and leases.",
+    )
+    data_market_structure_definitions.add_argument("--definition-id")
+    data_market_structure_definitions.set_defaults(
+        func=_cmd_data_market_structure_definitions
+    )
+    data_market_structure_sessions = data_market_structure_sub.add_parser(
+        "sessions",
+        help="Inspect immutable session lifecycle evidence.",
+    )
+    data_market_structure_sessions.add_argument("--definition-id")
+    data_market_structure_sessions.add_argument("--limit", type=int, default=100)
+    data_market_structure_sessions.set_defaults(func=_cmd_data_market_structure_sessions)
+    data_market_structure_status = data_market_structure_sub.add_parser(
+        "status",
+        help="Inspect archive, quality, coverage, and capacity blockers.",
+    )
+    data_market_structure_status.add_argument("definition_id")
+    data_market_structure_status.set_defaults(func=_cmd_data_market_structure_status)
+    data_market_structure_capture = data_market_structure_sub.add_parser(
+        "capture",
+        help="Run one explicitly bounded trade or Level 2 capture.",
+    )
+    data_market_structure_capture.add_argument("definition_id")
+    data_market_structure_capture.add_argument("--duration", type=float, default=60.0)
+    data_market_structure_capture.add_argument("--storage-root")
+    data_market_structure_capture.add_argument("--owner-id")
+    data_market_structure_capture.set_defaults(func=_cmd_data_market_structure_capture)
+    for safety_action in ("halt", "acknowledge"):
+        safety_parser = data_market_structure_sub.add_parser(
+            f"safety-{safety_action}",
+            help=(
+                "Latch collection off at a global, fleet, or stream scope."
+                if safety_action == "halt"
+                else "Acknowledge and release a persistent collector safety latch."
+            ),
+        )
+        safety_parser.add_argument(
+            "--scope-type", choices=["global", "fleet", "stream"], required=True
+        )
+        safety_parser.add_argument("--scope-id", required=True)
+        safety_parser.add_argument("--request-id", required=True)
+        safety_parser.add_argument("--requested-by", required=True)
+        safety_parser.add_argument("--reason", required=True)
+        safety_parser.add_argument("--policy-hash", required=True)
+        safety_parser.add_argument("--evidence-json")
+        safety_parser.set_defaults(
+            func=_cmd_data_market_structure_safety_change,
+            safety_action=safety_action,
+        )
+    data_market_structure_safety_status = data_market_structure_sub.add_parser(
+        "safety-status",
+        help="Inspect persistent collector safety latches and immutable events.",
+    )
+    data_market_structure_safety_status.add_argument("--limit", type=int, default=100)
+    data_market_structure_safety_status.set_defaults(
+        func=_cmd_data_market_structure_safety_status
+    )
+    data_market_structure_continuous_evidence = data_market_structure_sub.add_parser(
+        "continuous-evidence",
+        help="Inspect system-derived validation, archive, mapping, and coverage blockers.",
+    )
+    data_market_structure_continuous_evidence.add_argument("definition_id")
+    data_market_structure_continuous_evidence.add_argument("session_id")
+    data_market_structure_continuous_evidence.set_defaults(
+        func=_cmd_data_market_structure_continuous_evidence
+    )
+    data_market_structure_replay = data_market_structure_sub.add_parser(
+        "replay",
+        help="Verify one acknowledged raw manifest and deterministic trade replay.",
+    )
+    data_market_structure_replay.add_argument("manifest_id")
+    data_market_structure_replay.add_argument("--storage-root")
+    data_market_structure_replay.set_defaults(func=_cmd_data_market_structure_replay)
+    data_market_structure_replay_book = data_market_structure_sub.add_parser(
+        "replay-book",
+        help="Verify raw-to-book and checkpoint-plus-delta replay for one Level 2 session.",
+    )
+    data_market_structure_replay_book.add_argument("definition_id")
+    data_market_structure_replay_book.add_argument("session_id")
+    data_market_structure_replay_book.add_argument("--storage-root")
+    data_market_structure_replay_book.set_defaults(
+        func=_cmd_data_market_structure_replay_book
+    )
+    data_market_structure_compact = data_market_structure_sub.add_parser(
+        "compact",
+        help="Compact an explicit contiguous active raw-manifest set without deleting sources.",
+    )
+    data_market_structure_compact.add_argument("definition_id")
+    data_market_structure_compact.add_argument("session_id")
+    data_market_structure_compact.add_argument(
+        "--manifest-id", action="append", required=True
+    )
+    data_market_structure_compact.add_argument("--storage-root")
+    data_market_structure_compact.add_argument("--owner-id")
+    data_market_structure_compact.set_defaults(
+        func=_cmd_data_market_structure_compact
+    )
+    data_market_structure_retention_pin = data_market_structure_sub.add_parser(
+        "retention-pin",
+        help="Append an explicit archive/checkpoint retention pin or release revision.",
+    )
+    data_market_structure_retention_pin.add_argument(
+        "target_kind", choices=("raw_manifest", "book_checkpoint")
+    )
+    data_market_structure_retention_pin.add_argument("target_id")
+    data_market_structure_retention_pin.add_argument("--owner-kind", required=True)
+    data_market_structure_retention_pin.add_argument("--owner-id", required=True)
+    data_market_structure_retention_pin.add_argument("--reason", required=True)
+    data_market_structure_retention_pin.add_argument("--release", action="store_true")
+    data_market_structure_retention_pin.set_defaults(
+        func=_cmd_data_market_structure_retention_pin
+    )
+    data_market_structure_retention_status = data_market_structure_sub.add_parser(
+        "retention-status",
+        help="Inspect dataset/explicit pins and ordinary-retention eligibility.",
+    )
+    data_market_structure_retention_status.add_argument(
+        "target_kind", choices=("raw_manifest", "book_checkpoint")
+    )
+    data_market_structure_retention_status.add_argument("target_id")
+    data_market_structure_retention_status.set_defaults(
+        func=_cmd_data_market_structure_retention_status
+    )
+    data_market_structure_lifecycle_plan = data_market_structure_sub.add_parser(
+        "lifecycle-plan",
+        help="Plan pin-safe archive and Timescale lifecycle work without mutation.",
+    )
+    data_market_structure_lifecycle_plan.set_defaults(
+        func=_cmd_data_market_structure_lifecycle_plan
+    )
+    data_market_structure_lifecycle_run = data_market_structure_sub.add_parser(
+        "lifecycle-run",
+        help="Run lifecycle work; remains a dry-run unless --execute is supplied and enabled.",
+    )
+    data_market_structure_lifecycle_run.add_argument(
+        "--execute", action="store_true"
+    )
+    data_market_structure_lifecycle_run.add_argument("--storage-root")
+    data_market_structure_lifecycle_run.add_argument("--owner-id")
+    data_market_structure_lifecycle_run.set_defaults(
+        func=_cmd_data_market_structure_lifecycle_run
+    )
+    data_market_structure_lifecycle_events = data_market_structure_sub.add_parser(
+        "lifecycle-events",
+        help="Inspect immutable lifecycle completion, skip, and failure evidence.",
+    )
+    data_market_structure_lifecycle_events.add_argument(
+        "--limit", type=int, default=200
+    )
+    data_market_structure_lifecycle_events.set_defaults(
+        func=_cmd_data_market_structure_lifecycle_events
+    )
+    data_market_structure_reconcile = data_market_structure_sub.add_parser(
+        "reconcile-recent",
+        help="Compare a bounded recent Coinbase REST window with canonical trade IDs.",
+    )
+    data_market_structure_reconcile.add_argument("definition_id")
+    data_market_structure_reconcile.add_argument("--limit", type=int, default=100)
+    data_market_structure_reconcile.set_defaults(
+        func=_cmd_data_market_structure_reconcile_recent
+    )
 
     research = subparsers.add_parser("research", help="Research memory and lightweight historical checks.")
     research_sub = research.add_subparsers(dest="research_command", required=True)
@@ -3074,6 +4136,22 @@ def build_parser() -> argparse.ArgumentParser:
     research_observe_create.add_argument("--tag", action="append", default=[])
     research_observe_create.add_argument("--payload", help="Observation payload JSON object path, inline object, or '-'.")
     research_observe_create.set_defaults(func=_cmd_research_observe_create)
+    research_observe_from_check = research_observe_sub.add_parser(
+        "from-check",
+        help="Create an evidence-bearing Observation from a durable Check result.",
+    )
+    research_observe_from_check.add_argument("check_id")
+    research_observe_from_check.add_argument(
+        "--request-json",
+        help="Observation metadata JSON object path, inline object, or '-'.",
+    )
+    research_observe_from_check.add_argument("--title")
+    research_observe_from_check.add_argument("--body")
+    research_observe_from_check.add_argument("--status")
+    research_observe_from_check.add_argument("--tag", action="append", default=[])
+    research_observe_from_check.set_defaults(
+        func=_cmd_research_observe_from_check
+    )
 
     research_links = research_sub.add_parser("links", help="Research memory link commands.")
     research_links_sub = research_links.add_subparsers(dest="research_links_command", required=True)
@@ -3102,7 +4180,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_jobs_result.set_defaults(func=_cmd_research_job_result)
 
     def add_research_check_base_args(command: argparse.ArgumentParser) -> None:
-        command.add_argument("--request-json", help="research_check_request.v1 JSON object path, inline object, or '-'.")
+        command.add_argument("--request-json", help="Check operation JSON object path, inline object, or '-'.")
         command.add_argument("--title")
         command.add_argument("--body")
         command.add_argument("--observation-id")
@@ -3128,8 +4206,63 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--direction", choices=["long", "short"])
         command.add_argument("--min-edge-pct", type=float)
 
-    research_check = research_sub.add_parser("check", help="Run and persist lightweight analytical checks.")
+    research_check = research_sub.add_parser(
+        "check", help="Plan, preview, execute, and replay canonical analytical Checks."
+    )
     research_check_sub = research_check.add_subparsers(dest="research_check_command", required=True)
+    research_check_requirements = research_check_sub.add_parser(
+        "requirements",
+        help="Resolve direct and transitive Check requirements without acquisition.",
+    )
+    research_check_requirements.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_requirements.set_defaults(
+        func=_cmd_research_check_requirements
+    )
+
+    research_check_preview = research_check_sub.add_parser(
+        "preview",
+        help="Run an ephemeral watermark-pinned Check preview.",
+    )
+    research_check_preview.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_preview.set_defaults(func=_cmd_research_check_preview)
+
+    research_check_prepare = research_check_sub.add_parser(
+        "prepare",
+        help="Resolve evidence requirements and optionally freeze known facts and gaps.",
+    )
+    research_check_prepare.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_prepare.add_argument(
+        "--freeze", action="store_true", help="Create or reuse the immutable Dataset after resolution."
+    )
+    research_check_prepare.add_argument("--created-by")
+    research_check_prepare.add_argument("--dataset-name")
+    research_check_prepare.set_defaults(func=_cmd_research_check_prepare)
+
+    research_check_run = research_check_sub.add_parser(
+        "run",
+        help="Persist provider-free Check evidence against an immutable input.",
+    )
+    research_check_run.add_argument(
+        "--request-json", required=True, help="Check request JSON object path, inline object, or '-'."
+    )
+    research_check_run.add_argument("--dataset-id")
+    research_check_run.add_argument(
+        "--dispatch", action="store_true", help="Queue evidence execution and return the research job id."
+    )
+    research_check_run.set_defaults(func=_cmd_research_check_run)
+
+    research_check_replay = research_check_sub.add_parser(
+        "replay", help="Replay durable Check evidence through the canonical execution path."
+    )
+    research_check_replay.add_argument("check_id")
+    research_check_replay.set_defaults(func=_cmd_research_check_replay)
+
     research_check_raw = research_check_sub.add_parser("raw", help="Check raw OHLCV conditions against forward outcomes.")
     add_research_check_base_args(research_check_raw)
     add_research_window_args(research_check_raw)
@@ -3251,6 +4384,98 @@ def build_parser() -> argparse.ArgumentParser:
     research_compare.add_argument("left_check_id")
     research_compare.add_argument("right_check_id")
     research_compare.set_defaults(func=_cmd_research_compare)
+
+    research_authority = research_sub.add_parser(
+        "authority",
+        help="Protocol-bound offline scientific search and holdout operations.",
+    )
+    research_authority_sub = research_authority.add_subparsers(
+        dest="research_authority_command", required=True
+    )
+
+    def add_authority_post(
+        name: str, help_text: str, path: str
+    ) -> argparse.ArgumentParser:
+        command = research_authority_sub.add_parser(name, help=help_text)
+        command.add_argument(
+            "--payload-json",
+            required=True,
+            help="Exact request JSON object as a path, inline object, or '-'.",
+        )
+        command.set_defaults(
+            func=_cmd_research_authority_post, authority_path=path
+        )
+        return command
+
+    add_authority_post(
+        "protocol-create", "Create one immutable scientific protocol.",
+        "/api/research/authority/protocols",
+    )
+    protocol_get = research_authority_sub.add_parser(
+        "protocol-get", help="Read a protocol with its holdout binding redacted."
+    )
+    protocol_get.add_argument("protocol_id")
+    protocol_get.set_defaults(func=_cmd_research_authority_protocol_get)
+    add_authority_post(
+        "family-create", "Open a protocol-bound experiment family.",
+        "/api/research/authority/families",
+    )
+    add_authority_post(
+        "attempt-register", "Register a budgeted train or validation attempt.",
+        "/api/research/authority/attempts",
+    )
+    attempt_complete = add_authority_post(
+        "attempt-complete", "Persist a terminal attempt outcome.",
+        "/api/research/authority/attempts/{attempt_id}/complete",
+    )
+    attempt_complete.add_argument("attempt_id")
+    add_authority_post(
+        "candidate-freeze", "Freeze an immutable validation candidate.",
+        "/api/research/authority/candidates",
+    )
+    add_authority_post(
+        "strategy-graph-create",
+        "Create a typed graph and consume family search budget.",
+        "/api/research/authority/strategy-graphs",
+    )
+    add_authority_post(
+        "family-close", "Close search before final holdout access.",
+        "/api/research/authority/families/{family_id}/close",
+    ).add_argument("family_id")
+    add_authority_post(
+        "holdout-reserve", "Reserve the family holdout exactly once.",
+        "/api/research/authority/holdouts/reserve",
+    )
+    add_authority_post(
+        "family-certify", "Issue scientific evidence after sealed evaluation.",
+        "/api/research/authority/families/{family_id}/certify",
+    ).add_argument("family_id")
+    family_evidence = research_authority_sub.add_parser(
+        "family-evidence", help="Read public family lineage and released evidence."
+    )
+    family_evidence.add_argument("family_id")
+    family_evidence.set_defaults(func=_cmd_research_authority_family_evidence)
+    add_authority_post(
+        "governance-case-create",
+        "Open an offline governance case from a persisted observation.",
+        "/api/research/governance/cases",
+    )
+    add_authority_post(
+        "transition-propose",
+        "Propose one evidence-linked offline state transition.",
+        "/api/research/governance/proposals",
+    )
+    transition_decide = add_authority_post(
+        "transition-decide",
+        "Authorize or reject a transition as a distinct actor.",
+        "/api/research/governance/proposals/{proposal_id}/decide",
+    )
+    transition_decide.add_argument("proposal_id")
+    governance_case_get = research_authority_sub.add_parser(
+        "governance-case-get", help="Read the append-only offline governance trail."
+    )
+    governance_case_get.add_argument("case_id")
+    governance_case_get.set_defaults(func=_cmd_research_governance_case_get)
 
     instruments = subparsers.add_parser("instruments", help="Instrument metadata and runtime profiles.")
     instruments_sub = instruments.add_subparsers(dest="instruments_command", required=True)
@@ -3385,7 +4610,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_bot = experiments_sub.add_parser("start-bot", help="Start a bot run and write a resumable experiment record.")
     start_bot.add_argument("bot_id")
     start_bot.add_argument("--dataset-id", required=True, help="Prepared immutable dataset identity.")
-    start_bot.add_argument("--profile", action="store_true", help="Enable opt-in cProfile and tracemalloc evidence for this backtest run.")
+    start_bot.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable opt-in cProfile and process peak-RSS evidence for this backtest run.",
+    )
     start_bot.add_argument("--request-id")
     start_bot.add_argument("--baseline-run-id")
     start_bot.add_argument("--export", action="store_true", help="Record export as a default for collect.")
@@ -3434,8 +4663,19 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--no-golden", action="store_true")
     collect.add_argument("--require-golden", action="store_true")
     collect.set_defaults(func=_cmd_experiments_collect)
-    run_bot = experiments_sub.add_parser("run-bot", help="Start a bot run, optionally wait, and export the report.")
+    run_bot = experiments_sub.add_parser(
+        "run-bot",
+        help="Deprecated alias for start-bot followed by collect.",
+    )
     run_bot.add_argument("bot_id")
+    run_bot.add_argument(
+        "--dataset-id", required=True, help="Prepared immutable dataset identity."
+    )
+    run_bot.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable opt-in cProfile and process peak-RSS evidence for this backtest run.",
+    )
     run_bot.add_argument("--request-id")
     run_bot.add_argument("--baseline-run-id")
     run_bot.add_argument("--wait", action="store_true")

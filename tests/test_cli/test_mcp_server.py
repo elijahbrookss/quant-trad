@@ -17,6 +17,17 @@ class _FakeClient:
         self.calls.append((method, path, params, payload))
         if method == "GET" and path == "/api/health":
             return {"status": "ok"}
+        if (
+            method == "GET"
+            and path == "/api/market-data/operations/collectors/snapshot"
+        ):
+            return {"collectors": [], "attempt_limit": params["attempt_limit"]}
+        if method == "GET" and path == "/api/market-data/operations/data-plane":
+            return {"schema_version": "market.data_plane_operational.v1"}
+        if method == "GET" and path.startswith(
+            "/api/market-data/operations/collectors/scheduled_fact/collector-1"
+        ):
+            return {"path": path, "params": params}
         if method == "GET" and path == "/api/bots/run-contexts":
             return {"items": [{"bot_id": "bot-1"}]}
         if method == "GET" and path == "/api/bots/bot-1/run-context":
@@ -83,6 +94,13 @@ class _FakeClient:
             return {"schema_version": "bot_run_start.v1", "run_id": "run-1", "payload": payload}
         if method == "PUT" and path == "/api/bots/bot-1":
             return {"schema_version": "bot_response.v1", "payload": payload}
+        if path.startswith("/api/research/"):
+            return {
+                "schema_version": "research_test_response.v1",
+                "method": method,
+                "path": path,
+                "payload": payload,
+            }
         raise AssertionError(f"unexpected request: {method} {path}")
 
 
@@ -109,6 +127,7 @@ def _plan() -> dict:
     return {
         "schema_version": "experiment_plan.v1",
         "name": "mcp-smoke-plan",
+        "intent": "exploration",
         "hypothesis": "Candidate should not drift.",
         "windows": [{"id": "w1", "start": "2026-01-01T00:00:00Z", "end": "2026-01-31T23:59:59Z"}],
         "variants": [{"id": "baseline", "bot_id": "bot-1"}, {"id": "candidate", "bot_id": "bot-2"}],
@@ -138,6 +157,18 @@ def test_mcp_initialize_and_tools_list_exclude_python_handlers(tmp_path):
         "get_effective_strategy",
         "prepare_instrument_matrix_experiment",
         "summarize_experiment",
+        "get_research_check_requirements",
+        "preview_research_check",
+        "prepare_research_check_evidence",
+        "run_research_check_evidence",
+        "replay_research_check",
+        "create_observation_from_check",
+        "get_research_trail",
+        "list_collectors",
+        "get_collector",
+        "diagnose_collector",
+        "probe_collector",
+        "operate_collector",
     }
     assert all("handler" not in tool for tool in tools["result"]["tools"])
     json.dumps(tools)
@@ -164,6 +195,155 @@ def test_mcp_resource_read_routes_to_backend_contracts(tmp_path):
     }
     assert ("GET", "/api/bots/run-contexts", None, None) in client.calls
     assert ("GET", "/api/reports/run-1/research-summary", None, None) in client.calls
+
+
+def test_mcp_collector_resources_use_the_canonical_operational_api(tmp_path):
+    client = _FakeClient()
+    server = _server(tmp_path, client=client)
+
+    fleet = server.read_resource(
+        "quanttrad://market-data/collectors?attempt_limit=7"
+    )
+    detail = server.read_resource(
+        "quanttrad://market-data/collectors/scheduled_fact/collector-1?limit=9"
+    )
+    diagnostics = server.read_resource(
+        "quanttrad://market-data/collectors/scheduled_fact/collector-1/diagnostics"
+    )
+
+    assert fleet["attempt_limit"] == 7
+    assert detail["params"] == {"limit": 9}
+    assert diagnostics["path"].endswith("/diagnostics")
+    assert diagnostics["params"] is None
+
+
+def test_mcp_collector_mutation_is_planned_guarded_and_routes_through_qt(tmp_path):
+    runner = _FakeCommandRunner()
+    server = _server(tmp_path, runner=runner)
+    arguments = {
+        "collector_kind": "scheduled_fact",
+        "collector_id": "collector-1",
+        "action": "restart",
+        "reason": "recover a stale collector",
+    }
+
+    planned = server.call_tool("operate_collector", arguments)
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool("operate_collector", {**arguments, "apply": True})
+    applied = server.call_tool(
+        "operate_collector",
+        {
+            **arguments,
+            "apply": True,
+            "confirm": True,
+            "request_id": "request-1",
+            "actor_id": "mcp:test-agent",
+        },
+    )
+    probed = server.call_tool(
+        "probe_collector",
+        {
+            "collector_kind": "scheduled_fact",
+            "collector_id": "collector-1",
+        },
+    )
+
+    assert planned["apply"] is False
+    assert applied["args"] == [
+        "data",
+        "collectors",
+        "restart",
+        "scheduled_fact",
+        "collector-1",
+        "--request-id",
+        "request-1",
+        "--actor-id",
+        "mcp:test-agent",
+        "--reason",
+        "recover a stale collector",
+        "--confirm",
+    ]
+    assert probed["args"] == [
+        "data",
+        "collectors",
+        "probe",
+        "scheduled_fact",
+        "collector-1",
+    ]
+
+
+def test_mcp_research_tools_share_api_contract_and_guard_writes(tmp_path):
+    client = _FakeClient()
+    server = _server(tmp_path, client=client)
+    request = {"check_family": "raw_forward_outcome"}
+
+    requirements = server.call_tool(
+        "get_research_check_requirements", {"request": request}
+    )
+    preview = server.call_tool("preview_research_check", {"request": request})
+    prepared = server.call_tool(
+        "prepare_research_check_evidence", {"request": request}
+    )
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool(
+            "prepare_research_check_evidence",
+            {"request": request, "freeze": True},
+        )
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool("run_research_check_evidence", {"request": request})
+    evidence = server.call_tool(
+        "run_research_check_evidence",
+        {
+            "request": request,
+            "dataset_id": "mds-1",
+            "confirm": True,
+        },
+    )
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool(
+            "dispatch_research_check_evidence", {"request": request}
+        )
+    dispatched = server.call_tool(
+        "dispatch_research_check_evidence",
+        {
+            "request": request,
+            "dataset_id": "mds-1",
+            "confirm": True,
+        },
+    )
+    job_status = server.call_tool(
+        "get_research_job_status", {"job_id": "job-1"}
+    )
+    job_result = server.call_tool(
+        "get_research_job_result", {"job_id": "job-1"}
+    )
+    replay = server.call_tool("replay_research_check", {"check_id": "check-1"})
+    with pytest.raises(McpError, match="confirm=true"):
+        server.call_tool(
+            "create_observation_from_check", {"check_id": "check-1"}
+        )
+    observation = server.call_tool(
+        "create_observation_from_check",
+        {
+            "check_id": "check-1",
+            "request": {"title": "Evidence"},
+            "confirm": True,
+        },
+    )
+    trail = server.read_resource("quanttrad://research/items/check-1/trail")
+
+    assert requirements["path"] == "/api/research/checks/requirements"
+    assert preview["payload"]["mode"] == "preview"
+    assert prepared["payload"]["preparation"] == {"freeze": False}
+    assert evidence["payload"]["mode"] == "evidence"
+    assert evidence["payload"]["dataset_id"] == "mds-1"
+    assert dispatched["path"] == "/api/research/jobs/checks/run"
+    assert dispatched["payload"]["mode"] == "evidence"
+    assert job_status["path"] == "/api/research/jobs/job-1"
+    assert job_result["path"] == "/api/research/jobs/job-1/result"
+    assert replay["path"] == "/api/research/checks/check-1/replay"
+    assert observation["path"] == "/api/research/checks/check-1/observations"
+    assert trail["path"] == "/api/research/items/check-1/trail"
 
 
 def test_mcp_experiment_summary_resource_reads_local_artifacts(tmp_path):
@@ -262,7 +442,10 @@ def test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest(tmp_path):
     with pytest.raises(McpError, match="allow_non_backtest"):
         server.call_tool("start_bot_run", {"bot_id": "bot-1", "run_type": "paper", "confirm": True})
     with pytest.raises(McpError, match="dataset_id is required"):
-        server.call_tool("start_bot_run", {"bot_id": "bot-1", "confirm": True})
+        server.call_tool(
+            "start_bot_run",
+            {"bot_id": "bot-1", "economic_claim_intent": "exploration", "confirm": True},
+        )
 
     payload = server.call_tool(
         "start_bot_run",
@@ -270,6 +453,7 @@ def test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest(tmp_path):
             "bot_id": "bot-1",
             "dataset_id": "mds-1",
             "request_id": "req-1",
+            "economic_claim_intent": "exploration",
             "confirm": True,
         },
     )
@@ -281,6 +465,7 @@ def test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest(tmp_path):
         None,
         {
             "run_type": "backtest",
+            "economic_claim_intent": "exploration",
             "dataset_id": "mds-1",
             "request_id": "req-1",
         },

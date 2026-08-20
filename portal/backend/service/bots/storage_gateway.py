@@ -9,28 +9,33 @@ from ..storage.repos.lifecycle import (
     get_bot_run_lifecycle,
     get_latest_bot_run_lifecycle,
     list_latest_bot_run_lifecycles,
+    list_bot_run_lifecycles,
     rebuild_bot_run_lifecycle_summary,
     record_bot_run_lifecycle_checkpoint,
 )
 from ..storage.repos.report_materializations import (
     get_report_materialization_status,
     list_report_materialization_statuses,
+    list_report_materialization_observations,
 )
 from ..storage.repos.run_leases import (
     acquire_bot_run_lease,
     get_bot_run_lease,
     list_bot_run_leases_by_run_ids,
+    list_active_bot_run_leases,
     release_bot_run_lease,
 )
 from ..storage.repos.runs import (
     get_bot_run,
     list_bot_runs,
     list_bot_runs_by_ids,
+    list_bot_runs_page,
     list_latest_bot_runs_by_bot_ids,
     upsert_bot_run,
 )
 from ..storage.repos.runtime_events import (
     get_latest_bot_runtime_run_id,
+    list_botlens_run_evidence,
 )
 
 
@@ -60,7 +65,16 @@ class BotStorageGateway(Protocol):
         run_ids: List[str],
     ) -> Dict[str, Dict[str, Any]]: ...
 
+    def list_report_materialization_observations(
+        self,
+        run_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]: ...
+
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]: ...
+
+    def list_botlens_run_evidence(
+        self, run_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]: ...
 
     def get_bot_run_lifecycle(
         self,
@@ -76,6 +90,8 @@ class BotStorageGateway(Protocol):
         self,
         run_ids: List[str],
     ) -> Dict[str, Dict[str, Any]]: ...
+
+    def list_active_bot_run_leases(self) -> List[Dict[str, Any]]: ...
 
     def acquire_bot_run_lease(
         self,
@@ -111,6 +127,11 @@ class BotStorageGateway(Protocol):
         run_ids_by_bot: Mapping[str, str] | None = None,
     ) -> Dict[str, Dict[str, Any]]: ...
 
+    def list_bot_run_lifecycles(
+        self,
+        run_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]: ...
+
     def record_bot_run_lifecycle_checkpoint(
         self,
         payload: Mapping[str, Any],
@@ -126,6 +147,14 @@ class BotStorageGateway(Protocol):
         *,
         bot_id: Optional[str] = None,
         limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]: ...
+
+    def list_bot_runs_page(
+        self,
+        *,
+        limit: int = 100,
+        before_sort_at: Optional[str] = None,
+        before_run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]: ...
 
 
@@ -166,8 +195,21 @@ class RepositoryBotStorageGateway:
             [str(run_id) for run_id in run_ids]
         )
 
+    def list_report_materialization_observations(
+        self,
+        run_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        return list_report_materialization_observations(
+            [str(run_id) for run_id in run_ids]
+        )
+
     def get_latest_bot_runtime_run_id(self, bot_id: str) -> Optional[str]:
         return get_latest_bot_runtime_run_id(str(bot_id))
+
+    def list_botlens_run_evidence(
+        self, run_ids: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        return list_botlens_run_evidence([str(run_id) for run_id in run_ids])
 
     def get_bot_run_lifecycle(
         self,
@@ -188,6 +230,9 @@ class RepositoryBotStorageGateway:
         return list_bot_run_leases_by_run_ids(
             [str(run_id) for run_id in run_ids]
         )
+
+    def list_active_bot_run_leases(self) -> List[Dict[str, Any]]:
+        return list_active_bot_run_leases()
 
     def acquire_bot_run_lease(
         self,
@@ -247,6 +292,12 @@ class RepositoryBotStorageGateway:
             },
         )
 
+    def list_bot_run_lifecycles(
+        self,
+        run_ids: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        return list_bot_run_lifecycles([str(run_id) for run_id in run_ids])
+
     def record_bot_run_lifecycle_checkpoint(
         self,
         payload: Mapping[str, Any],
@@ -269,6 +320,19 @@ class RepositoryBotStorageGateway:
         if limit and int(limit) > 0:
             return list(rows)[: int(limit)]
         return list(rows)
+
+    def list_bot_runs_page(
+        self,
+        *,
+        limit: int = 100,
+        before_sort_at: Optional[str] = None,
+        before_run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return list_bot_runs_page(
+            limit=limit,
+            before_sort_at=before_sort_at,
+            before_run_id=before_run_id,
+        )
 
 
 def build_bot_storage_gateway() -> BotStorageGateway:

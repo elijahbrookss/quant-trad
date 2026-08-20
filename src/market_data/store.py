@@ -7,7 +7,20 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional, Protocol
 
-from .contracts import CandleFact, CandleRecord, DatasetSeriesRequest, SourceIdentity
+from .canonical import CanonicalFact, CanonicalFactRecord
+from .contracts import (
+    CandleFact,
+    CandleRecord,
+    DatasetSeriesRequest,
+    FundingRateFact,
+    FundingRateRecord,
+    MarketDataRecord,
+    NumericFact,
+    NumericFactRecord,
+    OpenInterestFact,
+    OpenInterestRecord,
+    SourceIdentity,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +43,7 @@ class FrozenDataset:
     name: Optional[str] = None
     purpose: str = "research"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    created_at: Optional[datetime] = field(default=None, compare=False)
     reused_existing: bool = field(default=False, compare=False)
 
 
@@ -60,6 +74,7 @@ class MarketDataStore(Protocol):
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
         ...
 
@@ -70,7 +85,34 @@ class MarketDataStore(Protocol):
         fact_type: str,
         timeframe_seconds: Optional[int],
         contract_version: str,
+        dimensions: Optional[Mapping[str, Any]] = None,
     ) -> int:
+        ...
+
+    def read_facts(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        ...
+
+    def ingest_facts(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[CanonicalFact],
+        request: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
         ...
 
     def ingest_candles(
@@ -94,13 +136,127 @@ class MarketDataStore(Protocol):
         end: datetime,
         as_of_commit_seq: Optional[int] = None,
         known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
     ) -> list[CandleRecord]:
         ...
+
+    def ingest_open_interest(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[OpenInterestFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        ...
+
+    def read_open_interest(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[OpenInterestRecord]:
+        ...
+
+    def ingest_funding_rates(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[FundingRateFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        ...
+
+    def read_funding_rates(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[FundingRateRecord]:
+        ...
+
+    def ingest_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[NumericFact],
+        request: Optional[Mapping[str, Any]] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
+        provenance_by_event: Optional[Mapping[str, Mapping[str, Any]]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = True,
+    ) -> IngestionOutcome:
+        ...
+
+    def read_numeric_facts(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
+        ...
+
+    def read_numeric_fact_revisions(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+    ) -> list[NumericFactRecord]:
+        ...
+
+    def read_series_records(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[MarketDataRecord]:
+        ...
+
 
     def record_gap_evidence(self, **kwargs: Any) -> str:
         ...
 
     def list_gap_evidence(self, **kwargs: Any) -> list[Mapping[str, Any]]:
+        ...
+
+    def list_source_acquisition_coverage(
+        self,
+        *,
+        series_id: int,
+        source_identity_keys: Sequence[str],
+        start: datetime,
+        end: datetime,
+        created_at_lte: Optional[datetime] = None,
+    ) -> list[Mapping[str, Any]]:
         ...
 
     def freeze_dataset(
@@ -122,7 +278,9 @@ class MarketDataStore(Protocol):
         known_at_lte: Optional[datetime] = None,
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
-    ) -> list[CandleRecord]:
+        source_identity_keys: Sequence[str] = (),
+        causal_at_interval_close: bool = False,
+    ) -> list[MarketDataRecord]:
         ...
 
 

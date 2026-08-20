@@ -6,6 +6,11 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
+from engines.bot_runtime.core.execution_assumptions import (
+    execution_quality_meets,
+    resolve_execution_assumptions,
+)
+
 
 PLAN_SCHEMA = "experiment_plan.v1"
 STATE_SCHEMA = "experiment_suite_state.v1"
@@ -240,6 +245,16 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
     schema_version = str(payload.get("schema_version") or PLAN_SCHEMA)
     if schema_version != PLAN_SCHEMA:
         raise ValueError(f"unsupported experiment plan schema_version: {schema_version}")
+    intent = _clean_id(payload.get("intent"), "intent").lower()
+    if intent not in {"exploration", "economic", "selection", "promotion"}:
+        raise ValueError("intent must be exploration, economic, selection, or promotion")
+    execution_assumptions = resolve_execution_assumptions(
+        intent,
+        payload.get("execution_assumptions")
+        if isinstance(payload.get("execution_assumptions"), Mapping)
+        else None,
+        source="experiment_plan",
+    ).to_dict()
     windows = _normalize_windows(payload.get("windows"))
     variants = _normalize_variants(payload.get("variants"))
     comparisons = _normalize_comparisons(payload.get("comparisons"), variants=variants)
@@ -269,7 +284,8 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
     }
     comparison_policy = {
         "include_golden": True,
-        "require_golden": False,
+        "require_golden": intent in {"selection", "promotion"},
+        "minimum_execution_quality_class": "X2" if intent in {"selection", "promotion"} else "X0",
         **dict(payload.get("comparison_policy") or {}),
     }
     notification_policy = {
@@ -279,9 +295,27 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
         "on_states": ["COMPLETED", "FAILED", "PARTIALLY_COMPLETED"],
         **dict(payload.get("notification_policy") or {}),
     }
+    pass_gates = _normalize_pass_gates(payload.get("pass_gates") or {})
+    if intent in {"selection", "promotion"}:
+        if not comparisons:
+            raise ValueError(f"{intent} experiments require at least one baseline comparison")
+        if not pass_gates.get("gates"):
+            raise ValueError(f"{intent} experiments require non-empty pass_gates")
+        if not bool(comparison_policy.get("require_golden")):
+            raise ValueError(f"{intent} experiments require comparison_policy.require_golden=true")
+        minimum_execution_quality = str(
+            comparison_policy.get("minimum_execution_quality_class") or ""
+        ).upper()
+        if not execution_quality_meets(minimum_execution_quality, "X2"):
+            raise ValueError(
+                f"{intent} experiments require minimum_execution_quality_class=X2 or higher"
+            )
     normalized = {
         "schema_version": PLAN_SCHEMA,
         "name": _clean_id(payload.get("name"), "name"),
+        "intent": intent,
+        "economic_claim_intent": intent,
+        "execution_assumptions": execution_assumptions,
         "hypothesis": str(payload.get("hypothesis") or "").strip(),
         "run_policy": run_policy,
         "windows": windows,
@@ -290,7 +324,7 @@ def normalize_plan(raw: Mapping[str, Any]) -> dict[str, Any]:
         "export_policy": export_policy,
         "materialization_policy": materialization_policy,
         "comparison_policy": comparison_policy,
-        "pass_gates": _normalize_pass_gates(payload.get("pass_gates") or {}),
+        "pass_gates": pass_gates,
         "notification_policy": notification_policy,
         "metadata": dict(payload.get("metadata") or {}),
     }
@@ -375,4 +409,3 @@ def build_step_plan(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         }
     )
     return steps
-

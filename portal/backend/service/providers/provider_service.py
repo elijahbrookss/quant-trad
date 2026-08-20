@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from data_providers.providers.factory import get_provider
 from data_providers.registry import (
+    FeatureAuth,
     exchange_slug_for_venue,
+    feature_contract_payload,
     get_provider_config,
     get_venue_config,
     list_providers,
@@ -29,6 +31,50 @@ from data_providers.services.credential_store import (
 from ..market import instrument_service
 
 logger = logging.getLogger(__name__)
+
+
+def _venue_feature_payload(
+    venue: Any,
+    credential_status: Mapping[str, Any],
+) -> Dict[str, object]:
+    payload = feature_contract_payload(venue)
+    required = required_keys(venue.provider_id, venue.id)
+    features: Dict[str, Dict[str, object]] = {}
+    for feature_id, contract in venue.features.items():
+        item: Dict[str, object] = contract.as_dict()
+        if contract.auth == FeatureAuth.PUBLIC:
+            item["state"] = "available"
+        elif contract.auth == FeatureAuth.CREDENTIALS:
+            item["state"] = (
+                "available"
+                if credential_status.get("state") == "available"
+                else str(credential_status.get("state") or "credentials_unavailable")
+            )
+            item["required_secrets"] = list(required)
+        elif contract.auth == FeatureAuth.EXTERNAL:
+            item["state"] = "external_auth_required"
+        else:
+            item["state"] = "unavailable"
+        features[feature_id] = item
+    payload["features"] = dict(sorted(features.items()))
+    return payload
+
+
+def _feature_validation_error(
+    venue: Any,
+    feature_id: str,
+    credential_status: Mapping[str, Any],
+) -> Optional[str]:
+    feature = _venue_feature_payload(venue, credential_status)["features"].get(feature_id)
+    if not isinstance(feature, Mapping):
+        return f"Provider feature contract is undeclared: {feature_id}."
+    state = str(feature.get("state") or "unavailable")
+    if state in {"available", "external_auth_required"}:
+        return None
+    if state in {"missing_secrets", "invalid_credentials", "error"}:
+        missing = feature.get("required_secrets") or []
+        return f"Feature '{feature_id}' requires provider credentials: {', '.join(missing)}"
+    return f"Feature '{feature_id}' is {state}: {feature.get('reason') or 'unavailable'}"
 
 
 def provider_payloads() -> List[Dict[str, Any]]:
@@ -61,6 +107,7 @@ def provider_payloads() -> List[Dict[str, Any]]:
                 "symbols_format": venue.symbols_format,
                 "metadata": venue.metadata,
                 "status": venue_status,
+                "feature_contract": _venue_feature_payload(venue, venue_status),
             }
         )
 
@@ -93,7 +140,12 @@ def provider_payloads() -> List[Dict[str, Any]]:
     return payload
 
 
-def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str]) -> Tuple[bool, Dict[str, str], Dict[str, Optional[str]]]:
+def validate_provider_venue(
+    provider_id: Optional[str],
+    venue_id: Optional[str],
+    *,
+    feature_id: str = "instrument_metadata",
+) -> Tuple[bool, Dict[str, str], Dict[str, Optional[str]]]:
     """Validate provider/venue pairing and return normalized identifiers."""
 
     errors: Dict[str, str] = {}
@@ -111,17 +163,6 @@ def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str])
 
     if not provider_cfg:
         errors["provider_id"] = "Select a valid data provider."
-    else:
-        provider_status = resolve_status(provider_cfg.id, None)
-        if provider_status.get("state") != "available":
-            if provider_status.get("state") == "invalid_credentials":
-                errors["provider_id"] = (
-                    "Provider credentials cannot be decrypted with the current key. "
-                    "Re-save provider API keys."
-                )
-            else:
-                missing = provider_status.get("missing", [])
-                errors["provider_id"] = f"Provider unavailable; missing secrets: {', '.join(missing)}"
 
     venue_cfg = get_venue_config(normalized_venue) if normalized_venue else None
     if normalized_venue and not venue_cfg:
@@ -130,15 +171,9 @@ def validate_provider_venue(provider_id: Optional[str], venue_id: Optional[str])
         errors["venue_id"] = "Venue is not supported by the chosen provider."
     elif venue_cfg:
         venue_status = resolve_status(venue_cfg.provider_id, venue_cfg.id)
-        if venue_status.get("state") != "available":
-            if venue_status.get("state") == "invalid_credentials":
-                errors["venue_id"] = (
-                    "Venue credentials cannot be decrypted with the current key. "
-                    "Re-save venue API keys."
-                )
-            else:
-                missing = venue_status.get("missing", [])
-                errors["venue_id"] = f"Venue unavailable; missing secrets: {', '.join(missing)}"
+        feature_error = _feature_validation_error(venue_cfg, feature_id, venue_status)
+        if feature_error:
+            errors["venue_id"] = feature_error
 
     return len(errors) == 0, errors, {"provider_id": normalized_provider, "venue_id": normalized_venue}
 

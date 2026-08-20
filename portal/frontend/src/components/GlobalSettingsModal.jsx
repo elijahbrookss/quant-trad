@@ -5,9 +5,9 @@ import { usePortalSettings } from '../contexts/PortalSettingsContext.jsx'
 import { useAccentColor } from '../contexts/AccentColorContext.jsx'
 
 const ACCENT_PRESETS = [
+  { name: 'Brass', value: '#b6892d' },
   { name: 'Harbor', value: '#175a81' },
   { name: 'Signal', value: '#0f766e' },
-  { name: 'Brass', value: '#b6892d' },
   { name: 'Ember', value: '#c35a2d' },
 ]
 
@@ -85,13 +85,13 @@ function OptionGrid({ options, currentValue, onSelect, columns = 'sm:grid-cols-2
 export function GlobalSettingsModal({ open, onClose }) {
   const { settings, updateSettings, resetSettings } = usePortalSettings()
   const { setAccentColor } = useAccentColor()
-  const accentValue = settings?.accentColor || '#175a81'
+  const accentValue = settings?.accentColor || '#b6892d'
 
   return (
     <Dialog open={open} onClose={onClose} className="relative z-50">
-      <div className="fixed inset-0 bg-black/75 backdrop-blur-sm" aria-hidden="true" />
-      <div className="fixed inset-0 flex items-center justify-center p-4">
-        <DialogPanel className="flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-white/[0.09] bg-[#0c1018]/90 shadow-[0_32px_80px_-20px_rgba(0,0,0,0.9)] backdrop-blur-2xl">
+      <div className="qt2-glass-backdrop fixed inset-0" aria-hidden="true" />
+      <div className="fixed inset-0 z-[1] flex items-center justify-center p-4">
+        <DialogPanel className="qt2-glass-panel flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-white/[0.12]">
 
           {/* accent top strip */}
           <div className="h-px w-full bg-gradient-to-r from-transparent via-[color:var(--accent-alpha-60)] to-transparent" />
@@ -251,7 +251,7 @@ export function GlobalSettingsModal({ open, onClose }) {
                 type="button"
                 onClick={() => {
                   resetSettings()
-                  setAccentColor('#175a81')
+                  setAccentColor('#b6892d')
                 }}
                 className="inline-flex items-center gap-2 rounded-md border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-[12px] text-slate-300 transition-colors hover:border-white/[0.14] hover:bg-white/[0.06] hover:text-slate-100"
               >

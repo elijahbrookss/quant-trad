@@ -13,6 +13,7 @@ from data_providers.streams import (
     MarketSubscription,
     ProviderMarketDataStream,
 )
+from data_providers.providers.coinbase import CoinbaseProvider
 
 
 StreamFactory = Callable[[], ProviderMarketDataStream]
@@ -51,10 +52,20 @@ async def run_provider_stream_smoke(
         timeframe=timeframe,
         auth_mode=auth_mode,
     )
-    if subscription.auth_mode != "public":
-        raise ValueError("Only public Coinbase stream smoke checks are supported in v1.")
+    if subscription.auth_mode not in {"public", "authenticated"}:
+        raise ValueError("Coinbase stream smoke auth_mode must be 'public' or 'authenticated'.")
 
-    stream = stream_factory() if stream_factory is not None else CoinbaseAdvancedTradeStream(provider=provider, venue=subscription.venue)
+    if stream_factory is not None:
+        stream = stream_factory()
+    else:
+        jwt_factory = None
+        if subscription.auth_mode == "authenticated":
+            jwt_factory = CoinbaseProvider().build_websocket_jwt
+        stream = CoinbaseAdvancedTradeStream(
+            provider=provider,
+            venue=subscription.venue,
+            jwt_factory=jwt_factory,
+        )
     started_monotonic = time.monotonic()
     started_at = _utc_iso()
     counts: dict[str, int] = {}
@@ -138,6 +149,10 @@ async def run_provider_stream_smoke(
                 latest["ticker"] = payload
             elif kind == "market_candle_update":
                 latest["candle"] = payload
+            elif kind == "market_trade":
+                latest["trade"] = payload
+            elif kind in {"market_l2_snapshot", "market_l2_update"}:
+                latest["level2"] = payload
             elif kind == "provider_subscription_ack":
                 latest["subscription_ack"] = payload
             elif kind == "provider_disconnected":
@@ -230,6 +245,10 @@ def summarize_events(events: Sequence[CanonicalMarketEvent]) -> dict[str, Any]:
             latest["ticker"] = payload
         elif kind == "market_candle_update":
             latest["candle"] = payload
+        elif kind == "market_trade":
+            latest["trade"] = payload
+        elif kind in {"market_l2_snapshot", "market_l2_update"}:
+            latest["level2"] = payload
     return {"counts": counts, "latest": latest}
 
 

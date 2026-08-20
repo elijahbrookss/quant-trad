@@ -45,9 +45,10 @@ truth or silently call a provider when local data was missing. The old tables
 also overwrote logical candles, making corrections and causal replay difficult
 to audit.
 
-The platform needs a boundary that can later add open interest, basis, and other
-facts without treating them as candle columns. The first implementation remains
-candle-only; unsupported fact types must remain visibly unsupported.
+The platform needs a boundary that can add open interest, basis, and other facts
+without treating them as candle columns. ADR 0052 extends this store with the
+first non-candle contract and a durable collector; unsupported fact types remain
+visibly unsupported.
 
 ## Decision
 
@@ -109,9 +110,9 @@ but make causal replay and correction history possible. Dataset manifests are
 reusable evidence; backtests still retain their existing exact consumed-row
 snapshot as the final proof of derived runtime inputs.
 
-The generic series identity is ready for additional fact contracts, but no open
-interest, basis, funding, order-flow, L2, options, or live-order capability is
-claimed by this ADR.
+ADR 0052 now implements venue-specific Coinbase open-interest facts on the same
+series, provenance, quality, and dataset concepts. Basis, funding, aggregated OI,
+order-flow, L2, options, and live-order capability remain unclaimed.
 
 ## Rejected Alternatives
 
@@ -142,9 +143,13 @@ claimed by this ADR.
   the second execution verified idempotence. A repository replay returned all
   1,271 selected rows, and an unrelated series correction left the selected
   dataset ID unchanged.
+- `tests/test_market_data/test_repository_db.py` additionally enforces the
+  shared candle/OI commit clock and mixed-fact frozen datasets introduced by ADR
+  0052.
 
 ## References
 
 - [ADR 0003: Preserve Data Boundary Source Facts](0003-preserve-data-boundary-source-facts.md)
 - [ADR 0044: Enforce Known-At Prefix Invariance](0044-enforce-known-at-prefix-invariance.md)
 - [ADR 0046: Fingerprint Exact Candle Inputs And Keep Quality Separate](0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md)
+- [ADR 0052: Typed Fact Collectors And Explicit Instrument Roles](0052-use-typed-fact-collectors-and-explicit-instrument-roles.md)

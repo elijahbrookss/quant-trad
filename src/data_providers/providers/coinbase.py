@@ -3,22 +3,31 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
+import math
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
 try:
+    from coinbase import jwt_generator
     from coinbase.rest import RESTClient
     COINBASE_SDK_AVAILABLE = True
 except ImportError:  # pragma: no cover - handled in __init__
+    jwt_generator = None
     RESTClient = None
     COINBASE_SDK_AVAILABLE = False
 
 from core.logger import logger
 from data_providers.registry import _REGISTRY
+from data_providers.facts import (
+    ProviderFundingRateSnapshot,
+    ProviderOpenInterestSnapshot,
+)
 from data_providers.services.credential_store import load_credentials
 from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
 
@@ -28,7 +37,13 @@ from .base import BaseDataProvider, InstrumentMetadata, InstrumentType
     id="COINBASE",
     label="Coinbase Direct API",
     supported_venues=["COINBASE_DIRECT"],
-    capabilities={"supportsHistorical": True, "supportsLive": True, "supportsOrders": True, "assetClasses": ["crypto"]},
+    capabilities={
+        "supportsHistorical": True,
+        "supportsLive": True,
+        "supportsOrders": False,
+        "publicMarketData": True,
+        "assetClasses": ["crypto"],
+    },
     implementation_module="data_providers.providers.coinbase",
     implementation_class="CoinbaseProvider",
 )
@@ -141,6 +156,7 @@ class CoinbaseProvider(BaseDataProvider):
         self._api_key: Optional[str] = None
         self._api_secret: Optional[str] = None
         self._client: Optional[RESTClient] = None
+        self._public_client: Optional[RESTClient] = None
         self._last_product_payload: Dict[str, Any] = {}
 
     # Credentials / helpers -------------------------------------------------
@@ -181,6 +197,35 @@ class CoinbaseProvider(BaseDataProvider):
         )
         return self._client
 
+    def _ensure_public_client(self) -> RESTClient:
+        """Return an unauthenticated client for Coinbase public market data."""
+
+        if self._public_client is None:
+            self._public_client = RESTClient(timeout=self._timeout)
+        return self._public_client
+
+    def build_websocket_jwt(self) -> str:
+        """Build one short-lived WebSocket JWT through shared credentials."""
+
+        if jwt_generator is None:
+            raise RuntimeError(
+                "Coinbase WebSocket authentication requires coinbase-advanced-py."
+            )
+        api_key, api_secret = self._resolve_credentials()
+        try:
+            token = str(jwt_generator.build_ws_jwt(api_key, api_secret) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "coinbase_websocket_jwt_failed | error_type=%s",
+                type(exc).__name__,
+            )
+            raise RuntimeError(
+                "Coinbase WebSocket JWT generation failed through the provider credential boundary."
+            ) from exc
+        if not token:
+            raise RuntimeError("Coinbase WebSocket JWT generation returned an empty token.")
+        return token
+
     @staticmethod
     def _response_to_dict(response: Any) -> Dict[str, Any]:
         if response is None:
@@ -193,14 +238,114 @@ class CoinbaseProvider(BaseDataProvider):
             return dict(response.__dict__)
         return {}
 
+    def fetch_product_proof(
+        self,
+        product_id: str,
+        *,
+        auth_mode: str = "public",
+    ) -> Dict[str, Any]:
+        """Return one bounded product payload for provider-contract proof."""
+
+        normalized_product_id = str(product_id or "").strip()
+        if not normalized_product_id:
+            raise ValueError("Coinbase product proof requires product_id.")
+        client, authenticated = self._proof_client(auth_mode)
+        try:
+            response = (
+                client.get_product(product_id=normalized_product_id)
+                if authenticated
+                else client.get_public_product(product_id=normalized_product_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CoinbaseAPIError(
+                "Coinbase product proof failed "
+                f"| product_id={normalized_product_id} auth_mode={auth_mode} error={exc}"
+            ) from exc
+        return self._response_to_dict(response)
+
+    def fetch_product_book_proof(
+        self,
+        product_id: str,
+        *,
+        auth_mode: str = "public",
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Return one bounded product-book payload for provider-contract proof."""
+
+        normalized_product_id = str(product_id or "").strip()
+        bounded_limit = max(1, min(int(limit), 1000))
+        if not normalized_product_id:
+            raise ValueError("Coinbase product-book proof requires product_id.")
+        client, authenticated = self._proof_client(auth_mode)
+        try:
+            response = (
+                client.get_product_book(product_id=normalized_product_id, limit=bounded_limit)
+                if authenticated
+                else client.get_public_product_book(
+                    product_id=normalized_product_id,
+                    limit=bounded_limit,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CoinbaseAPIError(
+                "Coinbase product-book proof failed "
+                f"| product_id={normalized_product_id} auth_mode={auth_mode} error={exc}"
+            ) from exc
+        return self._response_to_dict(response)
+
+    def fetch_recent_market_trades_proof(
+        self,
+        product_id: str,
+        *,
+        auth_mode: str = "public",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Return bounded recent trades; this is not a completeness backfill."""
+
+        normalized_product_id = str(product_id or "").strip()
+        bounded_limit = max(1, min(int(limit), 1000))
+        if not normalized_product_id:
+            raise ValueError("Coinbase recent-trades proof requires product_id.")
+        client, authenticated = self._proof_client(auth_mode)
+        try:
+            response = (
+                client.get_market_trades(product_id=normalized_product_id, limit=bounded_limit)
+                if authenticated
+                else client.get_public_market_trades(
+                    product_id=normalized_product_id,
+                    limit=bounded_limit,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise CoinbaseAPIError(
+                "Coinbase recent-trades proof failed "
+                f"| product_id={normalized_product_id} auth_mode={auth_mode} error={exc}"
+            ) from exc
+        return self._response_to_dict(response)
+
+    def _proof_client(self, auth_mode: str) -> tuple[RESTClient, bool]:
+        normalized_auth_mode = str(auth_mode or "public").strip().lower()
+        if normalized_auth_mode == "public":
+            return self._ensure_public_client(), False
+        if normalized_auth_mode == "authenticated":
+            return self._ensure_client(), True
+        raise ValueError(
+            "Coinbase proof auth_mode must be 'public' or 'authenticated': "
+            f"{normalized_auth_mode!r}"
+        )
+
     def _load_product(self, symbol: str) -> CoinbaseProduct:
         if not symbol:
             raise ValueError("Symbol is required for Coinbase lookup.")
-        client = self._ensure_client()
+        client = self._ensure_public_client()
         try:
-            response = client.get_product(product_id=symbol)
+            response = client.get_public_product(product_id=symbol)
         except Exception as exc:
-            logger.warning("coinbase_product_lookup_failed | symbol=%s | error=%s", symbol, exc)
+            logger.warning(
+                "coinbase_public_product_lookup_failed | symbol=%s | error=%s",
+                symbol,
+                exc,
+            )
             raise ValueError(f"Coinbase product lookup failed: {exc}") from exc
 
         data = self._response_to_dict(response)
@@ -208,9 +353,233 @@ class CoinbaseProvider(BaseDataProvider):
         if not data:
             raise ValueError(
                 f"Coinbase did not return product metadata for '{symbol}'. "
-                "Ensure the symbol exists and API keys have sufficient access."
+                "Ensure the Coinbase Advanced Trade product ID exists."
             )
         return CoinbaseProduct.from_dict(data)
+
+    def fetch_open_interest(self, symbol: str) -> ProviderOpenInterestSnapshot:
+        """Poll one Coinbase futures product for its current native-contract OI.
+
+        Advanced Trade does not expose an OI event timestamp. This adapter keeps
+        that absence explicit and reports only platform receipt time; the collector
+        later assigns the scheduled sample identity and accepted known-at time.
+        """
+
+        product = self._load_product(symbol)
+        payload = dict(self._last_product_payload or {})
+        product_type = str(product.product_type or "").strip().upper()
+        if product_type != "FUTURE":
+            raise ValueError(
+                "coinbase_open_interest_unsupported: "
+                f"product_id={symbol} product_type={product_type or '<missing>'}"
+            )
+        future_details = (
+            dict(product.future_product_details)
+            if isinstance(product.future_product_details, dict)
+            else {}
+        )
+        candidates = [
+            ("future_product_details.open_interest", future_details.get("open_interest")),
+            ("open_interest", payload.get("open_interest")),
+        ]
+        present = [(path, value) for path, value in candidates if value not in (None, "")]
+        if not present:
+            raise ValueError(
+                "coinbase_open_interest_missing: "
+                f"product_id={symbol} response contains no open_interest field"
+            )
+        numeric_values: list[tuple[str, float]] = []
+        for path, raw in present:
+            if isinstance(raw, bool):
+                raise ValueError(
+                    f"coinbase_open_interest_invalid: product_id={symbol} path={path} is not numeric"
+                )
+            try:
+                value = float(Decimal(str(raw)))
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise ValueError(
+                    f"coinbase_open_interest_invalid: product_id={symbol} path={path} value={raw!r}"
+                ) from exc
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"coinbase_open_interest_invalid: product_id={symbol} path={path} must be finite and nonnegative"
+                )
+            numeric_values.append((path, value))
+        distinct_values = {value for _path, value in numeric_values}
+        if len(distinct_values) != 1:
+            raise ValueError(
+                "coinbase_open_interest_conflict: top-level and futures-detail values disagree "
+                f"product_id={symbol}"
+            )
+        source_path, value = numeric_values[0]
+        received_at = dt.datetime.now(dt.timezone.utc)
+        response_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return ProviderOpenInterestSnapshot(
+            provider_product_id=str(product.product_id or symbol),
+            value=value,
+            received_at=received_at,
+            provider_event_at=None,
+            response_hash=response_hash,
+            source_path=source_path,
+            metadata={
+                "provider_event_time_available": False,
+                "contract_code": future_details.get("contract_code"),
+                "contract_root_unit": future_details.get("contract_root_unit"),
+                "venue": future_details.get("venue"),
+            },
+        )
+
+    def fetch_funding_rate(self, symbol: str) -> ProviderFundingRateSnapshot:
+        """Poll one Coinbase perpetual future for its current funding tuple."""
+
+        product = self._load_product(symbol)
+        payload = dict(self._last_product_payload or {})
+        product_type = str(product.product_type or "").strip().upper()
+        if product_type != "FUTURE":
+            raise ValueError(
+                "coinbase_funding_rate_unsupported: "
+                f"product_id={symbol} product_type={product_type or '<missing>'}"
+            )
+        future_details = (
+            dict(product.future_product_details)
+            if isinstance(product.future_product_details, dict)
+            else {}
+        )
+        perpetual_details = (
+            dict(future_details.get("perpetual_details") or {})
+            if isinstance(future_details.get("perpetual_details"), dict)
+            else {}
+        )
+
+        rate_candidates = [
+            ("future_product_details.funding_rate", future_details.get("funding_rate")),
+            (
+                "future_product_details.perpetual_details.funding_rate",
+                perpetual_details.get("funding_rate"),
+            ),
+        ]
+        present_rates = [
+            (path, value)
+            for path, value in rate_candidates
+            if value not in (None, "")
+        ]
+        if not present_rates:
+            raise ValueError(
+                "coinbase_funding_rate_missing: "
+                f"product_id={symbol} response contains no funding_rate field"
+            )
+        normalized_rates: list[tuple[str, float]] = []
+        for path, raw in present_rates:
+            if isinstance(raw, bool):
+                raise ValueError(
+                    f"coinbase_funding_rate_invalid: product_id={symbol} path={path} is not numeric"
+                )
+            try:
+                rate = float(Decimal(str(raw)))
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise ValueError(
+                    f"coinbase_funding_rate_invalid: product_id={symbol} path={path} value={raw!r}"
+                ) from exc
+            if not math.isfinite(rate):
+                raise ValueError(
+                    f"coinbase_funding_rate_invalid: product_id={symbol} path={path} must be finite"
+                )
+            normalized_rates.append((path, rate))
+        if len({value for _path, value in normalized_rates}) != 1:
+            raise ValueError(
+                "coinbase_funding_rate_conflict: futures-detail values disagree "
+                f"product_id={symbol}"
+            )
+        source_path, rate = normalized_rates[0]
+
+        time_candidates = [
+            ("future_product_details.funding_time", future_details.get("funding_time")),
+            (
+                "future_product_details.perpetual_details.funding_time",
+                perpetual_details.get("funding_time"),
+            ),
+        ]
+        present_times = [
+            (path, value)
+            for path, value in time_candidates
+            if value not in (None, "")
+        ]
+        if not present_times:
+            raise ValueError(
+                "coinbase_funding_time_missing: "
+                f"product_id={symbol} response contains no funding_time field"
+            )
+        normalized_times: list[tuple[str, dt.datetime]] = []
+        for path, raw in present_times:
+            text_value = str(raw).strip()
+            if text_value.endswith("Z"):
+                text_value = f"{text_value[:-1]}+00:00"
+            try:
+                parsed = dt.datetime.fromisoformat(text_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"coinbase_funding_time_invalid: product_id={symbol} path={path} value={raw!r}"
+                ) from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            normalized_times.append((path, parsed.astimezone(dt.timezone.utc)))
+        if len({value for _path, value in normalized_times}) != 1:
+            raise ValueError(
+                "coinbase_funding_time_conflict: futures-detail values disagree "
+                f"product_id={symbol}"
+            )
+        funding_time_path, funding_time = normalized_times[0]
+
+        raw_interval = future_details.get("funding_interval")
+        interval_text = str(raw_interval or "").strip().lower()
+        numeric_interval = interval_text[:-1] if interval_text.endswith("s") else interval_text
+        try:
+            interval_decimal = Decimal(numeric_interval)
+            interval_seconds = int(interval_decimal)
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError(
+                "coinbase_funding_interval_invalid: "
+                f"product_id={symbol} value={raw_interval!r}"
+            ) from exc
+        if interval_decimal != interval_seconds or interval_seconds <= 0:
+            raise ValueError(
+                "coinbase_funding_interval_invalid: "
+                f"product_id={symbol} value={raw_interval!r}"
+            )
+
+        received_at = dt.datetime.now(dt.timezone.utc)
+        response_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        return ProviderFundingRateSnapshot(
+            provider_product_id=str(product.product_id or symbol),
+            rate=rate,
+            funding_time=funding_time,
+            interval_seconds=interval_seconds,
+            received_at=received_at,
+            response_hash=response_hash,
+            source_path=source_path,
+            metadata={
+                "funding_time_path": funding_time_path,
+                "funding_interval_path": "future_product_details.funding_interval",
+                "funding_time_semantics": "provider_reported_unspecified",
+                "contract_code": future_details.get("contract_code"),
+                "contract_root_unit": future_details.get("contract_root_unit"),
+                "venue": future_details.get("venue"),
+            },
+        )
 
     def get_datasource(self) -> str:
         return "COINBASE"
@@ -256,6 +625,56 @@ class CoinbaseProvider(BaseDataProvider):
         raise ValueError(
             f"Unsupported Coinbase product type '{product.product_type}' for symbol '{symbol}'"
         )
+
+    def get_account_fee_rates(
+        self, *, product_type: Optional[str] = None
+    ) -> Dict[str, float]:
+        """Return authenticated account fee rates from the shared credential layer."""
+
+        normalized_type = str(product_type or "").strip().upper() or None
+        try:
+            response = self._ensure_client().get_transaction_summary(
+                product_type=normalized_type
+            )
+        except Exception as exc:
+            logger.error(
+                "coinbase_account_fee_rates_failed | product_type=%s error=%s",
+                normalized_type,
+                exc,
+            )
+            raise CoinbaseAPIError(
+                "coinbase_account_fee_rates_failed: authenticated Coinbase "
+                f"transaction summary failed for product_type={normalized_type or '<all>'}: {exc}"
+            ) from exc
+
+        payload = self._response_to_dict(response)
+        fee_tier = (
+            payload.get("fee_tier")
+            if isinstance(payload.get("fee_tier"), dict)
+            else {}
+        )
+        rates: Dict[str, float] = {}
+        for field in ("maker_fee_rate", "taker_fee_rate"):
+            raw = fee_tier.get(field)
+            if raw is None:
+                raise CoinbaseAPIError(
+                    "coinbase_account_fee_rates_missing: "
+                    f"product_type={normalized_type or '<all>'} field={field}"
+                )
+            try:
+                value = float(Decimal(str(raw)))
+            except (TypeError, ValueError, InvalidOperation) as exc:
+                raise CoinbaseAPIError(
+                    "coinbase_account_fee_rates_invalid: "
+                    f"product_type={normalized_type or '<all>'} field={field} value={raw!r}"
+                ) from exc
+            if not math.isfinite(value) or value < 0:
+                raise CoinbaseAPIError(
+                    "coinbase_account_fee_rates_invalid: "
+                    f"product_type={normalized_type or '<all>'} field={field} must be finite and nonnegative"
+                )
+            rates[field] = value
+        return rates
 
     def get_instrument_metadata(self, venue: str, symbol: str) -> InstrumentMetadata:
         product = self._load_product(symbol)
@@ -358,51 +777,8 @@ class CoinbaseProvider(BaseDataProvider):
                 "short_margin_rate": overnight_margin.get("short_margin_rate"),
             }
 
-        fee_tier_payload: Dict[str, Any] = {}
         maker_fee_rate = None
         taker_fee_rate = None
-        try:
-            summary_response = self._ensure_client().get_transaction_summary(
-                product_type=product_type or None
-            )
-            summary_payload = self._response_to_dict(summary_response)
-            fee_tier_payload = (
-                summary_payload.get("fee_tier")
-                if isinstance(summary_payload.get("fee_tier"), dict)
-                else {}
-            )
-        except Exception as exc:
-            logger.error(
-                "coinbase_transaction_summary_failed | symbol=%s | product_type=%s | error=%s",
-                symbol,
-                product_type,
-                exc,
-            )
-            raise ValueError(
-                f"Coinbase transaction summary failed for '{symbol}': {exc}"
-            ) from exc
-
-        maker_fee_rate_value = fee_tier_payload.get("maker_fee_rate")
-        if maker_fee_rate_value is None:
-            missing_fields.append("maker_fee_rate")
-        else:
-            try:
-                maker_fee_rate = Decimal(maker_fee_rate_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Coinbase fee tier invalid maker_fee_rate '{maker_fee_rate_value}'"
-                ) from exc
-
-        taker_fee_rate_value = fee_tier_payload.get("taker_fee_rate")
-        if taker_fee_rate_value is None:
-            missing_fields.append("taker_fee_rate")
-        else:
-            try:
-                taker_fee_rate = Decimal(taker_fee_rate_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Coinbase fee tier invalid taker_fee_rate '{taker_fee_rate_value}'"
-                ) from exc
 
         tick_value = tick_size * contract_size if contract_size is not None else None
 
@@ -443,6 +819,7 @@ class CoinbaseProvider(BaseDataProvider):
         metadata_payload: Dict[str, Any] = {
             "product": dict(self._last_product_payload or {}),
             "fees": {
+                "status": "not_requested",
                 "maker_fee_rate": float(maker_fee_rate) if maker_fee_rate is not None else None,
                 "taker_fee_rate": float(taker_fee_rate) if taker_fee_rate is not None else None,
             },
@@ -525,13 +902,17 @@ class CoinbaseProvider(BaseDataProvider):
         if end_ts <= start_ts:
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-        chunk_seconds = interval_seconds * self.MAX_CANDLES_PER_REQUEST
+        # Coinbase treats both request bounds as candle candidates. Keep each
+        # page within the provider limit before normalizing it to QT's half-open
+        # range; otherwise a 300-interval page can contain 301 timestamps and
+        # the provider may drop the earliest candle.
+        chunk_seconds = interval_seconds * max(self.MAX_CANDLES_PER_REQUEST - 1, 1)
         rows: List[Dict[str, Any]] = []
 
         window_start = start_ts
         while window_start < end_ts:
             window_end = min(end_ts, window_start + chunk_seconds)
-            response = self._ensure_client().get_candles(
+            response = self._ensure_public_client().get_public_candles(
                 product_id=symbol,
                 start=str(window_start),
                 end=str(window_end),
@@ -546,10 +927,22 @@ class CoinbaseProvider(BaseDataProvider):
                 start_value = candle_payload.get("start")
                 if start_value is None:
                     continue
+                candle_start = int(start_value)
+                if candle_start < window_start or candle_start > window_end:
+                    raise CoinbaseAPIError(
+                        "Coinbase candle response escaped requested bounds "
+                        f"| product_id={symbol} candle_start={candle_start} "
+                        f"window_start={window_start} window_end={window_end}"
+                    )
+                # Coinbase may include the candle that opens exactly on the
+                # request end. QT candle acquisition is half-open [start, end),
+                # so normalize that boundary overlap at the provider boundary.
+                if candle_start == window_end:
+                    continue
                 rows.append(
                     {
                         "timestamp": pd.to_datetime(
-                            int(start_value), unit="s", utc=True
+                            candle_start, unit="s", utc=True
                         ),
                         "open": float(candle_payload.get("open"))
                         if candle_payload.get("open") is not None

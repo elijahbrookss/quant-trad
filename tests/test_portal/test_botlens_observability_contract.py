@@ -220,6 +220,29 @@ def test_backend_observer_source_budgets_high_volume_metrics() -> None:
     assert float(coalesced["tags"]["latest_value"]) == float(sample_every)
 
 
+def test_backend_observer_source_budgets_runtime_coalescing_metric() -> None:
+    observer = BackendObserver(component="container_runtime_telemetry")
+    sample_every = int(get_settings().observability.high_volume_metric_sample_every)
+
+    for _value in range(sample_every + 1):
+        observer.increment(
+            "telemetry_messages_coalesced_total",
+            run_id="run-1",
+            message_kind="botlens_runtime_facts",
+            queue_name="telemetry_emit_queue",
+        )
+
+    metrics = [
+        metric
+        for metric in get_observability_sink().snapshot()["metrics"]
+        if metric["metric_name"] == "telemetry_messages_coalesced_total"
+    ]
+    assert len(metrics) == 2
+    assert metrics[0]["tags"]["capture_policy"] == "source_budgeted"
+    assert int(metrics[1]["tags"]["sample_count"]) == sample_every
+    assert float(metrics[1]["tags"]["value_sum"]) == float(sample_every)
+
+
 def test_backend_observer_source_budgets_hotpath_wait_and_retention_metrics() -> None:
     sample_every = int(get_settings().observability.high_volume_metric_sample_every)
 

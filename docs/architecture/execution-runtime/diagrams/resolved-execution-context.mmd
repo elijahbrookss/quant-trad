@@ -1,0 +1,18 @@
+flowchart LR
+    SI[Strategy intent and RuntimeExecutionPlan] --> PC[Startup policy conformance]
+    IC[InstrumentExecutionContract] --> RC[ResolvedExecutionContext]
+    VP[VenueExecutionProfile] --> RC
+    FS[FeeSchedule] --> RC
+    EM[ExecutionModelArtifact] --> RC
+    RC --> PC
+    PC --> RS[Immutable run snapshot and context bundle]
+    RS --> EX[Canonical bar execution]
+    EX --> CF[Canonical fills and accounting]
+    CF --> EV[Runtime events and BotLens facts]
+    EV --> RP[Report context verification and X0-X2 assessment]
+
+    PA[Provider and venue data registry] -. identity only .-> IC
+    PA -. not execution authority .-> VP
+    OL[Durable canonical order lifecycle] --> EX
+    L2[L2 replay queue and latency] -. deferred to Phase 3 .-> EX
+    LIVE[External order submission] -. prohibited by ADR 0049 .-> EX

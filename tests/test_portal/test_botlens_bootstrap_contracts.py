@@ -90,6 +90,36 @@ def test_run_bootstrap_contract_is_run_scoped_and_excludes_selected_symbol_state
     assert "detail" not in payload
 
 
+def test_run_bootstrap_contract_recovers_routing_identity_from_canonical_series_key() -> None:
+    payload = run_bootstrap_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        run_meta={"run_id": "run-1"},
+        lifecycle={"phase": "terminal", "status": "completed"},
+        health={"status": "completed", "warning_count": 0, "warnings": []},
+        symbol_catalog={
+            "instrument-btc|1h": {
+                "symbol_key": "instrument-btc|1h",
+            }
+        },
+        open_trades={},
+        selected_symbol_key="instrument-btc|1h",
+        state="ready",
+        run_live=False,
+        transport_eligible=False,
+        message="Historical BotLens bootstrap ready.",
+        bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id="stream-1",
+    )
+
+    identity = payload["navigation"]["symbols"][0]["identity"]
+    assert identity["instrument_id"] == "instrument-btc"
+    assert identity["timeframe"] == "1h"
+    assert identity["symbol"] is None
+    assert identity["display_label"] == "instrument-btc · 1h"
+
+
 def test_selected_symbol_snapshot_contract_is_symbol_scoped_and_not_detail_contract() -> None:
     symbol_state = _symbol_state()
 
@@ -148,6 +178,111 @@ def test_selected_symbol_snapshot_contract_is_symbol_scoped_and_not_detail_contr
     assert payload["live_transport"]["selected_symbol_key"] == "instrument-btc|1m"
     assert payload["live_transport"]["stream_session_id"] == "stream-1"
     assert "detail" not in payload
+
+
+def test_terminal_selected_symbol_snapshot_cannot_claim_live_readiness() -> None:
+    payload = selected_symbol_snapshot_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        symbol_state=_symbol_state(),
+        symbol_catalog_entry={"symbol_key": "instrument-btc|1m"},
+        run_health={"status": "completed"},
+        run_bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id=None,
+        run_live=False,
+        transport_eligible=False,
+        message="BotLens selected-symbol snapshot ready.",
+    )
+
+    assert payload["readiness"] == {
+        "catalog_discovered": True,
+        "snapshot_ready": True,
+        "symbol_live": False,
+        "run_live": False,
+    }
+    assert payload["selected_symbol"]["metadata"]["readiness"]["symbol_live"] is False
+    assert payload["live_transport"]["eligible"] is False
+
+
+def test_selected_symbol_snapshot_bounds_heavy_evidence_and_reports_window() -> None:
+    symbol_state = replace(
+        _symbol_state(),
+        signals=SymbolSignalsState(
+            signals=tuple({"event_id": f"signal-{index}"} for index in range(40))
+        ),
+        decisions=SymbolDecisionsState(
+            decisions=tuple({"event_id": f"decision-{index}"} for index in range(40))
+        ),
+        trades=SymbolTradesState(
+            trades=tuple(
+                {"trade_id": f"trade-{index}", "symbol_key": "instrument-btc|1m"}
+                for index in range(80)
+            )
+        ),
+    )
+
+    payload = selected_symbol_snapshot_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        symbol_state=symbol_state,
+        symbol_catalog_entry=None,
+        run_health={"status": "completed"},
+        run_bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id=None,
+        run_live=False,
+        transport_eligible=False,
+        message="BotLens selected-symbol snapshot ready.",
+    )
+
+    current = payload["selected_symbol"]["current"]
+    assert len(current["signals"]) == 16
+    assert current["signals"][0]["event_id"] == "signal-24"
+    assert len(current["decisions"]) == 16
+    assert len(current["recent_trades"]) == 32
+    assert current["evidence_window"]["signals"] == {
+        "ordering": "latest_tail",
+        "included": 16,
+        "available": 40,
+        "truncated": True,
+    }
+    assert current["evidence_window"]["recent_trades"]["available"] == 80
+
+
+def test_selected_symbol_snapshot_bounds_warning_details_without_losing_count() -> None:
+    warnings = [
+        {"warning_id": f"warning-{index}", "severity": "warning", "message": "detail"}
+        for index in range(40)
+    ]
+
+    payload = selected_symbol_snapshot_contract(
+        bot_id="bot-1",
+        run_id="run-1",
+        symbol_key="instrument-btc|1m",
+        symbol_state=_symbol_state(),
+        symbol_catalog_entry=None,
+        run_health={"status": "running", "warning_count": 40, "warnings": warnings},
+        run_bootstrap_seq=11,
+        base_seq=17,
+        stream_session_id="stream-1",
+        run_live=True,
+        transport_eligible=True,
+        message="BotLens selected-symbol snapshot ready.",
+    )
+
+    runtime = payload["selected_symbol"]["current"]["runtime"]
+    assert runtime["warning_count"] == 40
+    assert len(runtime["warnings"]) == 16
+    assert runtime["warnings"][0]["warning_id"] == "warning-24"
+    assert runtime["warning_details"] == {
+        "ordering": "latest_tail",
+        "included": 16,
+        "available": 40,
+        "truncated": True,
+    }
 
 
 def test_symbol_detail_contract_remains_separate_from_selected_symbol_snapshot_contract() -> None:

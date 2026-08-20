@@ -16,6 +16,7 @@ import logging
 import math
 import re
 import statistics
+import time
 from typing import Any, Dict, List, Optional
 
 from utils.log_context import build_log_context, with_log_context
@@ -24,6 +25,12 @@ from core.candle_snapshot import (
     aggregate_candle_series_snapshots,
     build_expected_candle_series_inventory,
 )
+from engines.bot_runtime.core.execution_assumptions import (
+    ExecutionQualityClass,
+    execution_quality_meets,
+    resolve_execution_assumptions,
+)
+from engines.bot_runtime.core.execution_context import ResolvedExecutionContextBundle
 from indicators.runtime.source_diagnostics import (
     normalize_indicator_source_diagnostics,
 )
@@ -31,7 +38,7 @@ from ..provenance import REPORT_DATASET_SCHEMA_VERSION
 from ..storage.repos.candles import (
     get_candle_storage_summary,
     list_candle_provider_gap_evidence,
-    list_candles_for_series,
+    list_candles_for_series_windows,
 )
 from ..storage.repos.lifecycle import list_bot_run_lifecycle_events
 from ..storage.repos.observability import list_observability_events
@@ -152,6 +159,12 @@ class RunResearchReadiness:
     repeatability_status: str = "unknown"
     semantic_fingerprint: Optional[str] = None
     operational_fingerprint: Optional[str] = None
+    reproducibility_status: str = "unknown"
+    execution_quality_class: str = "X0"
+    scientific_quality_class: str = "S0"
+    instrument_economics_class: str = "unknown"
+    promotion_eligibility: str = "ineligible"
+    promotion_blocking_reasons: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1112,58 +1125,97 @@ def _candle_dt(row: Mapping[str, Any]) -> Optional[datetime]:
     return _parse_iso(value)
 
 
-def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    instrument_id = str(trade.get("instrument_id") or "").strip()
-    entry_dt = _parse_iso(trade.get("entry_time"))
-    exit_dt = _parse_iso(trade.get("exit_time"))
-    if not instrument_id or not entry_dt or not exit_dt:
-        return [], {"status": "unavailable", "caveats": ["trade_identity_or_lifecycle_incomplete"]}
-    candidate_timeframes = _unique_text(["1m", trade.get("timeframe")])
-    partial: tuple[List[Dict[str, Any]], Dict[str, Any]] | None = None
-    for timeframe in candidate_timeframes:
-        seconds = _timeframe_seconds(timeframe) or 60
-        duration_seconds = max((exit_dt - entry_dt).total_seconds(), 0.0)
-        expected_limit = int(duration_seconds / seconds) + 3
-        limit = max(1, min(expected_limit, 2000))
-        end = exit_dt + timedelta(seconds=seconds)
+def _prefetch_excursion_candles(
+    trades: Sequence[Mapping[str, Any]],
+) -> Dict[int, tuple[List[Dict[str, Any]], Dict[str, Any]]]:
+    requests_by_series: Dict[tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    expected_limits: Dict[tuple[int, str], int] = {}
+    candidate_timeframes_by_trade: Dict[int, List[str]] = {}
+    results: Dict[int, tuple[List[Dict[str, Any]], Dict[str, Any]]] = {}
+
+    for trade_index, trade in enumerate(trades):
+        instrument_id = str(trade.get("instrument_id") or "").strip()
+        entry_dt = _parse_iso(trade.get("entry_time"))
+        exit_dt = _parse_iso(trade.get("exit_time"))
+        if not instrument_id or not entry_dt or not exit_dt:
+            results[trade_index] = (
+                [],
+                {"status": "unavailable", "caveats": ["trade_identity_or_lifecycle_incomplete"]},
+            )
+            continue
+        candidate_timeframes = _unique_text(["1m", trade.get("timeframe")])
+        candidate_timeframes_by_trade[trade_index] = candidate_timeframes
+        for timeframe in candidate_timeframes:
+            seconds = _timeframe_seconds(timeframe) or 60
+            duration_seconds = max((exit_dt - entry_dt).total_seconds(), 0.0)
+            expected_limit = int(duration_seconds / seconds) + 3
+            expected_limits[(trade_index, timeframe)] = expected_limit
+            requests_by_series[(instrument_id, timeframe)].append(
+                {
+                    "window_id": str(trade_index),
+                    "start": _iso(entry_dt),
+                    "end": _iso(exit_dt + timedelta(seconds=seconds)),
+                    "limit": max(1, min(expected_limit, 2000)),
+                }
+            )
+
+    rows_by_series: Dict[tuple[str, str], Dict[str, List[Dict[str, Any]]]] = {}
+    for (instrument_id, timeframe), windows in requests_by_series.items():
         try:
-            rows = list_candles_for_series(
+            rows_by_series[(instrument_id, timeframe)] = list_candles_for_series_windows(
                 instrument_id=instrument_id,
                 timeframe=timeframe,
-                start=_iso(entry_dt),
-                end=_iso(end),
-                limit=limit,
-                prefer_latest=False,
+                windows=windows,
             )
         except Exception as exc:  # pragma: no cover - defensive report caveat
+            first_trade_index = int(windows[0]["window_id"])
+            first_trade = trades[first_trade_index]
             logger.warning(
-                "report_excursion_candle_fetch_failed run_id=%s trade_id=%s instrument_id=%s timeframe=%s error=%s",
-                trade.get("run_id"),
-                trade.get("trade_id"),
+                "report_excursion_candle_batch_fetch_failed run_id=%s instrument_id=%s timeframe=%s trade_count=%s error=%s",
+                first_trade.get("run_id"),
                 instrument_id,
                 timeframe,
+                len(windows),
                 exc,
             )
+            rows_by_series[(instrument_id, timeframe)] = {}
+
+    for trade_index, trade in enumerate(trades):
+        if trade_index in results:
             continue
-        normalized = [dict(row) for row in rows if isinstance(row, Mapping)]
-        if not normalized:
-            continue
-        metadata = {
-            "status": "available",
-            "source": "market.candle_versions",
-            "source_timeframe": timeframe,
-            "candle_count": len(normalized),
-            "caveats": [],
-        }
-        if expected_limit > 2000 and len(normalized) >= 2000:
-            metadata["status"] = "partial"
-            metadata["caveats"] = ["excursion_candle_window_truncated_at_2000_rows"]
-            partial = (normalized, metadata)
-            continue
-        return normalized, metadata
-    if partial is not None:
-        return partial
-    return [], {"status": "unavailable", "caveats": ["excursion_candles_unavailable"]}
+        instrument_id = str(trade.get("instrument_id") or "").strip()
+        partial: tuple[List[Dict[str, Any]], Dict[str, Any]] | None = None
+        for timeframe in candidate_timeframes_by_trade.get(trade_index, []):
+            rows = rows_by_series.get((instrument_id, timeframe), {}).get(str(trade_index), [])
+            normalized = [dict(row) for row in rows if isinstance(row, Mapping)]
+            if not normalized:
+                continue
+            metadata = {
+                "status": "available",
+                "source": "market.fact_versions",
+                "source_timeframe": timeframe,
+                "candle_count": len(normalized),
+                "caveats": [],
+            }
+            if expected_limits[(trade_index, timeframe)] > 2000 and len(normalized) >= 2000:
+                metadata["status"] = "partial"
+                metadata["caveats"] = ["excursion_candle_window_truncated_at_2000_rows"]
+                partial = (normalized, metadata)
+                continue
+            results[trade_index] = (normalized, metadata)
+            break
+        else:
+            results[trade_index] = partial or (
+                [],
+                {"status": "unavailable", "caveats": ["excursion_candles_unavailable"]},
+            )
+    return results
+
+
+def _fetch_excursion_candles(trade: Mapping[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Compatibility helper for one trade using the canonical batched read path."""
+
+    return _prefetch_excursion_candles([trade])[0]
 
 
 def _compute_excursion(
@@ -1291,8 +1343,9 @@ def _enrich_trades_for_research(
     execution: Mapping[str, Any],
 ) -> List[Dict[str, Any]]:
     fallback_bars = [dict(row) for row in execution.get("fallback_bars") or [] if isinstance(row, Mapping)]
+    excursion_candles = _prefetch_excursion_candles(trades)
     enriched: List[Dict[str, Any]] = []
-    for trade in trades:
+    for trade_index, trade in enumerate(trades):
         row = dict(trade)
         risk = _entry_risk_fields(row)
         for key in ("stop_price", "stop_distance_price", "stop_distance_pct", "stop_distance_ticks", "r_ticks", "r_value", "tick_size"):
@@ -1301,7 +1354,7 @@ def _enrich_trades_for_research(
         row["entry_risk"] = risk["entry_risk"]
         row["runtime_excursion"] = _runtime_excursion_from_trade(row)
 
-        candles, candle_source = _fetch_excursion_candles(row)
+        candles, candle_source = excursion_candles[trade_index]
         trade_excursion = _compute_excursion(trade=row, candles=candles, source=candle_source, end_time=row.get("exit_time"))
         row["excursion"] = trade_excursion
         row["unrealized_excursion_before_exit"] = trade_excursion
@@ -1695,7 +1748,10 @@ def _slippage_accounting(
         if fact:
             facts.append(fact)
     config = _mapping(run.get("config_snapshot"))
-    configured_bps = _find_config_number(config, "slippage_bps")
+    manifest = _execution_assumption_manifest(run)
+    configured_bps = _safe_float(manifest.get("market_slippage_bps"))
+    if configured_bps is None:
+        configured_bps = _find_config_number(config, "slippage_bps")
     costs = [_safe_float(fact.get("slippage_cost")) for fact in facts]
     costs = [value for value in costs if value is not None]
     bps_values = [_safe_float(fact.get("slippage_bps")) for fact in facts]
@@ -1710,6 +1766,10 @@ def _slippage_accounting(
         "schema_version": "slippage_accounting.v1",
         "status": "available" if total_cost is not None or facts else "unavailable",
         "configured_slippage_bps": configured_bps,
+        "configured_market_slippage_bps": _safe_float(manifest.get("market_slippage_bps")),
+        "configured_stop_slippage_bps": _safe_float(manifest.get("stop_slippage_bps")),
+        "execution_model_version": manifest.get("model_version"),
+        "execution_assumption_manifest_hash": manifest.get("manifest_hash"),
         "fill_fact_count": len(facts),
         "total_slippage_cost": total_cost,
         "slippage_bps": {
@@ -1719,6 +1779,767 @@ def _slippage_accounting(
         },
         "facts": facts[:500],
         "caveats": caveats,
+    }
+
+
+def _execution_assumption_manifest(run: Mapping[str, Any]) -> Dict[str, Any]:
+    config = _mapping(run.get("config_snapshot"))
+    candidates = (
+        config.get("execution_assumptions"),
+        _mapping(config.get("bot")).get("execution_assumptions"),
+        _mapping(_mapping(config.get("start_request")).get("overrides")).get("execution_assumptions"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, Mapping) and candidate:
+            return dict(candidate)
+    return {}
+
+
+def _resolved_execution_context_bundle_manifest(run: Mapping[str, Any]) -> Dict[str, Any]:
+    config = _mapping(run.get("config_snapshot"))
+    readiness = _mapping(config.get("runtime_readiness"))
+    candidates = (
+        config.get("resolved_execution_context_bundle"),
+        _mapping(config.get("bot")).get("resolved_execution_context_bundle"),
+        readiness.get("resolved_execution_context_bundle"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, Mapping) and candidate:
+            return dict(candidate)
+    return {}
+
+
+def _resolved_execution_context_evidence(run: Mapping[str, Any]) -> Dict[str, Any]:
+    raw = _resolved_execution_context_bundle_manifest(run)
+    if not raw:
+        return {
+            "schema_version": "resolved_execution_context_evidence.v1",
+            "status": "legacy_unavailable",
+            "bundle_hash": None,
+            "context_count": 0,
+            "contexts": [],
+            "blocking_reasons": [],
+            "caveats": ["resolved_execution_context_bundle_unavailable_for_legacy_run"],
+        }
+    try:
+        bundle = ResolvedExecutionContextBundle.from_dict(raw)
+    except (TypeError, ValueError) as exc:
+        return {
+            "schema_version": "resolved_execution_context_evidence.v1",
+            "status": "invalid",
+            "bundle_hash": raw.get("bundle_hash"),
+            "context_count": 0,
+            "contexts": [],
+            "blocking_reasons": ["resolved_execution_context_bundle_invalid"],
+            "caveats": [str(exc)],
+        }
+    return {
+        "schema_version": "resolved_execution_context_evidence.v1",
+        "status": "available",
+        "bundle_hash": bundle.bundle_hash,
+        "context_count": len(bundle.contexts),
+        "contexts": [context.to_dict() for context in bundle.contexts],
+        "blocking_reasons": [],
+        "caveats": [],
+    }
+
+
+def _economic_claim_intent(run: Mapping[str, Any], manifest: Mapping[str, Any]) -> str:
+    config = _mapping(run.get("config_snapshot"))
+    return str(
+        manifest.get("economic_claim_intent")
+        or config.get("economic_claim_intent")
+        or _mapping(config.get("bot")).get("economic_claim_intent")
+        or _mapping(_mapping(config.get("start_request")).get("overrides")).get("economic_claim_intent")
+        or "legacy_unclassified"
+    ).strip().lower()
+
+
+def _trade_turnover_notional(trade: Mapping[str, Any]) -> float:
+    contract_size = _safe_float(trade.get("contract_size")) or 1.0
+    quantity = _safe_float(
+        trade.get("filled_qty")
+        if trade.get("filled_qty") is not None
+        else trade.get("quantity")
+        if trade.get("quantity") is not None
+        else trade.get("contracts")
+    )
+    entry_price = _safe_float(trade.get("entry_price"))
+    turnover = abs(float(quantity or 0.0) * float(entry_price or 0.0) * contract_size)
+    exit_turnover = 0.0
+    for leg in trade.get("legs") or []:
+        if not isinstance(leg, Mapping):
+            continue
+        leg_qty = _safe_float(leg.get("contracts") if leg.get("contracts") is not None else leg.get("quantity"))
+        leg_price = _safe_float(leg.get("exit_price"))
+        if leg_qty is not None and leg_price is not None:
+            exit_turnover += abs(leg_qty * leg_price * contract_size)
+    if exit_turnover <= 0:
+        exit_price = _safe_float(trade.get("exit_price"))
+        if quantity is not None and exit_price is not None:
+            exit_turnover = abs(quantity * exit_price * contract_size)
+    return float(turnover + exit_turnover)
+
+
+def _cost_stress_evidence(
+    *,
+    run: Mapping[str, Any],
+    trades: Sequence[Mapping[str, Any]],
+    summary: RunResearchSummary,
+) -> Dict[str, Any]:
+    manifest = _execution_assumption_manifest(run)
+    scenarios = [dict(row) for row in manifest.get("cost_stress_scenarios") or [] if isinstance(row, Mapping)]
+    turnover = sum(_trade_turnover_notional(trade) for trade in trades)
+    outcomes: List[Dict[str, Any]] = []
+    for scenario in scenarios:
+        additional_bps = _safe_float(
+            scenario.get("additional_slippage_bps")
+            if scenario.get("additional_slippage_bps") is not None
+            else scenario.get("slippage_bps")
+        )
+        fee_multiplier = _safe_float(scenario.get("fee_multiplier"))
+        if additional_bps is None or fee_multiplier is None:
+            continue
+        additional_slippage_cost = turnover * additional_bps / 10000.0
+        base_fees = float(summary.fees)
+        stressed_fees = (
+            base_fees * fee_multiplier
+            if base_fees >= 0.0
+            else base_fees / fee_multiplier
+        )
+        stressed_net_pnl = float(summary.gross_pnl) - stressed_fees - additional_slippage_cost
+        outcomes.append(
+            {
+                "scenario_id": scenario.get("scenario_id") or scenario.get("id"),
+                "additional_slippage_bps": additional_bps,
+                "fee_multiplier": fee_multiplier,
+                "turnover_notional": turnover,
+                "stressed_fees": stressed_fees,
+                "additional_slippage_cost": additional_slippage_cost,
+                "stressed_net_pnl": stressed_net_pnl,
+                "positive_net_pnl": stressed_net_pnl > 0,
+            }
+        )
+    payload = {
+        "schema_version": "execution_cost_stress.v1",
+        "status": "available" if outcomes and turnover > 0 else "unavailable",
+        "method": "fixed_fill_turnover_counterfactual",
+        "execution_assumption_manifest_hash": manifest.get("manifest_hash"),
+        "turnover_notional": turnover,
+        "scenario_count": len(outcomes),
+        "scenarios": outcomes,
+        "all_scenarios_positive": bool(outcomes) and all(row["positive_net_pnl"] for row in outcomes),
+        "caveats": [] if outcomes and turnover > 0 else ["cost_stress_evidence_unavailable"],
+    }
+    payload["evidence_hash"] = _stable_hash(payload)
+    return payload
+
+
+def _instrument_economics_class(metadata: RunResearchMetadata) -> str:
+    semantics = {
+        str(row.get("execution_semantics") or "").strip().lower()
+        for row in metadata.instrument_semantics
+        if isinstance(row, Mapping)
+    }
+    if semantics & {"derivative", "proxy_derivative"}:
+        return "derivative_economics_incomplete"
+    if semantics and semantics <= {"spot"}:
+        return "spot_economics_v1"
+    return "unknown"
+
+
+def _book_execution_quality_assessment(
+    *,
+    execution: Mapping[str, Any],
+    require_l2: bool,
+) -> Dict[str, Any]:
+    """Verify replay and visible-depth evidence projected from lifecycle truth."""
+
+    lifecycle = _mapping(execution.get("order_lifecycle"))
+    rows = [
+        dict(row)
+        for row in lifecycle.get("events") or []
+        if isinstance(row, Mapping)
+    ]
+    level_rows = [row for row in rows if str(row.get("fill_id") or "").strip()]
+    canonical_fill_rows = [
+        row
+        for row in execution.get("fills") or []
+        if isinstance(row, Mapping)
+    ]
+    evidence_rows = [
+        (row, dict(row.get("book_execution_evidence") or {}))
+        for row in rows
+        if isinstance(row.get("book_execution_evidence"), Mapping)
+        and row.get("book_execution_evidence")
+    ]
+    evidence_by_event = {
+        str(row.get("event_id") or ""): evidence
+        for row, evidence in evidence_rows
+    }
+    blockers: List[str] = []
+    required_fields = (
+        "schema_version",
+        "execution_model_version",
+        "execution_model_artifact_hash",
+        "execution_book_tape_id",
+        "execution_book_tape_hash",
+        "execution_book_replay_fingerprint",
+        "execution_book_replay_certified",
+        "execution_book_source_capability",
+        "execution_book_snapshot_hash",
+        "execution_book_state_hash",
+        "execution_book_validity_interval_id",
+        "execution_book_source_reference",
+        "execution_book_known_at",
+        "order_arrival_at",
+        "best_bid",
+        "best_ask",
+        "spread",
+        "limitations",
+    )
+    if canonical_fill_rows and not level_rows:
+        blockers.append("per_level_order_lifecycle_evidence_missing")
+    if level_rows and not evidence_rows:
+        blockers.append("execution_book_evidence_missing")
+    for row, evidence in evidence_rows:
+        if any(evidence.get(field) is None for field in required_fields):
+            blockers.append("execution_book_evidence_incomplete")
+            continue
+        if str(evidence.get("schema_version") or "") != "book_execution_evidence.v1":
+            blockers.append("execution_book_evidence_schema_invalid")
+        if evidence.get("execution_book_replay_certified") is not True:
+            blockers.append("execution_book_replay_uncertified")
+        capability = str(evidence.get("execution_book_source_capability") or "").lower()
+        if capability not in {"l1", "l2", "l3"}:
+            blockers.append("execution_book_capability_invalid")
+        elif require_l2 and capability not in {"l2", "l3"}:
+            blockers.append("execution_book_capability_below_l2")
+        source_reference = evidence.get("execution_book_source_reference")
+        if not isinstance(source_reference, Mapping) or any(
+            source_reference.get(field) is None
+            for field in (
+                "definition_id",
+                "session_id",
+                "connection_epoch",
+                "source_product_id",
+                "receive_ordinal",
+                "event_ordinal",
+            )
+        ):
+            blockers.append("execution_book_source_reference_incomplete")
+        known_at = _parse_iso(evidence.get("execution_book_known_at"))
+        arrival_at = _parse_iso(evidence.get("order_arrival_at"))
+        if known_at is None or arrival_at is None or known_at > arrival_at:
+            blockers.append("execution_book_arrival_not_causal")
+        best_bid = _safe_float(evidence.get("best_bid"))
+        best_ask = _safe_float(evidence.get("best_ask"))
+        spread = _safe_float(evidence.get("spread"))
+        if (
+            best_bid is None
+            or best_ask is None
+            or spread is None
+            or best_bid >= best_ask
+            or spread < 0.0
+            or abs((best_ask - best_bid) - spread) > 1e-9
+        ):
+            blockers.append("execution_book_spread_evidence_invalid")
+        if not isinstance(evidence.get("limitations"), list):
+            blockers.append("execution_book_limitations_missing")
+
+    for row in level_rows:
+        evidence = evidence_by_event.get(str(row.get("event_id") or ""))
+        if evidence is None:
+            blockers.append("per_level_execution_book_evidence_missing")
+            continue
+        if evidence.get("passive_queue_schema_version") is not None:
+            continue
+        if require_l2:
+            required_level_fields = (
+                "book_level_index",
+                "book_side",
+                "visible_level_qty",
+                "consumed_level_qty",
+                "eligible_visible_depth",
+            )
+            if any(evidence.get(field) is None for field in required_level_fields):
+                blockers.append("per_level_l2_evidence_incomplete")
+                continue
+            visible = _safe_float(evidence.get("visible_level_qty"))
+            consumed = _safe_float(evidence.get("consumed_level_qty"))
+            fill_qty = _safe_float(row.get("fill_qty"))
+            if (
+                visible is None
+                or consumed is None
+                or fill_qty is None
+                or consumed <= 0.0
+                or consumed > visible + 1e-12
+                or abs(consumed - fill_qty) > 1e-12
+            ):
+                blockers.append("per_level_visible_depth_bound_invalid")
+
+    if require_l2:
+        grouped: Dict[tuple[str, str, str], Dict[str, float]] = {}
+        for row in level_rows:
+            evidence = evidence_by_event.get(str(row.get("event_id") or ""), {})
+            if evidence.get("passive_queue_schema_version") is not None:
+                continue
+            key = (
+                str(row.get("order_request_id") or ""),
+                str(evidence.get("execution_book_snapshot_hash") or ""),
+                str(evidence.get("order_arrival_at") or ""),
+            )
+            bucket = grouped.setdefault(key, {"consumed": 0.0, "eligible": 0.0})
+            bucket["consumed"] += float(_safe_float(row.get("fill_qty")) or 0.0)
+            bucket["eligible"] = max(
+                bucket["eligible"],
+                float(_safe_float(evidence.get("eligible_visible_depth")) or 0.0),
+            )
+        if any(
+            values["eligible"] <= 0.0
+            or values["consumed"] > values["eligible"] + 1e-12
+            for values in grouped.values()
+        ):
+            blockers.append("execution_book_visible_depth_exceeded")
+
+    latest_by_order: Dict[str, Dict[str, Any]] = {}
+    for row in sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("order_request_id") or ""),
+            int(item.get("order_event_seq") or 0),
+        ),
+    ):
+        request_id = str(row.get("order_request_id") or "")
+        if request_id:
+            latest_by_order[request_id] = row
+    for row in latest_by_order.values():
+        remaining = float(_safe_float(row.get("order_remaining_qty")) or 0.0)
+        state = str(row.get("state") or "")
+        evidence = dict(row.get("book_execution_evidence") or {})
+        if remaining > 1e-12 and state in {"canceled", "expired"}:
+            if str(evidence.get("residual_disposition") or "") != state:
+                blockers.append("execution_book_residual_disposition_missing")
+        elif remaining > 1e-12 and state not in {"open", "partially_filled"}:
+            blockers.append("execution_book_residual_state_invalid")
+
+    payload = {
+        "schema_version": "execution_book_quality_evidence.v1",
+        "status": "available" if evidence_rows and not blockers else "invalid" if blockers else "not_exercised",
+        "required_capability": "l2" if require_l2 else "l1",
+        "lifecycle_event_count": len(rows),
+        "level_fill_event_count": len(level_rows),
+        "evidence_event_count": len(evidence_rows),
+        "tape_ids": sorted(
+            {
+                str(evidence.get("execution_book_tape_id"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_tape_id")
+            }
+        ),
+        "tape_hashes": sorted(
+            {
+                str(evidence.get("execution_book_tape_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_tape_hash")
+            }
+        ),
+        "snapshot_hashes": sorted(
+            {
+                str(evidence.get("execution_book_snapshot_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_snapshot_hash")
+            }
+        ),
+        "replay_fingerprints": sorted(
+            {
+                str(evidence.get("execution_book_replay_fingerprint"))
+                for _row, evidence in evidence_rows
+                if evidence.get("execution_book_replay_fingerprint")
+            }
+        ),
+        "limitations": sorted(
+            {
+                str(item)
+                for _row, evidence in evidence_rows
+                for item in evidence.get("limitations") or []
+            }
+        ),
+        "blocking_reasons": sorted(dict.fromkeys(blockers)),
+    }
+    payload["evidence_hash"] = _stable_hash(payload)
+    return payload
+
+
+def _passive_execution_quality_assessment(
+    *,
+    execution: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Validate named, deterministic X5 queue bounds without claiming exact position."""
+
+    lifecycle = _mapping(execution.get("order_lifecycle"))
+    rows = [dict(row) for row in lifecycle.get("events") or [] if isinstance(row, Mapping)]
+    evidence_rows = [
+        (row, dict(row.get("book_execution_evidence") or {}))
+        for row in rows
+        if isinstance(row.get("book_execution_evidence"), Mapping)
+        and row.get("book_execution_evidence", {}).get("passive_queue_schema_version") is not None
+    ]
+    blockers: List[str] = []
+    required_fields = (
+        "schema_version",
+        "passive_queue_schema_version",
+        "execution_model_artifact_hash",
+        "execution_book_tape_hash",
+        "execution_book_replay_fingerprint",
+        "execution_book_snapshot_hash",
+        "order_arrival_at",
+        "queue_evaluation_at",
+        "latency_scenario_id",
+        "latency_scenario_hash",
+        "arrival_latency_ms",
+        "queue_model_version",
+        "queue_policy_id",
+        "queue_policy_hash",
+        "queue_scenario",
+        "initial_displayed_quantity_ahead",
+        "observed_execution_quantity_at_price",
+        "definitely_supported_total_fill_qty",
+        "scenario_supported_total_fill_qty",
+        "passive_fill_support",
+        "observed_trade_hashes",
+        "limitations",
+    )
+    admitted_support = {
+        "definitely_supported",
+        "possibly_supported",
+        "not_supported",
+        "assumption_dependent",
+    }
+    admitted_scenarios = {
+        "TAIL_NO_CANCEL_CREDIT",
+        "TAIL_OBSERVED_TRADE_PROGRESS",
+        "BOUNDED_CANCEL_CREDIT",
+    }
+    for row, evidence in evidence_rows:
+        if any(evidence.get(field) is None for field in required_fields):
+            blockers.append("passive_queue_evidence_incomplete")
+            continue
+        if str(evidence.get("schema_version") or "") != "book_execution_evidence.v1":
+            blockers.append("passive_queue_book_evidence_schema_invalid")
+        if str(evidence.get("passive_queue_schema_version") or "") != "passive_queue_evidence.v1":
+            blockers.append("passive_queue_evidence_schema_invalid")
+        if evidence.get("execution_book_replay_certified") is not True:
+            blockers.append("passive_queue_book_replay_uncertified")
+        if str(evidence.get("execution_book_source_capability") or "").lower() not in {"l2", "l3"}:
+            blockers.append("passive_queue_capability_below_l2")
+        arrival_at = _parse_iso(evidence.get("order_arrival_at"))
+        evaluation_at = _parse_iso(evidence.get("queue_evaluation_at"))
+        if arrival_at is None or evaluation_at is None or evaluation_at < arrival_at:
+            blockers.append("passive_queue_evaluation_not_causal")
+        if str(evidence.get("queue_scenario") or "") not in admitted_scenarios:
+            blockers.append("passive_queue_scenario_invalid")
+        if str(evidence.get("passive_fill_support") or "") not in admitted_support:
+            blockers.append("passive_fill_support_invalid")
+        if not isinstance(evidence.get("observed_trade_hashes"), list):
+            blockers.append("passive_queue_trade_lineage_missing")
+        limitations = evidence.get("limitations")
+        if not isinstance(limitations, list) or "exact_queue_position_unavailable" not in limitations:
+            blockers.append("passive_queue_limitation_disclosure_missing")
+        initial_ahead = _safe_float(evidence.get("initial_displayed_quantity_ahead"))
+        definitely_total = _safe_float(evidence.get("definitely_supported_total_fill_qty"))
+        scenario_total = _safe_float(evidence.get("scenario_supported_total_fill_qty"))
+        if (
+            initial_ahead is None
+            or definitely_total is None
+            or scenario_total is None
+            or initial_ahead < 0.0
+            or definitely_total < 0.0
+            or scenario_total + 1e-12 < definitely_total
+        ):
+            blockers.append("passive_queue_quantity_bound_invalid")
+        if str(row.get("fill_id") or ""):
+            fill_qty = _safe_float(row.get("fill_qty"))
+            new_fill_qty = _safe_float(evidence.get("new_fill_qty"))
+            if (
+                fill_qty is None
+                or new_fill_qty is None
+                or fill_qty <= 0.0
+                or abs(fill_qty - new_fill_qty) > 1e-12
+            ):
+                blockers.append("passive_queue_fill_bound_invalid")
+            if str(evidence.get("passive_fill_support") or "") not in {
+                "definitely_supported",
+                "assumption_dependent",
+            }:
+                blockers.append("passive_queue_fill_support_invalid")
+
+    payload = {
+        "schema_version": "passive_execution_quality_evidence.v1",
+        "status": (
+            "available"
+            if evidence_rows and not blockers
+            else "invalid"
+            if blockers
+            else "not_exercised"
+        ),
+        "evidence_event_count": len(evidence_rows),
+        "policy_hashes": sorted(
+            {
+                str(evidence.get("queue_policy_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("queue_policy_hash")
+            }
+        ),
+        "latency_scenario_hashes": sorted(
+            {
+                str(evidence.get("latency_scenario_hash"))
+                for _row, evidence in evidence_rows
+                if evidence.get("latency_scenario_hash")
+            }
+        ),
+        "queue_scenarios": sorted(
+            {
+                str(evidence.get("queue_scenario"))
+                for _row, evidence in evidence_rows
+                if evidence.get("queue_scenario")
+            }
+        ),
+        "limitations": sorted(
+            {
+                str(item)
+                for _row, evidence in evidence_rows
+                for item in evidence.get("limitations") or []
+            }
+        ),
+        "blocking_reasons": sorted(dict.fromkeys(blockers)),
+    }
+    payload["evidence_hash"] = _stable_hash(payload)
+    return payload
+
+
+def _execution_quality_evidence(
+    *,
+    run: Mapping[str, Any],
+    trades: Sequence[Mapping[str, Any]],
+    execution: Mapping[str, Any],
+    fee_accounting: Mapping[str, Any],
+    slippage: Mapping[str, Any],
+    cost_stress: Mapping[str, Any],
+) -> Dict[str, Any]:
+    manifest = _execution_assumption_manifest(run)
+    context_evidence = _resolved_execution_context_evidence(run)
+    intent = _economic_claim_intent(run, manifest)
+    blockers: List[str] = []
+    validated_manifest: Dict[str, Any] = {}
+    if not manifest:
+        blockers.append("execution_assumption_manifest_unavailable")
+    else:
+        try:
+            resolved = resolve_execution_assumptions(
+                intent,
+                manifest,
+                source=str(manifest.get("source") or "run_start_request"),
+            )
+            validated_manifest = resolved.to_dict()
+            if str(manifest.get("manifest_hash") or "") != resolved.manifest_hash:
+                blockers.append("execution_assumption_manifest_hash_mismatch")
+        except ValueError:
+            blockers.append("execution_assumption_manifest_invalid")
+    ceiling = str(validated_manifest.get("execution_quality_ceiling") or manifest.get("execution_quality_ceiling") or "X0").upper()
+    if ceiling not in {item.value for item in ExecutionQualityClass}:
+        ceiling = "X0"
+        blockers.append("execution_quality_ceiling_invalid")
+    fee_caveats = {str(item) for item in fee_accounting.get("caveats") or []}
+    slippage_caveats = {str(item) for item in slippage.get("caveats") or []}
+    if "unconfigured_zero_fee_model" in fee_caveats:
+        blockers.append("fee_schedule_unresolved")
+    if trades and int(fee_accounting.get("fee_fact_count") or 0) <= 0:
+        blockers.append("per_fill_fee_evidence_unavailable")
+    if trades and int(slippage.get("fill_fact_count") or 0) <= 0:
+        blockers.append("per_fill_slippage_evidence_unavailable")
+    fill_rows = [dict(row) for row in execution.get("fills") or [] if isinstance(row, Mapping)]
+    context_rows = [
+        dict(row)
+        for row in context_evidence.get("contexts") or []
+        if isinstance(row, Mapping)
+    ]
+    context_by_hash = {
+        str(row.get("context_hash") or ""): row
+        for row in context_rows
+        if str(row.get("context_hash") or "")
+    }
+    if context_evidence.get("status") == "available" and context_rows:
+        quality_rank = {
+            item.value: index
+            for index, item in enumerate(ExecutionQualityClass)
+        }
+        model_ceilings = [
+            str(_mapping(row.get("model")).get("execution_quality_ceiling") or "").upper()
+            for row in context_rows
+        ]
+        if any(value not in quality_rank for value in model_ceilings):
+            blockers.append("execution_context_quality_ceiling_invalid")
+        else:
+            # A multi-series report may claim only the weakest pinned model.
+            ceiling = min(model_ceilings, key=quality_rank.__getitem__)
+    if context_evidence.get("status") == "invalid":
+        blockers.extend(context_evidence.get("blocking_reasons") or [])
+    if context_evidence.get("status") == "available":
+        if not context_rows:
+            blockers.append("resolved_execution_context_bundle_empty")
+        expected_assumption_hash = str(validated_manifest.get("manifest_hash") or "")
+        if expected_assumption_hash and any(
+            str(_mapping(row.get("model")).get("assumption_manifest_hash") or "")
+            != expected_assumption_hash
+            for row in context_rows
+        ):
+            blockers.append("execution_context_assumption_manifest_mismatch")
+        required_execution_context_fill_fields = (
+            "resolved_execution_context_hash",
+            "instrument_execution_contract_hash",
+            "venue_execution_profile_hash",
+            "venue_execution_profile_id",
+            "venue_execution_profile_version",
+            "fee_schedule_hash",
+            "fee_schedule_id",
+            "fee_schedule_version",
+            "fee_currency",
+            "fee_rounding_mode",
+            "fee_tier",
+            "execution_model_artifact_hash",
+            "execution_model_artifact_id",
+            "book_data_capability",
+            "time_in_force",
+            "post_only",
+        )
+        for fill in fill_rows:
+            if any(
+                fill.get(field) is None
+                for field in required_execution_context_fill_fields
+            ):
+                blockers.append("per_fill_resolved_execution_context_evidence_incomplete")
+                break
+            context_row = context_by_hash.get(str(fill.get("resolved_execution_context_hash") or ""))
+            if context_row is None:
+                blockers.append("per_fill_resolved_execution_context_hash_mismatch")
+                break
+            expected_fields = {
+                "instrument_execution_contract_hash": context_row.get("instrument_execution_contract_hash"),
+                "venue_execution_profile_hash": context_row.get("venue_execution_profile_hash"),
+                "fee_schedule_hash": context_row.get("fee_schedule_hash"),
+                "execution_model_artifact_hash": context_row.get("execution_model_artifact_hash"),
+            }
+            if any(str(fill.get(field) or "") != str(expected or "") for field, expected in expected_fields.items()):
+                blockers.append("per_fill_execution_context_component_mismatch")
+                break
+            expected_model_version = str(
+                _mapping(context_row.get("model")).get("version") or ""
+            )
+            if expected_model_version and str(
+                fill.get("execution_model_version") or ""
+            ) != expected_model_version:
+                blockers.append("per_fill_execution_context_model_version_mismatch")
+                break
+    if execution_quality_meets(ceiling, "X1"):
+        if trades and not fill_rows:
+            blockers.append("canonical_fill_evidence_unavailable")
+        required_fill_fields = (
+            "requested_price",
+            "fill_price",
+            "slippage_bps",
+            "execution_model_version",
+            "execution_assumption_manifest_hash",
+            "economic_claim_intent",
+            "full_fill_assumption",
+            "fee_rate",
+            "fee_type",
+            "fee_source",
+            "fee_version",
+        )
+        for row in fill_rows:
+            if any(row.get(field) is None for field in required_fill_fields):
+                blockers.append("per_fill_execution_evidence_incomplete")
+                break
+        expected_manifest_hash = str(validated_manifest.get("manifest_hash") or "")
+        expected_model_version = (
+            str(validated_manifest.get("model_version") or "")
+            if context_evidence.get("status") != "available"
+            else ""
+        )
+        expected_intent = str(validated_manifest.get("economic_claim_intent") or intent)
+        if expected_manifest_hash and any(
+            str(row.get("execution_assumption_manifest_hash") or "") != expected_manifest_hash
+            for row in fill_rows
+        ):
+            blockers.append("per_fill_execution_manifest_mismatch")
+        if expected_model_version and any(
+            str(row.get("execution_model_version") or "") != expected_model_version
+            for row in fill_rows
+        ):
+            blockers.append("per_fill_execution_model_mismatch")
+        if any(str(row.get("economic_claim_intent") or "") != expected_intent for row in fill_rows):
+            blockers.append("per_fill_economic_claim_intent_mismatch")
+    if execution_quality_meets(ceiling, "X1") and str(cost_stress.get("status")) != "available":
+        blockers.append("cost_stress_evidence_unavailable")
+    base_blockers = sorted(dict.fromkeys(blockers))
+    x3_evidence = _book_execution_quality_assessment(
+        execution=execution,
+        require_l2=False,
+    )
+    x4_evidence = _book_execution_quality_assessment(
+        execution=execution,
+        require_l2=True,
+    )
+    x5_evidence = _passive_execution_quality_assessment(execution=execution)
+    x3_blockers = (
+        list(x3_evidence.get("blocking_reasons") or [])
+        if execution_quality_meets(ceiling, "X3")
+        else []
+    )
+    x4_blockers = (
+        list(x4_evidence.get("blocking_reasons") or [])
+        if execution_quality_meets(ceiling, "X4")
+        else []
+    )
+    x5_blockers = (
+        list(x5_evidence.get("blocking_reasons") or [])
+        if execution_quality_meets(ceiling, "X5")
+        else []
+    )
+    if execution_quality_meets(ceiling, "X5") and x5_evidence.get("status") == "not_exercised":
+        x5_blockers.append("passive_queue_evidence_not_exercised")
+    if base_blockers:
+        actual = "X0"
+    elif execution_quality_meets(ceiling, "X5"):
+        actual = "X2" if x3_blockers else "X3" if x4_blockers else "X4" if x5_blockers else "X5"
+    elif execution_quality_meets(ceiling, "X4"):
+        actual = "X2" if x3_blockers else "X3" if x4_blockers else "X4"
+    elif execution_quality_meets(ceiling, "X3"):
+        actual = "X2" if x3_blockers else "X3"
+    else:
+        actual = ceiling
+    all_blockers = sorted(
+        dict.fromkeys([*base_blockers, *x3_blockers, *x4_blockers, *x5_blockers])
+    )
+    return {
+        "schema_version": "execution_quality_evidence.v1",
+        "economic_claim_intent": intent,
+        "execution_quality_class": actual,
+        "execution_quality_ceiling": ceiling,
+        "qualified": actual != "X0" or intent in {"exploration", "legacy_unclassified"},
+        "blocking_reasons": all_blockers,
+        "assumption_manifest": validated_manifest or manifest,
+        "assumption_manifest_hash": manifest.get("manifest_hash"),
+        "fee_evidence_status": "available" if not fee_caveats else "degraded",
+        "slippage_evidence_status": str(slippage.get("status") or "unavailable"),
+        "cost_stress_status": cost_stress.get("status"),
+        "resolved_execution_context_status": context_evidence.get("status"),
+        "resolved_execution_context_bundle_hash": context_evidence.get("bundle_hash"),
+        "resolved_execution_context_evidence": context_evidence,
+        "spread_execution_evidence": x3_evidence,
+        "l2_execution_evidence": x4_evidence,
+        "passive_execution_evidence": x5_evidence,
     }
 
 
@@ -1966,9 +2787,59 @@ def _execution_section(
         warnings.extend(dict(entry) for entry in config.get(key) or [] if isinstance(entry, Mapping))
     fallback_rows: Dict[str, Dict[str, Any]] = {}
     fill_rows: List[Dict[str, Any]] = []
+    order_rows: List[Dict[str, Any]] = []
     for row in events:
         name = _event_name_key(row)
         context = _context(row)
+        if name == "order_lifecycle_changed":
+            order_rows.append(
+                {
+                    "event_id": row.get("event_id") or _payload(row).get("event_id"),
+                    "source_event_id": context.get("source_event_id"),
+                    "source_run_seq": context.get("source_run_seq"),
+                    "event_time": _payload(row).get("event_ts"),
+                    "known_at": context.get("known_at") or context.get("bar_time"),
+                    "series_key": context.get("series_key"),
+                    "instrument_id": context.get("instrument_id"),
+                    "symbol": context.get("symbol"),
+                    "timeframe": context.get("timeframe"),
+                    "strategy_id": context.get("strategy_id"),
+                    "trade_id": context.get("trade_id"),
+                    "signal_id": context.get("signal_id"),
+                    "decision_id": context.get("decision_id"),
+                    "order_request_id": context.get("order_request_id"),
+                    "order_request_manifest_hash": context.get("order_request_manifest_hash"),
+                    "attempt_id": context.get("attempt_id"),
+                    "order_attempt_manifest_hash": context.get("order_attempt_manifest_hash"),
+                    "order_event_seq": context.get("order_event_seq"),
+                    "previous_state": context.get("previous_state"),
+                    "state": context.get("state"),
+                    "side": context.get("side"),
+                    "requested_qty": context.get("requested_qty"),
+                    "attempt_requested_qty": context.get("attempt_requested_qty"),
+                    "attempt_cumulative_filled_qty": context.get("attempt_cumulative_filled_qty"),
+                    "attempt_remaining_qty": context.get("attempt_remaining_qty"),
+                    "order_cumulative_filled_qty": context.get("order_cumulative_filled_qty"),
+                    "order_remaining_qty": context.get("order_remaining_qty"),
+                    "execution_context_hash": context.get("execution_context_hash"),
+                    "execution_policy_hash": context.get("execution_policy_hash"),
+                    "order_lifecycle_replay_hash": context.get("order_lifecycle_replay_hash"),
+                    "source_sequence": context.get("source_sequence"),
+                    "fill_id": context.get("fill_id"),
+                    "fill_qty": context.get("fill_qty"),
+                    "fill_price": context.get("fill_price"),
+                    "fill_fee": context.get("fill_fee"),
+                    "reason": context.get("reason"),
+                    "replacement_attempt_id": context.get("replacement_attempt_id"),
+                    "venue_event_name": context.get("venue_event_name"),
+                    "book_execution_evidence": dict(
+                        context.get("book_execution_evidence") or {}
+                    ),
+                    "correlation_id": _payload(row).get("correlation_id"),
+                    "root_id": _payload(row).get("root_id"),
+                    "parent_id": _payload(row).get("parent_id"),
+                }
+            )
         if name in {"entry_filled", "exit_filled"}:
             fill_rows.append(
                 {
@@ -1990,6 +2861,40 @@ def _execution_section(
                     "fee_rate": context.get("fee_rate"),
                     "fee_type": context.get("fee_type"),
                     "fee_source": context.get("fee_source"),
+                    "fee_version": context.get("fee_version"),
+                    "requested_price": context.get("requested_price"),
+                    "fill_price": context.get("fill_price"),
+                    "slippage_price": context.get("slippage_price"),
+                    "slippage_bps": context.get("slippage_bps"),
+                    "execution_model_version": context.get("execution_model_version"),
+                    "execution_assumption_manifest_hash": context.get("execution_assumption_manifest_hash"),
+                    "passive_fill_policy": context.get("passive_fill_policy"),
+                    "execution_quality_ceiling": context.get("execution_quality_ceiling"),
+                    "economic_claim_intent": context.get("economic_claim_intent"),
+                    "fee_policy": context.get("fee_policy"),
+                    "full_fill_assumption": context.get("full_fill_assumption"),
+                    "market_slippage_bps": context.get("market_slippage_bps"),
+                    "stop_slippage_bps": context.get("stop_slippage_bps"),
+                    "resolved_execution_context_hash": context.get("resolved_execution_context_hash"),
+                    "instrument_execution_contract_hash": context.get("instrument_execution_contract_hash"),
+                    "venue_execution_profile_hash": context.get("venue_execution_profile_hash"),
+                    "venue_execution_profile_id": context.get("venue_execution_profile_id"),
+                    "venue_execution_profile_version": context.get("venue_execution_profile_version"),
+                    "fee_schedule_hash": context.get("fee_schedule_hash"),
+                    "fee_schedule_id": context.get("fee_schedule_id"),
+                    "fee_schedule_version": context.get("fee_schedule_version"),
+                    "fee_currency": context.get("fee_currency"),
+                    "fee_rounding_mode": context.get("fee_rounding_mode"),
+                    "fee_precision": context.get("fee_precision"),
+                    "fee_tier": context.get("fee_tier"),
+                    "execution_model_artifact_hash": context.get("execution_model_artifact_hash"),
+                    "execution_model_artifact_id": context.get("execution_model_artifact_id"),
+                    "book_data_capability": context.get("book_data_capability"),
+                    "time_in_force": context.get("time_in_force"),
+                    "post_only": context.get("post_only"),
+                    "book_execution_evidence": dict(
+                        context.get("book_execution_evidence") or {}
+                    ),
                     "accounting_mode": context.get("accounting_mode"),
                     "wallet_commit_seq": context.get("wallet_commit_seq"),
                     "position_commit_seq": context.get("position_commit_seq"),
@@ -2025,6 +2930,29 @@ def _execution_section(
             },
         )
     reason_distribution = Counter(str(row.get("reason") or "unknown") for row in fallback_rows.values())
+    order_state_distribution = Counter(str(row.get("state") or "unknown") for row in order_rows)
+    latest_orders: Dict[str, Dict[str, Any]] = {}
+    for row in sorted(
+        order_rows,
+        key=lambda item: (
+            str(item.get("order_request_id") or ""),
+            int(item.get("order_event_seq") or 0),
+            str(item.get("event_id") or ""),
+        ),
+    ):
+        order_request_id = str(row.get("order_request_id") or "").strip()
+        if order_request_id:
+            latest_orders[order_request_id] = row
+    lifecycle_event_ids = {
+        str(row.get("event_id") or "")
+        for row in order_rows
+        if str(row.get("event_id") or "")
+    }
+    for fill in fill_rows:
+        parent_id = str(fill.get("parent_id") or "")
+        fill["order_lifecycle_event_id"] = parent_id if parent_id in lifecycle_event_ids else None
+    open_states = {"requested", "validated", "accepted", "open", "partially_filled"}
+    open_orders = [row for row in latest_orders.values() if str(row.get("state") or "") in open_states]
     fast_full_caveats = []
     if fallback_rows and _execution_mode(run) == "full":
         fast_full_caveats.append("FULL mode used pessimistic same-bar fallback for some bars.")
@@ -2035,6 +2963,16 @@ def _execution_section(
         "fallback_bars": list(fallback_rows.values()),
         "fill_count": len(fill_rows),
         "fills": fill_rows,
+        "order_lifecycle": {
+            "schema_version": "canonical_order_lifecycle.v1",
+            "event_count": len(order_rows),
+            "order_count": len(latest_orders),
+            "state_distribution": dict(sorted(order_state_distribution.items())),
+            "open_order_count": len(open_orders),
+            "open_orders": open_orders,
+            "latest_orders": [latest_orders[key] for key in sorted(latest_orders)],
+            "events": order_rows,
+        },
         "fast_full_caveats": fast_full_caveats,
     }
 
@@ -2735,6 +3673,7 @@ def _report_diagnostics(
     portfolio_metrics: Mapping[str, Any],
     performance: Mapping[str, Any],
     summary: RunResearchSummary,
+    trades: Sequence[Mapping[str, Any]],
     position_ordering: Mapping[str, Any],
     context: Mapping[str, Any],
     observability_events: Sequence[Mapping[str, Any]] = (),
@@ -2898,6 +3837,9 @@ def _report_diagnostics(
 
     fallback_count = int(execution.get("intrabar_fallback_count") or 0)
     if fallback_count:
+        fallback_bars = [dict(row) for row in execution.get("fallback_bars") or [] if isinstance(row, Mapping)]
+        fallback_times = sorted(str(row.get("bar_time") or "").strip() for row in fallback_bars if str(row.get("bar_time") or "").strip())
+        affected_trade_count = sum(1 for trade in trades if int(trade.get("intrabar_fallback_count") or 0) > 0)
         items.append(
             _diagnostic(
                 severity="warning",
@@ -2906,6 +3848,10 @@ def _report_diagnostics(
                 message=f"{fallback_count} bars used pessimistic intrabar fallback.",
                 affected_identity={
                     "run_id": run_id,
+                    "fallback_bar_count": fallback_count,
+                    "affected_trade_count": affected_trade_count,
+                    "first_bar_time": fallback_times[0] if fallback_times else None,
+                    "last_bar_time": fallback_times[-1] if fallback_times else None,
                     "reason_distribution": execution.get("fallback_reason_distribution") or {},
                 },
                 readiness_impact="degrades_metrics",
@@ -4693,7 +5639,7 @@ def _candle_catalog(
                 "continuity_status": continuity_status,
                 "candle_snapshot": _mapping(fact.get("candle_snapshot")),
                 "available_resolutions": available_resolutions,
-                "storage_source": "market.candle_versions" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
+                "storage_source": "market.fact_versions" if stored else "candle_continuity_summary" if fact else "unresolved_instrument",
                 "series_key": series_key,
             }
         )
@@ -5304,6 +6250,10 @@ def _report_operational_fingerprint(
             "comparison_status": readiness.comparison_status,
             "data_quality_status": readiness.data_quality_status,
             "execution_quality_status": readiness.execution_quality_status,
+            "execution_quality_class": readiness.execution_quality_class,
+            "scientific_quality_class": readiness.scientific_quality_class,
+            "instrument_economics_class": readiness.instrument_economics_class,
+            "promotion_eligibility": readiness.promotion_eligibility,
             "degraded_sections": readiness.degraded_sections,
             "unavailable_sections": readiness.unavailable_sections,
         },
@@ -5415,6 +6365,7 @@ def _with_golden_status(
         golden_candidate_status=status,
         golden_blocking_reasons=reasons,
         repeatability_status=repeatability_status,
+        reproducibility_status="certified" if status == "certified" else "blocked" if reasons else "unknown",
     )
 
 
@@ -5633,11 +6584,18 @@ def _readiness(
     run: Mapping[str, Any],
     decision_summary: Mapping[str, Any],
     financial_summary: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    decision_ledger: Sequence[Mapping[str, Any]],
+    stored_trades: Sequence[Mapping[str, Any]],
 ) -> RunResearchReadiness:
     readiness = report_data.get_result_readiness(
         run_id,
         decision_summary=decision_summary,
         financial_summary=financial_summary,
+        run_row=run,
+        runtime_events=events,
+        decision_ledger=decision_ledger,
+        stored_trades=stored_trades,
     )
     caveats = list(readiness.get("caveats") or [])
     caveats.append("botlens_snapshots_rebuildable_from_material_event_ledger_and_compact_context")
@@ -5697,7 +6655,14 @@ def _finalize_readiness(
     elif "missing_canonical_continuity_evidence" in candle_caveats or "candle_gap_observability_unavailable" in candle_caveats:
         data_quality_status = "unknown"
 
-    execution_quality_status = "degraded" if int(execution.get("intrabar_fallback_count") or 0) > 0 else "clean"
+    quality_evidence = _mapping(execution.get("quality"))
+    execution_quality_class = str(quality_evidence.get("execution_quality_class") or "X0").upper()
+    claim_intent = str(quality_evidence.get("economic_claim_intent") or "legacy_unclassified")
+    execution_quality_status = (
+        "degraded"
+        if int(execution.get("intrabar_fallback_count") or 0) > 0 or execution_quality_class == "X0"
+        else "clean"
+    )
     caveats = list(readiness.caveats)
     degraded_sections: List[str] = []
     unavailable_sections: List[str] = []
@@ -5729,6 +6694,9 @@ def _finalize_readiness(
         )
     if execution_quality_status == "degraded":
         degraded_sections.append("execution_quality")
+    if claim_intent not in {"exploration", "legacy_unclassified"} and execution_quality_class == "X0":
+        blocking_reasons.extend(str(reason) for reason in quality_evidence.get("blocking_reasons") or [])
+        blocking_reasons.append("economic_execution_quality_unqualified")
     for caveat in fee_accounting.get("caveats") or []:
         degraded_sections.append("fee_accounting")
         caveats.append(str(caveat))
@@ -5883,6 +6851,12 @@ def _finalize_readiness(
     comparison_status = "blocked"
     if readiness.safe_to_compare:
         comparison_status = "ready_with_caveats" if degraded_sections or data_quality_status != "clean" or execution_quality_status != "clean" else "ready"
+    instrument_economics_class = _instrument_economics_class(metadata)
+    promotion_blocking_reasons = ["scientific_quality_below_S3"]
+    if not execution_quality_meets(execution_quality_class, "X2"):
+        promotion_blocking_reasons.append("execution_quality_below_X2")
+    if instrument_economics_class == "derivative_economics_incomplete":
+        promotion_blocking_reasons.append("derivative_economics_incomplete")
     return RunResearchReadiness(
         dataset_ready=readiness.dataset_ready,
         results_ready=readiness.results_ready,
@@ -5899,12 +6873,19 @@ def _finalize_readiness(
         blocking_reasons=sorted(dict.fromkeys(blocking_reasons)),
         degraded_sections=sorted(dict.fromkeys(degraded_sections)),
         unavailable_sections=sorted(dict.fromkeys(unavailable_sections)),
+        execution_quality_class=execution_quality_class,
+        scientific_quality_class="S0",
+        instrument_economics_class=instrument_economics_class,
+        promotion_eligibility="ineligible",
+        promotion_blocking_reasons=sorted(dict.fromkeys(promotion_blocking_reasons)),
     )
 
 
 def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     """Build the canonical research dataset for a bot run from durable DB truth."""
 
+    build_started = time.perf_counter()
+    source_load_started = build_started
     run = get_bot_run(run_id)
     if not run:
         raise KeyError(f"Run {run_id} was not found")
@@ -5912,12 +6893,14 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
     log_context = build_log_context(run_id=run_id, bot_id=run.get("bot_id"))
     logger.info(with_log_context("run_research_dataset_build_start", log_context))
     events = report_data.list_run_events(run_id)
-    decisions = [_decision_row(entry) for entry in report_data.list_decision_ledger(run_id)]
+    decision_ledger = report_data.decision_ledger_from_events(events)
+    decisions = [_decision_row(entry) for entry in decision_ledger]
     signals = _signal_rows(events)
     trade_closed_by_id = _trade_closed_context_by_id(events)
     raw_trades = [dict(row) for row in list_bot_trades_for_run(run_id)]
     trades = _normalize_trades(raw_trades, trade_closed_context_by_id=trade_closed_by_id)
     decisions, signals, trades = _link_trace_rows(decisions=decisions, signals=signals, trades=trades)
+    source_load_seconds = time.perf_counter() - source_load_started
     metadata = _metadata(run)
     expected_candle_series = _expected_candle_series(run)
     execution = _execution_section(run=run, events=events)
@@ -5938,7 +6921,9 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
             fill_rows,
         ),
     )
+    trade_enrichment_started = time.perf_counter()
     trades = _enrich_trades_for_research(trades, execution=execution)
+    trade_enrichment_seconds = time.perf_counter() - trade_enrichment_started
     trace_rows = [*decisions, *signals, *trades]
     summary = _summary(decisions=decisions, trades=trades, starting_capital=metadata.starting_capital)
     decision_summary = {
@@ -5954,20 +6939,38 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         "profit_factor": summary.profit_factor,
         "win_rate": summary.win_rate,
     }
+    readiness_started = time.perf_counter()
     readiness = _readiness(
         run_id=run_id,
         run=run,
         decision_summary=decision_summary,
         financial_summary=financial_summary,
+        events=events,
+        decision_ledger=decision_ledger,
+        stored_trades=raw_trades,
     )
+    readiness_seconds = time.perf_counter() - readiness_started
     execution = dict(execution)
     execution["slippage"] = _slippage_accounting(run=run, events=events, trades=trades)
     fee_accounting = _fee_accounting(trades, summary, events=events)
+    execution["cost_stress"] = _cost_stress_evidence(run=run, trades=trades, summary=summary)
+    execution["quality"] = _execution_quality_evidence(
+        run=run,
+        trades=trades,
+        execution=execution,
+        fee_accounting=fee_accounting,
+        slippage=_mapping(execution.get("slippage")),
+        cost_stress=_mapping(execution.get("cost_stress")),
+    )
+    wallet_accounting_started = time.perf_counter()
     wallet_accounting = _wallet_accounting(run=run, decisions=decisions, events=events, summary=summary)
+    wallet_accounting_seconds = time.perf_counter() - wallet_accounting_started
     wallet_diagnostics = _mapping(wallet_accounting.get("wallet_diagnostics"))
+    observability_started = time.perf_counter()
     observability_events, observability_coverage = (
         _observability_events_for_run(run_id)
     )
+    observability_seconds = time.perf_counter() - observability_started
     candle_gaps = _candle_gaps(events, observability_events, metadata=metadata)
     portfolio_metrics = _portfolio_metrics(run=run, trades=trades, summary=summary)
     summary = _summary_with_portfolio_metrics(summary, portfolio_metrics)
@@ -6025,6 +7028,7 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         portfolio_metrics=portfolio_metrics,
         performance=performance,
         summary=summary,
+        trades=trades,
         position_ordering=position_ordering,
         context=context,
         observability_events=observability_events,
@@ -6156,6 +7160,20 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
         strategy_insights=insights,
         narrative_summary=narrative_summary,
     )
+    serialization_started = time.perf_counter()
+    dataset_payload = dataset.to_dict()
+    build_finished = time.perf_counter()
+    serialization_seconds = build_finished - serialization_started
+    measured_phase_seconds = (
+        source_load_seconds
+        + trade_enrichment_seconds
+        + readiness_seconds
+        + wallet_accounting_seconds
+        + observability_seconds
+        + serialization_seconds
+    )
+    total_seconds = build_finished - build_started
+    assembly_seconds = max(total_seconds - measured_phase_seconds, 0.0)
     logger.info(
         with_log_context(
             "run_research_dataset_build_done",
@@ -6166,10 +7184,19 @@ def build_run_research_dataset(run_id: str) -> Dict[str, Any]:
                 "safe_to_compare": readiness.safe_to_compare,
                 "trades": summary.closed_trades,
                 "decisions": summary.total_decisions,
+                "duration_ms": round(total_seconds * 1000.0, 3),
+                "source_load_ms": round(source_load_seconds * 1000.0, 3),
+                "trade_enrichment_ms": round(trade_enrichment_seconds * 1000.0, 3),
+                "readiness_ms": round(readiness_seconds * 1000.0, 3),
+                "wallet_accounting_ms": round(wallet_accounting_seconds * 1000.0, 3),
+                "observability_ms": round(observability_seconds * 1000.0, 3),
+                "assembly_ms": round(assembly_seconds * 1000.0, 3),
+                "serialization_ms": round(serialization_seconds * 1000.0, 3),
+                "wallet_events": int(wallet_diagnostics.get("wallet_event_count") or 0),
             },
         )
     )
-    return dataset.to_dict()
+    return dataset_payload
 
 
 __all__ = [

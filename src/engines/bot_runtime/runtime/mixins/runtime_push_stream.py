@@ -27,6 +27,8 @@ from ..components.overlay_delta import (
 
 logger = logging.getLogger(__name__)
 
+_OVERLAY_FULL_CHECKPOINT_EVERY_COMMITS = 20
+
 BOTLENS_FACT_RUNTIME_STATE = "runtime_state_observed"
 BOTLENS_FACT_SERIES_STATE = "series_state_observed"
 BOTLENS_FACT_CANDLE_UPSERTED = "candle_upserted"
@@ -735,7 +737,10 @@ class RuntimePushStreamMixin:
         self,
         cache: Dict[str, Any],
         overlays: Sequence[Mapping[str, Any]],
+        *,
+        force: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        next_commit_seq = int(cache.get("overlay_commit_seq") or 0) + 1
         return build_overlay_delta(
             cache,
             overlays,
@@ -746,6 +751,11 @@ class RuntimePushStreamMixin:
                     BOTLENS_FACT_STREAM_OVERLAY_POINT_LIMIT,
                 )
                 or BOTLENS_FACT_STREAM_OVERLAY_POINT_LIMIT
+            ),
+            force=force,
+            force_full=bool(
+                force
+                or next_commit_seq % _OVERLAY_FULL_CHECKPOINT_EVERY_COMMITS == 0
             ),
         )
 
@@ -889,6 +899,16 @@ class RuntimePushStreamMixin:
             return None
 
     @staticmethod
+    def _compact_runtime_state_progress(value: Any) -> Optional[float]:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric != numeric or numeric in {float("inf"), float("-inf")}:
+            return None
+        return round(min(max(numeric, 0.0), 1.0), 8)
+
+    @staticmethod
     def _compact_runtime_state_text(value: Any) -> Optional[str]:
         text = str(value or "").strip()
         return text or None
@@ -983,6 +1003,10 @@ class RuntimePushStreamMixin:
             value = self._compact_runtime_state_int(snapshot.get(field))
             if value is not None:
                 runtime[field] = value
+        progress = self._compact_runtime_state_progress(snapshot.get("progress"))
+        if progress is not None:
+            runtime["progress"] = progress
+            runtime["progress_unit"] = "fraction"
         if normalized_warnings:
             runtime["warnings"] = normalized_warnings
         runtime["warning_count"] = len(normalized_warnings)
@@ -1155,7 +1179,15 @@ class RuntimePushStreamMixin:
         return durable
 
     def _log_facts(self) -> Tuple[List[Dict[str, Any]], int]:
-        entries = self.logs()
+        revision_tracked = hasattr(self, "_log_revision")
+        with self._lock:
+            revision = int(getattr(self, "_log_revision", 0) or 0)
+            seen_revision = int(getattr(self, "_push_log_revision_seen", -1))
+            if revision_tracked and seen_revision == revision:
+                return [], 0
+            entries = list(self._logs) if revision_tracked else []
+        if not revision_tracked:
+            entries = self.logs()
         new_entries, marker, dropped = self._bounded_entries_after_marker(
             entries,
             marker_field="id",
@@ -1167,6 +1199,7 @@ class RuntimePushStreamMixin:
             fact_type=BOTLENS_FACT_LOG_EMITTED,
         )
         self._push_log_marker = marker
+        self._push_log_revision_seen = revision
         return [{"fact_type": BOTLENS_FACT_LOG_EMITTED, "log": entry} for entry in new_entries], dropped
 
     def _decision_facts(self) -> Tuple[List[Dict[str, Any]], int]:
@@ -1967,13 +2000,26 @@ class RuntimePushStreamMixin:
         stream = getattr(run_context, "runtime_event_stream", None)
         if stream is None:
             return []
-        entries = list(stream)
-        new_entries, marker = self._entries_after_marker(
-            entries,
-            marker_field="event_id",
-            previous_marker=getattr(self, "_push_wallet_marker", None),
-        )
+        stream_length = len(stream)
+        previous_length = max(int(getattr(self, "_push_wallet_stream_length", 0) or 0), 0)
+        if stream_length == previous_length:
+            return []
+        if 0 <= previous_length < stream_length:
+            new_entries = list(stream[previous_length:])
+            marker = (
+                str(new_entries[-1].get("event_id") or "").strip()
+                if new_entries and isinstance(new_entries[-1], AbcMapping)
+                else getattr(self, "_push_wallet_marker", None)
+            )
+        else:
+            entries = list(stream)
+            new_entries, marker = self._entries_after_marker(
+                entries,
+                marker_field="event_id",
+                previous_marker=getattr(self, "_push_wallet_marker", None),
+            )
         self._push_wallet_marker = marker
+        self._push_wallet_stream_length = stream_length
         facts: List[Dict[str, Any]] = []
         projected_wallet = getattr(self, "_push_wallet_projection", None)
         if isinstance(projected_wallet, AbcMapping):
@@ -2301,7 +2347,11 @@ class RuntimePushStreamMixin:
             projection_build_ms = max((time.perf_counter() - build_started) * 1000.0, 0.0)
             delta_started = time.perf_counter()
             working_cache = dict(cache)
-            overlay_delta = self._build_overlay_delta(working_cache, visible_overlays)
+            overlay_delta = self._build_overlay_delta(
+                working_cache,
+                visible_overlays,
+                force=force,
+            )
             delta_ms = max((time.perf_counter() - delta_started) * 1000.0, 0.0)
         except Exception as exc:
             duration_ms = max((time.perf_counter() - projection_started_perf) * 1000.0, 0.0)
@@ -2355,6 +2405,8 @@ class RuntimePushStreamMixin:
                     "window_bars": int(getattr(self, "_botlens_overlay_window_bars", 0) or 0),
                     "emit_every_bars": int(getattr(self, "_botlens_overlay_emit_every_bars", 0) or 0),
                     "bar_index": int(getattr(state, "bar_index", 0) or 0),
+                    "reason": str(reason or "").strip() or None,
+                    "terminal": bool(force and getattr(state, "done", False)),
                 },
             }
             payload = {
@@ -2898,13 +2950,28 @@ class RuntimePushStreamMixin:
                 if gap_classification:
                     payload["gap_classification"] = gap_classification
                     payload["source_reason"] = "provider_closure"
-                payload["facts"].append(
-                    self._series_state_fact(
-                        series=series,
-                        bar_index=bar_index,
-                        replace_last=bool(replace_last),
-                    )
+                series_state_fact = self._series_state_fact(
+                    series=series,
+                    bar_index=bar_index,
+                    replace_last=bool(replace_last),
                 )
+                series_metadata_fingerprint = json.dumps(
+                    {
+                        key: series_state_fact.get(key)
+                        for key in (
+                            "series_key",
+                            "strategy_id",
+                            "instrument_id",
+                            "symbol",
+                            "timeframe",
+                        )
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if cache.get("series_metadata_fingerprint") != series_metadata_fingerprint:
+                    payload["facts"].append(series_state_fact)
+                    cache["series_metadata_fingerprint"] = series_metadata_fingerprint
                 trade_facts, series_stats, trades_count, trade_entry_refresh_required = self._trade_facts(
                     series=series,
                     cache=cache,

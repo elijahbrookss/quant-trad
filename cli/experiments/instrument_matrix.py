@@ -242,9 +242,6 @@ def _selected_variant_name(source_bot: Mapping[str, Any], source_context: Mappin
         for variant in source_variants:
             if selected_id == _clean_text(variant.get("id")):
                 return _clean_text(variant.get("name"))
-    for variant in source_variants:
-        if bool(variant.get("is_default")):
-            return _clean_text(variant.get("name"))
     return None
 
 
@@ -292,59 +289,6 @@ def _strategy_create_payload(
         "atm_template_id": core.get("atm_template_id"),
         "risk_config": dict(core.get("risk_config") or {}),
     }
-
-
-def _rule_create_payload(rule: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "name": _clean_text(rule.get("name")) or _clean_text(rule.get("id")) or "rule",
-        "intent": _clean_text(rule.get("intent")) or "enter_long",
-        "priority": int(rule.get("priority") or 0),
-        "trigger": dict(rule.get("trigger") or {}),
-        "guards": [dict(item) for item in _as_list(rule.get("guards")) if isinstance(item, Mapping)],
-        "description": rule.get("description"),
-        "enabled": bool(rule.get("enabled", True)),
-    }
-
-
-def _copy_strategy_variants(
-    client: ApiClient,
-    *,
-    new_strategy_id: str,
-    source_variants: Sequence[Mapping[str, Any]],
-) -> dict[str, str]:
-    variant_id_by_source_id: dict[str, str] = {}
-    target_variants_doc = client.request_json("GET", f"/api/strategies/{new_strategy_id}/variants")
-    target_variants = _as_mapping(target_variants_doc)
-    created_variants = _strategy_variants(target_variants)
-    default_target = next((variant for variant in created_variants if bool(variant.get("is_default"))), None)
-    for source_variant in source_variants:
-        payload = {
-            "name": _clean_text(source_variant.get("name")) or "default",
-            "description": source_variant.get("description"),
-            "output_filters": list(source_variant.get("output_filters") or []),
-            "is_default": bool(source_variant.get("is_default", False)),
-        }
-        if payload["is_default"] and default_target and _clean_text(default_target.get("id")):
-            target_id = _required_text(default_target, "id", "target variant id")
-            updated = client.request_json(
-                "PUT",
-                f"/api/strategies/{new_strategy_id}/variants/{target_id}",
-                payload=payload,
-            )
-            if isinstance(updated, Mapping):
-                variant_id_by_source_id[_required_text(source_variant, "id", "source variant id")] = _clean_text(updated.get("id")) or target_id
-            continue
-        created = client.request_json(
-            "POST",
-            f"/api/strategies/{new_strategy_id}/variants",
-            payload=payload,
-        )
-        if isinstance(created, Mapping):
-            source_id = _clean_text(source_variant.get("id"))
-            created_id = _clean_text(created.get("id"))
-            if source_id and created_id:
-                variant_id_by_source_id[source_id] = created_id
-    return variant_id_by_source_id
 
 
 def _bot_create_payload(
@@ -490,6 +434,12 @@ def _experiment_plan(
     plan = {
         "schema_version": "experiment_plan.v1",
         "name": _required_text(request, "name"),
+        "intent": str(request.get("intent") or "exploration").strip().lower(),
+        "execution_assumptions": (
+            dict(request.get("execution_assumptions"))
+            if isinstance(request.get("execution_assumptions"), Mapping)
+            else None
+        ),
         "hypothesis": request.get("hypothesis")
         or "Compare solo spot proxy and derivative instruments through bot runtime/report truth.",
         "windows": [dict(window) for window in windows],
@@ -580,20 +530,16 @@ def prepare_instrument_matrix_experiment(
         raise ValueError("source strategy id could not be resolved from request or source bot")
     source_strategy_raw = client.request_json("GET", f"/api/strategies/{source_strategy_id}")
     source_bindings_raw = client.request_json("GET", f"/api/strategies/{source_strategy_id}/bindings")
-    source_rules_raw = client.request_json("GET", f"/api/strategies/{source_strategy_id}/rules")
     source_variants_raw = client.request_json("GET", f"/api/strategies/{source_strategy_id}/variants")
     if not isinstance(source_strategy_raw, Mapping):
         raise ApiError(f"GET strategy {source_strategy_id} returned an unexpected payload")
     if not isinstance(source_bindings_raw, Mapping):
         raise ApiError(f"GET strategy {source_strategy_id} bindings returned an unexpected payload")
-    if not isinstance(source_rules_raw, Mapping):
-        raise ApiError(f"GET strategy {source_strategy_id} rules returned an unexpected payload")
     if not isinstance(source_variants_raw, Mapping):
         raise ApiError(f"GET strategy {source_strategy_id} variants returned an unexpected payload")
     source_strategy = {
         **dict(source_strategy_raw),
         "bindings": _as_mapping(source_bindings_raw).get("bindings") or {},
-        "decision": {"rules": _strategy_rules(_as_mapping(source_rules_raw))},
     }
     source_variants = _strategy_variants(_as_mapping(source_variants_raw))
     selected_variant_name = _selected_variant_name(source_bot, source_context, source_variants)
@@ -601,7 +547,6 @@ def prepare_instrument_matrix_experiment(
     request_with_selected = {**dict(request), "selected_strategy_variant_name": selected_variant_name}
     strategy_prefix = _clean_text(request.get("strategy_name_prefix")) or f"{request.get('name')} / "
     bot_prefix = _clean_text(request.get("bot_name_prefix")) or f"{request.get('name')} / "
-    rules = _strategy_rules(source_strategy)
 
     planned_cases: list[dict[str, Any]] = []
     bot_ids_by_case: dict[str, str] = {}
@@ -626,18 +571,27 @@ def prepare_instrument_matrix_experiment(
             name_prefix=bot_prefix,
         )
         if apply:
-            created_strategy = client.request_json("POST", "/api/strategies/", payload=strategy_payload)
-            if not isinstance(created_strategy, Mapping):
-                raise ApiError("POST /api/strategies/ returned an unexpected payload")
-            new_strategy_id = _required_text(_strategy_core(created_strategy), "id")
-            created_strategy_ids[_required_text(case, "id", "case id")] = new_strategy_id
-            for rule in rules:
-                client.request_json("POST", f"/api/strategies/{new_strategy_id}/rules", payload=_rule_create_payload(rule))
-            _copy_strategy_variants(
-                client,
-                new_strategy_id=new_strategy_id,
-                source_variants=source_variants,
+            clone_payload = {
+                key: strategy_payload[key]
+                for key in (
+                    "name",
+                    "description",
+                    "instrument_slots",
+                    "datasource",
+                    "exchange",
+                )
+            }
+            created_strategy = client.request_json(
+                "POST",
+                f"/api/strategies/{source_strategy_id}/clone",
+                payload=clone_payload,
             )
+            if not isinstance(created_strategy, Mapping):
+                raise ApiError("POST Strategy clone returned an unexpected payload")
+            clone_definition = _as_mapping(created_strategy.get("strategy"))
+            cloned_core = _as_mapping(clone_definition.get("strategy")) or clone_definition
+            new_strategy_id = _required_text(cloned_core, "id")
+            created_strategy_ids[_required_text(case, "id", "case id")] = new_strategy_id
             bot_payload = {**bot_payload, "strategy_id": new_strategy_id}
             created_bot = client.request_json("POST", "/api/bots", payload=bot_payload)
             if not isinstance(created_bot, Mapping):

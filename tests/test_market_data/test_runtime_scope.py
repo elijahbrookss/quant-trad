@@ -309,3 +309,44 @@ def test_runtime_dependency_keeps_unbound_paper_strategy_loading_mutable(
     assert runtime_dependencies.build_bot_runtime_deps().fetch_strategy(
         "strategy-1", {}
     ) is strategy
+
+
+def test_preview_scope_pins_mutable_candle_reads_to_one_watermark(monkeypatch) -> None:
+    observed = {}
+    monkeypatch.setattr(
+        candle_service.instrument_service,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "id": instrument_id,
+            "symbol": "BTC/USD",
+            "datasource": "CCXT",
+            "exchange": "coinbase",
+        },
+    )
+
+    def fake_read(instrument, **kwargs):
+        observed["instrument"] = instrument
+        observed.update(kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(candle_service.canonical_candle_feed, "read_by_instrument", fake_read)
+
+    with candle_service.market_data_preview_read_scope(
+        as_of_commit_seq=123,
+        source_revision="revision-1",
+    ):
+        frame = candle_service.fetch_ohlcv_by_instrument(
+            "instrument-1",
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            "1h",
+        )
+
+    assert observed["as_of_commit_seq"] == 123
+    assert frame.attrs["market_data_read_scope"] == {
+        "schema_version": "market_data_preview_read_scope.v1",
+        "as_of_commit_seq": 123,
+        "source_revision": "revision-1",
+        "mutable_store": True,
+        "replayable": False,
+    }

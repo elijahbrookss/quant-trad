@@ -33,6 +33,37 @@ code_paths:
 ---
 # Research Orchestration Boundary
 
+## Offline autonomy through Phase 6
+
+The production research surface now includes three additional, provider-free
+boundaries:
+
+- [Scientific Research Authority](SCIENTIFIC_RESEARCH_AUTHORITY.md) owns
+  immutable protocols, role-derived frozen datasets, attempt/search accounting,
+  candidate freezing, one-use holdouts, and S0-S4 evidence.
+- [Typed Strategy and Action Graph](TYPED_STRATEGY_GRAPH.md) owns bounded
+  data-only strategy invention and canonical action-intent compilation; graph
+  creation consumes family search budget.
+- [Offline Research Governance](OFFLINE_RESEARCH_GOVERNANCE.md) owns separate
+  proposal/decision records and registry promotion through
+  `RESEARCH_CERTIFIED` only.
+
+These are logical components inside the current application and PostgreSQL
+deployment. They do not require allocator, researcher, certifier, governance,
+or auditor microservices. Stronger identity/custody services are future seams,
+not a prerequisite for honest controlled-workflow claims.
+
+[Check Evidence Boundary](CHECK_EVIDENCE_BOUNDARY.md) defines the canonical
+preview, frozen evidence, replay, Observation, and trail workflow. It replaces
+objective-specific calculations with versioned QT-owned evaluators;
+"campaign" remains an external objective description, not QT domain
+nomenclature.
+
+The autonomous research workflow cannot choose provider data, resolve a sealed
+holdout through public operations, disable durable audit, mutate a frozen
+candidate, self-authorize a transition, or progress to shadow, paper, live,
+deployment, external submission, or capital states.
+
 ## Purpose
 
 The research orchestration boundary gives agent/tool workflows a small,
@@ -55,6 +86,17 @@ It is an interface boundary, not a new strategy engine.
 The backend API owns the semantic contract for orchestration. The CLI is a thin
 adapter over that API.
 
+Compact run-status polling joins persisted terminal truth with the latest hot
+runtime health. A terminal persisted run status dominates a stale non-terminal
+lifecycle phase; while active, the newest projected event time and progress
+drive checkpoint output. Therefore qt runs wait observes forward progress and
+termination without reading frontend state or a stale initial lifecycle row.
+
+Complete research evidence is terminal work. An active-run research request
+returns a typed deferred summary from cheap run/lifecycle fields and never
+constructs the growing signals/decisions/trades dataset. Terminal requests
+continue through the canonical report research dataset.
+
 The boundary may:
 
 - call bot control API routes,
@@ -75,6 +117,9 @@ The boundary may:
   through the research API.
 - dispatch long-running research checks and sweeps through shared async jobs,
   then read status/result contracts by job id.
+- sequence Check requirement planning, explicit preparation, Dataset freeze,
+  provider-free execution, replay, Observation creation, and trail inspection
+  through shared application operations.
 
 The boundary must not:
 
@@ -88,6 +133,30 @@ The boundary must not:
 - treat MCP resources as cached truth or introduce MCP-only workflow semantics.
 - treat research-memory items or check outputs as runtime, report, or execution
   truth.
+- calculate indicators, features, event populations, causal fact joins,
+  outcomes, folds, statistics, assertions, pass gates, or evidence hashes.
+- trust caller-supplied scientific evidence projections instead of resolving
+  and replaying canonical Check or Backtest references.
+
+## Canonical Research Journey
+
+```text
+objective
+  -> Check requirements
+  -> explicit preparation (optional acquisition authority)
+  -> preview OR Dataset freeze
+  -> provider-free Indicator + Check
+  -> durable result
+  -> replay
+  -> evidence-backed Observation
+  -> evidence trail/report projection
+```
+
+Preview is ephemeral mutable-store feedback and cannot create durable evidence.
+Evidence requires a frozen Dataset. Backtest remains a separate path requiring
+an exact versioned Strategy. Check statistics and assertions have no promotion,
+certification, paper, or live authority; Scientific Protocol owns advanced
+validation and certification.
 
 ## Local Log Partitioning
 
@@ -212,8 +281,10 @@ for:
 - instrument listing, detail inspection, and runtime profile compilation through
   `qt instruments ...`,
 - direct candle coverage inspection through `qt data coverage`,
-- research-memory item/link capture and lightweight historical checks through
-  `qt research ...`; the check surface is intentionally compact:
+- the primary Check workflow through `qt research check requirements`,
+  `preview`, `prepare`, `run`, and `replay`, plus evidence-backed Observation
+  creation and `qt research trail`,
+- compatibility/diagnostic checks through `qt research ...`:
   `qt research check raw`, `qt research check indicator`,
   `qt research check audit`, `qt research check lifecycle`,
   `qt research check signal`, `qt research check decision`, and
@@ -222,13 +293,15 @@ for:
   plus `qt research jobs status/result <job_id>`,
 - research evidence read models through `qt research run`, `qt research trail`,
   and `qt research compare`,
-- run lifecycle waiting through compact run status API state,
+- run lifecycle waiting through compact run status API state that combines
+  fresh hot progress with persisted terminal precedence,
 - report listing, readiness, compact research summary, diagnostics,
   materialization status/build, export, and materialized report comparison
   summary,
 - `experiments start-bot`, `experiments status`, and `experiments collect` for
   long-running resumable research work,
-- `experiments run-bot` as a one-shot wrapper over the same start/collect flow.
+- deprecated `experiments run-bot` as a compatibility wrapper with a structured
+  replacement message; primary workflows use start/collect or a plan.
 - `experiments validate-plan`, `run-plan`, `resume`, `watch`, `events`, and
   `doctor` for sequential, file-backed experiment suites.
 - `experiments summarize` for compact suite-level read models over local

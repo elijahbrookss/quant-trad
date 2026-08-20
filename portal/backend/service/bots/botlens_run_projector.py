@@ -15,7 +15,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine
 
 from ..observability import BackendObserver, QueueStateMetricOwner
-from .botlens_event_replay import load_domain_projection_batches, rebuild_run_projection_snapshot
+from .botlens_event_replay import (
+    RUN_PROJECTION_EVENT_NAMES,
+    load_domain_projection_batches,
+    rebuild_run_projection_snapshot,
+)
 from .botlens_mailbox import FanoutEnvelope, FanoutRunDeltaBatch, QueueEnvelope, RunMailbox
 from .botlens_symbol_projector import SymbolSummaryNotification
 from .botlens_state import (
@@ -421,6 +425,7 @@ class RunProjector:
                 runtime_state=notification.runtime.get("runtime_state"),
                 last_useful_progress_at=notification.runtime.get("last_useful_progress_at"),
                 progress_state=notification.runtime.get("progress_state"),
+                progress=notification.runtime.get("progress"),
                 degraded=notification.runtime.get("degraded"),
                 churn=notification.runtime.get("churn"),
                 pressure=notification.runtime.get("pressure"),
@@ -569,7 +574,12 @@ class RunProjector:
                 from .bot_service import publish_runtime_update
 
                 payload = self._runtime_summary_payload(known_at=batch.known_at)
-                await asyncio.to_thread(publish_runtime_update, self._bot_id, payload)
+                await asyncio.to_thread(
+                    publish_runtime_update,
+                    self._bot_id,
+                    payload,
+                    run_id=self._run_id,
+                )
             except Exception as exc:
                 logger.warning("run_projector_runtime_publish_failed | run_id=%s | error=%s", self._run_id, exc)
 
@@ -589,6 +599,7 @@ class RunProjector:
                 bot_id=self._bot_id,
                 run_id=self._run_id,
                 series_key=None,
+                event_names=RUN_PROJECTION_EVENT_NAMES,
             )
             for batch in batches:
                 self._state, _ = apply_run_batch(self._state, batch=batch)

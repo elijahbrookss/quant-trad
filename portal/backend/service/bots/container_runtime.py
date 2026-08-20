@@ -466,7 +466,12 @@ def _load_strategy_symbols(
 ) -> List[str]:
     raw_binding = runtime_config.get("dataset_binding")
     deps = build_bot_runtime_deps(
-        dataset_binding=raw_binding if isinstance(raw_binding, Mapping) else None
+        dataset_binding=raw_binding if isinstance(raw_binding, Mapping) else None,
+        market_data_bindings=(
+            runtime_config.get("market_data_bindings")
+            if isinstance(runtime_config.get("market_data_bindings"), Mapping)
+            else None
+        ),
     )
     strategy = deps.fetch_strategy(strategy_id, dict(runtime_config))
     symbols: List[str] = []
@@ -579,6 +584,16 @@ def _load_runtime_bot_snapshot(bot_id: str, run_id: str) -> tuple[Dict[str, Any]
     if bot_snapshot:
         bot = dict(bot_snapshot)
         bot["id"] = str(bot.get("id") or bot_id)
+        for field in (
+            "economic_claim_intent",
+            "execution_assumptions",
+            "resolved_execution_context_bundle",
+            "execution_book_tape_bundle",
+            "passive_queue_policy",
+        ):
+            if field in config_snapshot:
+                value = config_snapshot.get(field)
+                bot[field] = dict(value) if isinstance(value, Mapping) else value
         return bot, dict(run)
     bot = next((b for b in load_bots() if b.get("id") == bot_id), None)
     if bot is None:
@@ -1819,7 +1834,14 @@ def _series_worker(
     runtime = BotRuntime(
         bot_id=bot_id,
         config=child_config,
-        deps=build_bot_runtime_deps(dataset_binding=child_config.get("dataset_binding")),
+        deps=build_bot_runtime_deps(
+            dataset_binding=child_config.get("dataset_binding"),
+            market_data_bindings=(
+                child_config.get("market_data_bindings")
+                if isinstance(child_config.get("market_data_bindings"), Mapping)
+                else None
+            ),
+        ),
     )
 
     def _queue_worker_event(payload: Mapping[str, Any], *, timeout_s: float = 0.25) -> bool:

@@ -36,6 +36,11 @@ research checks, hypotheses, studies, and links to existing platform artifacts.
 Research memory is not runtime truth. It is the reasoning trail around runtime,
 data, indicator, experiment, report, and strategy artifacts.
 
+Durable Check behavior is defined by
+[Check Evidence Boundary](../research-orchestration/CHECK_EVIDENCE_BOUNDARY.md).
+Research memory persists and links that evidence; it does not calculate a
+parallel result.
+
 ## Boundary Contract
 
 Research memory may:
@@ -75,7 +80,31 @@ A research check is a bounded analytical run that asks:
 When this condition appeared historically, what happened afterward?
 ```
 
-The raw source check runner is intentionally boring:
+Current canonical Checks have two modes. Preview reads a commit/watermark-pinned
+mutable-store view and remains ephemeral. Evidence requires a frozen Dataset,
+executes through the provider-free frozen binding, and persists definition,
+request, plan, input, Indicator, gap/quality, result, and composite evidence
+hashes. Only evidence classified as observation-eligible may support a durable
+Observation. Replay requires the exact clean producing source revision and the
+same canonical execution path.
+
+`event_fact_analysis` is the generic durable market-data Check. It consumes
+typed fact aliases and registered Indicator events, performs causal alignment,
+outcomes, statistics, and optional assertions, and contains no provider-specific
+family. It preserves resolved and unresolved counts/reasons for each horizon.
+No assertions means no verdict; unresolved assertions are indeterminate. A
+verdict grants no Strategy, promotion, certification, or execution authority.
+
+The older raw, Indicator-forward, signal/lifecycle, and report-backed families
+remain compatibility or diagnostic surfaces according to their registered
+definition. Historical mutable-store records are `legacy_unpinned`; their
+payloads and hashes are preserved and they cannot be represented as current
+frozen replayable evidence.
+
+The following description documents the legacy raw compatibility runner; it is
+not the durable event-and-fact path:
+
+The legacy raw source check runner is intentionally bounded:
 
 1. normalize the check request,
 2. resolve the canonical instrument through the instrument/data boundary,

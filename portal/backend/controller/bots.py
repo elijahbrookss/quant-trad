@@ -18,7 +18,11 @@ from starlette.websockets import WebSocketState
 
 from ..service.bots import bot_service
 from ..service.bots.bot_run_diagnostics_projection import project_bot_run_diagnostics
-from ..service.bots.botlens_bootstrap_service import get_active_botlens_run_bootstrap, resolve_active_botlens_stream
+from ..service.bots.botlens_bootstrap_service import (
+    get_active_botlens_run_bootstrap,
+    get_botlens_run_bootstrap,
+    resolve_active_botlens_stream,
+)
 from ..service.bots.botlens_chart_service import get_symbol_chart_history
 from ..service.bots.botlens_forensics_service import get_run_signal_forensics, list_run_forensic_events
 from ..service.bots.botlens_symbol_service import get_selected_symbol_snapshot, get_symbol_detail, list_run_symbols
@@ -128,6 +132,7 @@ class BotUpdateRequest(BaseModel):
 
 
 class BotStartRequest(BaseModel):
+    economic_claim_intent: str = Field(pattern="^(exploration|economic|selection|promotion)$")
     request_id: Optional[str] = None
     run_type: Optional[str] = Field(default=None, pattern="^(backtest|sim_trade|paper|live)$")
     dataset_id: Optional[str] = None
@@ -135,6 +140,9 @@ class BotStartRequest(BaseModel):
     execution_behavior: Optional[str] = Field(default=None, pattern="^(simulated|observe-only)$")
     duration_seconds: Optional[float] = Field(default=None, gt=0)
     market_data_stream_policy: Optional[Dict[str, Any]] = None
+    execution_assumptions: Optional[Dict[str, Any]] = None
+    execution_book_tape_bundle: Optional[Dict[str, Any]] = None
+    passive_queue_policy: Optional[Dict[str, Any]] = None
 
 
 class BotStopRequest(BaseModel):
@@ -153,6 +161,7 @@ class BotBacktestDatasetPrepareRequest(BaseModel):
     evaluation_end: str
     acquire_missing: bool = False
     created_by: Optional[str] = None
+    numeric_acquisition: Optional[Dict[str, Any]] = None
 
 
 class BotResponse(BotBase):
@@ -172,13 +181,13 @@ class BotResponse(BotBase):
 
 @router.get("", response_model=List[BotResponse], include_in_schema=False)
 @router.get("/", response_model=List[BotResponse])
-async def list_bots() -> List[Dict[str, Any]]:
+def list_bots() -> List[Dict[str, Any]]:
     return bot_service.list_bots()
 
 
 @router.post("", response_model=BotResponse, status_code=201, include_in_schema=False)
 @router.post("/", response_model=BotResponse, status_code=201)
-async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
+def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
     try:
         return bot_service.create_bot(**body.dict())
     except ValueError as exc:
@@ -188,22 +197,22 @@ async def create_bot(body: BotCreateRequest) -> Dict[str, Any]:
 
 
 @router.get("/settings-catalog")
-async def bot_settings_catalog() -> Dict[str, Any]:
+def bot_settings_catalog() -> Dict[str, Any]:
     return bot_service.bot_settings_catalog()
 
 
 @router.get("/watchdog")
-async def bot_watchdog_status() -> Dict[str, Any]:
+def bot_watchdog_status() -> Dict[str, Any]:
     return bot_service.watchdog_status()
 
 
 @router.get("/runtime-capacity")
-async def bot_runtime_capacity() -> Dict[str, Any]:
+def bot_runtime_capacity() -> Dict[str, Any]:
     return bot_service.runtime_capacity()
 
 
 @router.get("/run-contexts")
-async def list_bot_run_contexts() -> Dict[str, Any]:
+def list_bot_run_contexts() -> Dict[str, Any]:
     """Return compact bot run contexts for CLI/research orchestration."""
 
     return bot_service.list_bot_run_contexts()
@@ -211,7 +220,7 @@ async def list_bot_run_contexts() -> Dict[str, Any]:
 
 @router.get("/stream")
 async def stream_bots() -> StreamingResponse:
-    release, channel, initial = bot_service.bots_stream()
+    release, channel, initial = await asyncio.to_thread(bot_service.bots_stream)
 
     async def event_iterator():
         try:
@@ -235,8 +244,57 @@ async def stream_bots() -> StreamingResponse:
     return StreamingResponse(event_iterator(), media_type="text/event-stream", headers=headers)
 
 
+@router.get("/runs/active")
+def active_bot_runs() -> Dict[str, Any]:
+    rows = bot_service.list_active_run_instances()
+    return {
+        "schema_version": "active_run_list.v1",
+        "runs": rows,
+        "total": len(rows),
+        "observed_at": _utc_now_iso(),
+    }
+
+
+@router.get("/runs/stream")
+async def stream_active_bot_runs() -> StreamingResponse:
+    release, channel, initial = await asyncio.to_thread(bot_service.active_runs_stream)
+
+    async def event_iterator():
+        try:
+            yield _format_sse(initial.get("type", "snapshot"), initial)
+            while True:
+                try:
+                    payload = await asyncio.to_thread(channel.get)
+                except asyncio.CancelledError:
+                    break
+                if not payload:
+                    continue
+                yield _format_sse(payload.get("type", "update"), payload)
+        finally:
+            release()
+
+    return StreamingResponse(
+        event_iterator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/runs")
+def bot_run_inventory(
+    limit: int = 100,
+    before_sort_at: Optional[str] = None,
+    before_run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return bot_service.list_bot_runs_inventory(
+        limit=max(1, min(int(limit or 100), 100)),
+        before_sort_at=before_sort_at,
+        before_run_id=before_run_id,
+    )
+
+
 @router.get("/{bot_id}/run-context")
-async def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
+def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
     """Return the effective bot run context without full UI projections."""
 
     try:
@@ -246,7 +304,7 @@ async def get_bot_run_context(bot_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{bot_id}", response_model=BotResponse)
-async def get_bot(bot_id: str) -> Dict[str, Any]:
+def get_bot(bot_id: str) -> Dict[str, Any]:
     try:
         return bot_service.get_bot(bot_id)
     except KeyError as exc:
@@ -254,7 +312,7 @@ async def get_bot(bot_id: str) -> Dict[str, Any]:
 
 
 @router.put("/{bot_id}", response_model=BotResponse)
-async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
+def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
     try:
         payload = body.dict(exclude_unset=True)
         return bot_service.update_bot(bot_id, **payload)
@@ -265,19 +323,19 @@ async def update_bot(bot_id: str, body: BotUpdateRequest) -> Dict[str, Any]:
 
 
 @router.delete("/{bot_id}", status_code=204, response_class=Response)
-async def delete_bot(bot_id: str) -> Response:
+def delete_bot(bot_id: str) -> Response:
     bot_service.delete_bot_record(bot_id)
     return Response(status_code=204)
 
 
 @router.post("/{bot_id}/start")
-async def start_bot(
+def start_bot(
     bot_id: str,
-    body: Optional[BotStartRequest] = None,
+    body: BotStartRequest,
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
 ) -> Dict[str, Any]:
-    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
-    overrides = body.dict(exclude_none=True, exclude={"request_id"}) if body else {}
+    request_id = str(body.request_id or x_request_id or "").strip() or None
+    overrides = body.model_dump(exclude_none=True, exclude={"request_id"})
     try:
         return bot_service.start_bot(bot_id, request_id=request_id, start_overrides=overrides)
     except KeyError as exc:
@@ -289,15 +347,15 @@ async def start_bot(
 
 
 @router.post("/{bot_id}/runs/start")
-async def start_bot_run_context(
+def start_bot_run_context(
     bot_id: str,
-    body: Optional[BotStartRequest] = None,
+    body: BotStartRequest,
     x_request_id: Optional[str] = Header(default=None, alias="X-Request-ID"),
 ) -> Dict[str, Any]:
     """Start a run and return a compact run-context payload for CLI workflows."""
 
-    request_id = str((body.request_id if body else None) or x_request_id or "").strip() or None
-    overrides = body.dict(exclude_none=True, exclude={"request_id"}) if body else {}
+    request_id = str(body.request_id or x_request_id or "").strip() or None
+    overrides = body.model_dump(exclude_none=True, exclude={"request_id"})
     try:
         return bot_service.start_bot_run_context(bot_id, request_id=request_id, start_overrides=overrides)
     except KeyError as exc:
@@ -309,7 +367,7 @@ async def start_bot_run_context(
 
 
 @router.get("/{bot_id}/runs/{run_id}/status")
-async def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
+def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
     """Return compact run status for polling/watching long-running CLI work."""
 
     try:
@@ -321,7 +379,7 @@ async def get_bot_run_status(bot_id: str, run_id: str) -> Dict[str, Any]:
 
 
 @router.post("/{bot_id}/data-preflight")
-async def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict[str, Any]:
+def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict[str, Any]:
     """Return compact pre-run candle coverage for a bot/window."""
 
     try:
@@ -333,20 +391,22 @@ async def preflight_bot_data(bot_id: str, body: BotDataPreflightRequest) -> Dict
 
 
 @router.post("/{bot_id}/backtest-dataset/prepare")
-async def prepare_bot_backtest_dataset(
+def prepare_bot_backtest_dataset(
     bot_id: str,
     body: BotBacktestDatasetPrepareRequest,
 ) -> Dict[str, Any]:
     """Prepare and freeze historical material without starting execution."""
 
     try:
-        return bot_service.prepare_backtest_dataset(
-            bot_id,
-            evaluation_start=body.evaluation_start,
-            evaluation_end=body.evaluation_end,
-            acquire_missing=body.acquire_missing,
-            created_by=body.created_by,
-        )
+        prepare_kwargs: Dict[str, Any] = {
+            "evaluation_start": body.evaluation_start,
+            "evaluation_end": body.evaluation_end,
+            "acquire_missing": body.acquire_missing,
+            "created_by": body.created_by,
+        }
+        if body.numeric_acquisition is not None:
+            prepare_kwargs["numeric_acquisition"] = body.numeric_acquisition
+        return bot_service.prepare_backtest_dataset(bot_id, **prepare_kwargs)
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
@@ -355,7 +415,7 @@ async def prepare_bot_backtest_dataset(
         raise HTTPException(409, str(exc)) from exc
 
 @router.post("/{bot_id}/stop")
-async def stop_bot(
+def stop_bot(
     bot_id: str,
     body: Optional[BotStopRequest] = None,
     preserve_container: bool = False,
@@ -378,7 +438,7 @@ async def stop_bot(
 
 
 @router.post("/{bot_id}/runs/{run_id}/cancel")
-async def cancel_bot_run(
+def cancel_bot_run(
     bot_id: str,
     run_id: str,
     body: Optional[BotStopRequest] = None,
@@ -467,7 +527,7 @@ def bot_run_lifecycle_events(bot_id: str, run_id: str) -> Dict[str, Any]:
 
 
 @router.get("/{bot_id}/runs/{run_id}/forensics/signals/{signal_id}")
-async def bot_run_signal_forensics(
+def bot_run_signal_forensics(
     bot_id: str,
     run_id: str,
     signal_id: str,
@@ -485,7 +545,7 @@ async def bot_run_signal_forensics(
 
 
 @router.get("/{bot_id}/runs/{run_id}/forensics/events")
-async def bot_run_forensic_events(
+def bot_run_forensic_events(
     bot_id: str,
     run_id: str,
     after_seq: int = 0,
@@ -516,6 +576,30 @@ async def bot_run_forensic_events(
 
 
 
+
+
+@router.get("/runs/{run_id}")
+def bot_run_inspection(run_id: str) -> Dict[str, Any]:
+    """Return one exact run for read-only Operations and direct links."""
+
+    try:
+        return bot_service.get_bot_run_inspection(str(run_id))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/runs/{run_id}/botlens/bootstrap")
+async def bot_lens_exact_run_bootstrap(run_id: str) -> Dict[str, Any]:
+    """Return BotLens projection state for one exact active or historical run."""
+
+    try:
+        return await get_botlens_run_bootstrap(run_id=str(run_id))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/series")
@@ -585,7 +669,7 @@ async def bot_lens_symbol_detail(
 
 
 @router.get("/runs/{run_id}/series/{series_key}/chart")
-async def bot_lens_series_chart_history(
+def bot_lens_series_chart_history(
     run_id: str,
     series_key: str,
     start_time: Optional[str] = None,
@@ -686,6 +770,10 @@ async def bot_telemetry_ingest(websocket: WebSocket) -> None:
             **labels,
         )
         await telemetry_hub.ingest(payload)
+        # A hot socket may already have the next frame buffered, and intake
+        # routing commonly completes without blocking. Yield explicitly so
+        # Uvicorn can service protocol keepalives under sustained backtests.
+        await asyncio.sleep(0)
 
 
 
@@ -696,7 +784,7 @@ async def bot_lens_active_live(
     websocket: WebSocket,
 ) -> None:
     try:
-        resolved = resolve_active_botlens_stream(bot_id=str(bot_id))
+        resolved = await asyncio.to_thread(resolve_active_botlens_stream, bot_id=str(bot_id))
     except (KeyError, ValueError) as exc:
         await websocket.accept()
         logger.warning("botlens_live_ws_open_failed | bot_id=%s | error=%s", bot_id, str(exc))

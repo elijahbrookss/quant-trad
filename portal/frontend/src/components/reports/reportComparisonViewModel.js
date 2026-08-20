@@ -67,6 +67,7 @@ export const buildRunComparisonView = (payload = {}) => {
   const operational = payload.operational_drift || {}
   const firstDivergence = payload.first_divergence || {}
   const goldenEvidence = payload.golden_evidence || {}
+  const semanticEligibility = payload.semantic_eligibility || {}
 
   const trustRows = [
     {
@@ -137,6 +138,17 @@ export const buildRunComparisonView = (payload = {}) => {
     comparisonVerdict: payload.comparison_verdict || UNKNOWN,
     canCompare: payload.can_compare === true,
     blockedReason: payload.blocked_reason || null,
+    semanticEligibility: {
+      status: semanticEligibility.status || UNKNOWN,
+      equivalent: semanticEligibility.equivalent ?? null,
+      leftExecutionSemantics: semanticEligibility.left_execution_semantics || [],
+      rightExecutionSemantics: semanticEligibility.right_execution_semantics || [],
+      datasetMatch: semanticEligibility.dataset_match ?? null,
+      strategyMatch: semanticEligibility.strategy_match ?? null,
+      materialConfigMatch: semanticEligibility.material_config_match ?? null,
+      blockers: semanticEligibility.blockers || [],
+      statement: semanticEligibility.statement || null,
+    },
     trustRows,
     performanceMetrics: PERFORMANCE_DELTA_DEFS.map((definition) => ({
       ...definition,

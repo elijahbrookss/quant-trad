@@ -24,6 +24,77 @@ class _Response:
         return self._body
 
 
+def _capture_request(monkeypatch, response: bytes = b'{"ok":true}'):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        observed["method"] = request.get_method()
+        observed["path"] = urllib.parse.urlparse(request.full_url).path
+        observed["body"] = (
+            json.loads(request.data.decode("utf-8")) if request.data else None
+        )
+        return _Response(response)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return observed
+
+
+def test_research_authority_strategy_graph_create_posts_exact_payload(monkeypatch):
+    observed = _capture_request(monkeypatch)
+    payload = {
+        "actor_id": "agent:researcher",
+        "actor_role": "research_agent",
+        "request_id": "request-graph-1",
+        "family_id": "family-1",
+        "graph": {"schema_version": "typed_strategy_graph.v1"},
+        "mutation_dimensions": ["initial_graph"],
+    }
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "authority",
+            "strategy-graph-create",
+            "--payload-json",
+            json.dumps(payload),
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/research/authority/strategy-graphs",
+        "body": payload,
+    }
+
+
+def test_research_governance_transition_decision_uses_path_identity(monkeypatch):
+    observed = _capture_request(monkeypatch)
+    payload = {
+        "actor_id": "human:authority",
+        "actor_role": "research_authority",
+        "request_id": "decision-1",
+        "disposition": "approve",
+    }
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "research",
+            "authority",
+            "transition-decide",
+            "proposal-1",
+            "--payload-json",
+            json.dumps(payload),
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/research/governance/proposals/proposal-1/decide",
+        "body": payload,
+    }
+
+
 def test_research_observe_create_uses_memory_item_route(monkeypatch):
     observed = {}
 
@@ -118,8 +189,9 @@ def test_research_check_raw_builds_raw_condition_request(monkeypatch):
     assert exit_code == 0
     assert observed == {
         "method": "POST",
-        "path": "/api/research/checks/run",
+        "path": "/api/research/checks/evaluate",
         "body": {
+            "mode": "preview",
             "title": "ETH close follow-through",
             "check_family": "raw_forward_outcome",
             "observation_id": "obs-1",
@@ -176,8 +248,9 @@ def test_research_check_signal_builds_report_request(monkeypatch):
 
     assert exit_code == 0
     assert observed["method"] == "POST"
-    assert observed["path"] == "/api/research/checks/run"
+    assert observed["path"] == "/api/research/checks/evaluate"
     assert observed["body"] == {
+        "mode": "preview",
         "title": "Run signal check: confirmed_balance_breakout",
         "check_family": "run_signal_summary",
         "scope": {"run_id": "run-1"},
@@ -297,8 +370,9 @@ def test_research_check_audit_builds_signal_audit_request(monkeypatch):
 
     assert exit_code == 0
     assert observed["method"] == "POST"
-    assert observed["path"] == "/api/research/checks/run"
+    assert observed["path"] == "/api/research/checks/evaluate"
     assert observed["body"] == {
+        "mode": "preview",
         "title": "Signal audit: break_out",
         "check_family": "signal_audit",
         "scope": {
@@ -374,8 +448,9 @@ def test_research_check_lifecycle_builds_candidate_lifecycle_request(monkeypatch
 
     assert exit_code == 0
     assert observed["method"] == "POST"
-    assert observed["path"] == "/api/research/checks/run"
+    assert observed["path"] == "/api/research/checks/evaluate"
     assert observed["body"] == {
+        "mode": "preview",
         "title": "Lifecycle check: retest",
         "check_family": "candidate_lifecycle",
         "scope": {
@@ -601,3 +676,48 @@ def test_research_read_models_use_backend_routes(monkeypatch):
         ("GET", "/api/research/items/obs-1/trail", ""),
         ("GET", "/api/research/checks/compare", "left_check_id=check-a&right_check_id=check-b"),
     ]
+
+
+def test_canonical_research_check_cli_uses_shared_operation_routes(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        _ = timeout
+        calls.append(
+            (
+                request.get_method(),
+                urllib.parse.urlparse(request.full_url).path,
+                json.loads(request.data.decode("utf-8")) if request.data else None,
+            )
+        )
+        return _Response(b'{"schema_version":"ok"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    request = {
+        "check_family": "raw_forward_outcome",
+        "scope": {"instrument_id": "inst-1", "timeframe": "1h", "start": "a", "end": "b"},
+        "detector": {"type": "raw_condition", "field": "close", "operator": "gt", "value": 1},
+        "gap_policy": "reject",
+    }
+    encoded = json.dumps(request)
+
+    assert main(["--no-audit-log", "research", "check", "requirements", "--request-json", encoded]) == 0
+    assert main(["--no-audit-log", "research", "check", "preview", "--request-json", encoded]) == 0
+    assert main(["--no-audit-log", "research", "check", "prepare", "--request-json", encoded, "--freeze", "--created-by", "operator-1"]) == 0
+    assert main(["--no-audit-log", "research", "check", "run", "--request-json", encoded, "--dataset-id", "mds_1"]) == 0
+    assert main(["--no-audit-log", "research", "check", "replay", "check-1"]) == 0
+    assert main(["--no-audit-log", "research", "observe", "from-check", "check-1", "--title", "Evidence-backed"]) == 0
+
+    assert [row[:2] for row in calls] == [
+        ("POST", "/api/research/checks/requirements"),
+        ("POST", "/api/research/checks/evaluate"),
+        ("POST", "/api/research/checks/prepare"),
+        ("POST", "/api/research/checks/run"),
+        ("POST", "/api/research/checks/check-1/replay"),
+        ("POST", "/api/research/checks/check-1/observations"),
+    ]
+    assert calls[1][2]["mode"] == "preview"
+    assert calls[2][2]["preparation"] == {"freeze": True, "created_by": "operator-1"}
+    assert calls[3][2]["mode"] == "evidence"
+    assert calls[3][2]["dataset_id"] == "mds_1"
+    assert calls[5][2] == {"title": "Evidence-backed"}

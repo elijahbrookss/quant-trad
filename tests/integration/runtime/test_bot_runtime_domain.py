@@ -126,6 +126,56 @@ def test_risk_engine_advances_position_commit_seq_for_changed_trade_only():
     assert engine._trade_change_log == [(1, ("trade-a",))]
 
 
+def test_risk_engine_checks_only_touched_trade_for_material_change():
+    class _Trade:
+        def __init__(self, trade_id: str, *, entry_price: float) -> None:
+            self.trade_id = trade_id
+            self.direction = "long"
+            self.entry_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
+            self.entry_price = entry_price
+            self.stop_price = 95.0
+            self.moved_to_breakeven = False
+            self.trailing_active = False
+            self.closed_at = None
+            self.gross_pnl = 0.0
+            self.fees_paid = 0.0
+            self.net_pnl = 0.0
+            self.legs = []
+            self.position_commit_seq = 0
+
+    changed_trade = _Trade("trade-active", entry_price=100.0)
+    historical_trades = [
+        _Trade(f"trade-{index}", entry_price=200.0 + index)
+        for index in range(100)
+    ]
+    engine = LadderRiskEngine.__new__(LadderRiskEngine)
+    engine.trades = [*historical_trades, changed_trade]
+    engine.active_trade = changed_trade
+    engine.trade_revision = 0
+    engine._trade_change_log = []
+    engine._trade_change_log_max = 8192
+    engine._trade_material_signature_map = engine._trade_material_signature_by_id()
+    previous_signature = engine._cached_trade_material_signatures((changed_trade,))
+    original_signature = engine._trade_material_signature_for_trade
+    signature_calls = 0
+
+    def _counted_signature(trade):
+        nonlocal signature_calls
+        signature_calls += 1
+        return original_signature(trade)
+
+    engine._trade_material_signature_for_trade = _counted_signature
+    changed_trade.entry_price = 101.0
+
+    assert engine._bump_trade_revision_if_material_changed(
+        previous_signature,
+        touched_trades=(changed_trade,),
+    ) is True
+    assert signature_calls == 1
+    assert changed_trade.position_commit_seq == 1
+    assert all(trade.position_commit_seq == 0 for trade in historical_trades)
+
+
 def test_ladder_position_targets_and_stops():
     start = datetime(2024, 1, 1, tzinfo=timezone.utc)
     position = LadderPosition(
