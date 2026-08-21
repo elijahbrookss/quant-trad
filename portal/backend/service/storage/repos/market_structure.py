@@ -2049,17 +2049,28 @@ class PostgresMarketStructureRepository:
             )
             for fact in rows
         ]
+        canonical_by_key: dict[str, Any] = {}
+        batch_noop_count = 0
+        for fact in canonical:
+            prior = canonical_by_key.get(fact.observation_key)
+            if prior is None:
+                canonical_by_key[fact.observation_key] = fact
+                continue
+            if prior.material_hash != fact.material_hash:
+                raise MarketTradeConflictError(
+                    "market_trade_conflict: same provider trade ID has divergent "
+                    f"material product_id={fact.external_event_group_key} "
+                    f"trade_id={fact.external_event_key}"
+                )
+            batch_noop_count += 1
+        canonical = list(canonical_by_key.values())
         keys = [fact.observation_key for fact in canonical]
-        if len(keys) != len(set(keys)):
-            raise ValueError(
-                "market_trade_ingest_invalid: duplicate canonical observation key"
-            )
         heads = self._canonical_heads(
             series_id=claim.series_id,
             observation_keys=keys,
         )
         pending = []
-        noop_count = 0
+        noop_count = batch_noop_count
         for fact in canonical:
             head = heads.get(fact.observation_key)
             if head is None:

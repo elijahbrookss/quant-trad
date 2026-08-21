@@ -554,10 +554,12 @@ and every aggressive-flow/CVD feature is unavailable, not guessed.
 
 - provider identity is `(source_id, provider_product_id, provider_trade_id)`.
   The trade ID remains a string; numeric coercion is forbidden.
-- identical repeated material is idempotent. A conflicting same-ID material
-  value creates `provider_trade_conflict` evidence. If Coinbase later documents
-  corrections/busts, append a typed revision with that provider action;
-  otherwise fail admission rather than invent correction semantics.
+- identical repeated material is idempotent both within one archive/replay batch
+  and against the stored canonical head; extra deliveries count as no-ops. A
+  conflicting same-ID material value creates `provider_trade_conflict`
+  evidence. If Coinbase later documents corrections/busts, append a typed
+  revision with that provider action; otherwise fail admission rather than
+  invent correction semantics.
 - canonical event order is provider event time, then proven provider sequence,
   then receive ordinal/event/trade ordinal. Equal event times remain distinct.
 - a late trade is admitted with its original event time and later known-at. It

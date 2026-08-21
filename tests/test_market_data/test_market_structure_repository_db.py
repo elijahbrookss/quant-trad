@@ -516,9 +516,11 @@ def test_trade_archive_coverage_and_aggregate_are_fenced_and_idempotent(
         accepted_at=received_at + timedelta(milliseconds=1),
         coverage_interval_id=coverage_id,
     )
-    first = market_structure_repository.ingest_trades(claim, facts=[fact])
+    first = market_structure_repository.ingest_trades(claim, facts=[fact, fact])
     repeated = market_structure_repository.ingest_trades(claim, facts=[fact])
+    assert first.requested_count == 2
     assert first.inserted_count == 1
+    assert first.noop_count == 1
     assert repeated.noop_count == 1
     assert market_structure_repository.read_trades(
         series_id=trade_series_id,
