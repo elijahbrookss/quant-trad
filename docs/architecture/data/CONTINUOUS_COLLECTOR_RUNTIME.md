@@ -174,6 +174,9 @@ L2 recovery therefore selects the latest verified checkpoint strictly before
 the first retained record, replays only earlier acknowledged archives, and then
 re-applies every retained segment idempotently. It does not try to reconcile a
 pre-tail reducer against a watermark that can already include that same tail.
+When the immutable book Fact already exists, recovery reuses its persisted
+acceptance clock; an interrupted post-book feature stage can therefore be
+repaired without manufacturing a correction to the canonical source Fact.
 This rule belongs to the L2 projection adapter; lease, WAL, queue, lifecycle,
 and restart orchestration remain provider- and projection-neutral.
 

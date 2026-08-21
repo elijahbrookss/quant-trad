@@ -416,6 +416,23 @@ class _Level2Repository:
             return None
         return dict(self.reconstruction)
 
+    def get_book_fact_accepted_at(self, *, position, **_kwargs):
+        expected = (
+            int(position["connection_epoch"]),
+            int(position["receive_ordinal"]),
+            int(position["event_ordinal"]),
+        )
+        for ingest in reversed(self.book_ingests):
+            for fact in (*ingest["snapshots"], *ingest["batches"]):
+                actual = (
+                    fact.event.position.connection_epoch,
+                    fact.event.position.receive_ordinal,
+                    fact.event.position.event_ordinal,
+                )
+                if actual == expected:
+                    return fact.event.accepted_at
+        return None
+
     def list_book_checkpoints(self, **_kwargs):
         return [dict(row) for row in self.checkpoint_rows]
 
@@ -735,6 +752,9 @@ def test_continuous_level2_recovery_rewinds_partially_committed_spool(
     assert retained.sealed_path.exists()
     assert repository.reconstruction is not None
     assert repository.reconstruction["receive_ordinal"] == 2
+    original_batch_accepted_at = repository.book_ingests[-1]["batches"][
+        0
+    ].event.accepted_at
 
     entries = [(retained.sealed_path, DurableRawSpoolSegment.from_path(retained.sealed_path))]
     context = projection.begin_recovery(
@@ -771,6 +791,10 @@ def test_continuous_level2_recovery_rewinds_partially_committed_spool(
 
     assert repository.reconstruction["receive_ordinal"] == 2
     assert repository.reconstruction["lifecycle"] == "invalid"
+    assert (
+        repository.book_ingests[-1]["batches"][0].event.accepted_at
+        == original_batch_accepted_at
+    )
     assert not retained.sealed_path.exists()
 
 

@@ -532,6 +532,7 @@ class CoinbaseLevel2BookProjectionAdapter:
             event_writer=event_writer,
             states=states,
             counters=context["counters"],
+            preserve_existing_fact_clocks=True,
         )
         analyzer.quality.clear()
         return len(records)
@@ -1751,6 +1752,7 @@ class ContinuousStreamRuntime:
         event_writer: _SessionEventWriter,
         states: dict[int, _EpochProjectionState],
         counters: dict[str, int],
+        preserve_existing_fact_clocks: bool = False,
     ) -> None:
         """Archive and incrementally reduce one continuous Level 2 segment."""
 
@@ -1885,11 +1887,26 @@ class ContinuousStreamRuntime:
                     "market_l2_update",
                 }:
                     continue
+                accepted_at = datetime.now(UTC)
+                if preserve_existing_fact_clocks:
+                    position_probe = translate_coinbase_l2_event(
+                        event,
+                        raw_record=record,
+                        contract=contract,
+                        accepted_at=record.received_at,
+                    )
+                    accepted_at = (
+                        self.repository.get_book_fact_accepted_at(
+                            series_id=claim.series_id,
+                            position=position_probe.position.material(),
+                        )
+                        or accepted_at
+                    )
                 fact = translate_coinbase_l2_event(
                     event,
                     raw_record=record,
                     contract=contract,
-                    accepted_at=datetime.now(UTC),
+                    accepted_at=accepted_at,
                 )
                 max_event_ordinal_by_receive[record.receive_ordinal] = max(
                     fact.position.event_ordinal,

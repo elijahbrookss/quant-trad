@@ -1153,6 +1153,10 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
     assert first.inserted_validity_count == 2
     assert repeated.noop_snapshot_count == repeated.noop_batch_count == 1
     assert repeated.inserted_validity_count == 0
+    assert market_structure_repository.get_book_fact_accepted_at(
+        series_id=series_id,
+        position=last_fact.position.material(),
+    ) == last_fact.accepted_at
     valuation = MarketStateValuationContract(
         product_definition_version_id=product_definition_id,
         provider_size_unit="base",

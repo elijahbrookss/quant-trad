@@ -116,6 +116,14 @@ def _version_id(prefix: str, payload: Mapping[str, Any]) -> str:
     return f"{prefix}_{_stable_hash(payload)}"
 
 
+def _book_observation_key(position: Mapping[str, Any]) -> str:
+    return (
+        f"{position['definition_id']}:{position['session_id']}:"
+        f"{int(position['connection_epoch'])}:{int(position['receive_ordinal'])}:"
+        f"{int(position['event_ordinal'])}"
+    )
+
+
 @dataclass(frozen=True)
 class StreamClaim:
     definition_id: str
@@ -211,11 +219,7 @@ def _require_book_state_source(
 ) -> None:
     """Require a canonical archive-acknowledged snapshot or mutation state."""
 
-    observation_key = (
-        f"{position['definition_id']}:{position['session_id']}:"
-        f"{int(position['connection_epoch'])}:{int(position['receive_ordinal'])}:"
-        f"{int(position['event_ordinal'])}"
-    )
+    observation_key = _book_observation_key(position)
     found = session.execute(
         text(
             """
@@ -3652,6 +3656,34 @@ class PostgresMarketStructureRepository:
                 },
             ).mappings().first()
         return dict(row) if row is not None else None
+
+    def get_book_fact_accepted_at(
+        self,
+        *,
+        series_id: int,
+        position: Mapping[str, Any],
+    ) -> Optional[datetime]:
+        """Return the immutable acceptance clock for an already-persisted event."""
+
+        with db.session() as session:
+            value = session.execute(
+                text(
+                    """
+                    SELECT accepted_at
+                    FROM market.fact_versions
+                    WHERE series_id = :series_id
+                      AND observation_key = :observation_key
+                      AND payload_schema_id = 'market.l2_book.v1'
+                    ORDER BY revision DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "series_id": int(series_id),
+                    "observation_key": _book_observation_key(position),
+                },
+            ).scalar_one_or_none()
+        return _utc(value) if value is not None else None
 
     def get_book_validity_opening(
         self, *, series_id: int, interval_id: str
