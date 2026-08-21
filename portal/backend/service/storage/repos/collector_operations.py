@@ -366,6 +366,44 @@ class PostgresCollectorOperationsRepository:
             ).mappings().all()
         return {int(row["series_id"]): _public_row(row) for row in rows}
 
+    def continuous_stream_telemetry(
+        self, *, definition_ids: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return provider activity without treating Fact flow as liveness."""
+
+        normalized_ids = sorted(
+            {str(value).strip() for value in definition_ids if str(value).strip()}
+        )
+        if not normalized_ids:
+            return {}
+        with db.session() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT definitions.id AS definition_id,
+                           latest.last_provider_activity_at
+                    FROM market.stream_definitions AS definitions
+                    LEFT JOIN LATERAL (
+                        SELECT ranges.max_received_at AS last_provider_activity_at
+                        FROM market.raw_archive_manifests AS manifests
+                        JOIN market.raw_archive_ranges AS ranges
+                          ON ranges.manifest_id = manifests.id
+                        WHERE manifests.definition_id = definitions.id
+                          AND ranges.channel <> 'subscriptions'
+                        ORDER BY manifests.first_received_at DESC,
+                                 ranges.max_received_at DESC
+                        LIMIT 1
+                    ) AS latest ON TRUE
+                    WHERE definitions.id = ANY(:definition_ids)
+                    """
+                ),
+                {"definition_ids": normalized_ids},
+            ).mappings().all()
+        return {
+            str(row["definition_id"]): _public_row(row)
+            for row in rows
+        }
+
     def recent_facts(
         self,
         *,

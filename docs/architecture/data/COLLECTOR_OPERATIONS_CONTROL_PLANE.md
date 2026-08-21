@@ -15,7 +15,7 @@ tags:
 code_paths:
   - src/market_data/collector_operations.py
   - portal/backend/db/market_data_models.py
-  - portal/backend/service/market/collector_operations.py
+  - portal/backend/service/market/collector_operations_service.py
   - portal/backend/service/storage/repos/collector_operations.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/collector_supervisor.py
@@ -124,6 +124,16 @@ Scheduled attempts already preserve stage timings and insertion/noop evidence.
 Continuous streams preserve raw archive ranges, mappings, session events,
 coverage, quality, and Facts. The operations projector normalizes those sources;
 it does not copy them into a competing event ledger.
+
+Continuous health keeps transport liveness separate from canonical Fact flow.
+The latest archived non-subscription provider frame, including an enrolled
+heartbeat, establishes provider activity and drives the running-stream freshness
+projection. `last_accepted_fact_at` and Fact throughput remain separate
+persistence evidence. A valid quiet stream therefore stays healthy when its
+provider heartbeat is current even if its primary domain channel has emitted no
+new canonical Fact. The freshness threshold accounts for the reviewed segment
+rotation policy so asynchronous archive finalization does not create a false
+delay.
 
 The common recent-activity contract maps evidence to stable event kinds such as
 `fact_accepted`, `provider_succeeded`, `retry_scheduled`, `provider_failed`,

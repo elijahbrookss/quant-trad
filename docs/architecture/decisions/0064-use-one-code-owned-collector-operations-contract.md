@@ -14,7 +14,7 @@ tags:
   - audit
 code_paths:
   - src/market_data/collector_operations.py
-  - portal/backend/service/market/collector_operations.py
+  - portal/backend/service/market/collector_operations_service.py
   - portal/backend/service/storage/repos/collector_operations.py
   - portal/backend/controller/market_data.py
   - portal/backend/workers/market_data_collector.py

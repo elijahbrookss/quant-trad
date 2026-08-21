@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping
 
+from data_providers.streams.runtime import ContinuousStreamPolicy
 from market_data.collector_operations import (
     COLLECTOR_DETAIL_VERSION,
     COLLECTOR_DIAGNOSTIC_VERSION,
@@ -213,7 +214,7 @@ class CollectorOperationsService:
         retrying: bool,
         recovering: bool,
         has_error: bool,
-        has_accepted_fact: bool,
+        has_acquisition_evidence: bool,
         freshness_ok: bool | None,
     ) -> CollectorActualState:
         if configured_state == CollectorConfiguredState.DISABLED:
@@ -240,7 +241,7 @@ class CollectorOperationsService:
             return CollectorActualState.DEGRADED
         if has_error:
             return CollectorActualState.DEGRADED
-        if not has_accepted_fact:
+        if not has_acquisition_evidence:
             return CollectorActualState.STARTING
         if freshness_ok is False:
             return CollectorActualState.DEGRADED
@@ -489,7 +490,7 @@ class CollectorOperationsService:
             retrying=retrying,
             recovering=False,
             has_error=bool(error and not retrying),
-            has_accepted_fact=last_accepted is not None,
+            has_acquisition_evidence=last_accepted is not None,
             freshness_ok=freshness_ok,
         )
         return {
@@ -532,6 +533,8 @@ class CollectorOperationsService:
                 ),
                 "freshness_seconds": freshness_seconds,
                 "freshness_ok": freshness_ok,
+                "freshness_basis": "accepted_fact",
+                "freshness_threshold_seconds": max(120.0, cadence * 3.0),
             },
             "throughput": {
                 "accepted_last_minute": int(
@@ -581,6 +584,7 @@ class CollectorOperationsService:
         worker: Mapping[str, Any] | None,
         supervisor: Mapping[str, Any],
         telemetry: Mapping[str, Any],
+        stream_telemetry: Mapping[str, Any],
         now: datetime,
     ) -> dict[str, Any]:
         configured_state, registration_errors = self._continuous_registration(
@@ -593,9 +597,16 @@ class CollectorOperationsService:
         error = errors.get(str(definition["id"])) or task.get("last_error")
         worker_projection = self._worker_projection(worker, now=now)
         last_accepted = telemetry.get("last_accepted_at")
-        freshness_seconds = _seconds_since(last_accepted, now=now)
+        last_provider_activity = stream_telemetry.get("last_provider_activity_at")
+        runtime_policy = ContinuousStreamPolicy.from_mapping(
+            dict(definition.get("config") or {}).get("runtime_policy")
+        )
+        freshness_threshold = max(120.0, runtime_policy.segment_max_seconds * 2.0)
+        freshness_seconds = _seconds_since(last_provider_activity, now=now)
         freshness_ok = (
-            freshness_seconds <= 120.0 if freshness_seconds is not None else None
+            freshness_seconds <= freshness_threshold
+            if freshness_seconds is not None
+            else None
         )
         active = bool(task) or bool(definition.get("lease_current"))
         retrying = bool(error and not task and desired_state == CollectorDesiredState.RUNNING)
@@ -607,7 +618,7 @@ class CollectorOperationsService:
             retrying=retrying,
             recovering=False,
             has_error=bool(error and not retrying),
-            has_accepted_fact=last_accepted is not None,
+            has_acquisition_evidence=last_provider_activity is not None,
             freshness_ok=freshness_ok,
         )
         return {
@@ -647,13 +658,15 @@ class CollectorOperationsService:
                 "cadence_seconds": None,
                 "trigger": "provider_stream",
                 "channels": list(definition.get("channels") or []),
-                "last_provider_success_at": _iso(last_accepted),
+                "last_provider_success_at": _iso(last_provider_activity),
                 "last_accepted_fact_at": _iso(last_accepted),
                 "last_observation_time": _iso(
                     telemetry.get("last_observation_time")
                 ),
                 "freshness_seconds": freshness_seconds,
                 "freshness_ok": freshness_ok,
+                "freshness_basis": "provider_activity",
+                "freshness_threshold_seconds": freshness_threshold,
             },
             "throughput": {
                 "accepted_last_minute": int(
@@ -752,6 +765,9 @@ class CollectorOperationsService:
         telemetry = self.operations_repository.fact_series_telemetry(
             series_ids=all_series_ids
         )
+        stream_telemetry = self.operations_repository.continuous_stream_telemetry(
+            definition_ids=[str(definition["id"]) for definition in continuous]
+        )
 
         collectors = [
             self._project_scheduled(
@@ -768,6 +784,7 @@ class CollectorOperationsService:
                 worker=worker,
                 supervisor=supervisor,
                 telemetry=telemetry.get(int(definition["series_id"]), {}),
+                stream_telemetry=stream_telemetry.get(str(definition["id"]), {}),
                 now=now,
             )
             for definition in continuous
@@ -1233,6 +1250,14 @@ class CollectorOperationsService:
             )
         )
         freshness_ok = collector["acquisition"]["freshness_ok"]
+        freshness_basis = str(
+            collector["acquisition"].get("freshness_basis") or "accepted_fact"
+        )
+        freshness_subject = (
+            "provider activity"
+            if freshness_basis == "provider_activity"
+            else "accepted facts"
+        )
         boundaries.append(
             self._diagnostic_item(
                 CollectorDiagnosticBoundary.FRESHNESS,
@@ -1241,9 +1266,9 @@ class CollectorOperationsService:
                 else CollectorDiagnosticStatus.FAIL
                 if freshness_ok is False
                 else CollectorDiagnosticStatus.UNKNOWN,
-                "accepted facts are fresh"
+                f"{freshness_subject} is fresh"
                 if freshness_ok is True
-                else "accepted facts are stale"
+                else f"{freshness_subject} is stale"
                 if freshness_ok is False
                 else "freshness cannot be established yet",
                 {
@@ -1251,6 +1276,10 @@ class CollectorOperationsService:
                         "freshness_seconds"
                     ],
                     "freshness_ok": freshness_ok,
+                    "freshness_basis": freshness_basis,
+                    "freshness_threshold_seconds": collector["acquisition"].get(
+                        "freshness_threshold_seconds"
+                    ),
                 },
             )
         )

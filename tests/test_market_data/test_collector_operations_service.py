@@ -154,6 +154,14 @@ class _OperationsRepository:
             },
         }
 
+    def continuous_stream_telemetry(self, *, definition_ids):
+        assert definition_ids == ["coinbase-trades"]
+        return {
+            "coinbase-trades": {
+                "last_provider_activity_at": NOW - timedelta(seconds=1),
+            }
+        }
+
     def apply_lifecycle_action(self, **kwargs):
         self.last_action = dict(kwargs)
         error = kwargs.get("precondition_error")
@@ -208,6 +216,10 @@ def test_fleet_snapshot_projects_both_collector_families_without_provider_ui_log
         "market.trade_flow_feature",
     }
     assert stream["runtime"]["restart_count"] == 1
+    assert stream["acquisition"]["freshness_basis"] == "provider_activity"
+    assert stream["acquisition"]["last_provider_success_at"] == (
+        NOW - timedelta(seconds=1)
+    ).isoformat()
     assert "health_probe" in stream["capabilities"]["actions"]
     assert all(
         "health_probe" in item["capabilities"]["actions"]
@@ -283,6 +295,41 @@ def test_level2_registration_and_outputs_are_projection_declared() -> None:
     )
 
 
+def test_continuous_health_uses_provider_activity_when_fact_flow_is_quiet():
+    class _QuietStreamOperationsRepository(_OperationsRepository):
+        def fact_series_telemetry(self, *, series_ids):
+            telemetry = super().fact_series_telemetry(series_ids=series_ids)
+            telemetry[21] = {
+                "last_observation_time": NOW - timedelta(minutes=10),
+                "last_accepted_at": NOW - timedelta(minutes=10),
+                "accepted_last_minute": 0,
+                "accepted_last_five_minutes": 0,
+            }
+            return telemetry
+
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=_QuietStreamOperationsRepository(),
+        stream_registry=CollectorAdapterRegistry((_StreamAdapter(),)),
+        clock=lambda: NOW,
+    )
+
+    stream = next(
+        item
+        for item in service.fleet_snapshot()["collectors"]
+        if item["collector_kind"] == "continuous_stream"
+    )
+
+    assert stream["actual_state"] == "HEALTHY"
+    assert stream["health_status"] == "HEALTHY"
+    assert stream["throughput"]["accepted_last_minute"] == 0
+    assert stream["acquisition"]["last_accepted_fact_at"] == (
+        NOW - timedelta(minutes=10)
+    ).isoformat()
+    assert stream["acquisition"]["freshness_seconds"] == 1.0
+
+
 def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
     derive = CollectorOperationsService._actual_state
 
@@ -294,7 +341,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=False,
         recovering=False,
         has_error=False,
-        has_accepted_fact=True,
+        has_acquisition_evidence=True,
         freshness_ok=True,
     ) == CollectorActualState.DISABLED
     assert derive(
@@ -305,7 +352,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=False,
         recovering=False,
         has_error=False,
-        has_accepted_fact=False,
+        has_acquisition_evidence=False,
         freshness_ok=None,
     ) == CollectorActualState.STOPPED
     assert derive(
@@ -316,7 +363,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=False,
         recovering=False,
         has_error=False,
-        has_accepted_fact=True,
+        has_acquisition_evidence=True,
         freshness_ok=True,
     ) == CollectorActualState.STOPPING
     assert derive(
@@ -327,7 +374,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=True,
         recovering=False,
         has_error=True,
-        has_accepted_fact=True,
+        has_acquisition_evidence=True,
         freshness_ok=False,
     ) == CollectorActualState.RETRYING
 
