@@ -79,6 +79,7 @@ from market_data.structure import (
     TradeFlowAggregateFact,
     TradeFlowAggregateRecord,
 )
+from market_data.stream_quality import normalize_stream_quality_classification
 
 from ._shared import db
 from .market_data import market_data_repo
@@ -1827,16 +1828,7 @@ class PostgresMarketStructureRepository:
         sequence_after: Optional[int] = None,
         evidence: Optional[Mapping[str, Any]] = None,
     ) -> str:
-        allowed = {
-            "sequence_gap", "out_of_order", "duplicate", "divergent_duplicate",
-            "heartbeat_gap", "disconnect", "decode_error", "archive_loss",
-            "provider_trade_conflict", "canonicalization_lag", "backpressure_stop",
-            "book_invalid", "unknown_zero_delete", "update_before_snapshot",
-            "resync_snapshot_accepted",
-        }
-        normalized = str(classification).strip().lower()
-        if normalized not in allowed:
-            raise ValueError("market_stream_quality_invalid: unsupported classification")
+        normalized = normalize_stream_quality_classification(classification)
         detected = _utc(detected_at)
         material = {
             "schema_version": "market.stream_quality_event.v1",

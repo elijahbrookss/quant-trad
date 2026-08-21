@@ -15,6 +15,7 @@ tags:
   - known-at
   - active
 code_paths:
+  - src/market_data/stream_quality.py
   - src/data_providers/streams
   - src/data_providers/providers/coinbase.py
   - src/market_data
@@ -334,11 +335,16 @@ No hot query scans raw frame bytes.
 affects a canonical series also creates immutable generic gap evidence with a
 reference back to the transport event.
 
-Its classification is a closed versioned enum, initially `sequence_gap`,
-`out_of_order`, `duplicate`, `divergent_duplicate`, `heartbeat_gap`,
-`disconnect`, `decode_error`, `archive_loss`, `book_invalid`,
-`resync_started`, and `resync_snapshot_accepted`. Sequence, ordinal, state-hash,
-and reason fields are typed columns; this is not an opaque JSON error bucket.
+Its classification is the shared closed v1 enum in
+`src/market_data/stream_quality.py`: `sequence_gap`, `out_of_order`, `duplicate`,
+`divergent_duplicate`, `heartbeat_gap`, `disconnect`, `decode_error`,
+`archive_loss`, `provider_trade_conflict`, `canonicalization_lag`,
+`backpressure_stop`, `book_invalid`, `unknown_zero_delete`,
+`update_before_snapshot`, `collector_restart_gap`, `resync_started`, and
+`resync_snapshot_accepted`. Sequence, ordinal, state-hash, and reason fields are
+typed columns; this is not an opaque JSON error bucket. Restart replay uses the
+same contract as live capture, so durable recovery evidence cannot drift from
+the persistence validator.
 
 A raw record becomes `archive_complete` only when at least one acknowledged,
 non-expired or dataset-pinned manifest mapping matches its exact SHA-256. A

@@ -16,6 +16,7 @@ from market_data.archive import (
     FilesystemRawArchiveObjectStore,
 )
 from market_data.structure import RawStreamRecord
+from market_data.stream_quality import normalize_stream_quality_classification
 from portal.backend.service.market.continuous_stream_collector import (
     CoinbaseContinuousTransportAdapter,
     CoinbaseMarketTradeProjectionAdapter,
@@ -389,6 +390,9 @@ class _Level2Repository:
         return SimpleNamespace(inserted_count=count, noop_count=0)
 
     def record_quality_event(self, _claim, **kwargs):
+        kwargs["classification"] = normalize_stream_quality_classification(
+            kwargs["classification"]
+        )
         self.quality.append(dict(kwargs))
         return f"quality-{len(self.quality)}"
 
@@ -550,6 +554,10 @@ def test_continuous_level2_segments_preserve_state_and_close_restart_gap(
     assert any(
         row.status.value == "closed_invalidated"
         for row in repository.book_ingests[-1]["validity_versions"]
+    )
+    assert any(
+        row["classification"] == "collector_restart_gap"
+        for row in repository.quality
     )
     assert states == {}
     assert not tuple((tmp_path / "spool").rglob("*.open"))
