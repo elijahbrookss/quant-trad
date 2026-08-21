@@ -172,6 +172,9 @@ def test_deploy_helper_never_runs_migrations_and_verifies_every_app_image():
     assert "verify_initializer" in deploy
     assert "previous_revision" in deploy
     assert "credentials-coinbase)" in deploy
+    assert "will be enrolled without credentials" in deploy
+    assert "credentials are optional" in deploy
+    assert "load provider credentials before judging" not in deploy
     assert 'compose exec -T backend /app/scripts/qt setup provider coinbase "$@"' in deploy
     assert '$deployment_root/secrets.env' in deploy
     assert '$repo_root/secrets.env' not in deploy

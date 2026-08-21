@@ -385,7 +385,8 @@ run_doctor() {
   echo "Market-data available bytes: $available_bytes"
   echo "State root: $state_root"
   if test "$(env_value QT_SINGLE_NODE_BOOTSTRAP_MARKET_DATA)" != "false"; then
-    echo "Coinbase definitions will be enrolled; load provider credentials before judging acquisition health."
+    echo "Public Coinbase OI, funding, trade, and L2 definitions will be enrolled without credentials."
+    echo "Provider credentials are optional unless an authenticated enrollment or operation is selected."
   fi
 }
 
