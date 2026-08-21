@@ -458,10 +458,9 @@ class CollectorOperationsService:
         )
         desired_state = CollectorDesiredState(definition["desired_state"])
         cadence = int(definition["poll_interval_seconds"])
-        last_accepted = telemetry.get("last_accepted_at") or definition.get(
-            "last_success_at"
-        )
-        freshness_seconds = _seconds_since(last_accepted, now=now)
+        last_accepted = telemetry.get("last_accepted_at")
+        last_provider_activity = definition.get("last_success_at") or last_accepted
+        freshness_seconds = _seconds_since(last_provider_activity, now=now)
         freshness_ok = (
             freshness_seconds <= max(120.0, cadence * 3.0)
             if freshness_seconds is not None
@@ -490,7 +489,7 @@ class CollectorOperationsService:
             retrying=retrying,
             recovering=False,
             has_error=bool(error and not retrying),
-            has_acquisition_evidence=last_accepted is not None,
+            has_acquisition_evidence=last_provider_activity is not None,
             freshness_ok=freshness_ok,
         )
         return {
@@ -526,14 +525,14 @@ class CollectorOperationsService:
                 "cadence_seconds": cadence,
                 "next_scheduled_at": _iso(definition.get("next_scheduled_at")),
                 "last_attempt_at": _iso(definition.get("last_attempt_at")),
-                "last_provider_success_at": _iso(definition.get("last_success_at")),
+                "last_provider_success_at": _iso(last_provider_activity),
                 "last_accepted_fact_at": _iso(last_accepted),
                 "last_observation_time": _iso(
                     telemetry.get("last_observation_time")
                 ),
                 "freshness_seconds": freshness_seconds,
                 "freshness_ok": freshness_ok,
-                "freshness_basis": "accepted_fact",
+                "freshness_basis": "provider_activity",
                 "freshness_threshold_seconds": max(120.0, cadence * 3.0),
             },
             "throughput": {

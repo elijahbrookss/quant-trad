@@ -172,6 +172,18 @@ class _OperationsRepository:
         }
 
 
+class _QuietScheduledOperationsRepository(_OperationsRepository):
+    def fact_series_telemetry(self, *, series_ids):
+        telemetry = super().fact_series_telemetry(series_ids=series_ids)
+        telemetry[11] = {
+            "last_observation_time": NOW - timedelta(hours=4),
+            "last_accepted_at": NOW - timedelta(hours=4),
+            "accepted_last_minute": 0,
+            "accepted_last_five_minutes": 0,
+        }
+        return telemetry
+
+
 class _StreamAdapter:
     adapter_id = "fixture.trades.v1"
 
@@ -225,6 +237,33 @@ def test_fleet_snapshot_projects_both_collector_families_without_provider_ui_log
         "health_probe" in item["capabilities"]["actions"]
         for item in snapshot["collectors"]
     )
+
+
+def test_scheduled_noop_success_keeps_liveness_separate_from_fact_flow() -> None:
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=_QuietScheduledOperationsRepository(),
+        stream_registry=CollectorAdapterRegistry((_StreamAdapter(),)),
+        clock=lambda: NOW,
+    )
+
+    scheduled = next(
+        item
+        for item in service.fleet_snapshot()["collectors"]
+        if item["collector_kind"] == "scheduled_fact"
+    )
+
+    assert scheduled["actual_state"] == "HEALTHY"
+    assert scheduled["acquisition"]["freshness_basis"] == "provider_activity"
+    assert scheduled["acquisition"]["freshness_seconds"] == 10.0
+    assert scheduled["acquisition"]["last_provider_success_at"] == (
+        NOW - timedelta(seconds=10)
+    ).isoformat()
+    assert scheduled["acquisition"]["last_accepted_fact_at"] == (
+        NOW - timedelta(hours=4)
+    ).isoformat()
+    assert scheduled["throughput"]["accepted_last_minute"] == 0
 
 
 def test_level2_registration_and_outputs_are_projection_declared() -> None:

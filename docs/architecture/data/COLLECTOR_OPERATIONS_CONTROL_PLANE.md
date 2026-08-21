@@ -135,6 +135,14 @@ new canonical Fact. The freshness threshold accounts for the reviewed segment
 rotation policy so asynchronous archive finalization does not create a false
 delay.
 
+Scheduled health uses the same separation. A successful provider attempt is
+fresh provider activity even when canonical persistence reports a content-hash
+no-op for an unchanged observation. `last_provider_success_at` therefore drives
+the scheduled liveness projection, while `last_accepted_fact_at`, observation
+time, insertion/noop evidence, and Fact throughput remain independent
+persistence evidence. No-op deduplication must not turn a healthy low-change
+source into a delayed collector.
+
 The common recent-activity contract maps evidence to stable event kinds such as
 `fact_accepted`, `provider_succeeded`, `retry_scheduled`, `provider_failed`,
 `gap_opened`, `gap_recovered`, `ownership_acquired`, `restart`, `pause`, and
