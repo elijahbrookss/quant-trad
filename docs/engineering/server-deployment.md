@@ -182,18 +182,40 @@ The first release enrolls and starts the reviewed market-data fleet by default:
 Enrollment owns initial state only. Reapplying a release updates reviewed
 configuration without undoing a later audited stop, pause, or safety halt.
 
-On a clean database, load Coinbase credentials once through the encrypted
-provider credential store:
+The default `market_trades`, `level2`, and `heartbeats` subscriptions are
+public Coinbase channels, so a clean single-node deployment starts those six
+continuous streams without credentials. Authentication remains an explicit
+per-enrollment option; the transport creates JWTs only for definitions whose
+reviewed manifest selects `auth_mode: authenticated`.
+
+When authenticated subscriptions or account-scoped provider workflows are
+needed, load Coinbase credentials once through the encrypted provider
+credential store. Coinbase recommends Ed25519 keys, and the deployment lock
+supports raw 32-byte or 64-byte base64 Ed25519 private-key material as issued
+by the CDP portal:
 
 ```bash
 bash scripts/automation/server_deploy.sh credentials-coinbase
 ```
 
 The command is interactive and does not echo credentials into release state or
-the operator environment file. Until credentials exist, the worker remains
-observable and retries fail visibly; that is not evidence of provider health.
-Once stored, all enabled definitions are eligible on the next normal supervisor
-or scheduler pass.
+the operator environment file. To import the downloaded CDP JSON directly from
+a WSL client without copying it onto the server or transforming it with `jq`,
+pipe it over SSH:
+
+```bash
+ssh qt-server \
+  'cd /srv/quanttrad/app && bash scripts/automation/server_deploy.sh credentials-coinbase --cdp-key-file - --no-input' \
+  < /mnt/c/Users/<you>/Downloads/coinbase/cdp_api_key.json
+```
+
+The importer accepts Coinbase's `name` or `id` key identifier and its
+`privateKey`, proves locally that the material can sign a WebSocket JWT, and
+reports only `EdDSA` or `ES256`. It never returns the key or signed token.
+Credential-store validation proves encrypted storage and required-field
+presence; use a bounded authenticated stream smoke check when provider-side
+acceptance must also be proven. Public definitions remain eligible whether or
+not a credential is stored.
 
 The default Chainlink binding reads a public Arbitrum JSON-RPC endpoint from
 `CHAINLINK_ARBITRUM_RPC_URL`; `init-env` supplies the public mainnet endpoint and

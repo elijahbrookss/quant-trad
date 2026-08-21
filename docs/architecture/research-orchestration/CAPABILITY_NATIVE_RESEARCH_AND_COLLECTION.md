@@ -17,6 +17,7 @@ code_paths:
   - src/market_data/stream_enrollment.py
   - portal/backend/service/market/collector_safety.py
   - config/market_data/coinbase_perpetual_trade_fleet.v1.json
+  - config/market_data/coinbase_perpetual_l2_fleet.v1.json
 ---
 # Capability-Native Research and Collection
 
@@ -74,11 +75,13 @@ StreamEnrollment manifest
   -> provider frames -> durable spool -> archive -> canonical facts
 ```
 
-The Coinbase perpetual trade fleet currently enrolls BIP, ETP, and SLP. Each
-has no `stop_at`; the worker runs it until an operator stop, a persistent
+The Coinbase perpetual trade and L2 fleets currently enroll BIP, ETP, and SLP.
+Each has no `stop_at`; the worker runs it until an operator stop, a persistent
 safety latch, or a fail-closed local spool condition. A compatible product is
-added by manifest data and catalog registration. L2 remains outside the
-continuous adapter registry.
+added by manifest data and catalog registration. Authentication is enrollment
+data rather than collector ownership: the single-node public market channels
+use `auth_mode: public`, while another reviewed manifest may explicitly select
+authenticated transport without changing the supervisor or projection path.
 
 ## Safety semantics
 

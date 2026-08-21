@@ -54,7 +54,7 @@ Usage:
   scripts/automation/server_deploy.sh release
   scripts/automation/server_deploy.sh status
   scripts/automation/server_deploy.sh fleet
-  scripts/automation/server_deploy.sh credentials-coinbase
+  scripts/automation/server_deploy.sh credentials-coinbase [setup-options]
   scripts/automation/server_deploy.sh logs [service]
   scripts/automation/server_deploy.sh stop
 
@@ -102,7 +102,9 @@ values = {
     "POSTGRES_DB": "quanttrad",
     "POSTGRES_USER": "quanttrad",
     "POSTGRES_PASSWORD": password(),
-    "PGADMIN_DEFAULT_EMAIL": "admin@quanttrad.local",
+    # pgAdmin rejects special-use domains such as .local even when email
+    # deliverability checks are disabled. This is only the local login name.
+    "PGADMIN_DEFAULT_EMAIL": "admin@quanttrad.dev",
     "PGADMIN_DEFAULT_PASSWORD": password(),
     "GF_SECURITY_ADMIN_USER": "admin",
     "GF_SECURITY_ADMIN_PASSWORD": password(),
@@ -449,7 +451,11 @@ case "$action" in
   credentials-coinbase)
     require_runtime
     compute_release_material
-    compose exec backend /app/scripts/qt setup provider coinbase
+    if test "$#" -eq 0; then
+      compose exec backend /app/scripts/qt setup provider coinbase
+    else
+      compose exec -T backend /app/scripts/qt setup provider coinbase "$@"
+    fi
     ;;
   logs)
     require_runtime

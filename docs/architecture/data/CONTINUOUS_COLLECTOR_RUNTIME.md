@@ -82,6 +82,15 @@ collector whose book projection additionally owns reconstruction validity and
 checkpoint evidence. Per-epoch projection state and analysis are opaque to the
 runtime; the finalizer returns them only to the adapter that created them.
 
+Authentication is definition material, not a property of the collector
+lifecycle. Coinbase documents `market_trades`, `level2`, and `heartbeats` as
+public channels, so the single-node manifests enroll them with public auth mode
+and the transport sends no JWT. A separately reviewed enrollment may select
+`auth_mode: authenticated`; only that branch resolves credentials and signs
+each subscription. The locked Coinbase SDK supports the CDP-recommended
+Ed25519 format as well as legacy ECDSA, and provider-specific onboarding proves
+local JWT signing before saving a downloaded key file.
+
 The full server composition runs TimescaleDB, the backend control plane, both
 operator frontends, this collector worker, database administration, and the
 Grafana/Loki/Alloy observability surface. It uses commit-tagged application

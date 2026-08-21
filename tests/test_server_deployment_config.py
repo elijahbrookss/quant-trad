@@ -172,6 +172,7 @@ def test_deploy_helper_never_runs_migrations_and_verifies_every_app_image():
     assert "verify_initializer" in deploy
     assert "previous_revision" in deploy
     assert "credentials-coinbase)" in deploy
+    assert 'compose exec -T backend /app/scripts/qt setup provider coinbase "$@"' in deploy
     assert '$deployment_root/secrets.env' in deploy
     assert '$repo_root/secrets.env' not in deploy
     assert "env_value QT_REBUILD_DATABASE_IMAGE" in deploy
@@ -225,6 +226,7 @@ def test_deploy_helper_generates_private_operator_environment_once(tmp_path):
         r"[A-Za-z0-9_-]{43}=",
         values["QT_SECURITY_PROVIDER_CREDENTIAL_KEY"],
     )
+    assert values["PGADMIN_DEFAULT_EMAIL"] == "admin@quanttrad.dev"
     assert values["QT_SINGLE_NODE_ENABLE_L2_STREAMS"] == "true"
     assert values["QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS"] == "true"
     assert values["CHAINLINK_ARBITRUM_RPC_URL"].startswith("https://")
