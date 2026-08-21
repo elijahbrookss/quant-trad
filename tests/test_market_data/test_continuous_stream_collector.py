@@ -19,6 +19,7 @@ from market_data.structure import RawStreamRecord
 from market_data.stream_quality import normalize_stream_quality_classification
 from portal.backend.service.market.continuous_stream_collector import (
     CoinbaseContinuousTransportAdapter,
+    CoinbaseLevel2BookProjectionAdapter,
     CoinbaseMarketTradeProjectionAdapter,
     ContinuousMarketStructureCollector,
     ContinuousStreamRuntime,
@@ -645,6 +646,132 @@ def test_continuous_level2_restart_restores_checkpoint_plus_raw_delta(
     assert restored.book_last_position is not None
     assert restored.book_last_position.receive_ordinal == 2
     assert restored.book_checkpoint_id == repository.checkpoint_ids[-1]
+
+
+def test_continuous_level2_recovery_rewinds_partially_committed_spool(
+    tmp_path: Path,
+) -> None:
+    """A retained spool can already be present in the disposable DB watermark."""
+
+    repository = _Level2Repository()
+    collector = ContinuousMarketStructureCollector(repository=repository)
+    projection = CoinbaseLevel2BookProjectionAdapter()
+    claim = _l2_claim(session_id="l2-partial-commit-session")
+    object_store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    states: dict[int, _EpochProjectionState] = {}
+    counters = {
+        "manifests": 0,
+        "quality_events": 0,
+        "book_snapshots": 0,
+        "book_batches": 0,
+        "book_mutations": 0,
+        "book_checkpoints": 0,
+        "book_features": 0,
+    }
+    parser = CoinbaseMessageParser()
+    analyzer = _CaptureAnalyzer(claim, primary_channel="level2")
+    event_writer = _SessionEventWriter(repository, claim)
+    retained: DurableRawSpoolSegment | None = None
+    state_before_retained: str | None = None
+
+    for ordinal, frame in enumerate(_captured_l2_frames(), start=1):
+        segment = DurableRawSpoolSegment(
+            root=tmp_path / "spool",
+            definition_id=claim.definition_id,
+            session_id=claim.session_id,
+            connection_epoch=0,
+            segment_ordinal=ordinal - 1,
+        )
+        message = ProviderRawMessage.build(
+            provider="COINBASE",
+            venue="COINBASE_DIRECT",
+            stream_session_id=claim.session_id,
+            connection_epoch=0,
+            receive_ordinal=ordinal,
+            received_at=datetime.now(UTC) + timedelta(milliseconds=ordinal),
+            raw_frame=frame,
+        )
+        record = RawStreamRecord.from_provider_message(
+            message,
+            definition_id=claim.definition_id,
+            spool_segment_id=segment.spool_segment_id,
+            provider_product_id=claim.provider_product_id,
+            requested_channel="level2",
+            observed_channel="l2_data",
+        )
+        segment.append(record)
+        segment.seal()
+        analyzer.observe(
+            record,
+            parser.parse_raw(
+                frame,
+                received_at=message.received_at,
+                raw_ref={"raw_record_id": record.raw_record_id},
+            ),
+        )
+        if ordinal == 2:
+            retained = segment
+            segment.discard_acknowledged_spool = lambda: None  # type: ignore[method-assign]
+        collector._finalize_level2_segment(
+            claim=claim,
+            checkpoint=_SegmentCheckpoint(
+                segment=segment,
+                analysis=analyzer.finalize(),
+                terminal=False,
+                terminal_reason=None,
+                closing_session_event_id=None,
+            ),
+            object_store=object_store,
+            temporary_root=tmp_path / "tmp",
+            event_writer=event_writer,
+            states=states,
+            counters=counters,
+        )
+        analyzer.quality.clear()
+        if ordinal == 1:
+            state_before_retained = states[0].book_reducer.current_state_hash
+
+    assert retained is not None
+    assert retained.sealed_path.exists()
+    assert repository.reconstruction is not None
+    assert repository.reconstruction["receive_ordinal"] == 2
+
+    entries = [(retained.sealed_path, DurableRawSpoolSegment.from_path(retained.sealed_path))]
+    context = projection.begin_recovery(
+        collector,
+        claim=claim,
+        entries=entries,
+        object_store=object_store,
+    )
+    restored = collector._restore_level2_projection(
+        claim=claim,
+        connection_epoch=0,
+        object_store=object_store,
+        excluded_spool_segment_ids=context["excluded_spool_ids"],
+        recovery_start_receive_ordinal=context["recovery_start_by_epoch"][0],
+    )[0]
+
+    assert restored.book_reducer is not None
+    assert restored.book_reducer.current_state_hash == state_before_retained
+    assert restored.book_last_position is not None
+    assert restored.book_last_position.receive_ordinal == 1
+
+    projection.recover_segment(
+        collector,
+        context=context,
+        claim=claim,
+        segment=entries[0][1],
+        terminal=True,
+        truncated_tail_bytes=0,
+        object_store=object_store,
+        temporary_root=tmp_path / "tmp",
+        event_writer=event_writer,
+        recovery_event_id="restart-event",
+    )
+
+    assert repository.reconstruction["receive_ordinal"] == 2
+    assert repository.reconstruction["lifecycle"] == "invalid"
+    assert not retained.sealed_path.exists()
 
 
 def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projection(

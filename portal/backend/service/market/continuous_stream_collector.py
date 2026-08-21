@@ -416,6 +416,18 @@ class CoinbaseLevel2BookProjectionAdapter:
         object_store: FilesystemRawArchiveObjectStore,
     ) -> dict[str, Any]:
         del runtime, claim, object_store
+        recovery_start_by_epoch: dict[int, int] = {}
+        for _path, probe in entries:
+            if probe.record_count <= 0:
+                continue
+            first_record = next(probe.records(), None)
+            if first_record is None:
+                continue
+            epoch = int(probe.connection_epoch)
+            recovery_start_by_epoch[epoch] = min(
+                int(first_record.receive_ordinal),
+                recovery_start_by_epoch.get(epoch, int(first_record.receive_ordinal)),
+            )
         return {
             "states": {},
             "parsers": {},
@@ -423,6 +435,7 @@ class CoinbaseLevel2BookProjectionAdapter:
             "excluded_spool_ids": {
                 probe.spool_segment_id for _path, probe in entries
             },
+            "recovery_start_by_epoch": recovery_start_by_epoch,
             "counters": {"manifests": 0, "quality_events": 0, **self.counters()},
         }
 
@@ -451,6 +464,9 @@ class CoinbaseLevel2BookProjectionAdapter:
                     connection_epoch=epoch,
                     object_store=object_store,
                     excluded_spool_segment_ids=context["excluded_spool_ids"],
+                    recovery_start_receive_ordinal=context[
+                        "recovery_start_by_epoch"
+                    ].get(epoch),
                 )
             )
         records = tuple(segment.records())
@@ -1236,8 +1252,17 @@ class ContinuousStreamRuntime:
         connection_epoch: int,
         object_store: FilesystemRawArchiveObjectStore,
         excluded_spool_segment_ids: set[str],
+        recovery_start_receive_ordinal: Optional[int] = None,
     ) -> tuple[_EpochProjectionState, CoinbaseMessageParser, _CaptureAnalyzer]:
-        """Restore a valid reducer from a verified checkpoint plus raw delta."""
+        """Restore the reducer immediately before an orphaned recovery tail.
+
+        A worker can be interrupted after the canonical book transaction commits
+        but before its local spool is acknowledged and deleted.  In that window the
+        disposable reconstruction watermark is ahead of the retained spool.  The
+        recovery reducer must therefore rewind to the last checkpoint before the
+        retained tail and replay only earlier archives; replaying to the current
+        watermark and excluding that same spool is internally inconsistent.
+        """
 
         state = _EpochProjectionState()
         parser = CoinbaseMessageParser(
@@ -1272,8 +1297,22 @@ class ContinuousStreamRuntime:
                 int(reconstruction["receive_ordinal"]),
                 int(reconstruction["event_ordinal"]),
             )
+            and (
+                recovery_start_receive_ordinal is None
+                or int(row["receive_ordinal"])
+                < int(recovery_start_receive_ordinal)
+            )
         ]
         if not checkpoint_rows:
+            if (
+                recovery_start_receive_ordinal is not None
+                and int(reconstruction["receive_ordinal"])
+                >= int(recovery_start_receive_ordinal)
+            ):
+                # The retained tail can contain the first accepted snapshot.  In
+                # that case recovery starts from an empty reducer and deterministically
+                # rebuilds the tail instead of trusting its partially committed state.
+                return state, parser, analyzer
             raise RuntimeError(
                 "continuous_l2_recovery_checkpoint_missing: "
                 f"definition_id={claim.definition_id} "
@@ -1444,6 +1483,12 @@ class ContinuousStreamRuntime:
                     f"manifest_id={manifest['id']}"
                 )
             for record in read_raw_archive_parquet(path):
+                if (
+                    recovery_start_receive_ordinal is not None
+                    and record.receive_ordinal
+                    >= int(recovery_start_receive_ordinal)
+                ):
+                    continue
                 if record.receive_ordinal < checkpoint_position.receive_ordinal:
                     continue
                 events = parser.parse_raw(
@@ -1482,7 +1527,12 @@ class ContinuousStreamRuntime:
                     reducer.process(fact)
                     state.book_last_position = fact.position
         analyzer.quality.clear()
-        if (
+        reconstruction_includes_recovery_tail = (
+            recovery_start_receive_ordinal is not None
+            and int(reconstruction["receive_ordinal"])
+            >= int(recovery_start_receive_ordinal)
+        )
+        if not reconstruction_includes_recovery_tail and (
             reducer.lifecycle is not BookLifecycle.VALID
             or reducer.current_state_hash != str(reconstruction["state_hash"])
             or reducer.current_interval is None

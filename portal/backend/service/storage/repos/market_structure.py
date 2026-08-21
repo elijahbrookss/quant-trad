@@ -211,12 +211,18 @@ def _require_book_state_source(
 ) -> None:
     """Require a canonical archive-acknowledged snapshot or mutation state."""
 
+    observation_key = (
+        f"{position['definition_id']}:{position['session_id']}:"
+        f"{int(position['connection_epoch'])}:{int(position['receive_ordinal'])}:"
+        f"{int(position['event_ordinal'])}"
+    )
     found = session.execute(
         text(
             """
             SELECT 1
             FROM market.fact_versions
             WHERE series_id = :series_id
+              AND observation_key = :observation_key
               AND payload_schema_id = 'market.l2_book.v1'
               AND provenance -> '_qt_l2_evidence' ->> 'connection_epoch'
                     = CAST(:connection_epoch AS text)
@@ -231,6 +237,7 @@ def _require_book_state_source(
         ),
         {
             "series_id": int(series_id),
+            "observation_key": observation_key,
             "connection_epoch": int(position["connection_epoch"]),
             "receive_ordinal": int(position["receive_ordinal"]),
             "event_ordinal": int(position["event_ordinal"]),

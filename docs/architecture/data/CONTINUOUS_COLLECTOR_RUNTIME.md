@@ -167,6 +167,23 @@ validity interval, then records the restart discontinuity. If that proof is not
 possible, the book remains invalid until a fresh provider snapshot establishes
 a new valid interval.
 
+The retained-spool boundary is authoritative during recovery. A process can be
+interrupted after its canonical book transaction advances the disposable
+reconstruction watermark but before the local spool acknowledgement is written.
+L2 recovery therefore selects the latest verified checkpoint strictly before
+the first retained record, replays only earlier acknowledged archives, and then
+re-applies every retained segment idempotently. It does not try to reconcile a
+pre-tail reducer against a watermark that can already include that same tail.
+This rule belongs to the L2 projection adapter; lease, WAL, queue, lifecycle,
+and restart orchestration remain provider- and projection-neutral.
+
+Derived BBO and depth source validation uses the canonical L2 observation key
+to reach the existing `(series_id, observation_key, revision)` index before it
+checks provenance, validity, and state hashes. Source proof remains strict, but
+continuous finalization no longer performs a JSON-expression scan for every
+derived observation. Sustained admission still depends on measured
+capture-to-canonicalization lag and bounded spool growth, not merely free disk.
+
 ## Storage Lifecycle
 
 The collector worker also owns a provider-independent storage-lifecycle
