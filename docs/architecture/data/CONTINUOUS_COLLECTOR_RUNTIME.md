@@ -14,6 +14,7 @@ tags:
   - retention
   - timescaledb
 code_paths:
+  - src/core/settings.py
   - src/data_providers/structured_facts.py
   - src/market_data/instrument_enrollment.py
   - src/data_providers/providers/chainlink.py
@@ -37,6 +38,7 @@ code_paths:
   - scripts/reporting/docker_capacity_sampler.sh
   - scripts/reporting/host_capacity_sampler.ps1
   - scripts/db/manual_enable_market_storage_lifecycle_v1.sql
+  - config/defaults.yaml
   - docker/grafana/provisioning/dashboards/capacity-database-growth.json
   - docker/grafana/provisioning/alerting/collector-safety.yml
   - docker/docker-compose.yml
@@ -135,6 +137,17 @@ the lifetime reconnect count.
 A normal stop closes the provider connection, seals the final segment, drains
 all archive/database finalizers, records terminal evidence, and only then
 releases the fencing lease.
+
+The worker's generic supervisor drain budget defaults to 270 seconds through
+`workers.collectors.shutdown_drain_timeout_seconds`, leaving a 30-second margin
+inside the single-node container's five-minute stop grace period. While terminal
+segments are still finalizing, the runtime continues renewing the stream lease;
+a replacement owner cannot overlap unfinished canonicalization. Lease release
+failure is a task failure with correlated context, not a suppressed best-effort
+cleanup. Any supervisor, lifecycle, or worker-heartbeat shutdown failure also
+makes the worker exit nonzero after bounded cleanup. These rules apply to every
+registered continuous projection. L2 merely has enough terminal state to make
+the boundary especially visible.
 
 After an interruption, the next owner scans durable spool segments before
 opening a new session. It:

@@ -192,6 +192,44 @@ def test_restart_recovery_repairs_archives_and_closes_prior_coverage(
     assert not segment.sealed_path.exists()
 
 
+def test_terminal_finalizer_drain_renews_fencing_lease() -> None:
+    class _Repository:
+        def __init__(self) -> None:
+            self.heartbeat_count = 0
+
+        def heartbeat(self, _claim, *, lease_seconds):
+            assert lease_seconds == 90.0
+            self.heartbeat_count += 1
+            return datetime.now(UTC) + timedelta(seconds=lease_seconds)
+
+    async def scenario() -> int:
+        repository = _Repository()
+        collector = ContinuousMarketStructureCollector(repository=repository)
+        queue: asyncio.Queue[object | None] = asyncio.Queue()
+        await queue.put(object())
+
+        async def slow_finalizer() -> None:
+            checkpoint = await queue.get()
+            assert checkpoint is not None
+            await asyncio.sleep(0.05)
+            queue.task_done()
+            sentinel = await queue.get()
+            assert sentinel is None
+            queue.task_done()
+
+        finalizer = asyncio.create_task(slow_finalizer())
+        await collector._drain_finalizer(
+            queue,
+            finalizer,
+            claim=_claim(session_id="session-drain"),
+            heartbeat_seconds=0.01,
+            lease_seconds=90.0,
+        )
+        return repository.heartbeat_count
+
+    assert asyncio.run(scenario()) >= 1
+
+
 def test_terminal_checkpoint_retires_only_its_connection_epoch_state() -> None:
     collector = ContinuousMarketStructureCollector(repository=object())
     claim = _claim(session_id="session-a")

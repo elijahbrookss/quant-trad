@@ -85,6 +85,10 @@ _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
     ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_SECONDS", ("workers", "collectors", "idle_sleep_seconds")),
     ("QT_WORKERS_COLLECTORS_IDLE_SLEEP_MAX_SECONDS", ("workers", "collectors", "idle_sleep_max_seconds")),
     ("QT_WORKERS_COLLECTORS_DB_WAIT_TIMEOUT_SECONDS", ("workers", "collectors", "db_wait_timeout_seconds")),
+    (
+        "QT_WORKERS_COLLECTORS_SHUTDOWN_DRAIN_TIMEOUT_SECONDS",
+        ("workers", "collectors", "shutdown_drain_timeout_seconds"),
+    ),
     ("QT_MARKET_DATA_LIFECYCLE_ENABLED", ("market_data_lifecycle", "enabled")),
     (
         "QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED",
@@ -512,6 +516,7 @@ class WorkerGroupSettings:
     idle_sleep_seconds: float
     idle_sleep_max_seconds: float
     db_wait_timeout_seconds: float
+    shutdown_drain_timeout_seconds: float = 270.0
 
 
 @dataclass(frozen=True)
@@ -906,6 +911,11 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 ),
                 db_wait_timeout_seconds=_coerce_float(
                     collector_workers_payload.get("db_wait_timeout_seconds"), 120.0, minimum=0.5
+                ),
+                shutdown_drain_timeout_seconds=_coerce_float(
+                    collector_workers_payload.get("shutdown_drain_timeout_seconds"),
+                    270.0,
+                    minimum=1.0,
                 ),
             ),
         ),

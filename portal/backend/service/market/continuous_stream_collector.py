@@ -929,9 +929,13 @@ class ContinuousStreamRuntime:
                     policy.reconnect.max_backoff_seconds,
                     max(policy.reconnect.initial_backoff_seconds, backoff * 2),
                 )
-            await queue.join()
-            queue.put_nowait(None)
-            await finalizer
+            await self._drain_finalizer(
+                queue,
+                finalizer,
+                claim=claim,
+                heartbeat_seconds=policy.heartbeat_seconds,
+                lease_seconds=policy.lease_seconds,
+            )
             result = {
                 "schema_version": "market.continuous_collector_result.v1",
                 "status": "stopped",
@@ -959,7 +963,15 @@ class ContinuousStreamRuntime:
             return result
         except BaseException as exc:
             try:
-                await asyncio.shield(self._drain_finalizer(queue, finalizer))
+                await asyncio.shield(
+                    self._drain_finalizer(
+                        queue,
+                        finalizer,
+                        claim=claim,
+                        heartbeat_seconds=policy.heartbeat_seconds,
+                        lease_seconds=policy.lease_seconds,
+                    )
+                )
             except BaseException:
                 logger.exception(
                     "continuous_collector_finalizer_drain_failed | "
@@ -1001,8 +1013,20 @@ class ContinuousStreamRuntime:
                     current_segment.close()
             with contextlib.suppress(Exception):
                 await stream.close()
-            with contextlib.suppress(Exception):
+            try:
                 await asyncio.to_thread(self.repository.release, claim)
+            except Exception as exc:
+                logger.exception(
+                    "continuous_collector_lease_release_failed | "
+                    "definition_id=%s session_id=%s lease_generation=%s",
+                    definition_id,
+                    claim.session_id,
+                    claim.lease_generation,
+                )
+                raise RuntimeError(
+                    "continuous_collector_lease_release_failed: "
+                    f"definition_id={definition_id} session_id={claim.session_id}"
+                ) from exc
 
     async def _recover_orphaned_spools(
         self,
@@ -1551,29 +1575,50 @@ class ContinuousStreamRuntime:
                 f"continuous_collector_finalizer_failed: definition_id={definition_id}"
             ) from error
 
-    @staticmethod
     async def _drain_finalizer(
+        self,
         queue: asyncio.Queue[_SegmentCheckpoint | None],
         finalizer: asyncio.Task,
+        *,
+        claim: StreamClaim,
+        heartbeat_seconds: float,
+        lease_seconds: float,
     ) -> None:
-        """Wait for active projection work before the fencing lease is released."""
+        """Keep the fence live until terminal projection work is durable."""
 
         if finalizer.done():
             await finalizer
             return
         joined = asyncio.create_task(queue.join())
-        done, _pending = await asyncio.wait(
-            {joined, finalizer}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if finalizer in done:
-            joined.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await joined
-            await finalizer
-            return
-        await joined
-        queue.put_nowait(None)
-        await finalizer
+        heartbeat_interval = max(0.01, float(heartbeat_seconds))
+        try:
+            while True:
+                done, _pending = await asyncio.wait(
+                    {joined, finalizer},
+                    timeout=heartbeat_interval,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if finalizer in done:
+                    await finalizer
+                    raise RuntimeError(
+                        "continuous_collector_finalizer_stopped_before_drain: "
+                        f"definition_id={claim.definition_id}"
+                    )
+                if joined in done:
+                    await joined
+                    queue.put_nowait(None)
+                    await finalizer
+                    return
+                await asyncio.to_thread(
+                    self.repository.heartbeat,
+                    claim,
+                    lease_seconds=lease_seconds,
+                )
+        finally:
+            if not joined.done():
+                joined.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await joined
 
     @staticmethod
     async def _sleep_until_reconnect(
