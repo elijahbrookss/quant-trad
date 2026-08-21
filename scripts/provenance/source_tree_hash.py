@@ -9,8 +9,8 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 
-ROOTS = ("config", "src", "portal", "scripts/provenance")
-ROOT_FILES = ("requirements.txt",)
+ROOTS = ("config", "src", "cli", "portal", "scripts/provenance")
+ROOT_FILES = ("requirements.txt", "requirements.lock", "scripts/qt")
 IGNORED_PARTS = {"__pycache__", "node_modules", "dist", ".vite", ".npm-cache"}
 IGNORED_PART_SUFFIXES = (".egg-info",)
 IGNORED_SUFFIXES = {".pyc", ".pyo"}

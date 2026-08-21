@@ -1,0 +1,482 @@
+name: ${QT_COMPOSE_PROJECT_NAME:-quant-trad-single-node}
+
+x-runtime-environment: &runtime-environment
+  PYTHONPATH: /app/src:/app
+  PG_DSN: "postgresql+psycopg2://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@tsdb:5432/${POSTGRES_DB:?POSTGRES_DB is required}"
+  QT_CONFIG_PROFILE: prod
+  QT_LOGGING_DEBUG: "false"
+  QT_LOGGING_LOKI_URL: ""
+  QT_MARKET_DATA_LIFECYCLE_ENABLED: "true"
+  QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED: "false"
+  MARKET_STRUCTURE_STORAGE_ROOT: /app/logs/market-structure
+
+x-backend-build: &backend-build
+  context: ..
+  dockerfile: portal/backend/Dockerfile
+  args:
+    QT_SOURCE_REVISION: ${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    QT_SOURCE_TREE_HASH: ${QT_SOURCE_TREE_HASH:?QT_SOURCE_TREE_HASH is required}
+
+x-frontend-build: &frontend-build
+  context: ..
+  dockerfile: portal/frontend/Dockerfile
+  args:
+    QT_SOURCE_REVISION: ${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    QT_SOURCE_TREE_HASH: ${QT_SOURCE_TREE_HASH:?QT_SOURCE_TREE_HASH is required}
+
+x-service-logging: &service-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+services:
+  tsdb:
+    build:
+      context: ..
+      dockerfile: docker/postgres/Dockerfile
+    image: quanttrad-postgres:2.14.2-pg15
+    hostname: tsdb.quanttrad
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: tsdb
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    command:
+      - postgres
+      - -c
+      - logging_collector=off
+      - -c
+      - log_destination=stderr
+      - -c
+      - log_line_prefix=%m [%p] app=%a user=%u db=%d client=%h
+      - -c
+      - log_min_duration_statement=200
+      - -c
+      - shared_preload_libraries=timescaledb,pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.save=on
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      quanttrad:
+        aliases:
+          - tsdb.quanttrad
+    logging: *service-logging
+
+  backend:
+    build: *backend-build
+    image: quanttrad-backend:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    hostname: backend.quanttrad
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 1m
+    labels:
+      loki.job: quanttrad
+      loki.service: backend
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    environment:
+      <<: *runtime-environment
+      QT_BOT_RUNTIME_IMAGE: quanttrad-backend:${QT_RELEASE_REVISION}
+      QT_BOT_RUNTIME_NETWORK: ${QT_COMPOSE_PROJECT_NAME:-quant-trad-single-node}_quanttrad
+      SOURCE_REVISION: ${QT_RELEASE_REVISION}
+      SOURCE_TREE_HASH: ${QT_SOURCE_TREE_HASH}
+    command:
+      - python
+      - -m
+      - portal.backend.run_backend
+    depends_on:
+      tsdb:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/instruments/health', timeout=3).read()
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    ports:
+      - "${QT_BACKEND_BIND_ADDRESS:-127.0.0.1}:${QT_BACKEND_PORT:-8000}:8000"
+    volumes:
+      - type: bind
+        source: ${QT_SERVER_ENV_FILE:-../secrets.env}
+        target: /app/secrets.env
+        read_only: true
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
+        target: /app/logs/market-structure
+    networks:
+      quanttrad:
+        aliases:
+          - backend.quanttrad
+    logging: *service-logging
+
+  initialize:
+    build: *backend-build
+    image: quanttrad-backend:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    hostname: initialize.quanttrad
+    restart: "no"
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: initialize
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    environment:
+      <<: *runtime-environment
+      QT_SINGLE_NODE_BOOTSTRAP_MARKET_DATA: "${QT_SINGLE_NODE_BOOTSTRAP_MARKET_DATA:-true}"
+      QT_SINGLE_NODE_ENABLE_SCHEDULED_FACTS: "${QT_SINGLE_NODE_ENABLE_SCHEDULED_FACTS:-true}"
+      QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS: "${QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS:-true}"
+      QT_SINGLE_NODE_ENABLE_TRADE_STREAMS: "${QT_SINGLE_NODE_ENABLE_TRADE_STREAMS:-true}"
+      QT_SINGLE_NODE_ENABLE_L2_STREAMS: "${QT_SINGLE_NODE_ENABLE_L2_STREAMS:-true}"
+      QT_SINGLE_NODE_INSTRUMENT_MANIFEST: "${QT_SINGLE_NODE_INSTRUMENT_MANIFEST:-/app/config/market_data/coinbase_perpetual_instruments.v1.json}"
+      QT_SINGLE_NODE_STRUCTURED_FACT_MANIFESTS: "${QT_SINGLE_NODE_STRUCTURED_FACT_MANIFESTS:-/app/config/market-data/structured-facts/chainlink-nxtassets-btc-etp-reserves.json}"
+      QT_SINGLE_NODE_OI_POLL_SECONDS: "${QT_SINGLE_NODE_OI_POLL_SECONDS:-60}"
+      QT_SINGLE_NODE_FUNDING_POLL_SECONDS: "${QT_SINGLE_NODE_FUNDING_POLL_SECONDS:-60}"
+    command:
+      - python
+      - -m
+      - portal.backend.workers.single_node_initializer
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: ${QT_SERVER_ENV_FILE:-../secrets.env}
+        target: /app/secrets.env
+        read_only: true
+      - type: bind
+        source: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
+        target: /app/logs/market-structure
+    networks:
+      - quanttrad
+    logging: *service-logging
+
+  market-data-collector:
+    build: *backend-build
+    image: quanttrad-backend:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    hostname: market-data-collector.quanttrad
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 5m
+    labels:
+      loki.job: quanttrad
+      loki.service: market-data-collector
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    environment:
+      <<: *runtime-environment
+      QT_DATABASE_CONNECT_TIMEOUT_SECONDS: "120"
+    command:
+      - python
+      - -m
+      - portal.backend.workers.market_data_collector
+    depends_on:
+      tsdb:
+        condition: service_healthy
+      initialize:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - portal.backend.workers.market_data_collector_health
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    volumes:
+      - type: bind
+        source: ${QT_SERVER_ENV_FILE:-../secrets.env}
+        target: /app/secrets.env
+        read_only: true
+      - type: bind
+        source: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
+        target: /app/logs/market-structure
+    networks:
+      quanttrad:
+        aliases:
+          - market-data-collector.quanttrad
+    logging: *service-logging
+
+  frontend:
+    build:
+      <<: *frontend-build
+      target: prod
+    image: quanttrad-frontend:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    hostname: frontend.quanttrad
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1/ >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "${QT_FRONTEND_BIND_ADDRESS:-127.0.0.1}:${QT_FRONTEND_PORT:-5173}:80"
+    networks:
+      quanttrad:
+        aliases:
+          - frontend.quanttrad
+    logging: *service-logging
+
+  frontend-v2:
+    build:
+      <<: *frontend-build
+      target: prod-v2
+    image: quanttrad-frontend-v2:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    hostname: frontend-v2.quanttrad
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: frontend-v2
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1/ >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "${QT_FRONTEND_V2_BIND_ADDRESS:-127.0.0.1}:${QT_FRONTEND_V2_PORT:-5174}:80"
+    networks:
+      quanttrad:
+        aliases:
+          - frontend-v2.quanttrad
+    logging: *service-logging
+
+  pgadmin:
+    image: dpage/pgadmin4:9.12
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: pgadmin
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_LISTEN_ADDRESS: 0.0.0.0
+    depends_on:
+      tsdb:
+        condition: service_healthy
+    ports:
+      - "${QT_PGADMIN_BIND_ADDRESS:-127.0.0.1}:${QT_PGADMIN_PORT:-8080}:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - quanttrad
+    logging: *service-logging
+
+  loki:
+    image: grafana/loki:3.7.6
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: loki
+    command:
+      - -config.file=/etc/loki/server-config.yml
+    volumes:
+      - ./loki/server-config.yml:/etc/loki/server-config.yml:ro
+      - loki-data:/loki
+    networks:
+      - quanttrad
+    logging: *service-logging
+
+  alloy:
+    image: grafana/alloy:v1.18.1
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: alloy
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - --disable-reporting
+      - /etc/alloy/config.alloy
+    depends_on:
+      - loki
+    ports:
+      - "${QT_ALLOY_BIND_ADDRESS:-127.0.0.1}:${QT_ALLOY_PORT:-12345}:12345"
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    networks:
+      - quanttrad
+    logging: *service-logging
+
+  docker-events:
+    image: docker:29.7.0-cli-alpine3.24
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: docker-events
+    command:
+      - /bin/sh
+      - -lc
+      - "docker events --format '{{json .}}' --filter type=container --filter label=loki.job=quanttrad"
+    depends_on:
+      - alloy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - quanttrad
+    logging: *service-logging
+
+  docker-stats:
+    image: docker:29.7.0-cli-alpine3.24
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: docker-stats
+    environment:
+      QT_DOCKER_CAPACITY_INTERVAL_SECONDS: "${QT_DOCKER_CAPACITY_INTERVAL_SECONDS:-15}"
+      QT_DOCKER_STORAGE_MOUNT: /host-docker
+    command:
+      - /bin/sh
+      - /opt/quanttrad/docker_capacity_sampler.sh
+    depends_on:
+      - alloy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${QT_DOCKER_STORAGE_ROOT:-/var/lib/docker}:/host-docker:ro
+      - ../scripts/reporting/docker_capacity_sampler.sh:/opt/quanttrad/docker_capacity_sampler.sh:ro
+    networks:
+      - quanttrad
+    logging: *service-logging
+
+  grafana:
+    image: grafana/grafana:13.2.0
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: grafana
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    depends_on:
+      tsdb:
+        condition: service_healthy
+      loki:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:3000/api/health >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    ports:
+      - "${QT_GRAFANA_BIND_ADDRESS:-127.0.0.1}:${QT_GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - quanttrad
+    logging: *service-logging
+
+  ibkr-gateway:
+    profiles: [broker]
+    build:
+      context: ..
+      dockerfile: docker/ibkr-gateway/Dockerfile
+      args:
+        IBC_VERSION: ${IBKR_IBC_VERSION:-3.23.0}
+        IBC_DOWNLOAD_URL: ${IBKR_IBC_DOWNLOAD_URL:-https://github.com/IbcAlpha/IBC/releases/download/3.23.0/IBCLinux-3.23.0.zip}
+        IB_GATEWAY_VERSION: ${IBKR_GATEWAY_VERSION:-1037}
+        IB_GATEWAY_DOWNLOAD_URL: ${IBKR_GATEWAY_DOWNLOAD_URL:-https://download2.interactivebrokers.com/installers/ibgateway/stable-standalone/ibgateway-stable-standalone-linux-x64.sh}
+    image: quanttrad-ibkr-gateway:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
+    hostname: ibkr-gateway.quanttrad
+    restart: unless-stopped
+    init: true
+    labels:
+      loki.job: quanttrad
+      loki.service: ibkr-gateway
+    env_file:
+      - ${QT_SERVER_ENV_FILE:-../secrets.env}
+    environment:
+      IBC_TWS_USERNAME: ${IBKR_TWS_USERNAME:-}
+      IBC_TWS_PASSWORD: ${IBKR_TWS_PASSWORD:-}
+      IBC_TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
+      IBC_READONLY_API: ${IBKR_READONLY_API:-yes}
+      IBC_ACCEPT_INCOMING_ACTION: ${IBKR_ACCEPT_INCOMING_ACTION:-accept}
+      IBC_EXISTING_SESSION_ACTION: ${IBKR_EXISTING_SESSION_ACTION:-primary}
+      IBC_LOG_LEVEL: ${IBKR_LOG_LEVEL:-info}
+      IBC_GATEWAY_PORT: ${IBKR_GATEWAY_PORT:-4002}
+      IBC_GATEWAY_LIVE_PORT: ${IBKR_GATEWAY_LIVE_PORT:-4001}
+      TWS_CONFIG_PATH: /config/jts.ini
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+    ports:
+      - "127.0.0.1:${IBKR_GATEWAY_PORT:-4002}:4002"
+      - "127.0.0.1:${IBKR_GATEWAY_LIVE_PORT:-4001}:4001"
+      - "127.0.0.1:${IBKR_VNC_PORT:-5900}:5900"
+    volumes:
+      - ibkr-gateway-config:/config
+      - ibkr-gateway-logs:/var/log/ibgateway
+    networks:
+      quanttrad:
+        aliases:
+          - ibkr-gateway.quanttrad
+    logging: *service-logging
+
+networks:
+  quanttrad:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  pgadmin-data:
+  grafana-data:
+  loki-data:
+  alloy-data:
+  ibkr-gateway-config:
+  ibkr-gateway-logs:

@@ -38,13 +38,13 @@ code_paths:
 This phased design is implemented through Phase 4: provider proof,
 futures/spot trades, Level 2 archive/reconstruction, typed market-state
 features, causal normalization, and frozen typed datasets. A generic supervised
-continuous runtime and the Coinbase trade adapter are implemented for bounded
-validation and admitted indefinite collection; the current Level 2 path remains
-bounded until its own adapter is registered. No phase or document by itself
-authorizes production collector enrollment, cloud resources, strategy changes,
-live trading, or frontend work. The 24-hour canonical evidence and explicit
-authoritative resource budget remain post-Phase-4 gates and are mandatory
-before production enrollment.
+continuous runtime composes explicit provider transports with trade or Level 2
+projection adapters for bounded validation and indefinite collection. Level 2
+uses the same lifecycle as other continuous collectors; its stateful projection
+adds checkpoint/reconciliation requirements after discontinuity. No phase or
+document by itself authorizes cloud resources, strategy changes, live trading,
+or frontend work. Production enrollment remains an explicit reviewed manifest
+and must produce canonical soak and authoritative resource evidence.
 
 The allowed live provider boundary is Coinbase Advanced Trade REST and
 WebSocket using the existing provider credential boundary. Public channels may
@@ -151,7 +151,7 @@ Status means:
 | Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; Phase 0 observed one connection-wide `sequence_num` across subscribed channels, reset on reconnect; local receipt/acceptance becomes known-at | dedupe by provider trade ID; a connection-sequence gap affects every subscription on that connection; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed for BIP/BTC proof scope |
 | Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | captured schema is the same; Phase 0 proved product access and contract units | same fields; maker-side semantics documented and captured | same typed coverage policy; BIP Phase 1 live capture passed | no complete event-level backfill documented | irreplaceable event evidence | confirmed semantics; only BIP Phase 1 live-verified |
 | Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; Phase 0 observed the same connection-wide `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed; validate the connection sequence; reconnect resets it and requires a new snapshot | none documented | irreplaceable book evidence | confirmed for BIP/BTC proof scope |
-| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | implemented and live-verified for bounded BIP; ETP/SLP unenrolled |
+| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | implemented and enrolled for BIP/ETP/SLP; bounded live evidence previously covered BIP and the single-node soak records continuing product evidence |
 | Advanced Trade WS `heartbeats` | public | every stream session | one-second heartbeat and counter | server current time, envelope time, receipt | counter discontinuity is transport evidence, not a product-book sequence substitute | none | session/gap evidence, low volume | confirmed |
 | Advanced Trade WS `ticker` | public | futures and spot allowlist | snapshot/update, may batch cascading matches | envelope/event receipt; no replacement for trade event time | validation only; not canonical trade recovery | no event history | BBO/trade cross-check only | confirmed |
 | Advanced Trade WS `status` | public | subscribed products | periodic product/currency snapshots | provider/envelope and receipt | revision by material hash | no reliable history promised | product-state cross-check | confirmed, optional |

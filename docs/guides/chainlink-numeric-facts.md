@@ -30,34 +30,18 @@ description, confirmation and staleness policy, canonical instrument/role,
 update/deviation schedule, official catalog, risk tier, and deprecation review
 locally before enabling a copy. Requests before `history_start` are rejected.
 
-## 1. Apply The Explicit Migration
+## 1. Confirm The Current Schema
 
-The numeric tables are migration-owned. Startup will not create them.
+A clean database creates the current canonical Fact store, acquisition
+coverage, schema registry, indexes, and immutable triggers on first startup.
+Do not run historical numeric or canonical migration scripts on a clean
+database.
 
-Stop the backend, collector, worker, paper runtime, and any other database
-clients, then run:
-
-```bash
-make db-file file=scripts/db/manual_migration_numeric_fact_store_v1.sql
-```
-
-The migration requires exclusive database access, the existing canonical
-`market` schema, the shared market fact commit sequence, and TimescaleDB. It
-adds `market.series.dimensions`, `market.numeric_fact_versions`, and
-`market.fact_acquisition_coverage`, including constraints, lookup indexes, and
-immutable update/delete triggers.
-
-Restart the application after the migration. Startup validates table and
-dimensions-column presence, the numeric-fact primary key/type/checks/indexes,
-coverage indexes, and both immutable triggers. It fails with the migration path
-when those validated objects are absent or drifted. The migration remains the
-owner of all definitions, including dimensions and coverage checks that startup
-does not independently re-derive. This explicit rule applies only to the new
-numeric objects; other schema bootstrap behavior is unchanged.
-
-Rollback does not drop immutable evidence. Revert the application revision and
-leave unused numeric relations in place until a separately reviewed destructive
-operation is justified.
+An operator preserving a database that predates the canonical Fact hard
+cutover may follow the reviewed offline migration and backup/restore procedure.
+The alternative is to retain any needed evidence and initialize a new empty
+database. Current non-empty databases are validated and fail loud on drift;
+startup never patches columns or replays historical scalar-store migrations.
 
 ## 2. Prepare An Enabled Manifest
 
@@ -319,7 +303,8 @@ Common failures:
 | `chainlink_latest_round_stale` | The newest confirmed current observation exceeds the manifest staleness limit. Inspect the feed; do not treat it as current. |
 | `chainlink_budget_exceeded` | Requested range/lookback exceeds declared bounds. Split the range or explicitly approve a new bounded budget. |
 | `chainlink_*_unavailable` / partial result | The adapter retained a typed gap and did not certify complete coverage. Inspect evidence before retrying. |
-| startup migration error | Stop writers and apply `manual_migration_numeric_fact_store_v1.sql`; startup will not create these objects. |
+| startup schema error on a clean database | Treat it as a bootstrap defect; do not replay historical migrations. |
+| startup schema error on an existing database | Stop writers and follow the exact reviewed upgrade or rebuild guidance in the error. |
 
 ## Precision And Finality Notes
 

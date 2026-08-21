@@ -21,7 +21,12 @@ from market_data.order_book import (
     Level2BookReconstructor,
 )
 from market_data.structure import MarketTradeRecord, ProductContract, ProviderSizeUnit
-from market_data.market_state import DERIVATIVE_STATE_FACT_TYPE
+from market_data.market_state import (
+    BBO_FACT_TYPE,
+    DEPTH_FACT_TYPE,
+    DERIVATIVE_STATE_FACT_TYPE,
+    RESPONSE_FACT_TYPE,
+)
 from portal.backend.service.market.market_structure_service import (
     MarketStructureService,
     _build_execution_book_tape_from_replay,
@@ -119,6 +124,14 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
     for call in repository.definition_calls:
         assert set(call["config"]["aggregate_series_ids"]) == {"1", "60"}
         assert set(call["config"]["flow_feature_series_ids"]) == {"1", "60"}
+        assert len(call["config"]["output_series"]) == 5
+        assert {
+            row["fact_type"] for row in call["config"]["output_series"]
+        } == {
+            "market.trade",
+            "market.trade_flow",
+            "market.trade_flow_feature",
+        }
         assert call["config"]["runtime_policy"]["lease_seconds"] == 90.0
         assert call["config"]["runtime_policy"]["heartbeat_seconds"] == 10.0
         assert "collector_runtime" not in call["config"]
@@ -126,6 +139,80 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
         key[1]
         for key in market_data_repository._series_ids
     } >= {"market.trade_flow", "market.trade_flow_feature"}
+
+
+def test_level2_fleet_manifest_registers_continuous_book_and_feature_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    products = {
+        "b2deb0a0-f292-408a-876d-3dadd8e3819b": "BIP-20DEC30-CDE",
+        "44226144-fb38-4566-92c4-580734d76d3c": "ETP-20DEC30-CDE",
+        "bead556e-22e2-4ac0-8ee0-0d8c5310e9a0": "SLP-20DEC30-CDE",
+    }
+    market_data_repository = _EnrollmentMarketDataRepository()
+    repository = _EnrollmentRepository()
+    monkeypatch.setattr(
+        market_structure_module,
+        "market_data_repo",
+        market_data_repository,
+    )
+    monkeypatch.setattr(
+        market_structure_module,
+        "get_instrument_record",
+        lambda instrument_id: {
+            "symbol": products[instrument_id],
+            "metadata": {
+                "instrument_fields": {
+                    "tick_size": "1",
+                    "qty_step": "1",
+                }
+            },
+        },
+    )
+
+    result = MarketStructureService(
+        repository=repository
+    ).apply_stream_enrollment_manifest(
+        manifest_path="config/market_data/coinbase_perpetual_l2_fleet.v1.json"
+    )
+
+    assert result["fleet_id"] == "coinbase_perpetual_l2"
+    assert len(repository.definition_calls) == 3
+    definition = repository.definition_calls[0]
+    assert definition["definition_id"] == "ms_coinbase_l2_bip_20dec30_cde"
+    assert definition["channels"] == ("level2", "heartbeats")
+    assert definition["enabled"] is True
+    assert definition["max_spool_bytes"] == 4 * 1024**3
+    assert definition["config"]["schema_version"] == (
+        "market_structure_l2_stream_config.v1"
+    )
+    assert definition["config"]["safety_policy"]["policy_hash"]
+    assert definition["config"]["runtime_policy"]["lease_seconds"] == 90.0
+    assert {
+        row["fact_type"] for row in definition["config"]["output_series"]
+    } == {
+        "market.l2_book",
+        BBO_FACT_TYPE,
+        DEPTH_FACT_TYPE,
+        RESPONSE_FACT_TYPE,
+    }
+    assert {
+        key[1] for key in market_data_repository._series_ids
+    } >= {
+        "market.l2_book",
+        BBO_FACT_TYPE,
+        DEPTH_FACT_TYPE,
+        RESPONSE_FACT_TYPE,
+        "market.trade",
+        "market.trade_flow_feature",
+    }
+    assert {
+        call["definition_id"] for call in repository.definition_calls
+    } == {
+        "ms_coinbase_l2_bip_20dec30_cde",
+        "ms_coinbase_l2_etp_20dec30_cde",
+        "ms_coinbase_l2_slp_20dec30_cde",
+    }
 
 
 class _FakeStream:

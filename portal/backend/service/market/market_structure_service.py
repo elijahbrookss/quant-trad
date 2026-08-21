@@ -133,6 +133,20 @@ MAX_ANALYZER_SEQUENCE_HASHES = 8192
 DEFAULT_TRADE_FLEET_MANIFEST = Path(
     "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
 )
+STREAM_ENROLLMENT_PROJECTION_CONTRACTS: Mapping[
+    tuple[str, str, tuple[str, ...]], str
+] = {
+    (
+        "COINBASE",
+        "COINBASE_DIRECT",
+        ("market_trades", "heartbeats"),
+    ): MARKET_TRADE_FACT_VERSION,
+    (
+        "COINBASE",
+        "COINBASE_DIRECT",
+        ("level2", "heartbeats"),
+    ): L2_BOOK_FACT_VERSION,
+}
 
 
 @dataclass(frozen=True)
@@ -314,7 +328,7 @@ class MarketStructureService:
         *,
         manifest_path: Path | str = DEFAULT_TRADE_FLEET_MANIFEST,
     ) -> dict[str, Any]:
-        """Register a validated fleet without product-specific Python branches."""
+        """Register a validated fleet through the built-in projection packs."""
 
         manifest = load_stream_enrollment_manifest(manifest_path)
         source_ids: dict[tuple[str, str, str], int] = {}
@@ -353,30 +367,99 @@ class MarketStructureService:
                     },
                 )
                 source_ids[source_key] = source_id
-            series_id = market_data_repo.register_series(
-                instrument_id=enrollment.instrument_id,
-                fact_type=MARKET_TRADE_FACT_TYPE,
-                timeframe_seconds=None,
-                contract_version=enrollment.contract_version,
+            channels = tuple(enrollment.channels)
+            projection_key = (
+                enrollment.provider.upper(),
+                enrollment.venue.upper(),
+                channels,
             )
-            aggregate_series_ids = {
-                interval: market_data_repo.register_series(
-                    instrument_id=enrollment.instrument_id,
-                    fact_type=TRADE_FLOW_FACT_TYPE,
-                    timeframe_seconds=interval,
-                    contract_version=TRADE_FLOW_FACT_VERSION,
+            expected_contract = STREAM_ENROLLMENT_PROJECTION_CONTRACTS.get(
+                projection_key
+            )
+            if expected_contract is None:
+                raise ValueError(
+                    "stream_enrollment_adapter_unsupported: "
+                    f"enrollment_id={enrollment.enrollment_id} "
+                    f"provider={enrollment.provider} venue={enrollment.venue} "
+                    f"channels={channels}"
                 )
-                for interval in (1, 60)
-            }
-            flow_feature_series_ids = {
-                interval: market_data_repo.register_series(
+            if channels == ("market_trades", "heartbeats"):
+                primary_channel = "market_trades"
+                series_id = market_data_repo.register_series(
                     instrument_id=enrollment.instrument_id,
-                    fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
-                    timeframe_seconds=interval,
-                    contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                    fact_type=MARKET_TRADE_FACT_TYPE,
+                    timeframe_seconds=None,
+                    contract_version=enrollment.contract_version,
                 )
-                for interval in (1, 60)
-            }
+                aggregate_series_ids = {
+                    interval: market_data_repo.register_series(
+                        instrument_id=enrollment.instrument_id,
+                        fact_type=TRADE_FLOW_FACT_TYPE,
+                        timeframe_seconds=interval,
+                        contract_version=TRADE_FLOW_FACT_VERSION,
+                    )
+                    for interval in (1, 60)
+                }
+                flow_feature_series_ids = {
+                    interval: market_data_repo.register_series(
+                        instrument_id=enrollment.instrument_id,
+                        fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+                        timeframe_seconds=interval,
+                        contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                    )
+                    for interval in (1, 60)
+                }
+            elif channels == ("level2", "heartbeats"):
+                primary_channel = "level2"
+                series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=L2_BOOK_FACT_TYPE,
+                    timeframe_seconds=None,
+                    contract_version=enrollment.contract_version,
+                )
+                trade_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=MARKET_TRADE_FACT_TYPE,
+                    timeframe_seconds=None,
+                    contract_version=MARKET_TRADE_FACT_VERSION,
+                )
+                flow_feature_series_ids = {
+                    interval: market_data_repo.register_series(
+                        instrument_id=enrollment.instrument_id,
+                        fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+                        timeframe_seconds=interval,
+                        contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                    )
+                    for interval in (1, 60)
+                }
+                bbo_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=BBO_FACT_TYPE,
+                    timeframe_seconds=1,
+                    contract_version=BBO_FACT_VERSION,
+                )
+                depth_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=DEPTH_FACT_TYPE,
+                    timeframe_seconds=1,
+                    contract_version=DEPTH_FACT_VERSION,
+                )
+                response_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=RESPONSE_FACT_TYPE,
+                    timeframe_seconds=1,
+                    contract_version=RESPONSE_FACT_VERSION,
+                )
+                aggregate_series_ids = {}
+            else:  # guarded by the projection pack registry above
+                raise AssertionError("stream enrollment projection pack is incomplete")
+            if enrollment.contract_version != expected_contract:
+                raise ValueError(
+                    "stream_enrollment_contract_mismatch: "
+                    f"enrollment_id={enrollment.enrollment_id} "
+                    f"expected={expected_contract} "
+                    f"actual={enrollment.contract_version}"
+                )
             contract = enrollment.product_contract
             self.repository.register_product_definition(
                 definition_version_id=contract.product_definition_version_id,
@@ -402,10 +485,136 @@ class MarketStructureService:
                     ),
                 },
             )
-            definition_id = (
-                "ms_coinbase_"
+            provider_slug = "".join(
+                character
+                if character.isalnum()
+                else "_"
+                for character in enrollment.provider.lower()
+            ).strip("_")
+            definition_id = f"ms_{provider_slug}_" + (
+                ("l2_" if primary_channel == "level2" else "")
                 + contract.provider_product_id.lower().replace("-", "_")
             )
+            if primary_channel == "market_trades":
+                output_series = [
+                    {
+                        "fact_type": MARKET_TRADE_FACT_TYPE,
+                        "schema_version": enrollment.contract_version,
+                        "series_id": series_id,
+                    },
+                    *[
+                        {
+                            "fact_type": TRADE_FLOW_FACT_TYPE,
+                            "schema_version": TRADE_FLOW_FACT_VERSION,
+                            "series_id": aggregate_series_ids[interval],
+                            "timeframe_seconds": interval,
+                        }
+                        for interval in (1, 60)
+                    ],
+                    *[
+                        {
+                            "fact_type": TRADE_FLOW_FEATURE_FACT_TYPE,
+                            "schema_version": TRADE_FLOW_FEATURE_FACT_VERSION,
+                            "series_id": flow_feature_series_ids[interval],
+                            "timeframe_seconds": interval,
+                        }
+                        for interval in (1, 60)
+                    ],
+                ]
+                runtime_config = {
+                    "schema_version": "market.stream_runtime_config.v1",
+                    "enrollment_id": enrollment.enrollment_id,
+                    "fleet_id": enrollment.fleet_id,
+                    "manifest_hash": manifest.manifest_hash,
+                    "safety_policy": manifest.safety_policy.to_dict(),
+                    "product_definition_version_id": (
+                        contract.product_definition_version_id
+                    ),
+                    "output_series": output_series,
+                    "aggregate_series_ids": {
+                        str(key): value
+                        for key, value in aggregate_series_ids.items()
+                    },
+                    "flow_feature_series_ids": {
+                        str(key): value
+                        for key, value in flow_feature_series_ids.items()
+                    },
+                    "runtime_policy": ContinuousStreamPolicy.from_mapping(
+                        None
+                    ).to_dict(),
+                }
+            else:
+                tick_size = _instrument_decimal(instrument, "tick_size")
+                quantity_step = _instrument_decimal(instrument, "qty_step")
+                output_series = [
+                    {
+                        "fact_type": L2_BOOK_FACT_TYPE,
+                        "schema_version": enrollment.contract_version,
+                        "series_id": series_id,
+                    },
+                    {
+                        "fact_type": BBO_FACT_TYPE,
+                        "schema_version": BBO_FACT_VERSION,
+                        "series_id": bbo_series_id,
+                        "timeframe_seconds": 1,
+                    },
+                    {
+                        "fact_type": DEPTH_FACT_TYPE,
+                        "schema_version": DEPTH_FACT_VERSION,
+                        "series_id": depth_series_id,
+                        "timeframe_seconds": 1,
+                    },
+                    {
+                        "fact_type": RESPONSE_FACT_TYPE,
+                        "schema_version": RESPONSE_FACT_VERSION,
+                        "series_id": response_series_id,
+                        "timeframe_seconds": 1,
+                    },
+                ]
+                runtime_config = {
+                    "schema_version": "market_structure_l2_stream_config.v1",
+                    "enrollment_id": enrollment.enrollment_id,
+                    "fleet_id": enrollment.fleet_id,
+                    "manifest_hash": manifest.manifest_hash,
+                    "safety_policy": manifest.safety_policy.to_dict(),
+                    "product_definition_version_id": (
+                        contract.product_definition_version_id
+                    ),
+                    "output_series": output_series,
+                    "provider_size_unit": contract.provider_size_unit.value,
+                    "price_increment": (
+                        str(tick_size) if tick_size is not None else None
+                    ),
+                    "quantity_increment": (
+                        "1"
+                        if contract.provider_size_unit.value == "contracts"
+                        else (
+                            str(quantity_step)
+                            if quantity_step is not None
+                            else None
+                        )
+                    ),
+                    "bbo_series_id": bbo_series_id,
+                    "depth_series_id": depth_series_id,
+                    "response_feature_series_id": response_series_id,
+                    "trade_series_id": trade_series_id,
+                    "flow_feature_series_ids": {
+                        str(key): value
+                        for key, value in flow_feature_series_ids.items()
+                    },
+                    "base_currency": contract.base_currency,
+                    "quote_currency": contract.quote_currency,
+                    "contract_size": (
+                        str(contract.contract_size)
+                        if contract.contract_size is not None
+                        else None
+                    ),
+                    "checkpoint_max_seconds": 300,
+                    "checkpoint_max_mutations": 100000,
+                    "runtime_policy": ContinuousStreamPolicy.from_mapping(
+                        None
+                    ).to_dict(),
+                }
             definitions.append(
                 self.repository.upsert_stream_definition(
                     definition_id=definition_id,
@@ -420,27 +629,7 @@ class MarketStructureService:
                     max_spool_bytes=enrollment.max_spool_bytes,
                     max_segment_bytes=enrollment.max_segment_bytes,
                     enabled=enrollment.continuous,
-                    config={
-                        "schema_version": "market.stream_runtime_config.v1",
-                        "enrollment_id": enrollment.enrollment_id,
-                        "fleet_id": enrollment.fleet_id,
-                        "manifest_hash": manifest.manifest_hash,
-                        "safety_policy": manifest.safety_policy.to_dict(),
-                        "product_definition_version_id": (
-                            contract.product_definition_version_id
-                        ),
-                        "aggregate_series_ids": {
-                            str(key): value
-                            for key, value in aggregate_series_ids.items()
-                        },
-                        "flow_feature_series_ids": {
-                            str(key): value
-                            for key, value in flow_feature_series_ids.items()
-                        },
-                        "runtime_policy": ContinuousStreamPolicy.from_mapping(
-                            None
-                        ).to_dict(),
-                    },
+                    config=runtime_config,
                 )
             )
         return {
@@ -2624,6 +2813,8 @@ class MarketStructureService:
 
 
 class _CaptureAnalyzer:
+    """Coinbase market-structure analyzer owned by its projection adapters."""
+
     def __init__(self, claim: StreamClaim, *, primary_channel: str = "market_trades") -> None:
         self.claim = claim
         self.primary_channel = str(primary_channel)

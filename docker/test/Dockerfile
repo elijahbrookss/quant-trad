@@ -14,9 +14,10 @@ RUN apt-get update \
 
 # Install deps with uv's pip-compatible installer. The cache mount keeps local
 # rebuilds fast without changing the runtime package set.
-COPY requirements.txt .
+COPY requirements.lock .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements.txt
+    uv pip install --system --no-deps -r requirements.lock \
+    && python -m pip check
 
 # Copy everything needed for testing
 COPY . .

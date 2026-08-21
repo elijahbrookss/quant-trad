@@ -40,8 +40,9 @@ from ..storage.repos.market_structure import (
     market_structure_repository,
 )
 from .collector_supervisor import (
+    CoinbaseLevel2CollectorAdapter,
+    CoinbaseMarketTradeCollectorAdapter,
     CollectorAdapterRegistry,
-    MarketStructureTradeAdapter,
 )
 
 
@@ -60,11 +61,6 @@ _SCHEDULED_ADAPTERS = {
     ),
 }
 _SCHEDULED_DEFINITION_VERSION = "market_collection_definition.v1"
-_CONTINUOUS_DEFINITION_VERSIONS = {
-    "market.stream_runtime_config.v1",
-    "market_structure_stream_config.v1",
-    "market_structure_l2_stream_config.v1",
-}
 _CONTINUOUS_DERIVED_SCHEMAS = (
     ("market.trade_flow", "market.trade_flow.v1", "aggregate_series_ids"),
     (
@@ -106,8 +102,18 @@ def _series_ids(definition: Mapping[str, Any], kind: CollectorKind) -> list[int]
     values = [int(definition["series_id"])]
     if kind == CollectorKind.CONTINUOUS_STREAM:
         config = dict(definition.get("config") or {})
-        for key in ("aggregate_series_ids", "flow_feature_series_ids"):
-            values.extend(int(value) for value in dict(config.get(key) or {}).values())
+        output_series = config.get("output_series")
+        if isinstance(output_series, list) and output_series:
+            values.extend(
+                int(row["series_id"])
+                for row in output_series
+                if isinstance(row, Mapping) and row.get("series_id") is not None
+            )
+        else:
+            for key in ("aggregate_series_ids", "flow_feature_series_ids"):
+                values.extend(
+                    int(value) for value in dict(config.get(key) or {}).values()
+                )
     return sorted(set(values))
 
 
@@ -133,7 +139,10 @@ class CollectorOperationsService:
         self.stream_repository = stream_repository
         self.operations_repository = operations_repository
         self.stream_registry = stream_registry or CollectorAdapterRegistry(
-            (MarketStructureTradeAdapter(),)
+            (
+                CoinbaseMarketTradeCollectorAdapter(),
+                CoinbaseLevel2CollectorAdapter(),
+            )
         )
         self.clock = clock
 
@@ -160,9 +169,8 @@ class CollectorOperationsService:
             return CollectorConfiguredState.INVALID, reasons
         return CollectorConfiguredState.ENABLED, []
 
-    @staticmethod
     def _is_operationally_registered(
-        definition: Mapping[str, Any], kind: CollectorKind
+        self, definition: Mapping[str, Any], kind: CollectorKind
     ) -> bool:
         config_version = str(
             dict(definition.get("config") or {}).get("schema_version") or ""
@@ -173,28 +181,22 @@ class CollectorOperationsService:
                 in _SCHEDULED_ADAPTERS
                 or config_version == _SCHEDULED_DEFINITION_VERSION
             )
-        return config_version in _CONTINUOUS_DEFINITION_VERSIONS
+        try:
+            self.stream_registry.resolve(definition)
+        except ValueError:
+            return False
+        return True
 
     def _continuous_registration(
         self, definition: Mapping[str, Any]
     ) -> tuple[CollectorConfiguredState, list[str]]:
         reasons: list[str] = []
         try:
-            self.stream_registry.resolve(definition)
+            adapter = self.stream_registry.resolve(definition)
         except ValueError:
             reasons.append("adapter_not_registered")
-        config = dict(definition.get("config") or {})
-        for key in (
-            "product_definition_version_id",
-            "aggregate_series_ids",
-            "flow_feature_series_ids",
-        ):
-            if not config.get(key):
-                reasons.append(f"config_missing:{key}")
-        for key in ("aggregate_series_ids", "flow_feature_series_ids"):
-            values = dict(config.get(key) or {})
-            if not {"1", "60"}.issubset(values):
-                reasons.append(f"config_incomplete:{key}")
+        else:
+            reasons.extend(adapter.registration_errors(definition))
         if not bool(definition.get("enabled")):
             return CollectorConfiguredState.DISABLED, reasons
         if reasons:
@@ -408,19 +410,37 @@ class CollectorOperationsService:
         ]
         if kind == CollectorKind.CONTINUOUS_STREAM:
             config = dict(definition.get("config") or {})
-            for fact_type, schema_version, config_key in _CONTINUOUS_DERIVED_SCHEMAS:
-                for timeframe, series_id in sorted(
-                    dict(config.get(config_key) or {}).items(),
-                    key=lambda item: int(item[0]),
-                ):
-                    schemas.append(
-                        {
-                            "fact_type": fact_type,
-                            "schema_version": schema_version,
-                            "series_id": int(series_id),
-                            "timeframe_seconds": int(timeframe),
+            output_series = config.get("output_series")
+            if isinstance(output_series, list) and output_series:
+                schemas = [
+                    {
+                        key: value
+                        for key, value in dict(row).items()
+                        if key
+                        in {
+                            "fact_type",
+                            "schema_version",
+                            "series_id",
+                            "timeframe_seconds",
                         }
-                    )
+                    }
+                    for row in output_series
+                    if isinstance(row, Mapping)
+                ]
+            else:
+                for fact_type, schema_version, config_key in _CONTINUOUS_DERIVED_SCHEMAS:
+                    for timeframe, series_id in sorted(
+                        dict(config.get(config_key) or {}).items(),
+                        key=lambda item: int(item[0]),
+                    ):
+                        schemas.append(
+                            {
+                                "fact_type": fact_type,
+                                "schema_version": schema_version,
+                                "series_id": int(series_id),
+                                "timeframe_seconds": int(timeframe),
+                            }
+                        )
         return schemas
 
     def _project_scheduled(

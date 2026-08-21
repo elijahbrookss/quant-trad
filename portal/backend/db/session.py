@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from contextlib import contextmanager
@@ -82,8 +83,10 @@ _LEGACY_MARKET_DATA_TABLES = (
     "market.normalized_feature_versions",
 )
 _CANONICAL_MARKET_DATA_TABLE = "market.fact_versions"
-_EXPLICIT_MIGRATION_TABLES = frozenset(
+_CLEAN_BOOTSTRAP_ONLY_TABLES = frozenset(
     {
+        ("market", "fact_schemas"),
+        ("market", "fact_versions"),
         ("market", "fact_acquisition_coverage"),
     }
 )
@@ -332,12 +335,26 @@ class Database:
                 text("SELECT pg_advisory_xact_lock(:key)"),
                 {"key": _SCHEMA_LOCK_KEY},
             )
+            clean_database = self._is_clean_database(conn)
+            if clean_database:
+                logger.warning("portal_db_clean_schema_initializing")
             self._assert_market_data_cutover_state(conn)
             self._create_missing_schemas(conn)
             self._ensure_market_data_commit_sequence(conn)
             self._assert_market_commit_clock(conn, existing_only=True)
             self._assert_retired_tables_absent(conn)
-            self._create_missing_tables(conn)
+            self._create_missing_tables(
+                conn,
+                include_clean_bootstrap=clean_database,
+            )
+            if clean_database:
+                self._seed_static_fact_registry(conn)
+                self._create_missing_indexes(
+                    conn,
+                    include_clean_bootstrap=True,
+                )
+                self._ensure_canonical_fact_insert_trigger(conn)
+                self._ensure_market_data_immutability(conn)
             self._assert_fact_acquisition_migration(conn)
             self._assert_canonical_fact_migration(conn)
             self._ensure_market_data_hypertables(conn)
@@ -347,7 +364,356 @@ class Database:
             self._create_missing_indexes(conn)
             self._assert_required_indexes(conn)
             self._ensure_market_data_immutability(conn)
+            if clean_database:
+                logger.info("portal_db_clean_schema_ready")
             logger.info("portal_db_schema_contract_ready")
+
+    def _is_clean_database(self, conn) -> bool:
+        """Return whether no Quant-Trad model relation exists yet."""
+
+        inspector = inspect(conn)
+        existing_schemas = {str(name) for name in inspector.get_schema_names()}
+        tables_by_schema: Dict[Optional[str], set[str]] = {}
+        for table in Base.metadata.sorted_tables:
+            schema_name = str(table.schema or "").strip() or None
+            lookup_schema = schema_name or "public"
+            if lookup_schema not in existing_schemas:
+                continue
+            if schema_name not in tables_by_schema:
+                tables_by_schema[schema_name] = set(
+                    inspector.get_table_names(schema=schema_name)
+                )
+            if table.name in tables_by_schema[schema_name]:
+                return False
+        return True
+
+    def _ensure_canonical_fact_functions(self, conn) -> None:
+        """Install functions required to create the current canonical Fact schema."""
+
+        conn.execute(
+            text(
+                r"""
+                CREATE OR REPLACE FUNCTION market.validate_fact_fields(
+                    field_contracts jsonb,
+                    candidate jsonb
+                )
+                RETURNS boolean
+                LANGUAGE plpgsql
+                IMMUTABLE
+                AS $$
+                DECLARE
+                    field_contract jsonb;
+                    field_name text;
+                    field_kind text;
+                    field_value jsonb;
+                    field_text text;
+                    required boolean;
+                    nullable boolean;
+                    minimum_text text;
+                    minimum_inclusive boolean;
+                    numeric_value numeric;
+                    items_contract jsonb;
+                    array_item jsonb;
+                BEGIN
+                    IF jsonb_typeof(field_contracts) <> 'array'
+                       OR jsonb_typeof(candidate) <> 'object' THEN
+                        RETURN false;
+                    END IF;
+                    IF EXISTS (
+                        SELECT 1
+                        FROM jsonb_object_keys(candidate) AS candidate_key
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM jsonb_array_elements(field_contracts) AS declared
+                            WHERE declared->>'name' = candidate_key
+                        )
+                    ) THEN
+                        RETURN false;
+                    END IF;
+
+                    FOR field_contract IN
+                        SELECT value FROM jsonb_array_elements(field_contracts)
+                    LOOP
+                        field_name := field_contract->>'name';
+                        field_kind := field_contract->>'kind';
+                        required := COALESCE(
+                            (field_contract->>'required')::boolean,
+                            true
+                        );
+                        nullable := COALESCE(
+                            (field_contract->>'nullable')::boolean,
+                            false
+                        );
+
+                        IF NOT (candidate ? field_name) THEN
+                            IF required THEN
+                                RETURN false;
+                            END IF;
+                            CONTINUE;
+                        END IF;
+
+                        field_value := candidate->field_name;
+                        IF jsonb_typeof(field_value) = 'null' THEN
+                            IF NOT nullable THEN
+                                RETURN false;
+                            END IF;
+                            CONTINUE;
+                        END IF;
+                        field_text := candidate->>field_name;
+                        numeric_value := NULL;
+
+                        IF field_kind IN ('decimal', 'float64') THEN
+                            IF jsonb_typeof(field_value) <> 'string'
+                               OR field_text !~ '^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$' THEN
+                                RETURN false;
+                            END IF;
+                            numeric_value := field_text::numeric;
+                        ELSIF field_kind = 'integer' THEN
+                            IF jsonb_typeof(field_value) <> 'number'
+                               OR field_text !~ '^-?(0|[1-9][0-9]*)$' THEN
+                                RETURN false;
+                            END IF;
+                            numeric_value := field_text::numeric;
+                        ELSIF field_kind = 'string' THEN
+                            IF jsonb_typeof(field_value) <> 'string'
+                               OR field_text = '' THEN
+                                RETURN false;
+                            END IF;
+                            IF jsonb_array_length(
+                                COALESCE(field_contract->'enum', '[]'::jsonb)
+                            ) > 0
+                               AND NOT (field_contract->'enum' ? field_text) THEN
+                                RETURN false;
+                            END IF;
+                        ELSIF field_kind = 'timestamp' THEN
+                            IF jsonb_typeof(field_value) <> 'string' THEN
+                                RETURN false;
+                            END IF;
+                            PERFORM field_text::timestamptz;
+                        ELSIF field_kind = 'boolean' THEN
+                            IF jsonb_typeof(field_value) <> 'boolean' THEN
+                                RETURN false;
+                            END IF;
+                        ELSIF field_kind = 'object' THEN
+                            IF jsonb_typeof(field_value) <> 'object' THEN
+                                RETURN false;
+                            END IF;
+                        ELSIF field_kind = 'array' THEN
+                            IF jsonb_typeof(field_value) <> 'array' THEN
+                                RETURN false;
+                            END IF;
+                            items_contract := field_contract->'items';
+                            IF items_contract IS NOT NULL
+                               AND jsonb_typeof(items_contract) <> 'null' THEN
+                                IF items_contract->>'kind' <> 'object'
+                                   OR jsonb_typeof(items_contract->'fields') <> 'array' THEN
+                                    RETURN false;
+                                END IF;
+                                FOR array_item IN
+                                    SELECT value FROM jsonb_array_elements(field_value)
+                                LOOP
+                                    IF NOT market.validate_fact_fields(
+                                        items_contract->'fields',
+                                        array_item
+                                    ) THEN
+                                        RETURN false;
+                                    END IF;
+                                END LOOP;
+                            END IF;
+                        ELSE
+                            RETURN false;
+                        END IF;
+
+                        minimum_text := field_contract->>'minimum';
+                        minimum_inclusive := COALESCE(
+                            (field_contract->>'minimum_inclusive')::boolean,
+                            true
+                        );
+                        IF minimum_text IS NOT NULL
+                           AND numeric_value IS NOT NULL THEN
+                            IF numeric_value < minimum_text::numeric
+                               OR (
+                                   NOT minimum_inclusive
+                                   AND numeric_value = minimum_text::numeric
+                               ) THEN
+                                RETURN false;
+                            END IF;
+                        END IF;
+                    END LOOP;
+                    RETURN true;
+                EXCEPTION
+                    WHEN invalid_text_representation
+                       OR datetime_field_overflow
+                       OR numeric_value_out_of_range THEN
+                        RETURN false;
+                END;
+                $$
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE OR REPLACE FUNCTION market.validate_fact_payload(
+                    requested_schema_id text,
+                    candidate jsonb
+                )
+                RETURNS boolean
+                LANGUAGE plpgsql
+                STABLE
+                AS $$
+                DECLARE
+                    schema_contract jsonb;
+                BEGIN
+                    SELECT contract
+                    INTO schema_contract
+                    FROM market.fact_schemas
+                    WHERE schema_id = requested_schema_id;
+                    IF schema_contract IS NULL THEN
+                        RETURN false;
+                    END IF;
+                    RETURN market.validate_fact_fields(
+                        schema_contract->'fields',
+                        candidate
+                    );
+                END;
+                $$
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE OR REPLACE FUNCTION market.canonical_fact_utc_timestamp(
+                    value text
+                )
+                RETURNS timestamptz
+                LANGUAGE sql
+                IMMUTABLE
+                STRICT
+                PARALLEL SAFE
+                SET search_path = pg_catalog
+                AS $$
+                    SELECT (
+                        substring(value FROM 1 FOR 26)::timestamp without time zone
+                        AT TIME ZONE 'UTC'
+                    )
+                $$
+                """
+            )
+        )
+
+    def _seed_static_fact_registry(self, conn) -> None:
+        """Seed code-owned immutable Fact contracts into a clean database."""
+
+        statement = text(
+            """
+            INSERT INTO market.fact_schemas (
+                schema_id,
+                fact_type,
+                contract_hash,
+                contract,
+                observation_time_field,
+                material_hash_version,
+                row_hash_version,
+                query_fields,
+                dataset_eligible
+            ) VALUES (
+                :schema_id,
+                :fact_type,
+                :contract_hash,
+                CAST(:contract AS jsonb),
+                :observation_time_field,
+                :material_hash_version,
+                :row_hash_version,
+                CAST(:query_fields AS jsonb),
+                :dataset_eligible
+            )
+            ON CONFLICT (schema_id) DO NOTHING
+            """
+        )
+        for schema in supported_static_fact_payload_schemas():
+            conn.execute(
+                statement,
+                {
+                    "schema_id": schema.schema_id,
+                    "fact_type": schema.fact_type,
+                    "contract_hash": schema.contract_hash,
+                    "contract": json.dumps(
+                        schema.contract,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=True,
+                    ),
+                    "observation_time_field": schema.observation_time_field,
+                    "material_hash_version": schema.material_hash_version,
+                    "row_hash_version": schema.row_hash_version,
+                    "query_fields": json.dumps(
+                        list(schema.query_fields),
+                        separators=(",", ":"),
+                    ),
+                    "dataset_eligible": schema.dataset_eligible,
+                },
+            )
+
+    def _ensure_canonical_fact_insert_trigger(self, conn) -> None:
+        """Install the current schema/series insert guard for a clean Fact store."""
+
+        conn.execute(
+            text(
+                """
+                CREATE OR REPLACE FUNCTION market.assert_fact_version_valid()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                DECLARE
+                    series_fact_type text;
+                    series_contract_version text;
+                BEGIN
+                    SELECT fact_type, contract_version
+                    INTO series_fact_type, series_contract_version
+                    FROM market.series
+                    WHERE id = NEW.series_id;
+                    IF series_fact_type IS NULL THEN
+                        RAISE EXCEPTION
+                            'canonical_fact_invalid: unknown series_id=%',
+                            NEW.series_id;
+                    END IF;
+                    IF NEW.fact_type <> series_fact_type
+                       OR NEW.payload_schema_id <> series_contract_version THEN
+                        RAISE EXCEPTION
+                            'canonical_fact_invalid: series/schema mismatch series_id=% series_fact_type=% series_contract_version=% fact_type=% payload_schema_id=%',
+                            NEW.series_id,
+                            series_fact_type,
+                            series_contract_version,
+                            NEW.fact_type,
+                            NEW.payload_schema_id;
+                    END IF;
+                    IF NOT market.validate_fact_payload(
+                        NEW.payload_schema_id,
+                        NEW.payload
+                    ) THEN
+                        RAISE EXCEPTION
+                            'canonical_fact_invalid: payload does not satisfy schema_id=% observation_key=%',
+                            NEW.payload_schema_id,
+                            NEW.observation_key;
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TRIGGER trg_assert_fact_version_valid
+                BEFORE INSERT ON market.fact_versions
+                FOR EACH ROW
+                EXECUTE FUNCTION market.assert_fact_version_valid()
+                """
+            )
+        )
 
     def _create_missing_schemas(self, conn) -> None:
         """Create non-public schemas declared by metadata when absent."""
@@ -494,6 +860,7 @@ class Database:
             "series",
             "fact_schemas",
             "fact_versions",
+            "fact_acquisition_coverage",
             "gap_evidence",
             "datasets",
             "dataset_series",
@@ -541,7 +908,12 @@ class Database:
                 )
             )
 
-    def _create_missing_tables(self, conn) -> None:
+    def _create_missing_tables(
+        self,
+        conn,
+        *,
+        include_clean_bootstrap: bool = False,
+    ) -> None:
         """Create metadata tables that are missing from the configured database."""
 
         inspector = inspect(conn)
@@ -555,7 +927,10 @@ class Database:
 
         for table in Base.metadata.sorted_tables:
             schema_name = str(table.schema or "").strip() or None
-            if (schema_name, table.name) in _EXPLICIT_MIGRATION_TABLES:
+            if (
+                (schema_name, table.name) in _CLEAN_BOOTSTRAP_ONLY_TABLES
+                and not include_clean_bootstrap
+            ):
                 continue
             retired_name = _HARD_CUTOVER_TABLE_RENAMES.get((schema_name, table.name))
             if retired_name:
@@ -578,6 +953,14 @@ class Database:
 
             if table.name in schema_table_names(schema_name):
                 continue
+            if (
+                include_clean_bootstrap
+                and (schema_name, table.name) == ("market", "fact_versions")
+            ):
+                # fact_schemas is dependency-sorted ahead of fact_versions.
+                # Install the validation functions only after that registry
+                # relation exists and immediately before its first consumer.
+                self._ensure_canonical_fact_functions(conn)
             conn.execute(CreateTable(table))
             logger.warning("portal_db_table_created | schema=%s | table=%s", schema_name or "public", table.name)
             schema_table_names(schema_name).add(table.name)
@@ -642,13 +1025,21 @@ class Database:
                 "Drop the table or rebuild the database to ensure a clean schema."
             )
 
-    def _create_missing_indexes(self, conn) -> None:
+    def _create_missing_indexes(
+        self,
+        conn,
+        *,
+        include_clean_bootstrap: bool = False,
+    ) -> None:
         """Create metadata indexes that are missing from otherwise valid tables."""
 
         inspector = inspect(conn)
         for table in Base.metadata.sorted_tables:
             schema_name = str(table.schema or "").strip() or None
-            if (schema_name, table.name) in _EXPLICIT_MIGRATION_TABLES:
+            if (
+                (schema_name, table.name) in _CLEAN_BOOTSTRAP_ONLY_TABLES
+                and not include_clean_bootstrap
+            ):
                 continue
             existing = {str(index.get("name") or "") for index in inspector.get_indexes(table.name, schema=schema_name)}
             for index in sorted(table.indexes, key=lambda item: str(item.name or "")):

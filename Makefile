@@ -11,7 +11,8 @@ VENV_PYTHON := $(VENV)/bin/python
 PYTHON      := PYTHONPATH=$(PYTHONPATH) $(VENV_PYTHON)
 PIP         := $(VENV)/bin/pip
 UV          ?= uv
-REQ         ?= requirements.txt
+REQ         ?= requirements.lock
+REQ_INSTALL_FLAGS ?= --no-deps
 DEV_REQ     ?= requirements-dev.txt
 REQS_HASH   := $(VENV)/.reqs.sha256
 
@@ -198,12 +199,12 @@ deps: _ensure_python _deps_hash ## Install Python dependencies
 	@if [ "$$(cat $(REQS_HASH).new)" != "$$(cat $(REQS_HASH) 2>/dev/null || echo _none_)" ] || [ ! -x "$(VENV)/bin/qt" ]; then \
 		echo "► Installing Python deps..."; \
 		if command -v "$(UV)" >/dev/null 2>&1; then \
-			[ -f "$(REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" -r "$(REQ)" || true; \
+			[ -f "$(REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" $(REQ_INSTALL_FLAGS) -r "$(REQ)" || true; \
 			[ -f "$(DEV_REQ)" ] && $(UV) pip install --python "$(VENV_PYTHON)" -r "$(DEV_REQ)" || true; \
 			$(UV) pip install --python "$(VENV_PYTHON)" -e .; \
 		else \
 			$(PIP) install --upgrade pip setuptools wheel; \
-			[ -f "$(REQ)" ] && $(PIP) install -r $(REQ) || true; \
+			[ -f "$(REQ)" ] && $(PIP) install $(REQ_INSTALL_FLAGS) -r $(REQ) || true; \
 			[ -f "$(DEV_REQ)" ] && $(PIP) install -r $(DEV_REQ) || true; \
 			$(PIP) install -e .; \
 		fi; \

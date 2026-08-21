@@ -1,0 +1,108 @@
+{
+  "schema_version": "market.instrument_enrollment_manifest.v1",
+  "fleet_id": "coinbase_perpetuals",
+  "instruments": [
+    {
+      "id": "b2deb0a0-f292-408a-876d-3dadd8e3819b",
+      "symbol": "BIP-20DEC30-CDE",
+      "datasource": "COINBASE",
+      "exchange": "COINBASE_DIRECT",
+      "instrument_type": "future",
+      "metadata": {
+        "instrument_fields": {
+          "tick_size": "5",
+          "qty_step": "1",
+          "min_order_size": "1",
+          "max_qty": "5000",
+          "contract_size": "0.01",
+          "base_currency": "BTC",
+          "quote_currency": "USD",
+          "can_short": true,
+          "short_requires_borrow": false,
+          "has_funding": true,
+          "expiry_ts": "2030-12-20T16:00:00Z"
+        },
+        "provider_metadata": {
+          "provider_product_id": "BIP-20DEC30-CDE",
+          "product_type": "FUTURE",
+          "product_venue": "FCM",
+          "contract_code": "BIP",
+          "funding_interval_seconds": 3600
+        },
+        "provenance": {
+          "source": "coinbase_advanced_trade_public_product",
+          "observed_at": "2026-08-20T22:30:00Z",
+          "contract": "market.instrument_enrollment.v1"
+        }
+      }
+    },
+    {
+      "id": "44226144-fb38-4566-92c4-580734d76d3c",
+      "symbol": "ETP-20DEC30-CDE",
+      "datasource": "COINBASE",
+      "exchange": "COINBASE_DIRECT",
+      "instrument_type": "future",
+      "metadata": {
+        "instrument_fields": {
+          "tick_size": "0.5",
+          "qty_step": "1",
+          "min_order_size": "1",
+          "max_qty": "5000",
+          "contract_size": "0.1",
+          "base_currency": "ETH",
+          "quote_currency": "USD",
+          "can_short": true,
+          "short_requires_borrow": false,
+          "has_funding": true,
+          "expiry_ts": "2030-12-20T16:00:00Z"
+        },
+        "provider_metadata": {
+          "provider_product_id": "ETP-20DEC30-CDE",
+          "product_type": "FUTURE",
+          "product_venue": "FCM",
+          "contract_code": "ETP",
+          "funding_interval_seconds": 3600
+        },
+        "provenance": {
+          "source": "coinbase_advanced_trade_public_product",
+          "observed_at": "2026-08-20T22:30:00Z",
+          "contract": "market.instrument_enrollment.v1"
+        }
+      }
+    },
+    {
+      "id": "bead556e-22e2-4ac0-8ee0-0d8c5310e9a0",
+      "symbol": "SLP-20DEC30-CDE",
+      "datasource": "COINBASE",
+      "exchange": "COINBASE_DIRECT",
+      "instrument_type": "future",
+      "metadata": {
+        "instrument_fields": {
+          "tick_size": "0.01",
+          "qty_step": "1",
+          "min_order_size": "1",
+          "max_qty": "1000",
+          "contract_size": "5",
+          "base_currency": "SOL",
+          "quote_currency": "USD",
+          "can_short": true,
+          "short_requires_borrow": false,
+          "has_funding": true,
+          "expiry_ts": "2030-12-20T16:00:00Z"
+        },
+        "provider_metadata": {
+          "provider_product_id": "SLP-20DEC30-CDE",
+          "product_type": "FUTURE",
+          "product_venue": "FCM",
+          "contract_code": "SLP",
+          "funding_interval_seconds": 3600
+        },
+        "provenance": {
+          "source": "coinbase_advanced_trade_public_product",
+          "observed_at": "2026-08-20T22:30:00Z",
+          "contract": "market.instrument_enrollment.v1"
+        }
+      }
+    }
+  ]
+}

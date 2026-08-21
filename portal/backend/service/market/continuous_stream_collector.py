@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from data_providers.providers.factory import get_provider
 from data_providers.streams.coinbase import (
@@ -31,14 +33,41 @@ from market_data.archive import (
     SpoolBackpressureError,
     discover_spool_segments,
     publish_spool_archive,
+    read_raw_archive_parquet,
     require_spool_capacity,
     spool_backlog_bytes,
 )
-from market_data.market_state import derive_trade_flow_feature
+from market_data.book_archive import (
+    BOOK_CHECKPOINT_COMPRESSION,
+    BOOK_CHECKPOINT_FORMAT,
+    publish_book_checkpoint,
+    read_book_checkpoint_parquet,
+)
+from market_data.market_state import (
+    MarketStateValuationContract,
+    derive_book_features,
+    derive_response_features,
+    derive_trade_flow_feature,
+)
+from market_data.order_book import (
+    BOOK_CHECKPOINT_SCHEMA_VERSION,
+    BOOK_RECONSTRUCTION_VERSION,
+    BookCheckpointFact,
+    BookLifecycle,
+    BookQualityEvidence,
+    BookSide,
+    BookSourcePosition,
+    BookValidityIntervalVersion,
+    BookValidityStatus,
+    L2ProductContract,
+    Level2BookReconstructor,
+    translate_coinbase_l2_event,
+)
 from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
     OrderingAssurance,
+    ProviderSizeUnit,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
     aggregate_trade_bucket,
@@ -54,7 +83,6 @@ from ..storage.repos.market_structure import (
 )
 from .market_structure_service import (
     DEFAULT_STORAGE_ROOT,
-    CaptureAnalysis,
     _CaptureAnalyzer,
     _observed_channel,
     _stable_hash,
@@ -67,7 +95,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class _SegmentCheckpoint:
     segment: DurableRawSpoolSegment
-    analysis: CaptureAnalysis
+    analysis: Any
     terminal: bool
     terminal_reason: Optional[str]
     closing_session_event_id: Optional[str]
@@ -84,6 +112,9 @@ class _EpochProjectionState:
     persisted_quality_hashes: set[str] = field(default_factory=set)
     invalidating_quality_ids: list[str] = field(default_factory=list)
     next_bucket_start: dict[int, datetime] = field(default_factory=dict)
+    book_reducer: Optional[Level2BookReconstructor] = None
+    book_checkpoint_id: Optional[str] = None
+    book_last_position: Optional[BookSourcePosition] = None
 
 
 class _SessionEventWriter:
@@ -124,17 +155,395 @@ class _SessionEventWriter:
             )
 
 
-class ContinuousMarketStructureCollector:
-    """Long-lived adapter for market-structure stream definitions."""
+class ContinuousTransportAdapter(Protocol):
+    """Provider transport plugged into the generic lease/WAL runtime."""
+
+    transport_id: str
+
+    def supports(self, definition: Mapping[str, Any]) -> bool:
+        ...
+
+    def create_stream(self, claim: StreamClaim) -> Any:
+        ...
+
+    def create_parser(self, claim: StreamClaim) -> Any:
+        ...
+
+    def subscription(self, claim: StreamClaim) -> MarketSubscription:
+        ...
+
+    def observed_channel(self, raw_frame: bytes) -> str:
+        ...
+
+
+class CoinbaseContinuousTransportAdapter:
+    """Coinbase WebSocket/JWT/parser binding; no projection semantics."""
+
+    transport_id = "coinbase.advanced_trade_websocket.v1"
+
+    def __init__(
+        self,
+        *,
+        stream_factory: Callable[..., CoinbaseAdvancedTradeStream] = (
+            CoinbaseAdvancedTradeStream
+        ),
+    ) -> None:
+        self.stream_factory = stream_factory
+
+    def supports(self, definition: Mapping[str, Any]) -> bool:
+        return (
+            str(definition.get("provider") or "").upper() == "COINBASE"
+            and str(definition.get("venue") or "").upper()
+            == "COINBASE_DIRECT"
+        )
+
+    def create_stream(self, claim: StreamClaim) -> CoinbaseAdvancedTradeStream:
+        provider = get_provider(claim.provider, venue=claim.venue)
+        jwt_factory = (
+            provider.build_websocket_jwt
+            if claim.auth_mode == "authenticated"
+            else None
+        )
+        return self.stream_factory(
+            jwt_factory=jwt_factory,
+            stream_session_id=claim.session_id,
+        )
+
+    def create_parser(self, claim: StreamClaim) -> CoinbaseMessageParser:
+        return CoinbaseMessageParser(
+            symbol_by_product_id={
+                claim.provider_product_id: claim.provider_product_id
+            }
+        )
+
+    def subscription(self, claim: StreamClaim) -> MarketSubscription:
+        return MarketSubscription.from_values(
+            provider=claim.provider,
+            venue=claim.venue,
+            symbol=claim.provider_product_id,
+            product_id=claim.provider_product_id,
+            channels=claim.channels,
+            auth_mode=claim.auth_mode,
+        )
+
+    def observed_channel(self, raw_frame: bytes) -> str:
+        observed = _observed_channel(raw_frame)
+        # Coinbase currently emits ``l2_data`` for the subscribed ``level2``
+        # channel. The transport owns that provider alias so projection and
+        # persistence retain the canonical subscription identity.
+        return "level2" if observed == "l2_data" else observed
+
+
+class ContinuousCaptureAnalyzer(Protocol):
+    """Projection-owned epoch analysis consumed by the generic runtime."""
+
+    raw_count: int
+    last_heartbeat_at: Optional[datetime]
+    last_record: Optional[RawStreamRecord]
+    last_sequence: Optional[int]
+    quality: list[dict[str, Any]]
+
+    def observe(self, record: RawStreamRecord, events: Sequence[Any]) -> None:
+        ...
+
+    def observe_idle(self, now: datetime) -> None:
+        ...
+
+    def finalize(self) -> Any:
+        ...
+
+
+class ContinuousProjectionAdapter(Protocol):
+    """Domain projection plugged into the provider-neutral stream runtime."""
+
+    projection_id: str
+    primary_channel: str
+    channels: tuple[str, ...]
+    disconnect_invalidates: bool
+
+    def create_analyzer(self, claim: StreamClaim) -> ContinuousCaptureAnalyzer:
+        """Build the projection-owned analyzer for one connection epoch."""
+
+        ...
+
+    def counters(self) -> dict[str, int]:
+        ...
+
+    def finalize_segment(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        **kwargs: Any,
+    ) -> None:
+        ...
+
+    def begin_recovery(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        claim: StreamClaim,
+        entries: Sequence[tuple[Path, DurableRawSpoolSegment]],
+        object_store: FilesystemRawArchiveObjectStore,
+    ) -> Any:
+        ...
+
+    def recover_segment(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        context: Any,
+        claim: StreamClaim,
+        segment: DurableRawSpoolSegment,
+        terminal: bool,
+        truncated_tail_bytes: int,
+        object_store: FilesystemRawArchiveObjectStore,
+        temporary_root: Path,
+        event_writer: _SessionEventWriter,
+        recovery_event_id: str,
+    ) -> int:
+        ...
+
+    def complete_recovery(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        context: Any,
+        claim: StreamClaim,
+        recovery_event_id: str,
+    ) -> Mapping[str, Any]:
+        ...
+
+
+class CoinbaseMarketTradeProjectionAdapter:
+    projection_id = "market.trade_projection.v1"
+    primary_channel = "market_trades"
+    channels = ("market_trades", "heartbeats")
+    disconnect_invalidates = False
+
+    def create_analyzer(self, claim: StreamClaim) -> _CaptureAnalyzer:
+        return _CaptureAnalyzer(claim, primary_channel=self.primary_channel)
+
+    def counters(self) -> dict[str, int]:
+        return {"trade_inserted": 0, "trade_noop": 0}
+
+    def finalize_segment(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        **kwargs: Any,
+    ) -> None:
+        runtime._finalize_trade_segment(**kwargs)
+
+    def begin_recovery(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        claim: StreamClaim,
+        entries: Sequence[tuple[Path, DurableRawSpoolSegment]],
+        object_store: FilesystemRawArchiveObjectStore,
+    ) -> None:
+        del runtime, claim, entries, object_store
+        return None
+
+    def recover_segment(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        context: Any,
+        claim: StreamClaim,
+        segment: DurableRawSpoolSegment,
+        terminal: bool,
+        truncated_tail_bytes: int,
+        object_store: FilesystemRawArchiveObjectStore,
+        temporary_root: Path,
+        event_writer: _SessionEventWriter,
+        recovery_event_id: str,
+    ) -> int:
+        del context, terminal, truncated_tail_bytes, event_writer, recovery_event_id
+        return runtime._recover_trade_segment(
+            claim=claim,
+            segment=segment,
+            object_store=object_store,
+            temporary_root=temporary_root,
+        )
+
+    def complete_recovery(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        context: Any,
+        claim: StreamClaim,
+        recovery_event_id: str,
+    ) -> Mapping[str, Any]:
+        del context
+        closed = runtime.repository.close_open_session_coverages(
+            claim,
+            closing_session_event_id=recovery_event_id,
+            reason="collector_restart_closed_at_last_proven_event",
+        )
+        return {"closed_open_coverage_intervals": int(closed)}
+
+
+class CoinbaseLevel2BookProjectionAdapter:
+    projection_id = "market.level2_book_projection.v1"
+    primary_channel = "level2"
+    channels = ("level2", "heartbeats")
+    disconnect_invalidates = True
+
+    def create_analyzer(self, claim: StreamClaim) -> _CaptureAnalyzer:
+        return _CaptureAnalyzer(claim, primary_channel=self.primary_channel)
+
+    def counters(self) -> dict[str, int]:
+        return {
+            "book_snapshots": 0,
+            "book_batches": 0,
+            "book_mutations": 0,
+            "book_checkpoints": 0,
+            "book_features": 0,
+        }
+
+    def finalize_segment(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        **kwargs: Any,
+    ) -> None:
+        runtime._finalize_level2_segment(**kwargs)
+
+    def begin_recovery(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        claim: StreamClaim,
+        entries: Sequence[tuple[Path, DurableRawSpoolSegment]],
+        object_store: FilesystemRawArchiveObjectStore,
+    ) -> dict[str, Any]:
+        del runtime, claim, object_store
+        return {
+            "states": {},
+            "parsers": {},
+            "analyzers": {},
+            "excluded_spool_ids": {
+                probe.spool_segment_id for _path, probe in entries
+            },
+            "counters": {"manifests": 0, "quality_events": 0, **self.counters()},
+        }
+
+    def recover_segment(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        context: dict[str, Any],
+        claim: StreamClaim,
+        segment: DurableRawSpoolSegment,
+        terminal: bool,
+        truncated_tail_bytes: int,
+        object_store: FilesystemRawArchiveObjectStore,
+        temporary_root: Path,
+        event_writer: _SessionEventWriter,
+        recovery_event_id: str,
+    ) -> int:
+        epoch = segment.connection_epoch
+        states = context["states"]
+        parsers = context["parsers"]
+        analyzers = context["analyzers"]
+        if epoch not in states:
+            states[epoch], parsers[epoch], analyzers[epoch] = (
+                runtime._restore_level2_projection(
+                    claim=claim,
+                    connection_epoch=epoch,
+                    object_store=object_store,
+                    excluded_spool_segment_ids=context["excluded_spool_ids"],
+                )
+            )
+        records = tuple(segment.records())
+        parser = parsers[epoch]
+        analyzer = analyzers[epoch]
+        for record in records:
+            events = parser.parse_raw(
+                record.raw_frame,
+                received_at=record.received_at.isoformat(),
+                raw_ref={
+                    "raw_record_id": record.raw_record_id,
+                    "spool_segment_id": record.spool_segment_id,
+                    "connection_epoch": record.connection_epoch,
+                    "receive_ordinal": record.receive_ordinal,
+                },
+            )
+            analyzer.observe(record, events)
+        external_quality: tuple[Mapping[str, Any], ...] = ()
+        if terminal:
+            last_record = records[-1]
+            external_quality = (
+                {
+                    "dedupe_hash": _stable_hash(
+                        {
+                            "classification": "collector_restart_gap",
+                            "connection_epoch": epoch,
+                            "receive_ordinal": last_record.receive_ordinal,
+                            "spool_segment_id": segment.spool_segment_id,
+                        }
+                    ),
+                    "connection_epoch": epoch,
+                    "receive_ordinal": last_record.receive_ordinal,
+                    "channel": self.primary_channel,
+                    "classification": "collector_restart_gap",
+                    "reason": (
+                        "worker restart ended transport continuity at the last "
+                        "durable raw record"
+                    ),
+                    "detected_at": datetime.now(UTC),
+                    "raw_record_id": last_record.raw_record_id,
+                    "sequence_before": analyzer.last_sequence,
+                    "sequence_after": None,
+                    "invalidating": True,
+                    "evidence": {
+                        "restart_recovery": True,
+                        "truncated_tail_bytes": truncated_tail_bytes,
+                    },
+                },
+            )
+        analysis = analyzer.finalize()
+        runtime._finalize_level2_segment(
+            claim=claim,
+            checkpoint=_SegmentCheckpoint(
+                segment=segment,
+                analysis=analysis,
+                terminal=terminal,
+                terminal_reason="collector_restart_recovery",
+                closing_session_event_id=recovery_event_id,
+                external_quality=external_quality,
+            ),
+            object_store=object_store,
+            temporary_root=temporary_root,
+            event_writer=event_writer,
+            states=states,
+            counters=context["counters"],
+        )
+        analyzer.quality.clear()
+        return len(records)
+
+    def complete_recovery(
+        self,
+        runtime: "ContinuousStreamRuntime",
+        *,
+        context: dict[str, Any],
+        claim: StreamClaim,
+        recovery_event_id: str,
+    ) -> Mapping[str, Any]:
+        del runtime, claim, recovery_event_id
+        return {
+            "closed_open_coverage_intervals": 0,
+            "projection_recovery": dict(context["counters"]),
+        }
+
+
+class ContinuousStreamRuntime:
+    """Provider-neutral long-lived lease, WAL, archive, and reconnect runtime."""
 
     def __init__(
         self,
         *,
         repository: PostgresMarketStructureRepository = market_structure_repository,
-        stream_factory: Callable[..., CoinbaseAdvancedTradeStream] = CoinbaseAdvancedTradeStream,
     ) -> None:
         self.repository = repository
-        self.stream_factory = stream_factory
 
     async def run(
         self,
@@ -144,6 +553,8 @@ class ContinuousMarketStructureCollector:
         stop_requested: Callable[[], bool],
         bounded_validation: bool,
         storage_root: Path = DEFAULT_STORAGE_ROOT,
+        projection: Optional[ContinuousProjectionAdapter] = None,
+        transport: Optional[ContinuousTransportAdapter] = None,
     ) -> dict[str, Any]:
         """Collect until the supervisor requests stop or a fatal invariant fails."""
 
@@ -155,11 +566,28 @@ class ContinuousMarketStructureCollector:
                 f"market_stream_definition_unknown: definition_id={definition_id}"
             )
         definition = definitions[0]
-        if tuple(definition["channels"]) != ("market_trades", "heartbeats"):
+        if projection is None or transport is None:
             raise ValueError(
-                "continuous_collector_adapter_unavailable: "
-                f"definition_id={definition_id} channels={definition['channels']}"
+                "continuous_collector_adapter_required: both transport and "
+                "projection adapters must be selected by the supervisor"
             )
+        active_projection = projection
+        active_transport = transport
+        if not active_transport.supports(definition):
+            raise ValueError(
+                "continuous_collector_transport_mismatch: "
+                f"definition_id={definition_id} "
+                f"transport={active_transport.transport_id}"
+            )
+        definition_channels = tuple(definition.get("channels") or ())
+        if definition_channels != active_projection.channels:
+            raise ValueError(
+                "continuous_collector_projection_mismatch: "
+                f"definition_id={definition_id} "
+                f"projection={active_projection.projection_id} "
+                f"channels={definition_channels}"
+            )
+        primary = active_projection.primary_channel
         policy_payload = dict(definition.get("config") or {}).get("runtime_policy")
         policy = ContinuousStreamPolicy.from_mapping(
             policy_payload if isinstance(policy_payload, Mapping) else None
@@ -176,6 +604,7 @@ class ContinuousMarketStructureCollector:
             spool_root=spool_root,
             object_store=object_store,
             temporary_root=temporary_root,
+            projection=active_projection,
         )
         claim = self.repository.claim_stream(
             definition_id=definition_id,
@@ -187,16 +616,15 @@ class ContinuousMarketStructureCollector:
         queue: asyncio.Queue[_SegmentCheckpoint | None] = asyncio.Queue(
             maxsize=policy.max_inflight_segments
         )
-        finalizer_states: dict[int, _EpochProjectionState] = {}
+        projection_states: dict[int, Any] = {}
         counters: dict[str, int] = {
             "raw_records": 0,
             "raw_bytes": 0,
             "segments": 0,
             "manifests": 0,
-            "trade_inserted": 0,
-            "trade_noop": 0,
             "reconnects": 0,
             "quality_events": 0,
+            **active_projection.counters(),
         }
         finalizer = asyncio.create_task(
             self._finalizer_loop(
@@ -205,21 +633,13 @@ class ContinuousMarketStructureCollector:
                 object_store=object_store,
                 temporary_root=temporary_root,
                 event_writer=event_writer,
-                states=finalizer_states,
+                states=projection_states,
                 counters=counters,
+                projection=active_projection,
             )
         )
         started_at = datetime.now(UTC)
-        provider = get_provider("COINBASE", venue="COINBASE_DIRECT")
-        jwt_factory = (
-            provider.build_websocket_jwt
-            if claim.auth_mode == "authenticated"
-            else None
-        )
-        stream = self.stream_factory(
-            jwt_factory=jwt_factory,
-            stream_session_id=claim.session_id,
-        )
+        stream = active_transport.create_stream(claim)
         current_segment: DurableRawSpoolSegment | None = None
         pending: asyncio.Task | None = None
         connection_epoch = -1
@@ -230,12 +650,8 @@ class ContinuousMarketStructureCollector:
             while not stop_requested():
                 self._raise_if_finalizer_failed(finalizer, definition_id)
                 connection_epoch += 1
-                analyzer = _CaptureAnalyzer(claim, primary_channel="market_trades")
-                parser = CoinbaseMessageParser(
-                    symbol_by_product_id={
-                        claim.provider_product_id: claim.provider_product_id
-                    }
-                )
+                analyzer = active_projection.create_analyzer(claim)
+                parser = active_transport.create_parser(claim)
                 segment_ordinal = 0
                 segment_started = time.monotonic()
                 disconnect_reason: Optional[str] = None
@@ -254,18 +670,7 @@ class ContinuousMarketStructureCollector:
                             "policy": policy.to_dict(),
                         },
                     )
-                    await stream.subscribe(
-                        [
-                            MarketSubscription.from_values(
-                                provider=claim.provider,
-                                venue=claim.venue,
-                                symbol=claim.provider_product_id,
-                                product_id=claim.provider_product_id,
-                                channels=claim.channels,
-                                auth_mode=claim.auth_mode,
-                            )
-                        ]
-                    )
+                    await stream.subscribe([active_transport.subscription(claim)])
                     await asyncio.to_thread(
                         event_writer.append,
                         connection_epoch=connection_epoch,
@@ -375,8 +780,10 @@ class ContinuousMarketStructureCollector:
                             definition_id=claim.definition_id,
                             spool_segment_id=current_segment.spool_segment_id,
                             provider_product_id=claim.provider_product_id,
-                            requested_channel="market_trades",
-                            observed_channel=_observed_channel(message.raw_frame),
+                            requested_channel=primary,
+                            observed_channel=active_transport.observed_channel(
+                                message.raw_frame
+                            ),
                         )
                         current_segment.append(record)
                         events = parser.parse_raw(
@@ -457,7 +864,7 @@ class ContinuousMarketStructureCollector:
                                 ),
                                 "connection_epoch": connection_epoch,
                                 "receive_ordinal": analyzer.last_record.receive_ordinal,
-                                "channel": analyzer.last_record.observed_channel,
+                                "channel": primary,
                                 "classification": "disconnect",
                                 "reason": (
                                     disconnect_reason or "provider disconnected"
@@ -466,7 +873,9 @@ class ContinuousMarketStructureCollector:
                                 "raw_record_id": analyzer.last_record.raw_record_id,
                                 "sequence_before": analyzer.last_sequence,
                                 "sequence_after": None,
-                                "invalidating": False,
+                                "invalidating": (
+                                    active_projection.disconnect_invalidates
+                                ),
                                 "evidence": {"reconnect_planned": True},
                             },
                         )
@@ -604,6 +1013,7 @@ class ContinuousMarketStructureCollector:
         spool_root: Path,
         object_store: FilesystemRawArchiveObjectStore,
         temporary_root: Path,
+        projection: ContinuousProjectionAdapter,
     ) -> None:
         await asyncio.to_thread(
             self._recover_orphaned_spools_sync,
@@ -613,6 +1023,7 @@ class ContinuousMarketStructureCollector:
             spool_root=spool_root,
             object_store=object_store,
             temporary_root=temporary_root,
+            projection=projection,
         )
 
     def _recover_orphaned_spools_sync(
@@ -624,7 +1035,9 @@ class ContinuousMarketStructureCollector:
         spool_root: Path,
         object_store: FilesystemRawArchiveObjectStore,
         temporary_root: Path,
+        projection: ContinuousProjectionAdapter,
     ) -> None:
+        active_projection = projection
         definition_id = str(definition["id"])
         grouped: dict[str, list[tuple[Path, DurableRawSpoolSegment]]] = {}
         for path in discover_spool_segments(spool_root):
@@ -655,16 +1068,35 @@ class ContinuousMarketStructureCollector:
                     reason="durable spool segments found after worker interruption",
                     evidence={"spool_segment_count": len(entries)},
                 )
-                recovered_records = 0
-                recovered_segments = 0
-                for path, probe in sorted(
+                ordered_entries = sorted(
                     entries,
                     key=lambda item: (
                         item[1].connection_epoch,
                         item[1].segment_ordinal,
                         str(item[0]),
                     ),
-                ):
+                )
+                last_segment_by_epoch = {
+                    epoch: max(
+                        probe.segment_ordinal
+                        for _path, probe in ordered_entries
+                        if probe.connection_epoch == epoch and probe.record_count > 0
+                    )
+                    for epoch in {
+                        probe.connection_epoch
+                        for _path, probe in ordered_entries
+                        if probe.record_count > 0
+                    }
+                }
+                projection_context = active_projection.begin_recovery(
+                    self,
+                    claim=claim,
+                    entries=ordered_entries,
+                    object_store=object_store,
+                )
+                recovered_records = 0
+                recovered_segments = 0
+                for path, probe in ordered_entries:
                     self.repository.heartbeat(
                         claim, lease_seconds=recovery_lease_seconds
                     )
@@ -690,11 +1122,21 @@ class ContinuousMarketStructureCollector:
                             )
                             continue
                         segment.seal()
-                    record_count = self._recover_trade_segment(
+                    terminal = (
+                        segment.segment_ordinal
+                        == last_segment_by_epoch.get(segment.connection_epoch)
+                    )
+                    record_count = active_projection.recover_segment(
+                        self,
+                        context=projection_context,
                         claim=claim,
                         segment=segment,
+                        terminal=terminal,
+                        truncated_tail_bytes=truncated_tail_bytes,
                         object_store=object_store,
                         temporary_root=temporary_root,
+                        event_writer=event_writer,
+                        recovery_event_id=recovery_event_id,
                     )
                     recovered_records += record_count
                     recovered_segments += 1
@@ -708,10 +1150,14 @@ class ContinuousMarketStructureCollector:
                             "truncated_tail_bytes": truncated_tail_bytes,
                         },
                     )
-                closed_intervals = self.repository.close_open_session_coverages(
-                    claim,
-                    closing_session_event_id=recovery_event_id,
-                    reason="collector_restart_closed_at_last_proven_event",
+                projection_evidence = active_projection.complete_recovery(
+                    self,
+                    context=projection_context,
+                    claim=claim,
+                    recovery_event_id=recovery_event_id,
+                )
+                closed_intervals = int(
+                    projection_evidence.get("closed_open_coverage_intervals", 0)
                 )
                 event_writer.append(
                     connection_epoch=max_epoch,
@@ -720,7 +1166,8 @@ class ContinuousMarketStructureCollector:
                     evidence={
                         "recovered_segments": recovered_segments,
                         "recovered_records": recovered_records,
-                        "closed_open_coverage_intervals": closed_intervals,
+                        "projection_id": active_projection.projection_id,
+                        **dict(projection_evidence),
                     },
                 )
                 logger.warning(
@@ -735,6 +1182,298 @@ class ContinuousMarketStructureCollector:
             finally:
                 with contextlib.suppress(Exception):
                     self.repository.release(claim)
+
+    @staticmethod
+    def _book_position_from_row(
+        row: Mapping[str, Any],
+        *,
+        prefix: str,
+        definition_id: str,
+        provider_product_id: str,
+    ) -> BookSourcePosition:
+        return BookSourcePosition(
+            definition_id=definition_id,
+            session_id=str(row[f"{prefix}_session_id"]),
+            connection_epoch=int(row[f"{prefix}_connection_epoch"]),
+            provider_product_id=provider_product_id,
+            provider_sequence_num=(
+                int(row[f"{prefix}_sequence_num"])
+                if row.get(f"{prefix}_sequence_num") is not None
+                else None
+            ),
+            receive_ordinal=int(row[f"{prefix}_receive_ordinal"]),
+            event_ordinal=int(row[f"{prefix}_event_ordinal"]),
+        )
+
+    def _restore_level2_projection(
+        self,
+        *,
+        claim: StreamClaim,
+        connection_epoch: int,
+        object_store: FilesystemRawArchiveObjectStore,
+        excluded_spool_segment_ids: set[str],
+    ) -> tuple[_EpochProjectionState, CoinbaseMessageParser, _CaptureAnalyzer]:
+        """Restore a valid reducer from a verified checkpoint plus raw delta."""
+
+        state = _EpochProjectionState()
+        parser = CoinbaseMessageParser(
+            symbol_by_product_id={
+                claim.provider_product_id: claim.provider_product_id
+            }
+        )
+        analyzer = _CaptureAnalyzer(claim, primary_channel="level2")
+        reconstruction = self.repository.get_book_reconstruction_state(
+            definition_id=claim.definition_id,
+            session_id=claim.session_id,
+            connection_epoch=connection_epoch,
+        )
+        if reconstruction is None:
+            return state, parser, analyzer
+        lifecycle = BookLifecycle(str(reconstruction["lifecycle"]))
+        if lifecycle is not BookLifecycle.VALID:
+            return state, parser, analyzer
+
+        checkpoint_rows = [
+            row
+            for row in self.repository.list_book_checkpoints(
+                definition_id=claim.definition_id,
+                session_id=claim.session_id,
+            )
+            if int(row["connection_epoch"]) == int(connection_epoch)
+            and (
+                int(row["receive_ordinal"]),
+                int(row["event_ordinal"]),
+            )
+            <= (
+                int(reconstruction["receive_ordinal"]),
+                int(reconstruction["event_ordinal"]),
+            )
+        ]
+        if not checkpoint_rows:
+            raise RuntimeError(
+                "continuous_l2_recovery_checkpoint_missing: "
+                f"definition_id={claim.definition_id} "
+                f"session_id={claim.session_id} epoch={connection_epoch}"
+            )
+        checkpoint_row = max(
+            checkpoint_rows,
+            key=lambda row: (
+                int(row["receive_ordinal"]),
+                int(row["event_ordinal"]),
+            ),
+        )
+        if (
+            str(checkpoint_row["reconstruction_version"])
+            != BOOK_RECONSTRUCTION_VERSION
+            or str(checkpoint_row["schema_version"])
+            != BOOK_CHECKPOINT_SCHEMA_VERSION
+            or str(checkpoint_row["format"]) != BOOK_CHECKPOINT_FORMAT
+            or str(checkpoint_row["compression"]) != BOOK_CHECKPOINT_COMPRESSION
+        ):
+            raise RuntimeError(
+                "continuous_l2_recovery_checkpoint_contract_mismatch: "
+                f"checkpoint_id={checkpoint_row['id']}"
+            )
+        opening_row = self.repository.get_book_validity_opening(
+            series_id=claim.series_id,
+            interval_id=str(checkpoint_row["validity_interval_id"]),
+        )
+        if opening_row is None:
+            raise RuntimeError(
+                "continuous_l2_recovery_validity_missing: "
+                f"checkpoint_id={checkpoint_row['id']}"
+            )
+        opening_position = self._book_position_from_row(
+            opening_row,
+            prefix="opening",
+            definition_id=claim.definition_id,
+            provider_product_id=claim.provider_product_id,
+        )
+        last_position = self._book_position_from_row(
+            opening_row,
+            prefix="last",
+            definition_id=claim.definition_id,
+            provider_product_id=claim.provider_product_id,
+        )
+        validity = BookValidityIntervalVersion(
+            version_id=str(opening_row["id"]),
+            interval_id=str(opening_row["interval_id"]),
+            revision=int(opening_row["revision"]),
+            series_id=int(opening_row["series_id"]),
+            status=BookValidityStatus(str(opening_row["status"])),
+            ordering_assurance=OrderingAssurance(
+                str(opening_row["ordering_assurance"])
+            ),
+            opening_snapshot_id=str(opening_row["opening_snapshot_id"]),
+            opening_position=opening_position,
+            opening_effective_at=opening_row["opening_effective_at"],
+            opening_known_at=opening_row["opening_known_at"],
+            last_valid_position=last_position,
+            last_valid_effective_at=opening_row["last_valid_effective_at"],
+            last_state_hash=str(opening_row["last_state_hash"]),
+            known_at=opening_row["known_at"],
+        )
+        checkpoint_path = object_store.local_path(str(checkpoint_row["object_key"]))
+        if not checkpoint_path.exists():
+            raise RuntimeError(
+                "continuous_l2_recovery_checkpoint_object_missing: "
+                f"checkpoint_id={checkpoint_row['id']}"
+            )
+        checkpoint_digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        if checkpoint_digest != str(checkpoint_row["object_sha256"]):
+            raise RuntimeError(
+                "continuous_l2_recovery_checkpoint_checksum_mismatch: "
+                f"checkpoint_id={checkpoint_row['id']}"
+            )
+        level_rows = read_book_checkpoint_parquet(checkpoint_path)
+        bids = tuple(
+            (Decimal(str(row["price"])), Decimal(str(row["quantity"])))
+            for row in level_rows
+            if str(row["side"]) == BookSide.BID.value
+        )
+        asks = tuple(
+            (Decimal(str(row["price"])), Decimal(str(row["quantity"])))
+            for row in level_rows
+            if str(row["side"]) == BookSide.ASK.value
+        )
+        checkpoint_position = BookSourcePosition(
+            definition_id=claim.definition_id,
+            session_id=str(checkpoint_row["session_id"]),
+            connection_epoch=int(checkpoint_row["connection_epoch"]),
+            provider_product_id=claim.provider_product_id,
+            provider_sequence_num=(
+                int(checkpoint_row["provider_sequence_num"])
+                if checkpoint_row.get("provider_sequence_num") is not None
+                else None
+            ),
+            receive_ordinal=int(checkpoint_row["receive_ordinal"]),
+            event_ordinal=int(checkpoint_row["event_ordinal"]),
+        )
+        checkpoint = BookCheckpointFact(
+            checkpoint_id=str(checkpoint_row["id"]),
+            series_id=int(checkpoint_row["series_id"]),
+            validity_interval_id=str(checkpoint_row["validity_interval_id"]),
+            source_position=checkpoint_position,
+            product_definition_version_id=str(
+                checkpoint_row["product_definition_version_id"]
+            ),
+            provider_size_unit=ProviderSizeUnit(
+                str(checkpoint_row["provider_size_unit"])
+            ),
+            ordering_assurance=validity.ordering_assurance,
+            effective_at=checkpoint_row["effective_at"],
+            known_at=checkpoint_row["known_at"],
+            state_hash=str(checkpoint_row["state_hash"]),
+            bids=bids,
+            asks=asks,
+            mutation_count_since_prior=int(
+                checkpoint_row["mutation_count_since_prior"]
+            ),
+        )
+        if (
+            checkpoint.content_fingerprint
+            != str(checkpoint_row["content_fingerprint"])
+            or len(level_rows) != int(checkpoint_row["level_count"])
+            or len(bids) != int(checkpoint_row["bid_level_count"])
+            or len(asks) != int(checkpoint_row["ask_level_count"])
+        ):
+            raise RuntimeError(
+                "continuous_l2_recovery_checkpoint_material_mismatch: "
+                f"checkpoint_id={checkpoint.checkpoint_id}"
+            )
+        config = dict(claim.config or {})
+        contract = L2ProductContract(
+            provider_product_id=claim.provider_product_id,
+            product_definition_version_id=str(
+                config.get("product_definition_version_id") or ""
+            ),
+            provider_size_unit=str(config.get("provider_size_unit") or ""),
+            price_increment=config.get("price_increment"),
+            quantity_increment=config.get("quantity_increment"),
+        )
+        reducer = Level2BookReconstructor.from_checkpoint(
+            checkpoint,
+            contract=contract,
+            validity=validity,
+        )
+        replay_manifests = [
+            row
+            for row in self.repository.list_session_manifests(
+                definition_id=claim.definition_id,
+                session_id=claim.session_id,
+            )
+            if int(row["connection_epoch"]) == int(connection_epoch)
+            and str(row["spool_segment_id"])
+            not in excluded_spool_segment_ids
+        ]
+        for manifest in replay_manifests:
+            path = object_store.local_path(str(manifest["object_key"]))
+            if not path.exists():
+                raise RuntimeError(
+                    "continuous_l2_recovery_raw_object_missing: "
+                    f"manifest_id={manifest['id']}"
+                )
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest != str(manifest["object_sha256"]):
+                raise RuntimeError(
+                    "continuous_l2_recovery_raw_checksum_mismatch: "
+                    f"manifest_id={manifest['id']}"
+                )
+            for record in read_raw_archive_parquet(path):
+                if record.receive_ordinal < checkpoint_position.receive_ordinal:
+                    continue
+                events = parser.parse_raw(
+                    record.raw_frame,
+                    received_at=record.received_at.isoformat(),
+                    raw_ref={
+                        "raw_record_id": record.raw_record_id,
+                        "spool_segment_id": record.spool_segment_id,
+                        "connection_epoch": record.connection_epoch,
+                        "receive_ordinal": record.receive_ordinal,
+                    },
+                )
+                analyzer.observe(record, events)
+                for event in events:
+                    if event.event_kind not in {
+                        "market_l2_snapshot",
+                        "market_l2_update",
+                    }:
+                        continue
+                    fact = translate_coinbase_l2_event(
+                        event,
+                        raw_record=record,
+                        contract=contract,
+                        accepted_at=record.received_at,
+                    )
+                    if (
+                        fact.position.connection_epoch,
+                        fact.position.receive_ordinal,
+                        fact.position.event_ordinal,
+                    ) <= (
+                        checkpoint_position.connection_epoch,
+                        checkpoint_position.receive_ordinal,
+                        checkpoint_position.event_ordinal,
+                    ):
+                        continue
+                    reducer.process(fact)
+                    state.book_last_position = fact.position
+        analyzer.quality.clear()
+        if (
+            reducer.lifecycle is not BookLifecycle.VALID
+            or reducer.current_state_hash != str(reconstruction["state_hash"])
+            or reducer.current_interval is None
+            or reducer.current_interval.interval_id
+            != str(reconstruction["validity_interval_id"])
+        ):
+            raise RuntimeError(
+                "continuous_l2_recovery_reconciliation_failed: "
+                f"definition_id={claim.definition_id} "
+                f"session_id={claim.session_id} epoch={connection_epoch}"
+            )
+        state.book_reducer = reducer
+        state.book_checkpoint_id = checkpoint.checkpoint_id
+        state.book_last_position = reducer.current_interval.last_valid_position
+        return state, parser, analyzer
 
     def _recover_trade_segment(
         self,
@@ -851,7 +1590,7 @@ class ContinuousMarketStructureCollector:
         queue: asyncio.Queue[_SegmentCheckpoint | None],
         *,
         segment: DurableRawSpoolSegment,
-        analysis: CaptureAnalysis,
+        analysis: Any,
         definition_id: str,
         terminal: bool = False,
         terminal_reason: Optional[str] = None,
@@ -884,8 +1623,9 @@ class ContinuousMarketStructureCollector:
         object_store: FilesystemRawArchiveObjectStore,
         temporary_root: Path,
         event_writer: _SessionEventWriter,
-        states: dict[int, _EpochProjectionState],
+        states: dict[int, Any],
         counters: dict[str, int],
+        projection: ContinuousProjectionAdapter,
     ) -> None:
         while True:
             checkpoint = await queue.get()
@@ -893,7 +1633,8 @@ class ContinuousMarketStructureCollector:
                 if checkpoint is None:
                     return
                 await asyncio.to_thread(
-                    self._finalize_trade_segment,
+                    projection.finalize_segment,
+                    self,
                     claim=claim,
                     checkpoint=checkpoint,
                     object_store=object_store,
@@ -904,6 +1645,464 @@ class ContinuousMarketStructureCollector:
                 )
             finally:
                 queue.task_done()
+
+    def _finalize_level2_segment(
+        self,
+        *,
+        claim: StreamClaim,
+        checkpoint: _SegmentCheckpoint,
+        object_store: FilesystemRawArchiveObjectStore,
+        temporary_root: Path,
+        event_writer: _SessionEventWriter,
+        states: dict[int, _EpochProjectionState],
+        counters: dict[str, int],
+    ) -> None:
+        """Archive and incrementally reduce one continuous Level 2 segment."""
+
+        segment = checkpoint.segment
+        encoded, acknowledgement, records = publish_spool_archive(
+            segment,
+            object_store=object_store,
+            temporary_directory=temporary_root,
+        )
+        commit = self.repository.commit_archive(
+            claim,
+            encoded=encoded,
+            acknowledgement=acknowledgement,
+            records=records,
+        )
+        counters["manifests"] += 1
+        connection_epoch = records[0].connection_epoch
+        state = states.setdefault(connection_epoch, _EpochProjectionState())
+        config = dict(claim.config or {})
+        contract = L2ProductContract(
+            provider_product_id=claim.provider_product_id,
+            product_definition_version_id=str(
+                config.get("product_definition_version_id") or ""
+            ),
+            provider_size_unit=str(config.get("provider_size_unit") or ""),
+            price_increment=config.get("price_increment"),
+            quantity_increment=config.get("quantity_increment"),
+        )
+        if state.book_reducer is None:
+            state.book_reducer = Level2BookReconstructor(
+                series_id=claim.series_id,
+                contract=contract,
+                ordering_assurance=OrderingAssurance.PROVIDER_DELIVERY_GUARANTEED,
+            )
+        reducer = state.book_reducer
+        parser = CoinbaseMessageParser(
+            symbol_by_product_id={
+                claim.provider_product_id: claim.provider_product_id
+            }
+        )
+        quality_by_ordinal: dict[int, list[Mapping[str, Any]]] = {}
+        for quality in checkpoint.analysis.quality_events:
+            quality_by_ordinal.setdefault(int(quality["receive_ordinal"]), []).append(
+                quality
+            )
+
+        snapshots = []
+        batches = []
+        validity_versions = []
+        book_checkpoints = []
+        book_quality: list[BookQualityEvidence] = []
+        direct_quality: list[Mapping[str, Any]] = []
+        valid_states = []
+        interval_by_position: dict[tuple[int, int], str] = {}
+        max_event_ordinal_by_receive: dict[int, int] = {}
+
+        def collect(result) -> None:
+            if result.snapshot is not None:
+                snapshots.append(result.snapshot)
+                interval_by_position[
+                    (
+                        result.snapshot.event.position.receive_ordinal,
+                        result.snapshot.event.position.event_ordinal,
+                    )
+                ] = result.snapshot.validity_interval_id
+            if result.batch is not None:
+                batches.append(result.batch)
+                interval_by_position[
+                    (
+                        result.batch.event.position.receive_ordinal,
+                        result.batch.event.position.event_ordinal,
+                    )
+                ] = result.batch.validity_interval_id
+            validity_versions.extend(result.validity_versions)
+            book_checkpoints.extend(result.checkpoints)
+            book_quality.extend(result.quality)
+            if result.state is not None:
+                valid_states.append(result.state)
+
+        for record in records:
+            raw_events = parser.parse_raw(
+                record.raw_frame,
+                received_at=record.received_at.isoformat(),
+                raw_ref={
+                    "raw_record_id": record.raw_record_id,
+                    "spool_segment_id": record.spool_segment_id,
+                    "connection_epoch": record.connection_epoch,
+                    "receive_ordinal": record.receive_ordinal,
+                },
+            )
+            sequence_num = next(
+                (
+                    event.provider_sequence_num
+                    for event in raw_events
+                    if event.provider_sequence_num is not None
+                ),
+                None,
+            )
+            for quality in quality_by_ordinal.get(record.receive_ordinal, []):
+                if not bool(quality.get("invalidating")):
+                    direct_quality.append(quality)
+                    continue
+                position = BookSourcePosition(
+                    definition_id=claim.definition_id,
+                    session_id=claim.session_id,
+                    connection_epoch=record.connection_epoch,
+                    provider_product_id=claim.provider_product_id,
+                    provider_sequence_num=(
+                        int(quality["sequence_after"])
+                        if quality.get("sequence_after") is not None
+                        else sequence_num
+                    ),
+                    receive_ordinal=record.receive_ordinal,
+                    event_ordinal=0,
+                )
+                collect(
+                    reducer.invalidate_transport(
+                        position=position,
+                        effective_at=quality["detected_at"],
+                        known_at=quality["detected_at"],
+                        raw_record_id=record.raw_record_id,
+                        classification=str(quality["classification"]),
+                        reason=str(quality["reason"]),
+                        evidence=dict(quality.get("evidence") or {}),
+                    )
+                )
+                state.book_last_position = position
+
+            for event in raw_events:
+                if event.event_kind not in {
+                    "market_l2_snapshot",
+                    "market_l2_update",
+                }:
+                    continue
+                fact = translate_coinbase_l2_event(
+                    event,
+                    raw_record=record,
+                    contract=contract,
+                    accepted_at=datetime.now(UTC),
+                )
+                max_event_ordinal_by_receive[record.receive_ordinal] = max(
+                    fact.position.event_ordinal,
+                    max_event_ordinal_by_receive.get(record.receive_ordinal, -1),
+                )
+                prior_lifecycle = reducer.lifecycle
+                result = reducer.process(fact)
+                collect(result)
+                state.book_last_position = fact.position
+                if (
+                    result.snapshot is not None
+                    and prior_lifecycle is BookLifecycle.INVALID
+                ):
+                    book_quality.append(
+                        BookQualityEvidence(
+                            classification="resync_snapshot_accepted",
+                            reason="fresh complete snapshot restored book validity",
+                            position=fact.position,
+                            known_at=fact.known_at,
+                            raw_record_id=fact.raw_record_id,
+                            invalidating=False,
+                            evidence={
+                                "state_hash": result.snapshot.state_hash,
+                                "validity_interval_id": (
+                                    result.snapshot.validity_interval_id
+                                ),
+                            },
+                        )
+                    )
+
+        last_record = records[-1]
+        terminal_position = BookSourcePosition(
+            definition_id=claim.definition_id,
+            session_id=claim.session_id,
+            connection_epoch=connection_epoch,
+            provider_product_id=claim.provider_product_id,
+            provider_sequence_num=checkpoint.analysis.last_sequence_num,
+            receive_ordinal=last_record.receive_ordinal,
+            event_ordinal=(
+                max_event_ordinal_by_receive.get(last_record.receive_ordinal, -1) + 1
+            ),
+        )
+        for quality in checkpoint.external_quality:
+            if not bool(quality.get("invalidating")):
+                direct_quality.append(quality)
+                continue
+            collect(
+                reducer.invalidate_transport(
+                    position=terminal_position,
+                    effective_at=quality["detected_at"],
+                    known_at=quality["detected_at"],
+                    raw_record_id=str(
+                        quality.get("raw_record_id") or last_record.raw_record_id
+                    ),
+                    classification=str(quality["classification"]),
+                    reason=str(quality["reason"]),
+                    evidence=dict(quality.get("evidence") or {}),
+                )
+            )
+            state.book_last_position = terminal_position
+
+        if checkpoint.terminal and reducer.lifecycle is BookLifecycle.VALID:
+            collect(
+                reducer.close_valid_at(
+                    position=terminal_position,
+                    effective_at=last_record.received_at,
+                    known_at=datetime.now(UTC),
+                    reason=(
+                        "continuous collector stopped at a proven transport boundary"
+                    ),
+                )
+            )
+            state.book_last_position = terminal_position
+
+        final_position = state.book_last_position or terminal_position
+        checkpoint_ids: list[str] = []
+        for book_checkpoint in book_checkpoints:
+            checkpoint_encoded, checkpoint_acknowledgement = publish_book_checkpoint(
+                book_checkpoint,
+                object_store=object_store,
+                temporary_directory=temporary_root,
+            )
+            self.repository.commit_book_checkpoint(
+                claim,
+                checkpoint=book_checkpoint,
+                encoded=checkpoint_encoded,
+                acknowledgement=checkpoint_acknowledgement,
+                source_manifest_ids=(commit.manifest_id,),
+            )
+            state.book_checkpoint_id = book_checkpoint.checkpoint_id
+            checkpoint_ids.append(book_checkpoint.checkpoint_id)
+
+        ingest = self.repository.ingest_book_facts(
+            claim,
+            snapshots=snapshots,
+            batches=batches,
+            validity_versions=validity_versions,
+            lifecycle=reducer.lifecycle,
+            final_validity_interval_id=(
+                reducer.current_interval.interval_id
+                if reducer.current_interval is not None
+                else None
+            ),
+            checkpoint_id=state.book_checkpoint_id,
+            final_state_hash=reducer.current_state_hash,
+            final_connection_epoch=final_position.connection_epoch,
+            final_receive_ordinal=final_position.receive_ordinal,
+            final_event_ordinal=final_position.event_ordinal,
+            final_sequence_num=final_position.provider_sequence_num,
+        )
+
+        bbo_facts = ()
+        depth_facts = ()
+        response_facts = ()
+        feature_inserted = 0
+        feature_noop = 0
+        if valid_states:
+            required = (
+                "bbo_series_id",
+                "depth_series_id",
+                "base_currency",
+                "quote_currency",
+            )
+            if not all(name in config for name in required):
+                raise RuntimeError(
+                    "market_book_feature_config_missing: re-run pair configuration"
+                )
+            valuation = MarketStateValuationContract(
+                product_definition_version_id=str(
+                    config.get("product_definition_version_id") or ""
+                ),
+                provider_size_unit=str(config.get("provider_size_unit") or ""),
+                base_currency=str(config.get("base_currency") or ""),
+                quote_currency=str(config.get("quote_currency") or ""),
+                contract_size=config.get("contract_size"),
+            )
+            bbo_facts, depth_facts = derive_book_features(
+                valid_states,
+                contract=valuation,
+                bbo_series_id=int(config["bbo_series_id"]),
+                depth_series_id=int(config["depth_series_id"]),
+                computed_at=datetime.now(UTC),
+            )
+            feature_outcome = self.repository.ingest_market_state_features(
+                bbo_facts=bbo_facts,
+                depth_facts=depth_facts,
+            )
+            feature_inserted += feature_outcome.inserted_count
+            feature_noop += feature_outcome.noop_count
+            response_config = (
+                "trade_series_id",
+                "flow_feature_series_ids",
+                "response_feature_series_id",
+            )
+            if all(name in config for name in response_config):
+                response_start = min(
+                    row.effective_at for row in valid_states
+                ) - timedelta(seconds=2)
+                response_end = max(
+                    row.effective_at for row in valid_states
+                ) + timedelta(seconds=2)
+                response_known_at = datetime.now(UTC)
+                flow_rows = self.repository.read_trade_flow_features(
+                    series_id=int(dict(config["flow_feature_series_ids"])["1"]),
+                    start=response_start,
+                    end=response_end,
+                    known_at=response_known_at,
+                )
+                trade_rows = self.repository.read_trades(
+                    series_id=int(config["trade_series_id"]),
+                    start=response_start,
+                    end=response_end,
+                    known_at_lte=response_known_at,
+                )
+                response_facts = derive_response_features(
+                    valid_states,
+                    tuple(row.fact for row in trade_rows),
+                    flow_rows,
+                    contract=valuation,
+                    series_id=int(config["response_feature_series_id"]),
+                    computed_at=response_known_at,
+                )
+                response_outcome = self.repository.ingest_market_state_features(
+                    response_facts=response_facts
+                )
+                feature_inserted += response_outcome.inserted_count
+                feature_noop += response_outcome.noop_count
+
+        closing_interval_by_quality_hash = {
+            row.closing_quality_hash: row.interval_id
+            for row in validity_versions
+            if row.closing_quality_hash
+        }
+        for quality in book_quality:
+            quality_id = self.repository.record_quality_event(
+                claim,
+                connection_epoch=quality.position.connection_epoch,
+                receive_ordinal=quality.position.receive_ordinal,
+                channel="level2",
+                classification=quality.classification,
+                reason=quality.reason,
+                detected_at=quality.known_at,
+                raw_record_id=quality.raw_record_id,
+                sequence_after=quality.position.provider_sequence_num,
+                evidence={
+                    **dict(quality.evidence),
+                    "book_quality_evidence_hash": quality.evidence_hash,
+                    "event_ordinal": quality.position.event_ordinal,
+                },
+            )
+            interval_id = closing_interval_by_quality_hash.get(
+                quality.evidence_hash
+            ) or interval_by_position.get(
+                (
+                    quality.position.receive_ordinal,
+                    quality.position.event_ordinal,
+                )
+            )
+            if interval_id:
+                self.repository.link_book_quality_event(
+                    claim,
+                    quality_event_id=quality_id,
+                    validity_interval_id=interval_id,
+                    link_role=(
+                        "invalidated" if quality.invalidating else "observed_within"
+                    ),
+                    known_at=quality.known_at,
+                )
+            counters["quality_events"] += 1
+        for quality in direct_quality:
+            dedupe_hash = str(quality.get("dedupe_hash") or "")
+            if dedupe_hash and dedupe_hash in state.persisted_quality_hashes:
+                continue
+            self.repository.record_quality_event(
+                claim,
+                connection_epoch=int(quality["connection_epoch"]),
+                receive_ordinal=int(quality["receive_ordinal"]),
+                channel="level2",
+                classification=str(quality["classification"]),
+                reason=str(quality.get("reason") or "stream quality event"),
+                detected_at=quality["detected_at"],
+                raw_record_id=quality.get("raw_record_id"),
+                sequence_before=quality.get("sequence_before"),
+                sequence_after=quality.get("sequence_after"),
+                evidence=quality.get("evidence"),
+            )
+            if dedupe_hash:
+                state.persisted_quality_hashes.add(dedupe_hash)
+            counters["quality_events"] += 1
+
+        counters["book_snapshots"] += len(snapshots)
+        counters["book_batches"] += len(batches)
+        counters["book_mutations"] += sum(
+            len(row.event.mutations) for row in batches
+        )
+        counters["book_checkpoints"] += len(checkpoint_ids)
+        counters["book_features"] += (
+            len(bbo_facts) + len(depth_facts) + len(response_facts)
+        )
+        event_writer.append(
+            connection_epoch=connection_epoch,
+            event_type="book_segment_canonicalized",
+            occurred_at=datetime.now(UTC),
+            evidence={
+                "manifest_id": commit.manifest_id,
+                "spool_segment_id": segment.spool_segment_id,
+                "record_count": len(records),
+                "snapshot_count": len(snapshots),
+                "batch_count": len(batches),
+                "mutation_count": sum(
+                    len(row.event.mutations) for row in batches
+                ),
+                "checkpoint_ids": checkpoint_ids,
+                "lifecycle": reducer.lifecycle.value,
+                "state_hash": reducer.current_state_hash,
+                "feature_inserted": feature_inserted,
+                "feature_noop": feature_noop,
+                "book_ingest_commit_seq": ingest.max_commit_seq,
+                "terminal": checkpoint.terminal,
+            },
+        )
+        segment.mark_database_acknowledged(
+            manifest_id=commit.manifest_id,
+            object_key=acknowledgement.object_key,
+            object_sha256=acknowledgement.sha256,
+        )
+        segment.discard_acknowledged_spool()
+        logger.info(
+            "continuous_l2_segment_committed | definition_id=%s session_id=%s "
+            "connection_epoch=%s segment_id=%s records=%s snapshots=%s "
+            "batches=%s mutations=%s checkpoints=%s terminal=%s",
+            claim.definition_id,
+            claim.session_id,
+            connection_epoch,
+            segment.spool_segment_id,
+            len(records),
+            len(snapshots),
+            len(batches),
+            sum(len(row.event.mutations) for row in batches),
+            len(checkpoint_ids),
+            checkpoint.terminal,
+        )
+        if checkpoint.terminal:
+            self._retire_epoch_state(
+                states=states,
+                connection_epoch=connection_epoch,
+                claim=claim,
+            )
 
     def _finalize_trade_segment(
         self,
@@ -928,12 +2127,6 @@ class ContinuousMarketStructureCollector:
             acknowledgement=acknowledgement,
             records=records,
         )
-        segment.mark_database_acknowledged(
-            manifest_id=commit.manifest_id,
-            object_key=acknowledgement.object_key,
-            object_sha256=acknowledgement.sha256,
-        )
-        segment.discard_acknowledged_spool()
         counters["manifests"] += 1
         connection_epoch = records[0].connection_epoch
         state = states.setdefault(connection_epoch, _EpochProjectionState())
@@ -1197,6 +2390,12 @@ class ContinuousMarketStructureCollector:
                 "terminal": checkpoint.terminal,
             },
         )
+        segment.mark_database_acknowledged(
+            manifest_id=commit.manifest_id,
+            object_key=acknowledgement.object_key,
+            object_sha256=acknowledgement.sha256,
+        )
+        segment.discard_acknowledged_spool()
         logger.info(
             "continuous_collector_segment_committed | definition_id=%s "
             "session_id=%s connection_epoch=%s segment_id=%s records=%s "
@@ -1360,10 +2559,26 @@ class ContinuousMarketStructureCollector:
                 )
 
 
-continuous_market_structure_collector = ContinuousMarketStructureCollector()
+# Compatibility names retained for existing callers. New registrations should
+# use the provider-qualified adapter classes and provider-neutral runtime module.
+ContinuousMarketStructureCollector = ContinuousStreamRuntime
+MarketTradeProjectionAdapter = CoinbaseMarketTradeProjectionAdapter
+Level2BookProjectionAdapter = CoinbaseLevel2BookProjectionAdapter
+continuous_stream_runtime = ContinuousStreamRuntime()
+continuous_market_structure_collector = continuous_stream_runtime
 
 
 __all__ = [
+    "CoinbaseContinuousTransportAdapter",
+    "CoinbaseLevel2BookProjectionAdapter",
+    "CoinbaseMarketTradeProjectionAdapter",
+    "ContinuousCaptureAnalyzer",
+    "ContinuousProjectionAdapter",
+    "ContinuousTransportAdapter",
     "ContinuousMarketStructureCollector",
+    "ContinuousStreamRuntime",
+    "Level2BookProjectionAdapter",
+    "MarketTradeProjectionAdapter",
     "continuous_market_structure_collector",
+    "continuous_stream_runtime",
 ]

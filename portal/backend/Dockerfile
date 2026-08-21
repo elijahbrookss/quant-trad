@@ -16,14 +16,19 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential libpq-dev docker.io \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY requirements.txt requirements.lock /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /app/requirements.txt
+    uv pip install --system --no-deps -r /app/requirements.lock \
+    && python -m pip check
 
 COPY config/ /app/config
 COPY src/ /app/src
+COPY cli/ /app/cli
 COPY portal/ /app/portal
+COPY scripts/qt /app/scripts/qt
 COPY scripts/provenance/ /app/scripts/provenance/
+
+RUN chmod +x /app/scripts/qt
 
 RUN actual_hash="$(python /app/scripts/provenance/source_tree_hash.py --root /app)" \
     && test -n "$QT_SOURCE_REVISION" \

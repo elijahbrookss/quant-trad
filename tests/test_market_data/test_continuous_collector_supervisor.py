@@ -6,8 +6,14 @@ import time
 from market_data.structure import ProductContract
 
 from portal.backend.service.market.collector_supervisor import (
+    CoinbaseLevel2CollectorAdapter,
+    CoinbaseMarketTradeCollectorAdapter,
     CollectorAdapterRegistry,
     ContinuousCollectorSupervisor,
+)
+from portal.backend.service.market.continuous_stream_collector import (
+    CoinbaseLevel2BookProjectionAdapter,
+    CoinbaseMarketTradeProjectionAdapter,
 )
 
 
@@ -91,6 +97,9 @@ class _Adapter:
     def supports(self, definition):
         return definition["provider"] == "TEST"
 
+    def registration_errors(self, _definition):
+        return []
+
     async def run(
         self,
         *,
@@ -149,3 +158,56 @@ def test_registry_rejects_ambiguous_adapter_matches() -> None:
         assert "matches=2" in str(exc)
     else:
         raise AssertionError("ambiguous collector adapter resolution was accepted")
+
+
+def test_supervisor_adapters_supply_domain_projection_to_generic_runtime() -> None:
+    class _Runtime:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def run(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"projection_id": kwargs["projection"].projection_id}
+
+    runtime = _Runtime()
+    trade = CoinbaseMarketTradeCollectorAdapter(runtime)
+    level2 = CoinbaseLevel2CollectorAdapter(runtime)
+
+    trade_result = asyncio.run(
+        trade.run(
+            definition_id="trade",
+            owner_id="worker",
+            stop_requested=lambda: True,
+            bounded_validation=False,
+        )
+    )
+    level2_result = asyncio.run(
+        level2.run(
+            definition_id="book",
+            owner_id="worker",
+            stop_requested=lambda: True,
+            bounded_validation=False,
+        )
+    )
+
+    assert isinstance(
+        runtime.calls[0]["projection"], CoinbaseMarketTradeProjectionAdapter
+    )
+    assert isinstance(
+        runtime.calls[1]["projection"], CoinbaseLevel2BookProjectionAdapter
+    )
+    assert trade_result["projection_id"] != level2_result["projection_id"]
+    assert trade.supports(
+        {
+            "provider": "COINBASE",
+            "venue": "COINBASE_DIRECT",
+            "channels": ("market_trades", "heartbeats"),
+        }
+    )
+    assert level2.supports(
+        {
+            "provider": "COINBASE",
+            "venue": "COINBASE_DIRECT",
+            "channels": ("level2", "heartbeats"),
+        }
+    )

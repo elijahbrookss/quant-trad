@@ -146,8 +146,10 @@ issuing another action.
 - Coinbase continuous trades preserve forward history plus idempotent spool
   recovery. Bounded capture/replay remains a separate explicitly authorized
   acquisition workflow.
-- Coinbase Level 2 has bounded capture/replay support but no registered
-  indefinite supervisor adapter, so it is not a live collector capability.
+- Coinbase Level 2 uses the same registered continuous supervisor and lifecycle
+  as trades. Its projection additionally requires a verified checkpoint plus
+  durable deltas, or a fresh provider snapshot, before book validity can resume
+  after a discontinuity.
 - Chainlink structured acquisition uses the scheduled collector contract when
   a reviewed definition is installed. No Chainlink collector appears in a
   fleet until the code-owned manifest/configuration is registered and enabled.

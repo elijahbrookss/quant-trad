@@ -11,6 +11,7 @@ from portal.backend.service.market.collector_operations_service import (
     CollectorOperationsService,
 )
 from portal.backend.service.market.collector_supervisor import (
+    CoinbaseLevel2CollectorAdapter,
     CollectorAdapterRegistry,
 )
 
@@ -169,6 +170,9 @@ class _StreamAdapter:
     def supports(self, definition):
         return definition.get("provider") == "COINBASE"
 
+    def registration_errors(self, _definition):
+        return []
+
 
 def _service() -> CollectorOperationsService:
     return CollectorOperationsService(
@@ -208,6 +212,74 @@ def test_fleet_snapshot_projects_both_collector_families_without_provider_ui_log
     assert all(
         "health_probe" in item["capabilities"]["actions"]
         for item in snapshot["collectors"]
+    )
+
+
+def test_level2_registration_and_outputs_are_projection_declared() -> None:
+    definition = {
+        "id": "coinbase-book",
+        "series_id": 31,
+        "enabled": True,
+        "provider": "COINBASE",
+        "venue": "COINBASE_DIRECT",
+        "channels": ("level2", "heartbeats"),
+        "contract_version": "market.l2_book.v1",
+        "config": {
+            "product_definition_version_id": "product.v1",
+            "bbo_series_id": 32,
+            "depth_series_id": 33,
+            "response_feature_series_id": 34,
+            "trade_series_id": 35,
+            "flow_feature_series_ids": {"1": 36, "60": 37},
+            "output_series": [
+                {
+                    "fact_type": "market.l2_book",
+                    "schema_version": "market.l2_book.v1",
+                    "series_id": 31,
+                },
+                {
+                    "fact_type": "market.bbo",
+                    "schema_version": "market.bbo.v1",
+                    "series_id": 32,
+                    "timeframe_seconds": 1,
+                },
+                {
+                    "fact_type": "market.depth_observation",
+                    "schema_version": "market.depth_band.v1",
+                    "series_id": 33,
+                    "timeframe_seconds": 1,
+                },
+                {
+                    "fact_type": "market.market_response",
+                    "schema_version": "market.market_response.v1",
+                    "series_id": 34,
+                    "timeframe_seconds": 1,
+                },
+            ],
+        },
+    }
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=_OperationsRepository(),
+        stream_registry=CollectorAdapterRegistry(
+            (CoinbaseLevel2CollectorAdapter(),)
+        ),
+        clock=lambda: NOW,
+    )
+
+    configured, errors = service._continuous_registration(definition)
+    schemas = service._fact_schemas(
+        definition,
+        CollectorKind.CONTINUOUS_STREAM,
+    )
+
+    assert configured == CollectorConfiguredState.ENABLED
+    assert errors == []
+    assert {row["series_id"] for row in schemas} == {31, 32, 33, 34}
+    assert not any(
+        error.startswith("config_missing:aggregate_series_ids")
+        for error in errors
     )
 
 

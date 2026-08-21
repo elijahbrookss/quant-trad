@@ -30,17 +30,19 @@ BotLens is a primary inspection surface. Projection readiness, selected-symbol s
 
 Grafana and Loki provide stack-level dashboards and log inspection. They complement BotLens but do not replace durable runtime facts or report datasets.
 
-Application logs enter Loki through Docker stdout/stderr scraped by Promtail.
-Backend and bot-runtime processes should write structured logs to their normal
-process stream; ordinary runtime logging must not post directly to Loki from the
-hot path.
+Application logs enter Loki through Docker stdout/stderr and one
+out-of-process shipper. The native-Linux server uses Grafana Alloy; the local
+development composition retains its historical Promtail path. Backend and
+bot-runtime processes should write structured logs to their normal process
+stream; ordinary runtime logging must not post directly to Loki from the hot
+path.
 
 Bot-runtime log lines include process context from environment variables:
 `request_id`, `bot_id`, `run_id`, `service=bot-runtime`, `runtime=bot`, and
-`source_revision` when available. Promtail indexes bounded routing labels such
-as `job`, `service`, `runtime`, `container`, and `compose_service`. It does not
-index `run_id` or `bot_id`; those remain searchable structured fields in the log
-line.
+`source_revision` when available. The shipper indexes bounded routing labels
+such as `job`, `service`, `runtime`, `container`, and `compose_service`. It does
+not index `run_id` or `bot_id`; those remain searchable structured fields in
+the log line.
 
 Use `qt logs run <run_id>` for run-centered Loki inspection. The command
 queries Loki, parses Quant-Trad structured log context into fields, and also
@@ -49,17 +51,16 @@ Use `qt logs query '<logql>'` when the investigation needs a raw LogQL shape.
 Use `qt logs doctor` to check Loki readiness and whether recent backend,
 bot-runtime, and Docker-event streams are visible.
 
-If Loki misses a bot-runtime failure, check whether the observability profile
-was running before the bot container exited. Promtail discovers live Docker
-containers; it cannot scrape stdout/stderr from a removed short-lived runtime
-container after the fact.
+If Loki misses a bot-runtime failure, check whether the log shipper was running
+before the bot container exited. Docker discovery cannot recover stdout/stderr
+from a removed short-lived runtime container after the fact.
 
 Local Loki is intentionally bounded. The dev stack keeps Loki data on a named
 volume and defaults to a seven-day retention/query lookback window. If log volume
 starts to pressure Loki, prefer these levers in order:
 
 1. Cull noisy source logs and lower DEBUG usage around hot loops.
-2. Add Promtail pipeline filtering for known low-value lines.
+2. Add shipper pipeline filtering for known low-value lines.
 3. Tune retention/lookback and the Docker volume size.
 4. Increase Loki resources or move to a larger Loki deployment.
 5. Add labels only for stable routing dimensions; avoid `run_id` and `bot_id`

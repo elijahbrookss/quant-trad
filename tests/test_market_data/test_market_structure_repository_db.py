@@ -44,6 +44,8 @@ from market_data.order_book import (
 from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
+    MARKET_TRADE_FACT_TYPE,
+    MARKET_TRADE_FACT_VERSION,
     OrderingAssurance,
     ProductContract,
     RawStreamRecord,
@@ -145,6 +147,91 @@ def _btc_l2_frames() -> list[str]:
         if observed_types == {"snapshot", "update"}:
             return selected
     raise AssertionError("BTC Level 2 snapshot/update fixtures missing")
+
+
+def test_stream_storage_accepts_future_channels_and_preserves_lifecycle() -> None:
+    token = uuid.uuid4().hex
+    instrument_id = f"generic-stream-{token[:16]}"
+    with db.session() as session:
+        session.add(
+            InstrumentRecord(
+                id=instrument_id,
+                datasource="FUTURE_PROVIDER",
+                exchange="DIRECT",
+                symbol=f"QUOTE-{token[:8].upper()}",
+                instrument_type="spot",
+                can_short=False,
+                short_requires_borrow=False,
+                has_funding=False,
+                extra_metadata={},
+            )
+        )
+    source_id = market_data_repo.register_source(
+        SourceIdentity(
+            provider="FUTURE_PROVIDER",
+            venue="DIRECT",
+            source_kind="stream",
+            adapter_version=f"future-quotes-db-test.{token}",
+        )
+    )
+    series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type=MARKET_TRADE_FACT_TYPE,
+        timeframe_seconds=None,
+        contract_version=MARKET_TRADE_FACT_VERSION,
+    )
+    definition_id = f"generic_stream_{token}"
+    market_structure_repository.upsert_stream_definition(
+        definition_id=definition_id,
+        source_id=source_id,
+        series_id=series_id,
+        provider="FUTURE_PROVIDER",
+        venue="DIRECT",
+        provider_product_id="ABC-USD",
+        channels=("quotes", "heartbeats"),
+        auth_mode="public",
+        contract_version=MARKET_TRADE_FACT_VERSION,
+        max_spool_bytes=1024**3,
+        max_segment_bytes=128 * 1024**2,
+        enabled=True,
+        config={"revision": 1},
+    )
+    with db.session() as session:
+        session.execute(
+            text(
+                """
+                UPDATE market.stream_definitions
+                SET enabled = false,
+                    desired_state = 'stopped',
+                    control_generation = 4
+                WHERE id = :definition_id
+                """
+            ),
+            {"definition_id": definition_id},
+        )
+
+    reinstalled = market_structure_repository.upsert_stream_definition(
+        definition_id=definition_id,
+        source_id=source_id,
+        series_id=series_id,
+        provider="FUTURE_PROVIDER",
+        venue="DIRECT",
+        provider_product_id="ABC-USD",
+        channels=("quotes", "heartbeats"),
+        auth_mode="public",
+        contract_version=MARKET_TRADE_FACT_VERSION,
+        max_spool_bytes=2 * 1024**3,
+        max_segment_bytes=256 * 1024**2,
+        enabled=True,
+        config={"revision": 2},
+    )
+
+    assert tuple(reinstalled["channels"]) == ("quotes", "heartbeats")
+    assert reinstalled["enabled"] is False
+    assert reinstalled["desired_state"] == "stopped"
+    assert int(reinstalled["control_generation"]) == 4
+    assert int(reinstalled["max_spool_bytes"]) == 2 * 1024**3
+    assert reinstalled["config"] == {"revision": 2}
 
 
 def test_collector_safety_halt_is_persistent_idempotent_and_acknowledged() -> None:

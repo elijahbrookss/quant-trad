@@ -1,9 +1,10 @@
-"""PostgreSQL authority for the bounded market-structure stream plane."""
+"""PostgreSQL authority for continuous stream evidence and projections."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from collections import defaultdict
@@ -333,14 +334,26 @@ class PostgresMarketStructureRepository:
         config: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         normalized_channels = tuple(
-            dict.fromkeys(str(channel).strip().lower() for channel in channels if str(channel).strip())
+            dict.fromkeys(
+                str(channel).strip().lower()
+                for channel in channels
+                if str(channel).strip()
+            )
         )
-        if normalized_channels not in {
-            ("market_trades", "heartbeats"),
-            ("level2", "heartbeats"),
-        }:
+        if not normalized_channels or len(normalized_channels) > 16:
             raise ValueError(
-                "market_stream_definition_invalid: supported ordered channels are market_trades,heartbeats or level2,heartbeats"
+                "market_stream_definition_invalid: one to sixteen channels are required"
+            )
+        invalid_channels = [
+            channel
+            for channel in normalized_channels
+            if len(channel) > 64
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", channel)
+        ]
+        if invalid_channels:
+            raise ValueError(
+                "market_stream_definition_invalid: channels must use bounded "
+                "lowercase identifiers"
             )
         normalized_auth = str(auth_mode or "").strip().lower()
         if normalized_auth not in {"public", "authenticated"}:
@@ -424,9 +437,10 @@ class PostgresMarketStructureRepository:
                         and operational_key not in next_config
                     ):
                         next_config[operational_key] = existing_config[operational_key]
-                next_enabled = (
-                    bool(existing["enabled"]) if enabled is None else bool(enabled)
-                )
+                # Enrollment owns initial state and reviewed configuration.
+                # Once installed, audited lifecycle actions are the only
+                # authority allowed to start, stop, pause, or resume a stream.
+                next_enabled = bool(existing["enabled"])
                 material = {
                     **material,
                     "enabled": next_enabled,
@@ -3587,6 +3601,71 @@ class PostgresMarketStructureRepository:
                 {"definition_id": definition_id, "session_id": session_id},
             ).mappings().all()
         return [dict(row) for row in rows]
+
+    def get_book_reconstruction_state(
+        self,
+        *,
+        definition_id: str,
+        session_id: str,
+        connection_epoch: Optional[int] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return the disposable book watermark for one resumable epoch."""
+
+        epoch_filter = (
+            "AND state.connection_epoch = :connection_epoch"
+            if connection_epoch is not None
+            else ""
+        )
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    f"""
+                    SELECT state.*
+                    FROM market.book_reconstruction_state AS state
+                    JOIN market.stream_definitions AS definitions
+                      ON definitions.series_id = state.series_id
+                     AND definitions.id = :definition_id
+                    WHERE state.definition_id = :definition_id
+                      AND state.session_id = :session_id
+                      {epoch_filter}
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "definition_id": str(definition_id),
+                    "session_id": str(session_id),
+                    "connection_epoch": (
+                        int(connection_epoch)
+                        if connection_epoch is not None
+                        else None
+                    ),
+                },
+            ).mappings().first()
+        return dict(row) if row is not None else None
+
+    def get_book_validity_opening(
+        self, *, series_id: int, interval_id: str
+    ) -> Optional[dict[str, Any]]:
+        """Load the immutable opening revision needed for checkpoint restore."""
+
+        with db.session() as session:
+            row = session.execute(
+                text(
+                    """
+                    SELECT *
+                    FROM market.book_validity_interval_versions
+                    WHERE series_id = :series_id
+                      AND interval_id = :interval_id
+                      AND revision = 1
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "series_id": int(series_id),
+                    "interval_id": str(interval_id),
+                },
+            ).mappings().first()
+        return dict(row) if row is not None else None
 
     def reconcile_manifest_trade_ids(
         self,

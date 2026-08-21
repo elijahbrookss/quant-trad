@@ -20,7 +20,7 @@ from portal.backend.db.models import (
 )
 
 
-_EXPLICIT_MIGRATION_TABLES = frozenset(
+_CLEAN_BOOTSTRAP_TABLES = frozenset(
     {
         ("market", "fact_schemas"),
         ("market", "fact_versions"),
@@ -70,9 +70,9 @@ class _Inspector:
             key: set(value)
             for key, value in (indexes or {}).items()
         }
-        # Explicit-migration relations must already carry their model-declared
-        # indexes because startup deliberately skips index DDL for them.
-        for schema, table_name in _EXPLICIT_MIGRATION_TABLES:
+        # Current canonical relations are created only for a genuinely clean
+        # database. Existing databases must already carry their indexes.
+        for schema, table_name in _CLEAN_BOOTSTRAP_TABLES:
             if table_name not in self.tables.get(schema, set()):
                 continue
             table = Base.metadata.tables.get(f"{schema}.{table_name}")
@@ -247,9 +247,8 @@ def _database_with_fake_engine(
     monkeypatch.setattr(db_session, "inspect", lambda _conn: inspector)
     database = db_session.Database("postgresql+psycopg2://test:test@localhost/test")
     database._engine = _Engine(connection)
-    # Canonical Fact tables are migration-owned SQL relations rather than ORM
-    # metadata. Their full contract is covered by migration/DB tests; these
-    # metadata-bootstrap tests isolate the remaining bootstrap behavior.
+    # Canonical registry equality is covered separately; these metadata tests
+    # isolate clean/current table provisioning and drift behavior.
     monkeypatch.setattr(database, "_assert_canonical_fact_migration", lambda _conn: None)
     return database, connection
 
@@ -289,7 +288,7 @@ def test_database_ready_log_redacts_dsn(monkeypatch, caplog) -> None:
     assert "postgresql+psycopg2://redacted:***@tsdb:5432/quanttrad?token=redacted" in messages
 
 
-def test_bootstrap_fresh_database_requires_explicit_acquisition_migration_without_runtime_ddl(
+def test_bootstrap_fresh_database_creates_complete_current_schema(
     monkeypatch,
 ) -> None:
     inspector = _Inspector()
@@ -299,12 +298,7 @@ def test_bootstrap_fresh_database_requires_explicit_acquisition_migration_withou
         canonical_ready=False,
     )
 
-    with pytest.raises(RuntimeError) as exc_info:
-        database._bootstrap_schema_contract()
-
-    message = str(exc_info.value)
-    assert "market.fact_acquisition_coverage" in message
-    assert "scripts/db/manual_migration_numeric_fact_store_v1.sql" in message
+    database._bootstrap_schema_contract()
 
     created_tables = {
         _table_key(statement.element)
@@ -316,14 +310,39 @@ def test_bootstrap_fresh_database_requires_explicit_acquisition_migration_withou
         for statement in connection.executed
         if isinstance(statement, CreateIndex)
     }
-    assert created_tables.isdisjoint(_EXPLICIT_MIGRATION_TABLES)
-    assert created_indexes.isdisjoint(_EXPLICIT_MIGRATION_TABLES)
+    assert _CLEAN_BOOTSTRAP_TABLES <= created_tables
+    assert {
+        ("market", "fact_versions"),
+        ("market", "fact_acquisition_coverage"),
+    } <= created_indexes
+
+    registry_table_position = next(
+        position
+        for position, statement in enumerate(connection.executed)
+        if isinstance(statement, CreateTable)
+        and _table_key(statement.element) == ("market", "fact_schemas")
+    )
+    validation_function_position = next(
+        position
+        for position, statement in enumerate(connection.executed)
+        if "CREATE OR REPLACE FUNCTION market.validate_fact_payload"
+        in str(statement)
+    )
+    fact_table_position = next(
+        position
+        for position, statement in enumerate(connection.executed)
+        if isinstance(statement, CreateTable)
+        and _table_key(statement.element) == ("market", "fact_versions")
+    )
+    assert registry_table_position < validation_function_position < fact_table_position
+
+
 def test_bootstrap_migrated_acquisition_schema_passes_and_creates_other_objects(
     monkeypatch,
 ) -> None:
     inspector = _Inspector(
         schemas={"public", "market"},
-        tables=_EXPLICIT_MIGRATION_TABLES,
+        tables=_CLEAN_BOOTSTRAP_TABLES,
     )
     database, connection = _database_with_fake_engine(monkeypatch, inspector)
 
@@ -348,13 +367,13 @@ def test_bootstrap_migrated_acquisition_schema_passes_and_creates_other_objects(
         _table_key(statement.element)
         for statement in connection.executed
         if isinstance(statement, CreateTable)
-        and _table_key(statement.element) in _EXPLICIT_MIGRATION_TABLES
+        and _table_key(statement.element) in _CLEAN_BOOTSTRAP_TABLES
     }
     created_explicit_indexes = {
         _table_key(statement.element.table)
         for statement in connection.executed
         if isinstance(statement, CreateIndex)
-        and _table_key(statement.element.table) in _EXPLICIT_MIGRATION_TABLES
+        and _table_key(statement.element.table) in _CLEAN_BOOTSTRAP_TABLES
     }
     assert created_explicit_tables == set()
     assert created_explicit_indexes == set()

@@ -37,8 +37,11 @@ code_paths:
   - scripts/db/manual_migration_observability_metric_rollups_v1.sql
   - scripts/db/manual_migration_versioning_hard_cutover.sql
   - docker/docker-compose.yml
+  - docker/docker-compose.server.yml
   - docker/promtail/config.yml
+  - docker/alloy/config.alloy
   - docker/loki/config.yml
+  - docker/loki/server-config.yml
   - docker/grafana
   - scripts/reporting/docker_capacity_sampler.sh
   - scripts/reporting/host_capacity_sampler.ps1
@@ -95,11 +98,13 @@ truth; it queries Loki, parses Quant-Trad structured log lines into fields, and
 keeps run incident investigation away from ad hoc curl command knowledge.
 
 Backend and runtime application logs enter Loki through one normal path:
-container stdout/stderr, Docker log storage, Promtail, then Loki. Runtime code
-must not synchronously post ordinary log lines to Loki. Bot-runtime processes
-append `run_id`, `bot_id`, `service=bot-runtime`, and `runtime=bot` to log
-lines so run-centered searches remain cheap enough without indexing every run as
-a Loki stream label.
+container stdout/stderr, Docker log storage, one out-of-process shipper, then
+Loki. Alloy owns this role on the native-Linux server; the local development
+composition retains its historical Promtail path. Runtime code must not
+synchronously post ordinary log lines to Loki. Bot-runtime processes append
+`run_id`, `bot_id`, `service=bot-runtime`, and `runtime=bot` to log lines so
+run-centered searches remain cheap enough without indexing every run as a Loki
+stream label.
 
 ## Storage Budget
 
@@ -167,8 +172,9 @@ memory, PID, and Docker engine-filesystem samples every 15 seconds through
 normal Docker stdout. Every filesystem sample declares its scope, authority,
 runtime kind, and whether physical host capacity is visible. Docker Desktop/WSL
 engine capacity is explicitly a virtual-guest sample, not host free space.
-Promtail and Loki retain that short-horizon operational stream; the sidecar does
-not post directly to Loki and does not add a second database.
+The configured Docker log shipper and Loki retain that short-horizon
+operational stream; the sidecar does not post directly to Loki and does not add
+a second database.
 
 On Windows Docker Desktop, `host_capacity_sampler.ps1` optionally supplies the
 missing physical authority. It discovers Docker's configured WSL VHDX and its
@@ -202,7 +208,7 @@ policy rather than trading truth.
 - runner clock-gap diagnostics,
 - Docker container lifecycle diagnostics for Quant-Trad containers,
 - structured Loki inspection through `qt logs` for run incident forensics,
-- Promtail-scraped backend and bot-runtime stdout/stderr logs,
+- Docker-shipped backend and bot-runtime stdout/stderr logs,
 - control-plane telemetry flush status for runtime lifecycle and bootstrap
   messages,
 - storage write timing,
@@ -279,7 +285,7 @@ policy rather than trading truth.
   accepted market facts. Attempt timing stays bounded inside the existing typed
   attempt evidence instead of creating one durable metric row per stage.
 - Dashboard gaps should point back to missing instrumentation or storage, not hidden execution semantics.
-- If Promtail/Loki are down while a short-lived bot container starts and exits,
+- If the Docker log shipper or Loki is down while a short-lived bot container starts and exits,
   and the container is later removed, Loki cannot retroactively recover that
   runtime stdout/stderr stream. The fix is observability availability and
   durable Docker/Loki storage, not a second runtime logging path.
