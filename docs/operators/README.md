@@ -180,6 +180,14 @@ Diagnose before changing state. Preserve fleet/detail output, recent events,
 gaps, provider success, accepted Fact time, worker/lease evidence, and the
 operation request ID when recording an incident.
 
+An isolated `provider_trade_side_unknown` event means the provider supplied a
+trade outside the proven BUY/SELL maker-side contract. QT retains the exact raw
+frame, quarantines only those trades, continues the collector, and marks the
+affected live-flow coverage invalid rather than inventing a side. Inspect the
+event's raw-record reference and rejected count; a repeating collector failure
+or growing retained spool is not the expected state and should be treated as a
+runtime incident.
+
 ## Backups, storage, and recovery
 
 The database, market-structure archive, deployment state, and private operator

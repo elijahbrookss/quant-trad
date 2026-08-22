@@ -127,6 +127,16 @@ disconnect budget resets only after a provider message arrives, not after a
 successful socket handshake. Sequence, subscription, heartbeat, snapshot, and
 coverage evidence remain epoch-scoped.
 
+Projection-quality rejection is distinct from transport failure. For example,
+Coinbase can emit a mixed trade update whose maker sides include
+`UNKNOWN_ORDER_SIDE`. The trade projection archives the exact frame, admits
+the BUY/SELL siblings, folds the rejected trades into one typed quality event,
+invalidates the affected flow-coverage interval, and acknowledges the segment.
+It never guesses a side, drops the raw record, or terminates the generic stream
+runtime on that known provider sentinel. Retained-spool recovery applies the
+same rule idempotently, so one semantically unusable trade cannot become a
+permanent restart loop.
+
 After a terminal segment is archived, mapped, canonicalized, and its terminal
 coverage revision is committed, the finalizer retires that connection epoch's
 projection state. Memory is therefore bounded by active/finalizing epochs, not

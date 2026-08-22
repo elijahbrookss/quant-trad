@@ -20,6 +20,7 @@ from market_data.structure import (
     ProviderSizeUnit,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
+    UnsupportedMarketTradeSideError,
     aggregate_trade_bucket,
     bucket_start_for,
     build_raw_record_id,
@@ -179,6 +180,25 @@ def test_captured_spot_trade_uses_provider_size_as_base_quantity() -> None:
     assert fact.contract_quantity is None
     assert fact.base_quantity == fact.provider_size
     assert fact.quote_notional == fact.price * fact.base_quantity
+
+
+def test_coinbase_unknown_order_side_is_a_typed_projection_rejection() -> None:
+    event, _raw = _captured_trade_event("BIP-20DEC30-CDE")
+    rejected = replace(
+        event,
+        payload={**dict(event.payload), "side": "UNKNOWN_ORDER_SIDE"},
+    )
+
+    with pytest.raises(UnsupportedMarketTradeSideError) as captured:
+        translate_coinbase_market_trade(
+            rejected,
+            contract=_product_contract("BIP-20DEC30-CDE"),
+            raw_record_id="raw-unknown-side",
+            connection_epoch=0,
+            receive_ordinal=1,
+        )
+
+    assert captured.value.provider_side == "UNKNOWN_ORDER_SIDE"
 
 
 def test_trade_material_identity_ignores_duplicate_delivery_provenance() -> None:

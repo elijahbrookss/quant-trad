@@ -19,6 +19,7 @@ STREAM_QUALITY_CLASSIFICATIONS_V1: Final[frozenset[str]] = frozenset(
         "heartbeat_gap",
         "out_of_order",
         "provider_trade_conflict",
+        "provider_trade_side_unknown",
         "resync_snapshot_accepted",
         "resync_started",
         "sequence_gap",

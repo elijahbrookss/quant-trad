@@ -338,7 +338,8 @@ reference back to the transport event.
 Its classification is the shared closed v1 enum in
 `src/market_data/stream_quality.py`: `sequence_gap`, `out_of_order`, `duplicate`,
 `divergent_duplicate`, `heartbeat_gap`, `disconnect`, `decode_error`,
-`archive_loss`, `provider_trade_conflict`, `canonicalization_lag`,
+`archive_loss`, `provider_trade_conflict`, `provider_trade_side_unknown`,
+`canonicalization_lag`,
 `backpressure_stop`, `book_invalid`, `unknown_zero_delete`,
 `update_before_snapshot`, `collector_restart_gap`, `resync_started`, and
 `resync_snapshot_accepted`. Sequence, ordinal, state-hash, and reason fields are
@@ -523,8 +524,8 @@ price-level book.
 
 ### Canonical Trade Translation
 
-Coinbase documents `market_trades.side` as the **maker side**. The canonical
-record therefore always stores `maker_side=BUY|SELL`. The optional transform
+Coinbase documents `market_trades.side` as the **maker side**. An admitted
+canonical record therefore always stores `maker_side=BUY|SELL`. The optional transform
 `coinbase_maker_to_aggressor.v1` is:
 
 | Coinbase maker side | Canonical aggressor side |
@@ -533,9 +534,16 @@ record therefore always stores `maker_side=BUY|SELL`. The optional transform
 | `SELL` | `BUY` |
 
 The transform is enabled for a product only after Phase 0 confirms the futures
-messages use the documented contract. Unknown values fail parsing and do not
-become unsigned trades. If semantics become ambiguous, `aggressor_side` is null
-and every aggressive-flow/CVD feature is unavailable, not guessed.
+messages use the documented contract. A provider sentinel such as
+`UNKNOWN_ORDER_SIDE` is not converted to BUY, SELL, or an unsigned canonical
+trade. The exact raw frame remains archived, affected trades are folded into
+one `provider_trade_side_unknown` quality event per raw record, and the segment
+continues canonicalizing valid trades. A rejected live update invalidates its
+typed flow-coverage interval; a rejected initial snapshot is recorded without
+claiming that historical trade or invalidating later update coverage. If maker
+semantics become ambiguous for an otherwise admitted product,
+`aggressor_side` is null and every aggressive-flow/CVD feature is unavailable,
+not guessed.
 
 ### Quantity And Notional
 
@@ -1037,7 +1045,7 @@ No test substitutes imagined Coinbase fields for a proof-spike fixture.
 | Gap/invalidation propagation | remove one sequence/frame, inject heartbeat gap, disconnect, corrupt quantity | explicit session quality + generic gap evidence; validity closes; downstream book features suppressed |
 | No invalid-book emission | feed updates after invalidation and before fresh snapshot | no BBO/depth/imbalance/basis using that book; diagnostics remain queryable |
 | Raw-to-derived reconciliation | recompute counts/volumes/notional and source-position ranges from raw trades | exact equality or typed, explainable rejected-record counts |
-| Maker/aggressor translation | replay documented BUY/SELL fixtures and unknown side | exact inversion for proven products; unknown fails/suppresses aggressive features |
+| Maker/aggressor translation | replay documented BUY/SELL fixtures and a mixed update batch containing an unknown side | exact inversion for admitted trades; unknown trades are raw-archived and quarantined in one typed quality event, valid siblings still publish, affected live coverage is invalid, and recovery terminates without a poison-segment loop |
 | Quantity/multiplier correctness | reconcile futures provider size, product multiplier, base quantity and notional against proof fixtures | exact Decimal equality and correct product-definition revision reference |
 | Futures/spot alignment | vary event/known-at order and staleness independently | pair known-at is max inputs; stale/invalid side suppresses output; explicit mapping only |
 | Provider-free backtest | disable network/provider registry and execute frozen dataset | execution succeeds with zero provider call; missing component fails before initialize |

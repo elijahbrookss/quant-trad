@@ -221,6 +221,8 @@ def test_level2_fleet_manifest_registers_continuous_book_and_feature_series(
 
 
 class _FakeStream:
+    unknown_update_sides: tuple[str, ...] = ()
+
     def __init__(self, *, stream_session_id: str, **_kwargs) -> None:
         self.session_id = stream_session_id
         self.closed = False
@@ -284,7 +286,22 @@ class _FakeStream:
                                 "size": "0.02",
                                 "side": "SELL",
                                 "time": (base + timedelta(seconds=1)).isoformat(),
-                            }
+                            },
+                            *[
+                                {
+                                    "product_id": "BTC-USD",
+                                    "trade_id": f"unknown-{index}",
+                                    "price": "60001",
+                                    "size": "0.01",
+                                    "side": side,
+                                    "time": (
+                                        base + timedelta(seconds=1)
+                                    ).isoformat(),
+                                }
+                                for index, side in enumerate(
+                                    self.unknown_update_sides, start=1
+                                )
+                            ],
                         ],
                     }
                 ],
@@ -336,6 +353,7 @@ class _FakeRepository:
         self.released = False
         self.manifests: list[str] = []
         self.aggregate_count = 0
+        self.quality_events: list[dict] = []
 
     def claim_stream(self, **_kwargs) -> StreamClaim:
         return StreamClaim(
@@ -389,7 +407,8 @@ class _FakeRepository:
         )
 
     def record_quality_event(self, _claim, **_kwargs) -> str:
-        return "quality"
+        self.quality_events.append(dict(_kwargs))
+        return f"quality-{len(self.quality_events)}"
 
     def ingest_trades(self, claim, *, facts, **_kwargs) -> TradeIngestionOutcome:
         inserted = []
@@ -748,6 +767,49 @@ def test_bounded_collector_spools_archives_persists_and_aggregates(
     assert repository.coverage is not None
     assert repository.aggregate_count > 0
     assert repository.released is True
+
+
+class _UnknownSideFakeStream(_FakeStream):
+    unknown_update_sides = ("UNKNOWN_ORDER_SIDE", "UNKNOWN_ORDER_SIDE")
+
+
+def test_bounded_collector_quarantines_unknown_trade_sides_without_failing(
+    tmp_path: Path,
+) -> None:
+    repository = _FakeRepository()
+    result = asyncio.run(
+        MarketStructureService(
+            repository=repository,
+            stream_factory=_UnknownSideFakeStream,
+        ).capture_bounded(
+            definition_id="btc-definition",
+            duration_seconds=1,
+            storage_root=tmp_path,
+            owner_id="test-owner",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["trade_events"] == 5
+    assert result["trade_ingestion"] == {
+        "requested": 3,
+        "inserted": 3,
+        "noop": 0,
+        "max_commit_seq": 3,
+        "rejected": 2,
+    }
+    assert result["coverage"]["status"] == "invalid"
+    assert set(repository.trades) == {"snapshot-1", "update-1", "update-2"}
+    rejection = next(
+        row
+        for row in repository.quality_events
+        if row["classification"] == "provider_trade_side_unknown"
+    )
+    assert rejection["coverage_interval_id"] == result["coverage"]["interval_id"]
+    assert rejection["evidence"]["quarantined_trade_count"] == 2
+    assert rejection["evidence"]["provider_side_values"] == [
+        "UNKNOWN_ORDER_SIDE"
+    ]
 
 
 class _FakeConfigurationRepository:

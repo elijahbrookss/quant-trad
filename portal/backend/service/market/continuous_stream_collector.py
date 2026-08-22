@@ -70,6 +70,7 @@ from market_data.structure import (
     ProviderSizeUnit,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
+    UnsupportedMarketTradeSideError,
     aggregate_trade_bucket,
     bucket_start_for,
     translate_coinbase_market_trade,
@@ -86,6 +87,10 @@ from .market_structure_service import (
     _CaptureAnalyzer,
     _observed_channel,
     _stable_hash,
+)
+from .market_trade_quality import (
+    QuarantinedTradeSide,
+    build_trade_side_quarantine_quality,
 )
 
 
@@ -323,7 +328,7 @@ class CoinbaseMarketTradeProjectionAdapter:
         return _CaptureAnalyzer(claim, primary_channel=self.primary_channel)
 
     def counters(self) -> dict[str, int]:
-        return {"trade_inserted": 0, "trade_noop": 0}
+        return {"trade_inserted": 0, "trade_noop": 0, "trade_rejected": 0}
 
     def finalize_segment(
         self,
@@ -1575,6 +1580,7 @@ class ContinuousStreamRuntime:
             }
         )
         translated = []
+        contract = None
         for record in records:
             events = parser.parse_raw(
                 record.raw_frame,
@@ -1586,14 +1592,19 @@ class ContinuousStreamRuntime:
                     "receive_ordinal": record.receive_ordinal,
                 },
             )
+            quarantined: list[QuarantinedTradeSide] = []
             for event in events:
-                if event.event_kind == "market_trade":
+                if event.event_kind != "market_trade":
+                    continue
+                if contract is None:
+                    contract = self.repository.get_product_contract(
+                        str(claim.config["product_definition_version_id"])
+                    )
+                try:
                     translated.append(
                         translate_coinbase_market_trade(
                             event,
-                            contract=self.repository.get_product_contract(
-                                str(claim.config["product_definition_version_id"])
-                            ),
+                            contract=contract,
                             raw_record_id=record.raw_record_id,
                             connection_epoch=record.connection_epoch,
                             receive_ordinal=record.receive_ordinal,
@@ -1601,6 +1612,33 @@ class ContinuousStreamRuntime:
                             coverage_interval_id=None,
                         )
                     )
+                except UnsupportedMarketTradeSideError as exc:
+                    quarantined.append(
+                        QuarantinedTradeSide(
+                            event=event,
+                            provider_side=exc.provider_side,
+                            invalidates_coverage=False,
+                        )
+                    )
+            if quarantined:
+                quality = build_trade_side_quarantine_quality(
+                    record=record,
+                    observations=quarantined,
+                    detected_at=datetime.now(UTC),
+                )
+                self.repository.record_quality_event(
+                    claim,
+                    connection_epoch=int(quality["connection_epoch"]),
+                    receive_ordinal=int(quality["receive_ordinal"]),
+                    channel=str(quality["channel"]),
+                    classification=str(quality["classification"]),
+                    reason=str(quality["reason"]),
+                    detected_at=quality["detected_at"],
+                    raw_record_id=quality.get("raw_record_id"),
+                    sequence_before=quality.get("sequence_before"),
+                    sequence_after=quality.get("sequence_after"),
+                    evidence=quality.get("evidence"),
+                )
         self.repository.ingest_trades(
             claim,
             facts=translated,
@@ -2332,6 +2370,10 @@ class ContinuousStreamRuntime:
             }
         )
         translated = []
+        quarantined_by_record: dict[str, dict[str, Any]] = {}
+        product_contract = self.repository.get_product_contract(
+            str(claim.config["product_definition_version_id"])
+        )
         for record in records:
             events = parser.parse_raw(
                 record.raw_frame,
@@ -2354,19 +2396,69 @@ class ContinuousStreamRuntime:
                     and record.receive_ordinal >= state.opening_receive_ordinal
                     else None
                 )
-                translated.append(
-                    translate_coinbase_market_trade(
-                        event,
-                        contract=self.repository.get_product_contract(
-                            str(claim.config["product_definition_version_id"])
-                        ),
-                        raw_record_id=record.raw_record_id,
-                        connection_epoch=record.connection_epoch,
-                        receive_ordinal=record.receive_ordinal,
-                        accepted_at=datetime.now(UTC),
-                        coverage_interval_id=coverage_ref,
+                try:
+                    translated.append(
+                        translate_coinbase_market_trade(
+                            event,
+                            contract=product_contract,
+                            raw_record_id=record.raw_record_id,
+                            connection_epoch=record.connection_epoch,
+                            receive_ordinal=record.receive_ordinal,
+                            accepted_at=datetime.now(UTC),
+                            coverage_interval_id=coverage_ref,
+                        )
                     )
+                except UnsupportedMarketTradeSideError as exc:
+                    quarantined = QuarantinedTradeSide(
+                        event=event,
+                        provider_side=exc.provider_side,
+                        invalidates_coverage=coverage_ref is not None,
+                    )
+                    grouped = quarantined_by_record.setdefault(
+                        record.raw_record_id,
+                        {"record": record, "observations": []},
+                    )
+                    grouped["observations"].append(quarantined)
+
+        quarantined_count = 0
+        for grouped in quarantined_by_record.values():
+            quality = build_trade_side_quarantine_quality(
+                record=grouped["record"],
+                observations=grouped["observations"],
+                detected_at=datetime.now(UTC),
+            )
+            quarantined_count += int(
+                dict(quality.get("evidence") or {}).get(
+                    "quarantined_trade_count", 0
                 )
+            )
+            dedupe_hash = str(quality.get("dedupe_hash") or "")
+            if dedupe_hash and dedupe_hash in state.persisted_quality_hashes:
+                continue
+            quality_id = self.repository.record_quality_event(
+                claim,
+                connection_epoch=int(quality["connection_epoch"]),
+                receive_ordinal=int(quality["receive_ordinal"]),
+                channel=str(quality["channel"]),
+                classification=str(quality["classification"]),
+                reason=str(quality["reason"]),
+                detected_at=quality["detected_at"],
+                raw_record_id=quality.get("raw_record_id"),
+                coverage_interval_id=(
+                    coverage_interval_id
+                    if bool(quality.get("invalidating"))
+                    else None
+                ),
+                sequence_before=quality.get("sequence_before"),
+                sequence_after=quality.get("sequence_after"),
+                evidence=quality.get("evidence"),
+            )
+            if dedupe_hash:
+                state.persisted_quality_hashes.add(dedupe_hash)
+            if bool(quality.get("invalidating")):
+                state.invalidating_quality_ids.append(quality_id)
+            counters["quality_events"] += 1
+        counters["trade_rejected"] += quarantined_count
         try:
             trade_outcome = self.repository.ingest_trades(
                 claim,
@@ -2496,6 +2588,7 @@ class ContinuousStreamRuntime:
                 "trade_requested": trade_outcome.requested_count,
                 "trade_inserted": trade_outcome.inserted_count,
                 "trade_noop": trade_outcome.noop_count,
+                "trade_rejected": quarantined_count,
                 "coverage_revision": (
                     coverage.revision if coverage is not None else None
                 ),
@@ -2511,7 +2604,8 @@ class ContinuousStreamRuntime:
         logger.info(
             "continuous_collector_segment_committed | definition_id=%s "
             "session_id=%s connection_epoch=%s segment_id=%s records=%s "
-            "manifest_id=%s trade_inserted=%s trade_noop=%s terminal=%s",
+            "manifest_id=%s trade_inserted=%s trade_noop=%s "
+            "trade_rejected=%s terminal=%s",
             claim.definition_id,
             claim.session_id,
             connection_epoch,
@@ -2520,6 +2614,7 @@ class ContinuousStreamRuntime:
             commit.manifest_id,
             trade_outcome.inserted_count,
             trade_outcome.noop_count,
+            quarantined_count,
             checkpoint.terminal,
         )
         if checkpoint.terminal:

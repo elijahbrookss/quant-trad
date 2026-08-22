@@ -192,8 +192,11 @@ issuing another action.
   durable history begins at enablement; arbitrary provider history is not
   available through restart.
 - Coinbase continuous trades preserve forward history plus idempotent spool
-  recovery. Bounded capture/replay remains a separate explicitly authorized
-  acquisition workflow.
+  recovery. A provider `UNKNOWN_ORDER_SIDE` trade remains in exact raw archive,
+  is omitted from the canonical BUY/SELL tape with
+  `provider_trade_side_unknown` evidence, and invalidates affected live-flow
+  coverage without stopping sibling trade ingestion or the collector. Bounded
+  capture/replay applies the same policy.
 - Coinbase Level 2 uses the same registered continuous supervisor and lifecycle
   as trades. Its projection additionally requires a verified checkpoint plus
   durable deltas, or a fresh provider snapshot, before book validity can resume

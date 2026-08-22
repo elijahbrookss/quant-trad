@@ -15,7 +15,7 @@ from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
 )
-from market_data.structure import RawStreamRecord
+from market_data.structure import ProductContract, RawStreamRecord
 from market_data.stream_quality import normalize_stream_quality_classification
 from portal.backend.service.market.continuous_stream_collector import (
     CoinbaseContinuousTransportAdapter,
@@ -45,7 +45,11 @@ def _claim(*, session_id: str) -> StreamClaim:
         contract_version="market.market_trade.v1",
         max_spool_bytes=1024**3,
         max_segment_bytes=1024**2,
-        config={},
+        config={
+            "product_definition_version_id": (
+                "coinbase.BTC-USD.product_contract.v1"
+            )
+        },
         owner_id="worker",
         lease_token="token",
         lease_generation=1,
@@ -99,6 +103,8 @@ class _RecoveryRepository:
         self.committed_records = 0
         self.closed_coverages = 0
         self.released = False
+        self.quality: list[dict] = []
+        self.trades = ()
 
     def claim_stream(self, **kwargs):
         assert kwargs["resume_session_id"] == "session-before-crash"
@@ -119,8 +125,32 @@ class _RecoveryRepository:
         self.committed_records += len(records)
         return SimpleNamespace(manifest_id="manifest-recovered")
 
-    def ingest_trades(self, _claim, **_kwargs):
-        return SimpleNamespace(inserted_count=0, noop_count=0)
+    def get_product_contract(self, _definition_version_id):
+        return ProductContract(
+            provider_product_id="BTC-USD",
+            provider_size_unit="base",
+            base_currency="BTC",
+            quote_currency="USD",
+            product_definition_version_id=(
+                "coinbase.BTC-USD.product_contract.v1"
+            ),
+        )
+
+    def record_quality_event(self, _claim, **kwargs):
+        kwargs["classification"] = normalize_stream_quality_classification(
+            kwargs["classification"]
+        )
+        self.quality.append(dict(kwargs))
+        return f"quality-{len(self.quality)}"
+
+    def ingest_trades(self, _claim, *, facts, **_kwargs):
+        self.trades = tuple(facts)
+        return SimpleNamespace(
+            requested_count=len(self.trades),
+            inserted_count=len(self.trades),
+            noop_count=0,
+            max_commit_seq=len(self.trades),
+        )
 
     def close_open_session_coverages(self, _claim, **_kwargs):
         self.closed_coverages += 1
@@ -191,6 +221,259 @@ def test_restart_recovery_repairs_archives_and_closes_prior_coverage(
     ]
     assert repository.events[1]["evidence"]["truncated_tail_bytes"] > 0
     assert not segment.open_path.exists()
+    assert not segment.sealed_path.exists()
+
+
+def test_restart_recovery_quarantines_unknown_side_and_releases_spool(
+    tmp_path: Path,
+) -> None:
+    spool_root = tmp_path / "spool"
+    segment = DurableRawSpoolSegment(
+        root=spool_root,
+        definition_id="definition-a",
+        session_id="session-before-crash",
+        connection_epoch=2,
+        segment_ordinal=7,
+    )
+    payload = {
+        "channel": "market_trades",
+        "timestamp": "2026-08-05T12:00:00Z",
+        "sequence_num": 9,
+        "events": [
+            {
+                "type": "update",
+                "trades": [
+                    {
+                        "product_id": "BTC-USD",
+                        "trade_id": "valid-1",
+                        "price": "60000",
+                        "size": "0.01",
+                        "side": "BUY",
+                        "time": "2026-08-05T12:00:00Z",
+                    },
+                    {
+                        "product_id": "BTC-USD",
+                        "trade_id": "unknown-1",
+                        "price": "60000",
+                        "size": "0.02",
+                        "side": "UNKNOWN_ORDER_SIDE",
+                        "time": "2026-08-05T12:00:00Z",
+                    },
+                ],
+            }
+        ],
+    }
+    message = ProviderRawMessage.build(
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        stream_session_id=segment.session_id,
+        connection_epoch=2,
+        receive_ordinal=1,
+        received_at="2026-08-05T12:00:01Z",
+        raw_frame=json.dumps(payload, separators=(",", ":")),
+    )
+    segment.append(
+        RawStreamRecord.from_provider_message(
+            message,
+            definition_id=segment.definition_id,
+            spool_segment_id=segment.spool_segment_id,
+            provider_product_id="BTC-USD",
+            requested_channel="market_trades",
+            observed_channel="market_trades",
+        )
+    )
+    segment.seal()
+
+    repository = _RecoveryRepository()
+    ContinuousMarketStructureCollector(
+        repository=repository
+    )._recover_orphaned_spools_sync(
+        definition={"id": "definition-a"},
+        owner_id="worker",
+        lease_seconds=90,
+        spool_root=spool_root,
+        object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+        temporary_root=tmp_path / "tmp",
+        projection=CoinbaseMarketTradeProjectionAdapter(),
+    )
+
+    assert [fact.provider_trade_id for fact in repository.trades] == ["valid-1"]
+    assert len(repository.quality) == 1
+    assert repository.quality[0]["classification"] == (
+        "provider_trade_side_unknown"
+    )
+    assert repository.quality[0]["evidence"]["quarantined_trade_count"] == 1
+    assert repository.quality[0].get("coverage_interval_id") is None
+    assert not segment.sealed_path.exists()
+
+
+class _TradeFinalizationRepository(_RecoveryRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.coverages = []
+
+    def append_coverage_version(self, _claim, *, coverage, **_kwargs):
+        self.coverages.append(coverage)
+        return f"coverage-{len(self.coverages)}"
+
+
+def test_continuous_trade_finalizer_quarantines_one_batch_and_invalidates_coverage(
+    tmp_path: Path,
+) -> None:
+    repository = _TradeFinalizationRepository()
+    collector = ContinuousMarketStructureCollector(repository=repository)
+    claim = _claim(session_id="trade-quality-session")
+    segment = DurableRawSpoolSegment(
+        root=tmp_path / "spool",
+        definition_id=claim.definition_id,
+        session_id=claim.session_id,
+        connection_epoch=0,
+        segment_ordinal=0,
+    )
+    base = datetime.now(UTC) - timedelta(seconds=30)
+    payloads = (
+        {
+            "channel": "subscriptions",
+            "timestamp": base.isoformat(),
+            "sequence_num": 0,
+            "events": [
+                {"subscriptions": {"market_trades": ["BTC-USD"]}}
+            ],
+        },
+        {
+            "channel": "heartbeats",
+            "timestamp": (base + timedelta(milliseconds=1)).isoformat(),
+            "sequence_num": 1,
+            "events": [
+                {"current_time": base.isoformat(), "heartbeat_counter": "1"}
+            ],
+        },
+        {
+            "channel": "market_trades",
+            "timestamp": (base + timedelta(milliseconds=2)).isoformat(),
+            "sequence_num": 2,
+            "events": [
+                {
+                    "type": "snapshot",
+                    "trades": [
+                        {
+                            "product_id": "BTC-USD",
+                            "trade_id": "snapshot-1",
+                            "price": "60000",
+                            "size": "0.01",
+                            "side": "BUY",
+                            "time": (base - timedelta(seconds=1)).isoformat(),
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "channel": "market_trades",
+            "timestamp": (base + timedelta(milliseconds=3)).isoformat(),
+            "sequence_num": 3,
+            "events": [
+                {
+                    "type": "update",
+                    "trades": [
+                        {
+                            "product_id": "BTC-USD",
+                            "trade_id": "valid-update",
+                            "price": "60001",
+                            "size": "0.01",
+                            "side": "SELL",
+                            "time": base.isoformat(),
+                        },
+                        {
+                            "product_id": "BTC-USD",
+                            "trade_id": "unknown-1",
+                            "price": "60001",
+                            "size": "0.02",
+                            "side": "UNKNOWN_ORDER_SIDE",
+                            "time": base.isoformat(),
+                        },
+                        {
+                            "product_id": "BTC-USD",
+                            "trade_id": "unknown-2",
+                            "price": "60001",
+                            "size": "0.03",
+                            "side": "UNKNOWN_ORDER_SIDE",
+                            "time": base.isoformat(),
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    parser = CoinbaseMessageParser()
+    analyzer = _CaptureAnalyzer(claim, primary_channel="market_trades")
+    for ordinal, payload in enumerate(payloads, start=1):
+        message = ProviderRawMessage.build(
+            provider="COINBASE",
+            venue="COINBASE_DIRECT",
+            stream_session_id=claim.session_id,
+            connection_epoch=0,
+            receive_ordinal=ordinal,
+            received_at=(base + timedelta(seconds=ordinal)).isoformat(),
+            raw_frame=json.dumps(payload, separators=(",", ":")),
+        )
+        record = RawStreamRecord.from_provider_message(
+            message,
+            definition_id=claim.definition_id,
+            spool_segment_id=segment.spool_segment_id,
+            provider_product_id=claim.provider_product_id,
+            requested_channel="market_trades",
+            observed_channel=str(payload["channel"]),
+        )
+        segment.append(record)
+        analyzer.observe(
+            record,
+            parser.parse_raw(
+                record.raw_frame,
+                received_at=record.received_at.isoformat(),
+                raw_ref={"raw_record_id": record.raw_record_id},
+            ),
+        )
+    segment.seal()
+    counters = {
+        "manifests": 0,
+        "quality_events": 0,
+        "trade_inserted": 0,
+        "trade_noop": 0,
+        "trade_rejected": 0,
+    }
+    states: dict[int, _EpochProjectionState] = {}
+
+    collector._finalize_trade_segment(
+        claim=claim,
+        checkpoint=_SegmentCheckpoint(
+            segment=segment,
+            analysis=analyzer.finalize(),
+            terminal=True,
+            terminal_reason="test_stop",
+            closing_session_event_id="stop-event",
+        ),
+        object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+        temporary_root=tmp_path / "tmp",
+        event_writer=_SessionEventWriter(repository, claim),
+        states=states,
+        counters=counters,
+    )
+
+    assert [fact.provider_trade_id for fact in repository.trades] == [
+        "snapshot-1",
+        "valid-update",
+    ]
+    assert len(repository.quality) == 1
+    rejection = repository.quality[0]
+    assert rejection["classification"] == "provider_trade_side_unknown"
+    assert rejection["evidence"]["quarantined_trade_count"] == 2
+    assert rejection["coverage_interval_id"] == repository.coverages[-1].interval_id
+    assert repository.coverages[-1].status.value == "invalid"
+    assert repository.coverages[-1].gap_quality_event_ids == ("quality-1",)
+    assert counters["trade_rejected"] == 2
+    assert counters["trade_inserted"] == 2
+    assert states == {}
     assert not segment.sealed_path.exists()
 
 
