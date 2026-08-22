@@ -54,6 +54,7 @@ Usage:
   scripts/automation/server_deploy.sh release
   scripts/automation/server_deploy.sh status
   scripts/automation/server_deploy.sh fleet
+  scripts/automation/server_deploy.sh qt <qt-arguments...>
   scripts/automation/server_deploy.sh credentials-coinbase [setup-options]
   scripts/automation/server_deploy.sh logs [service]
   scripts/automation/server_deploy.sh stop
@@ -448,6 +449,12 @@ case "$action" in
     require_runtime
     compute_release_material
     compose exec -T backend /app/scripts/qt data collectors fleet
+    ;;
+  qt)
+    require_runtime
+    compute_release_material
+    test "$#" -gt 0 || die "qt action requires at least one qt argument"
+    compose exec -T backend /app/scripts/qt "$@"
     ;;
   credentials-coinbase)
     require_runtime

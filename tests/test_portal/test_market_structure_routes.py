@@ -251,6 +251,56 @@ def test_market_structure_enrollment_route_applies_manifest(monkeypatch) -> None
     assert str(observed["manifest_path"]) == "config/fleet.json"
 
 
+def test_product_collector_enrollment_route_preserves_admin_context(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_enroll(**kwargs):
+        observed.update(kwargs)
+        return {
+            "schema_version": "market.collector_product_enrollment.v1",
+            "status": "enrolled",
+            "product_id": kwargs["product_id"],
+        }
+
+    monkeypatch.setattr(
+        controller.collector_definition_enrollment_service,
+        "enroll_product",
+        fake_enroll,
+    )
+    response = _client().post(
+        "/api/market-data/definitions/enroll-product",
+        json={
+            "provider": "COINBASE",
+            "venue": "COINBASE_DIRECT",
+            "product_id": "LNP-20DEC30-CDE",
+            "collector_types": [
+                "open_interest",
+                "funding_rate",
+                "market_trades",
+                "level2",
+            ],
+            "poll_interval_seconds": 60,
+            "request_id": "operator-link-1",
+            "actor_id": "operator:test",
+            "reason": "Add LINK market-data coverage",
+            "confirmation": "COINBASE:COINBASE_DIRECT:LNP-20DEC30-CDE:enroll",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "enrolled"
+    assert observed["collector_types"] == [
+        "open_interest",
+        "funding_rate",
+        "market_trades",
+        "level2",
+    ]
+    assert observed["actor_id"] == "operator:test"
+    assert observed["reason"] == "Add LINK market-data coverage"
+
+
 def test_market_structure_operator_routes_preserve_typed_boundaries(
     monkeypatch,
 ) -> None:

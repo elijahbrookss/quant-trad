@@ -3,6 +3,13 @@
 This is the minimal provider extension checklist. A provider is an acquisition
 adapter; it is not a schema owner, consumer fallback, or runtime dependency.
 
+Adding another product is not the same as adding a provider. If the deployed
+release already contains a registered provider pack and the required collector
+types, use `qt data collector-definitions enroll-product`; that is an operator
+configuration change and does not require a release. Use this guide when the
+transport, provider API, channel, projection, Fact contract, or recovery
+behavior is new.
+
 ## Where Providers Live
 
 Provider code and binding contracts live under:

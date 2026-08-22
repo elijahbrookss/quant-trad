@@ -21,6 +21,7 @@ from market_data.order_book import (
     Level2BookReconstructor,
 )
 from market_data.structure import MarketTradeRecord, ProductContract, ProviderSizeUnit
+from market_data.stream_enrollment import load_stream_enrollment_manifest
 from market_data.market_state import (
     BBO_FACT_TYPE,
     DEPTH_FACT_TYPE,
@@ -116,7 +117,11 @@ def test_reapplying_enrollment_manifest_has_stable_stream_definition_material(
     service = MarketStructureService(repository=repository)
 
     first = service.apply_stream_enrollment_manifest()
-    second = service.apply_stream_enrollment_manifest()
+    second = service.apply_stream_enrollment_manifest(
+        manifest=load_stream_enrollment_manifest(
+            "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
+        )
+    )
 
     assert first["manifest_hash"] == second["manifest_hash"]
     assert len(repository.definition_calls) == 6

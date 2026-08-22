@@ -326,11 +326,18 @@ class MarketStructureService:
     def apply_stream_enrollment_manifest(
         self,
         *,
-        manifest_path: Path | str = DEFAULT_TRADE_FLEET_MANIFEST,
+        manifest_path: Path | str | None = None,
+        manifest: StreamEnrollmentManifest | None = None,
     ) -> dict[str, Any]:
         """Register a validated fleet through the built-in projection packs."""
 
-        manifest = load_stream_enrollment_manifest(manifest_path)
+        if manifest is not None and manifest_path is not None:
+            raise ValueError(
+                "stream_enrollment_invalid: provide manifest or manifest_path, not both"
+            )
+        manifest = manifest or load_stream_enrollment_manifest(
+            manifest_path or DEFAULT_TRADE_FLEET_MANIFEST
+        )
         source_ids: dict[tuple[str, str, str], int] = {}
         definitions: list[dict[str, Any]] = []
         now = datetime.now(UTC)

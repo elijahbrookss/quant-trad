@@ -16,6 +16,7 @@ code_paths:
   - src/market_data/collector_operations.py
   - portal/backend/db/market_data_models.py
   - portal/backend/service/market/collector_operations_service.py
+  - portal/backend/service/market/collector_definition_enrollment_service.py
   - portal/backend/service/storage/repos/collector_operations.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/collector_supervisor.py
@@ -42,7 +43,9 @@ Frontend V2 / qt / MCP
 
 The service operates registered collectors. It does not register adapters,
 schemas, sources, subjects, credentials, or definitions. Those remain code and
-reviewed-manifest concerns.
+reviewed-pack concerns. Definition enrollment is a separate confirmed admin
+boundary; it can add a provider product only through executable adapters and
+contracts already registered by the deployed release.
 
 Persistence alone does not make a definition operational. The registry admits
 only definitions whose provider, adapter, configuration schema, Fact schemas,
@@ -68,8 +71,13 @@ the reviewed definition is configured. Operator desired state is a distinct,
 typed field and may be `running`, `stopped`, or `paused`. The worker requires
 both configuration and desired intent.
 
-No frontend request accepts provider URLs, product IDs, schedules, retry
-policies, credentials, schema IDs, adapter IDs, or arbitrary configuration.
+No lifecycle frontend request accepts provider URLs, product IDs, schedules,
+retry policies, credentials, schema IDs, adapter IDs, or arbitrary
+configuration. The separate product-enrollment API accepts a bounded provider,
+venue, product identity, registered collector-type list, poll interval, actor,
+reason, request ID, and exact confirmation. Its provider pack validates live
+metadata and constructs typed definitions from reviewed templates; it does not
+accept adapter IDs, schema IDs, channels, URLs, or raw runtime JSON.
 
 ## Operational snapshot
 
@@ -214,7 +222,9 @@ The canonical surface is organized by collector identity:
 - one aggregate market-data-plane snapshot.
 
 Definition installation and bounded provider acquisition remain separate admin
-or acquisition routes. No frontend adapter imports them.
+or acquisition routes. `qt data collector-definitions enroll-product` is the
+operator path for another product supported by a deployed pack. No frontend
+adapter imports these routes.
 
 The same surface is available through `qt data collectors ...` and
 `qt mcp serve`. MCP reads use `quanttrad://market-data/...` resources. MCP

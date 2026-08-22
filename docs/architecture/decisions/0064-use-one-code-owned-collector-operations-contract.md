@@ -15,6 +15,7 @@ tags:
 code_paths:
   - src/market_data/collector_operations.py
   - portal/backend/service/market/collector_operations_service.py
+  - portal/backend/service/market/collector_definition_enrollment_service.py
   - portal/backend/service/storage/repos/collector_operations.py
   - portal/backend/controller/market_data.py
   - portal/backend/workers/market_data_collector.py
@@ -43,8 +44,10 @@ and tables contained the cause, but no canonical diagnostic folded that
 evidence into a failing boundary and safe operator action.
 
 Collectors are implementation assets, not user-authored automation. Provider
-adapters, Fact schemas, subjects, cadence, safety policy, and recovery behavior
-must remain code- or reviewed-manifest-owned.
+adapters, Fact schemas, cadence bounds, safety policy, and recovery behavior
+must remain code- or reviewed-manifest-owned. An operator may admit another
+provider product only through an already deployed pack that validates its live
+contract and fixes those executable choices.
 
 Database rows are durable configuration/evidence, but do not define executable
 code. Historical integration-test and retired definitions may remain pinned by
@@ -59,18 +62,28 @@ collector. Scheduled polls and continuous streams retain their fit-for-purpose
 definition/evidence tables, but no UI, CLI, or MCP consumer may infer lifecycle
 or mutate those tables directly.
 
-Each definition retains a code-owned configured gate and receives the same
+Each definition retains a reviewed configured gate and receives the same
 typed operator-control fields:
 
 - `desired_state`: `running`, `stopped`, or `paused`;
 - monotonic `control_generation`;
 - last request identity, actor, and time.
 
-`enabled` is the configured/code-owned gate. Operator start/stop/pause/resume
+`enabled` is the configured admission gate. Operator start/stop/pause/resume
 does not redefine or reconfigure a collector. Workers run only a configured
 definition whose desired state is `running`. A restart advances the control
 generation so a continuous task drains and is replaced even when its desired
 state remains `running`.
+
+Definition admission is separate from lifecycle operation. Clean-install
+defaults come from reviewed source-controlled manifests. A confirmed admin CLI
+may add a product through a registered provider pack when the deployed release
+already owns every requested adapter, channel, projection, Fact schema,
+schedule bound, and recovery policy. That boundary validates current provider
+metadata, creates the canonical instrument and typed definitions, and records
+initial running intent. It cannot accept arbitrary runtime JSON or introduce
+new executable behavior. Reapplication is idempotent and preserves later
+audited lifecycle intent.
 
 The canonical actual lifecycle vocabulary is:
 
@@ -121,7 +134,7 @@ may lay out topology and format values, but it may not derive collector health,
 join operational tables, interpret provider payloads, or create collector
 definitions.
 
-The code-owned registry is the operational admission boundary. A persisted
+The code-owned adapter-pack registry is the operational admission boundary. A persisted
 definition is included only when the deployed runtime recognizes its kind,
 adapter, configuration version, provider binding, and produced schemas.
 Non-admitted durable rows remain countable and inspectable as migration/audit

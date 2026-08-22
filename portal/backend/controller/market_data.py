@@ -21,15 +21,19 @@ from market_data.contracts import (
     FundingRateRecord,
     OpenInterestRecord,
 )
-from ..service.market.normalization_service import market_normalization_service
 from market_data.requirements import UnavailableMarketData
 
+from ..service.market.collector_definition_enrollment_service import (
+    COINBASE_PRODUCT_COLLECTORS,
+    collector_definition_enrollment_service,
+)
 from ..service.market.collector_service import market_data_collector
 from ..service.market.collector_operations_service import (
     collector_operations_service,
 )
 from ..service.market.market_storage_lifecycle import market_storage_lifecycle_service
 from ..service.market.market_structure_service import market_structure_service
+from ..service.market.normalization_service import market_normalization_service
 from ..service.market.numeric_fact_acquisition import (
     NumericAcquisitionAuthorization,
     numeric_fact_acquisition_service,
@@ -238,6 +242,20 @@ class StructuredCollectorDefinitionInstallRequest(BaseModel):
     enabled: bool = False
     max_attempts: int = Field(default=3, ge=1, le=10)
     minimum_spacing_seconds: float = Field(default=1.0, ge=0)
+
+
+class ProductCollectorDefinitionEnrollmentRequest(BaseModel):
+    provider: str
+    venue: str
+    product_id: str
+    collector_types: list[str] = Field(
+        default_factory=lambda: list(COINBASE_PRODUCT_COLLECTORS)
+    )
+    poll_interval_seconds: int = Field(default=60, ge=10, le=86400)
+    request_id: str
+    actor_id: str
+    reason: str
+    confirmation: str
 
 
 @router.post("/numeric-facts/acquire")
@@ -449,6 +467,59 @@ def install_structured_collector_definition(
         "schema_version": "market.collector_definition_install.v1",
         "definition": definition,
     }
+
+
+@router.post("/definitions/enroll-product")
+def enroll_product_collector_definitions(
+    req: ProductCollectorDefinitionEnrollmentRequest,
+) -> dict[str, Any]:
+    """Enroll a product only through a registered, deployed collector pack."""
+
+    logger.info(
+        "collector_product_enrollment_requested | request_id=%s actor_id=%s "
+        "provider=%s venue=%s product_id=%s collector_types=%s",
+        req.request_id,
+        req.actor_id,
+        req.provider,
+        req.venue,
+        req.product_id,
+        req.collector_types,
+    )
+    try:
+        result = collector_definition_enrollment_service.enroll_product(
+            provider=req.provider,
+            venue=req.venue,
+            product_id=req.product_id,
+            collector_types=req.collector_types,
+            poll_interval_seconds=req.poll_interval_seconds,
+            request_id=req.request_id,
+            actor_id=req.actor_id,
+            reason=req.reason,
+            confirmation=req.confirmation,
+        )
+    except (KeyError, ValueError, RuntimeError) as exc:
+        logger.warning(
+            "collector_product_enrollment_failed | request_id=%s actor_id=%s "
+            "provider=%s venue=%s product_id=%s error=%s",
+            req.request_id,
+            req.actor_id,
+            req.provider,
+            req.venue,
+            req.product_id,
+            exc,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info(
+        "collector_product_enrollment_completed | request_id=%s actor_id=%s "
+        "provider=%s venue=%s product_id=%s collector_types=%s",
+        req.request_id,
+        req.actor_id,
+        req.provider,
+        req.venue,
+        req.product_id,
+        req.collector_types,
+    )
+    return result
 
 
 @router.get("/operations/collectors/snapshot")

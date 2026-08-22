@@ -1380,6 +1380,45 @@ def _cmd_data_collector_definitions_install_structured(
     return 0
 
 
+def _cmd_data_collector_definitions_enroll_product(
+    args: argparse.Namespace,
+) -> int:
+    provider = str(args.provider or "").strip().upper()
+    venue = str(args.venue or "").strip().upper()
+    product_id = str(args.product_id or "").strip().upper()
+    if not bool(args.confirm):
+        raise ValueError("product collector enrollment requires --confirm")
+    actor_id = str(
+        args.actor_id
+        or os.environ.get("QT_ACTOR_ID")
+        or f"qt:{getpass.getuser()}"
+    )
+    collector_types = args.collector_type or [
+        "open_interest",
+        "funding_rate",
+        "market_trades",
+        "level2",
+    ]
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/definitions/enroll-product",
+            payload={
+                "provider": provider,
+                "venue": venue,
+                "product_id": product_id,
+                "collector_types": collector_types,
+                "poll_interval_seconds": args.poll_interval_seconds,
+                "request_id": args.request_id or f"qt-{uuid.uuid4().hex}",
+                "actor_id": actor_id,
+                "reason": args.reason,
+                "confirmation": f"{provider}:{venue}:{product_id}:enroll",
+            },
+        )
+    )
+    return 0
+
+
 def _cmd_data_collectors_fleet(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -3788,7 +3827,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     data_collector_definitions = data_sub.add_parser(
         "collector-definitions",
-        help="Install code-reviewed collector definitions; lifecycle remains separate.",
+        help=(
+            "Install definitions through reviewed manifests or registered "
+            "adapter packs; lifecycle remains separate."
+        ),
     )
     data_collector_definitions_sub = data_collector_definitions.add_subparsers(
         dest="data_collector_definitions_command", required=True
@@ -3806,6 +3848,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_structured.set_defaults(
         func=_cmd_data_collector_definitions_install_structured
+    )
+    enroll_product = data_collector_definitions_sub.add_parser(
+        "enroll-product",
+        help=(
+            "Validate and enroll one provider product through an existing "
+            "deployed collector adapter pack."
+        ),
+    )
+    enroll_product.add_argument("--provider", default="COINBASE")
+    enroll_product.add_argument("--venue", default="COINBASE_DIRECT")
+    enroll_product.add_argument("--product-id", required=True)
+    enroll_product.add_argument(
+        "--collector",
+        dest="collector_type",
+        action="append",
+        choices=["open_interest", "funding_rate", "market_trades", "level2"],
+        help="Collector type to enroll. Repeat; defaults to all supported types.",
+    )
+    enroll_product.add_argument(
+        "--poll-interval-seconds", type=int, default=60
+    )
+    enroll_product.add_argument("--request-id")
+    enroll_product.add_argument("--actor-id")
+    enroll_product.add_argument("--reason", required=True)
+    enroll_product.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm provider validation and collector definition enrollment.",
+    )
+    enroll_product.set_defaults(
+        func=_cmd_data_collector_definitions_enroll_product
     )
     data_collectors = data_sub.add_parser(
         "collectors", help="Inspect and safely operate registered collectors."

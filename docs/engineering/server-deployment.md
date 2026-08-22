@@ -153,6 +153,7 @@ Useful operations are:
 bash scripts/automation/server_deploy.sh release
 bash scripts/automation/server_deploy.sh status
 bash scripts/automation/server_deploy.sh fleet
+bash scripts/automation/server_deploy.sh qt <qt-arguments...>
 bash scripts/automation/server_deploy.sh logs market-data-collector
 bash scripts/automation/server_deploy.sh stop
 ```
@@ -227,6 +228,41 @@ checked-in manifests. The initializer enrolls every manifest and binding marked
 enabled; `QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS=false` disables that group.
 This keeps provider selection in reviewed manifests while the worker continues
 to use the shared scheduled-collector lifecycle.
+
+## Additional Products Without A Release
+
+The three-product Coinbase fleet is the clean-install baseline, not a runtime
+symbol whitelist. Once a release contains the Coinbase futures collector pack,
+an operator can enroll another validated product without rebuilding images or
+restarting the stack:
+
+```bash
+bash scripts/automation/server_deploy.sh qt \
+  data collector-definitions enroll-product \
+  --provider COINBASE \
+  --venue COINBASE_DIRECT \
+  --product-id LNP-20DEC30-CDE \
+  --actor-id <operator-id> \
+  --reason "Add LINK market-data coverage" \
+  --confirm
+```
+
+Coinbase's [public product page](https://www.coinbase.com/futures/lnp-20dec30-cde/)
+and product API identify `LNP-20DEC30-CDE` as a future with one-contract
+quantity increments, a `0.001` price increment, and 50 LINK per contract.
+Enrollment refreshes that metadata from Coinbase instead of trusting those
+prose values, creates the canonical instrument, and installs the existing
+scheduled OI/funding and continuous trade/L2 definitions. The worker discovers
+them from durable configuration.
+
+The command is idempotent. Initial enrollment starts the definitions, while a
+later reapplication does not override audited lifecycle intent. Use repeated
+`--collector` arguments to select only part of the registered pack. A new
+provider, transport, channel, projection, Fact contract, or recovery behavior
+still requires code, CI, and a release.
+
+See the [operator handbook](../operators/README.md) for the preflight,
+verification, backup, and multi-node boundaries.
 
 ## Collector Architecture And Soak
 

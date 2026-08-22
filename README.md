@@ -286,15 +286,16 @@ backend concerns.
 - Known-at timing is part of correctness; nothing appears retroactively.
 - Agents operate through guarded CLI, API, and MCP contracts rather than hidden
   runtimes.
-- Collector and provider definitions remain code-owned; operator surfaces may
-  only operate registered capabilities.
+- Collector implementations and provider adapter packs remain code-owned;
+  operators may enroll products only through registered capabilities.
 - QT uses one persistence DSN: `PG_DSN`.
 
 ## Documentation
 
 | Topic | Documentation |
 | --- | --- |
-| Start here | [Getting started](docs/getting-started.md), [platform overview](docs/overview.md), [docs home](docs/index.md) |
+| Start here | [Getting started](docs/getting-started.md), [operator handbook](docs/operators/README.md), [platform overview](docs/overview.md), [docs home](docs/index.md) |
+| Deploy and update | [Portable single-node deployment](docs/engineering/server-deployment.md), [operator handbook](docs/operators/README.md) |
 | Market-data boundary | [Data boundary](docs/architecture/data/DATA_BOUNDARY.md), [generalized Fact data plane](docs/architecture/data/GENERALIZED_FACT_DATA_PLANE.md) |
 | Canonical Facts and datasets | [Canonical Fact ADR](docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md), [numeric Facts and acquisition](docs/architecture/data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md) |
 | Collectors | [Collector operations guide](docs/guides/collector-operations.md), [control-plane architecture](docs/architecture/data/COLLECTOR_OPERATIONS_CONTROL_PLANE.md), [continuous collector runtime](docs/architecture/data/CONTINUOUS_COLLECTOR_RUNTIME.md) |
