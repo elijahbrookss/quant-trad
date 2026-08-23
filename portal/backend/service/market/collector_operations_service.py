@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any, Callable, Mapping
 
+from data_providers.streams.runtime import ContinuousStreamPolicy
 from market_data.collector_operations import (
     COLLECTOR_DETAIL_VERSION,
     COLLECTOR_DIAGNOSTIC_VERSION,
@@ -40,8 +41,9 @@ from ..storage.repos.market_structure import (
     market_structure_repository,
 )
 from .collector_supervisor import (
+    CoinbaseLevel2CollectorAdapter,
+    CoinbaseMarketTradeCollectorAdapter,
     CollectorAdapterRegistry,
-    MarketStructureTradeAdapter,
 )
 
 
@@ -60,11 +62,6 @@ _SCHEDULED_ADAPTERS = {
     ),
 }
 _SCHEDULED_DEFINITION_VERSION = "market_collection_definition.v1"
-_CONTINUOUS_DEFINITION_VERSIONS = {
-    "market.stream_runtime_config.v1",
-    "market_structure_stream_config.v1",
-    "market_structure_l2_stream_config.v1",
-}
 _CONTINUOUS_DERIVED_SCHEMAS = (
     ("market.trade_flow", "market.trade_flow.v1", "aggregate_series_ids"),
     (
@@ -106,8 +103,18 @@ def _series_ids(definition: Mapping[str, Any], kind: CollectorKind) -> list[int]
     values = [int(definition["series_id"])]
     if kind == CollectorKind.CONTINUOUS_STREAM:
         config = dict(definition.get("config") or {})
-        for key in ("aggregate_series_ids", "flow_feature_series_ids"):
-            values.extend(int(value) for value in dict(config.get(key) or {}).values())
+        output_series = config.get("output_series")
+        if isinstance(output_series, list) and output_series:
+            values.extend(
+                int(row["series_id"])
+                for row in output_series
+                if isinstance(row, Mapping) and row.get("series_id") is not None
+            )
+        else:
+            for key in ("aggregate_series_ids", "flow_feature_series_ids"):
+                values.extend(
+                    int(value) for value in dict(config.get(key) or {}).values()
+                )
     return sorted(set(values))
 
 
@@ -133,7 +140,10 @@ class CollectorOperationsService:
         self.stream_repository = stream_repository
         self.operations_repository = operations_repository
         self.stream_registry = stream_registry or CollectorAdapterRegistry(
-            (MarketStructureTradeAdapter(),)
+            (
+                CoinbaseMarketTradeCollectorAdapter(),
+                CoinbaseLevel2CollectorAdapter(),
+            )
         )
         self.clock = clock
 
@@ -160,9 +170,8 @@ class CollectorOperationsService:
             return CollectorConfiguredState.INVALID, reasons
         return CollectorConfiguredState.ENABLED, []
 
-    @staticmethod
     def _is_operationally_registered(
-        definition: Mapping[str, Any], kind: CollectorKind
+        self, definition: Mapping[str, Any], kind: CollectorKind
     ) -> bool:
         config_version = str(
             dict(definition.get("config") or {}).get("schema_version") or ""
@@ -173,28 +182,22 @@ class CollectorOperationsService:
                 in _SCHEDULED_ADAPTERS
                 or config_version == _SCHEDULED_DEFINITION_VERSION
             )
-        return config_version in _CONTINUOUS_DEFINITION_VERSIONS
+        try:
+            self.stream_registry.resolve(definition)
+        except ValueError:
+            return False
+        return True
 
     def _continuous_registration(
         self, definition: Mapping[str, Any]
     ) -> tuple[CollectorConfiguredState, list[str]]:
         reasons: list[str] = []
         try:
-            self.stream_registry.resolve(definition)
+            adapter = self.stream_registry.resolve(definition)
         except ValueError:
             reasons.append("adapter_not_registered")
-        config = dict(definition.get("config") or {})
-        for key in (
-            "product_definition_version_id",
-            "aggregate_series_ids",
-            "flow_feature_series_ids",
-        ):
-            if not config.get(key):
-                reasons.append(f"config_missing:{key}")
-        for key in ("aggregate_series_ids", "flow_feature_series_ids"):
-            values = dict(config.get(key) or {})
-            if not {"1", "60"}.issubset(values):
-                reasons.append(f"config_incomplete:{key}")
+        else:
+            reasons.extend(adapter.registration_errors(definition))
         if not bool(definition.get("enabled")):
             return CollectorConfiguredState.DISABLED, reasons
         if reasons:
@@ -211,7 +214,7 @@ class CollectorOperationsService:
         retrying: bool,
         recovering: bool,
         has_error: bool,
-        has_accepted_fact: bool,
+        has_acquisition_evidence: bool,
         freshness_ok: bool | None,
     ) -> CollectorActualState:
         if configured_state == CollectorConfiguredState.DISABLED:
@@ -238,7 +241,7 @@ class CollectorOperationsService:
             return CollectorActualState.DEGRADED
         if has_error:
             return CollectorActualState.DEGRADED
-        if not has_accepted_fact:
+        if not has_acquisition_evidence:
             return CollectorActualState.STARTING
         if freshness_ok is False:
             return CollectorActualState.DEGRADED
@@ -408,19 +411,37 @@ class CollectorOperationsService:
         ]
         if kind == CollectorKind.CONTINUOUS_STREAM:
             config = dict(definition.get("config") or {})
-            for fact_type, schema_version, config_key in _CONTINUOUS_DERIVED_SCHEMAS:
-                for timeframe, series_id in sorted(
-                    dict(config.get(config_key) or {}).items(),
-                    key=lambda item: int(item[0]),
-                ):
-                    schemas.append(
-                        {
-                            "fact_type": fact_type,
-                            "schema_version": schema_version,
-                            "series_id": int(series_id),
-                            "timeframe_seconds": int(timeframe),
+            output_series = config.get("output_series")
+            if isinstance(output_series, list) and output_series:
+                schemas = [
+                    {
+                        key: value
+                        for key, value in dict(row).items()
+                        if key
+                        in {
+                            "fact_type",
+                            "schema_version",
+                            "series_id",
+                            "timeframe_seconds",
                         }
-                    )
+                    }
+                    for row in output_series
+                    if isinstance(row, Mapping)
+                ]
+            else:
+                for fact_type, schema_version, config_key in _CONTINUOUS_DERIVED_SCHEMAS:
+                    for timeframe, series_id in sorted(
+                        dict(config.get(config_key) or {}).items(),
+                        key=lambda item: int(item[0]),
+                    ):
+                        schemas.append(
+                            {
+                                "fact_type": fact_type,
+                                "schema_version": schema_version,
+                                "series_id": int(series_id),
+                                "timeframe_seconds": int(timeframe),
+                            }
+                        )
         return schemas
 
     def _project_scheduled(
@@ -437,10 +458,9 @@ class CollectorOperationsService:
         )
         desired_state = CollectorDesiredState(definition["desired_state"])
         cadence = int(definition["poll_interval_seconds"])
-        last_accepted = telemetry.get("last_accepted_at") or definition.get(
-            "last_success_at"
-        )
-        freshness_seconds = _seconds_since(last_accepted, now=now)
+        last_accepted = telemetry.get("last_accepted_at")
+        last_provider_activity = definition.get("last_success_at") or last_accepted
+        freshness_seconds = _seconds_since(last_provider_activity, now=now)
         freshness_ok = (
             freshness_seconds <= max(120.0, cadence * 3.0)
             if freshness_seconds is not None
@@ -469,7 +489,7 @@ class CollectorOperationsService:
             retrying=retrying,
             recovering=False,
             has_error=bool(error and not retrying),
-            has_accepted_fact=last_accepted is not None,
+            has_acquisition_evidence=last_provider_activity is not None,
             freshness_ok=freshness_ok,
         )
         return {
@@ -505,13 +525,15 @@ class CollectorOperationsService:
                 "cadence_seconds": cadence,
                 "next_scheduled_at": _iso(definition.get("next_scheduled_at")),
                 "last_attempt_at": _iso(definition.get("last_attempt_at")),
-                "last_provider_success_at": _iso(definition.get("last_success_at")),
+                "last_provider_success_at": _iso(last_provider_activity),
                 "last_accepted_fact_at": _iso(last_accepted),
                 "last_observation_time": _iso(
                     telemetry.get("last_observation_time")
                 ),
                 "freshness_seconds": freshness_seconds,
                 "freshness_ok": freshness_ok,
+                "freshness_basis": "provider_activity",
+                "freshness_threshold_seconds": max(120.0, cadence * 3.0),
             },
             "throughput": {
                 "accepted_last_minute": int(
@@ -561,6 +583,7 @@ class CollectorOperationsService:
         worker: Mapping[str, Any] | None,
         supervisor: Mapping[str, Any],
         telemetry: Mapping[str, Any],
+        stream_telemetry: Mapping[str, Any],
         now: datetime,
     ) -> dict[str, Any]:
         configured_state, registration_errors = self._continuous_registration(
@@ -573,9 +596,16 @@ class CollectorOperationsService:
         error = errors.get(str(definition["id"])) or task.get("last_error")
         worker_projection = self._worker_projection(worker, now=now)
         last_accepted = telemetry.get("last_accepted_at")
-        freshness_seconds = _seconds_since(last_accepted, now=now)
+        last_provider_activity = stream_telemetry.get("last_provider_activity_at")
+        runtime_policy = ContinuousStreamPolicy.from_mapping(
+            dict(definition.get("config") or {}).get("runtime_policy")
+        )
+        freshness_threshold = max(120.0, runtime_policy.segment_max_seconds * 2.0)
+        freshness_seconds = _seconds_since(last_provider_activity, now=now)
         freshness_ok = (
-            freshness_seconds <= 120.0 if freshness_seconds is not None else None
+            freshness_seconds <= freshness_threshold
+            if freshness_seconds is not None
+            else None
         )
         active = bool(task) or bool(definition.get("lease_current"))
         retrying = bool(error and not task and desired_state == CollectorDesiredState.RUNNING)
@@ -587,7 +617,7 @@ class CollectorOperationsService:
             retrying=retrying,
             recovering=False,
             has_error=bool(error and not retrying),
-            has_accepted_fact=last_accepted is not None,
+            has_acquisition_evidence=last_provider_activity is not None,
             freshness_ok=freshness_ok,
         )
         return {
@@ -627,13 +657,15 @@ class CollectorOperationsService:
                 "cadence_seconds": None,
                 "trigger": "provider_stream",
                 "channels": list(definition.get("channels") or []),
-                "last_provider_success_at": _iso(last_accepted),
+                "last_provider_success_at": _iso(last_provider_activity),
                 "last_accepted_fact_at": _iso(last_accepted),
                 "last_observation_time": _iso(
                     telemetry.get("last_observation_time")
                 ),
                 "freshness_seconds": freshness_seconds,
                 "freshness_ok": freshness_ok,
+                "freshness_basis": "provider_activity",
+                "freshness_threshold_seconds": freshness_threshold,
             },
             "throughput": {
                 "accepted_last_minute": int(
@@ -732,6 +764,9 @@ class CollectorOperationsService:
         telemetry = self.operations_repository.fact_series_telemetry(
             series_ids=all_series_ids
         )
+        stream_telemetry = self.operations_repository.continuous_stream_telemetry(
+            definition_ids=[str(definition["id"]) for definition in continuous]
+        )
 
         collectors = [
             self._project_scheduled(
@@ -748,6 +783,7 @@ class CollectorOperationsService:
                 worker=worker,
                 supervisor=supervisor,
                 telemetry=telemetry.get(int(definition["series_id"]), {}),
+                stream_telemetry=stream_telemetry.get(str(definition["id"]), {}),
                 now=now,
             )
             for definition in continuous
@@ -1213,6 +1249,14 @@ class CollectorOperationsService:
             )
         )
         freshness_ok = collector["acquisition"]["freshness_ok"]
+        freshness_basis = str(
+            collector["acquisition"].get("freshness_basis") or "accepted_fact"
+        )
+        freshness_subject = (
+            "provider activity"
+            if freshness_basis == "provider_activity"
+            else "accepted facts"
+        )
         boundaries.append(
             self._diagnostic_item(
                 CollectorDiagnosticBoundary.FRESHNESS,
@@ -1221,9 +1265,9 @@ class CollectorOperationsService:
                 else CollectorDiagnosticStatus.FAIL
                 if freshness_ok is False
                 else CollectorDiagnosticStatus.UNKNOWN,
-                "accepted facts are fresh"
+                f"{freshness_subject} is fresh"
                 if freshness_ok is True
-                else "accepted facts are stale"
+                else f"{freshness_subject} is stale"
                 if freshness_ok is False
                 else "freshness cannot be established yet",
                 {
@@ -1231,6 +1275,10 @@ class CollectorOperationsService:
                         "freshness_seconds"
                     ],
                     "freshness_ok": freshness_ok,
+                    "freshness_basis": freshness_basis,
+                    "freshness_threshold_seconds": collector["acquisition"].get(
+                        "freshness_threshold_seconds"
+                    ),
                 },
             )
         )

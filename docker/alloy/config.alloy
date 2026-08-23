@@ -1,0 +1,69 @@
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+discovery.docker "quanttrad" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+}
+
+discovery.relabel "quanttrad_logs" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_label_loki_job"]
+    regex         = "quanttrad"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_loki_job"]
+    target_label  = "job"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_loki_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_quanttrad_runtime"]
+    target_label  = "runtime"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+
+  rule {
+    action = "labeldrop"
+    regex  = "__meta_docker_container_label_(.+)"
+  }
+
+  rule {
+    action = "labeldrop"
+    regex  = "__meta_docker_container_(id|image|name)"
+  }
+}
+
+loki.source.docker "quanttrad" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.quanttrad.targets
+  labels        = {}
+  relabel_rules = discovery.relabel.quanttrad_logs.rules
+  forward_to    = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

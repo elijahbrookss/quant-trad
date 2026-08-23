@@ -11,6 +11,7 @@ from portal.backend.service.market.collector_operations_service import (
     CollectorOperationsService,
 )
 from portal.backend.service.market.collector_supervisor import (
+    CoinbaseLevel2CollectorAdapter,
     CollectorAdapterRegistry,
 )
 
@@ -153,6 +154,14 @@ class _OperationsRepository:
             },
         }
 
+    def continuous_stream_telemetry(self, *, definition_ids):
+        assert definition_ids == ["coinbase-trades"]
+        return {
+            "coinbase-trades": {
+                "last_provider_activity_at": NOW - timedelta(seconds=1),
+            }
+        }
+
     def apply_lifecycle_action(self, **kwargs):
         self.last_action = dict(kwargs)
         error = kwargs.get("precondition_error")
@@ -163,11 +172,26 @@ class _OperationsRepository:
         }
 
 
+class _QuietScheduledOperationsRepository(_OperationsRepository):
+    def fact_series_telemetry(self, *, series_ids):
+        telemetry = super().fact_series_telemetry(series_ids=series_ids)
+        telemetry[11] = {
+            "last_observation_time": NOW - timedelta(hours=4),
+            "last_accepted_at": NOW - timedelta(hours=4),
+            "accepted_last_minute": 0,
+            "accepted_last_five_minutes": 0,
+        }
+        return telemetry
+
+
 class _StreamAdapter:
     adapter_id = "fixture.trades.v1"
 
     def supports(self, definition):
         return definition.get("provider") == "COINBASE"
+
+    def registration_errors(self, _definition):
+        return []
 
 
 def _service() -> CollectorOperationsService:
@@ -204,11 +228,145 @@ def test_fleet_snapshot_projects_both_collector_families_without_provider_ui_log
         "market.trade_flow_feature",
     }
     assert stream["runtime"]["restart_count"] == 1
+    assert stream["acquisition"]["freshness_basis"] == "provider_activity"
+    assert stream["acquisition"]["last_provider_success_at"] == (
+        NOW - timedelta(seconds=1)
+    ).isoformat()
     assert "health_probe" in stream["capabilities"]["actions"]
     assert all(
         "health_probe" in item["capabilities"]["actions"]
         for item in snapshot["collectors"]
     )
+
+
+def test_scheduled_noop_success_keeps_liveness_separate_from_fact_flow() -> None:
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=_QuietScheduledOperationsRepository(),
+        stream_registry=CollectorAdapterRegistry((_StreamAdapter(),)),
+        clock=lambda: NOW,
+    )
+
+    scheduled = next(
+        item
+        for item in service.fleet_snapshot()["collectors"]
+        if item["collector_kind"] == "scheduled_fact"
+    )
+
+    assert scheduled["actual_state"] == "HEALTHY"
+    assert scheduled["acquisition"]["freshness_basis"] == "provider_activity"
+    assert scheduled["acquisition"]["freshness_seconds"] == 10.0
+    assert scheduled["acquisition"]["last_provider_success_at"] == (
+        NOW - timedelta(seconds=10)
+    ).isoformat()
+    assert scheduled["acquisition"]["last_accepted_fact_at"] == (
+        NOW - timedelta(hours=4)
+    ).isoformat()
+    assert scheduled["throughput"]["accepted_last_minute"] == 0
+
+
+def test_level2_registration_and_outputs_are_projection_declared() -> None:
+    definition = {
+        "id": "coinbase-book",
+        "series_id": 31,
+        "enabled": True,
+        "provider": "COINBASE",
+        "venue": "COINBASE_DIRECT",
+        "channels": ("level2", "heartbeats"),
+        "contract_version": "market.l2_book.v1",
+        "config": {
+            "product_definition_version_id": "product.v1",
+            "bbo_series_id": 32,
+            "depth_series_id": 33,
+            "response_feature_series_id": 34,
+            "trade_series_id": 35,
+            "flow_feature_series_ids": {"1": 36, "60": 37},
+            "output_series": [
+                {
+                    "fact_type": "market.l2_book",
+                    "schema_version": "market.l2_book.v1",
+                    "series_id": 31,
+                },
+                {
+                    "fact_type": "market.bbo",
+                    "schema_version": "market.bbo.v1",
+                    "series_id": 32,
+                    "timeframe_seconds": 1,
+                },
+                {
+                    "fact_type": "market.depth_observation",
+                    "schema_version": "market.depth_band.v1",
+                    "series_id": 33,
+                    "timeframe_seconds": 1,
+                },
+                {
+                    "fact_type": "market.market_response",
+                    "schema_version": "market.market_response.v1",
+                    "series_id": 34,
+                    "timeframe_seconds": 1,
+                },
+            ],
+        },
+    }
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=_OperationsRepository(),
+        stream_registry=CollectorAdapterRegistry(
+            (CoinbaseLevel2CollectorAdapter(),)
+        ),
+        clock=lambda: NOW,
+    )
+
+    configured, errors = service._continuous_registration(definition)
+    schemas = service._fact_schemas(
+        definition,
+        CollectorKind.CONTINUOUS_STREAM,
+    )
+
+    assert configured == CollectorConfiguredState.ENABLED
+    assert errors == []
+    assert {row["series_id"] for row in schemas} == {31, 32, 33, 34}
+    assert not any(
+        error.startswith("config_missing:aggregate_series_ids")
+        for error in errors
+    )
+
+
+def test_continuous_health_uses_provider_activity_when_fact_flow_is_quiet():
+    class _QuietStreamOperationsRepository(_OperationsRepository):
+        def fact_series_telemetry(self, *, series_ids):
+            telemetry = super().fact_series_telemetry(series_ids=series_ids)
+            telemetry[21] = {
+                "last_observation_time": NOW - timedelta(minutes=10),
+                "last_accepted_at": NOW - timedelta(minutes=10),
+                "accepted_last_minute": 0,
+                "accepted_last_five_minutes": 0,
+            }
+            return telemetry
+
+    service = CollectorOperationsService(
+        collection_repository=_CollectionRepository(),
+        stream_repository=_StreamRepository(),
+        operations_repository=_QuietStreamOperationsRepository(),
+        stream_registry=CollectorAdapterRegistry((_StreamAdapter(),)),
+        clock=lambda: NOW,
+    )
+
+    stream = next(
+        item
+        for item in service.fleet_snapshot()["collectors"]
+        if item["collector_kind"] == "continuous_stream"
+    )
+
+    assert stream["actual_state"] == "HEALTHY"
+    assert stream["health_status"] == "HEALTHY"
+    assert stream["throughput"]["accepted_last_minute"] == 0
+    assert stream["acquisition"]["last_accepted_fact_at"] == (
+        NOW - timedelta(minutes=10)
+    ).isoformat()
+    assert stream["acquisition"]["freshness_seconds"] == 1.0
 
 
 def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
@@ -222,7 +380,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=False,
         recovering=False,
         has_error=False,
-        has_accepted_fact=True,
+        has_acquisition_evidence=True,
         freshness_ok=True,
     ) == CollectorActualState.DISABLED
     assert derive(
@@ -233,7 +391,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=False,
         recovering=False,
         has_error=False,
-        has_accepted_fact=False,
+        has_acquisition_evidence=False,
         freshness_ok=None,
     ) == CollectorActualState.STOPPED
     assert derive(
@@ -244,7 +402,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=False,
         recovering=False,
         has_error=False,
-        has_accepted_fact=True,
+        has_acquisition_evidence=True,
         freshness_ok=True,
     ) == CollectorActualState.STOPPING
     assert derive(
@@ -255,7 +413,7 @@ def test_actual_state_keeps_configured_desired_and_runtime_state_distinct():
         retrying=True,
         recovering=False,
         has_error=True,
-        has_accepted_fact=True,
+        has_acquisition_evidence=True,
         freshness_ok=False,
     ) == CollectorActualState.RETRYING
 

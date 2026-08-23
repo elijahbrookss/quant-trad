@@ -1,0 +1,83 @@
+{
+  "schema_version": "market.stream_enrollment_manifest.v1",
+  "fleet_id": "coinbase_perpetual_l2",
+  "safety_policy": {
+    "schema_version": "market.collector_safety_policy.v1",
+    "policy_id": "coinbase_perpetual_l2.single_node.v1",
+    "warning_free_bytes": 21474836480,
+    "critical_free_bytes": 10737418240,
+    "warning_spool_ratio": 0.7,
+    "critical_spool_ratio": 0.9,
+    "warning_projected_exhaustion_hours": 72,
+    "critical_projected_exhaustion_hours": 24,
+    "evaluation_interval_seconds": 30
+  },
+  "enrollments": [
+    {
+      "enrollment_id": "coinbase.BIP-20DEC30-CDE.level2.v1",
+      "instrument_id": "b2deb0a0-f292-408a-876d-3dadd8e3819b",
+      "product_type": "future",
+      "provider": "COINBASE",
+      "venue": "COINBASE_DIRECT",
+      "channels": ["level2", "heartbeats"],
+      "auth_mode": "public",
+      "adapter_version": "coinbase_advanced_trade.level2.v1",
+      "contract_version": "market.l2_book.v1",
+      "max_spool_bytes": 4294967296,
+      "max_segment_bytes": 67108864,
+      "continuous": true,
+      "product_contract": {
+        "provider_product_id": "BIP-20DEC30-CDE",
+        "provider_size_unit": "contracts",
+        "base_currency": "BTC",
+        "quote_currency": "USD",
+        "product_definition_version_id": "coinbase.BIP-20DEC30-CDE.product_contract.v1",
+        "contract_size": "0.01"
+      }
+    },
+    {
+      "enrollment_id": "coinbase.ETP-20DEC30-CDE.level2.v1",
+      "instrument_id": "44226144-fb38-4566-92c4-580734d76d3c",
+      "product_type": "future",
+      "provider": "COINBASE",
+      "venue": "COINBASE_DIRECT",
+      "channels": ["level2", "heartbeats"],
+      "auth_mode": "public",
+      "adapter_version": "coinbase_advanced_trade.level2.v1",
+      "contract_version": "market.l2_book.v1",
+      "max_spool_bytes": 4294967296,
+      "max_segment_bytes": 67108864,
+      "continuous": true,
+      "product_contract": {
+        "provider_product_id": "ETP-20DEC30-CDE",
+        "provider_size_unit": "contracts",
+        "base_currency": "ETH",
+        "quote_currency": "USD",
+        "product_definition_version_id": "coinbase.ETP-20DEC30-CDE.product_contract.v1",
+        "contract_size": "0.1"
+      }
+    },
+    {
+      "enrollment_id": "coinbase.SLP-20DEC30-CDE.level2.v1",
+      "instrument_id": "bead556e-22e2-4ac0-8ee0-0d8c5310e9a0",
+      "product_type": "future",
+      "provider": "COINBASE",
+      "venue": "COINBASE_DIRECT",
+      "channels": ["level2", "heartbeats"],
+      "auth_mode": "public",
+      "adapter_version": "coinbase_advanced_trade.level2.v1",
+      "contract_version": "market.l2_book.v1",
+      "max_spool_bytes": 4294967296,
+      "max_segment_bytes": 67108864,
+      "continuous": true,
+      "product_contract": {
+        "provider_product_id": "SLP-20DEC30-CDE",
+        "provider_size_unit": "contracts",
+        "base_currency": "SOL",
+        "quote_currency": "USD",
+        "product_definition_version_id": "coinbase.SLP-20DEC30-CDE.product_contract.v1",
+        "contract_size": "5"
+      }
+    }
+  ]
+}

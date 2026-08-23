@@ -36,6 +36,17 @@ class MarketSide(str, Enum):
     SELL = "SELL"
 
 
+class UnsupportedMarketTradeSideError(ValueError):
+    """A provider trade cannot enter the canonical BUY/SELL contract."""
+
+    def __init__(self, provider_side: object) -> None:
+        self.provider_side = str(provider_side or "").strip()
+        super().__init__(
+            "market_trade_translation_invalid: maker side is outside the "
+            f"supported BUY/SELL contract: {self.provider_side!r}"
+        )
+
+
 class ProviderSizeUnit(str, Enum):
     CONTRACTS = "contracts"
     BASE = "base"
@@ -618,10 +629,11 @@ def translate_coinbase_market_trade(
         contract_quantity = None
         base_quantity = provider_size
     quote_notional = price * base_quantity if contract.linear_quote_notional else None
+    provider_side = str(payload.get("side") or "").strip()
     try:
-        maker_side = MarketSide(str(payload.get("side") or "").strip().upper())
+        maker_side = MarketSide(provider_side.upper())
     except ValueError as exc:
-        raise ValueError("market_trade_translation_invalid: maker side is unknown") from exc
+        raise UnsupportedMarketTradeSideError(provider_side) from exc
     if contract.maker_side_semantics_proven:
         aggressor_side: Optional[MarketSide] = (
             MarketSide.SELL if maker_side is MarketSide.BUY else MarketSide.BUY
@@ -1363,6 +1375,7 @@ __all__ = [
     "TradeDeliveryKind",
     "TradeFlowAggregateFact",
     "TradeFlowAggregateRecord",
+    "UnsupportedMarketTradeSideError",
     "build_market_trade_material_hash",
     "build_trade_flow_material_hash",
     "aggregate_trade_bucket",

@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 from market_data.contracts import (
     OPEN_INTEREST_FACT_TYPE,
@@ -19,6 +20,81 @@ from portal.backend.service.storage.repos.market_data import market_data_repo
 
 
 pytestmark = pytest.mark.db
+
+
+def test_definition_reinstall_preserves_operator_lifecycle_state() -> None:
+    token = uuid.uuid4().hex
+    instrument_id = f"collector-lifecycle-{token[:16]}"
+    with db.session() as session:
+        session.add(
+            InstrumentRecord(
+                id=instrument_id,
+                datasource="FUTURE_PROVIDER",
+                exchange="DIRECT",
+                symbol=f"LIFE-{token[:8].upper()}",
+                instrument_type="future",
+                can_short=True,
+                short_requires_borrow=False,
+                has_funding=False,
+                extra_metadata={},
+            )
+        )
+    source_id = market_data_repo.register_source(
+        SourceIdentity(
+            provider="FUTURE_PROVIDER",
+            venue="DIRECT",
+            source_kind="poll_api",
+            adapter_version=f"lifecycle-db-test.{token}",
+        )
+    )
+    series_id = market_data_repo.register_series(
+        instrument_id=instrument_id,
+        fact_type=OPEN_INTEREST_FACT_TYPE,
+        timeframe_seconds=None,
+        contract_version=OPEN_INTEREST_FACT_VERSION,
+    )
+    definition_id = f"mcd_{token}"
+    scheduled = datetime.now(UTC).replace(microsecond=0)
+    market_collection_repo.upsert_definition(
+        definition_id=definition_id,
+        source_id=source_id,
+        series_id=series_id,
+        poll_interval_seconds=60,
+        max_attempts=3,
+        enabled=True,
+        config={"revision": 1},
+        next_scheduled_at=scheduled,
+    )
+    with db.session() as session:
+        session.execute(
+            text(
+                """
+                UPDATE market.collection_definitions
+                SET enabled = false,
+                    desired_state = 'paused',
+                    control_generation = 7
+                WHERE id = :definition_id
+                """
+            ),
+            {"definition_id": definition_id},
+        )
+
+    reinstalled = market_collection_repo.upsert_definition(
+        definition_id=definition_id,
+        source_id=source_id,
+        series_id=series_id,
+        poll_interval_seconds=120,
+        max_attempts=5,
+        enabled=True,
+        config={"revision": 2},
+        next_scheduled_at=scheduled,
+    )
+
+    assert reinstalled["enabled"] is False
+    assert reinstalled["desired_state"] == "paused"
+    assert int(reinstalled["control_generation"]) == 7
+    assert int(reinstalled["poll_interval_seconds"]) == 120
+    assert reinstalled["config"] == {"revision": 2}
 
 
 def test_collection_claim_fences_fact_mutation_and_completion() -> None:

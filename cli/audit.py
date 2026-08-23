@@ -11,10 +11,12 @@ from typing import Any, Mapping, Sequence
 
 _SAFE_PATH_PART = re.compile(r"[^A-Za-z0-9_.=-]+")
 _SENSITIVE_FLAGS = {
+    "--cdp-key-file",
     "--secret",
     "--secrets-json",
 }
 _SENSITIVE_ARG_NAMES = {
+    "cdp_key_file",
     "credentials",
     "secret",
     "secrets",

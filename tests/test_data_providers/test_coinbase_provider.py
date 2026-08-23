@@ -1,9 +1,11 @@
+import base64
 import datetime as dt
 
 import pytest
 
 pd = pytest.importorskip("pandas")
 pytest.importorskip("coinbase")
+jwt = pytest.importorskip("jwt")
 
 from data_providers.providers import coinbase as coinbase_module
 from data_providers.providers.base import InstrumentType
@@ -106,6 +108,14 @@ def test_build_websocket_jwt_uses_shared_provider_credentials(monkeypatch):
 
     assert provider.build_websocket_jwt() == "signed-token"
     assert observed == {"key": "key-name", "secret": "private-key"}
+
+
+def test_coinbase_sdk_signs_raw_64_byte_ed25519_key() -> None:
+    secret = base64.b64encode(bytes(range(64))).decode("ascii")
+
+    token = coinbase_module.jwt_generator.build_ws_jwt("test-key-id", secret)
+
+    assert jwt.get_unverified_header(token)["alg"] == "EdDSA"
 
 
 @pytest.mark.parametrize(

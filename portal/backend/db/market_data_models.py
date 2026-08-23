@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -128,6 +129,273 @@ class MarketDataIngestionRunRecord(Base):
     corrected_count = Column(Integer, nullable=False, default=0, server_default="0")
     noop_count = Column(Integer, nullable=False, default=0, server_default="0")
     error = Column(Text, nullable=True)
+
+
+class MarketFactSchemaRecord(Base):
+    """Immutable code-owned payload contract for one canonical Fact schema."""
+
+    __tablename__ = "fact_schemas"
+    __table_args__ = (
+        UniqueConstraint(
+            "schema_id",
+            "fact_type",
+            "contract_hash",
+            name="uq_market_fact_schema_contract",
+        ),
+        UniqueConstraint(
+            "contract_hash",
+            name="uq_market_fact_schema_contract_hash",
+        ),
+        CheckConstraint("schema_id <> ''", name="ck_market_fact_schema_id"),
+        CheckConstraint("fact_type <> ''", name="ck_market_fact_schema_type"),
+        CheckConstraint(
+            "contract_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_fact_schema_contract_hash",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(contract) = 'object'",
+            name="ck_market_fact_schema_contract_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(query_fields) = 'array'",
+            name="ck_market_fact_schema_query_fields_array",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    schema_id = Column(String(128), primary_key=True)
+    fact_type = Column(String(64), nullable=False)
+    contract_hash = Column(String(64), nullable=False)
+    contract = Column(JSONB, nullable=False)
+    observation_time_field = Column(String(64), nullable=False)
+    material_hash_version = Column(String(64), nullable=False)
+    row_hash_version = Column(String(64), nullable=False)
+    query_fields = Column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    dataset_eligible = Column(Boolean, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactVersionRecord(Base):
+    """One immutable revision in the schema-registered canonical Fact store."""
+
+    __tablename__ = "fact_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "series_id",
+            "observation_key",
+            "revision",
+            name="uq_market_fact_observation_revision",
+        ),
+        ForeignKeyConstraint(
+            ("payload_schema_id", "fact_type", "payload_contract_hash"),
+            (
+                f"{MARKET_DATA_SCHEMA}.fact_schemas.schema_id",
+                f"{MARKET_DATA_SCHEMA}.fact_schemas.fact_type",
+                f"{MARKET_DATA_SCHEMA}.fact_schemas.contract_hash",
+            ),
+            name="fk_market_fact_payload_contract",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("revision > 0", name="ck_market_fact_revision_positive"),
+        CheckConstraint("fact_type <> ''", name="ck_market_fact_type"),
+        CheckConstraint(
+            "observation_key <> ''", name="ck_market_fact_observation_key"
+        ),
+        CheckConstraint(
+            "observation_time_method <> ''",
+            name="ck_market_fact_observation_method",
+        ),
+        CheckConstraint(
+            "known_at_method <> ''", name="ck_market_fact_known_method"
+        ),
+        CheckConstraint(
+            "transformation_id <> ''", name="ck_market_fact_transformation"
+        ),
+        CheckConstraint(
+            "state IN ('active', 'invalidated')",
+            name="ck_market_fact_state",
+        ),
+        CheckConstraint(
+            "received_at IS NULL OR accepted_at >= received_at",
+            name="ck_market_fact_acceptance_after_receipt",
+        ),
+        CheckConstraint(
+            "known_at_method NOT IN "
+            "('platform_acceptance', 'platform_receipt', 'stream_receipt') "
+            "OR known_at >= accepted_at",
+            name="ck_market_fact_receipt_known_after_acceptance",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(payload) = 'object'",
+            name="ck_market_fact_payload_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(provenance) = 'object'",
+            name="ck_market_fact_provenance_object",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(quality) = 'object'",
+            name="ck_market_fact_quality_object",
+        ),
+        CheckConstraint(
+            "market.validate_fact_payload(payload_schema_id, payload)",
+            name="ck_market_fact_payload_valid",
+        ),
+        CheckConstraint(
+            "payload_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_fact_payload_hash",
+        ),
+        CheckConstraint(
+            "material_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_fact_material_hash",
+        ),
+        CheckConstraint(
+            "provenance_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_fact_provenance_hash",
+        ),
+        CheckConstraint(
+            "quality_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_fact_quality_hash",
+        ),
+        CheckConstraint(
+            "row_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_market_fact_row_hash",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    id = Column(String(64), primary_key=True)
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    observation_key = Column(String(512), nullable=False)
+    revision = Column(Integer, nullable=False)
+    market_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        server_default=text("nextval('market.fact_commit_seq'::regclass)"),
+    )
+    source_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.sources.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    ingestion_run_id = Column(
+        String(64),
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.ingestion_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    fact_type = Column(String(64), nullable=False)
+    payload_schema_id = Column(String(128), nullable=False)
+    payload_contract_hash = Column(String(64), nullable=False)
+    observation_time = Column(DateTime(timezone=True), nullable=False)
+    observation_time_method = Column(String(64), nullable=False)
+    source_published_at = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_at = Column(DateTime(timezone=True), nullable=False)
+    known_at = Column(DateTime(timezone=True), nullable=False)
+    known_at_method = Column(String(64), nullable=False)
+    transformation_id = Column(String(128), nullable=False)
+    external_event_key = Column(String(512), nullable=True)
+    external_event_group_key = Column(String(512), nullable=True)
+    external_event_component_key = Column(String(256), nullable=True)
+    state = Column(String(16), nullable=False)
+    payload = Column(JSONB, nullable=False)
+    payload_hash = Column(String(64), nullable=False)
+    material_hash = Column(String(64), nullable=False)
+    provenance_schema_id = Column(String(64), nullable=False)
+    provenance = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    provenance_hash = Column(String(64), nullable=False)
+    quality_schema_id = Column(String(64), nullable=False)
+    quality = Column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    quality_hash = Column(String(64), nullable=False)
+    row_hash = Column(String(64), nullable=False)
+
+
+Index(
+    "ix_market_fact_series_time_revision",
+    MarketFactVersionRecord.series_id,
+    MarketFactVersionRecord.observation_time.desc(),
+    MarketFactVersionRecord.observation_key,
+    MarketFactVersionRecord.revision.desc(),
+)
+Index(
+    "ix_market_fact_series_commit",
+    MarketFactVersionRecord.series_id,
+    MarketFactVersionRecord.market_commit_seq,
+)
+Index(
+    "ix_market_fact_series_known",
+    MarketFactVersionRecord.series_id,
+    MarketFactVersionRecord.known_at,
+    MarketFactVersionRecord.observation_time,
+)
+Index(
+    "ix_market_fact_schema_time",
+    MarketFactVersionRecord.payload_schema_id,
+    MarketFactVersionRecord.observation_time,
+)
+Index(
+    "ix_market_fact_source_time",
+    MarketFactVersionRecord.source_id,
+    MarketFactVersionRecord.observation_time,
+)
+Index(
+    "ix_market_fact_external_group",
+    MarketFactVersionRecord.series_id,
+    MarketFactVersionRecord.external_event_group_key,
+)
+Index(
+    "ix_market_fact_payload_gin",
+    MarketFactVersionRecord.payload,
+    postgresql_using="gin",
+    postgresql_ops={"payload": "jsonb_path_ops"},
+)
+Index(
+    "ix_market_fact_provenance_gin",
+    MarketFactVersionRecord.provenance,
+    postgresql_using="gin",
+    postgresql_ops={"provenance": "jsonb_path_ops"},
+)
+Index(
+    "ix_market_fact_exact_value",
+    MarketFactVersionRecord.series_id,
+    text("((payload->>'value')::numeric)"),
+    MarketFactVersionRecord.observation_time,
+    postgresql_where=MarketFactVersionRecord.payload_schema_id.in_(
+        (
+            "derivatives.open_interest.v2",
+            "market.reference_price.v1",
+            "market.reserve_balance.v1",
+        )
+    ),
+)
+Index(
+    "ix_market_fact_exact_rate",
+    MarketFactVersionRecord.series_id,
+    text("((payload->>'rate')::numeric)"),
+    MarketFactVersionRecord.observation_time,
+    postgresql_where=(
+        MarketFactVersionRecord.payload_schema_id == "derivatives.funding_rate.v2"
+    ),
+)
+Index(
+    "ix_market_fact_funding_time",
+    MarketFactVersionRecord.series_id,
+    text("market.canonical_fact_utc_timestamp(payload->>'funding_time')"),
+    MarketFactVersionRecord.observation_time,
+    postgresql_where=MarketFactVersionRecord.payload_schema_id.in_(
+        ("derivatives.funding_rate.v1", "derivatives.funding_rate.v2")
+    ),
+)
 
 
 class MarketCollectionDefinitionRecord(Base):
@@ -591,7 +859,7 @@ class MarketInstrumentRoleMappingVersionRecord(Base):
 
 
 class MarketStreamDefinitionRecord(Base):
-    """Mutable bounded acquisition configuration with no credentials."""
+    """Mutable continuous-stream configuration with no provider credentials."""
 
     __tablename__ = "stream_definitions"
     __table_args__ = (

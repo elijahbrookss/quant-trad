@@ -195,7 +195,9 @@ The generic supervisor and continuous Coinbase trade adapter now rotate and
 finalize archive segments without closing acquisition, reconnect by explicit
 epoch, and recover orphaned WAL segments under fresh fencing before a new
 session. Recovery closes prior coverage at the last proven event and never
-bridges downtime. The Level 2 continuous adapter is not yet registered.
+bridges downtime. The later single-node admission registered Level 2 through
+the same supervisor/runtime boundary; its projection adapter owns checkpoint
+restore, delta replay, exact-state reconciliation, and post-gap invalidation.
 
 On 2026-08-05 the generic storage-lifecycle implementation added scheduled,
 lease-independent raw archive compaction; checksum-verified, pin-safe object

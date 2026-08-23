@@ -92,10 +92,11 @@ builder source revision, and report storage provenance.
 ## Schema Bootstrap Contract
 
 Fresh database bootstrap is a first-class persistence responsibility. Backend
-startup creates the existing model-owned schemas, tables, and indexes from
-`portal/backend/db/models.py` using the single `PG_DSN`. Other than the scoped
-numeric-fact addition below, a new desktop or clean Docker volume does not
-require operators to replay historical manual migration files.
+and collector startup serialize on one advisory transaction lock and create the
+complete current schema from `portal/backend/db/models.py` and
+`portal/backend/db/market_data_models.py` using the single `PG_DSN`. A new
+desktop or clean Docker volume never requires operators to replay historical
+manual migration files.
 
 Bootstrap may create missing schemas, tables, and model-declared indexes. It
 must not use blanket `IF NOT EXISTS` DDL as the schema contract. Existing tables
@@ -103,26 +104,25 @@ are inspected against the current column contract; missing columns fail loud
 with the table and column names so the operator can rebuild the database or
 intentionally run an out-of-band migration.
 
-Provider-neutral exact numeric storage is the explicit exception.
-`market.numeric_fact_versions` and
-`market.fact_acquisition_coverage`, plus the dimensions addition to an
-existing `market.series`, are owned by
-`scripts/db/manual_migration_numeric_fact_store_v1.sql`. Startup excludes the
-two numeric tables and their indexes from generic creation or repair. It
-validates table and dimensions-column presence, the numeric-fact unbounded
-numeric type and canonical event-revision primary key, required numeric-fact
-checks/indexes, required coverage indexes, and both immutable triggers. The
-migration also owns the dimensions-object constraint, coverage keys/checks,
-and commit-clock defaults; startup does not currently re-derive every one of
-those definitions. Validated missing or drifted objects fail with the exact
-migration path. Generic startup behavior for every pre-existing schema object
-is unchanged.
+Clean initialization first proves that no Quant-Trad model relation exists. It
+then creates the schema-registered `market.fact_schemas` and
+`market.fact_versions` relations, acquisition coverage, current indexes and
+constraints, the code-owned static Fact registry, and the validation and
+immutability triggers in the same transaction as the rest of the current
+schema. Failure rolls the entire initialization back, so concurrent first
+starts cannot leave a partially initialized database.
+
+Those canonical relations remain protected from generic repair on every
+non-empty database. Startup validates their complete column, key, index,
+registry, commit-clock, and trigger contract and fails loud when an existing
+database is missing or has drifted objects. Historical SQL under `scripts/db/`
+therefore remains upgrade and migration-lineage evidence for older databases,
+not clean-install input.
 
 Required operational indexes are part of the current schema contract. If they
 are still absent after bootstrap attempts to create model-declared indexes,
 startup fails. Historical SQL files under `scripts/db/` are repair/reference
-artifacts for old local databases, not normal fresh-start instructions; the
-named numeric migration is an intentional additive exception.
+artifacts for old local databases, not normal fresh-start instructions.
 
 Market-data persistence is model-declared in
 `portal/backend/db/market_data_models.py` under schema `market`. It owns

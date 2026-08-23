@@ -22,10 +22,15 @@ from ..storage.repos.collector_operations import (
     PostgresCollectorOperationsRepository,
     collector_operations_repository,
 )
+from .continuous_stream_collector import DEFAULT_STORAGE_ROOT
 from .continuous_stream_collector import (
-    ContinuousMarketStructureCollector,
-    DEFAULT_STORAGE_ROOT,
-    continuous_market_structure_collector,
+    CoinbaseContinuousTransportAdapter,
+    CoinbaseLevel2BookProjectionAdapter,
+    CoinbaseMarketTradeProjectionAdapter,
+)
+from .continuous_stream_runtime import (
+    ContinuousStreamRuntime,
+    continuous_stream_runtime,
 )
 from .collector_safety import evaluate_collector_safety
 
@@ -41,6 +46,9 @@ class ContinuousCollectorAdapter(Protocol):
     def supports(self, definition: Mapping[str, Any]) -> bool:
         ...
 
+    def registration_errors(self, definition: Mapping[str, Any]) -> list[str]:
+        ...
+
     async def run(
         self,
         *,
@@ -52,23 +60,41 @@ class ContinuousCollectorAdapter(Protocol):
         ...
 
 
-class MarketStructureTradeAdapter:
+class CoinbaseMarketTradeCollectorAdapter:
+    """Compose Coinbase transport with the market-trade projection."""
+
     adapter_id = "coinbase.market_structure_trades.v1"
 
     def __init__(
         self,
-        collector: ContinuousMarketStructureCollector = (
-            continuous_market_structure_collector
-        ),
+        collector: ContinuousStreamRuntime = continuous_stream_runtime,
+        projection=None,
+        transport=None,
     ) -> None:
         self.collector = collector
+        self.projection = projection or CoinbaseMarketTradeProjectionAdapter()
+        self.transport = transport or CoinbaseContinuousTransportAdapter()
 
     def supports(self, definition: Mapping[str, Any]) -> bool:
-        return (
-            str(definition.get("provider") or "").upper() == "COINBASE"
-            and tuple(definition.get("channels") or ())
-            == ("market_trades", "heartbeats")
-        )
+        return self.transport.supports(definition) and tuple(
+            definition.get("channels") or ()
+        ) == self.projection.channels
+
+    def registration_errors(self, definition: Mapping[str, Any]) -> list[str]:
+        config = dict(definition.get("config") or {})
+        reasons = []
+        for key in (
+            "product_definition_version_id",
+            "aggregate_series_ids",
+            "flow_feature_series_ids",
+        ):
+            if not config.get(key):
+                reasons.append(f"config_missing:{key}")
+        for key in ("aggregate_series_ids", "flow_feature_series_ids"):
+            values = dict(config.get(key) or {})
+            if not {"1", "60"}.issubset(values):
+                reasons.append(f"config_incomplete:{key}")
+        return reasons
 
     async def run(
         self,
@@ -83,7 +109,48 @@ class MarketStructureTradeAdapter:
             owner_id=owner_id,
             stop_requested=stop_requested,
             bounded_validation=bounded_validation,
+            projection=self.projection,
+            transport=self.transport,
         )
+
+
+class CoinbaseLevel2CollectorAdapter(CoinbaseMarketTradeCollectorAdapter):
+    """Compose Coinbase transport with the stateful Level 2 projection."""
+
+    adapter_id = "coinbase.market_structure_level2.v1"
+
+    def __init__(
+        self,
+        collector: ContinuousStreamRuntime = continuous_stream_runtime,
+    ) -> None:
+        super().__init__(
+            collector,
+            projection=CoinbaseLevel2BookProjectionAdapter(),
+            transport=CoinbaseContinuousTransportAdapter(),
+        )
+
+    def supports(self, definition: Mapping[str, Any]) -> bool:
+        return self.transport.supports(definition) and tuple(
+            definition.get("channels") or ()
+        ) == self.projection.channels
+
+    def registration_errors(self, definition: Mapping[str, Any]) -> list[str]:
+        config = dict(definition.get("config") or {})
+        reasons = []
+        for key in (
+            "product_definition_version_id",
+            "bbo_series_id",
+            "depth_series_id",
+            "response_feature_series_id",
+            "trade_series_id",
+            "flow_feature_series_ids",
+        ):
+            if not config.get(key):
+                reasons.append(f"config_missing:{key}")
+        flow_series = dict(config.get("flow_feature_series_ids") or {})
+        if not {"1", "60"}.issubset(flow_series):
+            reasons.append("config_incomplete:flow_feature_series_ids")
+        return reasons
 
 
 class CollectorAdapterRegistry:
@@ -151,7 +218,10 @@ class ContinuousCollectorSupervisor:
         self.repository = repository
         self.operations_repository = operations_repository
         self.registry = registry or CollectorAdapterRegistry(
-            (MarketStructureTradeAdapter(),)
+            (
+                CoinbaseMarketTradeCollectorAdapter(),
+                CoinbaseLevel2CollectorAdapter(),
+            )
         )
         self.poll_seconds = max(0.25, float(poll_seconds))
         self._stop = threading.Event()
@@ -458,9 +528,16 @@ class ContinuousCollectorSupervisor:
         self._publish_snapshot(state="stopped", tasks={}, errors=task_errors)
 
 
+MarketStructureTradeAdapter = CoinbaseMarketTradeCollectorAdapter
+MarketStructureL2Adapter = CoinbaseLevel2CollectorAdapter
+
+
 __all__ = [
+    "CoinbaseLevel2CollectorAdapter",
+    "CoinbaseMarketTradeCollectorAdapter",
     "CollectorAdapterRegistry",
     "ContinuousCollectorAdapter",
     "ContinuousCollectorSupervisor",
     "MarketStructureTradeAdapter",
+    "MarketStructureL2Adapter",
 ]

@@ -18,11 +18,146 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --no-deps -r requirements.lock
+          python -m pip check
 
       - name: Run PR suite
         run: ./scripts/ci/run_test_suite.sh pr
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: portal/frontend/package-lock.json
+
+      - name: Install pinned frontend dependencies
+        run: npm --prefix portal/frontend ci
+
+      - name: Test and build production frontend
+        run: make frontend-check
+
+  deployment-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate disposable operator environment
+        env:
+          QT_SINGLE_NODE_ENV_FILE: ${{ github.workspace }}/secrets.env
+        run: bash scripts/automation/server_deploy.sh init-env
+
+      - name: Validate shell and Compose contracts
+        run: |
+          bash -n scripts/automation/server_deploy.sh
+          bash -n scripts/automation/server_host_bootstrap.sh
+          revision="$(git rev-parse HEAD)"
+          tree_hash="$(
+            python3 scripts/provenance/source_tree_hash.py \
+              --root . \
+              --git-revision "$revision"
+          )"
+          export QT_RELEASE_REVISION="$revision"
+          export QT_SOURCE_TREE_HASH="$tree_hash"
+          docker compose \
+            --env-file secrets.env \
+            --file docker/docker-compose.server.yml \
+            config --quiet
+
+      - name: Build production images with source attestation
+        run: |
+          revision="$(git rev-parse HEAD)"
+          tree_hash="$(
+            python3 scripts/provenance/source_tree_hash.py \
+              --root . \
+              --git-revision "$revision"
+          )"
+          export QT_RELEASE_REVISION="$revision"
+          export QT_SOURCE_TREE_HASH="$tree_hash"
+          docker compose \
+            --env-file secrets.env \
+            --file docker/docker-compose.server.yml \
+            build tsdb backend frontend frontend-v2
+
+  clean-database-bootstrap:
+    runs-on: ubuntu-latest
+
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.14.2-pg15
+        env:
+          POSTGRES_DB: quanttrad_bootstrap
+          POSTGRES_USER: quanttrad
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U quanttrad -d quanttrad_bootstrap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 24
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -r requirements.lock
+          python -m pip check
+
+      - name: Prepare isolated database contracts
+        run: |
+          docker exec "${{ job.services.timescaledb.id }}" \
+            createdb -U quanttrad quanttrad_contracts
+          for database in quanttrad_bootstrap quanttrad_contracts; do
+            docker exec "${{ job.services.timescaledb.id }}" \
+              psql -v ON_ERROR_STOP=1 -U quanttrad -d "$database" \
+              -c "CREATE EXTENSION IF NOT EXISTS timescaledb" \
+              -c "CREATE EXTENSION IF NOT EXISTS pgcrypto"
+          done
+
+      - name: Prove clean current-schema bootstrap
+        env:
+          PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_bootstrap
+          QT_CLEAN_BOOTSTRAP_TEST_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_bootstrap
+          RUN_DB_TESTS: '1'
+          QT_DB_TEST_ISOLATED: '1'
+          QT_LOGGING_LOKI_URL: ''
+          QT_LOGGING_DEBUG: 'false'
+        run: python -m pytest -q tests/test_portal/test_clean_database_bootstrap_db.py
+
+      - name: Run PostgreSQL-backed contract tests
+        env:
+          PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_contracts
+          RUN_DB_TESTS: '1'
+          QT_DB_TEST_ISOLATED: '1'
+          QT_LOGGING_LOKI_URL: ''
+          QT_LOGGING_DEBUG: 'false'
+        run: >-
+          python -m pytest -q -m db
+          --ignore=tests/test_portal/test_clean_database_bootstrap_db.py

@@ -46,6 +46,11 @@ ADR 0061 remains the historical decision for exact scalar acquisition. Its
 provider authorization, finality, coverage, and gap rules still apply, but its
 retired scalar table is no longer an active persistence architecture.
 
+Its clean-install migration exception is also historical. After this canonical
+hard cutover, a clean database creates current canonical Fact and
+acquisition-coverage relations directly from the code-owned schema contract.
+The SQL migration remains lineage for databases that predate the cutover.
+
 ## Context
 
 QT has one logical market-series namespace, one append-only commit clock, and

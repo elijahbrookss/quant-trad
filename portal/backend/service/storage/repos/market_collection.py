@@ -128,8 +128,7 @@ class PostgresMarketCollectionRepository:
                         CAST(:config AS jsonb)
                     )
                     ON CONFLICT (source_id, series_id) DO UPDATE
-                    SET enabled = EXCLUDED.enabled,
-                        poll_interval_seconds = EXCLUDED.poll_interval_seconds,
+                    SET poll_interval_seconds = EXCLUDED.poll_interval_seconds,
                         max_attempts = EXCLUDED.max_attempts,
                         config = EXCLUDED.config,
                         updated_at = now()

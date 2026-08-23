@@ -1129,6 +1129,36 @@ class Level2BookReconstructor:
         self.current_state_hash = None
         return (closed,) if closed else ()
 
+    def close_valid_at(
+        self,
+        *,
+        position: BookSourcePosition,
+        effective_at: datetime,
+        known_at: datetime,
+        reason: str,
+    ) -> BookApplyResult:
+        """Close a proven interval at an explicit graceful transport boundary."""
+
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("market_l2_close_invalid: reason is required")
+        closed = self._close_current_at(
+            position=position,
+            effective_at=effective_at,
+            known_at=known_at,
+            status=BookValidityStatus.CLOSED_VALID,
+            reason=normalized_reason,
+            quality_hash=None,
+        )
+        self.lifecycle = BookLifecycle.AWAITING_SNAPSHOT
+        self.bids = {}
+        self.asks = {}
+        self.current_state_hash = None
+        return BookApplyResult(
+            accepted=False,
+            validity_versions=(closed,) if closed else (),
+        )
+
 
 def checkpoint_canonical_rows(
     checkpoint: BookCheckpointFact,

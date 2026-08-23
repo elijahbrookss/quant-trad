@@ -275,9 +275,11 @@ def main() -> int:
                 exc,
             )
 
+    shutdown_errors: list[str] = []
     try:
         lifecycle_supervisor.stop()
     except Exception as exc:
+        shutdown_errors.append(f"storage_lifecycle:{type(exc).__name__}:{exc}")
         logger.warning(
             "market_storage_lifecycle_supervisor_stop_failed | "
             "worker_id=%s error=%s",
@@ -285,8 +287,11 @@ def main() -> int:
             exc,
         )
     try:
-        supervisor.stop()
+        supervisor.stop(
+            timeout_seconds=_WORKER_SETTINGS.shutdown_drain_timeout_seconds
+        )
     except Exception as exc:
+        shutdown_errors.append(f"continuous_supervisor:{type(exc).__name__}:{exc}")
         logger.warning(
             "continuous_collector_supervisor_stop_failed | worker_id=%s error=%s",
             worker_id,
@@ -295,11 +300,19 @@ def main() -> int:
     try:
         heartbeat.stop()
     except Exception as exc:
+        shutdown_errors.append(f"worker_heartbeat:{type(exc).__name__}:{exc}")
         logger.warning(
             "market_data_collector_worker_stop_failed | worker_id=%s error=%s",
             worker_id,
             exc,
         )
+    if shutdown_errors:
+        logger.error(
+            "market_data_collector_shutdown_failed | worker_id=%s errors=%s",
+            worker_id,
+            ";".join(shutdown_errors),
+        )
+        return 5
     logger.info("market_data_collector_stopped | worker_id=%s", worker_id)
     return 0
 

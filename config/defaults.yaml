@@ -80,6 +80,7 @@ workers:
     idle_sleep_seconds: 0.5
     idle_sleep_max_seconds: 5.0
     db_wait_timeout_seconds: 120
+    shutdown_drain_timeout_seconds: 270
 
 market_data_lifecycle:
   enabled: true

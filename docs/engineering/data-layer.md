@@ -92,17 +92,16 @@ the fact-clock migration. There is no application fallback reader or writer.
 
 ## Persistence Bootstrap
 
-`market.numeric_fact_versions`, `market.fact_acquisition_coverage`, and the
-dimensions addition to an existing `market.series` are owned by:
+A clean database receives the complete current canonical Fact schema,
+`market.fact_acquisition_coverage`, registry, indexes, and immutable triggers
+atomically on first startup. No historical migration file is clean-install
+input.
 
-```bash
-make db-file file=scripts/db/manual_migration_numeric_fact_store_v1.sql
-```
-
-Run it with backend, collector, worker, and paper writers stopped. Startup does
-not create or repair the two new tables; it validates its required subset and
-fails with the migration path. This exception is scoped to the new numeric
-objects. Existing model-owned schema bootstrap behavior remains unchanged, and
+`manual_migration_numeric_fact_store_v1.sql` is retained as lineage for the
+retired pre-canonical scalar store. An operator preserving a database that
+predates the canonical cutover may use the reviewed offline migration
+procedure; rebuilding from a new empty database is the other supported choice.
+A current non-empty database is validated and never silently repaired.
 `PG_DSN` remains the only persistence DSN.
 
 ## OI And Funding Consolidation Gate

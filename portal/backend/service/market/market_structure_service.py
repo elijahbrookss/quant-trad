@@ -11,7 +11,7 @@ import os
 import socket
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -91,6 +91,7 @@ from market_data.structure import (
     TRADE_FLOW_FACT_TYPE,
     TRADE_FLOW_FACT_VERSION,
     TradeCoverageIntervalVersion,
+    UnsupportedMarketTradeSideError,
     aggregate_trade_bucket,
     bucket_start_for,
     translate_coinbase_market_trade,
@@ -117,6 +118,10 @@ from ..storage.repos.market_structure import (
     market_structure_repository,
 )
 from .instrument_service import get_instrument_record, resolve_or_create_instrument
+from .market_trade_quality import (
+    QuarantinedTradeSide,
+    build_trade_side_quarantine_quality,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -133,6 +138,20 @@ MAX_ANALYZER_SEQUENCE_HASHES = 8192
 DEFAULT_TRADE_FLEET_MANIFEST = Path(
     "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
 )
+STREAM_ENROLLMENT_PROJECTION_CONTRACTS: Mapping[
+    tuple[str, str, tuple[str, ...]], str
+] = {
+    (
+        "COINBASE",
+        "COINBASE_DIRECT",
+        ("market_trades", "heartbeats"),
+    ): MARKET_TRADE_FACT_VERSION,
+    (
+        "COINBASE",
+        "COINBASE_DIRECT",
+        ("level2", "heartbeats"),
+    ): L2_BOOK_FACT_VERSION,
+}
 
 
 @dataclass(frozen=True)
@@ -312,11 +331,18 @@ class MarketStructureService:
     def apply_stream_enrollment_manifest(
         self,
         *,
-        manifest_path: Path | str = DEFAULT_TRADE_FLEET_MANIFEST,
+        manifest_path: Path | str | None = None,
+        manifest: StreamEnrollmentManifest | None = None,
     ) -> dict[str, Any]:
-        """Register a validated fleet without product-specific Python branches."""
+        """Register a validated fleet through the built-in projection packs."""
 
-        manifest = load_stream_enrollment_manifest(manifest_path)
+        if manifest is not None and manifest_path is not None:
+            raise ValueError(
+                "stream_enrollment_invalid: provide manifest or manifest_path, not both"
+            )
+        manifest = manifest or load_stream_enrollment_manifest(
+            manifest_path or DEFAULT_TRADE_FLEET_MANIFEST
+        )
         source_ids: dict[tuple[str, str, str], int] = {}
         definitions: list[dict[str, Any]] = []
         now = datetime.now(UTC)
@@ -353,30 +379,99 @@ class MarketStructureService:
                     },
                 )
                 source_ids[source_key] = source_id
-            series_id = market_data_repo.register_series(
-                instrument_id=enrollment.instrument_id,
-                fact_type=MARKET_TRADE_FACT_TYPE,
-                timeframe_seconds=None,
-                contract_version=enrollment.contract_version,
+            channels = tuple(enrollment.channels)
+            projection_key = (
+                enrollment.provider.upper(),
+                enrollment.venue.upper(),
+                channels,
             )
-            aggregate_series_ids = {
-                interval: market_data_repo.register_series(
-                    instrument_id=enrollment.instrument_id,
-                    fact_type=TRADE_FLOW_FACT_TYPE,
-                    timeframe_seconds=interval,
-                    contract_version=TRADE_FLOW_FACT_VERSION,
+            expected_contract = STREAM_ENROLLMENT_PROJECTION_CONTRACTS.get(
+                projection_key
+            )
+            if expected_contract is None:
+                raise ValueError(
+                    "stream_enrollment_adapter_unsupported: "
+                    f"enrollment_id={enrollment.enrollment_id} "
+                    f"provider={enrollment.provider} venue={enrollment.venue} "
+                    f"channels={channels}"
                 )
-                for interval in (1, 60)
-            }
-            flow_feature_series_ids = {
-                interval: market_data_repo.register_series(
+            if channels == ("market_trades", "heartbeats"):
+                primary_channel = "market_trades"
+                series_id = market_data_repo.register_series(
                     instrument_id=enrollment.instrument_id,
-                    fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
-                    timeframe_seconds=interval,
-                    contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                    fact_type=MARKET_TRADE_FACT_TYPE,
+                    timeframe_seconds=None,
+                    contract_version=enrollment.contract_version,
                 )
-                for interval in (1, 60)
-            }
+                aggregate_series_ids = {
+                    interval: market_data_repo.register_series(
+                        instrument_id=enrollment.instrument_id,
+                        fact_type=TRADE_FLOW_FACT_TYPE,
+                        timeframe_seconds=interval,
+                        contract_version=TRADE_FLOW_FACT_VERSION,
+                    )
+                    for interval in (1, 60)
+                }
+                flow_feature_series_ids = {
+                    interval: market_data_repo.register_series(
+                        instrument_id=enrollment.instrument_id,
+                        fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+                        timeframe_seconds=interval,
+                        contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                    )
+                    for interval in (1, 60)
+                }
+            elif channels == ("level2", "heartbeats"):
+                primary_channel = "level2"
+                series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=L2_BOOK_FACT_TYPE,
+                    timeframe_seconds=None,
+                    contract_version=enrollment.contract_version,
+                )
+                trade_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=MARKET_TRADE_FACT_TYPE,
+                    timeframe_seconds=None,
+                    contract_version=MARKET_TRADE_FACT_VERSION,
+                )
+                flow_feature_series_ids = {
+                    interval: market_data_repo.register_series(
+                        instrument_id=enrollment.instrument_id,
+                        fact_type=TRADE_FLOW_FEATURE_FACT_TYPE,
+                        timeframe_seconds=interval,
+                        contract_version=TRADE_FLOW_FEATURE_FACT_VERSION,
+                    )
+                    for interval in (1, 60)
+                }
+                bbo_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=BBO_FACT_TYPE,
+                    timeframe_seconds=1,
+                    contract_version=BBO_FACT_VERSION,
+                )
+                depth_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=DEPTH_FACT_TYPE,
+                    timeframe_seconds=1,
+                    contract_version=DEPTH_FACT_VERSION,
+                )
+                response_series_id = market_data_repo.register_series(
+                    instrument_id=enrollment.instrument_id,
+                    fact_type=RESPONSE_FACT_TYPE,
+                    timeframe_seconds=1,
+                    contract_version=RESPONSE_FACT_VERSION,
+                )
+                aggregate_series_ids = {}
+            else:  # guarded by the projection pack registry above
+                raise AssertionError("stream enrollment projection pack is incomplete")
+            if enrollment.contract_version != expected_contract:
+                raise ValueError(
+                    "stream_enrollment_contract_mismatch: "
+                    f"enrollment_id={enrollment.enrollment_id} "
+                    f"expected={expected_contract} "
+                    f"actual={enrollment.contract_version}"
+                )
             contract = enrollment.product_contract
             self.repository.register_product_definition(
                 definition_version_id=contract.product_definition_version_id,
@@ -402,10 +497,136 @@ class MarketStructureService:
                     ),
                 },
             )
-            definition_id = (
-                "ms_coinbase_"
+            provider_slug = "".join(
+                character
+                if character.isalnum()
+                else "_"
+                for character in enrollment.provider.lower()
+            ).strip("_")
+            definition_id = f"ms_{provider_slug}_" + (
+                ("l2_" if primary_channel == "level2" else "")
                 + contract.provider_product_id.lower().replace("-", "_")
             )
+            if primary_channel == "market_trades":
+                output_series = [
+                    {
+                        "fact_type": MARKET_TRADE_FACT_TYPE,
+                        "schema_version": enrollment.contract_version,
+                        "series_id": series_id,
+                    },
+                    *[
+                        {
+                            "fact_type": TRADE_FLOW_FACT_TYPE,
+                            "schema_version": TRADE_FLOW_FACT_VERSION,
+                            "series_id": aggregate_series_ids[interval],
+                            "timeframe_seconds": interval,
+                        }
+                        for interval in (1, 60)
+                    ],
+                    *[
+                        {
+                            "fact_type": TRADE_FLOW_FEATURE_FACT_TYPE,
+                            "schema_version": TRADE_FLOW_FEATURE_FACT_VERSION,
+                            "series_id": flow_feature_series_ids[interval],
+                            "timeframe_seconds": interval,
+                        }
+                        for interval in (1, 60)
+                    ],
+                ]
+                runtime_config = {
+                    "schema_version": "market.stream_runtime_config.v1",
+                    "enrollment_id": enrollment.enrollment_id,
+                    "fleet_id": enrollment.fleet_id,
+                    "manifest_hash": manifest.manifest_hash,
+                    "safety_policy": manifest.safety_policy.to_dict(),
+                    "product_definition_version_id": (
+                        contract.product_definition_version_id
+                    ),
+                    "output_series": output_series,
+                    "aggregate_series_ids": {
+                        str(key): value
+                        for key, value in aggregate_series_ids.items()
+                    },
+                    "flow_feature_series_ids": {
+                        str(key): value
+                        for key, value in flow_feature_series_ids.items()
+                    },
+                    "runtime_policy": ContinuousStreamPolicy.from_mapping(
+                        None
+                    ).to_dict(),
+                }
+            else:
+                tick_size = _instrument_decimal(instrument, "tick_size")
+                quantity_step = _instrument_decimal(instrument, "qty_step")
+                output_series = [
+                    {
+                        "fact_type": L2_BOOK_FACT_TYPE,
+                        "schema_version": enrollment.contract_version,
+                        "series_id": series_id,
+                    },
+                    {
+                        "fact_type": BBO_FACT_TYPE,
+                        "schema_version": BBO_FACT_VERSION,
+                        "series_id": bbo_series_id,
+                        "timeframe_seconds": 1,
+                    },
+                    {
+                        "fact_type": DEPTH_FACT_TYPE,
+                        "schema_version": DEPTH_FACT_VERSION,
+                        "series_id": depth_series_id,
+                        "timeframe_seconds": 1,
+                    },
+                    {
+                        "fact_type": RESPONSE_FACT_TYPE,
+                        "schema_version": RESPONSE_FACT_VERSION,
+                        "series_id": response_series_id,
+                        "timeframe_seconds": 1,
+                    },
+                ]
+                runtime_config = {
+                    "schema_version": "market_structure_l2_stream_config.v1",
+                    "enrollment_id": enrollment.enrollment_id,
+                    "fleet_id": enrollment.fleet_id,
+                    "manifest_hash": manifest.manifest_hash,
+                    "safety_policy": manifest.safety_policy.to_dict(),
+                    "product_definition_version_id": (
+                        contract.product_definition_version_id
+                    ),
+                    "output_series": output_series,
+                    "provider_size_unit": contract.provider_size_unit.value,
+                    "price_increment": (
+                        str(tick_size) if tick_size is not None else None
+                    ),
+                    "quantity_increment": (
+                        "1"
+                        if contract.provider_size_unit.value == "contracts"
+                        else (
+                            str(quantity_step)
+                            if quantity_step is not None
+                            else None
+                        )
+                    ),
+                    "bbo_series_id": bbo_series_id,
+                    "depth_series_id": depth_series_id,
+                    "response_feature_series_id": response_series_id,
+                    "trade_series_id": trade_series_id,
+                    "flow_feature_series_ids": {
+                        str(key): value
+                        for key, value in flow_feature_series_ids.items()
+                    },
+                    "base_currency": contract.base_currency,
+                    "quote_currency": contract.quote_currency,
+                    "contract_size": (
+                        str(contract.contract_size)
+                        if contract.contract_size is not None
+                        else None
+                    ),
+                    "checkpoint_max_seconds": 300,
+                    "checkpoint_max_mutations": 100000,
+                    "runtime_policy": ContinuousStreamPolicy.from_mapping(
+                        None
+                    ).to_dict(),
+                }
             definitions.append(
                 self.repository.upsert_stream_definition(
                     definition_id=definition_id,
@@ -420,27 +641,7 @@ class MarketStructureService:
                     max_spool_bytes=enrollment.max_spool_bytes,
                     max_segment_bytes=enrollment.max_segment_bytes,
                     enabled=enrollment.continuous,
-                    config={
-                        "schema_version": "market.stream_runtime_config.v1",
-                        "enrollment_id": enrollment.enrollment_id,
-                        "fleet_id": enrollment.fleet_id,
-                        "manifest_hash": manifest.manifest_hash,
-                        "safety_policy": manifest.safety_policy.to_dict(),
-                        "product_definition_version_id": (
-                            contract.product_definition_version_id
-                        ),
-                        "aggregate_series_ids": {
-                            str(key): value
-                            for key, value in aggregate_series_ids.items()
-                        },
-                        "flow_feature_series_ids": {
-                            str(key): value
-                            for key, value in flow_feature_series_ids.items()
-                        },
-                        "runtime_policy": ContinuousStreamPolicy.from_mapping(
-                            None
-                        ).to_dict(),
-                    },
+                    config=runtime_config,
                 )
             )
         return {
@@ -1308,6 +1509,10 @@ class MarketStructureService:
                 )
 
             translated = []
+            quarantined_by_record: dict[str, dict[str, Any]] = {}
+            product_contract = self.repository.get_product_contract(
+                str(claim.config["product_definition_version_id"])
+            )
             for item in captured:
                 if item.event.event_kind != "market_trade":
                     continue
@@ -1319,18 +1524,69 @@ class MarketStructureService:
                     and item.raw_record.receive_ordinal >= coverage.opening_receive_ordinal
                     else None
                 )
-                translated.append(
-                    translate_coinbase_market_trade(
-                        item.event,
-                        contract=self.repository.get_product_contract(
-                            str(claim.config["product_definition_version_id"])
-                        ),
-                        raw_record_id=item.raw_record.raw_record_id,
-                        connection_epoch=item.raw_record.connection_epoch,
-                        receive_ordinal=item.raw_record.receive_ordinal,
-                        accepted_at=datetime.now(UTC),
-                        coverage_interval_id=coverage_ref,
+                try:
+                    translated.append(
+                        translate_coinbase_market_trade(
+                            item.event,
+                            contract=product_contract,
+                            raw_record_id=item.raw_record.raw_record_id,
+                            connection_epoch=item.raw_record.connection_epoch,
+                            receive_ordinal=item.raw_record.receive_ordinal,
+                            accepted_at=datetime.now(UTC),
+                            coverage_interval_id=coverage_ref,
+                        )
                     )
+                except UnsupportedMarketTradeSideError as exc:
+                    grouped = quarantined_by_record.setdefault(
+                        item.raw_record.raw_record_id,
+                        {"record": item.raw_record, "observations": []},
+                    )
+                    grouped["observations"].append(
+                        QuarantinedTradeSide(
+                            event=item.event,
+                            provider_side=exc.provider_side,
+                            invalidates_coverage=coverage_ref is not None,
+                        )
+                    )
+
+            quarantined_count = 0
+            for grouped in quarantined_by_record.values():
+                quality = build_trade_side_quarantine_quality(
+                    record=grouped["record"],
+                    observations=grouped["observations"],
+                    detected_at=datetime.now(UTC),
+                )
+                quarantined_count += int(
+                    dict(quality.get("evidence") or {}).get(
+                        "quarantined_trade_count", 0
+                    )
+                )
+                quality_id = self.repository.record_quality_event(
+                    claim,
+                    connection_epoch=int(quality["connection_epoch"]),
+                    receive_ordinal=int(quality["receive_ordinal"]),
+                    channel=str(quality["channel"]),
+                    classification=str(quality["classification"]),
+                    reason=str(quality["reason"]),
+                    detected_at=quality["detected_at"],
+                    raw_record_id=quality.get("raw_record_id"),
+                    coverage_interval_id=(
+                        coverage_interval_id
+                        if bool(quality.get("invalidating"))
+                        else None
+                    ),
+                    sequence_before=quality.get("sequence_before"),
+                    sequence_after=quality.get("sequence_after"),
+                    evidence=quality.get("evidence"),
+                )
+                quality_event_ids.append(quality_id)
+                if bool(quality.get("invalidating")):
+                    invalidating_quality_ids.append(quality_id)
+            if coverage is not None and invalidating_quality_ids:
+                coverage = replace(
+                    coverage,
+                    status=CoverageStatus.INVALID,
+                    gap_quality_event_ids=tuple(invalidating_quality_ids),
                 )
             try:
                 trade_outcome = self.repository.ingest_trades(
@@ -1471,6 +1727,7 @@ class MarketStructureService:
                     "trade_requested": trade_outcome.requested_count,
                     "trade_inserted": trade_outcome.inserted_count,
                     "trade_noop": trade_outcome.noop_count,
+                    "trade_rejected": quarantined_count,
                     "aggregate_counts": aggregate_counts,
                     "flow_feature_counts": feature_counts,
                     "manifest_ids": manifest_ids,
@@ -1501,6 +1758,7 @@ class MarketStructureService:
                     "inserted": trade_outcome.inserted_count,
                     "noop": trade_outcome.noop_count,
                     "max_commit_seq": trade_outcome.max_commit_seq,
+                    "rejected": quarantined_count,
                 },
                 "aggregates": aggregate_counts,
                 "flow_features": feature_counts,
@@ -2624,6 +2882,8 @@ class MarketStructureService:
 
 
 class _CaptureAnalyzer:
+    """Coinbase market-structure analyzer owned by its projection adapters."""
+
     def __init__(self, claim: StreamClaim, *, primary_channel: str = "market_trades") -> None:
         self.claim = claim
         self.primary_channel = str(primary_channel)

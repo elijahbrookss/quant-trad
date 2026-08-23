@@ -469,6 +469,66 @@ def test_market_structure_enroll_applies_a_manifest(
     }
 
 
+def test_collector_definition_enroll_product_sends_confirmed_pack_request(
+    monkeypatch,
+) -> None:
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        observed.update(
+            method=request.get_method(),
+            path=urllib.parse.urlparse(request.full_url).path,
+            body=json.loads(request.data.decode("utf-8")),
+        )
+        return _Response(
+            {
+                "schema_version": "market.collector_product_enrollment.v1",
+                "status": "enrolled",
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "data",
+            "collector-definitions",
+            "enroll-product",
+            "--product-id",
+            "lnp-20dec30-cde",
+            "--request-id",
+            "operator-link-1",
+            "--actor-id",
+            "operator:test",
+            "--reason",
+            "Add LINK market-data coverage",
+            "--confirm",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "method": "POST",
+        "path": "/api/market-data/definitions/enroll-product",
+        "body": {
+            "provider": "COINBASE",
+            "venue": "COINBASE_DIRECT",
+            "product_id": "LNP-20DEC30-CDE",
+            "collector_types": [
+                "open_interest",
+                "funding_rate",
+                "market_trades",
+                "level2",
+            ],
+            "poll_interval_seconds": 60,
+            "request_id": "operator-link-1",
+            "actor_id": "operator:test",
+            "reason": "Add LINK market-data coverage",
+            "confirmation": "COINBASE:COINBASE_DIRECT:LNP-20DEC30-CDE:enroll",
+        },
+    }
+
+
 def test_market_structure_safety_halt_is_scoped_and_audited(monkeypatch) -> None:
     observed = {}
 

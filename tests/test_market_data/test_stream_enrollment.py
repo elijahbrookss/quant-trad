@@ -13,6 +13,7 @@ from market_data.stream_enrollment import (
 
 
 MANIFEST = Path("config/market_data/coinbase_perpetual_trade_fleet.v1.json")
+L2_MANIFEST = Path("config/market_data/coinbase_perpetual_l2_fleet.v1.json")
 
 
 def test_perpetual_trade_fleet_is_hash_stable_and_continuous() -> None:
@@ -27,6 +28,17 @@ def test_perpetual_trade_fleet_is_hash_stable_and_continuous() -> None:
         "SLP-20DEC30-CDE",
     ]
     assert all(row.continuous for row in manifest.enrollments)
+
+
+@pytest.mark.parametrize("path", [MANIFEST, L2_MANIFEST])
+def test_public_market_stream_fleets_do_not_require_credentials(path: Path) -> None:
+    manifest = load_stream_enrollment_manifest(path)
+
+    assert {row.auth_mode for row in manifest.enrollments} == {"public"}
+    assert all(
+        set(row.channels) <= {"market_trades", "level2", "heartbeats"}
+        for row in manifest.enrollments
+    )
 
 
 def test_compatible_product_requires_manifest_data_only(tmp_path: Path) -> None:

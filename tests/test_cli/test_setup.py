@@ -4,7 +4,9 @@ import json
 import urllib.parse
 import urllib.request
 
+import cli.main as cli_main
 from cli import setup as qt_setup
+from cli.audit import _redact_argv
 from cli.main import main
 
 
@@ -23,6 +25,18 @@ class _Response:
 
     def read(self) -> bytes:
         return self._body
+
+
+def test_coinbase_cdp_key_file_is_redacted_from_cli_audit() -> None:
+    assert _redact_argv(
+        ["setup", "provider", "coinbase", "--cdp-key-file", "/private/key.json"]
+    ) == [
+        "setup",
+        "provider",
+        "coinbase",
+        "--cdp-key-file",
+        "***REDACTED***",
+    ]
 
 
 def test_ensure_operator_env_generates_local_values(tmp_path):
@@ -258,6 +272,15 @@ def test_setup_provider_coinbase_uses_canonical_credentials_api(monkeypatch, cap
         return _Response(json.dumps(payload).encode("utf-8"))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        cli_main,
+        "_validate_coinbase_signing_credentials",
+        lambda _credentials: {
+            "status": "passed",
+            "check": "local_websocket_jwt_signing",
+            "algorithm": "EdDSA",
+        },
+    )
 
     exit_code = main(
         [
@@ -276,9 +299,71 @@ def test_setup_provider_coinbase_uses_canonical_credentials_api(monkeypatch, cap
     assert payload["schema_version"] == "qt_setup_provider.v1"
     assert payload["status"] == "ok"
     assert payload["credential_ref"] == "coinbase-coinbase_direct-paper"
+    assert payload["signing_validation"]["algorithm"] == "EdDSA"
     assert payload["secrets_are_returned"] is False
     assert [call[:2] for call in calls] == [
         ("GET", "/api/providers/credentials/schema"),
         ("POST", "/api/providers/credentials"),
         ("POST", "/api/providers/credentials/coinbase-coinbase_direct-paper/validate"),
     ]
+
+
+def test_setup_provider_coinbase_accepts_downloaded_cdp_key_file(
+    monkeypatch, capsys, tmp_path
+):
+    key_file = tmp_path / "cdp_api_key.json"
+    key_file.write_text(
+        json.dumps({"id": "key-id", "privateKey": "private-key"}),
+        encoding="utf-8",
+    )
+    observed = {}
+
+    class FakeClient:
+        def request_json(self, method, path, *, params=None, payload=None):
+            if path == "/api/providers/credentials/schema":
+                return {
+                    "provider_id": "COINBASE",
+                    "venue_id": "COINBASE_DIRECT",
+                    "environment": "paper",
+                    "default_credential_ref": "coinbase-coinbase_direct-paper",
+                    "required": ["COINBASE_API_KEY", "COINBASE_API_SECRET"],
+                    "optional": [],
+                    "accepted": ["COINBASE_API_KEY", "COINBASE_API_SECRET"],
+                }
+            if path == "/api/providers/credentials":
+                observed.update(payload["credentials"])
+                return {"credential": {"credential_ref": payload["credential_ref"]}}
+            if path.endswith("/validate"):
+                return {"credential": {"status": "active"}}
+            raise AssertionError((method, path, params, payload))
+
+    monkeypatch.setattr(cli_main, "_client", lambda _args: FakeClient())
+    monkeypatch.setattr(
+        cli_main,
+        "_validate_coinbase_signing_credentials",
+        lambda credentials: {
+            "status": "passed",
+            "check": "local_websocket_jwt_signing",
+            "algorithm": "EdDSA",
+        },
+    )
+
+    exit_code = main(
+        [
+            "--no-audit-log",
+            "setup",
+            "provider",
+            "coinbase",
+            "--cdp-key-file",
+            str(key_file),
+            "--no-input",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert observed == {
+        "COINBASE_API_KEY": "key-id",
+        "COINBASE_API_SECRET": "private-key",
+    }
+    assert payload["signing_validation"]["algorithm"] == "EdDSA"

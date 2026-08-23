@@ -3,6 +3,13 @@
 This is the minimal provider extension checklist. A provider is an acquisition
 adapter; it is not a schema owner, consumer fallback, or runtime dependency.
 
+Adding another product is not the same as adding a provider. If the deployed
+release already contains a registered provider pack and the required collector
+types, use `qt data collector-definitions enroll-product`; that is an operator
+configuration change and does not require a release. Use this guide when the
+transport, provider API, channel, projection, Fact contract, or recovery
+behavior is new.
+
 ## Where Providers Live
 
 Provider code and binding contracts live under:
@@ -69,6 +76,30 @@ Candles must preserve source-data truth:
 - avoid duplicate bars;
 - expose missing data instead of silently filling it;
 - carry enough provider/venue/symbol/timeframe context for diagnostics.
+
+## Continuous Stream Requirements
+
+A continuous collector is composed from three explicit capabilities:
+
+- a transport adapter implements provider connection/authentication,
+  subscription, parsing, and observed-channel binding;
+- a projection adapter creates the epoch analyzer and owns canonical
+  translation, domain state, counters, and replay/recovery behavior; and
+- a supervisor adapter declares the exact definition shape it supports and
+  composes one transport with one projection.
+
+The shared runtime owns only fenced leases, provider-session lifecycle, fsynced
+WAL, bounded finalization, archive publication, reconnect, graceful drain,
+restart recovery, and gap evidence. It has no default provider, channel,
+analyzer, or projection. The stream-definition repository accepts bounded channel
+identifiers and does not decide whether a channel is supported; the adapter
+registry must resolve exactly one implementation or fail that definition loud.
+
+Add provider-specific enrollment as a reviewed manifest/adapter pack. Do not
+add provider or channel branches to the runtime, supervisor, persistence layer,
+or consumers. Stateful projections may require stronger recovery proof. For
+example, L2 restores a verified checkpoint plus durable deltas or requires a
+fresh snapshot, while an immutable trade projection can replay facts directly.
 
 ## Exact Numeric Fact Requirements
 
@@ -155,14 +186,14 @@ Never update or delete accepted facts to hide a reorg.
 
 ## Migration Ownership
 
-The shared exact-numeric tables are already owned by
-`scripts/db/manual_migration_numeric_fact_store_v1.sql`. A new compatible
-provider or binding must not change that schema.
+The shared canonical Fact and acquisition-coverage relations are current
+code-owned schema. A clean database creates them directly; the historical
+`scripts/db/manual_migration_numeric_fact_store_v1.sql` remains migration
+lineage and is not provider setup.
 
-Those tables are a scoped explicit-migration exception: startup validates its
-required subset but does not create or repair them. Existing legacy behavior is
-otherwise unchanged. If a genuinely new storage shape is approved, coordinate
-its contract, ORM, manual migration ordering, startup validation, tests, and
+A new compatible provider or binding must not change that schema. If a
+genuinely new storage shape is approved, coordinate its contract, current clean
+definition, existing-database upgrade, startup validation, tests, and
 architecture docs under one owner.
 
 ## OI And Funding Warning
@@ -186,6 +217,8 @@ Add focused tests for the capabilities introduced:
 - stable event identity, source-event material, corrections, and reorgs;
 - distinct effective/publication/known-at clocks;
 - bounded pagination/ranges/retries and budget accounting;
+- non-ambiguous continuous transport/projection registry resolution;
+- restart recovery and gap behavior appropriate to any stateful projection;
 - complete zero-event coverage and cached no-network reuse;
 - explicit partial/failed gaps and default-deny network authorization;
 - dataset freeze and provider-free replay;

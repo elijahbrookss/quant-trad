@@ -7,6 +7,8 @@ This folder is organized by reader intent:
 - [Start here](index.md): documentation homepage and reading paths.
 - [Overview](overview.md): what Quant-Trad is and how the major layers fit together.
 - [Getting started](getting-started.md): local setup and first stack run.
+- [Operator handbook](operators/README.md): deployment, onboarding, collector,
+  update, backup, and recovery entry point.
 - [Concepts](concepts/): mental models for runtime, execution, strategies, BotLens, and reporting datasets.
 - [Engineering](engineering/): implementation-oriented architecture and contributor standards.
 - [Guides](guides/): minimal extension guides for indicators, strategies, and providers.
@@ -20,9 +22,10 @@ This folder is organized by reader intent:
 1. [index.md](index.md)
 2. [overview.md](overview.md)
 3. [getting-started.md](getting-started.md)
-4. [concepts/runtime-timeline.md](concepts/runtime-timeline.md)
-5. [contracts/README.md](contracts/README.md)
-6. [architecture/decisions/README.md](architecture/decisions/README.md)
-7. [architecture/ARCHITECTURE_COMPONENT_INDEX.md](architecture/ARCHITECTURE_COMPONENT_INDEX.md)
+4. [operators/README.md](operators/README.md) when operating a durable host
+5. [concepts/runtime-timeline.md](concepts/runtime-timeline.md)
+6. [contracts/README.md](contracts/README.md)
+7. [architecture/decisions/README.md](architecture/decisions/README.md)
+8. [architecture/ARCHITECTURE_COMPONENT_INDEX.md](architecture/ARCHITECTURE_COMPONENT_INDEX.md)
 
 Contracts remain the source of truth. Concept and engineering pages should explain the system without redefining contract behavior.

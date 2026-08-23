@@ -1380,6 +1380,45 @@ def _cmd_data_collector_definitions_install_structured(
     return 0
 
 
+def _cmd_data_collector_definitions_enroll_product(
+    args: argparse.Namespace,
+) -> int:
+    provider = str(args.provider or "").strip().upper()
+    venue = str(args.venue or "").strip().upper()
+    product_id = str(args.product_id or "").strip().upper()
+    if not bool(args.confirm):
+        raise ValueError("product collector enrollment requires --confirm")
+    actor_id = str(
+        args.actor_id
+        or os.environ.get("QT_ACTOR_ID")
+        or f"qt:{getpass.getuser()}"
+    )
+    collector_types = args.collector_type or [
+        "open_interest",
+        "funding_rate",
+        "market_trades",
+        "level2",
+    ]
+    _print_json(
+        _client(args).request_json(
+            "POST",
+            "/api/market-data/definitions/enroll-product",
+            payload={
+                "provider": provider,
+                "venue": venue,
+                "product_id": product_id,
+                "collector_types": collector_types,
+                "poll_interval_seconds": args.poll_interval_seconds,
+                "request_id": args.request_id or f"qt-{uuid.uuid4().hex}",
+                "actor_id": actor_id,
+                "reason": args.reason,
+                "confirmation": f"{provider}:{venue}:{product_id}:enroll",
+            },
+        )
+    )
+    return 0
+
+
 def _cmd_data_collectors_fleet(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
@@ -2700,6 +2739,62 @@ def _collect_credential_values(args: argparse.Namespace, schema: dict[str, Any])
     return {key: str(value) for key, value in credentials.items() if str(value)}
 
 
+def _coinbase_cdp_key_file_credentials(value: str) -> dict[str, str]:
+    if str(value).lstrip().startswith("{"):
+        raise ValueError(
+            "--cdp-key-file accepts a file path or '-' for stdin, not inline JSON"
+        )
+    payload = _read_json_object_arg(value, label="cdp_key_file")
+    api_key = str(payload.get("name") or payload.get("id") or "").strip()
+    api_secret = str(payload.get("privateKey") or "").strip()
+    missing = [
+        field
+        for field, present in (
+            ("name or id", api_key),
+            ("privateKey", api_secret),
+        )
+        if not present
+    ]
+    if missing:
+        raise ValueError(
+            "Coinbase CDP key file is missing required fields: "
+            + ", ".join(missing)
+        )
+    return {
+        "COINBASE_API_KEY": api_key,
+        "COINBASE_API_SECRET": api_secret,
+    }
+
+
+def _validate_coinbase_signing_credentials(
+    credentials: Mapping[str, str],
+) -> dict[str, str]:
+    try:
+        from coinbase import jwt_generator as coinbase_jwt_generator
+        import jwt
+
+        token = coinbase_jwt_generator.build_ws_jwt(
+            str(credentials.get("COINBASE_API_KEY") or ""),
+            str(credentials.get("COINBASE_API_SECRET") or ""),
+        )
+        algorithm = str(jwt.get_unverified_header(token).get("alg") or "")
+    except Exception as exc:
+        raise ValueError(
+            "Coinbase credentials cannot sign a WebSocket JWT. "
+            "Use a current CDP Ed25519 key or a supported ECDSA key."
+        ) from exc
+    if algorithm not in {"EdDSA", "ES256"}:
+        raise ValueError(
+            "Coinbase credentials produced an unsupported JWT algorithm: "
+            f"{algorithm or 'missing'}"
+        )
+    return {
+        "status": "passed",
+        "check": "local_websocket_jwt_signing",
+        "algorithm": algorithm,
+    }
+
+
 def _cmd_provider_credentials_add(args: argparse.Namespace) -> int:
     client = _client(args)
     schema = client.request_json(
@@ -2794,7 +2889,16 @@ def _cmd_setup_provider_coinbase(args: argparse.Namespace) -> int:
     if not isinstance(schema, dict):
         raise ApiError("GET credential schema returned an unexpected payload")
 
-    credentials = _collect_credential_values(args, schema)
+    if args.cdp_key_file:
+        if args.secrets_json or args.from_env or args.secret_env:
+            raise ValueError(
+                "--cdp-key-file cannot be combined with --secrets-json, "
+                "--from-env, or --secret-env"
+            )
+        credentials = _coinbase_cdp_key_file_credentials(args.cdp_key_file)
+    else:
+        credentials = _collect_credential_values(args, schema)
+    signing_validation = _validate_coinbase_signing_credentials(credentials)
     save_payload = {
         "provider_id": provider,
         "venue_id": venue,
@@ -2821,6 +2925,7 @@ def _cmd_setup_provider_coinbase(args: argparse.Namespace) -> int:
         "credential_ref": credential_ref,
         "credential": saved.get("credential") if isinstance(saved, dict) else saved,
         "validation": validation.get("credential") if isinstance(validation, dict) else validation,
+        "signing_validation": signing_validation,
         "secrets_are_returned": False,
         "next_steps": [
             "Use this credential_ref in provider-backed paper/live workflows when a ref is required.",
@@ -3182,6 +3287,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_coinbase.add_argument(
         "--secrets-json",
         help="Secret JSON object as a path, inline object, or '-' for stdin. Prefer '-' so secrets do not enter shell history.",
+    )
+    setup_coinbase.add_argument(
+        "--cdp-key-file",
+        help="Coinbase CDP JSON key file path or '-' for stdin. Accepts name/id and privateKey without shell transformation.",
     )
     setup_coinbase.add_argument(
         "--secret-env",
@@ -3718,7 +3827,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     data_collector_definitions = data_sub.add_parser(
         "collector-definitions",
-        help="Install code-reviewed collector definitions; lifecycle remains separate.",
+        help=(
+            "Install definitions through reviewed manifests or registered "
+            "adapter packs; lifecycle remains separate."
+        ),
     )
     data_collector_definitions_sub = data_collector_definitions.add_subparsers(
         dest="data_collector_definitions_command", required=True
@@ -3736,6 +3848,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_structured.set_defaults(
         func=_cmd_data_collector_definitions_install_structured
+    )
+    enroll_product = data_collector_definitions_sub.add_parser(
+        "enroll-product",
+        help=(
+            "Validate and enroll one provider product through an existing "
+            "deployed collector adapter pack."
+        ),
+    )
+    enroll_product.add_argument("--provider", default="COINBASE")
+    enroll_product.add_argument("--venue", default="COINBASE_DIRECT")
+    enroll_product.add_argument("--product-id", required=True)
+    enroll_product.add_argument(
+        "--collector",
+        dest="collector_type",
+        action="append",
+        choices=["open_interest", "funding_rate", "market_trades", "level2"],
+        help="Collector type to enroll. Repeat; defaults to all supported types.",
+    )
+    enroll_product.add_argument(
+        "--poll-interval-seconds", type=int, default=60
+    )
+    enroll_product.add_argument("--request-id")
+    enroll_product.add_argument("--actor-id")
+    enroll_product.add_argument("--reason", required=True)
+    enroll_product.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm provider validation and collector definition enrollment.",
+    )
+    enroll_product.set_defaults(
+        func=_cmd_data_collector_definitions_enroll_product
     )
     data_collectors = data_sub.add_parser(
         "collectors", help="Inspect and safely operate registered collectors."

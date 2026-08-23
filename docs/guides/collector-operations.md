@@ -6,9 +6,57 @@ actions, `qt` for exact operator workflows, and MCP for guarded agent-host
 workflows. All three consume the same backend state, diagnostics, and immutable
 operation ledger.
 
-Collector definitions remain code-owned. These surfaces cannot create or
-delete collectors, edit provider/runtime configuration, change credentials,
-register schemas, run SQL, or authorize arbitrary acquisition.
+Collector implementations and executable adapter packs remain code-owned.
+Lifecycle surfaces cannot create or delete collectors, edit provider/runtime
+configuration, change credentials, register schemas, run SQL, or authorize
+arbitrary acquisition. Product definition enrollment is a separate confirmed
+admin command and can use only collector types already registered by the
+deployed adapter pack.
+
+## Enroll another supported product
+
+Adding a symbol is configuration when its provider and collector types are
+already deployed. For a Coinbase future, run a bounded public stream smoke
+check and then enroll its registered pack:
+
+```bash
+qt providers stream-smoke \
+  --provider COINBASE \
+  --venue COINBASE_DIRECT \
+  --symbol <coinbase-product-id> \
+  --product-id <coinbase-product-id> \
+  --channel market_trades \
+  --channel level2 \
+  --auth-mode public \
+  --duration 12
+
+qt data collector-definitions enroll-product \
+  --provider COINBASE \
+  --venue COINBASE_DIRECT \
+  --product-id <coinbase-product-id> \
+  --actor-id <operator-id> \
+  --reason "Approved market-data coverage" \
+  --confirm
+```
+
+Omitting `--collector` installs all supported Coinbase futures definitions:
+open interest, funding rate, trades, and Level 2. Repeat `--collector` to select
+a subset. New definitions start running and are discovered without an
+application deployment. Reapplying is idempotent and does not replace a later
+audited lifecycle choice.
+
+The command validates provider metadata and contract units before it writes a
+canonical instrument or definition. It cannot introduce a new provider,
+channel, projection, Fact schema, or recovery policy. Those changes remain a
+normal code/CI/deployment workflow. On a single-node server, use the equivalent
+`bash scripts/automation/server_deploy.sh qt ...` wrapper documented in the
+[operator handbook](../operators/README.md).
+
+Chainlink definitions run through the same scheduled lifecycle. Their feed
+bindings also contain a network, contract address, dimensions, unit, endpoint
+reference, and provenance contract, so V1 admits those bindings through
+reviewed manifests rather than the Coinbase product command. That is a binding
+admission difference, not a separate or opinionated collector runtime.
 
 ## Fleet and market-data plane
 
@@ -144,10 +192,15 @@ issuing another action.
   durable history begins at enablement; arbitrary provider history is not
   available through restart.
 - Coinbase continuous trades preserve forward history plus idempotent spool
-  recovery. Bounded capture/replay remains a separate explicitly authorized
-  acquisition workflow.
-- Coinbase Level 2 has bounded capture/replay support but no registered
-  indefinite supervisor adapter, so it is not a live collector capability.
+  recovery. A provider `UNKNOWN_ORDER_SIDE` trade remains in exact raw archive,
+  is omitted from the canonical BUY/SELL tape with
+  `provider_trade_side_unknown` evidence, and invalidates affected live-flow
+  coverage without stopping sibling trade ingestion or the collector. Bounded
+  capture/replay applies the same policy.
+- Coinbase Level 2 uses the same registered continuous supervisor and lifecycle
+  as trades. Its projection additionally requires a verified checkpoint plus
+  durable deltas, or a fresh provider snapshot, before book validity can resume
+  after a discontinuity.
 - Chainlink structured acquisition uses the scheduled collector contract when
   a reviewed definition is installed. No Chainlink collector appears in a
   fleet until the code-owned manifest/configuration is registered and enabled.

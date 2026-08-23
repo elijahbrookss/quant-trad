@@ -15,6 +15,7 @@ tags:
   - known-at
   - active
 code_paths:
+  - src/market_data/stream_quality.py
   - src/data_providers/streams
   - src/data_providers/providers/coinbase.py
   - src/market_data
@@ -38,13 +39,13 @@ code_paths:
 This phased design is implemented through Phase 4: provider proof,
 futures/spot trades, Level 2 archive/reconstruction, typed market-state
 features, causal normalization, and frozen typed datasets. A generic supervised
-continuous runtime and the Coinbase trade adapter are implemented for bounded
-validation and admitted indefinite collection; the current Level 2 path remains
-bounded until its own adapter is registered. No phase or document by itself
-authorizes production collector enrollment, cloud resources, strategy changes,
-live trading, or frontend work. The 24-hour canonical evidence and explicit
-authoritative resource budget remain post-Phase-4 gates and are mandatory
-before production enrollment.
+continuous runtime composes explicit provider transports with trade or Level 2
+projection adapters for bounded validation and indefinite collection. Level 2
+uses the same lifecycle as other continuous collectors; its stateful projection
+adds checkpoint/reconciliation requirements after discontinuity. No phase or
+document by itself authorizes cloud resources, strategy changes, live trading,
+or frontend work. Production enrollment remains an explicit reviewed manifest
+and must produce canonical soak and authoritative resource evidence.
 
 The allowed live provider boundary is Coinbase Advanced Trade REST and
 WebSocket using the existing provider credential boundary. Public channels may
@@ -151,7 +152,7 @@ Status means:
 | Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; Phase 0 observed one connection-wide `sequence_num` across subscribed channels, reset on reconnect; local receipt/acceptance becomes known-at | dedupe by provider trade ID; a connection-sequence gap affects every subscription on that connection; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed for BIP/BTC proof scope |
 | Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | captured schema is the same; Phase 0 proved product access and contract units | same fields; maker-side semantics documented and captured | same typed coverage policy; BIP Phase 1 live capture passed | no complete event-level backfill documented | irreplaceable event evidence | confirmed semantics; only BIP Phase 1 live-verified |
 | Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; Phase 0 observed the same connection-wide `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed; validate the connection sequence; reconnect resets it and requires a new snapshot | none documented | irreplaceable book evidence | confirmed for BIP/BTC proof scope |
-| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | implemented and live-verified for bounded BIP; ETP/SLP unenrolled |
+| Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | implemented and enrolled for BIP/ETP/SLP; bounded live evidence previously covered BIP and the single-node soak records continuing product evidence |
 | Advanced Trade WS `heartbeats` | public | every stream session | one-second heartbeat and counter | server current time, envelope time, receipt | counter discontinuity is transport evidence, not a product-book sequence substitute | none | session/gap evidence, low volume | confirmed |
 | Advanced Trade WS `ticker` | public | futures and spot allowlist | snapshot/update, may batch cascading matches | envelope/event receipt; no replacement for trade event time | validation only; not canonical trade recovery | no event history | BBO/trade cross-check only | confirmed |
 | Advanced Trade WS `status` | public | subscribed products | periodic product/currency snapshots | provider/envelope and receipt | revision by material hash | no reliable history promised | product-state cross-check | confirmed, optional |
@@ -334,11 +335,17 @@ No hot query scans raw frame bytes.
 affects a canonical series also creates immutable generic gap evidence with a
 reference back to the transport event.
 
-Its classification is a closed versioned enum, initially `sequence_gap`,
-`out_of_order`, `duplicate`, `divergent_duplicate`, `heartbeat_gap`,
-`disconnect`, `decode_error`, `archive_loss`, `book_invalid`,
-`resync_started`, and `resync_snapshot_accepted`. Sequence, ordinal, state-hash,
-and reason fields are typed columns; this is not an opaque JSON error bucket.
+Its classification is the shared closed v1 enum in
+`src/market_data/stream_quality.py`: `sequence_gap`, `out_of_order`, `duplicate`,
+`divergent_duplicate`, `heartbeat_gap`, `disconnect`, `decode_error`,
+`archive_loss`, `provider_trade_conflict`, `provider_trade_side_unknown`,
+`canonicalization_lag`,
+`backpressure_stop`, `book_invalid`, `unknown_zero_delete`,
+`update_before_snapshot`, `collector_restart_gap`, `resync_started`, and
+`resync_snapshot_accepted`. Sequence, ordinal, state-hash, and reason fields are
+typed columns; this is not an opaque JSON error bucket. Restart replay uses the
+same contract as live capture, so durable recovery evidence cannot drift from
+the persistence validator.
 
 A raw record becomes `archive_complete` only when at least one acknowledged,
 non-expired or dataset-pinned manifest mapping matches its exact SHA-256. A
@@ -517,8 +524,8 @@ price-level book.
 
 ### Canonical Trade Translation
 
-Coinbase documents `market_trades.side` as the **maker side**. The canonical
-record therefore always stores `maker_side=BUY|SELL`. The optional transform
+Coinbase documents `market_trades.side` as the **maker side**. An admitted
+canonical record therefore always stores `maker_side=BUY|SELL`. The optional transform
 `coinbase_maker_to_aggressor.v1` is:
 
 | Coinbase maker side | Canonical aggressor side |
@@ -527,9 +534,16 @@ record therefore always stores `maker_side=BUY|SELL`. The optional transform
 | `SELL` | `BUY` |
 
 The transform is enabled for a product only after Phase 0 confirms the futures
-messages use the documented contract. Unknown values fail parsing and do not
-become unsigned trades. If semantics become ambiguous, `aggressor_side` is null
-and every aggressive-flow/CVD feature is unavailable, not guessed.
+messages use the documented contract. A provider sentinel such as
+`UNKNOWN_ORDER_SIDE` is not converted to BUY, SELL, or an unsigned canonical
+trade. The exact raw frame remains archived, affected trades are folded into
+one `provider_trade_side_unknown` quality event per raw record, and the segment
+continues canonicalizing valid trades. A rejected live update invalidates its
+typed flow-coverage interval; a rejected initial snapshot is recorded without
+claiming that historical trade or invalidating later update coverage. If maker
+semantics become ambiguous for an otherwise admitted product,
+`aggressor_side` is null and every aggressive-flow/CVD feature is unavailable,
+not guessed.
 
 ### Quantity And Notional
 
@@ -548,10 +562,12 @@ and every aggressive-flow/CVD feature is unavailable, not guessed.
 
 - provider identity is `(source_id, provider_product_id, provider_trade_id)`.
   The trade ID remains a string; numeric coercion is forbidden.
-- identical repeated material is idempotent. A conflicting same-ID material
-  value creates `provider_trade_conflict` evidence. If Coinbase later documents
-  corrections/busts, append a typed revision with that provider action;
-  otherwise fail admission rather than invent correction semantics.
+- identical repeated material is idempotent both within one archive/replay batch
+  and against the stored canonical head; extra deliveries count as no-ops. A
+  conflicting same-ID material value creates `provider_trade_conflict`
+  evidence. If Coinbase later documents corrections/busts, append a typed
+  revision with that provider action; otherwise fail admission rather than
+  invent correction semantics.
 - canonical event order is provider event time, then proven provider sequence,
   then receive ordinal/event/trade ordinal. Equal event times remain distinct.
 - a late trade is admitted with its original event time and later known-at. It
@@ -1029,7 +1045,7 @@ No test substitutes imagined Coinbase fields for a proof-spike fixture.
 | Gap/invalidation propagation | remove one sequence/frame, inject heartbeat gap, disconnect, corrupt quantity | explicit session quality + generic gap evidence; validity closes; downstream book features suppressed |
 | No invalid-book emission | feed updates after invalidation and before fresh snapshot | no BBO/depth/imbalance/basis using that book; diagnostics remain queryable |
 | Raw-to-derived reconciliation | recompute counts/volumes/notional and source-position ranges from raw trades | exact equality or typed, explainable rejected-record counts |
-| Maker/aggressor translation | replay documented BUY/SELL fixtures and unknown side | exact inversion for proven products; unknown fails/suppresses aggressive features |
+| Maker/aggressor translation | replay documented BUY/SELL fixtures and a mixed update batch containing an unknown side | exact inversion for admitted trades; unknown trades are raw-archived and quarantined in one typed quality event, valid siblings still publish, affected live coverage is invalid, and recovery terminates without a poison-segment loop |
 | Quantity/multiplier correctness | reconcile futures provider size, product multiplier, base quantity and notional against proof fixtures | exact Decimal equality and correct product-definition revision reference |
 | Futures/spot alignment | vary event/known-at order and staleness independently | pair known-at is max inputs; stale/invalid side suppresses output; explicit mapping only |
 | Provider-free backtest | disable network/provider registry and execute frozen dataset | execution succeeds with zero provider call; missing component fails before initialize |

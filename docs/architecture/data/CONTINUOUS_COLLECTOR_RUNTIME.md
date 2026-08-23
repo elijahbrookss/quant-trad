@@ -14,7 +14,9 @@ tags:
   - retention
   - timescaledb
 code_paths:
+  - src/core/settings.py
   - src/data_providers/structured_facts.py
+  - src/market_data/instrument_enrollment.py
   - src/data_providers/providers/chainlink.py
   - src/data_providers/streams/runtime.py
   - src/core/market_storage_lifecycle.py
@@ -23,19 +25,26 @@ code_paths:
   - portal/backend/service/market/collector_safety.py
   - portal/backend/service/market/collector_service.py
   - portal/backend/service/market/continuous_stream_collector.py
+  - portal/backend/service/market/continuous_stream_runtime.py
   - portal/backend/service/market/market_storage_lifecycle.py
   - portal/backend/service/market/market_structure_service.py
   - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/workers/market_data_collector.py
+  - portal/backend/workers/market_data_collector_health.py
+  - portal/backend/workers/single_node_initializer.py
   - portal/backend/controller/market_data.py
   - cli/main.py
   - scripts/reporting/docker_capacity_sampler.sh
   - scripts/reporting/host_capacity_sampler.ps1
   - scripts/db/manual_enable_market_storage_lifecycle_v1.sql
+  - config/defaults.yaml
   - docker/grafana/provisioning/dashboards/capacity-database-growth.json
   - docker/grafana/provisioning/alerting/collector-safety.yml
   - docker/docker-compose.yml
+  - docker/docker-compose.server.yml
+  - config/market_data/coinbase_perpetual_instruments.v1.json
+  - scripts/automation/server_deploy.sh
 ---
 # Continuous Collector Runtime
 
@@ -48,12 +57,15 @@ stream definitions; unsupported or ambiguous definitions fail loudly without
 stopping healthy collectors.
 
 The scheduled open-interest, funding, and manifest-bound structured Fact
-collectors use the same worker process and lease/attempt contracts. The first
+collectors use the same worker process and operator lifecycle, with the
+scheduler's bounded attempt/lease contract rather than a socket session. The first
 structured adapter polls a Chainlink MVR reserve bundle and emits canonical
 `asset.reserve_state.v1`; it is not a separate Chainlink research subsystem.
-The first continuous adapter implements Coinbase `market_trades` plus
-`heartbeats`. Future trade, book, news, or alternate-provider adapters must
-register explicitly rather than adding provider switches to the supervisor.
+The first continuous adapters implement Coinbase `market_trades` plus
+`heartbeats` and Coinbase `level2` plus `heartbeats`. Future trade, book, news,
+or alternate-provider collectors register a transport adapter and a projection
+adapter rather than adding provider or channel switches to the supervisor,
+runtime, or definition repository.
 
 Scheduled structured definitions are installed disabled by default. Their
 manifest pins schema, subject, dimensions, provider mapping, endpoint
@@ -62,11 +74,35 @@ normal scheduler owns restart, fencing, retries, attempt logs, and gap evidence.
 Repeated latest-state reads are idempotent; changed provider reports append new
 canonical observations and never overwrite history.
 
-Coinbase L2 currently has bounded capture, archive, reconstruction, checkpoint,
-and replay support, but no registered long-lived supervisor adapter. An L2
-definition or historical checkpoint must therefore never be reported as a live
-indefinite collector. It remains bounded until a provider-neutral continuous
-book adapter and appropriate safety policy exist.
+The runtime has no default provider, analyzer, or projection. A transport
+adapter owns connection, authentication, subscription, parser, and
+observed-channel binding. A projection adapter creates its epoch analyzer and
+owns canonical translation, domain state, recovery, and projection-specific
+counters. Registration must resolve exactly one supervisor
+adapter composing those two capabilities. L2 is therefore a normal continuous
+collector whose book projection additionally owns reconstruction validity and
+checkpoint evidence. Per-epoch projection state and analysis are opaque to the
+runtime; the finalizer returns them only to the adapter that created them.
+
+Authentication is definition material, not a property of the collector
+lifecycle. Coinbase documents `market_trades`, `level2`, and `heartbeats` as
+public channels, so the single-node manifests enroll them with public auth mode
+and the transport sends no JWT. A separately reviewed enrollment may select
+`auth_mode: authenticated`; only that branch resolves credentials and signs
+each subscription. The locked Coinbase SDK supports the CDP-recommended
+Ed25519 format as well as legacy ECDSA, and provider-specific onboarding proves
+local JWT signing before saving a downloaded key file.
+
+The full server composition runs TimescaleDB, the backend control plane, both
+operator frontends, this collector worker, database administration, and the
+Grafana/Loki/Alloy observability surface. It uses commit-tagged application
+images, private database networking, loopback-only host publication, durable
+NVMe PostgreSQL, an explicit host archive mount, health-gated startup, and a
+five-minute collector drain window. IBKR Gateway remains profile-gated because
+broker credentials and trading surfaces require separate admission. The
+deployment helper promotes an exact reviewed Git commit and retains prior
+commit-tagged images for compatible rollback; it does not make the agent or Git
+checkout a workload supervisor.
 
 ## Runtime Contract
 
@@ -91,6 +127,16 @@ disconnect budget resets only after a provider message arrives, not after a
 successful socket handshake. Sequence, subscription, heartbeat, snapshot, and
 coverage evidence remain epoch-scoped.
 
+Projection-quality rejection is distinct from transport failure. For example,
+Coinbase can emit a mixed trade update whose maker sides include
+`UNKNOWN_ORDER_SIDE`. The trade projection archives the exact frame, admits
+the BUY/SELL siblings, folds the rejected trades into one typed quality event,
+invalidates the affected flow-coverage interval, and acknowledges the segment.
+It never guesses a side, drops the raw record, or terminates the generic stream
+runtime on that known provider sentinel. Retained-spool recovery applies the
+same rule idempotently, so one semantically unusable trade cannot become a
+permanent restart loop.
+
 After a terminal segment is archived, mapped, canonicalized, and its terminal
 coverage revision is committed, the finalizer retires that connection epoch's
 projection state. Memory is therefore bounded by active/finalizing epochs, not
@@ -102,18 +148,54 @@ A normal stop closes the provider connection, seals the final segment, drains
 all archive/database finalizers, records terminal evidence, and only then
 releases the fencing lease.
 
+The worker's generic supervisor drain budget defaults to 270 seconds through
+`workers.collectors.shutdown_drain_timeout_seconds`, leaving a 30-second margin
+inside the single-node container's five-minute stop grace period. While terminal
+segments are still finalizing, the runtime continues renewing the stream lease;
+a replacement owner cannot overlap unfinished canonicalization. Lease release
+failure is a task failure with correlated context, not a suppressed best-effort
+cleanup. Any supervisor, lifecycle, or worker-heartbeat shutdown failure also
+makes the worker exit nonzero after bounded cleanup. These rules apply to every
+registered continuous projection. L2 merely has enough terminal state to make
+the boundary especially visible.
+
 After an interruption, the next owner scans durable spool segments before
 opening a new session. It:
 
 1. validates and reclaims the original session under a fresh lease generation;
 2. truncates only an incomplete final JSONL tail and records the byte count;
 3. publishes the immutable archive and mappings idempotently;
-4. republishes canonical trades without claiming coverage across downtime;
-5. closes any prior open-valid coverage at its last already-proven event;
+4. invokes the registered projection adapter to rebuild canonical output;
+5. closes or invalidates prior coverage at its last already-proven event;
 6. records recovery lifecycle evidence and releases the recovery claim.
 
 The next provider connection must establish a new coverage interval. Collector
 downtime is therefore visible and never bridged by invented completeness.
+Trade recovery republishes immutable trades. L2 recovery verifies a typed book
+checkpoint, replays acknowledged raw deltas, reconciles the exact state and
+validity interval, then records the restart discontinuity. If that proof is not
+possible, the book remains invalid until a fresh provider snapshot establishes
+a new valid interval.
+
+The retained-spool boundary is authoritative during recovery. A process can be
+interrupted after its canonical book transaction advances the disposable
+reconstruction watermark but before the local spool acknowledgement is written.
+L2 recovery therefore selects the latest verified checkpoint strictly before
+the first retained record, replays only earlier acknowledged archives, and then
+re-applies every retained segment idempotently. It does not try to reconcile a
+pre-tail reducer against a watermark that can already include that same tail.
+When the immutable book Fact already exists, recovery reuses its persisted
+acceptance clock; an interrupted post-book feature stage can therefore be
+repaired without manufacturing a correction to the canonical source Fact.
+This rule belongs to the L2 projection adapter; lease, WAL, queue, lifecycle,
+and restart orchestration remain provider- and projection-neutral.
+
+Derived BBO and depth source validation uses the canonical L2 observation key
+to reach the existing `(series_id, observation_key, revision)` index before it
+checks provenance, validity, and state hashes. Source proof remains strict, but
+continuous finalization no longer performs a JSON-expression scan for every
+derived observation. Sustained admission still depends on measured
+capture-to-canonicalization lag and bounded spool growth, not merely free disk.
 
 ## Storage Lifecycle
 
@@ -189,9 +271,11 @@ used by Frontend V2 and MCP, preserve request/actor/reason context, and append
 immutable operation evidence. No surface edits the stream adapter or runtime
 configuration while operating it.
 
-The BIP, ETP, and SLP trade enrollments are continuous: their runtime has no
-`stop_at`. A restart reconstructs desired tasks from the database and cannot
-bypass an active safety latch.
+The BIP, ETP, and SLP trade and L2 enrollments are continuous: their runtime has
+no `stop_at`. A restart reconstructs desired tasks
+from the database and cannot bypass an active safety latch. Reapplying an
+enrollment changes reviewed configuration but does not overwrite an operator's
+later stopped or paused lifecycle state.
 
 ## Resource Authority
 

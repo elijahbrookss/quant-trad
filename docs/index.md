@@ -11,6 +11,8 @@ matters.
   to preserve.
 - [Getting started](getting-started.md): local setup, stack commands, endpoints,
   and first checks.
+- [Operator handbook](operators/README.md): deploy, update, provider onboarding,
+  product enrollment, collector operation, recovery, and node boundaries.
 - [README](../README.md): project portal and capability summary.
 
 ## Core Concepts
@@ -38,6 +40,10 @@ which identifiers carry meaning across boundaries.
 
 ## Guides
 
+- [Portable single-node deployment](engineering/server-deployment.md): install,
+  promote, verify, roll back, access, and move storage on a VPS or on-prem host.
+- [Collector operations](guides/collector-operations.md): enroll supported
+  products and inspect or operate the resulting collector fleet.
 - [Creating an indicator](guides/creating-an-indicator.md): minimal authoring checklist and example links.
 - [Creating a strategy](guides/creating-a-strategy.md): typed-output decision flow and test expectations.
 - [Adding a provider](guides/adding-a-provider.md): adapter, explicit intake, known-at, provider-gap, and test expectations.
