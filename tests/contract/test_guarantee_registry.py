@@ -2154,6 +2154,141 @@ def test_active_reference_validates_historical_attestation_after_head_advances(
         guarantees.validate_repository(root=tmp_path)
 
 
+def test_checked_in_phase_2b_snapshot_preserves_authorization_ceiling() -> None:
+    bundle = guarantees.validate_repository()
+    registry = bundle.registry
+    rows = registry["guarantees"]
+    scope = registry["scope"]
+
+    assert scope["phase"] == "whole_system_classification"
+    assert scope["gate"] == "gate_2_approved"
+    assert scope["whole_system_classification_complete"] is True
+    assert scope["source_candidate_count"] == 75
+    assert len(scope["included_candidate_ids"]) == 75
+    assert len(rows) == 75
+
+    disposition_counts = {
+        disposition: sum(
+            row["registry_disposition"] == disposition for row in rows
+        )
+        for disposition in {
+            "candidate",
+            "contradicted",
+            "implementation_property",
+            "partially_enforced",
+        }
+    }
+    assert disposition_counts == {
+        "candidate": 6,
+        "contradicted": 3,
+        "implementation_property": 1,
+        "partially_enforced": 65,
+    }
+    assert all(row["activation_status"] == "unactivated" for row in rows)
+    assert all(not row["activation_decision_refs"] for row in rows)
+    assert all(not row["activation_attestation_refs"] for row in rows)
+
+    nonconforming = [
+        row
+        for row in rows
+        if row["registry_disposition"] in {"partially_enforced", "contradicted"}
+    ]
+    assert len(nonconforming) == 68
+    assert all(row["remediation_status"] == "recorded" for row in nonconforming)
+    assert all(len(row["remediation_refs"]) == 1 for row in nonconforming)
+    assert len(bundle.proof_catalog["proofs"]) == 85
+
+    term_entries = guarantees._term_entries(guarantees.ROOT)
+    assert len(term_entries) == 55
+    assert sum(entry["status"] == "proposed" for entry in term_entries.values()) == 34
+    assert sum(entry["status"] == "blocked" for entry in term_entries.values()) == 2
+    assert sum(entry["status"] == "deferred" for entry in term_entries.values()) == 19
+    assert guarantees._adopted_term_entries(guarantees.ROOT) == {}
+
+
+def test_checked_in_phase_2b_review_map_is_complete_and_nonactivating() -> None:
+    bundle = guarantees.validate_repository()
+    review_map = guarantees.load_json_strict(
+        Path("docs/plans/documentation-reconciliation/phase-2b-review-map.json")
+    )
+    metadata = review_map["map"]
+    accounting = review_map["source_accounting"]
+
+    assert metadata["status"] == "complete_for_required_review"
+    assert metadata["classification_coverage_complete"] is True
+    assert metadata["classification_only"] is True
+    assert metadata["nonnormative"] is True
+    assert metadata["terms_adopted"] is False
+    assert metadata["guarantees_activated"] is False
+    assert metadata["proof_results_asserted"] is False
+    assert metadata["source_candidate_count"] == 75
+    assert metadata["active_guarantee_count"] == 0
+
+    assert accounting["phase_1_finding_count"] == 26
+    assert accounting["phase_2b_new_finding_ids"] == [
+        "DOC-CANDIDATE-LOCATOR-001"
+    ]
+    assert accounting["consolidated_finding_count"] == 27
+    assert accounting["phase_2a_calibration_candidate_count"] == 12
+    assert accounting["completed_batch_candidate_count"] == 63
+    assert accounting["coverage_candidate_count"] == 75
+    assert accounting["coverage_partition"]["complete"] is True
+    assert accounting["final_registry_guarantee_count"] == 75
+    assert accounting["final_proof_definition_count"] == 85
+    assert accounting["final_concrete_remediation_count"] == 68
+    assert accounting["completed_batch_decision_review_count"] == 21
+    assert accounting["final_registry_activation_counts"] == {
+        "unactivated": 75,
+        "active": 0,
+    }
+
+    index = accounting["candidate_guarantee_index"]
+    assert len(index) == 75
+    assert {row["candidate_id"] for row in index} == set(
+        bundle.registry["scope"]["included_candidate_ids"]
+    )
+    assert {row["guarantee_id"] for row in index} == {
+        row["id"] for row in bundle.registry["guarantees"]
+    }
+
+    decisions = [
+        decision
+        for group in review_map["review_groups"]
+        for decision in group["decisions"]
+    ]
+    assert len(decisions) == 40
+    assert len({decision["id"] for decision in decisions}) == 40
+    for decision in decisions:
+        reviewers = decision["required_reviewers"]
+        assert reviewers == sorted(set(reviewers))
+        assert reviewers
+        assert decision["decision_needed"].strip()
+        assert decision["why_classification_cannot_settle"].strip()
+        assert decision["forbidden_before_approval"].strip()
+
+    assert len(review_map["authority_model_decisions"]) == 3
+    assert len(review_map["proof_environment_ceilings"]) == 9
+    assert review_map["terminology_accounting"]["total"] == 55
+    assert review_map["terminology_accounting"]["proposed"] == 34
+    assert review_map["terminology_accounting"]["blocked"] == 2
+    assert review_map["terminology_accounting"]["deferred"] == 19
+    assert review_map["terminology_accounting"]["adopted"] == 0
+
+    conflict_reviews = {
+        row["conflict_id"]: row
+        for row in review_map["terminology_accounting"]["conflict_reviews"]
+    }
+    assert len(conflict_reviews) == 26
+    for row in bundle.registry["guarantees"]:
+        candidate_ids = {ref["id"] for ref in row["candidate_refs"]}
+        for conflict_id in {
+            ref for ref in row["finding_refs"] if ref.startswith("QT-CONFLICT-")
+        }:
+            review = conflict_reviews[conflict_id]
+            assert candidate_ids <= set(review["candidate_ids"])
+            assert row["id"] in review["guarantee_ids"]
+
+
 def test_checked_in_schemas_match_executable_versions_and_enums() -> None:
     guarantees.validate_schema_contracts()
     schema_dir = Path("docs/assurance/guarantees/schemas")

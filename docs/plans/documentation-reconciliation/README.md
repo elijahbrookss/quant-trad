@@ -10,17 +10,21 @@ replace `AGENTS.md`, the platform contracts, accepted ADRs, or component owners.
 - Baseline branch: `origin/develop`
 - Baseline commit: `d46e40bf55caeea12f4ccbde640c71f271eaf9c4`
 - Campaign branch: `feat/docs-guarantee-reconciliation`
-- Current phase: Phase 2A model calibration
-- Current gate: Gate 2 pending
+- Current phase: Phase 2B whole-system classification complete
+- Current gate: subsystem and normative-decision review before Phase 3
 
 `develop` remains unchanged for the duration of the campaign. The baseline is a
 fixed audit subject rather than a moving integration target.
 
 ## Authority During The Audit
 
-The repository's existing precedence remains in force:
+The repository's existing source classes remain in force as the subject of this
+audit. `AGENTS.md` governs agent and contributor work within its repository
+scope; its precedence relative to platform behavior contracts is not stated
+precisely enough for this campaign to invent one. The platform-document and
+evidence order is:
 
-1. `AGENTS.md` and `docs/contracts/` state normative platform behavior.
+1. `docs/contracts/` state normative platform behavior.
 2. Accepted ADRs explain durable decisions and their tradeoffs.
 3. Architecture and concept documents explain current boundaries and flows.
 4. Implementation, database constraints, tests, and runtime surfaces provide
@@ -30,7 +34,10 @@ The repository's existing precedence remains in force:
 
 The audit may identify a normative document as apparently stale or contradicted,
 but implementation does not replace that authority automatically. Any change to
-normative meaning requires an explicit reviewed decision.
+normative meaning requires an explicit reviewed decision. For assurance-index
+purposes, `AGENTS.md` remains non-activating until its precedence and ownership
+model is reviewed, and source-module contracts remain non-activating until their
+discovery and ownership model is reviewed.
 
 ## Phase 1 Coverage Policy
 
@@ -91,11 +98,12 @@ verified and intentionally retained.
 4. **Final gate:** review residual risks, proof attestations, validation, and the
    clean campaign branch before any integration into `develop`.
 
-Gate 1 was approved by the user on 2026-08-23. During Phase 2A, existing product
-semantics and normative documentation remain read-only. Writes are limited to
-the proposed glossary, assurance-index model, deterministic validation and human
-view, calibration record, and gate report. Product-semantic discrepancies remain
-findings rather than silent repairs.
+Gate 1 was approved by the user on 2026-08-23, and Gate 2 was approved on
+2026-08-24. During Phase 2A and Phase 2B, existing product semantics and
+normative documentation remain read-only. Writes are limited to the proposed
+glossary, assurance-index model, deterministic validation and human view,
+classification and remediation records, and review packets. Product-semantic
+discrepancies remain findings rather than silent repairs.
 
 ## Phase 1 Deliverables
 
@@ -130,4 +138,26 @@ remaining uncertainty is itself represented in the ledger.
 
 Phase 2A completion does not adopt the glossary, activate a guarantee, classify
 the remaining 63 candidates, settle a conflict, repair product semantics, or
-authorize deletion/archive. Phase 2B starts only after explicit Gate 2 approval.
+authorize deletion/archive. Gate 2 approval authorized application of the
+calibrated model; it did not authorize any of those other actions.
+
+## Phase 2B Deliverables
+
+- `phase-2b-work/batch-a.json` through `batch-d.json` — frozen-baseline
+  classification working records for the remaining 63 candidates;
+- `proposed-glossary.md` — all 55 Phase 1 term IDs accounted for as 34 proposed,
+  2 blocked, 19 deferred, and 0 adopted;
+- `../../assurance/guarantees/registry.json` — all 75 candidates classified,
+  with 65 `partially_enforced`, 3 `contradicted`, 6 `candidate`, 1
+  `implementation_property`, and 0 active guarantees;
+- `../../assurance/guarantees/remediations/` — 68 concrete remediation records,
+  one for every `partially_enforced` or `contradicted` guarantee;
+- `../../assurance/guarantees/proof-catalog.json` — 85 proof definitions without
+  execution results;
+- `../../assurance/guarantees/GUARANTEES.md` — regenerated human view;
+- `phase-2b-review-map.json` and `phase-2b-report.md` — the complete required
+  review routing and human decision packet before Phase 3.
+
+Phase 2B completion does not activate a guarantee, adopt terminology, resolve a
+normative conflict, repair product semantics, change a contract, execute proof,
+or authorize deletion, archival, consolidation, or integration into `develop`.

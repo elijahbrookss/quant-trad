@@ -1,0 +1,3073 @@
+{
+  "map": {
+    "id": "phase-2b-review-boundary-map",
+    "phase": "phase_2b_evidence_classification",
+    "status": "complete_for_required_review",
+    "audit_baseline_commit": "d46e40bf55caeea12f4ccbde640c71f271eaf9c4",
+    "branch": "feat/docs-guarantee-reconciliation",
+    "classification_only": true,
+    "nonnormative": true,
+    "terms_adopted": false,
+    "guarantees_activated": false,
+    "proof_results_asserted": false,
+    "classification_coverage_complete": true,
+    "source_candidate_count": 75,
+    "terminology_adopted_count": 0,
+    "active_guarantee_count": 0
+  },
+  "source_accounting": {
+    "review_basis_files": [
+      "docs/plans/documentation-reconciliation/authority-matrix.md",
+      "docs/plans/documentation-reconciliation/guarantee-candidates.md",
+      "docs/plans/documentation-reconciliation/phase-1-findings.md",
+      "docs/plans/documentation-reconciliation/proposed-glossary.md"
+    ],
+    "phase_1_finding_count": 26,
+    "phase_1_finding_ids": [
+      "ARCH-COVERAGE-001",
+      "CI-TRACE-001",
+      "DOC-AUTH-001",
+      "DOC-CI-TOPOLOGY-001",
+      "DOC-CONTRACT-001",
+      "DOC-INDEX-001",
+      "DOC-INDEX-002",
+      "DOC-LIFECYCLE-001",
+      "DOC-LINEAGE-001",
+      "DOC-LINK-001",
+      "DOC-LOG-INGRESS-001",
+      "DOC-MARKET-STRUCTURE-001",
+      "DOC-META-001",
+      "DOC-MODEL-001",
+      "DOC-MUTATION-SCOPE-001",
+      "DOC-OPS-001",
+      "DOC-PATH-001",
+      "DOC-RUNTIME-COMPOSITION-001",
+      "DOC-STALE-001",
+      "DOC-VALIDATION-001",
+      "REGISTRY-DYNAMIC-001",
+      "REGISTRY-OWNERSHIP-001",
+      "SCHEMA-AUTH-001",
+      "TEST-ENV-001",
+      "TEST-GAP-001",
+      "TEST-SCOPE-001"
+    ],
+    "phase_2b_new_finding_count": 1,
+    "phase_2b_new_finding_ids": [
+      "DOC-CANDIDATE-LOCATOR-001"
+    ],
+    "consolidated_finding_count": 27,
+    "consolidated_finding_ids": [
+      "ARCH-COVERAGE-001",
+      "CI-TRACE-001",
+      "DOC-AUTH-001",
+      "DOC-CANDIDATE-LOCATOR-001",
+      "DOC-CI-TOPOLOGY-001",
+      "DOC-CONTRACT-001",
+      "DOC-INDEX-001",
+      "DOC-INDEX-002",
+      "DOC-LIFECYCLE-001",
+      "DOC-LINEAGE-001",
+      "DOC-LINK-001",
+      "DOC-LOG-INGRESS-001",
+      "DOC-MARKET-STRUCTURE-001",
+      "DOC-META-001",
+      "DOC-MODEL-001",
+      "DOC-MUTATION-SCOPE-001",
+      "DOC-OPS-001",
+      "DOC-PATH-001",
+      "DOC-RUNTIME-COMPOSITION-001",
+      "DOC-STALE-001",
+      "DOC-VALIDATION-001",
+      "REGISTRY-DYNAMIC-001",
+      "REGISTRY-OWNERSHIP-001",
+      "SCHEMA-AUTH-001",
+      "TEST-ENV-001",
+      "TEST-GAP-001",
+      "TEST-SCOPE-001"
+    ],
+    "phase_1_terminology_conflict_count": 26,
+    "phase_1_terminology_conflict_ids": [
+      "QT-CONFLICT-001",
+      "QT-CONFLICT-002",
+      "QT-CONFLICT-003",
+      "QT-CONFLICT-004",
+      "QT-CONFLICT-005",
+      "QT-CONFLICT-006",
+      "QT-CONFLICT-007",
+      "QT-CONFLICT-008",
+      "QT-CONFLICT-009",
+      "QT-CONFLICT-010",
+      "QT-CONFLICT-011",
+      "QT-CONFLICT-012",
+      "QT-CONFLICT-013",
+      "QT-CONFLICT-014",
+      "QT-CONFLICT-015",
+      "QT-CONFLICT-016",
+      "QT-CONFLICT-017",
+      "QT-CONFLICT-018",
+      "QT-CONFLICT-019",
+      "QT-CONFLICT-020",
+      "QT-CONFLICT-021",
+      "QT-CONFLICT-022",
+      "QT-CONFLICT-023",
+      "QT-CONFLICT-024",
+      "QT-CONFLICT-025",
+      "QT-CONFLICT-026"
+    ],
+    "phase_2a_calibration_file": "docs/plans/documentation-reconciliation/phase-2a-calibration.md",
+    "phase_2a_calibration_candidate_count": 12,
+    "phase_2a_calibration_candidate_ids": [
+      "QT-GC-001",
+      "QT-GC-003",
+      "QT-GC-004",
+      "QT-GC-005",
+      "QT-GC-008",
+      "QT-GC-009",
+      "QT-GC-011",
+      "QT-GC-012",
+      "QT-GC-013",
+      "QT-GC-014",
+      "QT-GC-070",
+      "QT-GC-073"
+    ],
+    "completed_batch_files": [
+      "docs/plans/documentation-reconciliation/phase-2b-work/batch-a.json",
+      "docs/plans/documentation-reconciliation/phase-2b-work/batch-b.json",
+      "docs/plans/documentation-reconciliation/phase-2b-work/batch-c.json",
+      "docs/plans/documentation-reconciliation/phase-2b-work/batch-d.json"
+    ],
+    "completed_batch_candidate_count": 63,
+    "completed_batch_candidate_ids": [
+      "QT-GC-002",
+      "QT-GC-006",
+      "QT-GC-007",
+      "QT-GC-010",
+      "QT-GC-015",
+      "QT-GC-016",
+      "QT-GC-017",
+      "QT-GC-018",
+      "QT-GC-019",
+      "QT-GC-020",
+      "QT-GC-021",
+      "QT-GC-022",
+      "QT-GC-023",
+      "QT-GC-024",
+      "QT-GC-025",
+      "QT-GC-026",
+      "QT-GC-027",
+      "QT-GC-028",
+      "QT-GC-029",
+      "QT-GC-030",
+      "QT-GC-031",
+      "QT-GC-032",
+      "QT-GC-033",
+      "QT-GC-034",
+      "QT-GC-035",
+      "QT-GC-036",
+      "QT-GC-037",
+      "QT-GC-038",
+      "QT-GC-039",
+      "QT-GC-040",
+      "QT-GC-041",
+      "QT-GC-042",
+      "QT-GC-043",
+      "QT-GC-044",
+      "QT-GC-045",
+      "QT-GC-046",
+      "QT-GC-047",
+      "QT-GC-048",
+      "QT-GC-049",
+      "QT-GC-050",
+      "QT-GC-051",
+      "QT-GC-052",
+      "QT-GC-053",
+      "QT-GC-054",
+      "QT-GC-055",
+      "QT-GC-056",
+      "QT-GC-057",
+      "QT-GC-058",
+      "QT-GC-059",
+      "QT-GC-060",
+      "QT-GC-061",
+      "QT-GC-062",
+      "QT-GC-063",
+      "QT-GC-064",
+      "QT-GC-065",
+      "QT-GC-066",
+      "QT-GC-067",
+      "QT-GC-068",
+      "QT-GC-069",
+      "QT-GC-071",
+      "QT-GC-072",
+      "QT-GC-074",
+      "QT-GC-075"
+    ],
+    "completed_batch_decision_review_count": 21,
+    "completed_batch_decision_review_ids": [
+      "QT-DR-A-001",
+      "QT-DR-A-002",
+      "QT-DR-A-003",
+      "QT-DR-A-004",
+      "QT-DR-A-005",
+      "QT-DR-A-006",
+      "QT-DR-A-007",
+      "QT-DR-B-001",
+      "QT-DR-B-002",
+      "QT-DR-B-003",
+      "QT-DR-B-004",
+      "QT-DR-B-005",
+      "QT-DR-B-006",
+      "QT-DR-D-001",
+      "QT-DR-D-002",
+      "QT-DR-D-003",
+      "QT-DR-D-004",
+      "QT-REVIEW-C-001",
+      "QT-REVIEW-C-002",
+      "QT-REVIEW-C-003",
+      "QT-REVIEW-C-004"
+    ],
+    "coverage_candidate_count": 75,
+    "coverage_partition": {
+      "calibration_candidate_count": 12,
+      "phase_2b_batch_candidate_count": 63,
+      "duplicate_candidate_ids": [],
+      "missing_candidate_ids": [],
+      "complete": true
+    },
+    "final_registry_file": "docs/assurance/guarantees/registry.json",
+    "final_registry_guarantee_count": 75,
+    "final_registry_disposition_counts": {
+      "candidate": 6,
+      "contradicted": 3,
+      "implementation_property": 1,
+      "partially_enforced": 65
+    },
+    "final_registry_activation_counts": {
+      "unactivated": 75,
+      "active": 0
+    },
+    "candidate_guarantee_index": [
+      {
+        "candidate_id": "QT-GC-001",
+        "guarantee_id": "QT-GUAR-KNOWN-AT-PREFIX-INVARIANCE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-002",
+        "guarantee_id": "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-003",
+        "guarantee_id": "QT-GUAR-CANONICAL-FACT-APPEND-ONLY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-004",
+        "guarantee_id": "QT-GUAR-PROVIDER-FREE-CANONICAL-READS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-005",
+        "guarantee_id": "QT-GUAR-FROZEN-DATASET-REPLAY",
+        "disposition": "candidate",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-006",
+        "guarantee_id": "QT-GUAR-BACKTEST-FROZEN-BINDING",
+        "disposition": "candidate",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-007",
+        "guarantee_id": "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION",
+        "disposition": "candidate",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-008",
+        "guarantee_id": "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION",
+        "disposition": "candidate",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-009",
+        "guarantee_id": "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+        "disposition": "contradicted",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-010",
+        "guarantee_id": "QT-GUAR-CHECK-AUTHORITY-CEILING",
+        "disposition": "candidate",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-011",
+        "guarantee_id": "QT-GUAR-REPORTS-DURABLE-TRUTH-PROJECTION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-012",
+        "guarantee_id": "QT-GUAR-RUN-LIFECYCLE-LEDGER-AUTHORITY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-013",
+        "guarantee_id": "QT-GUAR-RUNTIME-PERSISTENCE-FAILURE-BOUNDARY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-014",
+        "guarantee_id": "QT-GUAR-SHARED-APPLICATION-CONTRACT",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-015",
+        "guarantee_id": "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-016",
+        "guarantee_id": "QT-GUAR-CANONICAL-MARKET-IDENTITY-ROUTING",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-017",
+        "guarantee_id": "QT-GUAR-TYPED-SPARSE-DATA-FAILURE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-018",
+        "guarantee_id": "QT-GUAR-BUDGETED-CLOSED-CANDLE-MARKET-STREAM",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-019",
+        "guarantee_id": "QT-GUAR-PROVIDER-CAPABILITY-AUTHORIZATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-020",
+        "guarantee_id": "QT-GUAR-TYPED-CONSUMER-FACT-REQUIREMENTS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-021",
+        "guarantee_id": "QT-GUAR-FENCED-IDEMPOTENT-SCHEDULED-COLLECTION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-022",
+        "guarantee_id": "QT-GUAR-DURABLE-VERIFIED-RAW-ARCHIVE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-023",
+        "guarantee_id": "QT-GUAR-PIN-SAFE-MARKET-DATA-LIFECYCLE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-024",
+        "guarantee_id": "QT-GUAR-INTERVAL-VALID-ORDER-BOOK-TRUTH",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-025",
+        "guarantee_id": "QT-GUAR-CODE-OWNED-AUDITED-COLLECTOR-CONTROL",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-026",
+        "guarantee_id": "QT-GUAR-PROVEN-ZERO-TRADE-COVERAGE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-027",
+        "guarantee_id": "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-028",
+        "guarantee_id": "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-029",
+        "guarantee_id": "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-030",
+        "guarantee_id": "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-031",
+        "guarantee_id": "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-032",
+        "guarantee_id": "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-033",
+        "guarantee_id": "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-034",
+        "guarantee_id": "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-035",
+        "guarantee_id": "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-036",
+        "guarantee_id": "QT-GUAR-MODE-AWARE-RUNTIME-COMPOSITION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-037",
+        "guarantee_id": "QT-GUAR-STRATEGY-INDEPENDENT-EXECUTION-ECONOMICS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-038",
+        "guarantee_id": "QT-GUAR-PINNED-EXECUTION-CONTEXTS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-039",
+        "guarantee_id": "QT-GUAR-EXPLICIT-EXECUTION-EXIT-POLICY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-040",
+        "guarantee_id": "QT-GUAR-POST-ONLY-SIGNAL-BAR-CAUSALITY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-041",
+        "guarantee_id": "QT-GUAR-PROTECTIVE-EXIT-RESIDUAL-TERMINAL-INTEGRITY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-042",
+        "guarantee_id": "QT-GUAR-EXECUTION-MODE-PLAYBACK-SEPARATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-043",
+        "guarantee_id": "QT-GUAR-RUNTIME-EXECUTION-OWNERSHIP-QUALITY-CEILING",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-044",
+        "guarantee_id": "QT-GUAR-CANONICAL-ORDER-LIFECYCLE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-045",
+        "guarantee_id": "QT-GUAR-FILL-SETTLEMENT-SINGLE-INGRESS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-046",
+        "guarantee_id": "QT-GUAR-WALLET-INITIALIZATION-AND-LEDGER-REPLAY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-047",
+        "guarantee_id": "QT-GUAR-SHARED-WALLET-MARKET-TIME-ARBITRATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-048",
+        "guarantee_id": "QT-GUAR-CANONICAL-FILL-ACCOUNTING-RECONCILIATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-049",
+        "guarantee_id": "QT-GUAR-REPLAY-CERTIFIED-EXECUTION-BOOK-TAPE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-050",
+        "guarantee_id": "QT-GUAR-PROJECTOR-ONLY-SELECTED-SYMBOL-READS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-051",
+        "guarantee_id": "QT-GUAR-BOTLENS-CURSOR-LINEAGE",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-052",
+        "guarantee_id": "QT-GUAR-BOTLENS-TYPED-READINESS",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-053",
+        "guarantee_id": "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-054",
+        "guarantee_id": "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-055",
+        "guarantee_id": "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-056",
+        "guarantee_id": "QT-GUAR-OPERATOR-CONSOLE-NONAUTHORITATIVE-SURFACE",
+        "disposition": "candidate",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-057",
+        "guarantee_id": "QT-GUAR-TRADE-MARKER-CAUSAL-CANDLE-PROJECTION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-058",
+        "guarantee_id": "QT-GUAR-PROVIDER-CREDENTIAL-REFERENCE-CONFINEMENT",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-059",
+        "guarantee_id": "QT-GUAR-V1-LOCAL-TRUST-BOUNDARY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-060",
+        "guarantee_id": "QT-GUAR-BOT-RUN-LEASE-OWNERSHIP",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-061",
+        "guarantee_id": "QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-062",
+        "guarantee_id": "QT-GUAR-ENUMERATED-AGENT-MUTATION-GATES",
+        "disposition": "contradicted",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-063",
+        "guarantee_id": "QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-064",
+        "guarantee_id": "QT-GUAR-BLOCKING-API-WORK-OFFLOAD",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-065",
+        "guarantee_id": "QT-GUAR-BOUNDED-NONCANONICAL-OBSERVABILITY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-066",
+        "guarantee_id": "QT-GUAR-SINGLE-LOKI-INGRESS-PER-TOPOLOGY",
+        "disposition": "contradicted",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-067",
+        "guarantee_id": "QT-GUAR-DIAGNOSTICS-NOT-EXECUTION-TRUTH",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-068",
+        "guarantee_id": "QT-GUAR-BOUNDED-TELEMETRY-CONTROL-DELIVERY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-069",
+        "guarantee_id": "QT-GUAR-ATTESTED-SINGLE-NODE-DEPLOYMENT",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-070",
+        "guarantee_id": "QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-071",
+        "guarantee_id": "QT-GUAR-SEMANTIC-OPERATIONAL-FINGERPRINT-SEPARATION",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-072",
+        "guarantee_id": "QT-GUAR-PR-VERIFICATION-TOPOLOGY",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-073",
+        "guarantee_id": "QT-GUAR-ARCHITECTURE-DOC-INDEX-INTEGRITY",
+        "disposition": "implementation_property",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-074",
+        "guarantee_id": "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      },
+      {
+        "candidate_id": "QT-GC-075",
+        "guarantee_id": "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+        "disposition": "partially_enforced",
+        "activation_status": "unactivated"
+      }
+    ],
+    "final_proof_catalog_file": "docs/assurance/guarantees/proof-catalog.json",
+    "completed_batch_proof_definition_count": 70,
+    "phase_2a_calibration_proof_definition_count": 15,
+    "final_proof_definition_count": 85,
+    "final_proof_profile_counts": {
+      "frontend-node": 8,
+      "manual-recovery": 1,
+      "python-db-isolated": 7,
+      "python-nondb": 69
+    },
+    "final_proof_kind_counts": {
+      "automated_test": 69,
+      "database_integration": 7,
+      "manual_procedure": 1,
+      "static_validation": 8
+    },
+    "final_proof_runner_counts": {
+      "manual": 1,
+      "node_test": 8,
+      "pytest": 76
+    },
+    "completed_batch_remediation_count": 59,
+    "phase_2a_calibration_remediation_count": 9,
+    "final_concrete_remediation_count": 68,
+    "accounting_note": "The disjoint 12-record Phase 2A calibration and 63 records in completed Batches A/B/C/D account for all 75 final registry records. Proofs are definitions only, all records remain unactivated, and DOC-CANDIDATE-LOCATOR-001 is a Phase 2B reference-integrity finding rather than a new terminology conflict."
+  },
+  "global_forbidden_before_approval": [
+    "Activating any guarantee or adding activation decision or attestation references.",
+    "Adopting, renaming, aliasing, deprecating, or replacing any proposed, blocked, or deferred glossary entry.",
+    "Changing product behavior or repairing product semantics from classification evidence.",
+    "Deleting, archiving, or replacing historical, validation, campaign, README, diagram, or other repository material.",
+    "Resolving, merging, suppressing, or choosing a winner in any normative or terminology conflict without its named review.",
+    "Treating implementation, tests, accepted ADRs, explanatory architecture, AGENTS.md, source-module contracts, this map, or the registry as automatic activation authority.",
+    "Treating a proof definition, selector presence, static alignment, or an unavailable environment as a proof result.",
+    "Using a live or production database, deployment, credential, or external-order path as a substitute for an isolated approved proof environment."
+  ],
+  "review_groups": [
+    {
+      "review_type": "authority_hierarchy_and_ownership",
+      "subsystem": "repository-wide",
+      "decisions": [
+        {
+          "id": "QT-RM-AUTH-001",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-AUTH-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "normative-contract-reviewer",
+            "research-governance-owner"
+          ],
+          "decision_needed": "Decide whether the autonomy matrix rule belongs in the existing normative contract hierarchy or whether the roadmap must be explicitly explanatory.",
+          "why_classification_cannot_settle": "The frozen roadmap asserts parallel normative status while the accepted hierarchy classifies architecture roadmaps as explanatory; evidence classification has no authority to promote or demote either source.",
+          "forbidden_before_approval": "Do not treat the roadmap as product authority, move its rule into a contract, or remove its normative wording."
+        },
+        {
+          "id": "QT-RM-AUTH-002",
+          "source_batch_review_ids": [
+            "QT-DR-A-002",
+            "QT-DR-A-005",
+            "QT-REVIEW-C-004"
+          ],
+          "source_finding_ids": [
+            "ARCH-COVERAGE-001",
+            "DOC-META-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-002",
+            "QT-GC-010",
+            "QT-GC-015",
+            "QT-GC-032",
+            "QT-GC-034",
+            "QT-GC-074",
+            "QT-GC-075"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+            "QT-GUAR-CHECK-AUTHORITY-CEILING",
+            "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+            "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+            "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+            "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+            "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION"
+          ],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "component-owner-reviewer",
+            "repository-governance-owner"
+          ],
+          "decision_needed": "Approve a canonical ownership source and validation model for documents, components, shared paths, and review roles without making this campaign directory permanent authority.",
+          "why_classification_cannot_settle": "Phase 1 found no CODEOWNERS or adopted owner metadata; current owner slugs and shared-path ownership are audit inferences only.",
+          "forbidden_before_approval": "Do not present inferred owners as repository authority, reassign components, or promote a classification owner slug into normative metadata."
+        },
+        {
+          "id": "QT-RM-AUTH-003",
+          "source_batch_review_ids": [
+            "QT-REVIEW-C-004"
+          ],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-026"
+          ],
+          "candidate_ids": [
+            "QT-GC-014",
+            "QT-GC-063",
+            "QT-GC-075"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+            "QT-GUAR-SHARED-APPLICATION-CONTRACT",
+            "QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY"
+          ],
+          "required_reviewers": [
+            "agent-governance-owner",
+            "normative-contract-reviewer",
+            "platform-contract-reviewer",
+            "repository-governance-owner"
+          ],
+          "decision_needed": "State the exact precedence and scope relationship between AGENTS.md contributor governance and normative platform behavior contracts.",
+          "why_classification_cannot_settle": "The frozen hierarchy recognizes both source classes but does not state a precedence rule precise enough to infer; Phase 2A therefore kept AGENTS.md nonactivating.",
+          "forbidden_before_approval": "Do not use AGENTS.md alone to activate a guarantee, override a platform contract, or convert contributor workflow text into product semantics."
+        },
+        {
+          "id": "QT-RM-AUTH-004",
+          "source_batch_review_ids": [
+            "QT-REVIEW-C-004"
+          ],
+          "source_finding_ids": [
+            "ARCH-COVERAGE-001",
+            "DOC-VALIDATION-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-026"
+          ],
+          "candidate_ids": [
+            "QT-GC-075"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES"
+          ],
+          "required_reviewers": [
+            "agent-governance-owner",
+            "application-interface-owner",
+            "architecture-documentation-owner"
+          ],
+          "decision_needed": "Classify each AGENTS.md workflow statement as authoritative, explanatory, or locally scoped and approve a closed enforcement denominator for the admitted repository workflows.",
+          "why_classification_cannot_settle": "Named Make, CLI, MCP, and architecture checks are representative evidence but do not close the distributed governance surface.",
+          "forbidden_before_approval": "Do not strengthen QT-GC-075, rewrite repository workflows, or infer universal enforcement from the named checks."
+        },
+        {
+          "id": "QT-RM-AUTH-005",
+          "source_batch_review_ids": [
+            "QT-DR-A-004"
+          ],
+          "source_finding_ids": [
+            "DOC-CONTRACT-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-017"
+          ],
+          "candidate_ids": [
+            "QT-GC-027",
+            "QT-GC-028",
+            "QT-GC-029",
+            "QT-GC-030",
+            "QT-GC-031"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+            "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+            "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+            "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+            "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+          ],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "component-owner-reviewer",
+            "indicator-runtime-owner",
+            "platform-contract-reviewer"
+          ],
+          "decision_needed": "Approve the discovery, ownership, and precedence rules for source-module contracts, including a reviewed component-owner and discovery allowlist before any activation path is admitted.",
+          "why_classification_cannot_settle": "Market Profile and Candle Stats use inconsistent contract placement, no canonical discovery registry exists, and Phase 2A intentionally represents source-module contracts without granting activation authority.",
+          "forbidden_before_approval": "Do not relocate semantic clauses automatically, call an explanatory document a module contract, or activate from a source-module contract."
+        },
+        {
+          "id": "QT-RM-AUTH-006",
+          "source_batch_review_ids": [
+            "QT-DR-A-002",
+            "QT-DR-A-004"
+          ],
+          "source_finding_ids": [
+            "REGISTRY-OWNERSHIP-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-016"
+          ],
+          "candidate_ids": [
+            "QT-GC-002",
+            "QT-GC-027",
+            "QT-GC-030"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+            "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+            "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+          ],
+          "required_reviewers": [
+            "botlens-projection-owner",
+            "frontend-owner",
+            "indicator-runtime-owner"
+          ],
+          "decision_needed": "Assign distinct owners and names to the typed runtime overlay registry and legacy plotting registry before considering consolidation.",
+          "why_classification_cannot_settle": "Both registries are active, semantically different implementation surfaces and neither has direct architecture ownership.",
+          "forbidden_before_approval": "Do not merge, delete, rename, or declare either registry redundant."
+        },
+        {
+          "id": "QT-RM-AUTH-007",
+          "source_batch_review_ids": [
+            "QT-DR-A-002",
+            "QT-DR-A-004"
+          ],
+          "source_finding_ids": [
+            "REGISTRY-DYNAMIC-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-002",
+            "QT-GC-027",
+            "QT-GC-028",
+            "QT-GC-029",
+            "QT-GC-030",
+            "QT-GC-074"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+            "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+            "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+            "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+            "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+            "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+          ],
+          "required_reviewers": [
+            "component-owner-reviewer",
+            "platform-contract-reviewer",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve a dynamic-attestation model that records both frozen built-ins and allowed runtime or import-time extension behavior for every open registry.",
+          "why_classification_cannot_settle": "Seven catalogs are intentionally extensible, so a frozen static list cannot establish a closed denominator.",
+          "forbidden_before_approval": "Do not describe an open registry as a permanently closed set or treat one static inventory as full proof."
+        }
+      ]
+    },
+    {
+      "review_type": "data_persistence_and_research_authority",
+      "subsystem": "data-and-research",
+      "decisions": [
+        {
+          "id": "QT-RM-DATA-001",
+          "source_batch_review_ids": [
+            "QT-DR-D-002"
+          ],
+          "source_finding_ids": [
+            "DOC-MARKET-STRUCTURE-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-004",
+            "QT-CONFLICT-013",
+            "QT-CONFLICT-014",
+            "QT-CONFLICT-015",
+            "QT-CONFLICT-020"
+          ],
+          "candidate_ids": [
+            "QT-GC-022",
+            "QT-GC-023",
+            "QT-GC-024",
+            "QT-GC-025",
+            "QT-GC-026"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-CODE-OWNED-AUDITED-COLLECTOR-CONTROL",
+            "QT-GUAR-DURABLE-VERIFIED-RAW-ARCHIVE",
+            "QT-GUAR-INTERVAL-VALID-ORDER-BOOK-TRUTH",
+            "QT-GUAR-PIN-SAFE-MARKET-DATA-LIFECYCLE",
+            "QT-GUAR-PROVEN-ZERO-TRADE-COVERAGE"
+          ],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "data-authority-owner",
+            "data-owner",
+            "documentation-assurance-owner",
+            "market-structure-owner"
+          ],
+          "decision_needed": "Reconcile the active market-structure boundary's implemented and later/proposed lifecycle language while preserving current-versus-historical storage distinctions.",
+          "why_classification_cannot_settle": "Batch D provides conservative classifications for the five candidates, but implementation evidence cannot repair the active explanatory document's retained proposed/later-campaign wording or decide its lifecycle authority.",
+          "forbidden_before_approval": "Do not rewrite the market-structure boundary, promote its explanatory clauses, change product semantics, or remove historical wording without the named review."
+        },
+        {
+          "id": "QT-RM-DATA-002",
+          "source_batch_review_ids": [
+            "QT-DR-A-001"
+          ],
+          "source_finding_ids": [
+            "SCHEMA-AUTH-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-006",
+            "QT-GC-007"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-BACKTEST-FROZEN-BINDING",
+            "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION"
+          ],
+          "required_reviewers": [
+            "data-authority-owner",
+            "database-owner",
+            "persistence-owner"
+          ],
+          "decision_needed": "Approve the enforcement owner and read order across ORM metadata, startup assertions, manual migrations, generated seed SQL, and Docker bootstrap.",
+          "why_classification_cannot_settle": "The frozen schema boundary is fragmented rather than demonstrably owned by one manifest, so a registry reference cannot choose the owner.",
+          "forbidden_before_approval": "Do not treat ORM declarations, a migration file, startup assertions, or Docker bootstrap alone as universal schema authority."
+        },
+        {
+          "id": "QT-RM-DATA-003",
+          "source_batch_review_ids": [
+            "QT-DR-A-001"
+          ],
+          "source_finding_ids": [
+            "ARCH-COVERAGE-001",
+            "SCHEMA-AUTH-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-008",
+            "QT-CONFLICT-014",
+            "QT-CONFLICT-019",
+            "QT-CONFLICT-025"
+          ],
+          "candidate_ids": [
+            "QT-GC-006",
+            "QT-GC-007",
+            "QT-GC-010"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-BACKTEST-FROZEN-BINDING",
+            "QT-GUAR-CHECK-AUTHORITY-CEILING",
+            "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION"
+          ],
+          "required_reviewers": [
+            "data-authority-owner",
+            "platform-contract-reviewer",
+            "research-authority-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Decide whether the conservatively worded Dataset-binding, consumer-admission, and Check-authority claims should remain candidates or receive separately adopted repository-level authority.",
+          "why_classification_cannot_settle": "Accepted ADRs and aligned behavior are decision/evidence inputs but cannot become adopted product guarantees by registry classification.",
+          "forbidden_before_approval": "Do not promote these candidates to enforced, activate them, universalize one consumer's readiness policy, or infer promotion/scientific authority from a Check."
+        },
+        {
+          "id": "QT-RM-RESEARCH-001",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-007",
+            "QT-CONFLICT-010"
+          ],
+          "candidate_ids": [
+            "QT-GC-008",
+            "QT-GC-009",
+            "QT-GC-010"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-CHECK-AUTHORITY-CEILING",
+            "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+            "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION"
+          ],
+          "required_reviewers": [
+            "normative-contract-reviewer",
+            "research-memory-owner",
+            "research-orchestration-owner"
+          ],
+          "decision_needed": "Approve explicit supersession and promotion-eligibility wording for Check preview, frozen evidence, and Research Observation creation.",
+          "why_classification_cannot_settle": "Older Check documentation conflicts with accepted ADR 0062 and current service behavior; the two affected glossary entries remain blocked.",
+          "forbidden_before_approval": "Do not change older Check/Observation semantics, adopt QT-TERM-006 or QT-TERM-012, or infer automatic Observation creation."
+        },
+        {
+          "id": "QT-RM-DATA-005",
+          "source_batch_review_ids": [
+            "QT-DR-D-001"
+          ],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-011",
+            "QT-CONFLICT-012"
+          ],
+          "candidate_ids": [
+            "QT-GC-016"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-CANONICAL-MARKET-IDENTITY-ROUTING"
+          ],
+          "required_reviewers": [
+            "data-owner",
+            "decision-layer-owner",
+            "runtime-owner"
+          ],
+          "decision_needed": "Decide which strategy alias-bearing inputs remain supported lookup hints and approve a closed route inventory proving that canonical linked instrument and source identities remain authoritative.",
+          "why_classification_cannot_settle": "The named collection, API, and runtime paths support a partial boundary, but only the owning subsystems can decide the compatibility surface and complete its denominator.",
+          "forbidden_before_approval": "Do not promote or activate the claim, reject every provider or venue alias repository-wide, or change strategy identity semantics."
+        },
+        {
+          "id": "QT-RM-DATA-006",
+          "source_batch_review_ids": [
+            "QT-DR-D-003"
+          ],
+          "source_finding_ids": [
+            "DOC-CANDIDATE-LOCATOR-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-026"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-PROVEN-ZERO-TRADE-COVERAGE"
+          ],
+          "required_reviewers": [
+            "data-owner",
+            "documentation-assurance-owner"
+          ],
+          "decision_needed": "Approve a separately authorized correction path for the Phase 1 QT-GC-026 locator discrepancy while preserving the frozen audit trail.",
+          "why_classification_cannot_settle": "The cited data-plane lines 380 and 1051 are unrelated; accepted ADR 0053 lines 128-132 and data-plane line 1044 support the intended claim, but classification cannot silently replace frozen Phase 1 locators.",
+          "forbidden_before_approval": "Do not edit Phase 1 findings, silently substitute locators, treat the corrected evidence as a new product rule, or merge this reference-integrity finding into DOC-MARKET-STRUCTURE-001."
+        },
+        {
+          "id": "QT-RM-DATA-007",
+          "source_batch_review_ids": [
+            "QT-DR-D-004"
+          ],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-011",
+            "QT-CONFLICT-012",
+            "QT-CONFLICT-013",
+            "QT-CONFLICT-014"
+          ],
+          "candidate_ids": [
+            "QT-GC-019",
+            "QT-GC-020",
+            "QT-GC-021"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-FENCED-IDEMPOTENT-SCHEDULED-COLLECTION",
+            "QT-GUAR-PROVIDER-CAPABILITY-AUTHORIZATION",
+            "QT-GUAR-TYPED-CONSUMER-FACT-REQUIREMENTS"
+          ],
+          "required_reviewers": [
+            "collection-owner",
+            "consumer-contract-owner",
+            "data-owner",
+            "provider-owner",
+            "security-owner"
+          ],
+          "decision_needed": "Approve closed provider-operation, consumer-requirement, and collector-family inventories before the representative market-data boundaries can be described as whole-system coverage.",
+          "why_classification_cannot_settle": "The frozen paths support partial claims, but open provider, consumer, and collector surfaces prevent evidence classification from inventing a closed denominator.",
+          "forbidden_before_approval": "Do not promote or activate these guarantees, claim universal market-data coverage, or change provider, consumer, or collection semantics from the representative evidence."
+        }
+      ]
+    },
+    {
+      "review_type": "indicator_strategy_and_experiment_denominators",
+      "subsystem": "indicator-and-decision-layer",
+      "decisions": [
+        {
+          "id": "QT-RM-IND-001",
+          "source_batch_review_ids": [
+            "QT-DR-A-002"
+          ],
+          "source_finding_ids": [
+            "ARCH-COVERAGE-001",
+            "CI-TRACE-001",
+            "REGISTRY-DYNAMIC-001",
+            "REGISTRY-OWNERSHIP-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-016",
+            "QT-CONFLICT-017"
+          ],
+          "candidate_ids": [
+            "QT-GC-002"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-DERIVED-OUTPUT-TIMELINE"
+          ],
+          "required_reviewers": [
+            "execution-runtime-owner",
+            "indicator-runtime-owner",
+            "platform-contract-reviewer",
+            "reporting-owner"
+          ],
+          "decision_needed": "Approve a closed causal, projection, reporting, and reconstruction consumer denominator without selecting between unresolved reconstruction authorities.",
+          "why_classification_cannot_settle": "Representative guards do not enumerate every consumer or reconstruction path, and the registry/terminology conflicts remain open.",
+          "forbidden_before_approval": "Do not broaden the claim beyond named paths, choose a registry authority, reconstruct product semantics, or activate the guarantee."
+        },
+        {
+          "id": "QT-RM-IND-002",
+          "source_batch_review_ids": [
+            "QT-DR-A-004"
+          ],
+          "source_finding_ids": [
+            "CI-TRACE-001",
+            "DOC-CONTRACT-001",
+            "REGISTRY-DYNAMIC-001",
+            "REGISTRY-OWNERSHIP-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-016",
+            "QT-CONFLICT-017",
+            "QT-CONFLICT-019"
+          ],
+          "candidate_ids": [
+            "QT-GC-027",
+            "QT-GC-028",
+            "QT-GC-029",
+            "QT-GC-030",
+            "QT-GC-031"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+            "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+            "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+            "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+            "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+          ],
+          "required_reviewers": [
+            "decision-layer-owner",
+            "indicator-runtime-owner",
+            "platform-contract-reviewer",
+            "testing-owner"
+          ],
+          "decision_needed": "Confirm the conservative Indicator claim scopes and approve closed registered-output, publication, projection, lifecycle, and Strategy-read denominators.",
+          "why_classification_cannot_settle": "The named paths are representative, dynamic registries are open, component-contract discovery is unresolved, and the terminology is unadopted.",
+          "forbidden_before_approval": "Do not consolidate registries, broaden the dynamic denominator, change Indicator or Strategy semantics, adopt terminology, or activate these guarantees."
+        },
+        {
+          "id": "QT-RM-STRAT-001",
+          "source_batch_review_ids": [
+            "QT-DR-A-005"
+          ],
+          "source_finding_ids": [
+            "ARCH-COVERAGE-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-018",
+            "QT-CONFLICT-019",
+            "QT-CONFLICT-020",
+            "QT-CONFLICT-024"
+          ],
+          "candidate_ids": [
+            "QT-GC-032",
+            "QT-GC-033",
+            "QT-GC-034"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+            "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+            "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY"
+          ],
+          "required_reviewers": [
+            "decision-layer-owner",
+            "execution-runtime-owner",
+            "strategy-service-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve the producer, filter/operator, and preview/Bot/runtime/reporting/provenance consumer denominators for the accepted Strategy decisions.",
+          "why_classification_cannot_settle": "Accepted ADRs provide decision authority and named code provides evidence, but neither closes the system surface or activates a guarantee.",
+          "forbidden_before_approval": "Do not change Strategy/Variant semantics, resolve identity or fingerprint terminology, promote the dispositions, or activate the guarantees."
+        },
+        {
+          "id": "QT-RM-EXPERIMENT-001",
+          "source_batch_review_ids": [
+            "QT-DR-A-006"
+          ],
+          "source_finding_ids": [
+            "CI-TRACE-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-019"
+          ],
+          "candidate_ids": [
+            "QT-GC-035"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN"
+          ],
+          "required_reviewers": [
+            "experiment-orchestration-owner",
+            "research-orchestration-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve the property domain and resume/tamper matrix needed to substantiate immutable hashing, step-diff limits, declared-variant verification, deterministic permutations, and resume safety.",
+          "why_classification_cannot_settle": "The accepted ADR and examples define intent and representative behavior but are not a complete property proof.",
+          "forbidden_before_approval": "Do not change experiment or resume policy, strengthen the disposition, adopt Strategy-stage terminology, or activate the guarantee."
+        }
+      ]
+    },
+    {
+      "review_type": "execution_runtime_accounting_and_playback",
+      "subsystem": "execution-runtime",
+      "decisions": [
+        {
+          "id": "QT-RM-EXEC-001",
+          "source_batch_review_ids": [
+            "QT-DR-A-003"
+          ],
+          "source_finding_ids": [
+            "ARCH-COVERAGE-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-025"
+          ],
+          "candidate_ids": [
+            "QT-GC-015"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED"
+          ],
+          "required_reviewers": [
+            "execution-runtime-owner",
+            "security-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve a closed repository inventory proving that no unreviewed external-order submission path exists across adapters, composition roots, credentials, and transports.",
+          "why_classification_cannot_settle": "Direct startup and simulation guards exist, but repository-wide absence requires an owner-reviewed static denominator.",
+          "forbidden_before_approval": "Do not enable external submission, treat credentials or a live label as authority, promote the disposition, or activate the guarantee."
+        },
+        {
+          "id": "QT-RM-EXEC-002",
+          "source_batch_review_ids": [
+            "QT-DR-B-001"
+          ],
+          "source_finding_ids": [
+            "DOC-RUNTIME-COMPOSITION-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-036"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-MODE-AWARE-RUNTIME-COMPOSITION"
+          ],
+          "required_reviewers": [
+            "architecture-owner",
+            "execution-runtime-owner"
+          ],
+          "decision_needed": "Reconcile explanatory paper/live lifecycle language with the accepted composition decision and the closed live-submission boundary.",
+          "why_classification_cannot_settle": "Paper behavior is implemented while explanatory sources disagree about lifecycle and one design remains draft-labeled.",
+          "forbidden_before_approval": "Do not amend the ADR, promote draft explanatory design, change paper/live product semantics, or open live authority."
+        },
+        {
+          "id": "QT-RM-EXEC-003",
+          "source_batch_review_ids": [
+            "QT-DR-B-002"
+          ],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-020",
+            "QT-CONFLICT-024"
+          ],
+          "candidate_ids": [
+            "QT-GC-037",
+            "QT-GC-038"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-PINNED-EXECUTION-CONTEXTS",
+            "QT-GUAR-STRATEGY-INDEPENDENT-EXECUTION-ECONOMICS"
+          ],
+          "required_reviewers": [
+            "execution-runtime-owner",
+            "instruments-owner"
+          ],
+          "decision_needed": "Approve wording that treats SeriesExecutionProfile as compiler/input authority and ResolvedExecutionContext as immutable run-scoped execution authority.",
+          "why_classification_cannot_settle": "The accepted decisions distinguish the stages, but their terminology and ownership relationship remains unadopted.",
+          "forbidden_before_approval": "Do not adopt QT-TERM-042 or QT-TERM-043, collapse profile into context, or resolve QT-CONFLICT-020 or QT-CONFLICT-024."
+        },
+        {
+          "id": "QT-RM-EXEC-004",
+          "source_batch_review_ids": [
+            "QT-DR-B-003"
+          ],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-020"
+          ],
+          "candidate_ids": [
+            "QT-GC-040"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-POST-ONLY-SIGNAL-BAR-CAUSALITY"
+          ],
+          "required_reviewers": [
+            "execution-runtime-owner",
+            "platform-contract-reviewer"
+          ],
+          "decision_needed": "Decide whether the claim is formally narrowed to resting limit-maker signal-bar range-fill causality while preserving immediate signal-close market entry.",
+          "why_classification_cannot_settle": "The conservative draft scope matches the named behavior, but only the active execution contract owners can approve normative narrowing.",
+          "forbidden_before_approval": "Do not change the execution contract or imply that immediate market entry is forbidden."
+        },
+        {
+          "id": "QT-RM-EXEC-005",
+          "source_batch_review_ids": [
+            "QT-DR-B-004"
+          ],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-020"
+          ],
+          "candidate_ids": [
+            "QT-GC-042"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-EXECUTION-MODE-PLAYBACK-SEPARATION"
+          ],
+          "required_reviewers": [
+            "execution-runtime-owner",
+            "platform-contract-reviewer",
+            "playback-owner"
+          ],
+          "decision_needed": "Approve wording for common causal discipline across FAST and FULL without implying identical resolution-specific fills or outcomes.",
+          "why_classification_cannot_settle": "The accepted separation decision and active contract preserve distinct mode rules, but the shared-semantics phrase remains ambiguous.",
+          "forbidden_before_approval": "Do not claim FAST/FULL outcome equality, change either mode's rules, or resolve QT-CONFLICT-020."
+        },
+        {
+          "id": "QT-RM-EXEC-006",
+          "source_batch_review_ids": [
+            "QT-DR-B-005"
+          ],
+          "source_finding_ids": [],
+          "source_conflict_ids": [
+            "QT-CONFLICT-020",
+            "QT-CONFLICT-024"
+          ],
+          "candidate_ids": [
+            "QT-GC-043"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-RUNTIME-EXECUTION-OWNERSHIP-QUALITY-CEILING"
+          ],
+          "required_reviewers": [
+            "accounting-owner",
+            "execution-model-owner",
+            "execution-runtime-owner"
+          ],
+          "decision_needed": "Approve the fee, slippage, rounding, liquidity, queue, and reporting denominator defining the minimum execution-quality label across admitted paths.",
+          "why_classification_cannot_settle": "Named execution-context paths are evidence, but no closed economic/accounting denominator exists.",
+          "forbidden_before_approval": "Do not repair economic semantics, declare complete execution quality, or resolve QT-CONFLICT-020 or QT-CONFLICT-024."
+        }
+      ]
+    },
+    {
+      "review_type": "documentation_reconciliation_and_lifecycle",
+      "subsystem": "architecture-and-operations-documentation",
+      "decisions": [
+        {
+          "id": "QT-RM-DOC-001",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-INDEX-001",
+            "DOC-INDEX-002"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-006"
+          ],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "adr-index-owner",
+            "architecture-documentation-owner"
+          ],
+          "decision_needed": "Approve reconciliation of the manual ADR index to accepted ADR 0048 metadata and inclusion of accepted ADR 0064.",
+          "why_classification_cannot_settle": "Classification records the primary/generated metadata but is not authority to rewrite an ADR index.",
+          "forbidden_before_approval": "Do not change ADR lifecycle metadata, imply ADR 0048 is proposed, or omit ADR 0064 by treating the index as authoritative."
+        },
+        {
+          "id": "QT-RM-DOC-002",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-LINK-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "research-campaign-owner"
+          ],
+          "decision_needed": "Choose the reviewed replacement destinations or removal treatment for the two nonexistent BTC campaign dossier links.",
+          "why_classification_cannot_settle": "The frozen scan proves the targets are absent but cannot infer whether they were renamed, intentionally removed, or should be restored.",
+          "forbidden_before_approval": "Do not invent replacement links, restore dossiers, or delete the navigation entries."
+        },
+        {
+          "id": "QT-RM-DOC-003",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-MODEL-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "cli-owner",
+            "frontend-owner",
+            "research-memory-owner"
+          ],
+          "decision_needed": "Approve the current architecture-model and boundary-map representation of the CLI, operator console, and research-memory components.",
+          "why_classification_cannot_settle": "The active component documents and stale model disagree, but only architecture owners can approve the intended model structure.",
+          "forbidden_before_approval": "Do not delete active component boundaries or rewrite the architecture model automatically from code presence."
+        },
+        {
+          "id": "QT-RM-DOC-004",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-LIFECYCLE-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "historical-records-owner"
+          ],
+          "decision_needed": "Approve lifecycle metadata and retained-history treatment for completed campaigns, validations, migrations, and research dossiers.",
+          "why_classification_cannot_settle": "Content demonstrates historical completion while frontmatter is active or missing; classification cannot archive or relabel records.",
+          "forbidden_before_approval": "Do not archive, delete, relabel, or move any listed historical or validation record."
+        },
+        {
+          "id": "QT-RM-DOC-005",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-STALE-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "frontend-owner"
+          ],
+          "decision_needed": "Approve replacement, retention, or deletion treatment for the generic React/Vite frontend README.",
+          "why_classification_cannot_settle": "Staleness is evidenced, but deletion or replacement changes maintained documentation and requires the owning subsystem.",
+          "forbidden_before_approval": "Do not delete or replace the frontend README."
+        },
+        {
+          "id": "QT-RM-DOC-006",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-OPS-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "makefile-owner",
+            "observability-owner",
+            "operations-owner"
+          ],
+          "decision_needed": "Approve the supported Grafana backup and restore workflow or removal of the two nonexistent Make-target instructions.",
+          "why_classification_cannot_settle": "The Makefile absence is factual, but the correct operational replacement is owner-controlled.",
+          "forbidden_before_approval": "Do not invent Make targets, change operator workflow, or delete the instructions."
+        },
+        {
+          "id": "QT-RM-DOC-007",
+          "source_batch_review_ids": [
+            "QT-REVIEW-C-004"
+          ],
+          "source_finding_ids": [
+            "DOC-VALIDATION-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-026"
+          ],
+          "candidate_ids": [
+            "QT-GC-073",
+            "QT-GC-075"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+            "QT-GUAR-ARCHITECTURE-DOC-INDEX-INTEGRITY"
+          ],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "docs-tooling-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve the Phase 3 validation denominator for owner values, paths, links, duplicate mappings, frontmatter completeness, and clean deterministic regeneration.",
+          "why_classification_cannot_settle": "The current validator proves only a narrower index contract and mutates the generated index before testing.",
+          "forbidden_before_approval": "Do not claim validate-docs proves clean regeneration, complete path/link integrity, or owner authority."
+        },
+        {
+          "id": "QT-RM-DOC-008",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "DOC-LINEAGE-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [],
+          "guarantee_ids": [],
+          "required_reviewers": [
+            "architecture-documentation-owner",
+            "generated-assets-owner"
+          ],
+          "decision_needed": "Approve source/generator lineage or intentional orphan treatment for the unreferenced platform-flow SVG and policy for optional Mermaid renders.",
+          "why_classification_cannot_settle": "The scan can establish missing lineage but cannot infer a generator or deletion intent.",
+          "forbidden_before_approval": "Do not call the SVG generated, delete it, or require missing renders without owner review."
+        }
+      ]
+    },
+    {
+      "review_type": "security_mutation_deployment_and_observability",
+      "subsystem": "security-and-deployment",
+      "decisions": [
+        {
+          "id": "QT-RM-SEC-001",
+          "source_batch_review_ids": [
+            "QT-REVIEW-C-001"
+          ],
+          "source_finding_ids": [
+            "DOC-MUTATION-SCOPE-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-062"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-ENUMERATED-AGENT-MUTATION-GATES"
+          ],
+          "required_reviewers": [
+            "application-interface-owner",
+            "normative-contract-reviewer",
+            "research-governance-owner"
+          ],
+          "decision_needed": "Resolve whether ADR 0048 creates one universal agent-mutation gate, separates baseline mutation controls from research-promotion evidence, or needs another explicitly enumerated scope.",
+          "why_classification_cannot_settle": "ADR 0048 overstates universal coverage while acknowledging exclusions and nonuniform enforcement; named CLI and MCP guards prove only enumerated paths.",
+          "forbidden_before_approval": "Do not universalize the gate, narrow its normative scope, or repair interface/product semantics."
+        },
+        {
+          "id": "QT-RM-OBS-001",
+          "source_batch_review_ids": [
+            "QT-REVIEW-C-002"
+          ],
+          "source_finding_ids": [
+            "DOC-LOG-INGRESS-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-066"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-SINGLE-LOKI-INGRESS-PER-TOPOLOGY"
+          ],
+          "required_reviewers": [
+            "deployment-owner",
+            "observability-owner"
+          ],
+          "decision_needed": "Reconcile the Alloy server amendment with the retained Promtail-only ADR body and identify the authoritative shipper for each supported topology.",
+          "why_classification_cannot_settle": "Compose alignment is behavior evidence, while the accepted ADR contains two conflicting normative clauses.",
+          "forbidden_before_approval": "Do not select Promtail or Alloy as universal authority, rewrite the ADR, or resolve DOC-LOG-INGRESS-001 by registry classification."
+        }
+      ]
+    },
+    {
+      "review_type": "testing_ci_frontend_and_proof_topology",
+      "subsystem": "testing-and-frontend",
+      "decisions": [
+        {
+          "id": "QT-RM-FRONTEND-001",
+          "source_batch_review_ids": [
+            "QT-DR-B-006"
+          ],
+          "source_finding_ids": [
+            "DOC-PATH-001",
+            "TEST-SCOPE-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-056"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-OPERATOR-CONSOLE-NONAUTHORITATIVE-SURFACE"
+          ],
+          "required_reviewers": [
+            "collector-operations-owner",
+            "frontend-owner",
+            "operator-console-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Choose the normative owner for the operator-console nonauthority rule and approve the complete frontend source roots for the mutation/import scan.",
+          "why_classification_cannot_settle": "The explanatory architecture names a missing path and the current test silently skips absent roots, so implementation evidence cannot close the denominator.",
+          "forbidden_before_approval": "Do not create or remove frontend paths, change UI behavior, promote the candidate, or claim the current scan proves a complete read-only surface."
+        },
+        {
+          "id": "QT-RM-CI-001",
+          "source_batch_review_ids": [
+            "QT-REVIEW-C-003"
+          ],
+          "source_finding_ids": [
+            "DOC-CI-TOPOLOGY-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-026"
+          ],
+          "candidate_ids": [
+            "QT-GC-072"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-PR-VERIFICATION-TOPOLOGY"
+          ],
+          "required_reviewers": [
+            "ci-owner",
+            "database-test-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve exact job-versus-step terminology and reconcile testing strategy documentation to the frozen four-job workflow topology.",
+          "why_classification_cannot_settle": "The workflow shows four jobs and distinct clean-bootstrap/database-marked steps, while current topology prose says no database runner exists.",
+          "forbidden_before_approval": "Do not call steps independent jobs, change CI topology, or treat one suite/profile as the entire validation universe."
+        },
+        {
+          "id": "QT-RM-CI-002",
+          "source_batch_review_ids": [
+            "QT-DR-A-002",
+            "QT-DR-A-004",
+            "QT-DR-A-006"
+          ],
+          "source_finding_ids": [
+            "CI-TRACE-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-026"
+          ],
+          "candidate_ids": [
+            "QT-GC-002",
+            "QT-GC-028",
+            "QT-GC-031",
+            "QT-GC-035"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+            "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+            "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+            "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS"
+          ],
+          "required_reviewers": [
+            "ci-owner",
+            "component-owner-reviewer",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve traceability rules connecting each active component and guarantee denominator to exact CI jobs, suites, profiles, collected cases, and direct test paths.",
+          "why_classification_cannot_settle": "Seventy backend test files lack profile markers and thirty active components lack direct test paths, although generic selection may still execute them.",
+          "forbidden_before_approval": "Do not call the code untested, infer profile membership, or report one selector as the whole corpus."
+        },
+        {
+          "id": "QT-RM-FRONTEND-002",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "TEST-GAP-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-026"
+          ],
+          "candidate_ids": [
+            "QT-GC-050",
+            "QT-GC-051",
+            "QT-GC-052",
+            "QT-GC-053",
+            "QT-GC-054",
+            "QT-GC-055",
+            "QT-GC-056",
+            "QT-GC-057"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+            "QT-GUAR-BOTLENS-CURSOR-LINEAGE",
+            "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+            "QT-GUAR-BOTLENS-TYPED-READINESS",
+            "QT-GUAR-OPERATOR-CONSOLE-NONAUTHORITATIVE-SURFACE",
+            "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+            "QT-GUAR-PROJECTOR-ONLY-SELECTED-SYMBOL-READS",
+            "QT-GUAR-TRADE-MARKER-CAUSAL-CANDLE-PROJECTION"
+          ],
+          "required_reviewers": [
+            "frontend-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Approve whether and how the two tracked JSX/Vitest suites enter the supported frontend test topology, including dependencies and selectors.",
+          "why_classification_cannot_settle": "The package command discovers Node test files but not the JSX suites, so 44 declared tests are outside the configured runner.",
+          "forbidden_before_approval": "Do not claim npm test covers the JSX suites, delete the suites, add dependencies, or change the test command."
+        },
+        {
+          "id": "QT-RM-FRONTEND-003",
+          "source_batch_review_ids": [],
+          "source_finding_ids": [
+            "TEST-ENV-001"
+          ],
+          "source_conflict_ids": [],
+          "candidate_ids": [
+            "QT-GC-050",
+            "QT-GC-051",
+            "QT-GC-052",
+            "QT-GC-053",
+            "QT-GC-054",
+            "QT-GC-055",
+            "QT-GC-056",
+            "QT-GC-057"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+            "QT-GUAR-BOTLENS-CURSOR-LINEAGE",
+            "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+            "QT-GUAR-BOTLENS-TYPED-READINESS",
+            "QT-GUAR-OPERATOR-CONSOLE-NONAUTHORITATIVE-SURFACE",
+            "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+            "QT-GUAR-PROJECTOR-ONLY-SELECTED-SYMBOL-READS",
+            "QT-GUAR-TRADE-MARKER-CAUSAL-CANDLE-PROJECTION"
+          ],
+          "required_reviewers": [
+            "frontend-owner",
+            "proof-environment-owner",
+            "testing-owner"
+          ],
+          "decision_needed": "Admit a reproducible frontend-node environment and rerun the exact frontend proof definitions with dependencies installed.",
+          "why_classification_cannot_settle": "The frozen attempt was unavailable because node_modules was absent; unavailable is neither PASS nor FAIL.",
+          "forbidden_before_approval": "Do not record FAIL or PASS, infer behavior from missing packages, or activate any frontend guarantee."
+        }
+      ]
+    },
+    {
+      "review_type": "terminology_adoption",
+      "subsystem": "cross-domain",
+      "decisions": [
+        {
+          "id": "QT-RM-TERM-001",
+          "source_batch_review_ids": [
+            "QT-DR-A-007"
+          ],
+          "source_finding_ids": [
+            "DOC-CONTRACT-001",
+            "REGISTRY-OWNERSHIP-001",
+            "SCHEMA-AUTH-001"
+          ],
+          "source_conflict_ids": [
+            "QT-CONFLICT-008",
+            "QT-CONFLICT-014",
+            "QT-CONFLICT-016",
+            "QT-CONFLICT-017",
+            "QT-CONFLICT-018",
+            "QT-CONFLICT-019",
+            "QT-CONFLICT-020",
+            "QT-CONFLICT-024",
+            "QT-CONFLICT-025"
+          ],
+          "candidate_ids": [
+            "QT-GC-002",
+            "QT-GC-006",
+            "QT-GC-007",
+            "QT-GC-010",
+            "QT-GC-015",
+            "QT-GC-027",
+            "QT-GC-028",
+            "QT-GC-029",
+            "QT-GC-030",
+            "QT-GC-031",
+            "QT-GC-032",
+            "QT-GC-033",
+            "QT-GC-034",
+            "QT-GC-035"
+          ],
+          "guarantee_ids": [
+            "QT-GUAR-BACKTEST-FROZEN-BINDING",
+            "QT-GUAR-CHECK-AUTHORITY-CEILING",
+            "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION",
+            "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+            "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+            "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+            "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+            "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+            "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+            "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+            "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+            "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH",
+            "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+            "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY"
+          ],
+          "required_reviewers": [
+            "domain-terminology-owner",
+            "platform-contract-reviewer"
+          ],
+          "decision_needed": "Separately adopt, defer, rename, or reject each glossary proposal and alias action without treating classification as adoption.",
+          "why_classification_cannot_settle": "All 55 entries are proposal-model records subordinate to existing authority; blocked and deferred entries retain unresolved source, ownership, or conflict questions.",
+          "forbidden_before_approval": "Do not adopt any term, alias, deprecation, or replacement, and do not use proposed wording unqualified as normative vocabulary."
+        }
+      ]
+    }
+  ],
+  "terminology_accounting": {
+    "total": 55,
+    "proposed": 34,
+    "blocked": 2,
+    "deferred": 19,
+    "adopted": 0,
+    "proposed_ids": [
+      "QT-TERM-001",
+      "QT-TERM-002",
+      "QT-TERM-003",
+      "QT-TERM-004",
+      "QT-TERM-005",
+      "QT-TERM-007",
+      "QT-TERM-008",
+      "QT-TERM-009",
+      "QT-TERM-010",
+      "QT-TERM-011",
+      "QT-TERM-013",
+      "QT-TERM-014",
+      "QT-TERM-015",
+      "QT-TERM-016",
+      "QT-TERM-018",
+      "QT-TERM-020",
+      "QT-TERM-022",
+      "QT-TERM-023",
+      "QT-TERM-024",
+      "QT-TERM-025",
+      "QT-TERM-026",
+      "QT-TERM-027",
+      "QT-TERM-037",
+      "QT-TERM-038",
+      "QT-TERM-040",
+      "QT-TERM-041",
+      "QT-TERM-046",
+      "QT-TERM-047",
+      "QT-TERM-048",
+      "QT-TERM-049",
+      "QT-TERM-050",
+      "QT-TERM-052",
+      "QT-TERM-053",
+      "QT-TERM-054"
+    ],
+    "blocked_ids": [
+      "QT-TERM-006",
+      "QT-TERM-012"
+    ],
+    "deferred_ids": [
+      "QT-TERM-017",
+      "QT-TERM-019",
+      "QT-TERM-021",
+      "QT-TERM-028",
+      "QT-TERM-029",
+      "QT-TERM-030",
+      "QT-TERM-031",
+      "QT-TERM-032",
+      "QT-TERM-033",
+      "QT-TERM-034",
+      "QT-TERM-035",
+      "QT-TERM-036",
+      "QT-TERM-039",
+      "QT-TERM-042",
+      "QT-TERM-043",
+      "QT-TERM-044",
+      "QT-TERM-045",
+      "QT-TERM-051",
+      "QT-TERM-055"
+    ],
+    "blocked_term_reviews": [
+      {
+        "term_id": "QT-TERM-006",
+        "source_conflict_ids": [
+          "QT-CONFLICT-007",
+          "QT-CONFLICT-010"
+        ],
+        "required_reviewers": [
+          "normative-contract-reviewer",
+          "research-memory-owner",
+          "research-orchestration-owner"
+        ],
+        "decision_needed": "Resolve the older automatic Observation-creation wording against accepted ADR 0062 and current promotion eligibility before defining Research Observation normatively.",
+        "forbidden_before_approval": "Do not adopt QT-TERM-006 or infer that a Check automatically creates or links a Research Observation."
+      },
+      {
+        "term_id": "QT-TERM-012",
+        "source_conflict_ids": [
+          "QT-CONFLICT-007"
+        ],
+        "required_reviewers": [
+          "normative-contract-reviewer",
+          "research-memory-owner",
+          "research-orchestration-owner"
+        ],
+        "decision_needed": "Approve the preview/evidence boundary and explicit supersession wording before defining Check preview normatively.",
+        "forbidden_before_approval": "Do not adopt QT-TERM-012 or allow preview to persist evidence or create an Observation by implication."
+      }
+    ],
+    "alias_accounting": {
+      "total": 20,
+      "adopted_alias_actions": 0,
+      "boundary": "QT-ALIAS-001 through QT-ALIAS-020 remain individual Phase 1 findings; no alias, deprecation, replacement, or removal is approved by this map."
+    },
+    "conflict_reviews": [
+      {
+        "conflict_id": "QT-CONFLICT-001",
+        "subsystem": "data-persistence",
+        "candidate_ids": [],
+        "guarantee_ids": [],
+        "required_reviewers": [
+          "architecture-documentation-owner",
+          "data-authority-owner",
+          "persistence-owner"
+        ],
+        "decision_needed": "Approve wording that separates the current Canonical Fact store from retired family-table history in the active data boundary.",
+        "why_classification_cannot_settle": "The active document itself presents both storage forms and classification cannot choose or rewrite normative storage meaning.",
+        "forbidden_before_approval": "Do not present retired family tables as current truth or delete their historical lineage."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-002",
+        "subsystem": "persistence",
+        "candidate_ids": [],
+        "guarantee_ids": [],
+        "required_reviewers": [
+          "architecture-documentation-owner",
+          "data-authority-owner",
+          "persistence-owner"
+        ],
+        "decision_needed": "Reconcile the persistence boundary's current fact_versions statement with its later list of retired family tables.",
+        "why_classification_cannot_settle": "Both claims occur in one active explanatory boundary and evidence classification cannot determine intended maintained wording.",
+        "forbidden_before_approval": "Do not alter persistence semantics, remove migration history, or call the old table list current."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-003",
+        "subsystem": "data-provider-documentation",
+        "candidate_ids": [],
+        "guarantee_ids": [],
+        "required_reviewers": [
+          "architecture-documentation-owner",
+          "data-authority-owner",
+          "provider-owner"
+        ],
+        "decision_needed": "Approve replacement of obsolete numeric-table and deferred-status instructions while preserving active family DTO vocabulary.",
+        "why_classification_cannot_settle": "Provider and engineering guides mix current canonical schema with obsolete storage guidance; behavior evidence does not authorize documentation replacement.",
+        "forbidden_before_approval": "Do not remove active DTO terms or rewrite provider workflows from inferred storage intent."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-004",
+        "subsystem": "market-structure-data",
+        "candidate_ids": [
+          "QT-GC-022",
+          "QT-GC-023",
+          "QT-GC-024",
+          "QT-GC-025",
+          "QT-GC-026"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CODE-OWNED-AUDITED-COLLECTOR-CONTROL",
+          "QT-GUAR-DURABLE-VERIFIED-RAW-ARCHIVE",
+          "QT-GUAR-INTERVAL-VALID-ORDER-BOOK-TRUTH",
+          "QT-GUAR-PIN-SAFE-MARKET-DATA-LIFECYCLE",
+          "QT-GUAR-PROVEN-ZERO-TRADE-COVERAGE"
+        ],
+        "required_reviewers": [
+          "architecture-documentation-owner",
+          "data-authority-owner",
+          "market-structure-owner"
+        ],
+        "decision_needed": "Separate the current fact_versions market-structure mapping from retired specialized-table history and later-phase wording.",
+        "why_classification_cannot_settle": "Batch D supplies conservative classifications for the five candidates, but the active boundary retains the lifecycle conflict and classification cannot authorize its repair.",
+        "forbidden_before_approval": "Do not choose a storage owner, rewrite the data plane, or treat proposed-phase prose as current authority."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-005",
+        "subsystem": "data-architecture-decisions",
+        "candidate_ids": [],
+        "guarantee_ids": [],
+        "required_reviewers": [
+          "adr-index-owner",
+          "architecture-documentation-owner",
+          "data-authority-owner"
+        ],
+        "decision_needed": "Approve explicit ADR 0061-to-0063 supersession and cutover lineage.",
+        "why_classification_cannot_settle": "ADR 0061's proposed-status statement is stale after ADR 0063 acceptance, but only ADR maintainers can record decision lineage.",
+        "forbidden_before_approval": "Do not change ADR status/history or erase the earlier decision context."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-006",
+        "subsystem": "architecture-decision-index",
+        "candidate_ids": [],
+        "guarantee_ids": [],
+        "required_reviewers": [
+          "adr-index-owner",
+          "architecture-documentation-owner"
+        ],
+        "decision_needed": "Reconcile the manual ADR index entry for ADR 0048 with its accepted primary and generated metadata.",
+        "why_classification_cannot_settle": "The mismatch is a metadata conflict in maintained documentation, not a classification choice.",
+        "forbidden_before_approval": "Do not infer that ADR 0048 is proposed or silently rewrite its decision state."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-007",
+        "subsystem": "research-memory",
+        "candidate_ids": [
+          "QT-GC-008",
+          "QT-GC-009"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+          "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION"
+        ],
+        "required_reviewers": [
+          "normative-contract-reviewer",
+          "research-memory-owner",
+          "research-orchestration-owner"
+        ],
+        "decision_needed": "Approve explicit supersession of older automatic Observation creation/linking by the frozen, replayable, observation-eligible evidence rule.",
+        "why_classification_cannot_settle": "Accepted ADR 0062 and current service behavior conflict with older Check documentation, blocking QT-TERM-006 and QT-TERM-012.",
+        "forbidden_before_approval": "Do not change Check/Observation semantics or adopt either blocked term."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-008",
+        "subsystem": "data-and-reporting",
+        "candidate_ids": [
+          "QT-GC-007"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION"
+        ],
+        "required_reviewers": [
+          "data-authority-owner",
+          "reporting-owner"
+        ],
+        "decision_needed": "Approve distinct names and ownership for source-data admissibility and reporting-dataset materialization readiness.",
+        "why_classification_cannot_settle": "Both meanings are active at separate boundaries and behavior evidence cannot make one readiness state universal.",
+        "forbidden_before_approval": "Do not use unqualified Dataset readiness or let one readiness state certify the other."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-009",
+        "subsystem": "data-and-execution-runtime",
+        "candidate_ids": [],
+        "guarantee_ids": [],
+        "required_reviewers": [
+          "data-authority-owner",
+          "domain-terminology-owner",
+          "execution-runtime-owner"
+        ],
+        "decision_needed": "Approve explicit namespaces for Canonical market Facts and specifically named runtime or lifecycle facts.",
+        "why_classification_cannot_settle": "The two Fact families have different owners and stores; classification cannot create a universal Fact abstraction.",
+        "forbidden_before_approval": "Do not imply a universal Fact store or use bare Fact where ownership is ambiguous."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-010",
+        "subsystem": "data-and-research-memory",
+        "candidate_ids": [
+          "QT-GC-008",
+          "QT-GC-009"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+          "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION"
+        ],
+        "required_reviewers": [
+          "data-authority-owner",
+          "domain-terminology-owner",
+          "research-memory-owner"
+        ],
+        "decision_needed": "Approve capitalization and ownership qualification separating a market observation from a durable Research Observation.",
+        "why_classification_cannot_settle": "The shared noun spans separate data and research-memory identities and QT-TERM-006 remains blocked.",
+        "forbidden_before_approval": "Do not alias the two Observation identities or adopt QT-TERM-006."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-011",
+        "subsystem": "provider-and-data-identity",
+        "candidate_ids": [
+          "QT-GC-016",
+          "QT-GC-019",
+          "QT-GC-020"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CANONICAL-MARKET-IDENTITY-ROUTING",
+          "QT-GUAR-PROVIDER-CAPABILITY-AUTHORIZATION",
+          "QT-GUAR-TYPED-CONSUMER-FACT-REQUIREMENTS"
+        ],
+        "required_reviewers": [
+          "data-authority-owner",
+          "identity-owner",
+          "provider-owner"
+        ],
+        "decision_needed": "Approve the Provider, Venue, Source, Series, datasource, and exchange identity chain and adapter-only compatibility boundaries.",
+        "why_classification_cannot_settle": "Active API, configuration, persistence, and adapter vocabulary overlap without one adopted cross-boundary definition.",
+        "forbidden_before_approval": "Do not collapse provider, venue, source, or series identity or remove compatibility aliases."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-012",
+        "subsystem": "instrument-identity",
+        "candidate_ids": [
+          "QT-GC-016",
+          "QT-GC-020"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CANONICAL-MARKET-IDENTITY-ROUTING",
+          "QT-GUAR-TYPED-CONSUMER-FACT-REQUIREMENTS"
+        ],
+        "required_reviewers": [
+          "data-authority-owner",
+          "identity-owner",
+          "instruments-owner"
+        ],
+        "decision_needed": "Approve canonical instrument_id authority and explicit provider product, symbol, and series identity relationships.",
+        "why_classification_cannot_settle": "The names are used as lookup substitutes across boundaries, while classification cannot change persisted or adapter identities.",
+        "forbidden_before_approval": "Do not use a display symbol or provider product ID as a global instrument key."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-013",
+        "subsystem": "collector-operations",
+        "candidate_ids": [
+          "QT-GC-021",
+          "QT-GC-025"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CODE-OWNED-AUDITED-COLLECTOR-CONTROL",
+          "QT-GUAR-FENCED-IDEMPOTENT-SCHEDULED-COLLECTION"
+        ],
+        "required_reviewers": [
+          "collector-operations-owner",
+          "data-authority-owner",
+          "operations-owner"
+        ],
+        "decision_needed": "Approve distinct configuration admission, desired state, worker ownership, session evidence, and operation-result terminology.",
+        "why_classification_cannot_settle": "Collector active currently conflates multiple separately implemented states and owners.",
+        "forbidden_before_approval": "Do not treat enrollment, enabled state, a running worker, session evidence, or one successful operation as interchangeable."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-014",
+        "subsystem": "coverage-and-readiness",
+        "candidate_ids": [
+          "QT-GC-007",
+          "QT-GC-017",
+          "QT-GC-021",
+          "QT-GC-022",
+          "QT-GC-023",
+          "QT-GC-024",
+          "QT-GC-026",
+          "QT-GC-049",
+          "QT-GC-054"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION",
+          "QT-GUAR-DURABLE-VERIFIED-RAW-ARCHIVE",
+          "QT-GUAR-FENCED-IDEMPOTENT-SCHEDULED-COLLECTION",
+          "QT-GUAR-INTERVAL-VALID-ORDER-BOOK-TRUTH",
+          "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+          "QT-GUAR-PIN-SAFE-MARKET-DATA-LIFECYCLE",
+          "QT-GUAR-PROVEN-ZERO-TRADE-COVERAGE",
+          "QT-GUAR-REPLAY-CERTIFIED-EXECUTION-BOOK-TAPE",
+          "QT-GUAR-TYPED-SPARSE-DATA-FAILURE"
+        ],
+        "required_reviewers": [
+          "data-authority-owner",
+          "execution-runtime-owner",
+          "reporting-owner"
+        ],
+        "decision_needed": "Approve exact namespaces for acquisition, archive, Dataset, book-validity, overlay, and reporting coverage/readiness.",
+        "why_classification_cannot_settle": "Each state is valid only at its owning boundary and no completed proof supports cross-certification.",
+        "forbidden_before_approval": "Do not let completeness or gap absence in one namespace certify another."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-015",
+        "subsystem": "market-structure-and-execution",
+        "candidate_ids": [
+          "QT-GC-022",
+          "QT-GC-023",
+          "QT-GC-024",
+          "QT-GC-026",
+          "QT-GC-049"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-DURABLE-VERIFIED-RAW-ARCHIVE",
+          "QT-GUAR-INTERVAL-VALID-ORDER-BOOK-TRUTH",
+          "QT-GUAR-PIN-SAFE-MARKET-DATA-LIFECYCLE",
+          "QT-GUAR-PROVEN-ZERO-TRADE-COVERAGE",
+          "QT-GUAR-REPLAY-CERTIFIED-EXECUTION-BOOK-TAPE"
+        ],
+        "required_reviewers": [
+          "execution-runtime-owner",
+          "market-structure-owner"
+        ],
+        "decision_needed": "Approve terminology preserving hot reconstructed book state, checkpoints, canonical L2 Facts, and frozen execution-book tapes as distinct material.",
+        "why_classification_cannot_settle": "The four artifacts serve projection, replay, observation, and runtime-input roles and cannot be merged by similar names.",
+        "forbidden_before_approval": "Do not call a checkpoint or hot book state provider truth, Dataset truth, or a certified execution tape."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-016",
+        "subsystem": "indicator-and-projections",
+        "candidate_ids": [
+          "QT-GC-002",
+          "QT-GC-027",
+          "QT-GC-030",
+          "QT-GC-054"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+          "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+          "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+          "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+        ],
+        "required_reviewers": [
+          "botlens-projection-owner",
+          "frontend-owner",
+          "indicator-runtime-owner"
+        ],
+        "decision_needed": "Assign distinct ownership and naming to typed runtime overlay contracts and legacy plotting handlers.",
+        "why_classification_cannot_settle": "Both registries are active and semantically different, with no direct architecture owner.",
+        "forbidden_before_approval": "Do not consolidate, delete, or infer redundancy between the registries."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-017",
+        "subsystem": "indicator-and-decision-layer",
+        "candidate_ids": [
+          "QT-GC-002",
+          "QT-GC-027",
+          "QT-GC-028",
+          "QT-GC-029",
+          "QT-GC-030",
+          "QT-GC-031"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+          "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+          "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+          "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+          "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+          "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+        ],
+        "required_reviewers": [
+          "decision-layer-owner",
+          "indicator-runtime-owner"
+        ],
+        "decision_needed": "Approve distinct definitions and decision-boundary treatment for typed outputs, lifecycle outputs, overlays, details, and signals.",
+        "why_classification_cannot_settle": "The frozen implementation separates these paths, but component-contract discovery and glossary authority remain unresolved.",
+        "forbidden_before_approval": "Do not flatten the concepts into indicator result or expose projections/lifecycle evidence as Strategy inputs."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-018",
+        "subsystem": "decision-execution-and-accounting",
+        "candidate_ids": [
+          "QT-GC-032",
+          "QT-GC-041",
+          "QT-GC-044",
+          "QT-GC-045",
+          "QT-GC-048",
+          "QT-GC-057"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CANONICAL-FILL-ACCOUNTING-RECONCILIATION",
+          "QT-GUAR-CANONICAL-ORDER-LIFECYCLE",
+          "QT-GUAR-FILL-SETTLEMENT-SINGLE-INGRESS",
+          "QT-GUAR-PROTECTIVE-EXIT-RESIDUAL-TERMINAL-INTEGRITY",
+          "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+          "QT-GUAR-TRADE-MARKER-CAUSAL-CANDLE-PROJECTION"
+        ],
+        "required_reviewers": [
+          "accounting-owner",
+          "decision-layer-owner",
+          "execution-runtime-owner"
+        ],
+        "decision_needed": "Approve distinct Signal, Decision, order, attempt, event, fill, position, and trade identities with explicit causal parent/provenance links.",
+        "why_classification_cannot_settle": "Shared lineage does not establish object identity, and legacy aliasing spans multiple owned domains.",
+        "forbidden_before_approval": "Do not alias causal IDs or infer that related artifacts are the same durable object."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-019",
+        "subsystem": "strategy-and-decision-layer",
+        "candidate_ids": [
+          "QT-GC-006",
+          "QT-GC-027",
+          "QT-GC-032",
+          "QT-GC-033",
+          "QT-GC-034",
+          "QT-GC-035"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-BACKTEST-FROZEN-BINDING",
+          "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+          "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+          "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+          "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+          "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY"
+        ],
+        "required_reviewers": [
+          "decision-layer-owner",
+          "strategy-service-owner"
+        ],
+        "decision_needed": "Approve qualified authoring, variant resolution, compilation, effective-configuration, and frozen-run Strategy stages.",
+        "why_classification_cannot_settle": "The same noun currently covers distinct persisted and runtime identities and the glossary remains unadopted.",
+        "forbidden_before_approval": "Do not use unqualified Strategy to hide stage or identity and do not adopt QT-TERM-040 or QT-TERM-041."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-020",
+        "subsystem": "execution-runtime",
+        "candidate_ids": [
+          "QT-GC-024",
+          "QT-GC-032",
+          "QT-GC-033",
+          "QT-GC-037",
+          "QT-GC-038",
+          "QT-GC-039",
+          "QT-GC-040",
+          "QT-GC-041",
+          "QT-GC-042",
+          "QT-GC-043",
+          "QT-GC-044",
+          "QT-GC-045",
+          "QT-GC-049"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CANONICAL-ORDER-LIFECYCLE",
+          "QT-GUAR-EXECUTION-MODE-PLAYBACK-SEPARATION",
+          "QT-GUAR-EXPLICIT-EXECUTION-EXIT-POLICY",
+          "QT-GUAR-FILL-SETTLEMENT-SINGLE-INGRESS",
+          "QT-GUAR-INTERVAL-VALID-ORDER-BOOK-TRUTH",
+          "QT-GUAR-PINNED-EXECUTION-CONTEXTS",
+          "QT-GUAR-POST-ONLY-SIGNAL-BAR-CAUSALITY",
+          "QT-GUAR-PROTECTIVE-EXIT-RESIDUAL-TERMINAL-INTEGRITY",
+          "QT-GUAR-REPLAY-CERTIFIED-EXECUTION-BOOK-TAPE",
+          "QT-GUAR-RUNTIME-EXECUTION-OWNERSHIP-QUALITY-CEILING",
+          "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+          "QT-GUAR-STRATEGY-INDEPENDENT-EXECUTION-ECONOMICS",
+          "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY"
+        ],
+        "required_reviewers": [
+          "accounting-owner",
+          "execution-runtime-owner",
+          "platform-contract-reviewer"
+        ],
+        "decision_needed": "Approve distinct execution profile, resolved context, plan, order request, durable lifecycle, FillOrder adapter, and fill-event definitions.",
+        "why_classification_cannot_settle": "These artifacts own different assumptions, bindings, intent, custody, compatibility, and realized-event semantics.",
+        "forbidden_before_approval": "Do not collapse execution artifacts, change execution semantics, or adopt QT-TERM-042 through QT-TERM-045."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-021",
+        "subsystem": "wallet-accounting-and-projections",
+        "candidate_ids": [
+          "QT-GC-045",
+          "QT-GC-046",
+          "QT-GC-047",
+          "QT-GC-048"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-CANONICAL-FILL-ACCOUNTING-RECONCILIATION",
+          "QT-GUAR-FILL-SETTLEMENT-SINGLE-INGRESS",
+          "QT-GUAR-SHARED-WALLET-MARKET-TIME-ARBITRATION",
+          "QT-GUAR-WALLET-INITIALIZATION-AND-LEDGER-REPLAY"
+        ],
+        "required_reviewers": [
+          "accounting-owner",
+          "botlens-projection-owner",
+          "execution-runtime-owner",
+          "reporting-owner"
+        ],
+        "decision_needed": "Approve wallet state, Wallet Ledger fact, commit clock, runtime-event, report, and BotLens projection boundaries.",
+        "why_classification_cannot_settle": "Several surfaces represent wallet information but only the runtime ledger owns ordered capital truth.",
+        "forbidden_before_approval": "Do not treat report, BotLens, snapshot, or runtime-event views as parallel wallet truth."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-022",
+        "subsystem": "botlens-projections",
+        "candidate_ids": [
+          "QT-GC-050",
+          "QT-GC-051",
+          "QT-GC-052",
+          "QT-GC-053",
+          "QT-GC-054",
+          "QT-GC-055"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+          "QT-GUAR-BOTLENS-CURSOR-LINEAGE",
+          "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+          "QT-GUAR-BOTLENS-TYPED-READINESS",
+          "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+          "QT-GUAR-PROJECTOR-ONLY-SELECTED-SYMBOL-READS"
+        ],
+        "required_reviewers": [
+          "botlens-projection-owner",
+          "execution-runtime-owner",
+          "frontend-owner"
+        ],
+        "decision_needed": "Approve distinct bootstrap, snapshot, delta, readiness, and cursor semantics subordinate to durable Run truth.",
+        "why_classification_cannot_settle": "BotLens is a bounded projection with its own validity states; frontend behavior cannot establish canonical runtime authority.",
+        "forbidden_before_approval": "Do not treat BotLens projection state as canonical Run state or empty projection as implicit readiness."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-023",
+        "subsystem": "persistence-and-orchestration",
+        "candidate_ids": [
+          "QT-GC-060",
+          "QT-GC-061"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING",
+          "QT-GUAR-BOT-RUN-LEASE-OWNERSHIP"
+        ],
+        "required_reviewers": [
+          "execution-runtime-owner",
+          "persistence-owner",
+          "research-orchestration-owner"
+        ],
+        "decision_needed": "Approve separate lease/claim duration, row-lock, heartbeat, token, generation, and commit-fence definitions.",
+        "why_classification_cannot_settle": "The mechanisms cooperate but grant different forms of temporary ownership and stale-writer rejection.",
+        "forbidden_before_approval": "Do not treat a lock, heartbeat, lease timestamp, token, generation, or fence as interchangeable authority."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-024",
+        "subsystem": "reporting-and-provenance",
+        "candidate_ids": [
+          "QT-GC-034",
+          "QT-GC-038",
+          "QT-GC-043",
+          "QT-GC-049",
+          "QT-GC-071"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+          "QT-GUAR-PINNED-EXECUTION-CONTEXTS",
+          "QT-GUAR-REPLAY-CERTIFIED-EXECUTION-BOOK-TAPE",
+          "QT-GUAR-RUNTIME-EXECUTION-OWNERSHIP-QUALITY-CEILING",
+          "QT-GUAR-SEMANTIC-OPERATIONAL-FINGERPRINT-SEPARATION"
+        ],
+        "required_reviewers": [
+          "execution-runtime-owner",
+          "provenance-owner",
+          "reporting-owner"
+        ],
+        "decision_needed": "Approve qualified semantic, operational, input, data-snapshot, replay, artifact, and source-tree fingerprint identities.",
+        "why_classification_cannot_settle": "Each hash/fingerprint has a different projection and equality domain; implementation equality does not establish cross-purpose meaning.",
+        "forbidden_before_approval": "Do not compare or substitute fingerprints across purposes or use bare fingerprint as an authority claim."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-025",
+        "subsystem": "deployment-security-and-research-governance",
+        "candidate_ids": [
+          "QT-GC-010",
+          "QT-GC-015",
+          "QT-GC-059",
+          "QT-GC-069"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-ATTESTED-SINGLE-NODE-DEPLOYMENT",
+          "QT-GUAR-CHECK-AUTHORITY-CEILING",
+          "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+          "QT-GUAR-V1-LOCAL-TRUST-BOUNDARY"
+        ],
+        "required_reviewers": [
+          "deployment-owner",
+          "research-governance-owner",
+          "security-owner"
+        ],
+        "decision_needed": "Approve distinct platform deployment, research promotion, strategy deployment, and external-order authorization terms and authority paths.",
+        "why_classification_cannot_settle": "CI/deployment evidence and research evidence do not grant trading or promotion authority, and the autonomy-roadmap authority conflict remains open.",
+        "forbidden_before_approval": "Do not infer promotion or external-order authority from deployment, credentials, a Check, or passing CI."
+      },
+      {
+        "conflict_id": "QT-CONFLICT-026",
+        "subsystem": "testing-and-ci",
+        "candidate_ids": [
+          "QT-GC-072",
+          "QT-GC-075"
+        ],
+        "guarantee_ids": [
+          "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+          "QT-GUAR-PR-VERIFICATION-TOPOLOGY"
+        ],
+        "required_reviewers": [
+          "ci-owner",
+          "docs-tooling-owner",
+          "testing-owner"
+        ],
+        "decision_needed": "Approve qualified Make-target, CI-job, shell-suite, pytest-profile, and collected-corpus reporting rules.",
+        "why_classification_cannot_settle": "The selectors overlap but are not interchangeable, and current CI/documentation topology is stale.",
+        "forbidden_before_approval": "Do not report one validation selector as passing all layers or conflate a job with its steps."
+      }
+    ]
+  },
+  "authority_model_decisions": [
+    {
+      "id": "QT-AUTH-MODEL-001",
+      "status": "required_before_activation_path_change",
+      "related_review_map_ids": [
+        "QT-RM-AUTH-003",
+        "QT-RM-AUTH-004"
+      ],
+      "source_batch_review_ids": [
+        "QT-REVIEW-C-004"
+      ],
+      "source_finding_ids": [
+        "ARCH-COVERAGE-001",
+        "DOC-VALIDATION-001"
+      ],
+      "source_conflict_ids": [
+        "QT-CONFLICT-026"
+      ],
+      "candidate_ids": [
+        "QT-GC-014",
+        "QT-GC-063",
+        "QT-GC-075"
+      ],
+      "guarantee_ids": [
+        "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+        "QT-GUAR-SHARED-APPLICATION-CONTRACT",
+        "QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY"
+      ],
+      "required_reviewers": [
+        "agent-governance-owner",
+        "normative-contract-reviewer",
+        "platform-contract-reviewer",
+        "repository-governance-owner"
+      ],
+      "decision_needed": "State the exact precedence, scope, and activation relationship between AGENTS.md contributor governance and normative platform behavior contracts.",
+      "why_classification_cannot_settle": "The frozen hierarchy recognizes both source classes but does not define a precise precedence rule; AGENTS.md therefore remains represented governance context but nonactivating.",
+      "retained_model_ceiling": "AGENTS.md cannot automatically activate a guarantee or override a normative platform contract in version 1.",
+      "forbidden_before_approval": "Do not activate from AGENTS.md, convert contributor workflow text into product semantics, or resolve the precedence question by classification."
+    },
+    {
+      "id": "QT-AUTH-MODEL-002",
+      "status": "required_before_activation_path_change",
+      "related_review_map_ids": [
+        "QT-RM-AUTH-005"
+      ],
+      "source_batch_review_ids": [
+        "QT-DR-A-004"
+      ],
+      "source_finding_ids": [
+        "DOC-CONTRACT-001"
+      ],
+      "source_conflict_ids": [
+        "QT-CONFLICT-017"
+      ],
+      "candidate_ids": [
+        "QT-GC-027",
+        "QT-GC-028",
+        "QT-GC-029",
+        "QT-GC-030",
+        "QT-GC-031"
+      ],
+      "guarantee_ids": [
+        "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+        "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+        "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+        "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+        "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+      ],
+      "required_reviewers": [
+        "architecture-documentation-owner",
+        "component-owner-reviewer",
+        "indicator-runtime-owner",
+        "platform-contract-reviewer"
+      ],
+      "decision_needed": "Approve canonical source-module-contract discovery, component ownership, precedence, and an explicit activation allowlist.",
+      "why_classification_cannot_settle": "Source-module contracts are in-scope authority, but placement is inconsistent and no canonical discovery or owner registry establishes which modules qualify.",
+      "retained_model_ceiling": "Version 1 represents source-module contracts but grants them no automatic activation authority until the reviewed discovery and component-owner allowlist exists.",
+      "forbidden_before_approval": "Do not activate from a source-module contract, infer qualification from file placement, relocate clauses automatically, or call explanatory architecture a module contract."
+    },
+    {
+      "id": "QT-AUTH-MODEL-003",
+      "status": "required_before_owner_metadata_adoption",
+      "related_review_map_ids": [
+        "QT-RM-AUTH-002"
+      ],
+      "source_batch_review_ids": [
+        "QT-DR-A-002",
+        "QT-DR-A-005",
+        "QT-REVIEW-C-004"
+      ],
+      "source_finding_ids": [
+        "ARCH-COVERAGE-001",
+        "DOC-META-001"
+      ],
+      "source_conflict_ids": [],
+      "candidate_ids": [
+        "QT-GC-002",
+        "QT-GC-010",
+        "QT-GC-015",
+        "QT-GC-032",
+        "QT-GC-034",
+        "QT-GC-074",
+        "QT-GC-075"
+      ],
+      "guarantee_ids": [
+        "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+        "QT-GUAR-CHECK-AUTHORITY-CEILING",
+        "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+        "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+        "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+        "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+        "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION"
+      ],
+      "required_reviewers": [
+        "architecture-documentation-owner",
+        "component-owner-reviewer",
+        "repository-governance-owner"
+      ],
+      "decision_needed": "Approve a canonical owner source and validation model for documents, components, shared paths, and reviewer roles.",
+      "why_classification_cannot_settle": "Phase 1 found no CODEOWNERS or adopted owner metadata, so owner and reviewer slugs in classification artifacts are routing proposals rather than repository authority.",
+      "retained_model_ceiling": "All owner slugs in this map, the registry, and remediation records remain provisional until the canonical owner model is adopted.",
+      "forbidden_before_approval": "Do not present inferred roles as canonical ownership, reassign components, or use a routing slug as proof of review authority."
+    }
+  ],
+  "proof_environment_ceilings": [
+    {
+      "id": "QT-PROOF-CEILING-001",
+      "kind": "definitions_are_not_results",
+      "coverage": {
+        "candidate_scope": "all_final_registry_records",
+        "candidate_count": 75,
+        "candidate_ids_ref": "source_accounting.candidate_guarantee_index[].candidate_id",
+        "guarantee_count": 75,
+        "guarantee_ids_ref": "source_accounting.candidate_guarantee_index[].guarantee_id"
+      },
+      "proof_definition_count": 85,
+      "required_reviewers": [
+        "assurance-model-owner",
+        "proof-catalog-owner",
+        "testing-owner"
+      ],
+      "decision_needed": "Admit commit-specific proof execution and attestation separately from the 85 required-proof definitions.",
+      "observed_ceiling": "The catalog records selectors, environments, and coverage requirements only; Phase 2B asserts no PASS, FAIL, MANUAL, PARTIAL, UNAVAILABLE, or other proof result.",
+      "why_classification_cannot_settle": "Static classification and selector presence do not establish execution, environment availability, or result validity.",
+      "forbidden_before_approval": "Do not report a definition, selector, collection result, or static alignment as a product-guarantee proof result."
+    },
+    {
+      "id": "QT-PROOF-CEILING-002",
+      "kind": "pytest_only_automated_pass_model",
+      "coverage": {
+        "candidate_scope": "explicit",
+        "candidate_count": 8,
+        "candidate_ids": [
+          "QT-GC-050",
+          "QT-GC-051",
+          "QT-GC-052",
+          "QT-GC-053",
+          "QT-GC-054",
+          "QT-GC-055",
+          "QT-GC-056",
+          "QT-GC-057"
+        ],
+        "guarantee_count": 8,
+        "guarantee_ids": [
+          "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+          "QT-GUAR-BOTLENS-CURSOR-LINEAGE",
+          "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+          "QT-GUAR-BOTLENS-TYPED-READINESS",
+          "QT-GUAR-OPERATOR-CONSOLE-NONAUTHORITATIVE-SURFACE",
+          "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+          "QT-GUAR-PROJECTOR-ONLY-SELECTED-SYMBOL-READS",
+          "QT-GUAR-TRADE-MARKER-CAUSAL-CANDLE-PROJECTION"
+        ]
+      },
+      "proof_ids": [
+        "QT-PROOF-215",
+        "QT-PROOF-217",
+        "QT-PROOF-219",
+        "QT-PROOF-221",
+        "QT-PROOF-223",
+        "QT-PROOF-225",
+        "QT-PROOF-226",
+        "QT-PROOF-227"
+      ],
+      "required_reviewers": [
+        "frontend-owner",
+        "proof-model-reviewer",
+        "testing-owner"
+      ],
+      "decision_needed": "Model and approve node_test result and count semantics, then admit and execute a reproducible frontend-node proof environment.",
+      "observed_ceiling": "Version 1 permits automated PASS only for pytest. Eight Node proof definitions may be cataloged but cannot produce an activation-eligible automated PASS.",
+      "why_classification_cannot_settle": "Classification can identify Node selectors but cannot extend attestation result semantics or certify their environment.",
+      "forbidden_before_approval": "Do not convert Node definition presence or collection into PASS, or activate any affected guarantee without an admitted PASS-capable path."
+    },
+    {
+      "id": "QT-PROOF-CEILING-003",
+      "kind": "isolated_database_environment",
+      "coverage": {
+        "candidate_scope": "explicit",
+        "candidate_count": 8,
+        "candidate_ids": [
+          "QT-GC-003",
+          "QT-GC-004",
+          "QT-GC-005",
+          "QT-GC-008",
+          "QT-GC-021",
+          "QT-GC-026",
+          "QT-GC-061",
+          "QT-GC-072"
+        ],
+        "guarantee_count": 8,
+        "guarantee_ids": [
+          "QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING",
+          "QT-GUAR-CANONICAL-FACT-APPEND-ONLY",
+          "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION",
+          "QT-GUAR-FENCED-IDEMPOTENT-SCHEDULED-COLLECTION",
+          "QT-GUAR-FROZEN-DATASET-REPLAY",
+          "QT-GUAR-PR-VERIFICATION-TOPOLOGY",
+          "QT-GUAR-PROVEN-ZERO-TRADE-COVERAGE",
+          "QT-GUAR-PROVIDER-FREE-CANONICAL-READS"
+        ]
+      },
+      "proof_ids": [
+        "QT-PROOF-002",
+        "QT-PROOF-004",
+        "QT-PROOF-005",
+        "QT-PROOF-303",
+        "QT-PROOF-314",
+        "QT-PROOF-405",
+        "QT-PROOF-410"
+      ],
+      "required_reviewers": [
+        "database-test-owner",
+        "persistence-owner",
+        "proof-environment-owner",
+        "testing-owner"
+      ],
+      "decision_needed": "Approve the fresh isolated PostgreSQL/TimescaleDB environment, versions, bootstrap, cleanup, and evidence capture for the seven database proof definitions.",
+      "observed_ceiling": "Database integration remains separately environment-bound; application tests or a live database are not substitutes for isolated constraint and transaction evidence.",
+      "why_classification_cannot_settle": "Repository references do not establish that the required disposable service exists or that a run is isolated and reproducible.",
+      "forbidden_before_approval": "Do not connect to live or production data, infer database PASS from mocked or non-database proof, or omit database identity from an attestation."
+    },
+    {
+      "id": "QT-PROOF-CEILING-004",
+      "kind": "manual_destructive_recovery_environment",
+      "coverage": {
+        "candidate_scope": "explicit",
+        "candidate_count": 1,
+        "candidate_ids": [
+          "QT-GC-070"
+        ],
+        "guarantee_count": 1,
+        "guarantee_ids": [
+          "QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION"
+        ]
+      },
+      "proof_ids": [
+        "QT-PROOF-014"
+      ],
+      "required_reviewers": [
+        "operations-owner",
+        "proof-environment-owner",
+        "recovery-owner",
+        "security-owner"
+      ],
+      "decision_needed": "Approve an isolated backup source, isolated restore target, operator protocol, checksums, and before/after verification for the manual recovery rehearsal.",
+      "observed_ceiling": "The proposed manual procedure is not an executed restore and cannot be replaced by archive-unit evidence or a production rehearsal.",
+      "why_classification_cannot_settle": "Destructive recovery requires an independently reviewable environment and operator evidence outside static repository classification.",
+      "forbidden_before_approval": "Do not run against production, label an unavailable rehearsal PASS, or activate destructive-recovery claims from the procedure definition."
+    },
+    {
+      "id": "QT-PROOF-CEILING-005",
+      "kind": "attestation_identity_and_authority_trust",
+      "coverage": {
+        "candidate_scope": "all_final_registry_records",
+        "candidate_count": 75,
+        "candidate_ids_ref": "source_accounting.candidate_guarantee_index[].candidate_id",
+        "guarantee_count": 75,
+        "guarantee_ids_ref": "source_accounting.candidate_guarantee_index[].guarantee_id"
+      },
+      "required_reviewers": [
+        "activation-review-owner",
+        "assurance-model-owner",
+        "repository-governance-owner"
+      ],
+      "decision_needed": "Approve how runner identity, reviewer identity, role authority, and the external activation decision are authenticated and bound to the exact attestation.",
+      "observed_ceiling": "Version 1 validates repository bindings, hashes, typed summaries, and internal consistency but does not cryptographically authenticate people or establish that a named reviewer holds a required role.",
+      "why_classification_cannot_settle": "Identity and delegated authority are trust decisions external to evidence classification.",
+      "forbidden_before_approval": "Do not treat a syntactically valid attestation or role slug as authenticated approval or activation authority."
+    },
+    {
+      "id": "QT-PROOF-CEILING-006",
+      "kind": "whole_catalog_snapshot_binding",
+      "coverage": {
+        "candidate_scope": "all_final_registry_records",
+        "candidate_count": 75,
+        "candidate_ids_ref": "source_accounting.candidate_guarantee_index[].candidate_id",
+        "guarantee_count": 75,
+        "guarantee_ids_ref": "source_accounting.candidate_guarantee_index[].guarantee_id"
+      },
+      "required_reviewers": [
+        "assurance-model-owner",
+        "proof-catalog-owner",
+        "registry-owner"
+      ],
+      "decision_needed": "Decide whether version 1 retains whole-registry and whole-proof-catalog snapshot binding or adopts a reviewed per-claim narrowing model.",
+      "observed_ceiling": "Version 1 binds the full registry semantic projection and proof catalog; unrelated later additions conservatively require re-attestation.",
+      "why_classification_cannot_settle": "Snapshot scope is an assurance-model decision, not a conclusion available from candidate evidence.",
+      "forbidden_before_approval": "Do not infer per-claim snapshot narrowing or reuse an attestation after an unbound catalog or registry change."
+    },
+    {
+      "id": "QT-PROOF-CEILING-007",
+      "kind": "baseline_bound_line_locators",
+      "coverage": {
+        "candidate_scope": "all_final_registry_records",
+        "candidate_count": 75,
+        "candidate_ids_ref": "source_accounting.candidate_guarantee_index[].candidate_id",
+        "guarantee_count": 75,
+        "guarantee_ids_ref": "source_accounting.candidate_guarantee_index[].guarantee_id"
+      },
+      "required_reviewers": [
+        "documentation-assurance-owner",
+        "proof-catalog-owner",
+        "registry-owner"
+      ],
+      "decision_needed": "Approve durable locator maintenance and revalidation rules for evidence that moves after the frozen baseline.",
+      "observed_ceiling": "Exact line locators are calibration evidence bound to d46e40bf55caeea12f4ccbde640c71f271eaf9c4; durable authority identity is path/heading based only where a stable heading exists.",
+      "why_classification_cannot_settle": "Later edits can move lines without changing authority identity, while silent locator substitution would break frozen-audit traceability.",
+      "forbidden_before_approval": "Do not silently retarget baseline locators, including QT-GC-026, or treat a moved line as current proof without revalidation."
+    },
+    {
+      "id": "QT-PROOF-CEILING-008",
+      "kind": "absence_and_universality_denominators",
+      "coverage": {
+        "candidate_scope": "explicit",
+        "candidate_count": 42,
+        "candidate_ids": [
+          "QT-GC-001",
+          "QT-GC-002",
+          "QT-GC-004",
+          "QT-GC-005",
+          "QT-GC-006",
+          "QT-GC-007",
+          "QT-GC-009",
+          "QT-GC-010",
+          "QT-GC-011",
+          "QT-GC-014",
+          "QT-GC-015",
+          "QT-GC-016",
+          "QT-GC-017",
+          "QT-GC-018",
+          "QT-GC-019",
+          "QT-GC-020",
+          "QT-GC-021",
+          "QT-GC-027",
+          "QT-GC-028",
+          "QT-GC-032",
+          "QT-GC-034",
+          "QT-GC-035",
+          "QT-GC-036",
+          "QT-GC-037",
+          "QT-GC-038",
+          "QT-GC-039",
+          "QT-GC-041",
+          "QT-GC-043",
+          "QT-GC-044",
+          "QT-GC-045",
+          "QT-GC-048",
+          "QT-GC-049",
+          "QT-GC-053",
+          "QT-GC-055",
+          "QT-GC-061",
+          "QT-GC-063",
+          "QT-GC-064",
+          "QT-GC-065",
+          "QT-GC-067",
+          "QT-GC-068",
+          "QT-GC-071",
+          "QT-GC-074"
+        ],
+        "guarantee_count": 42,
+        "guarantee_ids": [
+          "QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING",
+          "QT-GUAR-BACKTEST-FROZEN-BINDING",
+          "QT-GUAR-BLOCKING-API-WORK-OFFLOAD",
+          "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+          "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+          "QT-GUAR-BOUNDED-NONCANONICAL-OBSERVABILITY",
+          "QT-GUAR-BOUNDED-TELEMETRY-CONTROL-DELIVERY",
+          "QT-GUAR-BUDGETED-CLOSED-CANDLE-MARKET-STREAM",
+          "QT-GUAR-CANONICAL-FILL-ACCOUNTING-RECONCILIATION",
+          "QT-GUAR-CANONICAL-MARKET-IDENTITY-ROUTING",
+          "QT-GUAR-CANONICAL-ORDER-LIFECYCLE",
+          "QT-GUAR-CHECK-AUTHORITY-CEILING",
+          "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+          "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+          "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION",
+          "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+          "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+          "QT-GUAR-DIAGNOSTICS-NOT-EXECUTION-TRUTH",
+          "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+          "QT-GUAR-EXPLICIT-EXECUTION-EXIT-POLICY",
+          "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+          "QT-GUAR-FENCED-IDEMPOTENT-SCHEDULED-COLLECTION",
+          "QT-GUAR-FILL-SETTLEMENT-SINGLE-INGRESS",
+          "QT-GUAR-FROZEN-DATASET-REPLAY",
+          "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+          "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+          "QT-GUAR-KNOWN-AT-PREFIX-INVARIANCE",
+          "QT-GUAR-MODE-AWARE-RUNTIME-COMPOSITION",
+          "QT-GUAR-PINNED-EXECUTION-CONTEXTS",
+          "QT-GUAR-PROTECTIVE-EXIT-RESIDUAL-TERMINAL-INTEGRITY",
+          "QT-GUAR-PROVIDER-CAPABILITY-AUTHORIZATION",
+          "QT-GUAR-PROVIDER-FREE-CANONICAL-READS",
+          "QT-GUAR-REPLAY-CERTIFIED-EXECUTION-BOOK-TAPE",
+          "QT-GUAR-REPORTS-DURABLE-TRUTH-PROJECTION",
+          "QT-GUAR-RUNTIME-EXECUTION-OWNERSHIP-QUALITY-CEILING",
+          "QT-GUAR-SEMANTIC-OPERATIONAL-FINGERPRINT-SEPARATION",
+          "QT-GUAR-SHARED-APPLICATION-CONTRACT",
+          "QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY",
+          "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+          "QT-GUAR-STRATEGY-INDEPENDENT-EXECUTION-ECONOMICS",
+          "QT-GUAR-TYPED-CONSUMER-FACT-REQUIREMENTS",
+          "QT-GUAR-TYPED-SPARSE-DATA-FAILURE"
+        ]
+      },
+      "required_reviewers": [
+        "architecture-documentation-owner",
+        "component-owner-reviewer",
+        "proof-model-reviewer",
+        "testing-owner"
+      ],
+      "decision_needed": "Approve generated inventories, static dependency rules, or narrowed wording for the 42 records whose claims or wording constraints depend on all/every/never, repository-wide, inventory, or closed-surface reasoning.",
+      "observed_ceiling": "Representative tests cannot establish a universal negative or a complete surface without an owner-reviewed denominator.",
+      "why_classification_cannot_settle": "Open registries, dynamic extensions, distributed entrypoints, and incomplete ownership prevent classification from inventing closed coverage.",
+      "forbidden_before_approval": "Do not promote a representative proof to whole-system absence or universality and do not freeze an intentionally open registry as a permanent closed set."
+    },
+    {
+      "id": "QT-PROOF-CEILING-009",
+      "kind": "pytest_collection_import_side_effect",
+      "coverage": {
+        "candidate_scope": "all_final_registry_records_except",
+        "candidate_count": 73,
+        "excluded_candidate_ids": [
+          "QT-GC-056",
+          "QT-GC-057"
+        ],
+        "guarantee_count": 73,
+        "excluded_guarantee_ids": [
+          "QT-GUAR-OPERATOR-CONSOLE-NONAUTHORITATIVE-SURFACE",
+          "QT-GUAR-TRADE-MARKER-CAUSAL-CANDLE-PROJECTION"
+        ]
+      },
+      "pytest_proof_definition_count": 76,
+      "unique_pytest_selector_count": 258,
+      "collected_concrete_case_count": 269,
+      "collection_only": true,
+      "tests_executed": false,
+      "observed_collection_diagnostic": "portal_db_initialise_failed | dsn=<unset>",
+      "diagnostic_disposition": "caught environment/collection side effect only; not a proof result, conflict, or FAIL",
+      "required_reviewers": [
+        "database-test-owner",
+        "portal-persistence-owner",
+        "proof-environment-owner",
+        "testing-owner"
+      ],
+      "decision_needed": "Review and isolate portal database initialization during collection/import before collection can be treated as a clean proof-environment validation step.",
+      "observed_ceiling": "Collection of all 258 unique pytest selectors completed and yielded 269 concrete cases without test execution, but import emitted the caught dsn=<unset> diagnostic; no database connection or product proof was run.",
+      "why_classification_cannot_settle": "Successful collection establishes selector resolvability only, while the caught import diagnostic shows that collection can have environment-sensitive side effects.",
+      "forbidden_before_approval": "Do not report collection as PASS, FAIL, a normative conflict, a database connection, or a product proof run."
+    }
+  ],
+  "notes": [
+    "This completed map is nonnormative and review-required; it routes unresolved decisions but does not decide them.",
+    "The final registry supplies a one-to-one candidate/guarantee index for all 75 candidates: 65 partially_enforced, 3 contradicted, 6 candidate, and 1 implementation_property; all 75 remain unactivated.",
+    "The final proof catalog contains 85 required-proof definitions and the repository contains 68 concrete remediation records; neither count is a proof result or authorization to perform remediation.",
+    "Reviewer-role slugs are exact routing requirements for this map but remain provisional because Phase 1 found no adopted canonical owner registry.",
+    "An empty source_finding_ids or source_conflict_ids array means no exact link was established in the stated sources; it is not evidence that no finding or conflict relationship exists.",
+    "DOC-CANDIDATE-LOCATOR-001 is preserved as a separate Phase 2B reference-integrity finding for QT-GC-026 and does not replace, merge into, or resolve DOC-MARKET-STRUCTURE-001.",
+    "Terminology accounting remains exactly 55 total: 34 proposed, 2 blocked, 19 deferred, and 0 adopted; all 26 QT-CONFLICT records remain individually unresolved.",
+    "Accepted ADRs are decision authority but nonactivating; behavior is evidence; source-module contracts and AGENTS.md remain nonactivating; this map, the glossary, registry, proof catalog, proof definitions, and remediation drafts remain nonnormative.",
+    "No guarantee activation, terminology adoption, normative conflict resolution, product-semantic repair, deletion, archival, Phase 1 rewrite, or proof execution is authorized by this map."
+  ]
+}
