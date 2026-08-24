@@ -443,6 +443,7 @@ def test_remediation_records_are_structurally_bound_and_completion_requires_them
         "guarantee_ids: QT-GUAR-KNOWN-AT\n"
         "lifecycle: proposed\n"
         "owner: execution-runtime\n"
+        "required_reviewers: execution-runtime-owner,platform-contract-reviewer\n"
         "required_review: true\n"
         "review_status: pending\n"
         "---\n\n"
@@ -482,6 +483,29 @@ def test_remediation_records_are_structurally_bound_and_completion_requires_them
     with pytest.raises(
         guarantees.GuaranteeValidationError,
         match="frontmatter_unknown_keys:unknown_key",
+    ):
+        guarantees.validate_registry_data(registry, root=tmp_path)
+    remediation_path.write_text(original_remediation, encoding="utf-8")
+
+    missing_reviewers = original_remediation.replace(
+        "required_reviewers: execution-runtime-owner,platform-contract-reviewer\n", ""
+    )
+    remediation_path.write_text(missing_reviewers, encoding="utf-8")
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="frontmatter_missing_keys:required_reviewers",
+    ):
+        guarantees.validate_registry_data(registry, root=tmp_path)
+    remediation_path.write_text(original_remediation, encoding="utf-8")
+
+    unsorted_reviewers = original_remediation.replace(
+        "execution-runtime-owner,platform-contract-reviewer",
+        "platform-contract-reviewer,execution-runtime-owner",
+    )
+    remediation_path.write_text(unsorted_reviewers, encoding="utf-8")
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="remediation_record_invalid_required_reviewers",
     ):
         guarantees.validate_registry_data(registry, root=tmp_path)
     remediation_path.write_text(original_remediation, encoding="utf-8")

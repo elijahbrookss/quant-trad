@@ -839,6 +839,7 @@ def _validate_remediation_record(
             "guarantee_ids",
             "lifecycle",
             "owner",
+            "required_reviewers",
             "required_review",
             "review_status",
         },
@@ -865,6 +866,18 @@ def _validate_remediation_record(
     owner = frontmatter["owner"]
     if not PROFILE_ID_RE.fullmatch(owner):
         _fail(f"{where}:remediation_record_invalid_owner")
+    required_reviewers = [
+        item.strip()
+        for item in frontmatter["required_reviewers"].split(",")
+        if item.strip()
+    ]
+    if (
+        not required_reviewers
+        or required_reviewers != sorted(required_reviewers)
+        or len(required_reviewers) != len(set(required_reviewers))
+        or any(not PROFILE_ID_RE.fullmatch(item) for item in required_reviewers)
+    ):
+        _fail(f"{where}:remediation_record_invalid_required_reviewers")
     if frontmatter["required_review"] != "true":
         _fail(f"{where}:remediation_record_requires_review")
     review_status = frontmatter["review_status"]

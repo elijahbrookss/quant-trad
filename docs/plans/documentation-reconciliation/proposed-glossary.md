@@ -1,6 +1,6 @@
 # Proposed QT Platform Glossary
 
-> **Gate 2 proposal — non-normative.** This document is a review artifact for
+> **Phase 2B whole-system proposal — non-normative.** This document is a review artifact for
 > frozen baseline `d46e40bf55caeea12f4ccbde640c71f271eaf9c4`. It adopts no
 > terminology, activates no guarantee, resolves no conflict, and changes no
 > product semantics. Existing platform contracts and accepted decisions retain
@@ -8,14 +8,14 @@
 
 ## Purpose And Intended Placement
 
-This proposal calibrates the smallest cross-boundary vocabulary needed by the
-initial guarantee batch plus the ambiguity labels needed to read that batch
-honestly. It intentionally does not expand the Phase 1 inventory into a
-whole-system glossary.
+Phase 2A calibrated the entry model on 21 terms. Phase 2B now accounts for all
+55 Phase 1 term records: 34 further entries are added without adopting any
+meaning, alias, deprecation, or replacement. Entries remain proposed, blocked,
+or deferred according to their existing authority and unresolved conflicts.
 
-If Gate 2 approves this model and calibration, the non-blocked entries may
-proceed to a separate terminology-adoption review. Gate 2 itself adopts zero
-entries. Any later adoption must create the normative vocabulary index at
+Gate 2 approved the model for whole-system classification but adopted zero
+entries. Non-blocked entries can proceed only to a separate
+terminology-adoption review. Any later adoption must create the normative vocabulary index at
 `docs/contracts/platform/04_glossary.md` and add it to the platform-contract
 read order through the required normative review. Until that distinct adoption
 decision, this proposal must not enter the normative contract read order or
@@ -52,9 +52,9 @@ All guarantee IDs refer to the still-unactivated
 
 ## Calibration-Scoped Entries
 
-There are exactly 21 entries in this calibration scope: 19 proposals and two
-blocked entries. A proposed status means “eligible for Gate 2 review,” not
-“adopted.”
+The preserved Phase 2A calibration scope contains exactly 21 entries: 19
+proposals and two blocked entries. In that phase, proposed meant eligible for
+Gate 2 model review, not adopted.
 
 ### `QT-TERM-001` — Canonical Fact
 
@@ -533,7 +533,681 @@ blocked entries. A proposed status means “eligible for Gate 2 review,” not
   `QT-CONFLICT-022`, and `QT-CONFLICT-026`. The qualification rule records the
   collision without resolving subsystem semantics.
 
-## Calibration Mapping
+## Phase 2B Whole-System Vocabulary Expansion
+
+The following 34 Phase 1 terms were deferred during calibration. Phase 2B
+records each one explicitly for whole-system guarantee classification.
+`proposed` means eligible for a later terminology-adoption review; `deferred`
+means the source/ownership model needs review first. Neither status is
+adoption, and the registry remains non-normative.
+
+### `QT-TERM-016` — Candle continuity gap
+
+- Entry kind: `qualification_rule`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `data / runtime`
+- Whole-system classification uses: QT-GC-017
+- Frozen Phase 1 source evidence: runtime contract lines 239-248;
+  `src/core/candle_continuity.py:16-177`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: One exact
+  candle-continuity classification.
+- Usage boundary: Use expected-session, provider-missing, ingestion-failure,
+  runtime-missing, projection-missing, or unknown
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-017` — Order-book sequence gap
+
+- Entry kind: `qualification_rule`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `market-structure`
+- Whole-system classification uses: QT-GC-024
+- Frozen Phase 1 source evidence: market-structure data-plane lines 421-490
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Missing
+  sequence evidence that invalidates book reconstruction.
+- Usage boundary: Not candle coverage evidence
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`, `QT-CONFLICT-015`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-018` — Runner clock gap / overlay clock gap
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `execution-runtime / indicator-runtime`
+- Whole-system classification uses: QT-GC-054, QT-GC-067
+- Frozen Phase 1 source evidence: ADR 0021 line 42; runtime contract lines 99-102
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Separate
+  runner-liveness and projection-invalidation gaps.
+- Usage boundary: Not source-data gaps
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`, `QT-CONFLICT-022`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-019` — Book Validity Interval
+
+- Entry kind: `domain_term`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `market-structure`
+- Whole-system classification uses: QT-GC-024
+- Frozen Phase 1 source evidence: market-structure data-plane lines 410-490;
+  `portal/backend/db/market_data_models.py:1484`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Interval over
+  which reconstructed book state is valid.
+- Usage boundary: Avoid generic “valid interval”
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`, `QT-CONFLICT-015`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-020` — Raw record
+
+- Entry kind: `domain_term`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `raw-archive`
+- Whole-system classification uses: QT-GC-022
+- Frozen Phase 1 source evidence: ADR 0053 lines 72-102; market-structure data-plane
+  line 773 onward
+- Summary strategy: Index the Phase 1 distinction without adding behavior: One provider
+  frame record with deterministic `raw_record_id`.
+- Usage boundary: Not a raw archive object or Canonical Fact revision
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-021` — Raw archive object / manifest
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `raw-archive`
+- Whole-system classification uses: QT-GC-022, QT-GC-023
+- Frozen Phase 1 source evidence: `portal/backend/db/market_data_models.py:1118,1186`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Durable
+  placement/manifest for one or more preassigned raw records.
+- Usage boundary: Preserve record-versus-object distinction
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-025` — Live runtime/composition
+
+- Entry kind: `qualification_rule`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `execution-runtime`
+- Whole-system classification uses: QT-GC-015
+- Frozen Phase 1 source evidence: ADR 0049 lines 33-62
+- Summary strategy: Index the Phase 1 distinction without adding behavior: A live
+  composition/runtime label, without venue-trading authority.
+- Usage boundary: “Live” does not mean external order submission
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-025`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-027` — Provider ID / Venue ID / exchange slug
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `data-provider`
+- Whole-system classification uses: QT-GC-016, QT-GC-019, QT-GC-020
+- Frozen Phase 1 source evidence: `src/data_providers/registry.py:40-58,124-174`; data
+  boundary lines 96-105; runtime contract lines 50-58
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Provider ID
+  selects an implementation and capability/auth contract; Venue ID selects one concrete
+  market route; an exchange slug is an adapter translation.
+- Usage boundary: Provider, venue, datasource, and exchange are not interchangeable
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-011`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-028` — Canonical Instrument / provider product identity
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `identity / data`
+- Whole-system classification uses: QT-GC-016, QT-GC-020, QT-GC-037
+- Frozen Phase 1 source evidence: `portal/backend/db/models.py:986-1016`;
+  market-structure Phase 4 lines 129-132; BotLens boundary lines 222-228
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Canonical
+  Instrument is the platform identity keyed by `instrument_id`; symbol and product ID
+  are provider/venue-facing identifiers resolved against it.
+- Usage boundary: Never use a display symbol as a globally stable instrument key
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-012`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-029` — Source Identity / Series Identity
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `data`
+- Whole-system classification uses: QT-GC-016, QT-GC-020
+- Frozen Phase 1 source evidence: `src/market_data/contracts.py:170-205`;
+  `portal/backend/db/market_data_models.py:29-78`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Source
+  Identity identifies acquisition provenance; Series Identity identifies a typed fact
+  stream for an instrument, timeframe, and dimensions.
+- Usage boundary: A provider, source, series, and instrument are four separate
+  identities
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-011`, `QT-CONFLICT-012`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-030` — Collector Definition / collector adapter / collector worker
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `data collection`
+- Whole-system classification uses: QT-GC-021, QT-GC-025
+- Frozen Phase 1 source evidence: collector operations boundary lines 41-78; continuous
+  collector boundary lines 112-141;
+  `portal/backend/service/market/collector_supervisor.py:63-176`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Definition is
+  durable reviewed configuration; adapter is code that implements one stream contract;
+  worker is the running owner of a definition.
+- Usage boundary: Bare Collector is unsafe when configuration, code, and process
+  ownership differ
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-013`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-031` — Enrollment / collector operation
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `data operations`
+- Whole-system classification uses: QT-GC-025
+- Frozen Phase 1 source evidence: collector operations boundary lines 46-77 and 215-229;
+  continuous collector boundary lines 263-277
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Enrollment
+  admits reviewed product/stream definitions; an operation requests start, stop,
+  restart, pause, or resume against enrolled configuration.
+- Usage boundary: Enrollment neither starts a collector nor proves production readiness
+  by itself
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-013`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-032` — Qualified Coverage
+
+- Entry kind: `qualification_rule`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `data / reporting`
+- Whole-system classification uses: QT-GC-017, QT-GC-021, QT-GC-022, QT-GC-023,
+  QT-GC-026
+- Frozen Phase 1 source evidence: numeric-facts boundary lines 239-285; market-structure
+  data plane lines 329-330 and 579-581; data boundary lines 273-280
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Acquisition
+  coverage, stream coverage interval, archive coverage, Dataset coverage, and reporting
+  coverage are separately owned evidence.
+- Usage boundary: Complete in one coverage namespace does not certify another
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-033` — Archive mapping / archive coverage / retention pin
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `raw-archive`
+- Whole-system classification uses: QT-GC-022, QT-GC-023, QT-GC-026
+- Frozen Phase 1 source evidence: market-structure data plane lines 315-330, 874-889,
+  and 1017-1023; `portal/backend/db/market_data_models.py:1118-1307`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Mapping links
+  raw records to immutable archive objects; archive coverage proves durable placement
+  over a range; a retention pin prevents eligible object expiry.
+- Usage boundary: None is a Canonical Fact, Dataset freeze, or book-validity certificate
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-014`, `QT-CONFLICT-015`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-034` — Reconstructed Book State / book checkpoint / execution-book tape
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `market-structure / execution-runtime`
+- Whole-system classification uses: QT-GC-024, QT-GC-049
+- Frozen Phase 1 source evidence: market-structure data plane lines 380-385 and 481-487;
+  Phase 3A book execution lines 58-90
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Book state is
+  disposable current reconstruction; checkpoint accelerates deterministic replay; a
+  certified execution tape is a frozen runtime input over causal snapshots.
+- Usage boundary: A checkpoint or tape is not provider truth, and hot book state is
+  never Dataset truth
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-015`, `QT-CONFLICT-020`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-035` — Indicator definition / Indicator config / runtime Indicator instance
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `indicator-runtime`
+- Whole-system classification uses: QT-GC-027 through QT-GC-031
+- Frozen Phase 1 source evidence: indicator boundary lines 28-44 and 87-109;
+  `src/indicators/registry.py:18-64`; `src/indicators/manifest.py:161-181`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Definition
+  owns type contract and manifest; config is persisted parameterization; runtime
+  instance owns private walk-forward state.
+- Usage boundary: Qualify Indicator when type, saved config, and stateful runtime object
+  could differ
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-017`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-036` — Typed Indicator Output / output catalog / output readiness
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `indicator-runtime`
+- Whole-system classification uses: QT-GC-002, QT-GC-027 through QT-GC-031
+- Frozen Phase 1 source evidence: indicator boundary lines 44-57, 129-136, and 166-193;
+  `src/indicators/manifest.py:65-104`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Catalog
+  declares every public output; each bar returns every declared typed output;
+  `ready=false` means present but not yet usable.
+- Usage boundary: Output preference or visibility must not rewrite Indicator truth
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-017`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-037` — Indicator lifecycle output
+
+- Entry kind: `domain_term`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `indicator-runtime / research`
+- Whole-system classification uses: QT-GC-031
+- Frozen Phase 1 source evidence: indicator boundary lines 97-105 and 187-191; runtime
+  contract lines 71-79
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Public typed
+  research evidence about candidate/setup progression owned by an Indicator.
+- Usage boundary: Not a Bot Run, order, trade, collector, or deployment lifecycle event
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-017`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-038` — Overlay contract / overlay snapshot / overlay delta
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `indicator-runtime / BotLens`
+- Whole-system classification uses: QT-GC-002, QT-GC-030, QT-GC-054
+- Frozen Phase 1 source evidence: runtime contract lines 81-111 and 139-170;
+  `src/overlays/registry.py:15-135`; BotLens boundary lines 522-559
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Contract
+  names renderable payload semantics; snapshot is full current visual state; delta is
+  bounded projection transport with its own clock.
+- Usage boundary: Overlays are projections, never Strategy inputs or canonical execution
+  state
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-016`, `QT-CONFLICT-017`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-039` — Signal ID / Decision ID / order and fill IDs
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `decision / execution`
+- Whole-system classification uses: QT-GC-032, QT-GC-040 through QT-GC-045
+- Frozen Phase 1 source evidence: decision boundary lines 75-105; Phase 2B order
+  lifecycle lines 88-91
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Distinct
+  causal identities link an Indicator signal to a Strategy decision and later execution
+  artifacts without aliasing them.
+- Usage boundary: Sharing provenance does not make signal, decision, order, attempt,
+  event, and fill the same object
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-018`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-040` — Strategy definition / Compiled Strategy / effective strategy / run strategy snapshot
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `decision-layer`
+- Whole-system classification uses: QT-GC-032 through QT-GC-035
+- Frozen Phase 1 source evidence: decision boundary lines 87-118 and 119-141; ADR 0018
+  lines 82-90 and 158-168
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Authored
+  rules compile to executable semantics; variant resolution produces the effective
+  strategy; run start freezes the exact snapshot.
+- Usage boundary: “Strategy” must not conceal which stage or frozen identity is meant
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-019`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-041` — Strategy Variant / Output Filter
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `decision-layer`
+- Whole-system classification uses: QT-GC-033, QT-GC-034
+- Frozen Phase 1 source evidence: ADR 0018 lines 66-93, 154-189; decision boundary lines
+  101-116
+- Summary strategy: Index the Phase 1 distinction without adding behavior: A Variant is
+  a named diff whose output filters add deterministic conditions over public outputs
+  already attached to the base Strategy.
+- Usage boundary: A Variant does not own ATM selection, Indicator config, or a second
+  evaluator
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-019`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-042` — Instrument Execution Profile
+
+- Entry kind: `domain_term`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `execution-runtime`
+- Whole-system classification uses: QT-GC-037
+- Frozen Phase 1 source evidence: Phase 1 economic execution contract lines 117-139;
+  reporting boundary lines 215-225
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Persisted
+  runtime-readiness and economic semantics for one instrument, including capability,
+  fee, margin, and model references.
+- Usage boundary: Not provider metadata, a Strategy setting, or proof of external-order
+  authority
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-020`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-043` — Resolved Execution Context / context bundle
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `execution-runtime`
+- Whole-system classification uses: QT-GC-038
+- Frozen Phase 1 source evidence: Phase 2A execution context lines 55-80 and 160-168;
+  `src/engines/bot_runtime/core/execution_assumptions.py:1`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Immutable
+  per-series binding of exact execution contracts; a bundle pins one context per runtime
+  series for a run.
+- Usage boundary: Context binds execution assumptions; it does not own Strategy meaning,
+  accounting, or authorization
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-020`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-044` — Runtime Execution Plan / Canonical Order Request
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `execution-runtime`
+- Whole-system classification uses: QT-GC-039 through QT-GC-044
+- Frozen Phase 1 source evidence: Phase 2A lines 114-121 and 164-168; Phase 2B lines
+  57-91
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Plan is the
+  run-time intended action; Canonical Order Request begins durable order quantity and
+  policy custody.
+- Usage boundary: Neither is a fill, and the plan is not the durable order lifecycle
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-020`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-045` — Canonical Order Lifecycle / `FillOrder` / fill
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `execution-runtime`
+- Whole-system classification uses: QT-GC-040 through QT-GC-045
+- Frozen Phase 1 source evidence: Phase 2B lines 57-91, 133-165, and 180-196
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Lifecycle is
+  append-only durable order truth; `FillOrder` is a compatibility request to an
+  execution adapter; fill is one executed quantity event.
+- Usage boundary: Never describe `FillOrder` as the durable order or a fill as the whole
+  order
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-018`, `QT-CONFLICT-020`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-046` — Wallet state / Wallet Ledger fact / wallet commit clock
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `execution-runtime`
+- Whole-system classification uses: QT-GC-045 through QT-GC-048
+- Frozen Phase 1 source evidence: wallet boundary lines 72-120 and 123-146; runtime
+  contract lines 114-130
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Wallet state
+  is current capital truth; ledger facts are replayable transitions; `wallet_commit_seq`
+  orders shared-wallet mutation.
+- Usage boundary: Report/BotLens wallet views and runtime-event append order are not
+  alternate wallet truth
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-021`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-048` — Qualified Cursor
+
+- Entry kind: `qualification_rule`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `identity / BotLens`
+- Whole-system classification uses: QT-GC-051, QT-GC-054
+- Frozen Phase 1 source evidence: runtime contract lines 121-146; BotLens boundary lines
+  222-228, 333-356, 438-440, and 550-559
+- Summary strategy: Index the Phase 1 distinction without adding behavior: `run_seq`,
+  stream `base_seq`, `after_seq`/`after_row_id`, overlay commit sequence, and trade
+  revision are distinct ordered positions.
+- Usage boundary: Bare Cursor or Sequence invites cross-clock comparison
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-022`, `QT-CONFLICT-024`. Qualification records
+  the collision but does not resolve subsystem semantics.
+
+### `QT-TERM-050` — Lease / claim / ownership fence
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `persistence / orchestration`
+- Whole-system classification uses: QT-GC-060, QT-GC-061
+- Frozen Phase 1 source evidence: ADR 0047 lines 31-44 and 68-88; research async-job
+  boundary lines 54-79; ADR 0025
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Lease or
+  claim grants time-bounded work ownership; the fence is the token-and-generation check
+  that prevents a stale owner from committing.
+- Usage boundary: A row lock, heartbeat, lease timestamp, token, and generation are
+  related but not synonyms
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-023`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-051` — Async Job / job-owned effect
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `research-orchestration`
+- Whole-system classification uses: QT-GC-061
+- Frozen Phase 1 source evidence: research async-job boundary lines 28-79;
+  `portal/backend/service/async_jobs/repository.py`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Durable queue
+  item whose current fenced claim may append its result and associated domain effects
+  atomically.
+- Usage boundary: A job is neither the Check it dispatches nor the worker process that
+  claims it
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-023`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-052` — Semantic fingerprint / operational fingerprint
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `reporting`
+- Whole-system classification uses: QT-GC-071
+- Frozen Phase 1 source evidence: ADR 0015 lines 29-60; reporting boundary lines 255-268
+  and 303-333
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Semantic
+  fingerprint covers stable trading behavior and material identity; operational
+  fingerprint covers diagnostics, ordering, availability, and runtime drift.
+- Usage boundary: Operational drift can coexist with semantic equivalence
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-024`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-053` — Report input fingerprint / data snapshot hash
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `reporting`
+- Whole-system classification uses: QT-GC-011, QT-GC-071
+- Frozen Phase 1 source evidence: ADR 0031 lines 39-54; reporting boundary lines 60-79
+  and 142-146
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Input
+  fingerprint validates one report materialization against durable run inputs; data
+  snapshot hash identifies exact runtime-consumed data material.
+- Usage boundary: Neither is the semantic or operational fingerprint
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-024`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-054` — Deployment contract / strategy deployment authority
+
+- Entry kind: `contrast_set`
+- Proposal status: `proposed`
+- Term lifecycle: `current`
+- Source lifecycle: accepted decision and/or active platform contract as indexed in
+  Phase 1
+- Owner: `platform / security`
+- Whole-system classification uses: QT-GC-015, QT-GC-059, QT-GC-069
+- Frozen Phase 1 source evidence: `.github/workflows/test.yaml:53-125`; ADR 0049 lines
+  33-62; autonomous research roadmap lines 159-164
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Deployment
+  contract validates build, Compose, source attestation, and bootstrap; strategy
+  deployment authority would permit an artifact to control external execution.
+- Usage boundary: Successful deployment CI does not open external-order authority
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-025`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+### `QT-TERM-055` — Make target / CI job / test suite / pytest profile
+
+- Entry kind: `contrast_set`
+- Proposal status: `deferred`
+- Term lifecycle: `current`
+- Source lifecycle: mixed explanatory or source-owned evidence; authority review pending
+- Owner: `platform / CI`
+- Whole-system classification uses: QT-GC-072, QT-GC-074, QT-GC-075
+- Frozen Phase 1 source evidence: `Makefile:454-493`;
+  `scripts/ci/run_test_suite.sh:4-118`; `.github/workflows/test.yaml:9-125`
+- Summary strategy: Index the Phase 1 distinction without adding behavior: Separate
+  validation selectors: developer aggregation, hosted workflow lane, shell-runner suite,
+  and conftest file-selection profile.
+- Usage boundary: Passing one selector must not be reported as passing all validation
+  layers
+- Alias handling: No alias, deprecation, or replacement is adopted; labels
+  separated by slashes remain contrasted spellings or concepts pending review.
+- Conflict handling: Retain `QT-CONFLICT-026`. Qualification records the collision but
+  does not resolve subsystem semantics.
+
+## Calibration Mapping Preserved
 
 The Phase 1-recommended ten-candidate batch uses the glossary as follows:
 
@@ -554,26 +1228,16 @@ Term references do not activate a candidate. In particular, the blocked term
 references make `QT-GC-008` and `QT-GC-009` useful calibration cases without
 settling their unresolved terminology.
 
-## Deferred And Excluded Phase 1 Vocabulary
+## Phase 2B Vocabulary Accounting
 
-The following Phase 1 term candidates stay outside this proposed glossary:
+All 55 Phase 1 term IDs now have an explicit proposal-model entry: 34 are
+`proposed`, two (`QT-TERM-006` and `QT-TERM-012`) remain `blocked`, and
+19 remain `deferred` pending source/ownership review. Zero entries are
+adopted. No new term ID or terminology conflict was introduced by this
+mechanical expansion.
 
-- `QT-TERM-016` through `QT-TERM-021`;
-- `QT-TERM-025`;
-- `QT-TERM-027` through `QT-TERM-046`;
-- `QT-TERM-048`;
-- `QT-TERM-050` through `QT-TERM-055`.
-
-They are deferred, not rejected. They remain unadopted until whole-system
-classification and the relevant subsystem or conflict review. This preserves
-the open identity-chain, collector-state, coverage, archive/book, overlay,
-Strategy-stage, execution/order, wallet, cursor, lease, fingerprint,
-deployment, and validation-selector questions associated with
-`QT-CONFLICT-011` through `QT-CONFLICT-026`.
-
-All `QT-ALIAS-001` through `QT-ALIAS-020` also remain Phase 1 findings. Phase 2A
-does not formally deprecate, replace, remove, or normalize any of them. Exact
-code spellings recorded on a proposed entry are not deprecation decisions.
+All `QT-ALIAS-001` through `QT-ALIAS-020` remain Phase 1 findings. Phase 2B
+does not deprecate, replace, remove, or normalize any alias.
 
 ## Validation Rules
 
@@ -605,9 +1269,9 @@ can become normative:
 10. Historical, discouraged, or rejected aliases never become automatic
     replacements. A future deprecation requires a reviewed replacement term,
     valid target ID, and an acyclic replacement chain.
-11. Each calibration-scoped proposed term is referenced by at least one
-    calibration candidate or explicitly marked as a critical ambiguity label;
-    this prevents unreviewed glossary expansion.
+11. Each proposed or deferred term is referenced by at least one whole-system
+    candidate or explicitly marked as a critical ambiguity label; this prevents
+    unreviewed glossary expansion.
 12. Guarantee-registry term references resolve to a glossary ID. A candidate
     may reference a blocked term only as constrained context: it must remain
     unactivated, explicitly name each blocking conflict in its finding or
@@ -618,25 +1282,14 @@ can become normative:
     algorithms, behavioral exceptions, or authority. Such content belongs in
     the owning contract or reviewed decision.
 14. The proposal cannot be marked active, enter the normative read order, or be
-    cited as adopted vocabulary while Gate 2 remains pending.
+    cited as adopted vocabulary without a separate terminology-adoption review.
 15. Link checking and any generated index/view are deterministic; regeneration
     must leave a clean tree.
 
-## Gate 2 Model And Entry Review Decisions
+## Phase 2B Terminology Review Boundary
 
-Gate 2 review should decide only:
-
-- whether the entry model and intended normative location fit the existing
-  hierarchy;
-- whether each of the 19 proposed entries is sufficiently narrow and correctly
-  owned to remain a candidate for separate future adoption;
-- whether `QT-TERM-006` and `QT-TERM-012` remain blocked pending explicit
-  Check/Observation reconciliation;
-- whether the deferred denominator is appropriate for the calibration boundary;
-- whether the validation and guarantee-reference rules prevent accidental
-  activation or vocabulary drift.
-
-Approval adopts zero entries: not the 19 proposed terms, not the two blocked
-terms, and not any deferred term or alias. It also must not be interpreted as
-resolving any named Phase 1 conflict, activating any guarantee, or authorizing
-a product-semantic change.
+Phase 2B classification does not adopt any entry. Later terminology review
+must decide whether each proposed entry has sufficient authority and ownership,
+whether each deferred entry can advance, and whether the two blocked entries
+have received the required conflict resolution. No alias or replacement may be
+adopted by implication from the registry.

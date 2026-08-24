@@ -52,7 +52,9 @@ An aligned implementation or passing proof does not activate a guarantee.
 While `scope.gate` is `gate_2_pending`, validation requires an active-guarantee
 count of zero. Gate 2 model approval cannot be cited as a guarantee-activation
 decision. Finding IDs and Phase 1 crosswalk aliases do not count as remediation
-records.
+records. Concrete remediation records also bind the exact owning role and a
+sorted, nonempty `required_reviewers` role set. A generic review-required flag
+without those reviewer roles is insufficient for whole-system classification.
 
 ## Commands
 

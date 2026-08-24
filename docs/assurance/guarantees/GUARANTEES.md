@@ -49,7 +49,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-001`](#proof-qt-proof-001)
 - Glossary references (Gate 2 proposal): `QT-TERM-014`
 - Open finding references: `ARCH-COVERAGE-001`, `CI-TRACE-001`
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-001` [docs/assurance/guarantees/remediations/QT-REM-001.md#Remediation QT-REM-001](remediations/QT-REM-001.md#remediation-qt-rem-001) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -66,7 +66,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-002`](#proof-qt-proof-002)
 - Glossary references (Gate 2 proposal): `QT-TERM-001`, `QT-TERM-002`, `QT-TERM-003`, `QT-TERM-004`
 - Open finding references: `SCHEMA-AUTH-001`
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-002` [docs/assurance/guarantees/remediations/QT-REM-002.md#Remediation QT-REM-002](remediations/QT-REM-002.md#remediation-qt-rem-002) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -83,7 +83,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-003`](#proof-qt-proof-003), [`QT-PROOF-004`](#proof-qt-proof-004)
 - Glossary references (Gate 2 proposal): `QT-TERM-001`
 - Open finding references: `ARCH-COVERAGE-001`
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-003` [docs/assurance/guarantees/remediations/QT-REM-003.md#Remediation QT-REM-003](remediations/QT-REM-003.md#remediation-qt-rem-003) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -134,7 +134,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-006`](#proof-qt-proof-006), [`QT-PROOF-008`](#proof-qt-proof-008)
 - Glossary references (Gate 2 proposal): `QT-TERM-006`, `QT-TERM-011`, `QT-TERM-012`, `QT-TERM-013`, `QT-TERM-026`
 - Open finding references: `QT-CONFLICT-007`
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-004` [docs/assurance/guarantees/remediations/QT-REM-004.md#Remediation QT-REM-004](remediations/QT-REM-004.md#remediation-qt-rem-004) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -151,7 +151,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-009`](#proof-qt-proof-009)
 - Glossary references (Gate 2 proposal): `QT-TERM-005`, `QT-TERM-009`, `QT-TERM-010`, `QT-TERM-024`, `QT-TERM-026`, `QT-TERM-049`
 - Open finding references: `ARCH-COVERAGE-001`, `CI-TRACE-001`
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-005` [docs/assurance/guarantees/remediations/QT-REM-005.md#Remediation QT-REM-005](remediations/QT-REM-005.md#remediation-qt-rem-005) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -168,7 +168,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-010`](#proof-qt-proof-010)
 - Glossary references (Gate 2 proposal): `QT-TERM-005`, `QT-TERM-022`, `QT-TERM-023`, `QT-TERM-024`
 - Open finding references: `SCHEMA-AUTH-001`
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-006` [docs/assurance/guarantees/remediations/QT-REM-006.md#Remediation QT-REM-006](remediations/QT-REM-006.md#remediation-qt-rem-006) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -185,7 +185,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-011`](#proof-qt-proof-011)
 - Glossary references (Gate 2 proposal): `QT-TERM-005`, `QT-TERM-026`, `QT-TERM-047`, `QT-TERM-049`
 - Open finding references: none
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-007` [docs/assurance/guarantees/remediations/QT-REM-007.md#Remediation QT-REM-007](remediations/QT-REM-007.md#remediation-qt-rem-007) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -202,7 +202,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-012`](#proof-qt-proof-012)
 - Glossary references (Gate 2 proposal): none
 - Open finding references: `ARCH-COVERAGE-001`, `CI-TRACE-001`
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-008` [docs/assurance/guarantees/remediations/QT-REM-008.md#Remediation QT-REM-008](remediations/QT-REM-008.md#remediation-qt-rem-008) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none
@@ -219,7 +219,7 @@ produce an activation-qualifying PASS until typed result semantics are added.
 - Proof definitions: [`QT-PROOF-013`](#proof-qt-proof-013), [`QT-PROOF-014`](#proof-qt-proof-014)
 - Glossary references (Gate 2 proposal): none
 - Open finding references: none
-- Remediation: `pending`; references: none
+- Remediation: `recorded`; references: `QT-REM-009` [docs/assurance/guarantees/remediations/QT-REM-009.md#Remediation QT-REM-009](remediations/QT-REM-009.md#remediation-qt-rem-009) (`proposed`)
 - Replaced by: none
 - Activation decisions: none
 - Activation attestations: none

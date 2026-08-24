@@ -113,8 +113,18 @@
         "ARCH-COVERAGE-001",
         "CI-TRACE-001"
       ],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-001",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-001.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-001"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -221,8 +231,18 @@
       "finding_refs": [
         "SCHEMA-AUTH-001"
       ],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-002",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-002.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-002"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -303,8 +323,18 @@
       "finding_refs": [
         "ARCH-COVERAGE-001"
       ],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-003",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-003.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-003"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -603,8 +633,18 @@
       "finding_refs": [
         "QT-CONFLICT-007"
       ],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-004",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-004.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-004"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -692,8 +732,18 @@
         "ARCH-COVERAGE-001",
         "CI-TRACE-001"
       ],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-005",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-005.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-005"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -788,8 +838,18 @@
       "finding_refs": [
         "SCHEMA-AUTH-001"
       ],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-006",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-006.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-006"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -872,8 +932,18 @@
         }
       ],
       "finding_refs": [],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-007",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-007.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-007"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -975,8 +1045,18 @@
         "ARCH-COVERAGE-001",
         "CI-TRACE-001"
       ],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-008",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-008.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-008"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
@@ -1064,8 +1144,18 @@
         }
       ],
       "finding_refs": [],
-      "remediation_status": "pending",
-      "remediation_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-009",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-009.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Remediation QT-REM-009"
+          },
+          "lifecycle": "proposed"
+        }
+      ],
       "replaced_by_ids": []
     },
     {
