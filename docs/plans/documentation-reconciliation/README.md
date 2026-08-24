@@ -10,8 +10,8 @@ replace `AGENTS.md`, the platform contracts, accepted ADRs, or component owners.
 - Baseline branch: `origin/develop`
 - Baseline commit: `d46e40bf55caeea12f4ccbde640c71f271eaf9c4`
 - Campaign branch: `feat/docs-guarantee-reconciliation`
-- Current phase: Phase 2B whole-system classification complete
-- Current gate: subsystem and normative-decision review before Phase 3
+- Current phase: bounded Decision Resolution pass complete; Phase 3 unauthorized
+- Current gate: owner review of the consolidated decision and disposition packet
 
 `develop` remains unchanged for the duration of the campaign. The baseline is a
 fixed audit subject rather than a moving integration target.
@@ -161,3 +161,28 @@ calibrated model; it did not authorize any of those other actions.
 Phase 2B completion does not activate a guarantee, adopt terminology, resolve a
 normative conflict, repair product semantics, change a contract, execute proof,
 or authorize deletion, archival, consolidation, or integration into `develop`.
+
+## Decision Resolution Deliverables
+
+After Phase 2B was accepted, a separately authorized, bounded Decision
+Resolution pass translated its machine-level review map into an owner-readable
+system model:
+
+- `decision-resolution-packet.md` explains how QT's authority and truth flows
+  work, consolidates all 40 review routes exactly once into 15 resolutions, and
+  distinguishes 5 derivable readings, 9 owner judgments, and 1
+  execution/proof program;
+- `decision-resolution-remediation-dispositions.md` proposes a disposition for
+  all 68 remediation records without approving, editing, executing, or closing
+  one; and
+- `decision-resolution-proof-decisions.md` reduces all 9 proof ceilings to 5
+  owner-facing choices while preserving exact ceiling and reviewer routing.
+
+The pass also records, without implementing them, that the isolated-database
+profile is underspecified for several proposed remediation plans and that
+`QT-REM-311` would require a separately reviewed deployment-rehearsal profile.
+
+These deliverables are non-normative review proposals. They do not change
+product behavior, normative documents, adopted terminology, guarantees,
+remediation state, proof results, or the frozen Phase 1/2 findings. Phase 3
+remains unauthorized pending owner approval.
