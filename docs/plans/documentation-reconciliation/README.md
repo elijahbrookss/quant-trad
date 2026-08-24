@@ -10,8 +10,8 @@ replace `AGENTS.md`, the platform contracts, accepted ADRs, or component owners.
 - Baseline branch: `origin/develop`
 - Baseline commit: `d46e40bf55caeea12f4ccbde640c71f271eaf9c4`
 - Campaign branch: `feat/docs-guarantee-reconciliation`
-- Current phase: bounded Decision Resolution pass complete; Phase 3 unauthorized
-- Current gate: owner review of the consolidated decision and disposition packet
+- Current phase: Phase 3 authorized and in progress
+- Current gate: final residual-risk and integration review after Phase 3
 
 `develop` remains unchanged for the duration of the campaign. The baseline is a
 fixed audit subject rather than a moving integration target.
@@ -185,4 +185,15 @@ profile is underspecified for several proposed remediation plans and that
 These deliverables are non-normative review proposals. They do not change
 product behavior, normative documents, adopted terminology, guarantees,
 remediation state, proof results, or the frozen Phase 1/2 findings. Phase 3
-remains unauthorized pending owner approval.
+was subsequently authorized in
+`phase-3-authorization-and-plan.md`; that authorization does not itself change
+any of those states.
+
+## Phase 3 Authorization
+
+`phase-3-authorization-and-plan.md` preserves the approved Decision Resolution
+recommendations, the local-Promtail/native-server-Alloy clarification, proof
+safety boundaries, required sequencing, bounded work packages, and the final
+approval gate. Phase 3 may change approved normative and product artifacts in
+that order, but it may not merge into `develop` or activate a guarantee without
+the separately required final review.
