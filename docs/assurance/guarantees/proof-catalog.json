@@ -2,6 +2,16 @@
   "schema_version": "qt.guarantee_proof_catalog.v1",
   "environment_profiles": [
     {
+      "id": "frontend-node",
+      "python": ">=3.12,<3.13",
+      "node": ">=20,<21",
+      "lockfiles": [
+        "portal/frontend/package-lock.json",
+        "requirements.lock"
+      ],
+      "required_services": []
+    },
+    {
       "id": "manual-recovery",
       "python": ">=3.12,<3.13",
       "lockfiles": [
@@ -362,7 +372,7 @@
           "path": "docs/plans/documentation-reconciliation/phase-2a-calibration.md",
           "locator": {
             "kind": "heading",
-            "value": "`QT-GC-070` — Destructive recovery verification"
+            "value": "`QT-GC-070` \u2014 Destructive recovery verification"
           }
         }
       },
@@ -392,6 +402,1404 @@
       "coverage": [
         {
           "guarantee_id": "QT-GUAR-ARCHITECTURE-DOC-INDEX-INTEGRITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-100",
+      "title": "Derived-output timeline consumer-boundary checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_runtime_push_stream.py::test_push_update_never_builds_or_emits_overlay_projection_facts",
+          "tests/test_indicator_engine_overlays.py::test_strategy_decisions_match_across_overlay_detail_modes",
+          "tests/test_portal/test_run_research_dataset.py::test_dataset_builds_from_db_truth_without_artifact_directory",
+          "tests/test_strategies/test_strategy_evaluator.py::test_runtime_output_debug_details_and_overlays_do_not_enter_strategy_history"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-101",
+      "title": "Frozen backtest identity and runtime-binding checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_requires_dataset_identity_and_exact_evaluation_range",
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_revalidates_exact_snapshot_and_rejects_tampering",
+          "tests/test_market_data/test_backtest_dataset.py::test_binding_forbids_range_expansion_and_series_substitution",
+          "tests/test_market_data/test_backtest_dataset.py::test_indicator_configuration_is_part_of_execution_identity",
+          "tests/test_market_data/test_backtest_dataset.py::test_plan_freezes_exact_execution_instrument_configuration",
+          "tests/test_market_data/test_backtest_dataset.py::test_plan_separates_warmup_materialization_evaluation_and_decision_ranges",
+          "tests/test_market_data/test_backtest_dataset.py::test_strategy_identity_rejects_declared_hash_disagreement",
+          "tests/test_market_data/test_backtest_dataset.py::test_transitive_indicator_configuration_is_part_of_execution_identity",
+          "tests/test_market_data/test_runtime_scope.py::test_dataset_scope_rejects_range_expansion_before_store_read",
+          "tests/test_market_data/test_runtime_scope.py::test_market_data_scope_reads_only_the_bound_dataset_and_restores_context",
+          "tests/test_market_data/test_runtime_scope.py::test_runtime_dependency_rejects_execution_policy_substitution",
+          "tests/test_market_data/test_runtime_scope.py::test_runtime_dependency_rejects_strategy_or_indicator_substitution",
+          "tests/test_portal/test_container_runtime_transport.py::test_backtest_market_data_scope_persists_the_admitted_dataset_binding",
+          "tests/test_portal/test_container_runtime_transport.py::test_backtest_market_data_scope_rejects_execution_config_substitution",
+          "tests/test_portal/test_container_runtime_transport.py::test_backtest_market_data_scope_rejects_missing_or_substituted_binding"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BACKTEST-FROZEN-BINDING",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-102",
+      "title": "Dataset reality and consumer-admission checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_rejects_undisclosed_gap_but_preserves_disclosed_closure",
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_uses_only_quality_evidence_pinned_at_freeze",
+          "tests/test_portal/test_research_check_planning.py::test_complete_acquisition_manifest_can_prove_zero_event_numeric_range",
+          "tests/test_portal/test_research_check_planning.py::test_evidence_requires_explicit_gap_policy",
+          "tests/test_portal/test_research_check_planning.py::test_sparse_numeric_fact_does_not_prove_full_source_coverage"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-103",
+      "title": "Check authority-ceiling checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_research_authority.py::test_offline_governance_reaches_research_certified_and_no_further",
+          "tests/test_portal/test_research_result_reference.py::test_blocked_check_cannot_become_scientific_evidence",
+          "tests/test_portal/test_research_result_reference.py::test_check_reference_rejects_caller_projection",
+          "tests/test_portal/test_research_result_reference.py::test_check_reference_uses_fixed_hashed_projection_and_attempt_binding",
+          "tests/test_research_science/test_contracts.py::test_scientific_quality_advances_only_when_each_authority_layer_exists"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CHECK-AUTHORITY-CEILING",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-104",
+      "title": "External-order submission closure checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_execution_contexts.py::test_simulation_profiles_cannot_enable_external_order_submission",
+          "tests/test_cli/test_mcp_server.py::test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest",
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-116",
+      "title": "Indicator output-catalog and Strategy-read checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_indicator_output_catalog_contract.py::test_factory_build_meta_from_record_keeps_outputs_catalog_only",
+          "tests/test_portal/test_indicator_output_catalog_contract.py::test_indicator_create_update_exposes_all_signal_outputs_without_prefs",
+          "tests/test_portal/test_strategy_compile_contract.py::test_create_strategy_variant_validates_output_filters_against_compile",
+          "tests/test_portal/test_strategy_compile_contract.py::test_strategy_decision_inputs_catalog_marks_selected_rule_inputs"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-117",
+      "title": "Indicator output presence and readiness checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_indicator_engine_overlays.py::test_dependency_not_ready_propagates_to_overlays_and_outputs",
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_validation_reports_readiness_assertion_failures",
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_validation_summarizes_output_presence_and_readiness"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-118",
+      "title": "Indicator publication-authority checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_indicator_engine_overlays.py::test_indicator_engine_returns_outputs_and_overlays",
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_output_evidence_collects_per_bar_declared_values"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-119",
+      "title": "Projection-invariance checks for Indicator truth",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_indicator_engine_overlays.py::test_candle_stats_outputs_match_when_overlays_are_disabled",
+          "tests/test_indicator_engine_overlays.py::test_market_profile_outputs_match_when_overlays_are_disabled",
+          "tests/test_indicator_engine_overlays.py::test_regime_outputs_match_when_overlays_are_disabled",
+          "tests/test_indicator_engine_overlays.py::test_strategy_decisions_match_across_overlay_detail_modes",
+          "tests/test_strategies/test_strategy_evaluator.py::test_runtime_output_debug_details_and_overlays_do_not_enter_strategy_history"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-120",
+      "title": "Indicator lifecycle-evidence separation checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_output_evidence_collects_per_bar_declared_values",
+          "tests/test_strategies/test_strategy_evaluator.py::test_runtime_output_debug_details_and_overlays_do_not_enter_strategy_history"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-121",
+      "title": "Strategy decision-artifact separation checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_runtime_push_stream.py::test_emit_rejected_decision_adds_attempt_identity_when_source_lost",
+          "tests/test_portal/test_botlens_domain_events.py::test_decision_events_keep_signal_domain_root_correlation",
+          "tests/test_portal/test_botlens_domain_events.py::test_rejected_decision_requires_message",
+          "tests/test_portal/test_botlens_domain_events.py::test_rejected_decision_requires_reason_code"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-122",
+      "title": "Strategy variant output-filter boundary checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_strategy_compile_contract.py::test_create_strategy_variant_validates_output_filters_against_compile",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_materialize_output_filters_appends_context_guard_by_intent_scope",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_materialize_output_filters_appends_market_profile_metric_guard"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-123",
+      "title": "Effective Strategy resolution-parity checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_strategy_compile_contract.py::test_compile_strategy_contract_materializes_selected_variant_output_filters",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_materialize_output_filters_appends_context_guard_by_intent_scope",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_resolve_strategy_variant_preserves_output_filters_and_hashes_stably"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-124",
+      "title": "Deterministic sequential experiment-plan checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_cli/test_experiments_orchestration.py::test_experiments_run_plan_requires_explicit_proceed_for_data_warnings",
+          "tests/test_cli/test_experiments_orchestration.py::test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates",
+          "tests/test_cli/test_experiments_orchestration.py::test_experiments_validate_plan_prints_step_preview"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-200",
+      "title": "Mode-aware runtime composition guards",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_backtest_profile_is_explicit_and_persisted",
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot",
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_profile_rejects_non_backtest_runs"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-MODE-AWARE-RUNTIME-COMPOSITION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-201",
+      "title": "Execution-economics context ownership",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_execution_contexts.py::test_context_rejects_fee_schedules_canonical_accounting_cannot_settle",
+          "tests/integration/runtime/test_execution_contexts.py::test_fee_schedule_owns_currency_rounding_tier_and_hash",
+          "tests/integration/runtime/test_execution_contexts.py::test_resolved_context_drives_entry_exit_fees_and_fill_provenance"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-STRATEGY-INDEPENDENT-EXECUTION-ECONOMICS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-202",
+      "title": "Pinned resolved execution contexts",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_execution_contexts.py::test_generic_execution_modules_contain_no_named_venue_branches",
+          "tests/integration/runtime/test_execution_contexts.py::test_profile_conformance_rejects_unsupported_tif_increments_and_protections",
+          "tests/integration/runtime/test_execution_contexts.py::test_resolved_context_hashes_every_component_and_detects_tampering",
+          "tests/integration/runtime/test_execution_contexts.py::test_simulation_profiles_cannot_enable_external_order_submission",
+          "tests/integration/runtime/test_execution_contexts.py::test_two_different_profiles_use_the_same_context_resolver"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PINNED-EXECUTION-CONTEXTS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-203",
+      "title": "Explicit execution exit-policy activation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_disabled_trailing_config_with_stale_distance_fields_does_not_activate",
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_omitted_stop_adjustments_do_not_enable_implicit_breakeven",
+          "tests/integration/runtime/test_execution_semantics.py::test_ladder_position_default_does_not_enable_breakeven"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-EXPLICIT-EXECUTION-EXIT-POLICY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-204",
+      "title": "Post-only signal-bar causality",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_limit_maker_entry_does_not_fill_from_signal_bar_range",
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_submit_entry_limit_maker_rejects_marketable_post_only_order",
+          "tests/integration/runtime/test_execution_contexts.py::test_profile_post_only_cross_behavior_maps_to_canceled_outcome"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-POST-ONLY-SIGNAL-BAR-CAUSALITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-205",
+      "title": "Protective-exit residual and terminal integrity",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_partial_exit_preserves_residual_and_reuses_one_canonical_order",
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_rejected_stop_fill_keeps_position_open_without_terminal_metadata",
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_trailing_stop_from_normalized_config_only_tightens",
+          "tests/integration/runtime/test_runtime_push_stream.py::test_trade_facts_reject_closed_snapshot_missing_terminal_evidence"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROTECTIVE-EXIT-RESIDUAL-TERMINAL-INTEGRITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-206",
+      "title": "Execution-mode and playback-mode separation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_execution_semantics.py::test_execution_mode_is_separate_from_playback_mode",
+          "tests/integration/runtime/test_execution_semantics.py::test_fast_long_tp_and_stop_same_bar_resolves_stop",
+          "tests/integration/runtime/test_execution_semantics.py::test_full_complete_intrabar_sequence_does_not_emit_fallback_warning",
+          "tests/integration/runtime/test_execution_semantics.py::test_full_intrabar_tp_then_stop_resolves_take_profit",
+          "tests/integration/runtime/test_execution_semantics.py::test_full_missing_intrabar_falls_back_to_pessimistic_strategy_bar",
+          "tests/integration/runtime/test_execution_semantics.py::test_repeated_intrabar_fallbacks_share_one_compact_runtime_warning"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-EXECUTION-MODE-PLAYBACK-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-207",
+      "title": "Runtime execution ownership quality ceiling",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee",
+          "tests/integration/runtime/test_execution_contexts.py::test_explicit_fee_schedule_inherits_economic_status_and_requires_identity",
+          "tests/integration/runtime/test_execution_contexts.py::test_resolved_context_drives_entry_exit_fees_and_fill_provenance"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-RUNTIME-EXECUTION-OWNERSHIP-QUALITY-CEILING",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-208",
+      "title": "Canonical order lifecycle determinism",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_canonical_order_lifecycle.py::test_duplicate_event_and_fill_are_idempotent_but_divergence_fails",
+          "tests/integration/runtime/test_canonical_order_lifecycle.py::test_fill_wins_full_fill_cancel_race_independent_of_input_order",
+          "tests/integration/runtime/test_canonical_order_lifecycle.py::test_lifecycle_replay_is_equal_and_hash_stable",
+          "tests/integration/runtime/test_canonical_order_lifecycle.py::test_partial_fill_replacement_preserves_exact_residual_and_lineage"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CANONICAL-ORDER-LIFECYCLE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-209",
+      "title": "Fill-settlement single-ingress evidence",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_apply_entry_fill_accumulates_partial_fills",
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_book_entry_fills_mutate_wallet_and_position_once_per_price_level",
+          "tests/integration/runtime/test_execution_contexts.py::test_fill_order_compatibility_facade_preserves_economics_and_adds_lifecycle",
+          "tests/test_portal/test_wallet_margin_locking.py::test_settlement_applier_is_idempotent_for_already_settled_event"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-FILL-SETTLEMENT-SINGLE-INGRESS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-210",
+      "title": "Wallet initialization and ledger replay",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_container_runtime_transport.py::test_append_canonical_wallet_initialized_fact_accepts_exact_persistence_replay",
+          "tests/test_portal/test_container_runtime_transport.py::test_append_canonical_wallet_initialized_fact_allocates_one_run_seq_and_persists_once",
+          "tests/test_portal/test_container_runtime_transport.py::test_build_canonical_wallet_initialized_fact_is_run_scoped_and_absolute",
+          "tests/test_portal/test_wallet_ledger.py::test_canonical_spot_fill_replay_orders_and_validates_wallet_before",
+          "tests/test_portal/test_wallet_ledger.py::test_wallet_replay_rejects_duplicate_initialization_after_activity"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-WALLET-INITIALIZATION-AND-LEDGER-REPLAY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-211",
+      "title": "Shared-wallet market-time arbitration",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_shared_wallet_entry_decision_ordering.py::test_delayed_same_bar_candidate_releases_in_deterministic_order",
+          "tests/integration/runtime/test_shared_wallet_entry_decision_ordering.py::test_entry_request_final_tiebreaker_is_stable_across_repeated_sorts",
+          "tests/integration/runtime/test_shared_wallet_entry_decision_ordering.py::test_overlay_cost_delay_keeps_same_bar_wallet_candidate_order_stable",
+          "tests/integration/runtime/test_shared_wallet_entry_decision_ordering.py::test_same_bar_wallet_contention_uses_deterministic_candidate_order",
+          "tests/integration/runtime/test_shared_wallet_entry_decision_ordering.py::test_sparse_calendar_gap_placeholder_prevents_deadlock",
+          "tests/integration/runtime/test_shared_wallet_entry_decision_ordering.py::test_unresolved_prior_sparse_bar_blocks_future_bar_candidate"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SHARED-WALLET-MARKET-TIME-ARBITRATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-212",
+      "title": "Canonical fill-accounting reconciliation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_apply_entry_fill_accumulates_partial_fills",
+          "tests/test_portal/test_wallet_margin_locking.py::test_backtest_terminal_settlement_releases_all_margin",
+          "tests/test_portal/test_wallet_margin_locking.py::test_exit_settlement_validation_uses_execution_profile_when_instrument_payload_is_sparse",
+          "tests/test_portal/test_wallet_margin_locking.py::test_settlement_applier_is_idempotent_for_already_settled_event",
+          "tests/test_portal/test_wallet_margin_locking.py::test_shared_gateway_exit_metadata_releases_locked_margin_once"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CANONICAL-FILL-ACCOUNTING-RECONCILIATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-213",
+      "title": "Replay-certified execution book and tape",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_book_execution.py::test_arrival_during_closed_validity_interval_fails_closed",
+          "tests/integration/runtime/test_book_execution.py::test_arrival_selection_is_causal_and_prefix_invariant",
+          "tests/integration/runtime/test_book_execution.py::test_snapshot_and_tape_hashes_detect_tampering_and_bundle_round_trips",
+          "tests/integration/runtime/test_book_execution.py::test_x5_aggregated_l2_discloses_bounded_not_exact_queue_truth"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-REPLAY-CERTIFIED-EXECUTION-BOOK-TAPE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-214",
+      "title": "Projector-only selected-symbol backend reads",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_botlens_bootstrap_contracts.py::test_selected_symbol_snapshot_contract_can_report_unavailable_without_fabricating_state",
+          "tests/test_portal/test_botlens_series_service.py::test_get_selected_symbol_bootstrap_reads_projected_snapshots_without_replay",
+          "tests/test_portal/test_botlens_series_service.py::test_get_selected_symbol_bootstrap_returns_unavailable_when_projected_symbol_state_is_missing"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROJECTOR-ONLY-SELECTED-SYMBOL-READS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-215",
+      "title": "Selected-symbol unavailable-state frontend handling",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/botlensRuntimeState.test.js"
+        ],
+        "name_patterns": [
+          "^selected-symbol snapshot unavailable is tracked explicitly instead of fabricating base state$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROJECTOR-ONLY-SELECTED-SYMBOL-READS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-216",
+      "title": "BotLens cursor-lineage backend replay",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_botlens_typed_deltas.py::test_run_stream_replays_missed_deltas_from_resume_cursor",
+          "tests/test_portal/test_botlens_typed_deltas.py::test_run_stream_requests_fresh_bootstrap_when_replay_window_expired",
+          "tests/test_portal/test_botlens_typed_deltas.py::test_run_stream_tracks_cursor_lineage_for_selected_symbol_bootstrap"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOTLENS-CURSOR-LINEAGE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-217",
+      "title": "BotLens cursor-lineage frontend projection",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/botlensProjection.test.js"
+        ],
+        "name_patterns": [
+          "^(?:selected-symbol handoff applies bootstrap at seq N and live deltas from N\\+1 onward|stale overlay commit delta is ignored even with a newer stream sequence)$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOTLENS-CURSOR-LINEAGE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-218",
+      "title": "BotLens typed-readiness backend state",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_botlens_bootstrap_contracts.py::test_terminal_selected_symbol_snapshot_cannot_claim_live_readiness",
+          "tests/test_portal/test_botlens_bootstrap_service.py::test_get_active_botlens_run_bootstrap_is_run_scoped_and_embeds_selected_symbol_state"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOTLENS-TYPED-READINESS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-219",
+      "title": "BotLens typed-readiness frontend state",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/botlensRuntimeState.test.js"
+        ],
+        "name_patterns": [
+          "^run bootstrap creates separated runtime and retrieval ownership$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOTLENS-TYPED-READINESS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-220",
+      "title": "Durable BotLens chart-history reconstruction",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_botlens_series_service.py::test_completed_chart_history_reconstructs_complete_range_trade_markers",
+          "tests/test_portal/test_botlens_series_service.py::test_get_symbol_chart_history_reconstructs_from_domain_truth_without_projection_state"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-221",
+      "title": "Bounded BotLens frontend hot state",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/botlensProjection.test.js",
+          "portal/frontend/tests/botlensRuntimeState.test.js"
+        ],
+        "name_patterns": [
+          "^(?:chart history is a bounded sliding window and focused replacements discard unrelated history|ordered live candle appends stay bounded without reordering the hot tail|selectSymbol retains bounded client state and waits for explicit bootstrap on cache miss)$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOTLENS-HOT-STATE-NOT-HISTORY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-222",
+      "title": "Overlay completeness backend isolation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_botlens_overlay_history.py::test_overlay_history_never_claims_complete_geometry_after_payload_truncation",
+          "tests/test_portal/test_botlens_overlay_history.py::test_overlay_history_requires_terminal_checkpoint_for_latest_terminal_page",
+          "tests/test_portal/test_botlens_overlay_history.py::test_overlay_history_stops_at_clock_gap_and_marks_page_incomplete"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-223",
+      "title": "Overlay completeness frontend isolation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/botlensRuntimeState.test.js"
+        ],
+        "name_patterns": [
+          "^valid candle and trade history becomes ready even when overlay evidence is incomplete$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-OVERLAY-COMPLETENESS-ISOLATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-224",
+      "title": "Bot and BotRun backend identity separation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_bot_after_terminal_run_starts_new_run",
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_bot_different_request_creates_sibling_and_requires_exact_stop"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-225",
+      "title": "Bot and BotRun frontend identity separation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/operationsViewModel.test.js"
+        ],
+        "name_patterns": [
+          "^(?:current run rows come from live bot projections and exclude terminal definitions|run inventory keeps definition identity and run instance identity separate)$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-226",
+      "title": "Operator-console nonauthoritative frontend surface",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/v2ReadOnlySurface.test.js"
+        ],
+        "name_patterns": [
+          "^(?:run-scoped BotLens always performs authoritative exact-run and research-evidence reads|v2 market mutations use only the audited canonical collector action path|v2 UI surface never imports bot-mutation adapter functions)$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-OPERATOR-CONSOLE-NONAUTHORITATIVE-SURFACE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-227",
+      "title": "Causal trade-marker candle projection",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "frontend-node",
+      "runner": {
+        "kind": "node_test",
+        "files": [
+          "portal/frontend/tests/tradeMarkers.test.js"
+        ],
+        "name_patterns": [
+          "^(?:between-bar markers use containing candle time while retaining stable evidence identity|events outside the loaded candle window produce no fabricated marker|trade event projection is exact, containing-candle, or unavailable without nearest snapping)$"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-TRADE-MARKER-CAUSAL-CANDLE-PROJECTION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-300",
+      "title": "Provider credential reference metadata and schema boundary",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_data_providers/test_credential_store_refs.py::test_credential_store_requires_portal_schema_bootstrap",
+          "tests/test_data_providers/test_credential_store_refs.py::test_default_credential_ref_is_stable_and_slugged",
+          "tests/test_portal/test_provider_credentials.py::test_credential_schema_uses_registry_metadata_without_secret_values"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROVIDER-CREDENTIAL-REFERENCE-CONFINEMENT",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-301",
+      "title": "Server loopback publication boundary",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_server_deployment_config.py::test_server_ports_are_private_and_database_is_not_published"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-V1-LOCAL-TRUST-BOUNDARY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-302",
+      "title": "Bot Run lease ownership wiring and contention",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_bot_runtime_control_service.py::test_concurrent_start_attempts_create_one_active_run",
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_bot_passes_run_lease_to_runner",
+          "tests/test_portal/test_bot_watchdog.py::test_verify_container_ownership_skips_expired_lease_for_stale_scan"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOT-RUN-LEASE-OWNERSHIP",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-303",
+      "title": "Asynchronous job fencing transactions",
+      "lifecycle": "active",
+      "proof_kind": "database_integration",
+      "environment_profile_id": "python-db-isolated",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_async_jobs_db.py::test_current_heartbeat_blocks_and_defeats_concurrent_reclaim",
+          "tests/test_portal/test_async_jobs_db.py::test_reclaim_fences_stale_owner_and_commits_one_owned_effect",
+          "tests/test_portal/test_async_jobs_db.py::test_research_artifacts_rollback_with_owned_job_completion"
+        ]
+      },
+      "timeout_seconds": 300,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-304",
+      "title": "Representative agent mutation gates",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_cli/test_market_data_cli.py::test_data_collectors_restart_is_audited_and_confirmed",
+          "tests/test_cli/test_mcp_server.py::test_mcp_collector_mutation_is_planned_guarded_and_routes_through_qt",
+          "tests/test_cli/test_mcp_server.py::test_mcp_controlled_mutation_dry_run_and_apply",
+          "tests/test_cli/test_mcp_server.py::test_mcp_drafts_plan_and_run_plan_defaults_to_dry_run"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-ENUMERATED-AGENT-MUTATION-GATES",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-305",
+      "title": "PostgreSQL authority and strict schema drift guards",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fails_loud_on_existing_column_drift_before_index_repair",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fails_loud_when_async_fencing_constraint_is_missing",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fails_loud_when_retired_lifecycle_tables_exist",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fresh_database_creates_complete_current_schema",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_rejects_async_index_predicate_semantic_drift",
+          "tests/test_portal/test_strategy_service_import.py::test_database_does_not_require_pg_dsn_until_used"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-306",
+      "title": "FastAPI event-loop execution boundary",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/contract/test_fastapi_execution_boundary.py::test_async_http_routes_are_reserved_for_real_async_work",
+          "tests/contract/test_fastapi_execution_boundary.py::test_known_blocking_calls_inside_mixed_async_services_are_thread_offloaded"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BLOCKING-API-WORK-OFFLOAD",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-307",
+      "title": "Bounded observability storage and overflow visibility",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_observability_exporter.py::test_exporter_high_volume_burst_writes_one_rollup_row",
+          "tests/test_portal/test_observability_exporter.py::test_exporter_persists_overflow_event_when_pending_queue_drops",
+          "tests/test_portal/test_observability_exporter.py::test_exporter_rollup_bounds_label_cardinality",
+          "tests/test_portal/test_observability_repo.py::test_metric_rollup_row_normalizes_bucket_and_bounded_labels"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOUNDED-NONCANONICAL-OBSERVABILITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-308",
+      "title": "Development and server Loki topology configuration",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_observability_config.py::test_dev_config_does_not_enable_direct_loki_handler",
+          "tests/test_observability_config.py::test_promtail_indexes_runtime_not_run_identity",
+          "tests/test_server_deployment_config.py::test_server_alloy_preserves_bounded_loki_routing_labels"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SINGLE-LOKI-INGRESS-PER-TOPOLOGY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-309",
+      "title": "Runner and watchdog diagnostic evidence handling",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_bot_watchdog.py::test_scan_expired_run_leases_persists_runner_diagnostics",
+          "tests/test_portal/test_runner_observability.py::test_clock_gap_diagnostic_detects_wall_or_monotonic_runner_pause",
+          "tests/test_portal/test_runner_observability.py::test_docker_container_event_normalizes_quant_trad_bot_lifecycle"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DIAGNOSTICS-NOT-EXECUTION-TRUTH",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-310",
+      "title": "Telemetry priority flush deduplication and fallback",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_container_runtime_transport.py::test_notify_backend_lifecycle_event_terminal_falls_back_to_direct_transport_when_control_flush_fails",
+          "tests/test_portal/test_container_runtime_transport.py::test_notify_backend_lifecycle_event_terminal_prefers_control_flush",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_close_flushes_control_lane",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_send_and_wait_returns_after_control_delivery",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_suppresses_identical_bootstrap_payloads_in_same_session",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_suppresses_identical_large_facts_in_same_session"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOUNDED-TELEMETRY-CONTROL-DELIVERY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-311",
+      "title": "Server deployment script and image-attestation contract",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_server_deployment_config.py::test_ci_builds_the_rendered_production_image_targets",
+          "tests/test_server_deployment_config.py::test_deploy_helper_never_runs_migrations_and_verifies_every_app_image",
+          "tests/test_server_deployment_config.py::test_server_images_are_pinned_and_application_images_are_attested"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-ATTESTED-SINGLE-NODE-DEPLOYMENT",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-312",
+      "title": "Semantic and operational fingerprint behavior",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_run_research_dataset.py::test_operational_fingerprint_changes_when_runtime_event_order_changes",
+          "tests/test_portal/test_run_research_dataset.py::test_semantic_fingerprint_changes_when_runtime_context_evidence_changes",
+          "tests/test_portal/test_run_research_dataset.py::test_semantic_fingerprint_ignores_run_instance_identifiers"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SEMANTIC-OPERATIONAL-FINGERPRINT-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-313",
+      "title": "Pull-request workflow topology structure",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_server_deployment_config.py::test_ci_builds_the_rendered_production_image_targets"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PR-VERIFICATION-TOPOLOGY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-314",
+      "title": "Isolated disposable database test guard",
+      "lifecycle": "active",
+      "proof_kind": "database_integration",
+      "environment_profile_id": "python-db-isolated",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_canonical_fact_store_migration_db.py::test_canonical_fact_store_migration_is_explicit_strict_and_idempotent"
+        ]
+      },
+      "timeout_seconds": 300,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PR-VERIFICATION-TOPOLOGY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-315",
+      "title": "Representative generic-surface capability traps",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/contract/providers/test_provider_factory_routing.py::test_registry_fails_loud_when_provider_implementation_missing",
+          "tests/contract/test_capability_nomenclature.py::test_active_capability_contracts_do_not_encode_planning_nomenclature",
+          "tests/integration/runtime/test_execution_contexts.py::test_generic_execution_modules_contain_no_named_venue_branches"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-316",
+      "title": "Representative agent workflow and architecture-index checks",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/contract/test_architecture_docs_index.py::test_architecture_docs_have_required_frontmatter_tags",
+          "tests/test_cli/test_mcp_server.py::test_mcp_initialize_and_tools_list_exclude_python_handlers"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
           "strength": "partial",
           "required_for_full_attestation": true
         }

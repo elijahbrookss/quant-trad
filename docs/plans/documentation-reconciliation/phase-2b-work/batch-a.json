@@ -1,0 +1,2082 @@
+{
+  "batch": {
+    "id": "phase-2b-batch-a",
+    "phase": "phase_2b_evidence_classification",
+    "status": "draft_for_owner_and_gate_review",
+    "audit_baseline_commit": "d46e40bf55caeea12f4ccbde640c71f271eaf9c4",
+    "branch": "feat/docs-guarantee-reconciliation",
+    "classification_only": true,
+    "registry_is_nonnormative": true,
+    "proof_entries_are_definitions_not_results": true,
+    "terms_adopted": false,
+    "guarantees_activated": false
+  },
+  "candidate_ids": [
+    "QT-GC-002",
+    "QT-GC-006",
+    "QT-GC-007",
+    "QT-GC-010",
+    "QT-GC-015",
+    "QT-GC-027",
+    "QT-GC-028",
+    "QT-GC-029",
+    "QT-GC-030",
+    "QT-GC-031",
+    "QT-GC-032",
+    "QT-GC-033",
+    "QT-GC-034",
+    "QT-GC-035"
+  ],
+  "guarantees": [
+    {
+      "id": "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+      "candidate_refs": [
+        {"id": "QT-GC-002", "relation": "equivalent"}
+      ],
+      "title": "Single derived-output runtime timeline",
+      "claim_summary": "Within the named runtime paths, Strategies consume declared signal, context, and metric outputs published by the Indicator timeline, while projection and reporting paths do not become alternate decision semantics.",
+      "claim_scope": [
+        "Indicator-engine publication and Strategy evaluation paths named by the enforcement references.",
+        "Representative overlay, runtime-push, and durable-report projection paths at the frozen baseline."
+      ],
+      "failure_semantics": [
+        "A generic, projection, or reporting path reconstructs decision semantics outside the published runtime timeline.",
+        "A Strategy reads an overlay, detail, lifecycle output, or Indicator-private state as a decision input."
+      ],
+      "wording_constraints": [
+        "AGENTS.md is retained only as nonactivating governance context and does not strengthen the platform-contract clauses.",
+        "Referenced QT-TERM labels remain unadopted Phase 2A glossary entries.",
+        "The repository-wide consumer and reconstruction-path inventory is not closed; the claim is limited to the named paths."
+      ],
+      "owners": ["execution-runtime", "indicator-runtime"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-036", "QT-TERM-037", "QT-TERM-038", "QT-TERM-039"],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {"kind": "line_range", "start": 5, "end": 15},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0002-use-one-walk-forward-runtime-timeline.md",
+          "locator": {"kind": "line_range", "start": 39, "end": 59},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/architecture/decisions/0004-separate-indicator-truth-from-projections.md",
+          "locator": {"kind": "line_range", "start": 36, "end": 55},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {"kind": "line_range", "start": 103, "end": 112},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {"kind": "line_range", "start": 165, "end": 174},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {"kind": "line_range", "start": 75, "end": 84},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        },
+        {
+          "path": "AGENTS.md",
+          "locator": {"kind": "line_range", "start": 65, "end": 73},
+          "authority_kind": "normative_agent_governance",
+          "source_lifecycle": "active",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-100",
+          "kind": "runtime_guard",
+          "path": "src/engines/indicator_engine/runtime_engine.py",
+          "locator": {"kind": "line_range", "start": 122, "end": 195},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-101",
+          "kind": "structural_boundary",
+          "path": "src/strategies/evaluator.py",
+          "locator": {"kind": "line_range", "start": 347, "end": 438},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["ARCH-COVERAGE-001", "CI-TRACE-001", "QT-CONFLICT-016", "QT-CONFLICT-017", "REGISTRY-DYNAMIC-001", "REGISTRY-OWNERSHIP-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-100",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-100.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-100"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-BACKTEST-FROZEN-BINDING",
+      "candidate_refs": [
+        {"id": "QT-GC-006", "relation": "equivalent"}
+      ],
+      "title": "Exact frozen binding for canonical backtests",
+      "claim_summary": "A canonical backtest represented by the named admission and worker paths binds one Frozen Dataset to the exact Strategy, Indicator graph, execution configuration, instruments, and half-open ranges without runtime substitution or expansion.",
+      "claim_scope": [
+        "Backtest plan derivation, Dataset admission, and worker-scope binding at the frozen baseline.",
+        "The exact configuration and range fields represented by backtest_dataset_binding.v1."
+      ],
+      "failure_semantics": [
+        "A canonical backtest starts without an admitted Dataset identity.",
+        "A worker expands a range or substitutes Dataset, Strategy, Indicator, execution-policy, instrument, or run configuration material."
+      ],
+      "wording_constraints": [
+        "Referenced QT-TERM labels remain unadopted Phase 2A glossary entries.",
+        "The claim does not imply that every historical run has a verifiable frozen binding.",
+        "This accepted-ADR decision is indexed as a nonactivating candidate, not an adopted normative platform promise."
+      ],
+      "owners": ["execution-runtime", "market-data"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "candidate",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-007", "QT-TERM-008", "QT-TERM-028", "QT-TERM-035", "QT-TERM-040", "QT-TERM-043"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0051-require-frozen-datasets-for-canonical-backtests.md",
+          "locator": {"kind": "line_range", "start": 48, "end": 77},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0051-require-frozen-datasets-for-canonical-backtests.md",
+          "locator": {"kind": "line_range", "start": 102, "end": 117},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-102",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/market/backtest_dataset_service.py",
+          "locator": {"kind": "line_range", "start": 529, "end": 852},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-103",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/market/backtest_dataset_service.py",
+          "locator": {"kind": "line_range", "start": 1209, "end": 1641},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-104",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/bots/container_runtime.py",
+          "locator": {"kind": "line_range", "start": 149, "end": 185},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-019", "SCHEMA-AUTH-001"],
+      "remediation_status": "not_required",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION",
+      "candidate_refs": [
+        {"id": "QT-GC-007", "relation": "equivalent"}
+      ],
+      "title": "Dataset reality separated from consumer admission",
+      "claim_summary": "The named freeze path records source, quality, and gap reality, while each named consumer path applies its own explicit admissibility policy without rewriting the frozen evidence.",
+      "claim_scope": [
+        "Frozen Check binding construction and the named Check gap-policy evaluation paths.",
+        "Pinned quality and gap evidence represented at the frozen baseline."
+      ],
+      "failure_semantics": [
+        "A consumer represents its admissibility decision as a change to frozen source reality.",
+        "A Dataset freeze suppresses a known gap solely because one consumer would reject it."
+      ],
+      "wording_constraints": [
+        "Accepted ADR 0062 is decision authority but remains nonactivating and does not adopt the proposed glossary.",
+        "Coverage and readiness terms must remain qualified under QT-CONFLICT-008 and QT-CONFLICT-014.",
+        "The claim does not make one consumer's readiness policy universal across Backtest, Indicator, Check, and reporting boundaries."
+      ],
+      "owners": ["consumer-policy", "market-data"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "candidate",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "adequate",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-007", "QT-TERM-008", "QT-TERM-015", "QT-TERM-026", "QT-TERM-032", "QT-TERM-049"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md",
+          "locator": {"kind": "line_range", "start": 34, "end": 50},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 145, "end": 158},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-105",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/market/frozen_dataset_service.py",
+          "locator": {"kind": "line_range", "start": 497, "end": 604},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-106",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/research/event_fact_evaluator.py",
+          "locator": {"kind": "line_range", "start": 930, "end": 959},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-008", "QT-CONFLICT-014", "SCHEMA-AUTH-001"],
+      "remediation_status": "not_required",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-CHECK-AUTHORITY-CEILING",
+      "candidate_refs": [
+        {"id": "QT-GC-010", "relation": "equivalent"}
+      ],
+      "title": "Check verdict authority ceiling",
+      "claim_summary": "A Check result or verdict is bounded analytical evidence and does not by itself grant Strategy, execution, promotion, or scientific-certification authority.",
+      "claim_scope": [
+        "Check result/verdict construction, canonical result-reference validation, and scientific-certificate issuance paths named below.",
+        "The authority separation expressed by ADR 0062 and the active Check boundary."
+      ],
+      "failure_semantics": [
+        "A Check verdict alone is accepted as a Strategy decision, execution authorization, promotion decision, or scientific certificate.",
+        "An adapter or orchestration layer upgrades Check evidence without the separately owned authority artifact."
+      ],
+      "wording_constraints": [
+        "Promotion, deployment, and external-order authority remain distinct under QT-CONFLICT-025.",
+        "The claim does not deny that a canonical Check reference can be one input to a separately authorized Scientific Protocol.",
+        "This is a nonactivating candidate capability ceiling; it does not certify the completeness of every promotion or scientific-authority entrypoint."
+      ],
+      "owners": ["research-orchestration"],
+      "claim_kind": "capability_ceiling",
+      "claim_lifecycle": "current",
+      "registry_disposition": "candidate",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-011", "QT-TERM-013", "QT-TERM-026", "QT-TERM-039", "QT-TERM-054"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md",
+          "locator": {"kind": "line_range", "start": 59, "end": 68},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 113, "end": 126},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 211, "end": 224},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 64, "end": 68},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-107",
+          "kind": "schema_validation",
+          "path": "src/research_science/check.py",
+          "locator": {"kind": "line_range", "start": 506, "end": 547},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-108",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/research/result_reference.py",
+          "locator": {"kind": "line_range", "start": 153, "end": 211},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-109",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/research/authority_repository.py",
+          "locator": {"kind": "line_range", "start": 1236, "end": 1295},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["ARCH-COVERAGE-001", "QT-CONFLICT-025"],
+      "remediation_status": "not_required",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+      "candidate_refs": [
+        {"id": "QT-GC-015", "relation": "equivalent"}
+      ],
+      "title": "External order submission remains closed",
+      "claim_summary": "In the named simulation and Bot-control paths, a live label or provider credential/capability does not authorize external order submission, which remains closed pending a separate accepted decision and admission boundary.",
+      "claim_scope": [
+        "Current Bot execution-behavior normalization, simulation execution profiles, and guarded run-start paths.",
+        "The no-authorized-production-order boundary at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "A live runtime/lifecycle label selects an external-order adapter.",
+        "Provider credentials or supportsOrders metadata alone enable submission, amendment, or cancellation of an external order."
+      ],
+      "wording_constraints": [
+        "Live runtime/composition and deployment authority terms remain unadopted and qualified.",
+        "The repository-wide absence claim still requires a generated production-code path inventory; named guards are not exhaustive absence proof.",
+        "This record does not prohibit simulated fills or separately reviewed future live-trading work."
+      ],
+      "owners": ["execution-runtime", "security"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-025", "QT-TERM-027", "QT-TERM-042", "QT-TERM-054"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0049-keep-live-order-submission-closed.md",
+          "locator": {"kind": "line_range", "start": 33, "end": 62},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0049-keep-live-order-submission-closed.md",
+          "locator": {"kind": "line_range", "start": 83, "end": 93},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-110",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/bots/execution_behavior.py",
+          "locator": {"kind": "line_range", "start": 1, "end": 47},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-111",
+          "kind": "runtime_guard",
+          "path": "src/engines/bot_runtime/core/execution_context.py",
+          "locator": {"kind": "line_range", "start": 260, "end": 300},
+          "coverage": "complete"
+        }
+      ],
+      "finding_refs": ["ARCH-COVERAGE-001", "QT-CONFLICT-025"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-101",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-101.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-101"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+      "candidate_refs": [
+        {"id": "QT-GC-027", "relation": "equivalent"}
+      ],
+      "title": "Complete Indicator output catalogs and shared Strategy reads",
+      "claim_summary": "The named Indicator catalog and Strategy read paths expose complete preference-free public output catalogs, leave output selection to consumers, and reuse the established compiler and variant resolver for effective and decision-input reads.",
+      "claim_scope": [
+        "Indicator factory metadata and split Strategy read contracts represented by the named enforcement references.",
+        "Public output catalog, effective Strategy, and decision-input read behavior at the frozen baseline."
+      ],
+      "failure_semantics": [
+        "A split Strategy read reconstructs effective rules or Variant filters outside the shared compiler/resolver.",
+        "Persisted Indicator identity or catalog output is changed by UI or consumer output preferences."
+      ],
+      "wording_constraints": [
+        "Indicator, output, and Strategy-stage terminology remains unadopted.",
+        "The named paths are representative and do not close every Indicator registry or Strategy read entrypoint.",
+        "The typed and legacy overlay registries remain distinct and unresolved; neither is treated as redundant."
+      ],
+      "owners": ["decision-layer", "indicator-runtime"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-035", "QT-TERM-036", "QT-TERM-040"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md",
+          "locator": {"kind": "line_range", "start": 46, "end": 75},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md",
+          "locator": {"kind": "line_range", "start": 92, "end": 102},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-141",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/indicators/indicator_factory.py",
+          "locator": {"kind": "line_range", "start": 99, "end": 100},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-142",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/strategies/strategy_service/facade.py",
+          "locator": {"kind": "line_range", "start": 370, "end": 547},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-143",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/strategies/strategy_service/facade.py",
+          "locator": {"kind": "line_range", "start": 1975, "end": 2008},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["DOC-CONTRACT-001", "QT-CONFLICT-016", "QT-CONFLICT-017", "QT-CONFLICT-019", "REGISTRY-DYNAMIC-001", "REGISTRY-OWNERSHIP-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-113",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-113.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-113"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+      "candidate_refs": [
+        {"id": "QT-GC-028", "relation": "equivalent"}
+      ],
+      "title": "Indicator output presence and readiness separation",
+      "claim_summary": "For the named Indicator-engine and validation paths, every declared output is present on every processed bar, while ready=false marks a present output as unavailable to consumers.",
+      "claim_scope": [
+        "Declared-output presence and readiness behavior at the frozen baseline.",
+        "IndicatorEngine step validation, RuntimeOutput schema checks, and backend runtime-validation summaries."
+      ],
+      "failure_semantics": [
+        "A consumer treats ready=false as usable output or as an implicit wait/substitution instruction.",
+        "An Indicator omits a declared output for a processed bar without failing the engine boundary."
+      ],
+      "wording_constraints": [
+        "Output readiness is not runtime, reporting, BotLens, comparison, golden, or deployment readiness.",
+        "The proof covers the named engine and validation surfaces rather than every registered Indicator implementation dynamically.",
+        "Typed Indicator Output and Qualified Readiness remain unadopted glossary entries."
+      ],
+      "owners": ["indicator-runtime"],
+      "claim_kind": "behavioral_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-036", "QT-TERM-049"],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {"kind": "line_range", "start": 103, "end": 110},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 118, "end": 147},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/architecture/indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 169, "end": 172},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-144",
+          "kind": "runtime_guard",
+          "path": "src/engines/indicator_engine/runtime_engine.py",
+          "locator": {"kind": "line_range", "start": 157, "end": 191},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-145",
+          "kind": "schema_validation",
+          "path": "src/engines/indicator_engine/contracts.py",
+          "locator": {"kind": "line_range", "start": 334, "end": 377},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-146",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/indicators/indicator_service/runtime_validation.py",
+          "locator": {"kind": "line_range", "start": 323, "end": 381},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": ["CI-TRACE-001", "DOC-CONTRACT-001", "QT-CONFLICT-017", "REGISTRY-DYNAMIC-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-114",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-114.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-114"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+      "candidate_refs": [
+        {"id": "QT-GC-029", "relation": "equivalent"}
+      ],
+      "title": "Indicator engine publication authority",
+      "claim_summary": "The named Indicator engine owns output validation, the Indicator-scoped commit sequence, and typed provenance deltas for its published output truth.",
+      "claim_scope": [
+        "Backend runtime-output evidence for the same published rows at the frozen baseline.",
+        "IndicatorEngine construction, per-bar snapshot validation, commit stamping, and output-delta emission."
+      ],
+      "failure_semantics": [
+        "A published output bypasses declared-shape, bar-time, dependency, or provenance validation.",
+        "An Indicator implementation stamps or advances its own competing publication commit sequence."
+      ],
+      "wording_constraints": [
+        "Indicator commit sequence is Indicator-scoped and must not be described as a global cursor.",
+        "Indicator output and Qualified Cursor terminology remains unadopted.",
+        "The record does not make overlays, details, or lifecycle labels Strategy-visible inputs."
+      ],
+      "owners": ["indicator-runtime"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "adequate",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-036", "QT-TERM-048"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0004-separate-indicator-truth-from-projections.md",
+          "locator": {"kind": "line_range", "start": 38, "end": 55},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-147",
+          "kind": "structural_boundary",
+          "path": "src/engines/indicator_engine/runtime_engine.py",
+          "locator": {"kind": "line_range", "start": 81, "end": 97},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-148",
+          "kind": "runtime_guard",
+          "path": "src/engines/indicator_engine/runtime_engine.py",
+          "locator": {"kind": "line_range", "start": 164, "end": 191},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-149",
+          "kind": "structural_boundary",
+          "path": "src/engines/indicator_engine/runtime_engine.py",
+          "locator": {"kind": "line_range", "start": 325, "end": 331},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": ["DOC-CONTRACT-001", "QT-CONFLICT-017", "REGISTRY-DYNAMIC-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-115",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-115.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-115"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH",
+      "candidate_refs": [
+        {"id": "QT-GC-030", "relation": "equivalent"}
+      ],
+      "title": "Projection visibility does not change Indicator truth",
+      "claim_summary": "In the named engine and Strategy paths, overlays, details, debug payloads, and retained history may change visibility but do not change published typed Indicator outputs or Strategy decisions.",
+      "claim_scope": [
+        "Indicator overlay/detail contract separation, bounded overlay projection, and Strategy history represented below.",
+        "Output and decision equality across named projection/detail modes at the frozen baseline."
+      ],
+      "failure_semantics": [
+        "Enabling, disabling, pruning, or failing an overlay/detail path changes a typed Indicator output.",
+        "Overlay, detail, debug, or retained history enters Strategy evaluation as alternate truth."
+      ],
+      "wording_constraints": [
+        "A projection failure may degrade visibility and still must remain explicit; nonauthority does not mean healthy or ready.",
+        "Overlay and typed-output labels remain unadopted glossary entries.",
+        "The active typed and legacy overlay registries remain unresolved and are not consolidated by this classification."
+      ],
+      "owners": ["indicator-runtime", "projections"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-036", "QT-TERM-038"],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {"kind": "line_range", "start": 75, "end": 84},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0038-decouple-visual-overlay-projection-from-runtime-push.md",
+          "locator": {"kind": "line_range", "start": 72, "end": 122},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/architecture/indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 89, "end": 98},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-150",
+          "kind": "schema_validation",
+          "path": "src/engines/indicator_engine/contracts.py",
+          "locator": {"kind": "line_range", "start": 260, "end": 285},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-151",
+          "kind": "structural_boundary",
+          "path": "src/engines/indicator_engine/runtime_engine.py",
+          "locator": {"kind": "line_range", "start": 237, "end": 274},
+          "coverage": "complete"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-016", "QT-CONFLICT-017", "REGISTRY-DYNAMIC-001", "REGISTRY-OWNERSHIP-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-116",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-116.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-116"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+      "candidate_refs": [
+        {"id": "QT-GC-031", "relation": "equivalent"}
+      ],
+      "title": "Indicator lifecycle evidence separated from Strategy inputs",
+      "claim_summary": "In the named Indicator and Strategy paths, lifecycle outputs are typed public Indicator evidence with boundary-validated shapes and are excluded from Strategy-visible signal, context, and metric inputs.",
+      "claim_scope": [
+        "Indicator lifecycle output contracts and the named Strategy evaluator type filters.",
+        "Lifecycle rows represented by the backend runtime-output evidence collector at the frozen baseline."
+      ],
+      "failure_semantics": [
+        "A lifecycle output with an invalid public shape is published as valid Indicator evidence.",
+        "A Strategy consumes a lifecycle output as a trigger, context, or metric input."
+      ],
+      "wording_constraints": [
+        "Indicator lifecycle output is not a Bot Run, trade, order, collector, or deployment lifecycle event.",
+        "The focused lifecycle proof is partial and shares the broader derived-output boundary with QT-GC-002.",
+        "The lifecycle terminology remains an unadopted glossary entry."
+      ],
+      "owners": ["decision-layer", "indicator-runtime"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-036", "QT-TERM-037"],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {"kind": "line_range", "start": 75, "end": 79},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 183, "end": 199},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-152",
+          "kind": "schema_validation",
+          "path": "src/engines/indicator_engine/contracts.py",
+          "locator": {"kind": "line_range", "start": 467, "end": 544},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-153",
+          "kind": "structural_boundary",
+          "path": "src/strategies/evaluator.py",
+          "locator": {"kind": "line_range", "start": 429, "end": 429},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-154",
+          "kind": "structural_boundary",
+          "path": "src/strategies/evaluator.py",
+          "locator": {"kind": "line_range", "start": 832, "end": 832},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["CI-TRACE-001", "DOC-CONTRACT-001", "QT-CONFLICT-017"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-117",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-117.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-117"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+      "candidate_refs": [
+        {"id": "QT-GC-032", "relation": "equivalent"}
+      ],
+      "title": "Strategy decision artifacts remain separate from execution",
+      "claim_summary": "In the named Strategy evaluator paths, accepted and rejected decisions are emitted as typed decision artifacts with stable causal identity, while execution remains a separate downstream concern.",
+      "claim_scope": [
+        "Accepted and rejected decision artifacts constructed by the named Strategy evaluator paths at the frozen baseline.",
+        "The decision-versus-execution boundary established by accepted ADR 0005 and described by the decision-layer boundary."
+      ],
+      "failure_semantics": [
+        "A named evaluator path aliases a Strategy decision to an execution artifact or performs execution as part of decision construction.",
+        "An accepted or rejected decision produced by the named paths lacks the stable typed identity or rejection information required by its path-specific contract."
+      ],
+      "wording_constraints": [
+        "Accepted ADR 0005 is decision authority but does not activate this guarantee.",
+        "Signal, decision, order, and fill terminology remains unadopted and must remain qualified.",
+        "The available tests cover representative accepted and rejected paths, not every decision producer or downstream execution consumer."
+      ],
+      "owners": [
+        "decision-layer",
+        "execution-runtime"
+      ],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-039",
+        "QT-TERM-040"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0005-keep-strategy-decisions-separate-from-execution.md",
+          "locator": {"kind": "line_range", "start": 39, "end": 53},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decision-layer/DECISION_LAYER_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 66, "end": 105},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-155",
+          "kind": "structural_boundary",
+          "path": "src/strategies/evaluator.py",
+          "locator": {"kind": "line_range", "start": 305, "end": 338},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-156",
+          "kind": "structural_boundary",
+          "path": "src/strategies/evaluator.py",
+          "locator": {"kind": "line_range", "start": 351, "end": 383},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "ARCH-COVERAGE-001",
+        "QT-CONFLICT-018",
+        "QT-CONFLICT-019",
+        "QT-CONFLICT-020"
+      ],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-118",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-118.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-118"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY",
+      "candidate_refs": [
+        {"id": "QT-GC-033", "relation": "equivalent"}
+      ],
+      "title": "Strategy variants remain deterministic public-output filters",
+      "claim_summary": "In the named variant-resolution paths, a Strategy variant is materialized as deterministic filter conditions over public outputs already available to the base Strategy and does not acquire execution-economics or routing ownership.",
+      "claim_scope": [
+        "The ownership exclusions stated by accepted ADR 0018 for at-the-money selection, execution economics, and routing.",
+        "Variant validation and filter materialization in the named strategy-variant resolution paths."
+      ],
+      "failure_semantics": [
+        "A named variant path accepts a filter over an output outside the compiled public-output catalog.",
+        "A variant changes at-the-money selection, execution economics, routing, Indicator configuration, or evaluator ownership."
+      ],
+      "wording_constraints": [
+        "Accepted ADR 0018 is decision authority but does not activate this guarantee.",
+        "Strategy Variant and Output Filter remain unadopted glossary terms.",
+        "The named tests cover representative filter materialization and compile validation, not the complete variant/operator universe."
+      ],
+      "owners": [
+        "decision-layer"
+      ],
+      "claim_kind": "behavioral_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-040",
+        "QT-TERM-041"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0018-use-output-filters-as-strategy-variant-contract.md",
+          "locator": {"kind": "line_range", "start": 68, "end": 90},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0018-use-output-filters-as-strategy-variant-contract.md",
+          "locator": {"kind": "line_range", "start": 182, "end": 189},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-157",
+          "kind": "schema_validation",
+          "path": "portal/backend/service/strategy_variant_resolution.py",
+          "locator": {"kind": "line_range", "start": 72, "end": 126},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-158",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/strategy_variant_resolution.py",
+          "locator": {"kind": "line_range", "start": 269, "end": 320},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "QT-CONFLICT-019",
+        "QT-CONFLICT-020"
+      ],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-119",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-119.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-119"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+      "candidate_refs": [
+        {"id": "QT-GC-034", "relation": "equivalent"}
+      ],
+      "title": "Effective Strategy resolution parity",
+      "claim_summary": "In the named preview, Bot, runtime, and provenance paths, effective Strategy configuration and identity are derived through the shared variant-resolution boundary rather than independently reconstructed.",
+      "claim_scope": [
+        "Effective Strategy resolution and stable hash construction in the named resolver and strategy-service call sites.",
+        "Preview, Bot, runtime, and provenance parity required by accepted ADR 0018."
+      ],
+      "failure_semantics": [
+        "A named consumer independently reconstructs variant semantics instead of using the shared resolution boundary.",
+        "The same base Strategy and selected variant resolve to different effective configuration or identity across named consumers."
+      ],
+      "wording_constraints": [
+        "Accepted ADR 0018 is decision authority but does not activate this guarantee.",
+        "Named call sites and focused tests do not establish a closed inventory of every preview, Bot, runtime, reporting, or provenance consumer.",
+        "The stages indexed by the unadopted Strategy glossary entries must remain explicitly qualified."
+      ],
+      "owners": [
+        "decision-layer",
+        "strategy-service"
+      ],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-040",
+        "QT-TERM-041"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0018-use-output-filters-as-strategy-variant-contract.md",
+          "locator": {"kind": "line_range", "start": 109, "end": 123},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decision-layer/DECISION_LAYER_BOUNDARY.md",
+          "locator": {"kind": "line_range", "start": 112, "end": 118},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-159",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/strategy_variant_resolution.py",
+          "locator": {"kind": "line_range", "start": 206, "end": 248},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-160",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/strategies/strategy_service/facade.py",
+          "locator": {"kind": "line_range", "start": 262, "end": 304},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-161",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/strategies/strategy_service/facade.py",
+          "locator": {"kind": "line_range", "start": 1396, "end": 1422},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "ARCH-COVERAGE-001",
+        "QT-CONFLICT-019",
+        "QT-CONFLICT-024"
+      ],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-120",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-120.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-120"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+      "candidate_refs": [
+        {"id": "QT-GC-035", "relation": "equivalent"}
+      ],
+      "title": "Deterministic sequential experiment plans",
+      "claim_summary": "In the named experiment-orchestration paths, an experiment plan is file-backed, canonically hashed, and expanded into a deterministic sequential window-by-variant plan whose declared Strategy variant is verified before execution.",
+      "claim_scope": [
+        "Experiment plan parsing, canonical identity, step expansion, and runner sequencing in the named paths.",
+        "The file-backed sequential plan policy established by accepted ADR 0019."
+      ],
+      "failure_semantics": [
+        "A step mutates undeclared semantics beyond its window/variant coordinates or executes with a Strategy variant different from the declared plan.",
+        "Equivalent plan inputs produce unstable plan identity or step order in the named orchestration paths."
+      ],
+      "wording_constraints": [
+        "Accepted ADR 0019 is decision authority but does not activate this guarantee.",
+        "Strategy stage terminology remains unadopted and must remain qualified.",
+        "The available examples do not yet provide property-level coverage for all plan permutations, resume states, or tampering cases."
+      ],
+      "owners": [
+        "experiment-orchestration"
+      ],
+      "claim_kind": "operational_policy",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-040"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0019-use-file-backed-sequential-experiment-plans.md",
+          "locator": {"kind": "line_range", "start": 43, "end": 81},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-162",
+          "kind": "schema_validation",
+          "path": "cli/experiments/contracts.py",
+          "locator": {"kind": "line_range", "start": 258, "end": 331},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-163",
+          "kind": "structural_boundary",
+          "path": "cli/experiments/contracts.py",
+          "locator": {"kind": "line_range", "start": 338, "end": 386},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-164",
+          "kind": "runtime_guard",
+          "path": "cli/experiments/runner.py",
+          "locator": {"kind": "line_range", "start": 135, "end": 186},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "CI-TRACE-001",
+        "QT-CONFLICT-019"
+      ],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-121",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-121.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-121"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    }
+  ],
+  "proofs": [
+    {
+      "id": "QT-PROOF-100",
+      "title": "Derived-output timeline consumer-boundary checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_runtime_push_stream.py::test_push_update_never_builds_or_emits_overlay_projection_facts",
+          "tests/test_indicator_engine_overlays.py::test_strategy_decisions_match_across_overlay_detail_modes",
+          "tests/test_portal/test_run_research_dataset.py::test_dataset_builds_from_db_truth_without_artifact_directory",
+          "tests/test_strategies/test_strategy_evaluator.py::test_runtime_output_debug_details_and_overlays_do_not_enter_strategy_history"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DERIVED-OUTPUT-TIMELINE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-101",
+      "title": "Frozen backtest identity and runtime-binding checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_requires_dataset_identity_and_exact_evaluation_range",
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_revalidates_exact_snapshot_and_rejects_tampering",
+          "tests/test_market_data/test_backtest_dataset.py::test_binding_forbids_range_expansion_and_series_substitution",
+          "tests/test_market_data/test_backtest_dataset.py::test_indicator_configuration_is_part_of_execution_identity",
+          "tests/test_market_data/test_backtest_dataset.py::test_plan_freezes_exact_execution_instrument_configuration",
+          "tests/test_market_data/test_backtest_dataset.py::test_plan_separates_warmup_materialization_evaluation_and_decision_ranges",
+          "tests/test_market_data/test_backtest_dataset.py::test_strategy_identity_rejects_declared_hash_disagreement",
+          "tests/test_market_data/test_backtest_dataset.py::test_transitive_indicator_configuration_is_part_of_execution_identity",
+          "tests/test_market_data/test_runtime_scope.py::test_dataset_scope_rejects_range_expansion_before_store_read",
+          "tests/test_market_data/test_runtime_scope.py::test_market_data_scope_reads_only_the_bound_dataset_and_restores_context",
+          "tests/test_market_data/test_runtime_scope.py::test_runtime_dependency_rejects_execution_policy_substitution",
+          "tests/test_market_data/test_runtime_scope.py::test_runtime_dependency_rejects_strategy_or_indicator_substitution",
+          "tests/test_portal/test_container_runtime_transport.py::test_backtest_market_data_scope_persists_the_admitted_dataset_binding",
+          "tests/test_portal/test_container_runtime_transport.py::test_backtest_market_data_scope_rejects_execution_config_substitution",
+          "tests/test_portal/test_container_runtime_transport.py::test_backtest_market_data_scope_rejects_missing_or_substituted_binding"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BACKTEST-FROZEN-BINDING",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-102",
+      "title": "Dataset reality and consumer-admission checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_rejects_undisclosed_gap_but_preserves_disclosed_closure",
+          "tests/test_market_data/test_backtest_dataset.py::test_admission_uses_only_quality_evidence_pinned_at_freeze",
+          "tests/test_portal/test_research_check_planning.py::test_complete_acquisition_manifest_can_prove_zero_event_numeric_range",
+          "tests/test_portal/test_research_check_planning.py::test_evidence_requires_explicit_gap_policy",
+          "tests/test_portal/test_research_check_planning.py::test_sparse_numeric_fact_does_not_prove_full_source_coverage"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DATASET-REALITY-CONSUMER-ADMISSION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-103",
+      "title": "Check authority-ceiling checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_research_authority.py::test_offline_governance_reaches_research_certified_and_no_further",
+          "tests/test_portal/test_research_result_reference.py::test_blocked_check_cannot_become_scientific_evidence",
+          "tests/test_portal/test_research_result_reference.py::test_check_reference_rejects_caller_projection",
+          "tests/test_portal/test_research_result_reference.py::test_check_reference_uses_fixed_hashed_projection_and_attempt_binding",
+          "tests/test_research_science/test_contracts.py::test_scientific_quality_advances_only_when_each_authority_layer_exists"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CHECK-AUTHORITY-CEILING",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-104",
+      "title": "External-order submission closure checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_execution_contexts.py::test_simulation_profiles_cannot_enable_external_order_submission",
+          "tests/test_cli/test_mcp_server.py::test_mcp_start_bot_run_is_guarded_and_defaults_to_backtest",
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_observe_only_paper_run_uses_docker_runner_with_effective_snapshot"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-116",
+      "title": "Indicator output-catalog and Strategy-read checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_indicator_output_catalog_contract.py::test_factory_build_meta_from_record_keeps_outputs_catalog_only",
+          "tests/test_portal/test_indicator_output_catalog_contract.py::test_indicator_create_update_exposes_all_signal_outputs_without_prefs",
+          "tests/test_portal/test_strategy_compile_contract.py::test_create_strategy_variant_validates_output_filters_against_compile",
+          "tests/test_portal/test_strategy_compile_contract.py::test_strategy_decision_inputs_catalog_marks_selected_rule_inputs"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-117",
+      "title": "Indicator output presence and readiness checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_indicator_engine_overlays.py::test_dependency_not_ready_propagates_to_overlays_and_outputs",
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_validation_reports_readiness_assertion_failures",
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_validation_summarizes_output_presence_and_readiness"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-118",
+      "title": "Indicator publication-authority checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_indicator_engine_overlays.py::test_indicator_engine_returns_outputs_and_overlays",
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_output_evidence_collects_per_bar_declared_values"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-119",
+      "title": "Projection-invariance checks for Indicator truth",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_indicator_engine_overlays.py::test_candle_stats_outputs_match_when_overlays_are_disabled",
+          "tests/test_indicator_engine_overlays.py::test_market_profile_outputs_match_when_overlays_are_disabled",
+          "tests/test_indicator_engine_overlays.py::test_regime_outputs_match_when_overlays_are_disabled",
+          "tests/test_indicator_engine_overlays.py::test_strategy_decisions_match_across_overlay_detail_modes",
+          "tests/test_strategies/test_strategy_evaluator.py::test_runtime_output_debug_details_and_overlays_do_not_enter_strategy_history"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-120",
+      "title": "Indicator lifecycle-evidence separation checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_indicator_runtime_validation.py::test_runtime_output_evidence_collects_per_bar_declared_values",
+          "tests/test_strategies/test_strategy_evaluator.py::test_runtime_output_debug_details_and_overlays_do_not_enter_strategy_history"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-121",
+      "title": "Strategy decision-artifact separation checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_runtime_push_stream.py::test_emit_rejected_decision_adds_attempt_identity_when_source_lost",
+          "tests/test_portal/test_botlens_domain_events.py::test_decision_events_keep_signal_domain_root_correlation",
+          "tests/test_portal/test_botlens_domain_events.py::test_rejected_decision_requires_message",
+          "tests/test_portal/test_botlens_domain_events.py::test_rejected_decision_requires_reason_code"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-122",
+      "title": "Strategy variant output-filter boundary checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_strategy_compile_contract.py::test_create_strategy_variant_validates_output_filters_against_compile",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_materialize_output_filters_appends_context_guard_by_intent_scope",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_materialize_output_filters_appends_market_profile_metric_guard"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-123",
+      "title": "Effective Strategy resolution-parity checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_strategy_compile_contract.py::test_compile_strategy_contract_materializes_selected_variant_output_filters",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_materialize_output_filters_appends_context_guard_by_intent_scope",
+          "tests/test_portal/test_strategy_variant_resolution.py::test_resolve_strategy_variant_preserves_output_filters_and_hashes_stably"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-124",
+      "title": "Deterministic sequential experiment-plan checks",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_cli/test_experiments_orchestration.py::test_experiments_run_plan_requires_explicit_proceed_for_data_warnings",
+          "tests/test_cli/test_experiments_orchestration.py::test_experiments_run_plan_writes_state_events_artifacts_and_pass_gates",
+          "tests/test_cli/test_experiments_orchestration.py::test_experiments_validate_plan_prints_step_preview"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    }
+  ],
+  "remediations": [
+    {
+      "id": "QT-REM-100",
+      "guarantee_ids": [
+        "QT-GUAR-DERIVED-OUTPUT-TIMELINE"
+      ],
+      "lifecycle": "proposed",
+      "owner": "execution-runtime",
+      "required_reviewers": [
+        "execution-runtime-owner",
+        "indicator-runtime-owner",
+        "platform-contract-reviewer",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The frozen baseline has representative causal and projection separation guards, but no reviewed closed inventory establishes every Strategy, generic-compute, reporting, and reconstruction consumer or its timeline authority.",
+      "proposed_action": "After the named owners approve the denominator, create a generated consumer-and-reconstruction manifest that maps each consumer family to its authoritative causal or projection path, then add negative tests for every admitted reconstruction boundary.",
+      "acceptance_criteria": [
+        "The reviewed manifest enumerates every in-scope Strategy, generic-compute, reporting, and reconstruction consumer without an unowned remainder.",
+        "Each manifest entry identifies its authoritative timeline, enforcement point, and exact proof selector.",
+        "Negative tests reject overlay or reporting projections as causal Strategy or generic-compute input.",
+        "Execution-runtime, indicator-runtime, platform-contract, and testing reviewers approve the claim denominator before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-100"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and the reviewed denominator. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not choose between unresolved reconstruction authorities, change product semantics, adopt terminology, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-101",
+      "guarantee_ids": [
+        "QT-GUAR-EXTERNAL-ORDER-SUBMISSION-CLOSED"
+      ],
+      "lifecycle": "proposed",
+      "owner": "execution-runtime",
+      "required_reviewers": [
+        "execution-runtime-owner",
+        "security-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The named simulation and startup guards are aligned, but the frozen baseline lacks a reviewed absence proof covering every execution adapter, composition root, credential path, and order-submission route.",
+      "proposed_action": "After execution-runtime and security review, create an approved static submission-path inventory and bind every adapter, composition root, credential route, and transport to an explicit disabled-by-default or rejecting guard with negative tests.",
+      "acceptance_criteria": [
+        "The reviewed inventory closes every in-repository external-order submission path and names an owner for each entry.",
+        "Every entry is disabled by default or rejects unsupported submission before any external side effect.",
+        "Credential injection alone cannot enable an unreviewed submission path.",
+        "Execution-runtime, security, and testing reviewers approve the inventory and negative proof plan before any classification or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-104"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result, static path denominator, and negative-test selectors. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not enable external submission, alter execution modes or credential policy, repair product behavior, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-113",
+      "guarantee_ids": [
+        "QT-GUAR-INDICATOR-OUTPUT-CATALOG-AND-STRATEGY-READS"
+      ],
+      "lifecycle": "proposed",
+      "owner": "indicator-runtime",
+      "required_reviewers": [
+        "decision-layer-owner",
+        "indicator-runtime-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The named catalog and compile paths are aligned, but they do not close the dynamic set of registered Indicator outputs or every Strategy rule, context, metric, and variant read path.",
+      "proposed_action": "After indicator-runtime and decision-layer review, generate a registered-output and Strategy-read-path inventory, require each read to resolve through the public output catalog, and add parity and rejection tests for the reviewed denominator.",
+      "acceptance_criteria": [
+        "The reviewed inventory enumerates every registered public Indicator output and every admitted Strategy read family.",
+        "Each Strategy read resolves through the public output catalog and rejects undeclared or private outputs.",
+        "Catalog generation, compile validation, and runtime reads agree for every enumerated entry.",
+        "Decision-layer, indicator-runtime, and testing reviewers approve the denominator before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-116"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and the generated output/read denominator. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not define new Indicator or Strategy semantics, consolidate registries, adopt output terminology, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-114",
+      "guarantee_ids": [
+        "QT-GUAR-INDICATOR-OUTPUT-PRESENCE-AND-READINESS"
+      ],
+      "lifecycle": "proposed",
+      "owner": "indicator-runtime",
+      "required_reviewers": [
+        "indicator-runtime-owner",
+        "platform-contract-reviewer",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "Representative tests cover presence and readiness transitions, but the frozen baseline does not dynamically exercise every registered Indicator output across warmup, dependency-not-ready, and ready states.",
+      "proposed_action": "After owner review, derive a complete registered-Indicator/output denominator and execute each output through its reviewed warmup and readiness transitions, disallowing silent skips and recording any explicitly approved exception.",
+      "acceptance_criteria": [
+        "The reviewed denominator contains every active registered Indicator and every declared public output.",
+        "Every enumerated output is present on every exercised bar and carries a valid readiness state.",
+        "Dependency-not-ready and warmup transitions are tested without silent skips; any exception is explicitly owned and reviewed.",
+        "Indicator-runtime, platform-contract, and testing reviewers approve the denominator before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-117"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result, discovered denominator, and exception list. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not establish new readiness semantics, adopt glossary terms, repair Indicator behavior, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-115",
+      "guarantee_ids": [
+        "QT-GUAR-INDICATOR-PUBLICATION-AUTHORITY"
+      ],
+      "lifecycle": "proposed",
+      "owner": "indicator-runtime",
+      "required_reviewers": [
+        "indicator-runtime-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The runtime engine owns representative output publication, but the frozen proof set does not explicitly show that every registered output delta follows engine commit sequencing or that no Indicator can stamp the canonical commit sequence itself.",
+      "proposed_action": "After indicator-runtime review, generate the registered publication-path denominator and add invariant tests that the engine assigns commit sequence to every public output delta while Indicator implementations cannot provide or override that canonical sequence.",
+      "acceptance_criteria": [
+        "The reviewed denominator enumerates every registered public Indicator publication path.",
+        "Every enumerated delta receives canonical commit sequencing only at the engine boundary.",
+        "Tests reject Indicator-supplied or overridden canonical commit sequence values.",
+        "Indicator-runtime and testing reviewers approve the denominator before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-118"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and the registered publication denominator. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not change commit-clock ownership, alter publication semantics, adopt terminology, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-116",
+      "guarantee_ids": [
+        "QT-GUAR-PROJECTION-DOES-NOT-CHANGE-INDICATOR-TRUTH"
+      ],
+      "lifecycle": "proposed",
+      "owner": "indicator-runtime",
+      "required_reviewers": [
+        "botlens-projection-owner",
+        "indicator-runtime-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "Representative overlay-detail tests preserve Indicator outputs and Strategy decisions, but the frozen baseline does not close every registered projection family or every supported projection-mode transition, and the registry ownership finding remains unresolved.",
+      "proposed_action": "After indicator-runtime and BotLens projection review, define a reviewed inventory of registered projection families and supported mode transitions, then add output/decision equality and graceful-degradation tests without selecting or consolidating competing registry authorities.",
+      "acceptance_criteria": [
+        "The reviewed inventory enumerates every admitted projection family and supported mode transition.",
+        "Canonical Indicator outputs and Strategy decisions remain equal across every enumerated projection mode.",
+        "Unavailable or disabled projection work degrades according to existing owned behavior without mutating canonical truth.",
+        "Registry ownership remains explicitly unresolved until its separate normative review."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-119"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and the reviewed projection-mode denominator. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not choose a registry authority, change projection or Indicator semantics, adopt terminology, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-117",
+      "guarantee_ids": [
+        "QT-GUAR-INDICATOR-LIFECYCLE-EVIDENCE-SEPARATION"
+      ],
+      "lifecycle": "proposed",
+      "owner": "indicator-runtime",
+      "required_reviewers": [
+        "decision-layer-owner",
+        "indicator-runtime-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The focused paths validate lifecycle shapes and exclude representative debug, detail, and overlay data from Strategy history, but they do not cover every registered lifecycle output or every Strategy trigger, context, and metric admission path.",
+      "proposed_action": "After indicator-runtime and decision-layer review, generate a lifecycle-output and Strategy-admission denominator, add positive public-shape checks for every lifecycle output, and add negative evaluator tests rejecting each from every Strategy input class.",
+      "acceptance_criteria": [
+        "The reviewed denominator enumerates every registered Indicator lifecycle output and every Strategy input class.",
+        "Every enumerated lifecycle output satisfies its existing public typed shape.",
+        "Every Strategy trigger, context, and metric path rejects the enumerated lifecycle outputs.",
+        "Decision-layer, indicator-runtime, and testing reviewers approve the denominator before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-120"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and both reviewed denominators. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not redefine lifecycle semantics, alter Strategy inputs, adopt terminology, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-118",
+      "guarantee_ids": [
+        "QT-GUAR-STRATEGY-DECISION-ARTIFACT-SEPARATION"
+      ],
+      "lifecycle": "proposed",
+      "owner": "decision-layer",
+      "required_reviewers": [
+        "decision-layer-owner",
+        "execution-runtime-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The named evaluator and domain-event tests cover representative accepted and rejected decisions, but they do not close every decision producer, stable identity field, rejection-reason variant, or downstream execution boundary.",
+      "proposed_action": "After decision-layer and execution-runtime review, define the owned decision-artifact schema and producer denominator, then add property tests for typed identity and rejection information plus negative tests proving that decision construction cannot perform or masquerade as execution.",
+      "acceptance_criteria": [
+        "The reviewed denominator enumerates every accepted and rejected decision producer.",
+        "Every enumerated artifact satisfies its owner-approved typed identity and rejection-information requirements.",
+        "Negative tests establish separation between decision construction and every admitted execution boundary.",
+        "Decision-layer, execution-runtime, and testing reviewers approve the scope before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-121"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and the reviewed producer/schema denominator. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not resolve identity terminology, change decision or execution semantics, adopt glossary entries, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-119",
+      "guarantee_ids": [
+        "QT-GUAR-STRATEGY-VARIANT-OUTPUT-FILTER-BOUNDARY"
+      ],
+      "lifecycle": "proposed",
+      "owner": "decision-layer",
+      "required_reviewers": [
+        "decision-layer-owner",
+        "execution-runtime-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The named tests cover representative output filters and compile validation, but they do not close the full operator/output universe or prove every negative ownership boundary for at-the-money state, execution economics, routing, Indicator configuration, and evaluator selection.",
+      "proposed_action": "After decision-layer and execution-runtime review, generate the admitted filter-operator/public-output denominator and add rejection tests for undeclared outputs, unsupported operators, and any attempted ownership of the excluded execution or evaluation concerns.",
+      "acceptance_criteria": [
+        "The reviewed denominator enumerates every admitted output-filter operator and public output family.",
+        "Undeclared outputs and unsupported operators fail before effective Strategy materialization.",
+        "Tests reject variant ownership of at-the-money selection, execution economics, routing, Indicator configuration, and evaluator selection.",
+        "Decision-layer, execution-runtime, and testing reviewers approve the boundaries before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-122"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and the reviewed filter denominator. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not extend Variant ownership, repair product semantics, adopt terminology, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-120",
+      "guarantee_ids": [
+        "QT-GUAR-EFFECTIVE-STRATEGY-RESOLUTION-PARITY"
+      ],
+      "lifecycle": "proposed",
+      "owner": "decision-layer",
+      "required_reviewers": [
+        "decision-layer-owner",
+        "reporting-owner",
+        "strategy-service-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "Named resolver and strategy-service paths are aligned, but the frozen baseline lacks a closed call-site inventory proving that every preview, Bot, runtime, reporting, and provenance consumer resolves the same effective configuration and hash.",
+      "proposed_action": "After the named owner review, generate a shared-resolver call-site manifest and add cross-consumer parity tests showing that identical base Strategy and variant inputs yield the same effective configuration and stable identity without independent reconstruction.",
+      "acceptance_criteria": [
+        "The reviewed manifest enumerates every in-scope preview, Bot, runtime, reporting, and provenance consumer.",
+        "Every enumerated consumer calls the owned resolution boundary rather than independently reconstructing variant semantics.",
+        "Cross-consumer tests produce the same effective configuration and hash for identical inputs and reject mismatched identity.",
+        "Decision-layer, reporting, strategy-service, and testing reviewers approve the denominator before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-123"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result and the reviewed call-site manifest. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not redefine effective Strategy semantics, resolve reporting conflicts, adopt terminology, or activate the guarantee."
+    },
+    {
+      "id": "QT-REM-121",
+      "guarantee_ids": [
+        "QT-GUAR-DETERMINISTIC-SEQUENTIAL-EXPERIMENT-PLAN"
+      ],
+      "lifecycle": "proposed",
+      "owner": "experiment-orchestration",
+      "required_reviewers": [
+        "experiment-orchestration-owner",
+        "research-orchestration-owner",
+        "testing-owner"
+      ],
+      "required_review": true,
+      "review_status": "pending",
+      "gap": "The named examples exercise plan validation, sequential execution, and an explicit warning gate, but they do not fully prove immutable hash behavior, only-window/variant step mutation, declared-variant verification, deterministic permutations, or resume/tamper rejection.",
+      "proposed_action": "After experiment and research orchestration review, add property and tamper tests over canonical hashing, plan expansion, step-diff constraints, declared-variant verification, sequential resume, and immutable completed-step state.",
+      "acceptance_criteria": [
+        "Equivalent plan inputs produce the same canonical identity and step order across the reviewed permutation set.",
+        "Each generated step differs only by its declared window and variant coordinates; undeclared mutations are rejected.",
+        "Variant mismatch, plan tampering, and incompatible resume state fail before execution.",
+        "Experiment-orchestration, research-orchestration, and testing reviewers approve the property domain before any disposition or activation change."
+      ],
+      "proof_plan": {
+        "required_proof_ids": [
+          "QT-PROOF-124"
+        ],
+        "environment_profile_id": "python-nondb",
+        "attestation_requirement": "Run only after owner and reviewer approval; retain a clean commit-bound result, property domain, and tamper/resume cases. This proof definition is not a result."
+      },
+      "review_boundary": "Classification proposal only; it does not change experiment policy, Strategy semantics, resume behavior, adopt terminology, or activate the guarantee."
+    }
+  ],
+  "new_terms": [],
+  "new_conflicts": [],
+  "decision_reviews": [
+    {
+      "id": "QT-DR-A-001",
+      "candidate_ids": [
+        "QT-GC-006",
+        "QT-GC-007",
+        "QT-GC-010"
+      ],
+      "question": "Should these well-aligned but unactivated claims remain candidates until their repository-level wording and authority adoption are separately approved?",
+      "draft_judgment": "Keep each at candidate. The frozen baseline supplies strong accepted-decision and behavioral evidence, but this classification draft cannot turn that evidence into an adopted repository guarantee.",
+      "uncertainty": "moderate",
+      "required_reviewers": [
+        "data-authority-owner",
+        "platform-contract-reviewer",
+        "research-authority-owner",
+        "testing-owner"
+      ],
+      "blocking_effect": "Blocks activation or promotion to enforced; does not block retaining the evidence and proof definitions."
+    },
+    {
+      "id": "QT-DR-A-002",
+      "candidate_ids": [
+        "QT-GC-002"
+      ],
+      "question": "What reviewed denominator closes all causal, projection, reporting, and reconstruction consumers without resolving the existing reconstruction-authority conflicts?",
+      "draft_judgment": "Partially enforced for the named paths only. Keep the repository-wide denominator and every authority choice pending under QT-REM-100.",
+      "uncertainty": "high",
+      "required_reviewers": [
+        "execution-runtime-owner",
+        "indicator-runtime-owner",
+        "platform-contract-reviewer",
+        "reporting-owner"
+      ],
+      "blocking_effect": "Blocks stronger wording, conflict resolution, and activation."
+    },
+    {
+      "id": "QT-DR-A-003",
+      "candidate_ids": [
+        "QT-GC-015"
+      ],
+      "question": "Can execution-runtime and security owners approve a closed repository inventory proving that no unreviewed external-order submission path exists?",
+      "draft_judgment": "Partially enforced because direct startup and simulation guards exist, but a reviewed absence proof is missing.",
+      "uncertainty": "high",
+      "required_reviewers": [
+        "execution-runtime-owner",
+        "security-owner",
+        "testing-owner"
+      ],
+      "blocking_effect": "Blocks enforced disposition and activation; this review cannot enable external submission."
+    },
+    {
+      "id": "QT-DR-A-004",
+      "candidate_ids": [
+        "QT-GC-027",
+        "QT-GC-028",
+        "QT-GC-029",
+        "QT-GC-030",
+        "QT-GC-031"
+      ],
+      "question": "Do the platform-contract owners confirm these conservatively scoped Indicator claims and approve closed registered-output, projection, publication, and Strategy-read denominators?",
+      "draft_judgment": "Partially enforced for the exact named implementation paths. Do not consolidate competing registries, broaden the dynamic denominator, or adopt the deferred Indicator terminology in this batch.",
+      "uncertainty": "high",
+      "required_reviewers": [
+        "decision-layer-owner",
+        "indicator-runtime-owner",
+        "platform-contract-reviewer",
+        "testing-owner"
+      ],
+      "blocking_effect": "Blocks repository-wide wording, registry-authority resolution, terminology adoption, and activation."
+    },
+    {
+      "id": "QT-DR-A-005",
+      "candidate_ids": [
+        "QT-GC-032",
+        "QT-GC-033",
+        "QT-GC-034"
+      ],
+      "question": "Do the decision-layer, execution-runtime, and strategy-service owners approve the producer, filter, and consumer denominators needed to lift the accepted ADR decisions beyond named-path partial enforcement?",
+      "draft_judgment": "Partially enforced. Accepted ADRs are primary decision authority, while focused behavior is supporting evidence and neither source activates these guarantees.",
+      "uncertainty": "moderate",
+      "required_reviewers": [
+        "decision-layer-owner",
+        "execution-runtime-owner",
+        "strategy-service-owner",
+        "testing-owner"
+      ],
+      "blocking_effect": "Blocks stronger disposition, product-semantic changes, terminology adoption, and activation."
+    },
+    {
+      "id": "QT-DR-A-006",
+      "candidate_ids": [
+        "QT-GC-035"
+      ],
+      "question": "What owner-approved property domain and resume/tamper matrix are sufficient to substantiate the full deterministic experiment-plan claim?",
+      "draft_judgment": "Partially enforced for the named plan and runner paths. ADR 0019 is decision authority but the examples are not a complete property proof.",
+      "uncertainty": "moderate",
+      "required_reviewers": [
+        "experiment-orchestration-owner",
+        "research-orchestration-owner",
+        "testing-owner"
+      ],
+      "blocking_effect": "Blocks enforced disposition, changes to experiment policy or resume behavior, and activation."
+    },
+    {
+      "id": "QT-DR-A-007",
+      "candidate_ids": [
+        "QT-GC-002",
+        "QT-GC-006",
+        "QT-GC-007",
+        "QT-GC-010",
+        "QT-GC-015",
+        "QT-GC-027",
+        "QT-GC-028",
+        "QT-GC-029",
+        "QT-GC-030",
+        "QT-GC-031",
+        "QT-GC-032",
+        "QT-GC-033",
+        "QT-GC-034",
+        "QT-GC-035"
+      ],
+      "question": "Will terminology owners separately adopt, defer, rename, or reject the referenced glossary proposals without treating these classifications as adoption?",
+      "draft_judgment": "All referenced terms remain unadopted, including proposed entries. This batch introduces no new term and makes no alias, deprecation, or conflict decision.",
+      "uncertainty": "high",
+      "required_reviewers": [
+        "domain-terminology-owner",
+        "platform-contract-reviewer"
+      ],
+      "blocking_effect": "Blocks terminology adoption and any unqualified wording that depends on the proposed glossary."
+    }
+  ],
+  "notes": [
+    {
+      "id": "QT-NOTE-A-001",
+      "kind": "scope",
+      "message": "This narrowed Batch A classifies exactly 14 candidates: QT-GC-002, QT-GC-006, QT-GC-007, QT-GC-010, QT-GC-015, and QT-GC-027 through QT-GC-035. QT-GC-016 through QT-GC-026 were removed from this batch and remain unclassified here."
+    },
+    {
+      "id": "QT-NOTE-A-002",
+      "kind": "counts",
+      "guarantee_count": 14,
+      "disposition_counts": {
+        "candidate": 3,
+        "contradicted": 0,
+        "enforced": 0,
+        "implementation_property": 0,
+        "partially_enforced": 11,
+        "superseded": 0,
+        "unclear": 0
+      },
+      "proof_definition_count": 14,
+      "remediation_draft_count": 11,
+      "new_term_count": 0,
+      "new_conflict_count": 0,
+      "activated_guarantee_count": 0
+    },
+    {
+      "id": "QT-NOTE-A-003",
+      "kind": "authority_policy",
+      "message": "Accepted ADRs are treated as decision authority but remain nonactivating. Active behavior and tests are evidence only. Source-module contracts and AGENTS.md remain nonactivating. The guarantee registry is nonnormative and every final authority claim remains controlled by its cited source."
+    },
+    {
+      "id": "QT-NOTE-A-004",
+      "kind": "proof_semantics",
+      "message": "QT-PROOF-100 through QT-PROOF-104 and QT-PROOF-116 through QT-PROOF-124 are required-proof definitions only. No selector was executed for this classification draft, no result is asserted, and no attestation is created."
+    },
+    {
+      "id": "QT-NOTE-A-005",
+      "kind": "review_boundary",
+      "message": "This draft does not activate a guarantee, adopt or resolve terminology, repair product semantics, delete or archive material, choose between normative conflicts, or modify the final registry, proof catalog, glossary, product code, or normative documentation."
+    },
+    {
+      "id": "QT-NOTE-A-006",
+      "kind": "uncertainty",
+      "message": "Every repository-wide or absence-style claim is intentionally limited to named paths unless a remediation draft supplies an owner-reviewed closed denominator. Existing Phase 1 findings remain attached; an empty new_conflicts array means only that this batch discovered no additional conflict."
+    }
+  ]
+}

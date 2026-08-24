@@ -1,0 +1,2231 @@
+{
+  "batch": {
+    "id": "phase-2b-batch-c",
+    "phase": "phase_2b_evidence_classification",
+    "status": "draft_for_owner_and_gate_review",
+    "audit_baseline_commit": "d46e40bf55caeea12f4ccbde640c71f271eaf9c4",
+    "branch": "feat/docs-guarantee-reconciliation",
+    "classification_only": true,
+    "registry_is_nonnormative": true,
+    "proof_entries_are_definitions_not_results": true,
+    "terms_adopted": false,
+    "guarantees_activated": false
+  },
+  "candidate_ids": [
+    "QT-GC-058",
+    "QT-GC-059",
+    "QT-GC-060",
+    "QT-GC-061",
+    "QT-GC-062",
+    "QT-GC-063",
+    "QT-GC-064",
+    "QT-GC-065",
+    "QT-GC-066",
+    "QT-GC-067",
+    "QT-GC-068",
+    "QT-GC-069",
+    "QT-GC-071",
+    "QT-GC-072",
+    "QT-GC-074",
+    "QT-GC-075"
+  ],
+  "guarantees": [
+    {
+      "id": "QT-GUAR-PROVIDER-CREDENTIAL-REFERENCE-CONFINEMENT",
+      "candidate_refs": [{"id": "QT-GC-058", "relation": "equivalent"}],
+      "title": "Provider credential reference confinement",
+      "claim_summary": "Provider credentials are persisted behind encrypted references, public reads expose metadata rather than secret values, and unusable encryption-key material fails at the credential boundary.",
+      "claim_scope": [
+        "Credential reference creation, lookup, update, deletion, and public provider metadata represented by the named paths.",
+        "Provider credential storage at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "Credential API output exposes a plaintext provider secret.",
+        "Missing, malformed, or mismatched encryption-key material is silently accepted.",
+        "Persisted provider credential material bypasses the encrypted-reference boundary."
+      ],
+      "wording_constraints": [
+        "Named unit and service tests do not constitute a direct encryption round-trip or wrong-key proof.",
+        "Provider ID and Venue ID remain distinct proposed terms under QT-TERM-027.",
+        "The registry records the frozen implementation boundary without adopting a new credential format."
+      ],
+      "owners": ["provider-security", "security"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-027"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0024-use-provider-credential-references.md",
+          "locator": {"kind": "line_range", "start": 46, "end": 73},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-300",
+          "kind": "structural_boundary",
+          "path": "src/data_providers/services/credential_store.py",
+          "locator": {"kind": "line_range", "start": 112, "end": 146},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-301",
+          "kind": "runtime_guard",
+          "path": "src/data_providers/services/credential_store.py",
+          "locator": {"kind": "line_range", "start": 279, "end": 395},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-302",
+          "kind": "runtime_guard",
+          "path": "src/data_providers/services/credential_store.py",
+          "locator": {"kind": "line_range", "start": 405, "end": 488},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-303",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/providers/provider_service.py",
+          "locator": {"kind": "line_range", "start": 343, "end": 357},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-300",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-300.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-300"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-V1-LOCAL-TRUST-BOUNDARY",
+      "candidate_refs": [{"id": "QT-GC-059", "relation": "equivalent"}],
+      "title": "Version 1 local-trust deployment boundary",
+      "claim_summary": "Version 1 server deployment is limited to loopback or local-trusted access, while production authentication, authorization, rate limiting, and multi-user isolation remain outside the classified capability.",
+      "claim_scope": [
+        "Published server Compose ports and the named single-node deployment guidance.",
+        "Version 1 deployment access assumptions at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "A server service publishes a remotely reachable host port while relying on the local-trust assumption.",
+        "The deployment is described as providing production authentication, authorization, rate limiting, or multi-user isolation."
+      ],
+      "wording_constraints": [
+        "Loopback binding is not authentication or authorization.",
+        "QT-TERM-054 remains a proposed distinction between deployment validation and external execution authority.",
+        "The configuration test does not establish a deployed-network penetration result."
+      ],
+      "owners": ["deployment", "security"],
+      "claim_kind": "capability_ceiling",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-054"],
+      "authority_refs": [
+        {
+          "path": "docs/engineering/server-deployment.md",
+          "locator": {"kind": "line_range", "start": 45, "end": 63},
+          "authority_kind": "operational_canonical",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/security/SECURITY_LAYER.md",
+          "locator": {"kind": "line_range", "start": 35, "end": 44},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "context"
+        },
+        {
+          "path": "docs/architecture/security/SECURITY_LAYER.md",
+          "locator": {"kind": "line_range", "start": 69, "end": 91},
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-304",
+          "kind": "structural_boundary",
+          "path": "docker/docker-compose.server.yml",
+          "locator": {"kind": "line_range", "start": 110, "end": 461},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-025"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-301",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-301.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-301"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-BOT-RUN-LEASE-OWNERSHIP",
+      "candidate_refs": [{"id": "QT-GC-060", "relation": "equivalent"}],
+      "title": "Bot Run lease ownership",
+      "claim_summary": "Each Bot Run is governed by one renewable owner lease whose raw token remains caller-owned while only its hash is persisted, and mutation is rejected after mismatch, expiry, or ownership loss.",
+      "claim_scope": [
+        "Bot Run lease acquisition, renewal, validation, release, and ownership checks represented by the named paths.",
+        "Persisted token-hash and caller-held raw-token handling at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "A caller mutates a Bot Run after lease mismatch, expiry, or ownership loss.",
+        "A raw lease token is persisted in place of its hash.",
+        "Concurrent starts produce more than one effective active owner."
+      ],
+      "wording_constraints": [
+        "Lease, claim, lock, heartbeat, token, and generation remain contrasted under proposed QT-TERM-050.",
+        "Named service tests exercise representative acquisition and stale-scan paths but not the complete database lease state machine.",
+        "The accepted ADR is a durable decision record and does not activate this registry entry."
+      ],
+      "owners": ["execution-runtime", "persistence", "security"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-050"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0025-use-per-run-leases.md",
+          "locator": {"kind": "line_range", "start": 45, "end": 68},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-305",
+          "kind": "database_constraint",
+          "path": "portal/backend/service/storage/repos/run_leases.py",
+          "locator": {"kind": "line_range", "start": 36, "end": 46},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-306",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/storage/repos/run_leases.py",
+          "locator": {"kind": "line_range", "start": 85, "end": 163},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-307",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/storage/repos/run_leases.py",
+          "locator": {"kind": "line_range", "start": 172, "end": 298},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-308",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/bots/run_lease.py",
+          "locator": {"kind": "line_range", "start": 54, "end": 106},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-023"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-302",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-302.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-302"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING",
+      "candidate_refs": [{"id": "QT-GC-061", "relation": "equivalent"}],
+      "title": "Asynchronous job ownership fencing",
+      "claim_summary": "Asynchronous job effects are committed only under the current ownership token and generation, preventing a stale owner from committing after reclaim or lease loss.",
+      "claim_scope": [
+        "Asynchronous job claim, heartbeat, reclaim, completion, and domain-effect transaction paths represented by the named repository.",
+        "Ownership token and generation persistence at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "A stale worker commits completion or a job-owned domain effect after reclaim.",
+        "Job completion and its associated domain effects commit outside one ownership-fenced transaction.",
+        "Ownership validation omits either the token or the generation."
+      ],
+      "wording_constraints": [
+        "Async Job and job-owned effect remain deferred terminology under QT-TERM-051.",
+        "Lease, claim, and ownership fence remain proposed and contrasted under QT-TERM-050.",
+        "The database tests cover named ownership races and transactions, not every future asynchronous effect type."
+      ],
+      "owners": ["persistence", "research-orchestration"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-050", "QT-TERM-051"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0047-fence-async-job-ownership.md",
+          "locator": {"kind": "line_range", "start": 39, "end": 77},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-309",
+          "kind": "database_constraint",
+          "path": "portal/backend/service/async_jobs/repository.py",
+          "locator": {"kind": "line_range", "start": 608, "end": 627},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-310",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/async_jobs/repository.py",
+          "locator": {"kind": "line_range", "start": 703, "end": 718},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-311",
+          "kind": "database_constraint",
+          "path": "portal/backend/db/models.py",
+          "locator": {"kind": "line_range", "start": 1907, "end": 1918},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-023"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-303",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-303.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-303"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-ENUMERATED-AGENT-MUTATION-GATES",
+      "candidate_refs": [{"id": "QT-GC-062", "relation": "equivalent"}],
+      "title": "Enumerated agent mutation gates",
+      "claim_summary": "Agent-facing mutation is intended to remain within enumerated operations with dry-plan and apply or confirmation and audit handling, while research promotion additionally carries evidence requirements.",
+      "claim_scope": [
+        "Named CLI and MCP mutation paths represented by the accepted decision and frozen implementation.",
+        "Research-promotion evidence handling and general mutation controls as separately described by ADR 0048."
+      ],
+      "failure_semantics": [
+        "A named agent-facing mutation bypasses its declared confirmation, audit, or dry-plan boundary.",
+        "Research promotion proceeds through the named path without its evidence gate.",
+        "The broad enumerated-mutation claim is treated as settled despite the ADR scope contradiction."
+      ],
+      "wording_constraints": [
+        "DOC-MUTATION-SCOPE-001 remains unresolved and prevents a uniform normative reading.",
+        "Implementation guards on named paths are evidence only and do not resolve the ADR contradiction.",
+        "Qualified Evidence under QT-TERM-026 remains proposed and does not create new promotion semantics."
+      ],
+      "owners": ["application-interfaces", "research-governance"],
+      "claim_kind": "governance_policy",
+      "claim_lifecycle": "unclear",
+      "registry_disposition": "contradicted",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "contradicted",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-026"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0048-gate-agent-mutation-and-research-promotion.md",
+          "locator": {"kind": "line_range", "start": 33, "end": 37},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "conflicting"
+        },
+        {
+          "path": "docs/architecture/decisions/0048-gate-agent-mutation-and-research-promotion.md",
+          "locator": {"kind": "line_range", "start": 41, "end": 59},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "conflicting"
+        },
+        {
+          "path": "docs/architecture/decisions/0048-gate-agent-mutation-and-research-promotion.md",
+          "locator": {"kind": "line_range", "start": 66, "end": 69},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-312",
+          "kind": "workflow_gate",
+          "path": "cli/main.py",
+          "locator": {"kind": "line_range", "start": 922, "end": 1021},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-313",
+          "kind": "workflow_gate",
+          "path": "cli/mcp_server.py",
+          "locator": {"kind": "line_range", "start": 441, "end": 470},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-314",
+          "kind": "workflow_gate",
+          "path": "cli/mcp_server.py",
+          "locator": {"kind": "line_range", "start": 677, "end": 680},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-315",
+          "kind": "workflow_gate",
+          "path": "cli/mcp_server.py",
+          "locator": {"kind": "line_range", "start": 929, "end": 1067},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-316",
+          "kind": "workflow_gate",
+          "path": "cli/mcp_server.py",
+          "locator": {"kind": "line_range", "start": 1888, "end": 1890},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": ["DOC-MUTATION-SCOPE-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-304",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-304.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-304"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY",
+      "candidate_refs": [{"id": "QT-GC-063", "relation": "equivalent"}],
+      "title": "Sole PostgreSQL persistence authority",
+      "claim_summary": "PG_DSN is the sole PostgreSQL connection authority, and migration or schema drift is rejected instead of being repaired through runtime schema guessing.",
+      "claim_scope": [
+        "Portal PostgreSQL engine construction, schema bootstrap, migration checks, and drift rejection represented by the named paths.",
+        "Repository guidance indexed from AGENTS.md without treating that file as automatic activation authority."
+      ],
+      "failure_semantics": [
+        "A second environment variable or implicit default becomes a PostgreSQL connection authority.",
+        "Runtime bootstrap guesses or silently repairs unsupported schema drift.",
+        "The application imports only by requiring a live database connection."
+      ],
+      "wording_constraints": [
+        "AGENTS.md is classified repository governance and remains nonactivating in the Phase 2A hierarchy.",
+        "Mocked bootstrap tests establish structural behavior, not a complete deployed PostgreSQL proof.",
+        "The claim is limited to PostgreSQL authority and does not classify every non-PostgreSQL store."
+      ],
+      "owners": ["database-operations", "persistence"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0009-use-one-postgres-persistence-boundary-and-retained-event-ledger.md",
+          "locator": {"kind": "line_range", "start": 40, "end": 56},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "AGENTS.md",
+          "locator": {"kind": "line_range", "start": 31, "end": 31},
+          "authority_kind": "normative_agent_governance",
+          "source_lifecycle": "active",
+          "role": "context"
+        },
+        {
+          "path": "AGENTS.md",
+          "locator": {"kind": "line_range", "start": 152, "end": 156},
+          "authority_kind": "normative_agent_governance",
+          "source_lifecycle": "active",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-317",
+          "kind": "structural_boundary",
+          "path": "portal/backend/db/session.py",
+          "locator": {"kind": "line_range", "start": 246, "end": 250},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-318",
+          "kind": "runtime_guard",
+          "path": "portal/backend/db/session.py",
+          "locator": {"kind": "line_range", "start": 324, "end": 369},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-319",
+          "kind": "schema_validation",
+          "path": "portal/backend/db/session.py",
+          "locator": {"kind": "line_range", "start": 993, "end": 1025},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-320",
+          "kind": "schema_validation",
+          "path": "portal/backend/db/session.py",
+          "locator": {"kind": "line_range", "start": 1119, "end": 1228},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-305",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-305.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-305"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-BLOCKING-API-WORK-OFFLOAD",
+      "candidate_refs": [{"id": "QT-GC-064", "relation": "equivalent"}],
+      "title": "Blocking API work offload",
+      "claim_summary": "Known blocking work invoked from asynchronous API paths is dispatched off the event loop through the named execution boundary.",
+      "claim_scope": [
+        "Asynchronous FastAPI routes and mixed asynchronous services enumerated by the contract test.",
+        "BotLens run-projector blocking database work represented by the named service path."
+      ],
+      "failure_semantics": [
+        "A known blocking call executes directly on the asynchronous event loop.",
+        "A newly introduced mixed asynchronous service is omitted from the audited surface."
+      ],
+      "wording_constraints": [
+        "The contract test uses an explicit mixed-async file inventory rather than a closed repository-wide static analysis.",
+        "The engineering contract is the only normative platform authority in this record; ADR 0054 remains a nonactivating decision record.",
+        "The named projector call is representative implementation evidence."
+      ],
+      "owners": ["api", "runtime-services"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/03_engineering_contract.md",
+          "locator": {"kind": "line_range", "start": 43, "end": 48},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0054-keep-blocking-api-work-off-the-event-loop.md",
+          "locator": {"kind": "line_range", "start": 57, "end": 99},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-321",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/bots/botlens_run_projector.py",
+          "locator": {"kind": "line_range", "start": 678, "end": 684},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-306",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-306.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-306"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-BOUNDED-NONCANONICAL-OBSERVABILITY",
+      "candidate_refs": [{"id": "QT-GC-065", "relation": "equivalent"}],
+      "title": "Bounded noncanonical observability",
+      "claim_summary": "Noncanonical observability storage and labels are bounded, and overflow or dropped evidence is surfaced through explicit diagnostic evidence.",
+      "claim_scope": [
+        "Metric rollup label normalization, pending-export bounds, overflow persistence, and high-volume aggregation represented by the named paths.",
+        "Observability evidence that is explicitly noncanonical under ADR 0011."
+      ],
+      "failure_semantics": [
+        "Dropped observability evidence is silent.",
+        "Metric labels or pending exporter state grow without the represented bounds.",
+        "Observability records are treated as canonical execution or trading truth."
+      ],
+      "wording_constraints": [
+        "Qualified Evidence under QT-TERM-026 preserves the distinction between diagnostic and canonical evidence.",
+        "The tests cover named storage and exporter bounds, not every future observability sink.",
+        "This record does not make observability an execution authority."
+      ],
+      "owners": ["observability", "persistence"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-026"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0011-keep-observability-bounded-and-non-canonical.md",
+          "locator": {"kind": "line_range", "start": 39, "end": 52},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-322",
+          "kind": "schema_validation",
+          "path": "portal/backend/service/observability.py",
+          "locator": {"kind": "line_range", "start": 329, "end": 377},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-323",
+          "kind": "process_control",
+          "path": "portal/backend/service/observability_exporter.py",
+          "locator": {"kind": "line_range", "start": 83, "end": 93},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-324",
+          "kind": "process_control",
+          "path": "portal/backend/service/observability_exporter.py",
+          "locator": {"kind": "line_range", "start": 533, "end": 536},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-307",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-307.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-307"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-SINGLE-LOKI-INGRESS-PER-TOPOLOGY",
+      "candidate_refs": [{"id": "QT-GC-066", "relation": "equivalent"}],
+      "title": "Single Loki ingress per topology",
+      "claim_summary": "Application services are intended to emit logs to stdout with one out-of-process Loki shipper selected by topology, but the amended ADR retains a conflicting Promtail-only body.",
+      "claim_scope": [
+        "Development Promtail and server Alloy Compose paths at frozen baseline d46e40bf.",
+        "The stdout-only application logging and one-shipper topology described by the ADR amendment and observability guide."
+      ],
+      "failure_semantics": [
+        "Application services send directly to Loki alongside the selected out-of-process shipper.",
+        "More than one shipper is active for the same topology.",
+        "The ADR amendment and retained body are treated as one coherent normative topology."
+      ],
+      "wording_constraints": [
+        "DOC-LOG-INGRESS-001 remains unresolved; the registry does not choose between the amendment and retained ADR body.",
+        "Implementation and configuration tests show the frozen topology but do not repair the authority conflict.",
+        "Promtail is the observed development shipper and Alloy is the observed server shipper."
+      ],
+      "owners": ["deployment", "observability"],
+      "claim_kind": "operational_policy",
+      "claim_lifecycle": "unclear",
+      "registry_disposition": "contradicted",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "contradicted",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0033-use-promtail-as-runtime-loki-ingress.md",
+          "locator": {"kind": "line_range", "start": 33, "end": 37},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "conflicting"
+        },
+        {
+          "path": "docs/architecture/decisions/0033-use-promtail-as-runtime-loki-ingress.md",
+          "locator": {"kind": "line_range", "start": 61, "end": 80},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "conflicting"
+        },
+        {
+          "path": "docs/engineering/observability.md",
+          "locator": {"kind": "line_range", "start": 33, "end": 37},
+          "authority_kind": "operational_guidance",
+          "source_lifecycle": "active",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-325",
+          "kind": "structural_boundary",
+          "path": "docker/docker-compose.yml",
+          "locator": {"kind": "line_range", "start": 221, "end": 249},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-326",
+          "kind": "structural_boundary",
+          "path": "docker/docker-compose.server.yml",
+          "locator": {"kind": "line_range", "start": 307, "end": 346},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["DOC-LOG-INGRESS-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-308",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-308.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-308"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-DIAGNOSTICS-NOT-EXECUTION-TRUTH",
+      "candidate_refs": [{"id": "QT-GC-067", "relation": "equivalent"}],
+      "title": "Runtime diagnostics are not execution truth",
+      "claim_summary": "Runner clock gaps, Docker lifecycle events, and lease or watchdog degradation remain diagnostics that are persisted as evidence without becoming execution truth.",
+      "claim_scope": [
+        "Docker event normalization, runner clock-gap detection, lease degradation, and watchdog persistence represented by the named paths.",
+        "Runtime operational evidence covered by ADRs 0021, 0022, and 0023."
+      ],
+      "failure_semantics": [
+        "A Docker lifecycle event or runner clock gap becomes authoritative execution state.",
+        "A represented watchdog or lease degradation diagnostic is discarded instead of being handed to persistence.",
+        "Diagnostic interpretation silently mutates trading or execution truth."
+      ],
+      "wording_constraints": [
+        "Qualified Evidence under QT-TERM-026 does not collapse diagnostics into canonical truth.",
+        "Runner clock gap under QT-TERM-018 remains distinct from source-data and projection gaps.",
+        "The named tests prove normalization and handoff behavior, not every persistence failure mode."
+      ],
+      "owners": ["execution-runtime", "observability"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-018", "QT-TERM-026"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0023-persist-watchdog-degradation-diagnostics.md",
+          "locator": {"kind": "line_range", "start": 37, "end": 64},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0021-use-runner-clock-gap-sentinel.md",
+          "locator": {"kind": "line_range", "start": 28, "end": 64},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        },
+        {
+          "path": "docs/architecture/decisions/0022-capture-docker-container-lifecycle-as-runner-agnostic-observability.md",
+          "locator": {"kind": "line_range", "start": 40, "end": 77},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-327",
+          "kind": "process_control",
+          "path": "portal/backend/service/bots/runner_observability.py",
+          "locator": {"kind": "line_range", "start": 90, "end": 128},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-328",
+          "kind": "process_control",
+          "path": "portal/backend/service/bots/runner_observability.py",
+          "locator": {"kind": "line_range", "start": 198, "end": 276},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-329",
+          "kind": "process_control",
+          "path": "portal/backend/service/bots/bot_watchdog.py",
+          "locator": {"kind": "line_range", "start": 116, "end": 177},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-330",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/bots/bot_watchdog.py",
+          "locator": {"kind": "line_range", "start": 427, "end": 566},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-309",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-309.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-309"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-BOUNDED-TELEMETRY-CONTROL-DELIVERY",
+      "candidate_refs": [{"id": "QT-GC-068", "relation": "equivalent"}],
+      "title": "Bounded telemetry control delivery",
+      "claim_summary": "Runtime telemetry uses a bounded priority control lane with terminal flush, duplicate suppression, and visible fallback behavior on the named transport paths.",
+      "claim_scope": [
+        "Bot runtime telemetry queueing, control delivery, terminal lifecycle notification, and duplicate suppression represented by the named paths.",
+        "The bounded BotLens-facing telemetry transport at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "Control telemetry can be starved indefinitely by ordinary telemetry.",
+        "Duplicate bootstrap or large-fact payloads are repeatedly emitted within one session.",
+        "Terminal telemetry loss is silent after control-flush failure."
+      ],
+      "wording_constraints": [
+        "BotLens projection under QT-TERM-047 is bounded debugger state rather than execution truth.",
+        "The direct transport fallback is implementation evidence outside the candidate's original enforcement range.",
+        "The tests cover representative terminal, priority, duplicate, and fallback cases rather than every transport failure."
+      ],
+      "owners": ["botlens", "execution-runtime"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-047"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0026-use-control-plane-telemetry-flush.md",
+          "locator": {"kind": "line_range", "start": 46, "end": 93},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-331",
+          "kind": "process_control",
+          "path": "portal/backend/service/bots/container_runtime_telemetry.py",
+          "locator": {"kind": "line_range", "start": 204, "end": 217},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-332",
+          "kind": "process_control",
+          "path": "portal/backend/service/bots/container_runtime_telemetry.py",
+          "locator": {"kind": "line_range", "start": 672, "end": 746},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-333",
+          "kind": "process_control",
+          "path": "portal/backend/service/bots/container_runtime_telemetry.py",
+          "locator": {"kind": "line_range", "start": 864, "end": 906},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-334",
+          "kind": "process_control",
+          "path": "portal/backend/service/bots/container_runtime.py",
+          "locator": {"kind": "line_range", "start": 750, "end": 797},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-310",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-310.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-310"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-ATTESTED-SINGLE-NODE-DEPLOYMENT",
+      "candidate_refs": [{"id": "QT-GC-069", "relation": "equivalent"}],
+      "title": "Attested single-node deployment",
+      "claim_summary": "The server deployment workflow requires an exact clean reviewed commit, attests rendered application images, avoids implicit migration, and records rollback state.",
+      "claim_scope": [
+        "Single-node server deployment preparation, source review, image verification, rollout, and rollback recording represented by the named contract and script.",
+        "Static and scripted deployment checks at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "Application images are deployed without matching the recorded source and rendered image attestations.",
+        "Deployment proceeds from a dirty or different commit than the reviewed revision.",
+        "The deployment helper performs an implicit schema migration or omits rollback-state recording."
+      ],
+      "wording_constraints": [
+        "Deployment contract and strategy deployment authority remain distinct proposed terms under QT-TERM-054.",
+        "Static script tests do not attest an actual deployment run.",
+        "The deployment contract does not authorize external order submission."
+      ],
+      "owners": ["deployment", "operations", "security"],
+      "claim_kind": "operational_policy",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-054"],
+      "authority_refs": [
+        {
+          "path": "docs/engineering/server-deployment.md",
+          "locator": {"kind": "line_range", "start": 3, "end": 39},
+          "authority_kind": "operational_canonical",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/engineering/server-deployment.md",
+          "locator": {"kind": "line_range", "start": 65, "end": 86},
+          "authority_kind": "operational_canonical",
+          "source_lifecycle": "active",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-335",
+          "kind": "process_control",
+          "path": "scripts/automation/server_deploy.sh",
+          "locator": {"kind": "line_range", "start": 235, "end": 262},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-336",
+          "kind": "process_control",
+          "path": "scripts/automation/server_deploy.sh",
+          "locator": {"kind": "line_range", "start": 282, "end": 319},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-337",
+          "kind": "process_control",
+          "path": "scripts/automation/server_deploy.sh",
+          "locator": {"kind": "line_range", "start": 338, "end": 361},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-338",
+          "kind": "process_control",
+          "path": "scripts/automation/server_deploy.sh",
+          "locator": {"kind": "line_range", "start": 394, "end": 432},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-025"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-311",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-311.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-311"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-SEMANTIC-OPERATIONAL-FINGERPRINT-SEPARATION",
+      "candidate_refs": [{"id": "QT-GC-071", "relation": "equivalent"}],
+      "title": "Semantic and operational fingerprint separation",
+      "claim_summary": "Semantic and operational fingerprints are computed separately so operational event ordering drift does not alter the semantic fingerprint.",
+      "claim_scope": [
+        "Run research dataset fingerprint construction and the represented semantic-context, event-order, and run-identifier cases.",
+        "Semantic and operational fingerprint distinctions described by ADRs 0015 and 0016."
+      ],
+      "failure_semantics": [
+        "Operational event ordering changes the semantic fingerprint.",
+        "Semantically material runtime context fails to change the semantic fingerprint.",
+        "Transient run-instance identifiers are treated as semantic identity."
+      ],
+      "wording_constraints": [
+        "QT-CONFLICT-024 remains an indexed terminology collision and is not resolved here.",
+        "Semantic and operational fingerprint remain proposed contrasted terms under QT-TERM-052.",
+        "The selected tests do not close every future fingerprint input path."
+      ],
+      "owners": ["reporting", "runtime"],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-052"],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0015-split-semantic-and-operational-golden-fingerprints.md",
+          "locator": {"kind": "line_range", "start": 40, "end": 60},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md",
+          "locator": {"kind": "line_range", "start": 39, "end": 62},
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-339",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/reports/run_research_dataset.py",
+          "locator": {"kind": "line_range", "start": 5984, "end": 6103},
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-340",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/reports/run_research_dataset.py",
+          "locator": {"kind": "line_range", "start": 6108, "end": 6225},
+          "coverage": "complete"
+        }
+      ],
+      "finding_refs": ["QT-CONFLICT-024"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-312",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-312.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-312"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-PR-VERIFICATION-TOPOLOGY",
+      "candidate_refs": [{"id": "QT-GC-072", "relation": "equivalent"}],
+      "title": "Pull-request verification topology",
+      "claim_summary": "Pull-request verification separates non-database, frontend, deployment, clean-bootstrap, and database-marked validation lanes while database tests use an isolated disposable database.",
+      "claim_scope": [
+        "Hosted pull-request workflow jobs and steps, suite profiles, and isolated-database selection guards at frozen baseline d46e40bf.",
+        "The four-job workflow in which clean bootstrap and database-marked verification are distinct steps within the clean-database-bootstrap job."
+      ],
+      "failure_semantics": [
+        "A database-marked test runs without the isolated-database guard.",
+        "A required validation lane is omitted or silently folded into an unrelated selector.",
+        "Hosted workflow topology is reported using the stale five-job description."
+      ],
+      "wording_constraints": [
+        "DOC-CI-TOPOLOGY-001 and QT-CONFLICT-026 remain unresolved documentation and terminology findings.",
+        "Make target, CI job, test suite, and pytest profile remain deferred distinctions under QT-TERM-055.",
+        "The frozen workflow has four jobs; clean-bootstrap and database-marked verification are separate steps within one clean-database-bootstrap job."
+      ],
+      "owners": ["ci", "testing"],
+      "claim_kind": "operational_policy",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-055"],
+      "authority_refs": [
+        {
+          "path": "docs/engineering/testing/testing-strategy.md",
+          "locator": {"kind": "line_range", "start": 5, "end": 22},
+          "authority_kind": "operational_guidance",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/engineering/testing/testing-strategy.md",
+          "locator": {"kind": "line_range", "start": 347, "end": 366},
+          "authority_kind": "operational_guidance",
+          "source_lifecycle": "active",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-341",
+          "kind": "workflow_gate",
+          "path": ".github/workflows/test.yaml",
+          "locator": {"kind": "line_range", "start": 9, "end": 31},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-342",
+          "kind": "workflow_gate",
+          "path": ".github/workflows/test.yaml",
+          "locator": {"kind": "line_range", "start": 33, "end": 96},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-343",
+          "kind": "workflow_gate",
+          "path": ".github/workflows/test.yaml",
+          "locator": {"kind": "line_range", "start": 98, "end": 163},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-344",
+          "kind": "workflow_gate",
+          "path": "scripts/ci/run_test_suite.sh",
+          "locator": {"kind": "line_range", "start": 68, "end": 85},
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-345",
+          "kind": "runtime_guard",
+          "path": "tests/conftest.py",
+          "locator": {"kind": "line_range", "start": 205, "end": 237},
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": ["DOC-CI-TOPOLOGY-001", "QT-CONFLICT-026"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-313",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-313.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-313"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+      "candidate_refs": [{"id": "QT-GC-074", "relation": "equivalent"}],
+      "title": "Contract-driven generic surfaces",
+      "claim_summary": "Generic platform surfaces are intended to remain registry-, schema-, and contract-driven, without named-instance branches or guessed fallback, and to fail when a required capability is absent.",
+      "claim_scope": [
+        "Provider-registry routing and execution-context genericity represented by the named implementation and tests.",
+        "The active platform engineering contract at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "A generic surface guesses a fallback implementation when the requested capability is absent.",
+        "A named provider, venue, exchange, strategy, or instrument branch enters a generic execution surface.",
+        "Schema or contract validation is bypassed in a represented generic boundary."
+      ],
+      "wording_constraints": [
+        "ARCH-COVERAGE-001 and REGISTRY-DYNAMIC-001 keep the whole-repository denominator open.",
+        "Provider ID, Venue ID, and exchange slug remain proposed contrasted terms under QT-TERM-027.",
+        "Representative absence checks do not prove every generic surface in the repository."
+      ],
+      "owners": ["platform-engineering", "providers", "runtime"],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-027", "QT-TERM-055"],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/03_engineering_contract.md",
+          "locator": {"kind": "line_range", "start": 18, "end": 36},
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-346",
+          "kind": "structural_boundary",
+          "path": "src/data_providers/registry.py",
+          "locator": {"kind": "line_range", "start": 245, "end": 387},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-347",
+          "kind": "runtime_guard",
+          "path": "src/engines/bot_runtime/core/execution_context.py",
+          "locator": {"kind": "line_range", "start": 606, "end": 666},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["ARCH-COVERAGE-001", "REGISTRY-DYNAMIC-001"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-314",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-314.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-314"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+      "candidate_refs": [{"id": "QT-GC-075", "relation": "equivalent"}],
+      "title": "Agent workflow boundaries",
+      "claim_summary": "Repository agent work is intended to keep frontend work in the frontend, route API, qt, and MCP behavior through the shared application contract, use the named validation and architecture-index boundaries, and avoid ad hoc database or parallel-truth paths.",
+      "claim_scope": [
+        "Agent-facing repository workflow guidance and the named Make, CLI, MCP, and architecture-index checks.",
+        "The distributed governance boundary represented at frozen baseline d46e40bf."
+      ],
+      "failure_semantics": [
+        "An agent-facing path introduces an ad hoc database or parallel source of truth.",
+        "API, qt, or MCP behavior bypasses the shared application boundary.",
+        "Frontend or architecture-documentation work bypasses its named repository workflow."
+      ],
+      "wording_constraints": [
+        "AGENTS.md is repository governance but remains nonactivating under the Phase 2A authority hierarchy.",
+        "Make target, CI job, test suite, and pytest profile remain deferred distinctions under QT-TERM-055.",
+        "The named tests are representative and do not close the full distributed governance surface."
+      ],
+      "owners": ["application-interfaces", "architecture-documentation", "repository-governance"],
+      "claim_kind": "governance_policy",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": ["QT-TERM-055"],
+      "authority_refs": [
+        {
+          "path": "AGENTS.md",
+          "locator": {"kind": "line_range", "start": 15, "end": 21},
+          "authority_kind": "normative_agent_governance",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "AGENTS.md",
+          "locator": {"kind": "line_range", "start": 191, "end": 205},
+          "authority_kind": "normative_agent_governance",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "AGENTS.md",
+          "locator": {"kind": "line_range", "start": 216, "end": 239},
+          "authority_kind": "normative_agent_governance",
+          "source_lifecycle": "active",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-348",
+          "kind": "workflow_gate",
+          "path": "Makefile",
+          "locator": {"kind": "line_range", "start": 468, "end": 470},
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-349",
+          "kind": "structural_boundary",
+          "path": "cli/main.py",
+          "locator": {"kind": "line_range", "start": 4857, "end": 4884},
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": ["ARCH-COVERAGE-001", "DOC-VALIDATION-001", "QT-CONFLICT-026"],
+      "remediation_status": "recorded",
+      "remediation_refs": [
+        {
+          "id": "QT-REM-315",
+          "path": "docs/assurance/guarantees/remediations/QT-REM-315.md",
+          "locator": {"kind": "heading", "value": "Remediation QT-REM-315"},
+          "lifecycle": "proposed"
+        }
+      ],
+      "replaced_by_ids": []
+    }
+  ],
+  "proofs": [
+    {
+      "id": "QT-PROOF-300",
+      "title": "Provider credential reference metadata and schema boundary",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_data_providers/test_credential_store_refs.py::test_credential_store_requires_portal_schema_bootstrap",
+          "tests/test_data_providers/test_credential_store_refs.py::test_default_credential_ref_is_stable_and_slugged",
+          "tests/test_portal/test_provider_credentials.py::test_credential_schema_uses_registry_metadata_without_secret_values"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROVIDER-CREDENTIAL-REFERENCE-CONFINEMENT",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-301",
+      "title": "Server loopback publication boundary",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_server_deployment_config.py::test_server_ports_are_private_and_database_is_not_published"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-V1-LOCAL-TRUST-BOUNDARY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-302",
+      "title": "Bot Run lease ownership wiring and contention",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_bot_runtime_control_service.py::test_concurrent_start_attempts_create_one_active_run",
+          "tests/test_portal/test_bot_runtime_control_service.py::test_start_bot_passes_run_lease_to_runner",
+          "tests/test_portal/test_bot_watchdog.py::test_verify_container_ownership_skips_expired_lease_for_stale_scan"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOT-RUN-LEASE-OWNERSHIP",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-303",
+      "title": "Asynchronous job fencing transactions",
+      "lifecycle": "active",
+      "proof_kind": "database_integration",
+      "environment_profile_id": "python-db-isolated",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_async_jobs_db.py::test_current_heartbeat_blocks_and_defeats_concurrent_reclaim",
+          "tests/test_portal/test_async_jobs_db.py::test_reclaim_fences_stale_owner_and_commits_one_owned_effect",
+          "tests/test_portal/test_async_jobs_db.py::test_research_artifacts_rollback_with_owned_job_completion"
+        ]
+      },
+      "timeout_seconds": 300,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-304",
+      "title": "Representative agent mutation gates",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_cli/test_market_data_cli.py::test_data_collectors_restart_is_audited_and_confirmed",
+          "tests/test_cli/test_mcp_server.py::test_mcp_collector_mutation_is_planned_guarded_and_routes_through_qt",
+          "tests/test_cli/test_mcp_server.py::test_mcp_controlled_mutation_dry_run_and_apply",
+          "tests/test_cli/test_mcp_server.py::test_mcp_drafts_plan_and_run_plan_defaults_to_dry_run"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-ENUMERATED-AGENT-MUTATION-GATES",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-305",
+      "title": "PostgreSQL authority and strict schema drift guards",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fails_loud_on_existing_column_drift_before_index_repair",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fails_loud_when_async_fencing_constraint_is_missing",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fails_loud_when_retired_lifecycle_tables_exist",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_fresh_database_creates_complete_current_schema",
+          "tests/test_portal/test_database_bootstrap.py::test_bootstrap_rejects_async_index_predicate_semantic_drift",
+          "tests/test_portal/test_strategy_service_import.py::test_database_does_not_require_pg_dsn_until_used"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-306",
+      "title": "FastAPI event-loop execution boundary",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/contract/test_fastapi_execution_boundary.py::test_async_http_routes_are_reserved_for_real_async_work",
+          "tests/contract/test_fastapi_execution_boundary.py::test_known_blocking_calls_inside_mixed_async_services_are_thread_offloaded"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BLOCKING-API-WORK-OFFLOAD",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-307",
+      "title": "Bounded observability storage and overflow visibility",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_observability_exporter.py::test_exporter_high_volume_burst_writes_one_rollup_row",
+          "tests/test_portal/test_observability_exporter.py::test_exporter_persists_overflow_event_when_pending_queue_drops",
+          "tests/test_portal/test_observability_exporter.py::test_exporter_rollup_bounds_label_cardinality",
+          "tests/test_portal/test_observability_repo.py::test_metric_rollup_row_normalizes_bucket_and_bounded_labels"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOUNDED-NONCANONICAL-OBSERVABILITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-308",
+      "title": "Development and server Loki topology configuration",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_observability_config.py::test_dev_config_does_not_enable_direct_loki_handler",
+          "tests/test_observability_config.py::test_promtail_indexes_runtime_not_run_identity",
+          "tests/test_server_deployment_config.py::test_server_alloy_preserves_bounded_loki_routing_labels"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SINGLE-LOKI-INGRESS-PER-TOPOLOGY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-309",
+      "title": "Runner and watchdog diagnostic evidence handling",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_bot_watchdog.py::test_scan_expired_run_leases_persists_runner_diagnostics",
+          "tests/test_portal/test_runner_observability.py::test_clock_gap_diagnostic_detects_wall_or_monotonic_runner_pause",
+          "tests/test_portal/test_runner_observability.py::test_docker_container_event_normalizes_quant_trad_bot_lifecycle"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DIAGNOSTICS-NOT-EXECUTION-TRUTH",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-310",
+      "title": "Telemetry priority flush deduplication and fallback",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_container_runtime_transport.py::test_notify_backend_lifecycle_event_terminal_falls_back_to_direct_transport_when_control_flush_fails",
+          "tests/test_portal/test_container_runtime_transport.py::test_notify_backend_lifecycle_event_terminal_prefers_control_flush",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_close_flushes_control_lane",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_send_and_wait_returns_after_control_delivery",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_suppresses_identical_bootstrap_payloads_in_same_session",
+          "tests/test_portal/test_container_runtime_transport.py::test_telemetry_emitter_suppresses_identical_large_facts_in_same_session"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-BOUNDED-TELEMETRY-CONTROL-DELIVERY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-311",
+      "title": "Server deployment script and image-attestation contract",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_server_deployment_config.py::test_ci_builds_the_rendered_production_image_targets",
+          "tests/test_server_deployment_config.py::test_deploy_helper_never_runs_migrations_and_verifies_every_app_image",
+          "tests/test_server_deployment_config.py::test_server_images_are_pinned_and_application_images_are_attested"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-ATTESTED-SINGLE-NODE-DEPLOYMENT",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-312",
+      "title": "Semantic and operational fingerprint behavior",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_run_research_dataset.py::test_operational_fingerprint_changes_when_runtime_event_order_changes",
+          "tests/test_portal/test_run_research_dataset.py::test_semantic_fingerprint_changes_when_runtime_context_evidence_changes",
+          "tests/test_portal/test_run_research_dataset.py::test_semantic_fingerprint_ignores_run_instance_identifiers"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SEMANTIC-OPERATIONAL-FINGERPRINT-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-313",
+      "title": "Pull-request workflow topology structure",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_server_deployment_config.py::test_ci_builds_the_rendered_production_image_targets"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PR-VERIFICATION-TOPOLOGY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-314",
+      "title": "Isolated disposable database test guard",
+      "lifecycle": "active",
+      "proof_kind": "database_integration",
+      "environment_profile_id": "python-db-isolated",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_canonical_fact_store_migration_db.py::test_canonical_fact_store_migration_is_explicit_strict_and_idempotent"
+        ]
+      },
+      "timeout_seconds": 300,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PR-VERIFICATION-TOPOLOGY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-315",
+      "title": "Representative generic-surface capability traps",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/contract/providers/test_provider_factory_routing.py::test_registry_fails_loud_when_provider_implementation_missing",
+          "tests/contract/test_capability_nomenclature.py::test_active_capability_contracts_do_not_encode_planning_nomenclature",
+          "tests/integration/runtime/test_execution_contexts.py::test_generic_execution_modules_contain_no_named_venue_branches"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-316",
+      "title": "Representative agent workflow and architecture-index checks",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/contract/test_architecture_docs_index.py::test_architecture_docs_have_required_frontmatter_tags",
+          "tests/test_cli/test_mcp_server.py::test_mcp_initialize_and_tools_list_exclude_python_handlers"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    }
+  ],
+  "remediations": [
+    {
+      "id": "QT-REM-300",
+      "title": "Close provider credential encryption proof",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-300.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-300"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-PROVIDER-CREDENTIAL-REFERENCE-CONFINEMENT"],
+      "owner": "provider-security",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["data-provider-owner", "security-owner"],
+      "review_status": "pending",
+      "gap": "The selected proof checks stable references, schema bootstrap, and metadata exposure but does not exercise encrypted round trips, wrong keys, malformed key material, or plaintext absence in persisted rows.",
+      "action": "Define and review a credential-store integration proof that exercises encryption, decryption, key failure, rotation assumptions, and public metadata projection without changing credential semantics.",
+      "acceptance_criteria": [
+        "The reviewed proof inspects persisted material and establishes that plaintext credential values are absent.",
+        "The reviewed proof rejects missing, malformed, and mismatched encryption-key material.",
+        "The reviewed proof round-trips each supported provider credential shape through the frozen storage boundary."
+      ],
+      "proof_plan": [
+        "Add isolated credential-store integration selectors with controlled key material.",
+        "Bind runner evidence to persisted-row inspection and public API projection artifacts.",
+        "Retain QT-PROOF-300 as supporting structural coverage."
+      ],
+      "review_boundary": "Security and data-provider owners review key-handling expectations before any proof is promoted; this draft neither selects a rotation design nor activates the guarantee."
+    },
+    {
+      "id": "QT-REM-301",
+      "title": "Close the Version 1 deployment trust-boundary proof",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-301.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-301"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-V1-LOCAL-TRUST-BOUNDARY"],
+      "owner": "deployment-security",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["deployment-owner", "security-owner"],
+      "review_status": "pending",
+      "gap": "The current proof parses Compose port bindings but does not validate an instantiated host network boundary or continuously guard the explicit capability ceiling.",
+      "action": "Add a reviewed deployment-boundary inventory and isolated topology check covering every published service and the absence of claimed production access-control capabilities.",
+      "acceptance_criteria": [
+        "Every server Compose published port is inventoried and bound to loopback in the reviewed topology.",
+        "The capability statement explicitly excludes production authentication, authorization, rate limiting, and multi-user isolation.",
+        "The proof detects any newly published remotely reachable service."
+      ],
+      "proof_plan": [
+        "Generate a deterministic published-port inventory from the rendered server Compose configuration.",
+        "Run an isolated topology inspection against the rendered configuration.",
+        "Retain QT-PROOF-301 as the static configuration prerequisite."
+      ],
+      "review_boundary": "Deployment and security owners review any expansion beyond local-trusted access; the remediation cannot infer authentication or external-trading authority."
+    },
+    {
+      "id": "QT-REM-302",
+      "title": "Close Bot Run lease database coverage",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-302.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-302"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-BOT-RUN-LEASE-OWNERSHIP"],
+      "owner": "execution-persistence",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["execution-runtime-owner", "persistence-owner", "security-owner"],
+      "review_status": "pending",
+      "gap": "The selected tests establish service wiring and representative contention behavior but do not directly cover the persisted token hash, renewal race, mismatch rejection, expiry, reclaim, and post-loss mutation matrix in PostgreSQL.",
+      "action": "Define an isolated PostgreSQL lease-state proof that covers the full ownership transition matrix while preserving caller ownership of raw tokens.",
+      "acceptance_criteria": [
+        "Concurrent acquisition and renewal races preserve one effective owner.",
+        "Mismatch, expiry, reclaim, and post-loss mutation attempts are rejected.",
+        "Persisted lease rows contain only the expected token digest and never the raw token."
+      ],
+      "proof_plan": [
+        "Add isolated database selectors for acquisition, renewal, expiry, reclaim, release, and stale-owner mutation.",
+        "Capture persisted-row evidence for token-hash confinement.",
+        "Retain QT-PROOF-302 as supporting service-boundary evidence."
+      ],
+      "review_boundary": "Execution-runtime, persistence, and security owners review transition and token-handling expectations; this draft does not redefine lease semantics."
+    },
+    {
+      "id": "QT-REM-303",
+      "title": "Close asynchronous effect inventory and fencing coverage",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-303.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-303"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-ASYNC-JOB-OWNERSHIP-FENCING"],
+      "owner": "async-jobs",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["persistence-owner", "research-orchestration-owner"],
+      "review_status": "pending",
+      "gap": "The database tests cover key reclaim and transaction cases but no closed inventory proves that every job-owned effect uses the token-and-generation fence.",
+      "action": "Generate and review the asynchronous effect write-path inventory, then bind each included effect to the fenced repository transaction or an explicit exception decision.",
+      "acceptance_criteria": [
+        "Every asynchronous job completion and domain-effect write path is present in the reviewed inventory.",
+        "Each included path validates both ownership token and generation in the committing transaction.",
+        "New job-owned effect paths fail the inventory check until classified."
+      ],
+      "proof_plan": [
+        "Add a deterministic static inventory of async-job effect commit paths.",
+        "Extend isolated database race tests to every classified effect family.",
+        "Retain QT-PROOF-303 as the initial transactional proof."
+      ],
+      "review_boundary": "Persistence and research-orchestration owners review the effect denominator and any exceptions; no new job semantics are adopted by this draft."
+    },
+    {
+      "id": "QT-REM-304",
+      "title": "Resolve agent mutation scope authority",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-304.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-304"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-ENUMERATED-AGENT-MUTATION-GATES"],
+      "owner": "application-interfaces",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["application-interface-owner", "normative-contract-reviewer", "research-governance-owner"],
+      "review_status": "pending",
+      "gap": "ADR 0048 simultaneously describes a broad enumerated mutation boundary and limits the extra evidence gate to research promotion, leaving DOC-MUTATION-SCOPE-001 unresolved while named implementation guards remain nonuniform.",
+      "action": "Present the conflicting clauses and a complete mutation-surface inventory for owner review, then record a reviewed authority decision before changing normative text or product behavior.",
+      "acceptance_criteria": [
+        "A reviewed decision distinguishes baseline mutation controls from research-promotion evidence requirements.",
+        "Every agent-facing mutation surface is inventoried with its dry-plan, apply, confirmation, audit, and evidence behavior.",
+        "The accepted wording and implementation classification no longer rely on contradictory clauses."
+      ],
+      "proof_plan": [
+        "Generate a closed CLI and MCP mutation-surface inventory.",
+        "Retain QT-PROOF-304 as representative named-path evidence.",
+        "Specify additional selectors only after the authority decision fixes the intended denominator."
+      ],
+      "review_boundary": "Application-interface, research-governance, and normative-contract reviewers decide scope; this remediation does not choose semantics or authorize product repair."
+    },
+    {
+      "id": "QT-REM-305",
+      "title": "Close PostgreSQL authority and drift integration proof",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-305.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-305"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-SOLE-POSTGRES-PERSISTENCE-AUTHORITY"],
+      "owner": "persistence",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["database-operations-owner", "persistence-owner"],
+      "review_status": "pending",
+      "gap": "The current proof strongly checks bootstrap structure and drift rejection through mocks but does not exercise the complete migration and schema-drift matrix against an isolated PostgreSQL instance.",
+      "action": "Add a reviewed isolated-database proof for PG_DSN authority, clean bootstrap, supported migration, and representative incompatible schema drift.",
+      "acceptance_criteria": [
+        "Clean bootstrap and supported migration complete only through PG_DSN.",
+        "Representative table, column, constraint, and index drift fail before runtime repair.",
+        "Unset or invalid PG_DSN fails only when database use begins and no alternate PostgreSQL authority is selected."
+      ],
+      "proof_plan": [
+        "Add isolated PostgreSQL selectors for clean bootstrap and drift mutations.",
+        "Inventory PostgreSQL engine construction sites for alternate authorities.",
+        "Retain QT-PROOF-305 as structural prerequisite coverage."
+      ],
+      "review_boundary": "Persistence and database-operations owners review supported migration and drift cases; AGENTS.md remains nonactivating governance evidence."
+    },
+    {
+      "id": "QT-REM-306",
+      "title": "Close asynchronous API blocking-call coverage",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-306.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-306"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-BLOCKING-API-WORK-OFFLOAD"],
+      "owner": "api-runtime",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["api-owner", "runtime-services-owner"],
+      "review_status": "pending",
+      "gap": "The static contract test enumerates known mixed asynchronous files and the named projector path, leaving newly added blocking calls outside a closed discovery rule.",
+      "action": "Define and review a repository-wide asynchronous API surface inventory with typed blocking-call detection and an explicit exception process.",
+      "acceptance_criteria": [
+        "Every asynchronous route and mixed asynchronous service is included in a generated inventory.",
+        "Known blocking calls are offloaded or carry a reviewed exception.",
+        "A new unclassified blocking call fails the static validation."
+      ],
+      "proof_plan": [
+        "Extend the contract checker from the hand-maintained mixed-file list to generated discovery.",
+        "Retain QT-PROOF-306 as representative validation.",
+        "Add regression fixtures for newly introduced unoffloaded blocking calls."
+      ],
+      "review_boundary": "API and runtime-services owners review detection scope and exceptions; this draft does not prescribe a specific offload mechanism."
+    },
+    {
+      "id": "QT-REM-307",
+      "title": "Close observability sink and bound inventory",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-307.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-307"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-BOUNDED-NONCANONICAL-OBSERVABILITY"],
+      "owner": "observability",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["observability-owner", "persistence-owner"],
+      "review_status": "pending",
+      "gap": "Named repository and exporter tests cover representative bounds, but no closed sink inventory establishes boundedness and visible loss for every noncanonical observability path.",
+      "action": "Inventory observability sinks and their cardinality, queue, retention, overflow, and dropped-evidence behavior, then add a generated completeness guard.",
+      "acceptance_criteria": [
+        "Each observability sink has an explicit bound or a reviewed exclusion.",
+        "Each lossy or overflow path emits inspectable diagnostic evidence.",
+        "New sinks fail the inventory check until bounds and loss visibility are classified."
+      ],
+      "proof_plan": [
+        "Generate the sink and bound inventory from source registrations and schema definitions.",
+        "Extend representative overflow and cardinality tests per sink family.",
+        "Retain QT-PROOF-307 as initial repository and exporter evidence."
+      ],
+      "review_boundary": "Observability and persistence owners review sink boundaries; the remediation cannot promote diagnostic evidence to canonical execution truth."
+    },
+    {
+      "id": "QT-REM-308",
+      "title": "Resolve Loki ingress authority conflict",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-308.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-308"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-SINGLE-LOKI-INGRESS-PER-TOPOLOGY"],
+      "owner": "observability",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["deployment-owner", "observability-owner"],
+      "review_status": "pending",
+      "gap": "ADR 0033's amendment describes Alloy on the server while its retained body prescribes Promtail as the runtime ingress, leaving DOC-LOG-INGRESS-001 unresolved despite aligned frozen Compose files.",
+      "action": "Present the conflicting ADR clauses and rendered development and server topology inventories for joint review, then record the selected authority before any normative edit.",
+      "acceptance_criteria": [
+        "A reviewed decision identifies the one permitted shipper for each supported topology.",
+        "Application services and direct Loki handlers are inventoried and excluded from duplicate ingress.",
+        "The accepted authority text no longer contradicts itself."
+      ],
+      "proof_plan": [
+        "Generate rendered development and server logging-topology inventories.",
+        "Retain QT-PROOF-308 as representative configuration evidence.",
+        "Add a duplicate-ingress failure fixture after the authority decision."
+      ],
+      "review_boundary": "Deployment and observability owners decide topology authority; this draft does not select Promtail or Alloy beyond reporting the frozen implementation."
+    },
+    {
+      "id": "QT-REM-309",
+      "title": "Close runtime diagnostic persistence and authority coverage",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-309.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-309"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-DIAGNOSTICS-NOT-EXECUTION-TRUTH"],
+      "owner": "runtime-observability",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["execution-runtime-owner", "observability-owner"],
+      "review_status": "pending",
+      "gap": "The selected tests cover diagnostic normalization and a mocked persistence handoff but do not prove durable persistence, loss visibility, and non-authority across the complete diagnostic family.",
+      "action": "Define the runtime diagnostic inventory and add isolated persistence and authority-boundary tests for each classified diagnostic family.",
+      "acceptance_criteria": [
+        "Each named diagnostic family has a durable or explicitly reviewed lossy evidence path.",
+        "Persistence failure and evidence loss are observable.",
+        "No diagnostic event directly mutates execution truth in the reviewed inventory."
+      ],
+      "proof_plan": [
+        "Add isolated persistence selectors for clock-gap, Docker-lifecycle, and watchdog degradation evidence.",
+        "Generate a diagnostic-to-execution-mutation dependency check.",
+        "Retain QT-PROOF-309 as normalization and handoff evidence."
+      ],
+      "review_boundary": "Execution-runtime and observability owners review the diagnostic denominator and persistence expectations; this draft does not redefine execution truth."
+    },
+    {
+      "id": "QT-REM-310",
+      "title": "Close telemetry transport failure-matrix coverage",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-310.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-310"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-BOUNDED-TELEMETRY-CONTROL-DELIVERY"],
+      "owner": "runtime-telemetry",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["botlens-owner", "execution-runtime-owner"],
+      "review_status": "pending",
+      "gap": "Representative tests cover control delivery, terminal flush, duplicate suppression, and direct fallback, but no reviewed matrix closes queue saturation, shutdown races, retry, and repeated fallback outcomes.",
+      "action": "Define the bounded telemetry failure matrix and add deterministic tests for each reviewed queue, flush, deduplication, and fallback state.",
+      "acceptance_criteria": [
+        "Control-lane capacity and priority behavior are tested under saturation.",
+        "Duplicate suppression is scoped to the reviewed session and payload identity rules.",
+        "Terminal flush and fallback failures remain visible across shutdown and retry races."
+      ],
+      "proof_plan": [
+        "Add deterministic scheduler fixtures for saturation and shutdown races.",
+        "Bind fallback evidence to the caller path at portal/backend/service/bots/container_runtime.py.",
+        "Retain QT-PROOF-310 as the representative behavior set."
+      ],
+      "review_boundary": "BotLens and execution-runtime owners review transport and deduplication expectations; this draft does not create delivery guarantees beyond ADR 0026."
+    },
+    {
+      "id": "QT-REM-311",
+      "title": "Close deployment workflow execution evidence",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-311.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-311"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-ATTESTED-SINGLE-NODE-DEPLOYMENT"],
+      "owner": "deployment",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["deployment-owner", "operations-owner", "security-owner"],
+      "review_status": "pending",
+      "gap": "The selected static tests inspect the script and workflow but do not execute a clean reviewed deployment, image-attestation mismatch, migration prohibition, or rollback-state recovery scenario.",
+      "action": "Create an isolated deployment rehearsal with immutable source, rendered-image, command, migration, and rollback evidence, subject to operations and security review.",
+      "acceptance_criteria": [
+        "A dirty or mismatched source revision is rejected before rollout.",
+        "Every rendered application image is verified and a mismatch blocks rollout.",
+        "No implicit migration occurs and rollback state is recorded and usable in the isolated rehearsal."
+      ],
+      "proof_plan": [
+        "Build an isolated Compose deployment fixture with fake registry and rollback targets.",
+        "Capture typed source, image, command, and rollback evidence artifacts.",
+        "Retain QT-PROOF-311 as the static prerequisite."
+      ],
+      "review_boundary": "Deployment, operations, and security owners review the rehearsal and evidence; no live server action or external execution authority is authorized."
+    },
+    {
+      "id": "QT-REM-312",
+      "title": "Close fingerprint input-surface coverage",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-312.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-312"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-SEMANTIC-OPERATIONAL-FINGERPRINT-SEPARATION"],
+      "owner": "reporting",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["reporting-owner", "runtime-owner"],
+      "review_status": "pending",
+      "gap": "The selected tests cover key ordering, context, and run-identifier cases but no closed field inventory proves that all semantic and operational inputs are assigned to the correct fingerprint.",
+      "action": "Generate and review the fingerprint input projection inventory, then mutation-test every classified semantic and operational field family.",
+      "acceptance_criteria": [
+        "Every input field to each fingerprint is present in the reviewed projection inventory.",
+        "Operational-only field mutations preserve semantic identity while changing operational identity where specified.",
+        "Semantically material field mutations change semantic identity."
+      ],
+      "proof_plan": [
+        "Generate the field-to-fingerprint projection inventory from the implementation.",
+        "Add table-driven field mutation tests for both projections.",
+        "Retain QT-PROOF-312 as representative behavior coverage."
+      ],
+      "review_boundary": "Reporting and runtime owners review semantic materiality and operational classification; this draft does not resolve QT-CONFLICT-024 terminology."
+    },
+    {
+      "id": "QT-REM-313",
+      "title": "Reconcile and prove pull-request verification topology",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-313.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-313"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-PR-VERIFICATION-TOPOLOGY"],
+      "owner": "testing",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["ci-owner", "database-test-owner", "testing-owner"],
+      "review_status": "pending",
+      "gap": "The testing strategy has stale topology language, the frozen workflow has four jobs rather than five, and the existing selectors do not prove the complete job-to-suite-to-database-isolation mapping.",
+      "action": "Produce the exact workflow topology and selector map for owner review, distinguishing jobs from steps, then add a structural contract test and reconcile documentation after approval.",
+      "acceptance_criteria": [
+        "Each hosted job and step maps to its exact shell suite and pytest profile.",
+        "Every database-marked selector requires the isolated disposable database guard.",
+        "The reviewed documentation states four jobs and identifies clean bootstrap and database-marked verification as distinct steps in one job."
+      ],
+      "proof_plan": [
+        "Add a deterministic workflow-to-suite topology parser and contract test.",
+        "Retain QT-PROOF-313 for static workflow evidence and QT-PROOF-314 for isolated database behavior.",
+        "Verify the isolated database selector against a disposable PostgreSQL service."
+      ],
+      "review_boundary": "CI, testing, and database-test owners review topology wording and required lanes; this draft does not edit the testing strategy or workflow."
+    },
+    {
+      "id": "QT-REM-314",
+      "title": "Close generic-surface absence coverage",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-314.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-314"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-CONTRACT-DRIVEN-GENERIC-SURFACES"],
+      "owner": "platform-engineering",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["platform-contract-owner", "provider-owner", "runtime-owner"],
+      "review_status": "pending",
+      "gap": "Representative provider and execution tests align with the engineering contract, but ARCH-COVERAGE-001 and REGISTRY-DYNAMIC-001 leave the generic-surface denominator and dynamically registered cases incomplete.",
+      "action": "Define and review the complete generic-surface inventory, allowed registration mechanisms, forbidden named-instance branches, and missing-capability failure behavior.",
+      "acceptance_criteria": [
+        "Every classified generic surface is discovered by a deterministic inventory.",
+        "Named-instance branches and guessed fallbacks fail the contract check unless explicitly reviewed outside the generic layer.",
+        "Missing capabilities fail through the documented contract boundary."
+      ],
+      "proof_plan": [
+        "Generate registry and generic-module inventories from supported registration points.",
+        "Extend static branch and fallback detection across the reviewed surface.",
+        "Retain QT-PROOF-315 as representative provider and runtime evidence."
+      ],
+      "review_boundary": "Platform-contract, provider, and runtime owners review the denominator and registration model; this draft does not ban product-specific behavior outside generic surfaces."
+    },
+    {
+      "id": "QT-REM-315",
+      "title": "Close distributed agent workflow governance proof",
+      "path": "docs/assurance/guarantees/remediations/QT-REM-315.md",
+      "locator": {"kind": "heading", "value": "Remediation QT-REM-315"},
+      "lifecycle": "proposed",
+      "guarantee_ids": ["QT-GUAR-AGENT-WORKFLOW-BOUNDARIES"],
+      "owner": "repository-governance",
+      "required_review": "owner_and_gate_review",
+      "required_reviewers": ["agent-governance-owner", "application-interface-owner", "architecture-documentation-owner"],
+      "review_status": "pending",
+      "gap": "AGENTS.md distributes broad workflow expectations across frontend, application, validation, documentation, and database boundaries, while named tests cover only a small subset and AGENTS precedence remains nonactivating.",
+      "action": "Inventory each governance rule, its authoritative owner, enforcement point, and proof selector, then obtain explicit authority review before adopting or enforcing missing boundaries.",
+      "acceptance_criteria": [
+        "Each agent workflow rule maps to one owning boundary and a reviewed authority source.",
+        "Each enforceable rule has a deterministic check or a documented manual review boundary.",
+        "No AGENTS.md instruction is treated as automatic guarantee activation authority."
+      ],
+      "proof_plan": [
+        "Generate the governance-rule-to-check traceability matrix.",
+        "Add focused checks for unguarded application, database, and parallel-truth paths after owner review.",
+        "Retain QT-PROOF-316 as representative MCP and architecture-index evidence."
+      ],
+      "review_boundary": "Agent-governance, application-interface, and architecture-documentation owners review authority and enforcement; this draft neither changes AGENTS.md nor repairs product semantics."
+    }
+  ],
+  "new_terms": [],
+  "new_conflicts": [],
+  "decision_reviews": [
+    {
+      "id": "QT-REVIEW-C-001",
+      "candidate_ids": ["QT-GC-062"],
+      "review_type": "normative_scope_conflict",
+      "status": "required",
+      "required_reviewers": ["application-interface-owner", "normative-contract-reviewer", "research-governance-owner"],
+      "decision_needed": "Resolve whether ADR 0048 imposes one universal agent-mutation gate, separates baseline mutation controls from research-promotion evidence, or needs a different enumerated scope.",
+      "must_not_assume": "Named CLI and MCP guards do not resolve DOC-MUTATION-SCOPE-001 or authorize a product-semantics repair."
+    },
+    {
+      "id": "QT-REVIEW-C-002",
+      "candidate_ids": ["QT-GC-066"],
+      "review_type": "amended_decision_conflict",
+      "status": "required",
+      "required_reviewers": ["deployment-owner", "observability-owner"],
+      "decision_needed": "Reconcile the Alloy server amendment with the retained Promtail-only ADR body and identify the authoritative shipper for each supported topology.",
+      "must_not_assume": "Frozen Compose alignment does not resolve DOC-LOG-INGRESS-001 or make either conflicting clause normative by registry classification."
+    },
+    {
+      "id": "QT-REVIEW-C-003",
+      "candidate_ids": ["QT-GC-072"],
+      "review_type": "workflow_topology_reconciliation",
+      "status": "required",
+      "required_reviewers": ["ci-owner", "database-test-owner", "testing-owner"],
+      "decision_needed": "Approve exact job-versus-step terminology and reconcile the testing strategy to the frozen four-job workflow topology.",
+      "must_not_assume": "Clean bootstrap and database-marked verification are distinct steps within one clean-database-bootstrap job, not two independent jobs."
+    },
+    {
+      "id": "QT-REVIEW-C-004",
+      "candidate_ids": ["QT-GC-075"],
+      "review_type": "repository_governance_authority",
+      "status": "required",
+      "required_reviewers": ["agent-governance-owner", "application-interface-owner", "architecture-documentation-owner"],
+      "decision_needed": "Identify which AGENTS.md workflow statements are authoritative, explanatory, or locally scoped and approve a closed enforcement denominator.",
+      "must_not_assume": "AGENTS.md precedence is not automatic guarantee activation authority under the Phase 2A hierarchy."
+    }
+  ],
+  "notes": [
+    {
+      "id": "QT-NOTE-C-001",
+      "candidate_ids": ["QT-GC-058", "QT-GC-059", "QT-GC-060", "QT-GC-061", "QT-GC-062", "QT-GC-063", "QT-GC-064", "QT-GC-065", "QT-GC-066", "QT-GC-067", "QT-GC-068", "QT-GC-069", "QT-GC-071", "QT-GC-072", "QT-GC-074", "QT-GC-075"],
+      "category": "classification_boundary",
+      "text": "All sixteen records are unactivated drafts; accepted ADRs, AGENTS.md, implementation, tests, and this registry batch remain nonactivating under the frozen Phase 2A authority hierarchy."
+    },
+    {
+      "id": "QT-NOTE-C-002",
+      "candidate_ids": ["QT-GC-058", "QT-GC-059", "QT-GC-060", "QT-GC-061", "QT-GC-063", "QT-GC-064", "QT-GC-065", "QT-GC-067", "QT-GC-068", "QT-GC-069", "QT-GC-071", "QT-GC-072", "QT-GC-074", "QT-GC-075"],
+      "category": "classification_judgment",
+      "text": "Fourteen records are conservatively partially_enforced because each has named intent and implementation evidence but incomplete proof, incomplete closed-surface coverage, or stale documentation."
+    },
+    {
+      "id": "QT-NOTE-C-003",
+      "candidate_ids": ["QT-GC-062", "QT-GC-066"],
+      "category": "classification_judgment",
+      "text": "GC062 and GC066 are contradicted rather than partially_enforced because their cited accepted ADR text contains unresolved normative-scope or amendment conflicts already recorded in Phase 1."
+    },
+    {
+      "id": "QT-NOTE-C-004",
+      "candidate_ids": ["QT-GC-072"],
+      "category": "precision",
+      "text": "The frozen workflow contains four jobs; non-database, frontend, and deployment each have a job, while clean bootstrap and database-marked verification are separate steps in the clean-database-bootstrap job."
+    },
+    {
+      "id": "QT-NOTE-C-005",
+      "candidate_ids": ["QT-GC-058", "QT-GC-059", "QT-GC-060", "QT-GC-061", "QT-GC-062", "QT-GC-063", "QT-GC-064", "QT-GC-065", "QT-GC-066", "QT-GC-067", "QT-GC-068", "QT-GC-069", "QT-GC-071", "QT-GC-072", "QT-GC-074", "QT-GC-075"],
+      "category": "proof_boundary",
+      "text": "QT-PROOF-300 through QT-PROOF-316 are proposed proof definitions only; no selector was executed and no result is asserted by this batch."
+    },
+    {
+      "id": "QT-NOTE-C-006",
+      "candidate_ids": ["QT-GC-058", "QT-GC-059", "QT-GC-060", "QT-GC-061", "QT-GC-062", "QT-GC-063", "QT-GC-064", "QT-GC-065", "QT-GC-066", "QT-GC-067", "QT-GC-068", "QT-GC-069", "QT-GC-071", "QT-GC-072", "QT-GC-074", "QT-GC-075"],
+      "category": "terminology_boundary",
+      "text": "No newly discovered term or conflict is introduced; all referenced QT-TERM and finding IDs already exist in the Phase 1 inventory or proposed glossary, remain unadopted where proposed or deferred, and are not resolved here."
+    }
+  ]
+}
