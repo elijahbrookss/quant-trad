@@ -11,7 +11,7 @@ resolve a conflict, delete a document, or change normative meaning.
 
 - audited ref: `origin/develop`;
 - audited commit: `d46e40bf55caeea12f4ccbde640c71f271eaf9c4`;
-- campaign branch: `codex/docs-guarantee-reconciliation`;
+- campaign branch: `feat/docs-guarantee-reconciliation`;
 - product code/doc behavior edits during Phase 1: none;
 - Phase 1 writes: this audit directory and one deterministic inventory script;
 - `develop`: untouched.

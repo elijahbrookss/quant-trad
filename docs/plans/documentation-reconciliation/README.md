@@ -9,7 +9,7 @@ replace `AGENTS.md`, the platform contracts, accepted ADRs, or component owners.
 
 - Baseline branch: `origin/develop`
 - Baseline commit: `d46e40bf55caeea12f4ccbde640c71f271eaf9c4`
-- Campaign branch: `codex/docs-guarantee-reconciliation`
+- Campaign branch: `feat/docs-guarantee-reconciliation`
 - Current phase: Phase 1 discovery
 - Current gate: Gate 1 pending
 
