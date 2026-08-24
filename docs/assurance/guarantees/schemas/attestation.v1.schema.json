@@ -1,0 +1,585 @@
+{
+  "$id": "https://quant-trad.local/schemas/guarantee-attestation.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "attestation_id": {
+      "pattern": "^QT-ATT-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8,40}-[a-z0-9-]+$",
+      "type": "string"
+    },
+    "environments": {
+      "items": {
+        "$ref": "#/$defs/environment"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "finished_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "guarantee_results": {
+      "items": {
+        "$ref": "#/$defs/guaranteeResult"
+      },
+      "type": "array"
+    },
+    "inputs": {
+      "$ref": "#/$defs/inputs"
+    },
+    "proof_results": {
+      "items": {
+        "$ref": "#/$defs/proofResult"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "qt.guarantee_attestation.v1"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "schema_version",
+    "attestation_id",
+    "source",
+    "inputs",
+    "environments",
+    "started_at",
+    "finished_at",
+    "proof_results",
+    "guarantee_results"
+  ],
+  "title": "QT Guarantee Attestation v1",
+  "type": "object",
+  "$defs": {
+    "environment": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "lockfile_hashes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/hash"
+          },
+          "type": "object"
+        },
+        "os": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "profile_id": {
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "type": "string"
+        },
+        "services": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "tool_versions": {
+          "additionalProperties": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "profile_id",
+        "os",
+        "architecture",
+        "tool_versions",
+        "lockfile_hashes",
+        "services"
+      ],
+      "type": "object"
+    },
+    "evidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_kind": {
+          "enum": ["stdout", "stderr", "result_summary", "manual_evidence"]
+        },
+        "path": {
+          "pattern": "^docs/assurance/guarantees/evidence/QT-ATT-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8,40}-[a-z0-9-]+/QT-PROOF-[0-9]{3}/[^/]+$",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "artifact_kind",
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "guaranteeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "guarantee_id": {
+          "pattern": "^QT-GUAR-[A-Z0-9]+(?:-[A-Z0-9]+)*$",
+          "type": "string"
+        },
+        "proof_ids": {
+          "items": {
+            "pattern": "^QT-PROOF-[0-9]{3}$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "status": {
+          "$ref": "#/$defs/resultStatus"
+        }
+      },
+      "required": [
+        "guarantee_id",
+        "status",
+        "proof_ids"
+      ],
+      "type": "object"
+    },
+    "hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "glossaryInput": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "enum": [
+            "docs/plans/documentation-reconciliation/proposed-glossary.md",
+            "docs/contracts/platform/04_glossary.md"
+          ]
+        },
+        "sha256": {"$ref": "#/$defs/hash"},
+        "source_kind": {"enum": ["proposal", "adopted_normative"]}
+      },
+      "required": ["source_kind", "path", "sha256"],
+      "type": "object"
+    },
+    "inputs": {
+      "additionalProperties": false,
+      "properties": {
+        "glossary_inputs": {
+          "items": {"$ref": "#/$defs/glossaryInput"},
+          "type": "array",
+          "uniqueItems": true
+        },
+        "guarantee_material_sha256": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^QT-GUAR-[A-Z0-9]+(?:-[A-Z0-9]+)*$": {"$ref": "#/$defs/hash"}
+          },
+          "type": "object"
+        },
+        "proof_catalog_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "required_proof_material_sha256": {
+          "additionalProperties": false,
+          "patternProperties": {
+            "^QT-PROOF-[0-9]{3}$": {"$ref": "#/$defs/hash"}
+          },
+          "type": "object"
+        },
+        "registry_semantics_sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "registry_semantics_sha256",
+        "proof_catalog_sha256",
+        "guarantee_material_sha256",
+        "required_proof_material_sha256",
+        "glossary_inputs"
+      ],
+      "type": "object"
+    },
+    "proofResult": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "started_at",
+                "finished_at"
+              ]
+            },
+            {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "started_at"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "finished_at"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "PASS",
+                  "FAIL"
+                ]
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "evidence_refs": {"minItems": 1}
+                },
+                "required": [
+                  "executed_argv"
+                ]
+              },
+              {
+                "properties": {
+                  "evidence_refs": {
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "operator_identity",
+                  "reviewer_identity"
+                ]
+              }
+            ],
+            "required": [
+              "started_at",
+              "finished_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "PARTIAL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_code": {"const": 0}
+            },
+            "required": [
+              "executed_argv"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "NOT_RUN",
+                  "MANUAL",
+                  "UNAVAILABLE"
+                ]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "executed_argv"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "PASS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "FAIL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "exit_code": {
+                "minimum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "NOT_RUN",
+                  "MANUAL",
+                  "PARTIAL",
+                  "UNAVAILABLE"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason_code"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "NOT_RUN",
+                  "UNAVAILABLE"
+                ]
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["started_at"] },
+                { "required": ["finished_at"] },
+                { "required": ["exit_code"] },
+                { "required": ["collected_count"] },
+                { "required": ["passed_count"] },
+                { "required": ["failed_count"] },
+                { "required": ["skipped_count"] },
+                { "required": ["xfailed_count"] },
+                { "required": ["xpassed_count"] },
+                { "required": ["stdout_sha256"] },
+                { "required": ["stderr_sha256"] },
+                { "required": ["result_summary_sha256"] },
+                { "required": ["executed_argv"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "MANUAL"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "evidence_refs": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "started_at",
+              "finished_at",
+              "operator_identity"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "PARTIAL"
+              }
+            }
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "evidence_refs": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "required": [
+                  "stdout_sha256"
+                ]
+              },
+              {
+                "required": [
+                  "stderr_sha256"
+                ]
+              }
+            ],
+            "required": [
+              "started_at",
+              "finished_at"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "collected_count": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "executed_argv": {
+          "items": {
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "failed_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "environment_profile_id": {
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "type": "string"
+        },
+        "exit_code": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "operator_identity": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "passed_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proof_id": {
+          "pattern": "^QT-PROOF-[0-9]{3}$",
+          "type": "string"
+        },
+        "reason_code": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reviewer_identity": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "skipped_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/resultStatus",
+          "description": "Cross-file executable validation permits automated PASS only for a pytest proof-catalog runner in v1; manual PASS follows the reviewed-manual branch."
+        },
+        "stderr_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "result_summary_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "stdout_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "xfailed_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "xpassed_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "proof_id",
+        "environment_profile_id",
+        "status",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "resultStatus": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_RUN",
+        "MANUAL",
+        "PARTIAL",
+        "UNAVAILABLE"
+      ]
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "assurance_material_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "clean": {
+          "type": "boolean"
+        },
+        "git_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "git_commit",
+        "clean",
+        "assurance_material_sha256"
+      ],
+      "type": "object"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "pattern": "Z$",
+      "type": "string"
+    }
+  }
+}

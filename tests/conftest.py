@@ -125,7 +125,10 @@ def _ci_profile_markers_for_path(path: str) -> set[str]:
     if normalized.startswith("tests/contract/providers/"):
         profiles.add("provider")
     elif normalized.startswith("tests/contract/"):
-        profiles.add("docs" if "architecture_docs" in name else "core")
+        docs_contract = (
+            "architecture_docs" in name or "guarantee_registry" in name
+        )
+        profiles.add("docs" if docs_contract else "core")
 
     if normalized.startswith("tests/test_cli/"):
         profiles.add("cli")

@@ -58,7 +58,7 @@ run_suite() {
 profile_command() {
   local profile_args
   printf -v profile_args '%q ' "$@"
-  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py; fi; QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
+  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py && python scripts/docs/guarantees.py check; fi; QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
 }
 
 run_profiles() {

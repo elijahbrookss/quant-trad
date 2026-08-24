@@ -1,0 +1,401 @@
+{
+  "schema_version": "qt.guarantee_proof_catalog.v1",
+  "environment_profiles": [
+    {
+      "id": "manual-recovery",
+      "python": ">=3.12,<3.13",
+      "lockfiles": [
+        "requirements.lock"
+      ],
+      "required_services": [
+        "isolated-backup-source",
+        "isolated-restore-target"
+      ]
+    },
+    {
+      "id": "python-db-isolated",
+      "python": ">=3.12,<3.13",
+      "lockfiles": [
+        "requirements.lock"
+      ],
+      "required_services": [
+        "isolated-postgresql-timescaledb"
+      ]
+    },
+    {
+      "id": "python-nondb",
+      "python": ">=3.12,<3.13",
+      "lockfiles": [
+        "requirements.lock"
+      ],
+      "required_services": []
+    }
+  ],
+  "proofs": [
+    {
+      "id": "QT-PROOF-001",
+      "title": "Representative known-at suffix invariance",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_reference_execution_scenarios.py::test_known_at_pipeline_backtest_and_paper_semantics_agree",
+          "tests/integration/runtime/test_reference_execution_scenarios.py::test_known_at_pipeline_is_invariant_to_future_candle_suffix",
+          "tests/test_portal/test_report_data.py::test_report_decision_ledger_preserves_deterministic_known_at",
+          "tests/test_portal/test_report_data.py::test_report_decision_projection_is_invariant_to_later_event_suffix"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-KNOWN-AT-PREFIX-INVARIANCE",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-002",
+      "title": "Canonical Fact revision immutability",
+      "lifecycle": "active",
+      "proof_kind": "database_integration",
+      "environment_profile_id": "python-db-isolated",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_canonical_fact_store_migration_db.py::test_canonical_fact_store_migration_is_explicit_strict_and_idempotent",
+          "tests/test_market_data/test_repository_db.py::test_frozen_dataset_cannot_observe_post_freeze_correction"
+        ]
+      },
+      "timeout_seconds": 300,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CANONICAL-FACT-APPEND-ONLY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-003",
+      "title": "Canonical read provider trap",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_feed_service.py::test_canonical_read_never_calls_provider_and_returns_source_facts_only"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-PROVIDER-FREE-CANONICAL-READS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-004",
+      "title": "Structured canonical read provider trap",
+      "lifecycle": "active",
+      "proof_kind": "database_integration",
+      "environment_profile_id": "python-db-isolated",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_structured_fact_research_path_db.py::test_structured_fact_freezes_replays_and_binds_check_evidence"
+        ]
+      },
+      "timeout_seconds": 300,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        },
+        {
+          "guarantee_id": "QT-GUAR-FROZEN-DATASET-REPLAY",
+          "strength": "supporting",
+          "required_for_full_attestation": false
+        },
+        {
+          "guarantee_id": "QT-GUAR-PROVIDER-FREE-CANONICAL-READS",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-005",
+      "title": "Frozen Dataset correction and replay isolation",
+      "lifecycle": "active",
+      "proof_kind": "database_integration",
+      "environment_profile_id": "python-db-isolated",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_repository_db.py::test_content_identical_freeze_reuses_exact_persisted_manifest",
+          "tests/test_market_data/test_repository_db.py::test_freeze_persists_source_bound_quality_evidence_array",
+          "tests/test_market_data/test_repository_db.py::test_frozen_dataset_cannot_observe_post_freeze_correction",
+          "tests/test_market_data/test_repository_db.py::test_frozen_source_binding_filters_before_latest_revision_selection"
+        ]
+      },
+      "timeout_seconds": 300,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-FROZEN-DATASET-REPLAY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-006",
+      "title": "Check preview persistence and evidence boundaries",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_research_evidence_service.py::test_evidence_execution_rejects_missing_dataset",
+          "tests/test_portal/test_research_evidence_service.py::test_evidence_replay_rejects_dirty_source_tree",
+          "tests/test_portal/test_research_evidence_service.py::test_identical_evidence_replay_preserves_result_and_evidence_hashes",
+          "tests/test_portal/test_research_evidence_service.py::test_preview_only_legacy_family_cannot_persist_new_v2_evidence",
+          "tests/test_portal/test_research_evidence_service.py::test_unqualified_run_rejects_and_preview_cannot_persist_or_create_observation"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+          "strength": "supporting",
+          "required_for_full_attestation": false
+        },
+        {
+          "guarantee_id": "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION",
+          "strength": "complete",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-007",
+      "title": "Frozen binding provider and hash rejection",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_frozen_binding.py::test_frozen_binding_hash_covers_quality_and_source_binding",
+          "tests/test_market_data/test_frozen_binding.py::test_frozen_binding_is_strategy_independent_and_provider_free",
+          "tests/test_market_data/test_frozen_binding.py::test_frozen_binding_rejects_provider_transport_and_hash_substitution",
+          "tests/test_market_data/test_frozen_binding.py::test_frozen_binding_requires_exact_hashed_subject_coverage"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION",
+          "strength": "complete",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-008",
+      "title": "Observation admission conflict seam",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_research_evidence_service.py::test_legacy_check_is_readable_but_not_replayable_or_observation_eligible"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-009",
+      "title": "Reporting projection from durable truth",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_run_research_dataset.py::test_dataset_builds_from_db_truth_without_artifact_directory",
+          "tests/test_portal/test_run_research_dataset.py::test_dataset_exposes_candidate_lifecycle_from_report_indicator_artifacts",
+          "tests/test_portal/test_run_research_dataset.py::test_dataset_marks_missing_indicator_source_diagnostics_unavailable",
+          "tests/test_reports/test_report_materialization.py::test_terminal_run_builds_report_without_changing_run_lifecycle"
+        ]
+      },
+      "timeout_seconds": 240,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-REPORTS-DURABLE-TRUTH-PROJECTION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-010",
+      "title": "Lifecycle ledger validation and projection",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_portal/test_lifecycle_repo.py::test_canonical_lifecycle_rows_reject_backdated_checkpoint",
+          "tests/test_portal/test_lifecycle_repo.py::test_canonical_lifecycle_rows_reject_post_terminal_checkpoint",
+          "tests/test_portal/test_lifecycle_repo.py::test_get_and_list_lifecycle_use_only_canonical_rows",
+          "tests/test_portal/test_lifecycle_repo.py::test_lifecycle_summary_projection_failure_propagates_from_event_transaction",
+          "tests/test_portal/test_lifecycle_repo.py::test_record_bot_run_lifecycle_checkpoint_persists_canonical_rows_and_updates_run_summary",
+          "tests/test_portal/test_run_storage_json_safety.py::test_upsert_bot_run_rejects_lifecycle_owned_fields"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-RUN-LIFECYCLE-LEDGER-AUTHORITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-011",
+      "title": "Persistence failure and projection degradation",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/integration/runtime/test_bot_runtime_persistence_buffer.py::test_persistence_drain_timeout_is_terminal_and_shutdown_is_idempotent",
+          "tests/integration/runtime/test_bot_runtime_persistence_buffer.py::test_persistence_overflow_fails_without_dropping_accepted_writes",
+          "tests/integration/runtime/test_bot_runtime_persistence_buffer.py::test_persistence_writer_failure_propagates_at_terminal_drain",
+          "tests/integration/runtime/test_bot_runtime_persistence_buffer.py::test_runtime_terminal_trade_drain_failure_is_not_swallowed",
+          "tests/integration/runtime/test_canonical_fact_appender.py::test_canonical_fact_appender_persists_before_non_authoritative_consumers",
+          "tests/integration/runtime/test_canonical_fact_appender.py::test_canonical_fact_buffer_surfaces_writer_failure_on_drain",
+          "tests/integration/runtime/test_canonical_fact_appender.py::test_canonical_fact_projection_dispatcher_overflow_degrades_without_failing_run"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-RUNTIME-PERSISTENCE-FAILURE-BOUNDARY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-012",
+      "title": "Research interface application-contract parity",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_cli/test_mcp_server.py::test_mcp_research_tools_share_api_contract_and_guard_writes",
+          "tests/test_portal/test_research_checks.py::test_research_check_preview_and_sweep_routes_delegate_to_service",
+          "tests/test_portal/test_research_checks.py::test_research_check_route_delegates_to_service"
+        ]
+      },
+      "timeout_seconds": 180,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-SHARED-APPLICATION-CONTRACT",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-013",
+      "title": "Verified archive deletion guards",
+      "lifecycle": "active",
+      "proof_kind": "automated_test",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/test_market_data/test_market_structure_archive.py::test_verified_object_deletion_requires_matching_evidence"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-014",
+      "title": "Proposed isolated restore rehearsal",
+      "lifecycle": "proposed",
+      "proof_kind": "manual_procedure",
+      "environment_profile_id": "manual-recovery",
+      "runner": {
+        "kind": "manual",
+        "procedure_ref": {
+          "path": "docs/plans/documentation-reconciliation/phase-2a-calibration.md",
+          "locator": {
+            "kind": "heading",
+            "value": "`QT-GC-070` — Destructive recovery verification"
+          }
+        }
+      },
+      "timeout_seconds": 3600,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    },
+    {
+      "id": "QT-PROOF-015",
+      "title": "Architecture frontmatter and generated index validation",
+      "lifecycle": "active",
+      "proof_kind": "static_validation",
+      "environment_profile_id": "python-nondb",
+      "runner": {
+        "kind": "pytest",
+        "selectors": [
+          "tests/contract/test_architecture_docs_index.py::test_architecture_docs_have_required_frontmatter_tags",
+          "tests/contract/test_architecture_docs_index.py::test_architecture_index_references_runtime_composition_doc"
+        ]
+      },
+      "timeout_seconds": 120,
+      "coverage": [
+        {
+          "guarantee_id": "QT-GUAR-ARCHITECTURE-DOC-INDEX-INTEGRITY",
+          "strength": "partial",
+          "required_for_full_attestation": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1166 @@
+{
+  "schema_version": "qt.guarantee_registry.v1",
+  "audit_baseline_commit": "d46e40bf55caeea12f4ccbde640c71f271eaf9c4",
+  "scope": {
+    "phase": "phase_2a_calibration",
+    "gate": "gate_2_pending",
+    "source_candidate_count": 75,
+    "included_candidate_ids": [
+      "QT-GC-001",
+      "QT-GC-003",
+      "QT-GC-004",
+      "QT-GC-005",
+      "QT-GC-008",
+      "QT-GC-009",
+      "QT-GC-011",
+      "QT-GC-012",
+      "QT-GC-013",
+      "QT-GC-014",
+      "QT-GC-070",
+      "QT-GC-073"
+    ],
+    "whole_system_classification_complete": false
+  },
+  "guarantees": [
+    {
+      "id": "QT-GUAR-KNOWN-AT-PREFIX-INVARIANCE",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-001",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Known-at prefix invariance",
+      "claim_summary": "Appending facts that become known after a causal prefix does not change outputs already derived for that prefix.",
+      "claim_scope": [
+        "Backtest and paper causal market-data and runtime output paths represented by the named enforcement and proof references.",
+        "Known-at selection and suffix-invariance behavior at the frozen baseline."
+      ],
+      "failure_semantics": [
+        "A future-known fact changes an output for an earlier prefix.",
+        "A runtime path reads data before its recorded availability boundary."
+      ],
+      "wording_constraints": [
+        "The current proof denominator is representative rather than repository-wide.",
+        "The record does not certify every causal source or output path."
+      ],
+      "owners": [
+        "execution-runtime",
+        "market-data"
+      ],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-014"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/00_system_contract.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 9,
+            "end": 13
+          },
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0044-enforce-known-at-prefix-invariance.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 39,
+            "end": 70
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-001",
+          "kind": "runtime_guard",
+          "path": "src/market_data/requirements.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 403,
+            "end": 475
+          },
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-002",
+          "kind": "runtime_guard",
+          "path": "portal/backend/service/market/runtime_market_data.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 213,
+            "end": 362
+          },
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "ARCH-COVERAGE-001",
+        "CI-TRACE-001"
+      ],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-CANONICAL-FACT-APPEND-ONLY",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-003",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Canonical Fact append-only revisions",
+      "claim_summary": "Canonical Fact corrections append linked immutable revisions rather than mutating or deleting existing revisions.",
+      "claim_scope": [
+        "Canonical market-data Fact revision allocation and persistence.",
+        "Database constraints and repository writes at the frozen baseline."
+      ],
+      "failure_semantics": [
+        "A correction overwrites a prior revision or reuses its revision identity.",
+        "An existing canonical revision can be updated or deleted."
+      ],
+      "wording_constraints": [
+        "Direct delete rejection and concurrent allocation still need explicit attested proof.",
+        "The claim does not make accepted ADRs normative platform contracts."
+      ],
+      "owners": [
+        "database",
+        "market-data"
+      ],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-001",
+        "QT-TERM-002",
+        "QT-TERM-003",
+        "QT-TERM-004"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 90,
+            "end": 100
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 76,
+            "end": 91
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-003",
+          "kind": "database_constraint",
+          "path": "portal/backend/db/session.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 840,
+            "end": 903
+          },
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-004",
+          "kind": "database_constraint",
+          "path": "portal/backend/db/market_data_models.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 180,
+            "end": 201
+          },
+          "coverage": "supporting"
+        },
+        {
+          "id": "QT-ENF-005",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/storage/repos/market_data.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 1948,
+            "end": 2070
+          },
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [
+        "SCHEMA-AUTH-001"
+      ],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-PROVIDER-FREE-CANONICAL-READS",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-004",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Provider-free canonical reads",
+      "claim_summary": "Canonical read paths use persisted facts and do not invoke provider transport; acquisition remains explicit.",
+      "claim_scope": [
+        "Canonical feed and structured-Fact read entrypoints represented by the proof catalog.",
+        "Market-data read-versus-acquisition boundary."
+      ],
+      "failure_semantics": [
+        "A canonical read calls a provider or substitutes acquisition for missing stored data.",
+        "A read result is synthesized from provider transport instead of canonical storage."
+      ],
+      "wording_constraints": [
+        "Repository-wide entrypoint closure remains a proof gap.",
+        "The claim is limited to canonical reads and does not prohibit explicit acquisition workflows."
+      ],
+      "owners": [
+        "market-data"
+      ],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "adequate",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-001"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 41,
+            "end": 57
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-006",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/market/feed_service.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 117,
+            "end": 525
+          },
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-007",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/storage/repos/market_data.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 2219,
+            "end": 2241
+          },
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [
+        "ARCH-COVERAGE-001"
+      ],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-FROZEN-DATASET-REPLAY",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-005",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Frozen Dataset deterministic replay",
+      "claim_summary": "A Frozen Dataset deterministically binds series ranges, sources, revisions through an as-of watermark, hashes, and gap evidence for replay.",
+      "claim_scope": [
+        "Canonical market-data Dataset freeze and replay at exact bound ranges.",
+        "Database-backed Dataset identity, immutability, and source-quality evidence."
+      ],
+      "failure_semantics": [
+        "A later correction changes a prior frozen replay or its identity.",
+        "Replay expands beyond the frozen range or accepts mismatched source, quality, or hash evidence."
+      ],
+      "wording_constraints": [
+        "Revision pinning is expressed by the exact range, source, watermark, and content-hash model.",
+        "The claim does not require literal enumeration of every Fact revision row identifier."
+      ],
+      "owners": [
+        "market-data",
+        "research-data"
+      ],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "candidate",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-001",
+        "QT-TERM-002",
+        "QT-TERM-003",
+        "QT-TERM-004",
+        "QT-TERM-007",
+        "QT-TERM-008",
+        "QT-TERM-014",
+        "QT-TERM-015"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0051-require-frozen-datasets-for-canonical-backtests.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 43,
+            "end": 77
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 176,
+            "end": 186
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-008",
+          "kind": "database_constraint",
+          "path": "portal/backend/db/market_data_models.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 698,
+            "end": 760
+          },
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-009",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/storage/repos/market_data.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 2975,
+            "end": 3636
+          },
+          "coverage": "complete"
+        }
+      ],
+      "finding_refs": [
+        "SCHEMA-AUTH-001"
+      ],
+      "remediation_status": "not_required",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-CHECK-PREVIEW-EVIDENCE-SEPARATION",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-008",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Check preview and evidence separation",
+      "claim_summary": "Check preview does not persist Check or Observation evidence, while durable evidence requires an explicit frozen and replayable binding.",
+      "claim_scope": [
+        "Check planning, preview, evidence execution, and frozen-binding validation.",
+        "Research orchestration paths represented by the named service and proof definitions."
+      ],
+      "failure_semantics": [
+        "A preview persists a Check, creates an Observation, or claims durable evidence.",
+        "Evidence is admitted without an exact durable Dataset and matching source hashes."
+      ],
+      "wording_constraints": [
+        "Observation admission remains outside this record and unresolved under QT-CONFLICT-007.",
+        "QT-CONFLICT-010 remains unresolved; Research Observation is referenced only as a blocked label, not an adopted meaning.",
+        "The record does not adopt the blocked Check preview or Research Observation semantics."
+      ],
+      "owners": [
+        "research-orchestration"
+      ],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "candidate",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "adequate",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-006",
+        "QT-TERM-007",
+        "QT-TERM-008",
+        "QT-TERM-011",
+        "QT-TERM-012",
+        "QT-TERM-013",
+        "QT-TERM-014",
+        "QT-TERM-015",
+        "QT-TERM-026"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 47,
+            "end": 90
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 61,
+            "end": 87
+          },
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-010",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/research/service.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 906,
+            "end": 1257
+          },
+          "coverage": "complete"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "not_required",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-CHECK-OBSERVATION-ADMISSION",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-009",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Check Observation admission",
+      "claim_summary": "Accepted authorities disagree on whether every Check creates or links a Research Observation, while newer and legacy implementation seams coexist.",
+      "claim_scope": [
+        "Check-to-Observation creation, eligibility, and support-link behavior.",
+        "Legacy and V2 research persistence seams."
+      ],
+      "failure_semantics": [
+        "A classification chooses one accepted authority without supersession review.",
+        "Preview or ineligible evidence is treated as Observation-supporting under the newer path."
+      ],
+      "wording_constraints": [
+        "No Observation eligibility rule is adopted by this record.",
+        "QT-CONFLICT-007 remains unresolved.",
+        "QT-CONFLICT-010 remains unresolved; this record does not select a Research Observation definition."
+      ],
+      "owners": [
+        "research-memory",
+        "research-orchestration"
+      ],
+      "claim_kind": "behavioral_invariant",
+      "claim_lifecycle": "unclear",
+      "registry_disposition": "contradicted",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "contradicted",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-006",
+        "QT-TERM-011",
+        "QT-TERM-012",
+        "QT-TERM-013",
+        "QT-TERM-026"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0034-use-research-checks-as-analytical-memory-evidence.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 51,
+            "end": 66
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "conflicting"
+        },
+        {
+          "path": "docs/architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 52,
+            "end": 68
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "conflicting"
+        },
+        {
+          "path": "docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 61,
+            "end": 68
+          },
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "context"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-011",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/research/service.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 500,
+            "end": 568
+          },
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-012",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/research/service.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 1129,
+            "end": 1392
+          },
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "QT-CONFLICT-007"
+      ],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-REPORTS-DURABLE-TRUTH-PROJECTION",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-011",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Reports as durable-truth projections",
+      "claim_summary": "RunResearchDataset and reporting products project persisted run, event, trade, and artifact truth without rerunning Indicators or inventing missing evidence.",
+      "claim_scope": [
+        "Canonical RunResearchDataset construction and named report materialization paths.",
+        "Reporting and BotLens projections represented by the enforcement and proof references."
+      ],
+      "failure_semantics": [
+        "A report changes run lifecycle or silently reconstructs absent evidence.",
+        "A report reruns domain computation instead of projecting durable inputs."
+      ],
+      "wording_constraints": [
+        "The universal claim over all report entrypoints lacks a closed path inventory.",
+        "Unavailable inputs remain explicit caveats rather than guessed values."
+      ],
+      "owners": [
+        "botlens-projections",
+        "reporting"
+      ],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-005",
+        "QT-TERM-009",
+        "QT-TERM-010",
+        "QT-TERM-024",
+        "QT-TERM-026",
+        "QT-TERM-049"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0010-use-run-research-dataset-as-reporting-contract.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 31,
+            "end": 57
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/reporting/REPORTING_BOUNDARY.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 36,
+            "end": 103
+          },
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-013",
+          "kind": "structural_boundary",
+          "path": "portal/backend/service/reports/run_research_dataset.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 6884,
+            "end": 6987
+          },
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "ARCH-COVERAGE-001",
+        "CI-TRACE-001"
+      ],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-RUN-LIFECYCLE-LEDGER-AUTHORITY",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-012",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Run lifecycle ledger authority",
+      "claim_summary": "The runtime event ledger owns Bot Run lifecycle truth; summary fields are same-transaction projections and other writes cannot mutate lifecycle state.",
+      "claim_scope": [
+        "Bot Run lifecycle append, validation, projection, rebuild, and reporting isolation.",
+        "Runtime event-ledger and run-summary persistence paths."
+      ],
+      "failure_semantics": [
+        "A non-ledger write changes lifecycle-owned fields.",
+        "An invalid, backdated, or post-terminal transition is accepted."
+      ],
+      "wording_constraints": [
+        "Database rollback atomicity and concurrent sequence ordering need isolated integration proof.",
+        "The accepted ADR is indexed as decision authority, not elevated to a platform contract."
+      ],
+      "owners": [
+        "execution-persistence"
+      ],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-005",
+        "QT-TERM-022",
+        "QT-TERM-023",
+        "QT-TERM-024"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 38,
+            "end": 94
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/reporting/REPORTING_BOUNDARY.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 49,
+            "end": 54
+          },
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-014",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/storage/repos/lifecycle.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 134,
+            "end": 430
+          },
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-015",
+          "kind": "schema_validation",
+          "path": "portal/backend/service/storage/repos/runs.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 23,
+            "end": 75
+          },
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [
+        "SCHEMA-AUTH-001"
+      ],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-RUNTIME-PERSISTENCE-FAILURE-BOUNDARY",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-013",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Strict persistence and degradable projection",
+      "claim_summary": "Durable runtime persistence failure prevents successful completion, while bounded BotLens projection failure degrades visibility without changing durable truth.",
+      "claim_scope": [
+        "Canonical Fact and trade persistence buffers in Bot runtime.",
+        "Non-authoritative BotLens projection dispatch and terminal draining."
+      ],
+      "failure_semantics": [
+        "A durable write failure is swallowed or the run reports successful completion.",
+        "A projection failure mutates durable history or aborts an otherwise durable run."
+      ],
+      "wording_constraints": [
+        "Additional overflow, drain-timeout, and asynchronous consumer combinations remain proof gaps.",
+        "Projection degradation does not make missing visibility healthy or ready."
+      ],
+      "owners": [
+        "botlens-projections",
+        "execution-runtime"
+      ],
+      "claim_kind": "safety_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "static_aligned",
+      "enforcement_maturity": "defense_in_depth",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [
+        "QT-TERM-005",
+        "QT-TERM-026",
+        "QT-TERM-047",
+        "QT-TERM-049"
+      ],
+      "authority_refs": [
+        {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 188,
+            "end": 211
+          },
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-016",
+          "kind": "runtime_guard",
+          "path": "src/engines/bot_runtime/runtime/components/canonical_facts.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 153,
+            "end": 633
+          },
+          "coverage": "complete"
+        },
+        {
+          "id": "QT-ENF-017",
+          "kind": "runtime_guard",
+          "path": "src/engines/bot_runtime/runtime/mixins/runtime_persistence.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 99,
+            "end": 156
+          },
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-SHARED-APPLICATION-CONTRACT",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-014",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Shared application contract across interfaces",
+      "claim_summary": "CLI, API, and MCP adapters for the same operation family reuse one application contract and retain interface-specific authorization and confirmation only.",
+      "claim_scope": [
+        "Research Check CLI, API, and MCP operations represented by the calibration proof.",
+        "Shared application-service routing and interface-specific guards."
+      ],
+      "failure_semantics": [
+        "An interface bypasses the shared application operation.",
+        "An interface computes domain behavior or changes payload, result, or error semantics independently."
+      ],
+      "wording_constraints": [
+        "The current proof covers the Research Check family, not every interface family.",
+        "Whole-repository parity requires a generated operation-family manifest."
+      ],
+      "owners": [
+        "application-interfaces"
+      ],
+      "claim_kind": "authority_boundary",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [],
+      "authority_refs": [
+        {
+          "path": "AGENTS.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 15,
+            "end": 21
+          },
+          "authority_kind": "normative_agent_governance",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/contracts/platform/03_engineering_contract.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 18,
+            "end": 30
+          },
+          "authority_kind": "normative_platform_contract",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 189,
+            "end": 224
+          },
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-018",
+          "kind": "structural_boundary",
+          "path": "cli/research_operations.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 1,
+            "end": 135
+          },
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-019",
+          "kind": "structural_boundary",
+          "path": "cli/mcp_server.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 473,
+            "end": 570
+          },
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [
+        "ARCH-COVERAGE-001",
+        "CI-TRACE-001"
+      ],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-070",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Verified destructive recovery and archive deletion",
+      "claim_summary": "Destructive recovery and archive deletion proceed only after verified backup, replacement checksum, and retention-pin evidence.",
+      "claim_scope": [
+        "Archive-object deletion and storage-lifecycle enforcement.",
+        "Isolated database backup and restore procedure."
+      ],
+      "failure_semantics": [
+        "Archived material is deleted despite a checksum mismatch or active retention pin.",
+        "Destructive recovery proceeds without a verified, restorable replacement."
+      ],
+      "wording_constraints": [
+        "A production database is not an admissible calibration target.",
+        "Database restore evidence remains manual and environment-dependent."
+      ],
+      "owners": [
+        "data-retention",
+        "recovery"
+      ],
+      "claim_kind": "operational_policy",
+      "claim_lifecycle": "current",
+      "registry_disposition": "partially_enforced",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "mixed",
+      "term_refs": [],
+      "authority_refs": [
+        {
+          "path": "docs/engineering/server-deployment.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Storage Move And Recovery"
+          },
+          "authority_kind": "operational_guidance",
+          "source_lifecycle": "active",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 268,
+            "end": 285
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-020",
+          "kind": "workflow_gate",
+          "path": "src/market_data/archive.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 538,
+            "end": 563
+          },
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-021",
+          "kind": "workflow_gate",
+          "path": "portal/backend/service/market/market_storage_lifecycle.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 453,
+            "end": 525
+          },
+          "coverage": "partial"
+        }
+      ],
+      "finding_refs": [],
+      "remediation_status": "pending",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    },
+    {
+      "id": "QT-GUAR-ARCHITECTURE-DOC-INDEX-INTEGRITY",
+      "candidate_refs": [
+        {
+          "id": "QT-GC-073",
+          "relation": "equivalent"
+        }
+      ],
+      "title": "Architecture metadata and index validation ceiling",
+      "claim_summary": "Architecture documents with frontmatter are included in the generated component index; the existing validator does not establish path or link integrity.",
+      "claim_scope": [
+        "Architecture Markdown with recognized frontmatter and generated index inclusion.",
+        "Current architecture-index builder and contract tests."
+      ],
+      "failure_semantics": [
+        "An eligible architecture document is omitted from the generated index.",
+        "Validator success is misrepresented as proof of source-path or link integrity."
+      ],
+      "wording_constraints": [
+        "The record describes a validator capability ceiling, not a repaired documentation guarantee.",
+        "Unfrontmattered files, field-value validity, path existence, and links remain outside current enforcement."
+      ],
+      "owners": [
+        "architecture-documentation"
+      ],
+      "claim_kind": "documentation_invariant",
+      "claim_lifecycle": "current",
+      "registry_disposition": "implementation_property",
+      "activation_status": "unactivated",
+      "activation_decision_refs": [],
+      "activation_attestation_refs": [],
+      "conformance": "partial",
+      "enforcement_maturity": "partial",
+      "proof_maturity": "partial",
+      "proof_mode": "automated",
+      "term_refs": [],
+      "authority_refs": [
+        {
+          "path": "docs/architecture/decisions/0001-use-boundary-first-architecture-docs.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 34,
+            "end": 54
+          },
+          "authority_kind": "decision_record",
+          "source_lifecycle": "accepted",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/ARCHITECTURE_DOCS_MODEL.md",
+          "locator": {
+            "kind": "line_range",
+            "start": 107,
+            "end": 151
+          },
+          "authority_kind": "explanatory_architecture",
+          "source_lifecycle": "active",
+          "role": "supporting"
+        }
+      ],
+      "enforcement_refs": [
+        {
+          "id": "QT-ENF-022",
+          "kind": "schema_validation",
+          "path": "scripts/docs/build_architecture_index.py",
+          "locator": {
+            "kind": "line_range",
+            "start": 13,
+            "end": 95
+          },
+          "coverage": "partial"
+        },
+        {
+          "id": "QT-ENF-023",
+          "kind": "process_control",
+          "path": "Makefile",
+          "locator": {
+            "kind": "line_range",
+            "start": 468,
+            "end": 470
+          },
+          "coverage": "supporting"
+        }
+      ],
+      "finding_refs": [
+        "DOC-MODEL-001",
+        "DOC-PATH-001",
+        "DOC-VALIDATION-001",
+        "TEST-SCOPE-001"
+      ],
+      "remediation_status": "not_required",
+      "remediation_refs": [],
+      "replaced_by_ids": []
+    }
+  ]
+}

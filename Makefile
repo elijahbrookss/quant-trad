@@ -338,7 +338,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
-	test-reporting test-reporting-api test-botlens test-runtime backend-check validate-docs frontend-test frontend-build frontend-check \
+	test-reporting test-reporting-api test-botlens test-runtime backend-check guarantees-render validate-guarantees validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check check-all
 
 status: ## Show service status without docker compose ps sandbox friction
@@ -465,9 +465,17 @@ test-runtime: test-botlens ## Alias for focused BotLens/runtime tests
 backend-check: venv ## Run every non-database backend test
 	@$(PYTEST_ENV) QT_OMIT_DB_TESTS=1 $(PYTHON) -m pytest -q
 
-validate-docs: venv ## Refresh architecture index and run docs contract validation
+guarantees-render: venv ## Render the guarantee registry human view
+	@$(PYTHON) scripts/docs/guarantees.py render
+
+validate-guarantees: venv ## Validate guarantee metadata and its generated human view
+	@$(PYTHON) scripts/docs/guarantees.py check
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_guarantee_registry.py
+
+validate-docs: venv ## Refresh indexes and run docs contract validation
 	@$(PYTHON) scripts/docs/build_architecture_index.py
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py
+	@$(PYTHON) scripts/docs/guarantees.py check
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_guarantee_registry.py
 
 frontend-test: ## Run frontend unit tests
 	@$(NPM) --prefix $(FRONT_DIR) test
