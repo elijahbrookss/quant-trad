@@ -10,8 +10,8 @@ replace `AGENTS.md`, the platform contracts, accepted ADRs, or component owners.
 - Baseline branch: `origin/develop`
 - Baseline commit: `d46e40bf55caeea12f4ccbde640c71f271eaf9c4`
 - Campaign branch: `feat/docs-guarantee-reconciliation`
-- Current phase: Phase 1 discovery
-- Current gate: Gate 1 pending
+- Current phase: Phase 2A model calibration
+- Current gate: Gate 2 pending
 
 `develop` remains unchanged for the duration of the campaign. The baseline is a
 fixed audit subject rather than a moving integration target.
@@ -91,10 +91,11 @@ verified and intentionally retained.
 4. **Final gate:** review residual risks, proof attestations, validation, and the
    clean campaign branch before any integration into `develop`.
 
-During Phase 1, existing product code and documentation are read-only. Writes are
-limited to audit artifacts in this campaign directory and narrowly scoped audit
-tooling needed to produce them. Product-semantic discrepancies become findings,
-not silent repairs.
+Gate 1 was approved by the user on 2026-08-23. During Phase 2A, existing product
+semantics and normative documentation remain read-only. Writes are limited to
+the proposed glossary, assurance-index model, deterministic validation and human
+view, calibration record, and gate report. Product-semantic discrepancies remain
+findings rather than silent repairs.
 
 ## Phase 1 Deliverables
 
@@ -110,3 +111,23 @@ not silent repairs.
 Phase 1 is not complete merely because searches stop finding new material. It is
 complete when every enumerated unit has an owner and explicit status, and every
 remaining uncertainty is itself represented in the ledger.
+
+## Phase 2A Deliverables
+
+- `proposed-glossary.md` — 21 calibration-scoped term entries; 19 remain
+  proposed and `QT-TERM-006`/`QT-TERM-012` remain blocked;
+- `phase-2a-calibration.md` — the representative 12-record batch and its exact
+  frozen-baseline authority, enforcement, proof, conflict, and environment
+  findings;
+- `../../assurance/guarantees/registry.json` — machine-readable provisional
+  classifications with zero active guarantees;
+- `../../assurance/guarantees/proof-catalog.json` — stable proof requirements
+  without execution results;
+- `../../assurance/guarantees/GUARANTEES.md` — generated human view;
+- `../../assurance/guarantees/schemas/` and `attestations/README.md` — executable
+  model documentation and commit-bound attestation semantics;
+- `gate-2-report.md` — decision packet and explicit stop before Phase 2B.
+
+Phase 2A completion does not adopt the glossary, activate a guarantee, classify
+the remaining 63 candidates, settle a conflict, repair product semantics, or
+authorize deletion/archive. Phase 2B starts only after explicit Gate 2 approval.
