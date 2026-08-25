@@ -5,6 +5,12 @@ The frozen Phase 2 registry and remediation records remain immutable inputs.
 This module layers a commit-specific forward assessment over those inputs and
 optionally binds already-created immutable attestations. It never executes a
 proof, changes guarantee activation, or treats remediation progress as closure.
+
+Strict final-gate packets bind proof source commit S plus the clean packet-input
+commit/tree P. The generated packet cannot truthfully contain the identity of
+its own future Git commit C, so ``check --final-gate`` verifies C externally:
+clean branch state, single parent P, only the generated JSON/Markdown pair, and
+unchanged ``develop``. Post-commit validation is likewise reported externally.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, NoReturn, Sequence
 
@@ -42,8 +49,10 @@ SCHEMA_PATH = (
 
 POLICY_SCHEMA_VERSION = "qt.phase3_final_review_policy.v1"
 REVIEW_SCHEMA_VERSION = "qt.phase3_final_review.v1"
+VALIDATION_RESULTS_SCHEMA_VERSION = "qt.phase3_validation_results.v1"
 HEX40_RE = re.compile(r"[0-9a-f]{40}\Z")
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+VALIDATION_ID_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 REMEDIATION_ID_RE = re.compile(r"QT-REM-[0-9]{3}\Z")
 RISK_ID_RE = re.compile(r"QT-RISK-P3-[0-9]{3}\Z")
 SLICE_ID_RE = re.compile(r"QT-P3-SLICE-[A-Z0-9-]+\Z")
@@ -64,6 +73,23 @@ PHASE2_DISPOSITIONS = {
     "defer_activation_priority",
     "defer_owner_approval",
     "defer_proof_environment",
+}
+VALIDATION_STATUSES = {
+    "PASS",
+    "FAIL",
+    "PARTIAL",
+    "MANUAL",
+    "NOT_RUN",
+    "UNAVAILABLE",
+}
+FINAL_GATE_PACKET_FILES = {
+    REVIEW_PATH.relative_to(ROOT).as_posix(),
+    VIEW_PATH.relative_to(ROOT).as_posix(),
+}
+SOURCE_MATERIAL_PATHS = {
+    POLICY_PATH.relative_to(ROOT).as_posix(),
+    guarantees.REGISTRY_PATH.relative_to(guarantees.ROOT).as_posix(),
+    guarantees.PROOF_CATALOG_PATH.relative_to(guarantees.ROOT).as_posix(),
 }
 
 
@@ -133,6 +159,80 @@ def _canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _schema_value(
+    schema: Mapping[str, Any], path: Sequence[str], where: str
+) -> Any:
+    current: Any = schema
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            _fail(f"{where}:missing_schema_path:{'.'.join(path)}")
+        current = current[key]
+    return current
+
+
+def _schema_set(
+    schema: Mapping[str, Any],
+    path: Sequence[str],
+    expected: set[str],
+    where: str,
+) -> None:
+    raw = _schema_value(schema, path, where)
+    if not isinstance(raw, list) or set(raw) != expected or len(raw) != len(expected):
+        _fail(f"{where}:schema_set_mismatch:{'.'.join(path)}")
+
+
+def _validate_review_schema_contract(root: Path) -> None:
+    """Keep the published schema aligned with the executable review model."""
+
+    schema = guarantees.load_json_strict(root / SCHEMA_PATH.relative_to(ROOT))
+    where = "schema.phase3_final_review"
+    if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
+        _fail(f"{where}:expected_draft_2020_12")
+    if schema.get("additionalProperties") is not False:
+        _fail(f"{where}:top_level_must_be_strict")
+    if _schema_value(schema, ("properties", "schema_version", "const"), where) != REVIEW_SCHEMA_VERSION:
+        _fail(f"{where}:schema_version_mismatch")
+    _schema_set(
+        schema,
+        ("required",),
+        {
+            "schema_version",
+            "authority",
+            "frozen_evidence",
+            "assessment_subject",
+            "attestation_binding",
+            "attestation_results",
+            "summary",
+            "system_summary",
+            "phase3_slices",
+            "guarantees",
+            "proof_accounting",
+            "proofs",
+            "remediations",
+            "residual_risks",
+            "integration_plan",
+        },
+        where,
+    )
+    for name, count in (("guarantees", 75), ("proofs", 85), ("remediations", 68)):
+        if _schema_value(schema, ("properties", name, "minItems"), where) != count or _schema_value(
+            schema, ("properties", name, "maxItems"), where
+        ) != count:
+            _fail(f"{where}:{name}_cardinality_mismatch")
+    _schema_set(
+        schema,
+        ("$defs", "validationResult", "properties", "status", "enum"),
+        VALIDATION_STATUSES,
+        where,
+    )
+    _schema_set(
+        schema,
+        ("$defs", "finalGate", "properties", "mode", "enum"),
+        {"intermediate", "final_gate"},
+        where,
+    )
+
+
 def _repo_relative(root: Path, path: Path, where: str) -> str:
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
@@ -154,6 +254,248 @@ def _verify_git_commit(root: Path, source_commit: str) -> None:
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         _fail(f"assessment_subject.source_commit:not_available:{exc}")
+
+
+def _git_text(root: Path, *args: str, where: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _fail(f"{where}:git_failed:{exc}")
+    return completed.stdout.strip()
+
+
+def _git_blob(root: Path, source_commit: str, relative: str, where: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "show", f"{source_commit}:{relative}"],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _fail(f"{where}:source_material_unavailable:{relative}:{exc}")
+    return completed.stdout
+
+
+def _source_material_binding(root: Path, source_commit: str) -> list[dict[str, str]]:
+    """Bind the assessment semantics to exact material at ``source_commit``."""
+
+    if not (root / ".git").exists():
+        _fail("assessment_subject.source_material:git_metadata_required")
+    relative_paths = sorted(SOURCE_MATERIAL_PATHS)
+    bindings: list[dict[str, str]] = []
+    for relative in relative_paths:
+        where = f"assessment_subject.source_material.{relative}"
+        current = root / relative
+        if not current.is_file():
+            _fail(f"{where}:current_material_missing")
+        current_bytes = current.read_bytes()
+        source_bytes = _git_blob(root, source_commit, relative, where)
+        current_sha = hashlib.sha256(current_bytes).hexdigest()
+        source_sha = hashlib.sha256(source_bytes).hexdigest()
+        if current_sha != source_sha:
+            _fail(
+                f"{where}:exact_source_mismatch:"
+                f"source={source_sha}:current={current_sha}"
+            )
+        bindings.append({"path": relative, "sha256": source_sha})
+    return bindings
+
+
+def _is_ancestor(root: Path, ancestor: str, descendant: str, where: str) -> None:
+    try:
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", ancestor, descendant],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _fail(f"{where}:not_ancestor:{ancestor}:{descendant}:{exc}")
+
+
+def _capture_packet_input_state(root: Path, source_commit: str) -> dict[str, Any]:
+    """Capture the clean parent/tree from which a self-excluding packet is rendered."""
+
+    branch = _git_text(root, "symbolic-ref", "--short", "HEAD", where="final_gate.branch")
+    if branch == "develop":
+        _fail("final_gate.branch:develop_is_not_an_authorized_packet_branch")
+    head_commit = _git_text(root, "rev-parse", "HEAD", where="final_gate.head")
+    tree_oid = _git_text(root, "rev-parse", "HEAD^{tree}", where="final_gate.tree")
+    develop_commit = _git_text(root, "rev-parse", "develop", where="final_gate.develop")
+    dirty = _git_text(
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        where="final_gate.clean",
+    )
+    if dirty:
+        _fail("final_gate.repository_state:packet_input_worktree_not_clean")
+    _is_ancestor(
+        root,
+        source_commit,
+        head_commit,
+        "final_gate.repository_state.proof_source",
+    )
+    return {
+        "branch": branch,
+        "packet_input_commit": head_commit,
+        "packet_input_tree": tree_oid,
+        "develop_commit": develop_commit,
+        "clean": True,
+    }
+
+
+def _validate_recorded_packet_input(
+    root: Path,
+    source_commit: str,
+    state: Mapping[str, Any],
+) -> None:
+    _exact_keys(
+        state,
+        required={
+            "branch",
+            "packet_input_commit",
+            "packet_input_tree",
+            "develop_commit",
+            "clean",
+        },
+        where="final_gate.repository_state",
+    )
+    branch = _expect_string(state["branch"], "final_gate.repository_state.branch")
+    if branch == "develop":
+        _fail("final_gate.repository_state.branch:develop_forbidden")
+    for key in ("packet_input_commit", "packet_input_tree", "develop_commit"):
+        if not HEX40_RE.fullmatch(
+            _expect_string(state[key], f"final_gate.repository_state.{key}")
+        ):
+            _fail(f"final_gate.repository_state.{key}:expected_40_hex_oid")
+    if state["clean"] is not True:
+        _fail("final_gate.repository_state.clean:must_be_true")
+    _verify_git_commit(root, state["packet_input_commit"])
+    _verify_git_commit(root, state["develop_commit"])
+    observed_tree = _git_text(
+        root,
+        "rev-parse",
+        f"{state['packet_input_commit']}^{{tree}}",
+        where="final_gate.repository_state.packet_input_tree",
+    )
+    if observed_tree != state["packet_input_tree"]:
+        _fail("final_gate.repository_state.packet_input_tree:mismatch")
+    _is_ancestor(
+        root,
+        source_commit,
+        state["packet_input_commit"],
+        "final_gate.repository_state.proof_source",
+    )
+
+
+def _verify_external_approval_repository_state(
+    root: Path,
+    state: Mapping[str, Any],
+) -> dict[str, str | bool]:
+    """Verify the clean packet commit externally, avoiding commit self-reference."""
+
+    current_branch = _git_text(
+        root, "symbolic-ref", "--short", "HEAD", where="approval_gate.branch"
+    )
+    if current_branch != state["branch"]:
+        _fail("approval_gate.branch:recorded_branch_mismatch")
+    current_head = _git_text(root, "rev-parse", "HEAD", where="approval_gate.head")
+    current_tree = _git_text(
+        root, "rev-parse", "HEAD^{tree}", where="approval_gate.tree"
+    )
+    dirty = _git_text(
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        where="approval_gate.clean",
+    )
+    if dirty:
+        _fail("approval_gate.clean:worktree_not_clean")
+    if _git_text(root, "rev-parse", "develop", where="approval_gate.develop") != state[
+        "develop_commit"
+    ]:
+        _fail("approval_gate.develop:changed_since_packet_input")
+    parents = _git_text(
+        root, "show", "-s", "--format=%P", current_head, where="approval_gate.parent"
+    ).split()
+    if parents != [state["packet_input_commit"]]:
+        _fail("approval_gate.parent:head_must_be_single_packet_commit")
+    changed = _git_text(
+        root,
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        current_head,
+        where="approval_gate.packet_files",
+    ).splitlines()
+    if set(changed) != FINAL_GATE_PACKET_FILES:
+        _fail("approval_gate.packet_files:expected_only_generated_review_pair")
+    return {
+        "branch": current_branch,
+        "head_commit": current_head,
+        "head_tree": current_tree,
+        "clean": True,
+        "packet_parent_commit": state["packet_input_commit"],
+        "develop_commit": state["develop_commit"],
+    }
+
+
+def _parse_utc_timestamp(value: Any, where: str) -> datetime:
+    text = _expect_string(value, where)
+    if not text.endswith("Z"):
+        _fail(f"{where}:timestamp_must_be_utc_Z")
+    try:
+        return datetime.fromisoformat(text[:-1] + "+00:00")
+    except ValueError as exc:
+        _fail(f"{where}:invalid_timestamp:{exc}")
+
+
+def _load_validation_results(
+    *,
+    root: Path,
+    source_commit: str,
+    path: Path,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    resolved = path.resolve()
+    relative = _repo_relative(root, resolved, "final_gate.validation_results_source")
+    prefix = "docs/assurance/guarantees/validation-results/"
+    if not relative.startswith(prefix) or not relative.endswith(".json"):
+        _fail("final_gate.validation_results_source:path_outside_immutable_layout")
+    raw = guarantees.load_json_strict(resolved)
+    _exact_keys(
+        raw,
+        required={"schema_version", "source_commit", "results"},
+        where="final_gate.validation_results_document",
+    )
+    if raw["schema_version"] != VALIDATION_RESULTS_SCHEMA_VERSION:
+        _fail("final_gate.validation_results_document.schema_version:invalid")
+    if raw["source_commit"] != source_commit:
+        _fail("final_gate.validation_results_document.source_commit:mismatch")
+    validated = _validate_embedded_validation_results(raw["results"])
+    for index, row in enumerate(validated):
+        for evidence_index, evidence_row in enumerate(row["evidence_refs"]):
+            evidence_where = (
+                f"final_gate.validation_results[{index}]."
+                f"evidence_refs[{evidence_index}]"
+            )
+            evidence_path = evidence_row["path"]
+            resolved_evidence = (root / evidence_path).resolve()
+            if _repo_relative(root, resolved_evidence, evidence_where) != evidence_path:
+                _fail(f"{evidence_where}.path:not_canonical")
+            if (
+                not resolved_evidence.is_file()
+                or _sha256(resolved_evidence) != evidence_row["sha256"]
+            ):
+                _fail(f"{evidence_where}.sha256:mismatch")
+    return validated, {"path": relative, "sha256": _sha256(resolved)}
 
 
 def _verify_slice_evidence(root: Path, source_commit: str, slices: Sequence[Mapping[str, Any]]) -> None:
@@ -383,6 +725,7 @@ def _validate_policy(
                 "remediation_ids",
                 "effect",
             },
+            optional={"guarantee_selector", "remediation_selector"},
             where=where,
         )
         slice_id = _expect_string(row["id"], f"{where}.id")
@@ -398,6 +741,16 @@ def _validate_policy(
         files = _expect_list(row["files"], f"{where}.files")
         if not files or files != sorted(files):
             _fail(f"{where}.files:must_be_nonempty_sorted")
+        guarantee_selector = row.get("guarantee_selector", "listed")
+        remediation_selector = row.get("remediation_selector", "listed")
+        if guarantee_selector not in {"listed", "all"}:
+            _fail(f"{where}.guarantee_selector:invalid")
+        if remediation_selector not in {"listed", "all"}:
+            _fail(f"{where}.remediation_selector:invalid")
+        if guarantee_selector == "all" and row["guarantee_ids"]:
+            _fail(f"{where}.guarantee_ids:all_selector_requires_empty_list")
+        if remediation_selector == "all" and row["remediation_ids"]:
+            _fail(f"{where}.remediation_ids:all_selector_requires_empty_list")
         if not set(row["guarantee_ids"]) <= guarantee_ids:
             _fail(f"{where}.guarantee_ids:unknown_id")
         if not set(row["remediation_ids"]) <= remediation_ids:
@@ -644,11 +997,16 @@ def build_review(
     root: Path = ROOT,
     source_commit: str,
     attestation_paths: Sequence[Path] | None = None,
+    final_gate: bool = False,
+    validation_results_path: Path | None = None,
+    repository_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the exact forward assessment without executing any proof."""
 
     root = root.resolve()
+    _validate_review_schema_contract(root)
     _verify_git_commit(root, source_commit)
+    source_material = _source_material_binding(root, source_commit)
     bundle = guarantees.validate_repository(root=root)
     policy = guarantees.load_json_strict(root / POLICY_PATH.relative_to(ROOT))
     registry = bundle.registry["guarantees"]
@@ -688,6 +1046,47 @@ def build_review(
         source_commit=source_commit,
         attestation_paths=attestation_paths,
     )
+    if final_gate:
+        if not attestations:
+            _fail("final_gate:requires_nonempty_attestation_set")
+        if validation_results_path is None:
+            _fail("final_gate:requires_validation_results_document")
+        validation_results, validation_results_source = _load_validation_results(
+            root=root,
+            source_commit=source_commit,
+            path=validation_results_path,
+        )
+        if repository_state is None:
+            captured_repository_state = _capture_packet_input_state(
+                root, source_commit
+            )
+        else:
+            captured_repository_state = dict(repository_state)
+            _validate_recorded_packet_input(
+                root, source_commit, captured_repository_state
+            )
+        final_gate_state: dict[str, Any] = {
+            "mode": "final_gate",
+            "repository_state": captured_repository_state,
+            "validation_results_source": validation_results_source,
+            "validation_results": validation_results,
+            "integration_approval_request": {
+                "status": "requested",
+                "requested_action": "integrate_feature_branch_into_develop",
+                "target_branch": "develop",
+                "guarantee_activation_included": False,
+            },
+        }
+    else:
+        if validation_results_path is not None or repository_state is not None:
+            _fail("intermediate_review:forbids_final_gate_evidence")
+        final_gate_state = {
+            "mode": "intermediate",
+            "repository_state": None,
+            "validation_results_source": None,
+            "validation_results": [],
+            "integration_approval_request": None,
+        }
 
     phase2_disposition_by_remediation = _validate_partition(
         policy["phase2_dispositions"],
@@ -744,8 +1143,18 @@ def build_review(
     phase3_slices: list[dict[str, Any]] = []
     for raw in policy["phase3_slices"]:
         row = dict(raw)
-        row["guarantee_ids"] = sorted(row["guarantee_ids"], key=_id_sort_key)
-        row["remediation_ids"] = sorted(row["remediation_ids"], key=_id_sort_key)
+        guarantee_selector = row.pop("guarantee_selector", "listed")
+        remediation_selector = row.pop("remediation_selector", "listed")
+        row["guarantee_ids"] = sorted(
+            guarantee_ids if guarantee_selector == "all" else row["guarantee_ids"],
+            key=_id_sort_key,
+        )
+        row["remediation_ids"] = sorted(
+            remediation_ids
+            if remediation_selector == "all"
+            else row["remediation_ids"],
+            key=_id_sort_key,
+        )
         phase3_slices.append(row)
         for guarantee_id in row["guarantee_ids"]:
             slices_by_guarantee[guarantee_id].append(row["id"])
@@ -1044,6 +1453,7 @@ def build_review(
         "assessment_subject": {
             "source_commit": source_commit,
             "source_tree_kind": "committed_snapshot",
+            "source_material": source_material,
         },
         "attestation_binding": attestation_binding,
         "attestation_results": attestation_results,
@@ -1068,9 +1478,10 @@ def build_review(
         "proofs": proof_rows,
         "remediations": remediation_rows,
         "residual_risks": residual_risks,
+        "final_gate": final_gate_state,
         "integration_plan": list(policy["integration_plan"]),
     }
-    validate_review_data(review)
+    validate_review_data(review, final_gate_required=final_gate)
     _validate_expected_summary(policy["expected_summary"], review)
     return review
 
@@ -1095,7 +1506,252 @@ def _validate_expected_summary(expected: Mapping[str, Any], review: Mapping[str,
             _fail(f"expected_summary.{key}:mismatch")
 
 
-def validate_review_data(review: Mapping[str, Any]) -> None:
+def _validate_embedded_validation_results(results: Any) -> list[dict[str, Any]]:
+    rows = _expect_list(results, "review.final_gate.validation_results")
+    if not rows:
+        _fail("review.final_gate.validation_results:must_be_nonempty")
+    ids: list[str] = []
+    validated: list[dict[str, Any]] = []
+    for index, raw in enumerate(rows):
+        where = f"review.final_gate.validation_results[{index}]"
+        row = _expect_object(raw, where)
+        _exact_keys(
+            row,
+            required={
+                "id",
+                "command_argv",
+                "status",
+                "exit_code",
+                "started_at",
+                "finished_at",
+                "reason_code",
+                "evidence_refs",
+            },
+            where=where,
+        )
+        result_id = _expect_string(row["id"], f"{where}.id")
+        if not VALIDATION_ID_RE.fullmatch(result_id):
+            _fail(f"{where}.id:invalid")
+        ids.append(result_id)
+        argv = _expect_list(row["command_argv"], f"{where}.command_argv")
+        if not argv or any(
+            not isinstance(argument, str)
+            or not argument
+            or any(character in argument for character in ("\0", "\r", "\n"))
+            for argument in argv
+        ):
+            _fail(f"{where}.command_argv:invalid")
+        status = row["status"]
+        if status not in VALIDATION_STATUSES:
+            _fail(f"{where}.status:invalid")
+        evidence_rows = _expect_list(row["evidence_refs"], f"{where}.evidence_refs")
+        evidence_paths: list[str] = []
+        for evidence_index, evidence_raw in enumerate(evidence_rows):
+            evidence_where = f"{where}.evidence_refs[{evidence_index}]"
+            evidence = _expect_object(evidence_raw, evidence_where)
+            _exact_keys(
+                evidence,
+                required={"path", "sha256"},
+                where=evidence_where,
+            )
+            evidence_paths.append(
+                _expect_string(evidence["path"], f"{evidence_where}.path")
+            )
+            if not HEX64_RE.fullmatch(
+                _expect_string(evidence["sha256"], f"{evidence_where}.sha256")
+            ):
+                _fail(f"{evidence_where}.sha256:invalid")
+        if evidence_paths != sorted(set(evidence_paths)):
+            _fail(f"{where}.evidence_refs:must_be_sorted_unique")
+
+        executed = status in {"PASS", "FAIL", "PARTIAL", "MANUAL"}
+        if executed:
+            started = _parse_utc_timestamp(row["started_at"], f"{where}.started_at")
+            finished = _parse_utc_timestamp(row["finished_at"], f"{where}.finished_at")
+            if finished < started:
+                _fail(f"{where}:finished_before_started")
+            if not evidence_rows:
+                _fail(f"{where}:executed_result_requires_evidence")
+            if status == "MANUAL":
+                if row["exit_code"] is not None:
+                    _fail(f"{where}.exit_code:manual_requires_null")
+            else:
+                exit_code = _expect_int(row["exit_code"], f"{where}.exit_code")
+                if status in {"PASS", "PARTIAL"} and exit_code != 0:
+                    _fail(f"{where}.exit_code:{status}_requires_zero")
+                if status == "FAIL" and exit_code == 0:
+                    _fail(f"{where}.exit_code:FAIL_requires_nonzero")
+            if status == "PASS":
+                if row["reason_code"] is not None:
+                    _fail(f"{where}.reason_code:PASS_requires_null")
+            else:
+                _expect_string(row["reason_code"], f"{where}.reason_code")
+        else:
+            if any(
+                row[key] is not None
+                for key in ("exit_code", "started_at", "finished_at")
+            ) or evidence_rows:
+                _fail(f"{where}:{status}_forbids_execution_result")
+            _expect_string(row["reason_code"], f"{where}.reason_code")
+        validated.append(dict(row))
+    if ids != sorted(ids) or len(ids) != len(set(ids)):
+        _fail("review.final_gate.validation_results:ids_must_be_sorted_unique")
+    return validated
+
+
+def _validate_source_material(
+    source: Mapping[str, Any], *, required: bool
+) -> None:
+    raw = source.get("source_material")
+    if raw is None:
+        if required:
+            _fail("review.assessment_subject.source_material:required_at_final_gate")
+        return
+    rows = _expect_list(raw, "review.assessment_subject.source_material")
+    paths: list[str] = []
+    for index, item in enumerate(rows):
+        where = f"review.assessment_subject.source_material[{index}]"
+        row = _expect_object(item, where)
+        _exact_keys(row, required={"path", "sha256"}, where=where)
+        paths.append(_expect_string(row["path"], f"{where}.path"))
+        if not HEX64_RE.fullmatch(
+            _expect_string(row["sha256"], f"{where}.sha256")
+        ):
+            _fail(f"{where}.sha256:invalid")
+    if paths != sorted(SOURCE_MATERIAL_PATHS):
+        _fail("review.assessment_subject.source_material:expected_exact_bound_set")
+
+
+def _validate_final_gate_data(
+    review: Mapping[str, Any],
+    *,
+    binding: Mapping[str, Any],
+    guarantee_rows: Sequence[Mapping[str, Any]],
+    proof_rows: Sequence[Mapping[str, Any]],
+    final_gate_required: bool,
+) -> None:
+    raw = review.get("final_gate")
+    if raw is None:
+        if final_gate_required:
+            _fail("review.final_gate:required")
+        return
+    gate = _expect_object(raw, "review.final_gate")
+    _exact_keys(
+        gate,
+        required={
+            "mode",
+            "repository_state",
+            "validation_results_source",
+            "validation_results",
+            "integration_approval_request",
+        },
+        where="review.final_gate",
+    )
+    mode = gate["mode"]
+    if mode not in {"intermediate", "final_gate"}:
+        _fail("review.final_gate.mode:invalid")
+    if mode == "intermediate":
+        if final_gate_required:
+            _fail("review.final_gate.mode:final_gate_required")
+        if (
+            gate["repository_state"] is not None
+            or gate["validation_results_source"] is not None
+            or gate["validation_results"] != []
+            or gate["integration_approval_request"] is not None
+        ):
+            _fail("review.final_gate.intermediate:forbids_final_evidence")
+        return
+
+    if binding["state"] != "bound" or not binding["attestations"]:
+        _fail("review.final_gate:requires_nonempty_bound_attestations")
+    _validate_source_material(review["assessment_subject"], required=True)
+
+    state = _expect_object(
+        gate["repository_state"], "review.final_gate.repository_state"
+    )
+    _exact_keys(
+        state,
+        required={
+            "branch",
+            "packet_input_commit",
+            "packet_input_tree",
+            "develop_commit",
+            "clean",
+        },
+        where="review.final_gate.repository_state",
+    )
+    if _expect_string(state["branch"], "review.final_gate.repository_state.branch") == "develop":
+        _fail("review.final_gate.repository_state.branch:develop_forbidden")
+    for key in ("packet_input_commit", "packet_input_tree", "develop_commit"):
+        if not HEX40_RE.fullmatch(
+            _expect_string(state[key], f"review.final_gate.repository_state.{key}")
+        ):
+            _fail(f"review.final_gate.repository_state.{key}:invalid")
+    if state["clean"] is not True:
+        _fail("review.final_gate.repository_state.clean:must_be_true")
+
+    source = _expect_object(
+        gate["validation_results_source"],
+        "review.final_gate.validation_results_source",
+    )
+    _exact_keys(source, required={"path", "sha256"}, where="review.final_gate.validation_results_source")
+    validation_path = _expect_string(
+        source["path"], "review.final_gate.validation_results_source.path"
+    )
+    if not validation_path.startswith(
+        "docs/assurance/guarantees/validation-results/"
+    ) or not validation_path.endswith(".json"):
+        _fail("review.final_gate.validation_results_source.path:invalid")
+    if not HEX64_RE.fullmatch(
+        _expect_string(
+            source["sha256"], "review.final_gate.validation_results_source.sha256"
+        )
+    ):
+        _fail("review.final_gate.validation_results_source.sha256:invalid")
+    _validate_embedded_validation_results(gate["validation_results"])
+
+    approval = _expect_object(
+        gate["integration_approval_request"],
+        "review.final_gate.integration_approval_request",
+    )
+    _exact_keys(
+        approval,
+        required={
+            "status",
+            "requested_action",
+            "target_branch",
+            "guarantee_activation_included",
+        },
+        where="review.final_gate.integration_approval_request",
+    )
+    if approval != {
+        "status": "requested",
+        "requested_action": "integrate_feature_branch_into_develop",
+        "target_branch": "develop",
+        "guarantee_activation_included": False,
+    }:
+        _fail("review.final_gate.integration_approval_request:invalid")
+
+    if len(proof_rows) != 85 or any(row["lifecycle"] != "active" for row in proof_rows):
+        _fail("review.final_gate.proofs:expected_all_85_active")
+    for row in proof_rows:
+        if row["result_state"] not in {"profile_result", "unavailable", "not_run"}:
+            _fail(f"review.final_gate.proofs.{row['id']}:explicit_result_required")
+        if row["attested_status"] is None or not row["raw_result_refs"]:
+            _fail(f"review.final_gate.proofs.{row['id']}:raw_result_coverage_required")
+    for row in guarantee_rows:
+        proof = row["proof_assessment"]
+        if proof["state"] == "not_attested":
+            _fail(f"review.final_gate.guarantees.{row['id']}:assessment_required")
+        if row["active_required_proof_ids"] and (
+            proof["attested_status"] is None or proof["reported_status"] is None
+        ):
+            _fail(f"review.final_gate.guarantees.{row['id']}:explicit_result_required")
+
+
+def validate_review_data(
+    review: Mapping[str, Any], *, final_gate_required: bool = False
+) -> None:
     """Validate the generated v1 final-review structure and safety invariants."""
 
     _exact_keys(
@@ -1117,6 +1773,7 @@ def validate_review_data(review: Mapping[str, Any]) -> None:
             "residual_risks",
             "integration_plan",
         },
+        optional={"final_gate"},
         where="review",
     )
     if review["schema_version"] != REVIEW_SCHEMA_VERSION:
@@ -1127,12 +1784,14 @@ def validate_review_data(review: Mapping[str, Any]) -> None:
     _exact_keys(
         source,
         required={"source_commit", "source_tree_kind"},
+        optional={"source_material"},
         where="review.assessment_subject",
     )
     if not HEX40_RE.fullmatch(source["source_commit"]):
         _fail("review.assessment_subject.source_commit:invalid")
     if source["source_tree_kind"] != "committed_snapshot":
         _fail("review.assessment_subject.source_tree_kind:invalid")
+    _validate_source_material(source, required=False)
 
     binding = _expect_object(review["attestation_binding"], "review.attestation_binding")
     _exact_keys(
@@ -1367,6 +2026,13 @@ def validate_review_data(review: Mapping[str, Any]) -> None:
         _fail("review.proof_accounting:not_attested_invented_counts")
     if accounting["attestation_count"] != len(binding_rows):
         _fail("review.proof_accounting.attestation_count:mismatch")
+    _validate_final_gate_data(
+        review,
+        binding=binding,
+        guarantee_rows=guarantee_rows,
+        proof_rows=proof_rows,
+        final_gate_required=final_gate_required,
+    )
 
 
 def _join_ids(values: Sequence[str]) -> str:
@@ -1419,6 +2085,68 @@ def render_markdown(review: Mapping[str, Any]) -> str:
                 f"| `{row['attestation_id']}` | `{row['path']}` | "
                 f"`{row['sha256']}` | {_join_ids(row['environment_profile_ids'])} |"
             )
+
+    gate = review.get("final_gate")
+    if gate is not None:
+        lines.extend(
+            [
+                "",
+                "## Review Mode",
+                "",
+                f"This packet is in `{gate['mode']}` mode.",
+            ]
+        )
+    if gate is not None and gate["mode"] == "final_gate":
+        repository_state = gate["repository_state"]
+        validation_source = gate["validation_results_source"]
+        approval = gate["integration_approval_request"]
+        lines.extend(
+            [
+                "",
+                "## Final Gate Evidence",
+                "",
+                "The packet binds the clean repository input from which it was rendered. "
+                "It deliberately does not claim the Git identity of its own containing "
+                "commit. The strict external check verifies that final clean commit, its "
+                "single parent, its two generated files, unchanged `develop`, and any "
+                "post-commit validation reported at the approval gate.",
+                "",
+                "| Repository evidence | Value |",
+                "| --- | --- |",
+                f"| Feature branch | `{repository_state['branch']}` |",
+                f"| Clean packet-input commit | `{repository_state['packet_input_commit']}` |",
+                f"| Packet-input tree | `{repository_state['packet_input_tree']}` |",
+                f"| Unchanged develop commit | `{repository_state['develop_commit']}` |",
+                f"| Input worktree clean | `{repository_state['clean']}` |",
+                "",
+                "### Recorded Validation Results",
+                "",
+                f"Source: `{validation_source['path']}` "
+                f"(`{validation_source['sha256']}`).",
+                "",
+                "| Validation | Command argv | Status | Exit | Reason | Evidence |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for result in gate["validation_results"]:
+            command = " ".join(result["command_argv"])
+            evidence = _join_ids([row["path"] for row in result["evidence_refs"]])
+            lines.append(
+                f"| `{result['id']}` | `{command}` | `{result['status']}` | "
+                f"`{result['exit_code'] if result['exit_code'] is not None else '—'}` | "
+                f"`{result['reason_code'] or '—'}` | {evidence} |"
+            )
+        lines.extend(
+            [
+                "",
+                "### Explicit Approval Request",
+                "",
+                f"Status: `{approval['status']}`. Requested action: "
+                f"`{approval['requested_action']}` into `{approval['target_branch']}`. "
+                f"Guarantee activation included: "
+                f"`{approval['guarantee_activation_included']}`.",
+            ]
+        )
 
     lines.extend(["", "## How QT Works After Phase 3", ""])
     lines.extend(f"- {item}" for item in review["system_summary"])
@@ -1579,17 +2307,36 @@ def _write_outputs(root: Path, review: Mapping[str, Any]) -> None:
     print(f"wrote {view_path.relative_to(root).as_posix()}")
 
 
-def _check_outputs(root: Path) -> None:
+def _check_outputs(root: Path, *, final_gate_required: bool = False) -> None:
+    _validate_review_schema_contract(root)
     review_path = root / REVIEW_PATH.relative_to(ROOT)
     checked = guarantees.load_json_strict(review_path)
-    validate_review_data(checked)
+    validate_review_data(checked, final_gate_required=final_gate_required)
     binding = checked["attestation_binding"]
-    attestation_paths = [root / row["path"] for row in binding["attestations"]]
-    rebuilt = build_review(
-        root=root,
-        source_commit=checked["assessment_subject"]["source_commit"],
-        attestation_paths=attestation_paths,
-    )
+    gate = checked.get("final_gate")
+    if gate is None:
+        # The checked 8029 packet is an intentionally retained historical,
+        # pre-attestation fixture. Validate its own canonical bytes and view,
+        # but never rebuild it against later catalog/policy material.
+        rebuilt = checked
+        review_mode = "legacy_historical_intermediate"
+    else:
+        attestation_paths = [root / row["path"] for row in binding["attestations"]]
+        is_final_gate = gate["mode"] == "final_gate"
+        validation_results_path = (
+            root / gate["validation_results_source"]["path"]
+            if is_final_gate
+            else None
+        )
+        rebuilt = build_review(
+            root=root,
+            source_commit=checked["assessment_subject"]["source_commit"],
+            attestation_paths=attestation_paths,
+            final_gate=is_final_gate,
+            validation_results_path=validation_results_path,
+            repository_state=gate["repository_state"] if is_final_gate else None,
+        )
+        review_mode = gate["mode"]
     if review_path.read_bytes() != _canonical_json_bytes(rebuilt):
         _fail(
             "generated_phase3_final_review_json_stale:run "
@@ -1601,13 +2348,23 @@ def _check_outputs(root: Path) -> None:
             "generated_phase3_final_review_markdown_stale:run "
             "python scripts/docs/build_phase3_final_review.py render --source-commit <commit>"
         )
+    external_state: dict[str, str | bool] | None = None
+    if final_gate_required:
+        external_state = _verify_external_approval_repository_state(
+            root, rebuilt["final_gate"]["repository_state"]
+        )
     print(
         "phase 3 final review valid: "
         f"{len(rebuilt['guarantees'])} guarantees, "
         f"{len(rebuilt['proofs'])} proofs, "
         f"{len(rebuilt['remediations'])} remediations, "
-        f"attestation={binding['state']}"
+        f"attestation={binding['state']}, mode={review_mode}"
     )
+    if external_state is not None:
+        print(
+            "phase 3 external approval-gate repository evidence: "
+            + json.dumps(external_state, sort_keys=True, separators=(",", ":"))
+        )
 
 
 def _cli() -> int:
@@ -1623,7 +2380,24 @@ def _cli() -> int:
         default=[],
         help="immutable attestation JSON; repeat once per isolated execution",
     )
-    subparsers.add_parser("check", help="validate checked-in data and generated Markdown")
+    render_parser.add_argument(
+        "--final-gate",
+        action="store_true",
+        help="require the strict final-gate packet inputs",
+    )
+    render_parser.add_argument(
+        "--validation-results",
+        type=Path,
+        help="immutable, sorted validation-result document for strict final-gate mode",
+    )
+    check_parser = subparsers.add_parser(
+        "check", help="validate checked-in data and generated Markdown"
+    )
+    check_parser.add_argument(
+        "--final-gate",
+        action="store_true",
+        help="also verify strict final-gate completeness and the external packet commit",
+    )
     args = parser.parse_args()
     root = args.root.resolve()
     try:
@@ -1632,10 +2406,12 @@ def _cli() -> int:
                 root=root,
                 source_commit=args.source_commit,
                 attestation_paths=args.attestation,
+                final_gate=args.final_gate,
+                validation_results_path=args.validation_results,
             )
             _write_outputs(root, review)
         else:
-            _check_outputs(root)
+            _check_outputs(root, final_gate_required=args.final_gate)
     except (FinalReviewError, guarantees.GuaranteeValidationError) as exc:
         print(f"phase3_final_review_failed:{exc}", file=sys.stderr)
         return 1

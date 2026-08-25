@@ -579,6 +579,43 @@
         "QT-REM-410"
       ],
       "effect": "Admits exact Node 20 and PostgreSQL 15/TimescaleDB 2.14.2 isolated profiles; it executes no proof and creates no result."
+    },
+    {
+      "id": "QT-P3-SLICE-ASSURANCE-FINALIZATION",
+      "title": "Profile-bound assurance and non-normative final-review machinery",
+      "commits": [
+        "33fc3221dbd8be39f7f88dfb94c25211961b5eb3",
+        "a10a3f95b03abcb466847f547b9a307d4b37ef67",
+        "6aa02eada499968e29238ea304f1ca2f633268b3",
+        "991fe2dc8dc152d9919160fcda6312fffbaf17de",
+        "f882ac8037f8d96292c6c35d620c95042db4413f"
+      ],
+      "files": [
+        "Makefile",
+        "docs/assurance/guarantees/GUARANTEES.md",
+        "docs/assurance/guarantees/proof-catalog.json",
+        "docs/assurance/guarantees/schemas/attestation.v1.schema.json",
+        "docs/assurance/guarantees/schemas/phase-3-final-review.v1.schema.json",
+        "docs/assurance/guarantees/schemas/proof-catalog.v1.schema.json",
+        "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json",
+        "docs/plans/documentation-reconciliation/phase-3-final-review.json",
+        "docs/plans/documentation-reconciliation/phase-3-final-review.md",
+        "scripts/assurance/__init__.py",
+        "scripts/assurance/node_test_reporter.mjs",
+        "scripts/assurance/pytest_result_plugin.py",
+        "scripts/assurance/verify_guarantees.py",
+        "scripts/docs/build_phase3_final_review.py",
+        "scripts/docs/guarantees.py",
+        "tests/contract/test_assurance_environment_profiles.py",
+        "tests/contract/test_assurance_executor.py",
+        "tests/contract/test_guarantee_registry.py",
+        "tests/contract/test_phase3_final_review.py"
+      ],
+      "guarantee_selector": "all",
+      "guarantee_ids": [],
+      "remediation_selector": "all",
+      "remediation_ids": [],
+      "effect": "Binds admitted proof profiles, typed Node results, commit-bound execution, conservative guarantee-result capping, and deterministic final-review accounting. It executes no campaign proof, supplies no proof result, closes no remediation, and activates no guarantee."
     }
   ],
   "residual_risks": [
@@ -832,8 +869,8 @@
     "The registry and this final review are assurance indexes, not product authority, proof results, remediation closure, or activation decisions."
   ],
   "integration_plan": [
-    "Finish isolated validations and bind any available results to one immutable source-commit attestation; preserve unavailable and unattempted states.",
-    "Regenerate this final review against that exact source commit and optional attestation, then confirm the worktree is clean.",
+    "Finish isolated validations and bind every available result to the sorted set of immutable same-source attestations; preserve unavailable and unattempted states.",
+    "Regenerate this final review against that exact source commit, sorted attestation set, and immutable validation-result document from a clean packet-input commit.",
     "Request final owner approval for integration into develop; do not combine that approval with guarantee activation.",
     "After approval, integrate the bounded commits without rewriting frozen Phase 1/2 evidence and validate the resulting develop commit.",
     "Handle any future guarantee activation through separate reviewed decisions and attestation bindings."

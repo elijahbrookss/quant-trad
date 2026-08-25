@@ -90,6 +90,9 @@
       },
       "minItems": 1
     },
+    "final_gate": {
+      "$ref": "#/$defs/finalGate"
+    },
     "integration_plan": {
       "$ref": "#/$defs/nonemptyStrings"
     }
@@ -239,6 +242,35 @@
         },
         "source_tree_kind": {
           "const": "committed_snapshot"
+        },
+        "source_material": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceMaterialEntry"
+          },
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true
+        }
+      }
+    },
+    "sourceMaterialEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "enum": [
+            "docs/assurance/guarantees/proof-catalog.json",
+            "docs/assurance/guarantees/registry.json",
+            "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/hex64"
         }
       }
     },
@@ -867,6 +899,303 @@
           "$ref": "#/$defs/riskIds"
         }
       }
+    },
+    "validationStatus": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "PARTIAL",
+        "MANUAL",
+        "NOT_RUN",
+        "UNAVAILABLE"
+      ]
+    },
+    "validationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hex64"
+        }
+      }
+    },
+    "validationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "command_argv",
+        "status",
+        "exit_code",
+        "started_at",
+        "finished_at",
+        "reason_code",
+        "evidence_refs"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "command_argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^\\u0000\\r\\n]+$"
+          },
+          "minItems": 1
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "PARTIAL",
+            "MANUAL",
+            "NOT_RUN",
+            "UNAVAILABLE"
+          ]
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason_code": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/validationEvidence"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "repositoryState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "packet_input_commit",
+        "packet_input_tree",
+        "develop_commit",
+        "clean"
+      ],
+      "properties": {
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "const": "develop"
+          }
+        },
+        "packet_input_commit": {
+          "$ref": "#/$defs/hex40"
+        },
+        "packet_input_tree": {
+          "$ref": "#/$defs/hex40"
+        },
+        "develop_commit": {
+          "$ref": "#/$defs/hex40"
+        },
+        "clean": {
+          "const": true
+        }
+      }
+    },
+    "validationResultsSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^docs/assurance/guarantees/validation-results/[^/]+\\.json$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hex64"
+        }
+      }
+    },
+    "integrationApprovalRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "requested_action",
+        "target_branch",
+        "guarantee_activation_included"
+      ],
+      "properties": {
+        "status": {
+          "const": "requested"
+        },
+        "requested_action": {
+          "const": "integrate_feature_branch_into_develop"
+        },
+        "target_branch": {
+          "const": "develop"
+        },
+        "guarantee_activation_included": {
+          "const": false
+        }
+      }
+    },
+    "finalGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "repository_state",
+        "validation_results_source",
+        "validation_results",
+        "integration_approval_request"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "intermediate",
+            "final_gate"
+          ]
+        },
+        "repository_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/repositoryState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_results_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/validationResultsSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/validationResult"
+          },
+          "uniqueItems": true
+        },
+        "integration_approval_request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/integrationApprovalRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "intermediate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "repository_state": {
+                "type": "null"
+              },
+              "validation_results_source": {
+                "type": "null"
+              },
+              "validation_results": {
+                "maxItems": 0
+              },
+              "integration_approval_request": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "final_gate"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "repository_state": {
+                "$ref": "#/$defs/repositoryState"
+              },
+              "validation_results_source": {
+                "$ref": "#/$defs/validationResultsSource"
+              },
+              "validation_results": {
+                "minItems": 1
+              },
+              "integration_approval_request": {
+                "$ref": "#/$defs/integrationApprovalRequest"
+              }
+            }
+          }
+        }
+      ]
     },
     "residualRisk": {
       "type": "object",

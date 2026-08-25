@@ -138,3 +138,29 @@ Phase 3 stops with:
 - a proposed integration plan; and
 - an explicit request for final approval before any merge into `develop`.
 
+### Final packet identity
+
+The final packet has two identities that must not be conflated:
+
+1. proof source commit `S`, whose registry, proof catalog, and Phase 3 policy
+   bytes define the assessment and whose exact identity is shared by every
+   bound attestation; and
+2. clean packet-input commit and tree `P`, which already contains the immutable
+   attestations, evidence, and sorted validation-result document used to render
+   the packet.
+
+The rendered JSON and Markdown are then committed alone as packet commit `C`.
+A checked-in file cannot truthfully contain the hash of its own future commit,
+so the packet does not claim that `C` equals an embedded `HEAD`. The strict
+external final-gate check instead verifies that the current worktree is clean,
+the branch is the recorded feature branch, `C` has the single parent `P`, only
+the generated review pair changed in `C`, and `develop` is still the recorded
+commit. The exact `C` commit/tree and any post-commit validation results are
+reported to the owner outside the self-excluding packet at the approval gate.
+
+The ordinary review check remains permissive for intermediate and historical
+pre-attestation packets. Only the explicit strict final-gate check requires a
+nonempty sorted set of same-source attestations, an explicit result for all 85
+active proof definitions, the immutable sorted validation-result document, the
+repository evidence above, and the integration approval request. Neither mode
+activates a guarantee.
