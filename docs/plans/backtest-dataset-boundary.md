@@ -3,7 +3,7 @@ component: plan-backtest-dataset-boundary
 subsystem: execution-runtime
 layer: plan
 doc_type: plan
-status: active
+status: historical
 tags:
   - backtest
   - dataset
@@ -19,6 +19,10 @@ code_paths:
   - src/market_data
 ---
 # Dataset-Bound Backtesting And Performance Campaign
+
+> Historical campaign record. Branch, PR, production-path, and validation
+> statements below describe the recorded July 2026 campaign state and do not
+> assert current integration or deployment status.
 
 ## Baseline
 

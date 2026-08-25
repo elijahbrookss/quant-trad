@@ -1,4 +1,12 @@
+---
+status: historical
+---
+
 # Canonical Fact Migration Discovery
+
+> Historical evidence record. "Current" and database-state descriptions below
+> are observations at the recorded 2026-08-09 pre-cutover baseline, not claims
+> about the platform today.
 
 Status: historical pre-cutover discovery checkpoint. The inventory below was
 completed before implementation and was the comparison boundary for the now

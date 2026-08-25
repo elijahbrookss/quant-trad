@@ -1,4 +1,12 @@
+---
+status: historical
+---
+
 # Canonical Fact Migration Validation
+
+> Historical evidence record. Production, deployment, cutover, and rollback
+> statements below describe the recorded 2026-08-09 migration only; they do not
+> certify current deployment or recovery state.
 
 Status: complete on both a protected backup restore and the source `quanttrad`
 deployment. The canonical migration, equivalence validation, hard cutover,

@@ -1,10 +1,14 @@
 ---
 title: Collector Operations Validation
-status: active
+status: historical
 last_verified: 2026-08-10
 ---
 
 # Collector Operations Validation
+
+> Historical evidence record. "Live," "production," deployment, and rollback
+> statements below describe the recorded 2026-08-10 cutover campaign only; they
+> do not certify the current fleet or current recovery state.
 
 ## Campaign boundary
 
