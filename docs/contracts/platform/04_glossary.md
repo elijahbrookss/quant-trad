@@ -452,7 +452,7 @@ definition here.
   - `accepted_adr` — [0053-use-tiered-market-structure-archive-and-replay-boundary.md — Decision](../../architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md#decision)
   - `accepted_adr` — [0042-use-runtime-event-ledger-as-lifecycle-truth.md — Decision](../../architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md#decision)
   - `accepted_adr` — [0062-use-frozen-bindings-for-durable-check-evidence.md — Decision](../../architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md#decision)
-  - `accepted_adr` — [0059-use-first-class-scientific-research-objects.md — Decision](../../architecture/decisions/0059-use-first-class-scientific-research-objects.md#decision)
+  - `accepted_adr` — [0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md — Decision](../../architecture/decisions/0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md#decision)
 - Definition: `Evidence` has no universal platform meaning. Qualify source/receipt evidence, source-data quality or gap evidence, runtime-lifecycle evidence, Check evidence, and scientific evidence by their owning boundary.
 - Usage boundary: Evidence in one boundary grants no readiness, certification, or authority owned by another boundary.
 - Conflict disposition: none recorded for this term.
@@ -823,10 +823,10 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `reporting`
-- Required reviewers: `platform`, `reporting`
+- Required reviewers: `platform-contract`, `reporting`
 - Authority clauses:
   - `accepted_adr` — [0031-fingerprint-reports-and-slim-runtime-storage.md — Decision](../../architecture/decisions/0031-fingerprint-reports-and-slim-runtime-storage.md#decision)
-  - `accepted_adr` — [0046-use-replay-bundles-for-execution-reproduction.md — Decision](../../architecture/decisions/0046-use-replay-bundles-for-execution-reproduction.md#decision)
+  - `accepted_adr` — [0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md — Decision](../../architecture/decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md#decision)
 - Definition: Input fingerprint validates one report materialization against durable run inputs; data snapshot hash identifies exact runtime-consumed data material
 - Usage boundary: Neither is the semantic or operational fingerprint
 - Conflict disposition: `QT-CONFLICT-024` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
