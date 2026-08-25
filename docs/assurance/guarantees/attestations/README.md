@@ -109,10 +109,14 @@ and forbids `PASS`.
   contradiction was observed.
 - `UNAVAILABLE`: a concrete prerequisite is absent and identified.
 
-Aggregation is conservative: any required FAIL yields FAIL; all required PASS
-yields PASS; homogeneous NOT_RUN, UNAVAILABLE, or MANUAL preserves that state;
-every other mixture yields PARTIAL. Supporting proofs do not determine the
-aggregate.
+Aggregation is conservative: any required FAIL yields FAIL; homogeneous
+NOT_RUN, UNAVAILABLE, or MANUAL preserves that state; every other mixed result
+yields PARTIAL. Even when every active required proof execution passes, the
+guarantee result is PASS only when the registry's proof maturity is `adequate`,
+every active required mapping has `complete` strength, and no proposed required
+proof remains. Otherwise the guarantee result is PARTIAL. This cap does not
+change the individual proof result or mutate registry maturity, conformance,
+disposition, or activation. Supporting proofs do not determine the aggregate.
 
 Do not keep a mutable `latest.json`, put demonstration results here, or copy a
 status into the durable registry. Test fixtures for this model belong under
