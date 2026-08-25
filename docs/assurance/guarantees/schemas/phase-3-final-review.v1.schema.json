@@ -1041,7 +1041,8 @@
           "$ref": "#/$defs/hex40"
         },
         "develop_commit": {
-          "$ref": "#/$defs/hex40"
+          "$ref": "#/$defs/hex40",
+          "description": "Frozen integration-base commit resolved from the authoritative origin refs/heads/develop ref and matched to refs/remotes/origin/develop at packet-input capture."
         },
         "clean": {
           "const": true

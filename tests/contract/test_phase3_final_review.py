@@ -439,7 +439,13 @@ def test_external_gate_verifies_clean_single_packet_commit(monkeypatch) -> None:
             ("rev-parse", "HEAD"): packet_head,
             ("rev-parse", "HEAD^{tree}"): packet_tree,
             ("status", "--porcelain=v1", "--untracked-files=all"): "",
-            ("rev-parse", "develop"): develop,
+            (
+                "ls-remote",
+                "--exit-code",
+                final_review.DEVELOP_REMOTE,
+                final_review.DEVELOP_REMOTE_REF,
+            ): f"{develop}\t{final_review.DEVELOP_REMOTE_REF}",
+            ("rev-parse", final_review.DEVELOP_TRACKING_REF): develop,
             ("show", "-s", "--format=%P", packet_head): packet_input,
             (
                 "diff-tree",
@@ -464,6 +470,65 @@ def test_external_gate_verifies_clean_single_packet_commit(monkeypatch) -> None:
         "packet_parent_commit": packet_input,
         "develop_commit": develop,
     }
+
+
+def test_external_gate_rejects_remote_develop_drift(monkeypatch) -> None:
+    state = {
+        "branch": "feat/docs-guarantee-reconciliation",
+        "packet_input_commit": "a" * 40,
+        "packet_input_tree": "b" * 40,
+        "develop_commit": "c" * 40,
+        "clean": True,
+    }
+
+    def git_text(_root, *args, where):
+        responses = {
+            ("symbolic-ref", "--short", "HEAD"): state["branch"],
+            ("rev-parse", "HEAD"): "d" * 40,
+            ("rev-parse", "HEAD^{tree}"): "e" * 40,
+            ("status", "--porcelain=v1", "--untracked-files=all"): "",
+            (
+                "ls-remote",
+                "--exit-code",
+                final_review.DEVELOP_REMOTE,
+                final_review.DEVELOP_REMOTE_REF,
+            ): f"{'f' * 40}\t{final_review.DEVELOP_REMOTE_REF}",
+            ("rev-parse", final_review.DEVELOP_TRACKING_REF): "f" * 40,
+        }
+        assert args in responses, where
+        return responses[args]
+
+    monkeypatch.setattr(final_review, "_git_text", git_text)
+    with pytest.raises(
+        final_review.FinalReviewError,
+        match="develop_remote:changed_since_packet_input",
+    ):
+        final_review._verify_external_approval_repository_state(
+            final_review.ROOT, state
+        )
+
+
+def test_remote_develop_ref_rejects_stale_tracking_state(monkeypatch) -> None:
+    remote_commit = "a" * 40
+
+    def git_text(_root, *args, where):
+        responses = {
+            (
+                "ls-remote",
+                "--exit-code",
+                final_review.DEVELOP_REMOTE,
+                final_review.DEVELOP_REMOTE_REF,
+            ): f"{remote_commit}\t{final_review.DEVELOP_REMOTE_REF}",
+            ("rev-parse", final_review.DEVELOP_TRACKING_REF): "b" * 40,
+        }
+        assert args in responses, where
+        return responses[args]
+
+    monkeypatch.setattr(final_review, "_git_text", git_text)
+    with pytest.raises(final_review.FinalReviewError, match="tracking:stale"):
+        final_review._remote_develop_commit(
+            final_review.ROOT, "approval_gate.develop_remote"
+        )
 
 
 def test_multiple_attestations_resolve_only_the_owning_profile_result() -> None:

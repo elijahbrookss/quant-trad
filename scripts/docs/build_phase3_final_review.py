@@ -10,7 +10,8 @@ Strict final-gate packets bind proof source commit S plus the clean packet-input
 commit/tree P. The generated packet cannot truthfully contain the identity of
 its own future Git commit C, so ``check --final-gate`` verifies C externally:
 clean branch state, single parent P, only the generated JSON/Markdown pair, and
-unchanged ``develop``. Post-commit validation is likewise reported externally.
+unchanged frozen remote ``develop`` integration base. Post-commit validation is
+likewise reported externally.
 """
 
 from __future__ import annotations
@@ -86,6 +87,9 @@ FINAL_GATE_PACKET_FILES = {
     REVIEW_PATH.relative_to(ROOT).as_posix(),
     VIEW_PATH.relative_to(ROOT).as_posix(),
 }
+DEVELOP_REMOTE = "origin"
+DEVELOP_REMOTE_REF = "refs/heads/develop"
+DEVELOP_TRACKING_REF = "refs/remotes/origin/develop"
 SOURCE_MATERIAL_PATHS = {
     POLICY_PATH.relative_to(ROOT).as_posix(),
     guarantees.REGISTRY_PATH.relative_to(guarantees.ROOT).as_posix(),
@@ -269,6 +273,40 @@ def _git_text(root: Path, *args: str, where: str) -> str:
     return completed.stdout.strip()
 
 
+def _remote_develop_commit(root: Path, where: str) -> str:
+    """Return the authoritative remote develop commit and reject stale tracking data."""
+
+    observed = _git_text(
+        root,
+        "ls-remote",
+        "--exit-code",
+        DEVELOP_REMOTE,
+        DEVELOP_REMOTE_REF,
+        where=f"{where}.origin",
+    )
+    rows = [line.split() for line in observed.splitlines() if line.strip()]
+    if (
+        len(rows) != 1
+        or len(rows[0]) != 2
+        or rows[0][1] != DEVELOP_REMOTE_REF
+        or not HEX40_RE.fullmatch(rows[0][0])
+    ):
+        _fail(f"{where}.origin:unexpected_ref_response")
+    remote_commit = rows[0][0]
+    tracking_commit = _git_text(
+        root,
+        "rev-parse",
+        DEVELOP_TRACKING_REF,
+        where=f"{where}.tracking",
+    )
+    if tracking_commit != remote_commit:
+        _fail(
+            f"{where}.tracking:stale:"
+            f"remote={remote_commit}:tracking={tracking_commit}"
+        )
+    return remote_commit
+
+
 def _git_blob(root: Path, source_commit: str, relative: str, where: str) -> bytes:
     try:
         completed = subprocess.run(
@@ -317,7 +355,11 @@ def _is_ancestor(root: Path, ancestor: str, descendant: str, where: str) -> None
         _fail(f"{where}:not_ancestor:{ancestor}:{descendant}:{exc}")
 
 
-def _capture_packet_input_state(root: Path, source_commit: str) -> dict[str, Any]:
+def _capture_packet_input_state(
+    root: Path,
+    source_commit: str,
+    expected_develop_commit: str,
+) -> dict[str, Any]:
     """Capture the clean parent/tree from which a self-excluding packet is rendered."""
 
     branch = _git_text(root, "symbolic-ref", "--short", "HEAD", where="final_gate.branch")
@@ -325,7 +367,12 @@ def _capture_packet_input_state(root: Path, source_commit: str) -> dict[str, Any
         _fail("final_gate.branch:develop_is_not_an_authorized_packet_branch")
     head_commit = _git_text(root, "rev-parse", "HEAD", where="final_gate.head")
     tree_oid = _git_text(root, "rev-parse", "HEAD^{tree}", where="final_gate.tree")
-    develop_commit = _git_text(root, "rev-parse", "develop", where="final_gate.develop")
+    develop_commit = _remote_develop_commit(root, "final_gate.develop_remote")
+    if develop_commit != expected_develop_commit:
+        _fail(
+            "final_gate.develop_remote:not_frozen_baseline:"
+            f"expected={expected_develop_commit}:observed={develop_commit}"
+        )
     dirty = _git_text(
         root,
         "status",
@@ -354,6 +401,7 @@ def _validate_recorded_packet_input(
     root: Path,
     source_commit: str,
     state: Mapping[str, Any],
+    expected_develop_commit: str,
 ) -> None:
     _exact_keys(
         state,
@@ -376,6 +424,8 @@ def _validate_recorded_packet_input(
             _fail(f"final_gate.repository_state.{key}:expected_40_hex_oid")
     if state["clean"] is not True:
         _fail("final_gate.repository_state.clean:must_be_true")
+    if state["develop_commit"] != expected_develop_commit:
+        _fail("final_gate.repository_state.develop_commit:not_frozen_baseline")
     _verify_git_commit(root, state["packet_input_commit"])
     _verify_git_commit(root, state["develop_commit"])
     observed_tree = _git_text(
@@ -418,10 +468,10 @@ def _verify_external_approval_repository_state(
     )
     if dirty:
         _fail("approval_gate.clean:worktree_not_clean")
-    if _git_text(root, "rev-parse", "develop", where="approval_gate.develop") != state[
-        "develop_commit"
-    ]:
-        _fail("approval_gate.develop:changed_since_packet_input")
+    if _remote_develop_commit(
+        root, "approval_gate.develop_remote"
+    ) != state["develop_commit"]:
+        _fail("approval_gate.develop_remote:changed_since_packet_input")
     parents = _git_text(
         root, "show", "-s", "--format=%P", current_head, where="approval_gate.parent"
     ).split()
@@ -1058,12 +1108,17 @@ def build_review(
         )
         if repository_state is None:
             captured_repository_state = _capture_packet_input_state(
-                root, source_commit
+                root,
+                source_commit,
+                frozen["audit_baseline_commit"],
             )
         else:
             captured_repository_state = dict(repository_state)
             _validate_recorded_packet_input(
-                root, source_commit, captured_repository_state
+                root,
+                source_commit,
+                captured_repository_state,
+                frozen["audit_baseline_commit"],
             )
         final_gate_state: dict[str, Any] = {
             "mode": "final_gate",
@@ -2108,7 +2163,7 @@ def render_markdown(review: Mapping[str, Any]) -> str:
                 "The packet binds the clean repository input from which it was rendered. "
                 "It deliberately does not claim the Git identity of its own containing "
                 "commit. The strict external check verifies that final clean commit, its "
-                "single parent, its two generated files, unchanged `develop`, and any "
+                "single parent, its two generated files, unchanged remote `develop`, and any "
                 "post-commit validation reported at the approval gate.",
                 "",
                 "| Repository evidence | Value |",
@@ -2116,7 +2171,10 @@ def render_markdown(review: Mapping[str, Any]) -> str:
                 f"| Feature branch | `{repository_state['branch']}` |",
                 f"| Clean packet-input commit | `{repository_state['packet_input_commit']}` |",
                 f"| Packet-input tree | `{repository_state['packet_input_tree']}` |",
-                f"| Unchanged develop commit | `{repository_state['develop_commit']}` |",
+                "| Integration base ref | "
+                f"`{DEVELOP_REMOTE} {DEVELOP_REMOTE_REF}` |",
+                "| Unchanged frozen remote develop commit | "
+                f"`{repository_state['develop_commit']}` |",
                 f"| Input worktree clean | `{repository_state['clean']}` |",
                 "",
                 "### Recorded Validation Results",
