@@ -72,7 +72,6 @@
           "items": {
             "$ref": "#/$defs/resourceIdentity"
           },
-          "minItems": 1,
           "type": "array",
           "uniqueItems": true
         },

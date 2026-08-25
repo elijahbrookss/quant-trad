@@ -35,11 +35,13 @@ binds the draft hash, actual resource identities, exact executed-proof set, the
 candidate proof-result digest, timestamps, and one of `complete`,
 `interrupted`, or `executor_error`.
 
-Cleanup produces a `cleanup_manifest`. A successful manifest binds the draft
-and execution-manifest hashes, the same environment and control-plane
-identities, cleanup timestamps, output hashes, and a typed resource inventory.
-Every planned or observed resource must be explicitly absent and the
-session-label query must return an empty set.
+Every cleanup attempt produces an immutable, numbered `cleanup_manifest`. The
+record binds the draft and execution-manifest hashes, the same environment and
+control-plane identities, cleanup timestamps, the exact stdout/stderr bytes and
+their hashes, and a typed resource inventory. Failed and interrupted attempts
+remain durable. A passing record additionally requires every planned or
+observed resource to be explicitly absent and the session-label query to return
+an empty set.
 
 Only a `complete` execution with a successful first cleanup and exact absence
 inventory is finalizable. A proof assertion may still be attested as `FAIL`;

@@ -36,7 +36,7 @@
           "type": "string"
         },
         "cleanup_completed": {
-          "const": true
+          "type": "boolean"
         },
         "cleanup_finished_at": {
           "$ref": "#/$defs/timestamp"
@@ -58,11 +58,26 @@
           "$ref": "#/$defs/hash"
         },
         "exit_code": {
-          "const": 0
+          "minimum": 0,
+          "type": "integer"
         },
         "label_query_remaining": {
-          "maxItems": 0,
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
           "type": "array"
+        },
+        "attempt_number": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cleanup_state": {
+          "enum": [
+            "failed",
+            "interrupted",
+            "passed"
+          ]
         },
         "record_schema_version": {
           "const": "qt.assurance_cleanup_manifest.v1"
@@ -82,8 +97,14 @@
         "stderr_sha256": {
           "$ref": "#/$defs/hash"
         },
+        "stderr": {
+          "type": "string"
+        },
         "stdout_sha256": {
           "$ref": "#/$defs/hash"
+        },
+        "stdout": {
+          "type": "string"
         }
       },
       "required": [
@@ -96,8 +117,12 @@
         "control_plane_identity_sha256",
         "cleanup_started_at",
         "cleanup_finished_at",
+        "attempt_number",
+        "cleanup_state",
         "exit_code",
+        "stdout",
         "stdout_sha256",
+        "stderr",
         "stderr_sha256",
         "cleanup_completed",
         "resources",
@@ -117,7 +142,7 @@
       "additionalProperties": false,
       "properties": {
         "absent": {
-          "const": true
+          "type": "boolean"
         },
         "kind": {
           "enum": [

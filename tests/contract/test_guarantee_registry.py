@@ -3111,11 +3111,16 @@ def test_checked_in_schemas_match_executable_versions_and_enums() -> None:
         ]["const"]
         == guarantees.CLEANUP_MANIFEST_SCHEMA_VERSION
     )
+    assert set(
+        cleanup_manifest_schema["$defs"]["facts"]["properties"][
+            "cleanup_state"
+        ]["enum"]
+    ) == {"failed", "interrupted", "passed"}
     assert (
         cleanup_manifest_schema["$defs"]["facts"]["properties"][
-            "label_query_remaining"
-        ]["maxItems"]
-        == 0
+            "attempt_number"
+        ]["minimum"]
+        == 1
     )
     assert "environments" in attestation_schema["required"]
     assert "environment" not in attestation_schema["properties"]
