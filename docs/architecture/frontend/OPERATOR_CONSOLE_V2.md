@@ -19,7 +19,6 @@ code_paths:
   - portal/frontend/src/features/overview
   - portal/frontend/src/features/operations
   - portal/frontend/src/features/collectors
-  - portal/frontend/src/features/market-structure
   - portal/frontend/src/features/bots/botlens
   - portal/frontend/src/components/bots
   - portal/frontend/src/adapters/marketData.adapter.js
