@@ -198,6 +198,13 @@ approval gate. Phase 3 may change approved normative and product artifacts in
 that order, but it may not merge into `develop` or activate a guarantee without
 the separately required final review.
 
+### Phase 3 Forward Corrections
+
+- [`phase-3-forward-corrections.md`](phase-3-forward-corrections.md) records
+  approved forward-only locator lineage without editing the frozen audit
+  artifacts. Its references are not proof results, remediation closures,
+  attestations, guarantee reclassifications, or activations.
+
 ### Phase 3 Terminology Artifacts
 
 - `phase-3-terminology-dispositions.json` is the non-normative, machine-readable

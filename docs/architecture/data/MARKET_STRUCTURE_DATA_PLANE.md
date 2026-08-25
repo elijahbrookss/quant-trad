@@ -1027,8 +1027,10 @@ effects. It does not claim distributed exactly-once delivery.
 
 ## Determinism And Correctness Proof Plan
 
-Every later phase must add fixtures made from captured, sanitized exact frames.
-No test substitutes imagined Coinbase fields for a proof-spike fixture.
+Each implementation phase was required to add fixtures made from captured,
+sanitized exact frames. No test substitutes imagined Coinbase fields for a
+proof-spike fixture. The matrix below preserves the required proof and
+acceptance definitions; it does not report Phase 3 proof execution or results.
 
 | Proof | Test procedure | Required result |
 |---|---|---|
@@ -1055,9 +1057,10 @@ No test substitutes imagined Coinbase fields for a proof-spike fixture.
 | Consumer failure | crash parser/book/feature worker after source durable but before/after DB commit | restart catches up with idempotent effects and visible lag; acquisition remains bounded |
 | Fence safety | expire owner and let new generation start while old worker attempts append | old append/manifest/session completion rejected transactionally |
 
-Phase 2 is not accepted unless the L2 property suite also generates random
-valid absolute mutation sequences, injected duplicates/gaps, and checkpoint
-cuts and proves the state-machine invariants above.
+The Phase 2 acceptance definition additionally required the L2 property suite
+to generate random valid absolute mutation sequences, injected duplicates and
+gaps, and checkpoint cuts and to prove the state-machine invariants above. This
+retained requirement is not a new proof result.
 
 ## Research Integration And Falsifiable Evidence
 
@@ -1078,9 +1081,25 @@ No study may infer individual long/short positions from aggregate OI, call a
 block trade central-book aggression, or promote a strategy from descriptive
 conditional results.
 
-## Phased Implementation Backlog
+## Implementation History And Remaining Gates
 
-Each phase is independently reviewable and useful without later phases.
+The detailed phase material below is retained as the implementation campaign's
+design and acceptance history. Its dated status statements are campaign
+evidence, not live-environment readings or Phase 3 proof results. Current and
+remaining lifecycle states are:
+
+| Stage | Lifecycle reading |
+|---|---|
+| Phase 0 | completed historical provider-proof and provisional-capacity campaign |
+| Phase 1 | implemented and live-verified for the recorded bounded BIP/BTC scope on 2026-08-02; this record does not establish current production enrollment |
+| Phase 2 | completed for the recorded bounded BIP/BTC scope on 2026-08-02 |
+| Phase 3 | implemented for the recorded bounded BIP/BTC scope on 2026-08-02 |
+| Phase 4 | implemented and accepted for the recorded bounded BIP evidence on 2026-08-02 |
+| Post-Phase-4 production admission | remaining gate; no phase history or document silently satisfies it |
+| Phase 5 observation studies | future work; not implemented or authorized by this document |
+
+Each completed phase remains independently understandable without treating its
+historical acceptance bullets as current attestations.
 
 ### Phase 0: Provider Proof Spikes And Measured Capacity
 
@@ -1240,7 +1259,7 @@ Acceptance:
 Value without later phases: reusable causal feature datasets for any bounded
 research question.
 
-### Post-Phase 4 Production Admission Gate
+### Remaining Post-Phase 4 Production Admission Gate
 
 This gate is required before any market-structure collector is production
 enrolled. It is not a 24-hour runtime cap: validation and admitted production
@@ -1262,7 +1281,7 @@ See [Continuous Collector Runtime](CONTINUOUS_COLLECTOR_RUNTIME.md).
   Desktop/WSL guest free space is never sufficient;
 - only then enroll BIP/BTC, followed by separately budgeted ETP/ETH and SLP/SOL.
 
-### Phase 5: Observation Studies And Existing-Strategy Filters
+### Future Phase 5: Observation Studies And Existing-Strategy Filters
 
 Dependencies: approved Phase 4 datasets; no live-trading authorization.
 
@@ -1287,7 +1306,11 @@ alpha or deployment claim.
 
 ## Explicit Unknowns, Limitations, And Proof Decisions
 
-### Phase 0 Proof Decisions
+### Historical Phase 0 Proof Decisions
+
+These dated campaign decisions are retained to explain the inputs to Phases
+1–4. They do not establish a current proof, attestation, production admission,
+or guarantee state.
 
 | Question | Decision state |
 |---|---|
@@ -1319,54 +1342,60 @@ An unsupported fact is represented in coverage and requirements as unsupported;
 it is never fabricated, inferred from a nearby field, or advertised as a
 Quant-Trad feature.
 
-## Repository Impact Map For A Later Campaign
+## Current Repository Implementation Map
 
-No path below is changed by this design campaign except documentation. These are
-the likely implementation sites.
+This explanatory map names current repository paths instead of preserving
+never-created proposed directories alongside implemented code. Path presence is
+implementation evidence only; it does not by itself establish authority, proof,
+attestation, production admission, or guarantee activation.
 
-| Area | Likely paths/artifacts | Later change |
+| Area | Current paths/artifacts | Current role |
 |---|---|---|
-| Stream contracts/adapters | `src/data_providers/streams/contracts.py`, `src/data_providers/streams/coinbase.py`, `src/data_providers/streams/__init__.py` | raw receive callback/identity, market-trade/L2 parsing, connection-epoch sequence evidence, authenticated/public subscribe support |
-| Provider semantics | `src/data_providers/facts.py`, `src/data_providers/providers/coinbase.py`, `src/data_providers/registry.py` | typed product/trade unit validation and implemented feature declarations only |
-| Core market contracts | `src/market_data/contracts.py`, `src/market_data/requirements.py`, `src/market_data/store.py`, proposed `src/market_data/archive/`, `src/market_data/book/`, `src/market_data/features/` | typed models, source positions, archive manifests, reconstruction/spec/fingerprint contracts |
-| Database models/bootstrap | `portal/backend/db/market_data_models.py`, `portal/backend/db/session.py` | proposed tables, shared fact clock, hypertables, immutability, strict drift checks |
-| Manual migrations | proposed `scripts/db/manual_migration_market_structure_v1.sql` and later phase-specific migrations | out-of-band clean definitions only; no runtime alter/backfill |
-| Repositories | `portal/backend/service/storage/repos/market_data.py`, `market_collection.py`, proposed market archive/book repositories | fenced append, range reads, manifest/pin, validity/checkpoint/spec/dataset refs |
-| Services | `portal/backend/service/market/collector_service.py`, `runtime_market_data.py`, `backtest_dataset_service.py`, proposed archive/replay/book/feature services | continuous session lifecycle, replay, registry-driven dataset planning and causal delivery |
-| Workers | `portal/backend/workers/market_data_collector.py`, proposed stream/archive/replay/feature/retention workers | independent fenced components described above |
-| Paper/runtime | `portal/backend/service/bots/paper_market_stream.py`, `src/engines/bot_runtime/live_market.py`, runtime snapshot contracts | consume canonical facts; do not own archival collection or mutable book state |
-| Controllers/API | `portal/backend/controller/market_data.py`, API schemas | definitions/sessions/archive lag/quality/replay/dataset inspection; no raw secret/object mutation |
-| CLI/MCP | `cli/main.py`, `cli/mcp_server.py`, `cli/api_client.py` | `qt data streams`, `archives`, `quality`, `replay verify`, `features`, and extended dataset coverage/freeze operations |
-| Configuration | `config/defaults.yaml`, `src/core/settings.py`, deployment env docs | allowlist, spool path/cap, rotation, object prefix, retention, reconnect, checkpoint and capacity gates; no second DSN |
-| Tests/fixtures | `tests/test_data_providers`, `tests/test_market_data`, `tests/test_portal`, `tests/integration/runtime`, proposed sanitized raw fixtures | proof fixtures and correctness matrix |
-| Architecture/operations docs | `DATA_BOUNDARY.md`, this design, ADR 0053, developer audit workflow, provider guide, runbooks | accepted boundaries, operating procedures, measured budgets, supported coverage |
+| Stream contracts/adapters | `src/data_providers/streams/contracts.py`, `src/data_providers/streams/coinbase.py`, `src/data_providers/streams/__init__.py` | raw receive identity, market-trade/L2 translation, connection-epoch sequence evidence, and explicit public/authenticated subscription branches |
+| Provider semantics | `src/data_providers/facts.py`, `src/data_providers/providers/coinbase.py`, `src/data_providers/registry.py` | typed product/trade validation and implemented provider capability declarations |
+| Core market contracts and state | `src/market_data/contracts.py`, `src/market_data/requirements.py`, `src/market_data/store.py`, `src/market_data/archive.py`, `src/market_data/order_book.py`, `src/market_data/market_state.py`, `src/market_data/normalization.py`, `src/market_data/frozen.py`, `src/market_data/acquisition_coverage.py` | typed source positions, archive manifests, exact-scope coverage, reconstruction, normalization, fingerprints, and frozen material |
+| Database models/bootstrap | `portal/backend/db/market_data_models.py`, `portal/backend/db/session.py` | current market tables, shared fact clock, hypertables, immutability, and strict drift checks |
+| Manual migrations | `scripts/db/manual_migration_market_data_v2_hard_cutover.sql`, `scripts/db/manual_migration_market_fact_commit_clock_v1.sql`, `scripts/db/manual_enable_market_storage_lifecycle_v1.sql` | reviewed out-of-band schema and storage-lifecycle changes; runtime code does not patch schema |
+| Repositories | `portal/backend/service/storage/repos/market_data.py`, `portal/backend/service/storage/repos/market_collection.py`, `portal/backend/service/storage/repos/market_structure.py`, `portal/backend/service/storage/repos/market_lifecycle.py` | fenced append/range reads plus archive, pin, validity, checkpoint, coverage, and lifecycle persistence |
+| Services | `portal/backend/service/market/continuous_stream_collector.py`, `portal/backend/service/market/continuous_stream_runtime.py`, `portal/backend/service/market/market_structure_service.py`, `portal/backend/service/market/market_storage_lifecycle.py`, `portal/backend/service/market/normalization_service.py`, `portal/backend/service/market/backtest_dataset_service.py`, `portal/backend/service/market/runtime_market_data.py` | bounded and continuous collection, replay/reconstruction, lifecycle planning, normalization, dataset planning, and causal delivery |
+| Workers | `portal/backend/workers/market_data_collector.py`, `portal/backend/workers/market_data_collector_health.py` | supervised collection and health projection over the service-owned plane |
+| Paper/runtime consumers | `portal/backend/service/bots/paper_market_stream.py`, `src/engines/bot_runtime/live_market.py` | consume canonical facts without owning archival collection or mutable book truth |
+| Controllers/API | `portal/backend/controller/market_data.py` and its typed API schemas | definitions, sessions, coverage, quality, replay, lifecycle, and dataset inspection/operations |
+| CLI/MCP | `cli/main.py`, `cli/api.py`, `cli/mcp_server.py` | API-backed collector, market-structure, replay, retention, lifecycle, and dataset operations |
+| Configuration | `config/defaults.yaml`, `src/core/settings.py`, deployment environment documentation | allowlists, spool/archive bounds, retention, reconnect, checkpoint, and capacity settings without a second DSN |
+| Tests/fixtures | `tests/test_data_providers`, `tests/test_market_data`, `tests/test_portal`, `tests/integration/runtime` | current test and fixture locations; a named test remains a proof definition until separately executed and attested |
+| Architecture/operations docs | `DATA_BOUNDARY.md`, this document, ADR 0053, provider guidance, and runbooks | explanatory navigation, accepted decision lineage, operating procedures, measured campaign evidence, and supported-coverage guidance |
 
-The likely CLI operations are intentionally operator-oriented:
+Current CLI operations remain operator-oriented:
 
 ```text
-qt data streams list|show|enable|disable|sessions
-qt data archives coverage|lag|verify
-qt data quality gaps|book-validity
-qt data replay verify --definition ... --start ... --end ...
-qt data features coverage|specs
+qt data collectors fleet|plane|detail|diagnose|probe|events|gaps
+qt data market-structure definitions|sessions|status|continuous-evidence
+qt data market-structure capture|replay|replay-book|compact
+qt data market-structure retention-status|lifecycle-plan|lifecycle-events
 qt data prepare-backtest-dataset ...
 qt data freeze-dataset ...
 ```
 
-The frontend may later visualize these read models, but it is not part of this
-campaign and never becomes the mutation or workflow authority.
+Frontend V2 now visualizes bounded market and collector read models. Its primary
+rooms remain read-only; enumerated collector action requests route through the
+backend's code-owned collector-operations service. The frontend does not become
+market-data truth, mutation-policy authority, or workflow authority.
 
-## Definition Of Ready For Phase 0 And Phase 1
+## Historical Definition Of Ready For Phase 0 And Phase 1
 
-An implementation agent may execute Phase 0 without choosing a new provider,
+The following definition governed the completed campaign and is retained as
+decision lineage, not as a current instruction or proof result.
+
+An implementation agent could execute Phase 0 without choosing a new provider,
 credential model, raw format, storage role, identity, time model, product scope,
-or validity philosophy. Phase 0 exists to fill the explicitly named empirical
+or validity philosophy. Phase 0 existed to fill the explicitly named empirical
 fields, not to redesign the plane.
 
-After Phase 0 acceptance, Phase 1 has fixed boundaries for durable-spool-first
+After Phase 0 acceptance, Phase 1 had fixed boundaries for durable-spool-first
 delivery, pre-parse raw identity, append-only manifest mapping, session fencing,
 trade coverage, trade identity, maker/aggressor translation, unit conversion,
 typed storage, late revisions, aggregation, replay, retention, dataset freezing,
-CLI ownership, and the three-pair gated allowlist. Any proof that contradicts
-those boundaries must amend this proposed design/ADR before implementation
-rather than hiding the contradiction in provider code.
+CLI ownership, and the three-pair gated allowlist. Evidence contradicting those
+boundaries required an owner-reviewed amendment before implementation rather
+than a hidden divergence in provider code.
