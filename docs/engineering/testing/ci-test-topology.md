@@ -1,133 +1,253 @@
 # CI Test Topology
 
-This document describes the current GitHub Actions test topology as it actually exists today.
+This document describes the GitHub Actions topology defined by
+[`.github/workflows/test.yaml`](../../../.github/workflows/test.yaml). The
+workflow runs for pushes to `develop` or `main` and for pull requests targeting
+either branch.
 
 ## Goals
 
-- Fail fast on core/runtime contract regressions.
-- Isolate optional-provider and web import boundary failures.
-- Avoid hidden coupling by centralizing suite definitions.
-- Run every backend test that does not require a live database.
-- Run DB-marked tests only against a disposable container database.
+- Fail fast on backend, frontend, deployment-contract, and database regressions.
+- Keep optional-provider and database boundaries explicit.
+- Use pinned dependency inputs for Python and frontend jobs.
+- Exercise database contracts only against disposable CI databases.
+- Preserve the difference between a passing workflow and runtime, deployment,
+  or production proof.
 
-## Current CI Flow
+## Current Workflow Topology
 
-1. **pr-suite**: `./scripts/ci/run_test_suite.sh pr`
+The workflow defines exactly four jobs. None declares `needs`, so GitHub may run
+them concurrently. The numbering below is for documentation only.
 
-That is the whole GitHub PR gate right now.
+| # | Job ID | Primary boundary |
+| ---: | --- | --- |
+| 1 | `pr-suite` | Complete non-database backend pytest screen on the runner host |
+| 2 | `frontend` | Current frontend test command plus production asset build |
+| 3 | `deployment-contract` | Server shell/Compose validation and attested production-image builds |
+| 4 | `clean-database-bootstrap` | Clean-schema bootstrap followed by PostgreSQL-marked contract tests |
 
-Suite commands are centralized in `scripts/ci/run_test_suite.sh` and run directly on the GitHub runner host by default.
+### 1. `pr-suite`
 
-## Current Boundary
+Runner: `ubuntu-latest` with Python 3.12 and pip caching keyed by
+`requirements.lock`.
 
-- GitHub PR CI is host-run.
-- The local `db` suite always uses the disposable Docker test stack.
-- Product/runtime behavior is still container-first.
-- These are not the same thing.
+The workflow steps are:
 
-The current CI job is a complete non-database backend regression screen, not a
-full runtime-faithful environment.
+1. `Checkout repository` with full Git history;
+2. `Set up Python`;
+3. `Install dependencies` with `pip install --no-deps -r requirements.lock`
+   followed by `python -m pip check`; and
+4. `Run PR suite` with `./scripts/ci/run_test_suite.sh pr`.
 
-## Why this structure
+The `pr` suite currently runs `QT_OMIT_DB_TESTS=1 pytest -q`. It is the complete
+non-database backend screen, not the whole workflow gate.
 
-- GitHub runners do not have the project database available.
-- PR CI omits tests marked `db` before collection so DB-backed modules are not imported for a job that cannot run them.
-- The full non-database suite runs in roughly the same time as the retired
-  filename allowlist, so the PR gate has no second source of test ownership.
-- The PR gate is one job to avoid repeated dependency-install and job-rounding overhead.
-- A single suite-runner script reduces drift between workflow YAML and actual test commands.
-- GitHub-host execution avoids spending time fighting container orchestration for every PR.
+### 2. `frontend`
 
-## What CI Is And Is Not Protecting
+Runner: `ubuntu-latest` with Node.js 20 and npm caching keyed by
+`portal/frontend/package-lock.json`.
 
-Current GitHub PR CI is good at catching:
+The workflow steps are:
 
-- import/bootstrap breakage
-- pure logic regressions
-- provider wiring regressions
-- runtime, wallet, fee, margin, reporting, BotLens, CLI, MCP, and service-contract regressions that do not require a live database
+1. `Checkout repository`;
+2. `Set up Node.js`;
+3. `Install pinned frontend dependencies` with
+   `npm --prefix portal/frontend ci`; and
+4. `Test and build production frontend` with `make frontend-check`.
 
-Current GitHub PR CI is not the source of truth for:
+`frontend-check` invokes the package's current `npm test` command and the Vite
+production build. It does not run lint, a browser, or tests that the current
+package test command does not discover.
 
-- container networking behavior
-- runtime composition across real services
-- database wiring inside the Docker network
-- full backtest/runtime orchestration
-- DB-backed endpoint behavior
+### 3. `deployment-contract`
 
-If a bug only appears once services are inside the Docker network, host-run PR CI may miss it.
+Runner: `ubuntu-latest`, with a 45-minute timeout.
 
-## Safe Landing Path
+The workflow steps are:
 
-### Phase 1 (now)
-- Host-run all non-database backend tests.
-- DB-marked tests omitted from GitHub PR CI.
+1. `Checkout repository`;
+2. `Generate disposable operator environment` by running
+   `bash scripts/automation/server_deploy.sh init-env` with
+   `QT_SINGLE_NODE_ENV_FILE` bound to the checkout's `secrets.env`;
+3. `Validate shell and Compose contracts` by syntax-checking both server
+   scripts, computing the Git revision and source-tree hash, and running
+   `docker compose ... config --quiet`; and
+4. `Build production images with source attestation` by recomputing the
+   revision/tree hash and building `tsdb`, `backend`, `frontend`, and
+   `frontend-v2` from `docker/docker-compose.server.yml`.
 
-### Phase 2
-- Keep semantic profiles for focused diagnosis and local development.
-- Delete or downgrade low-value tests that only freeze implementation shape.
+This job validates configuration and image construction. It does not start the
+composed platform, deploy to a server, exercise health checks, or perform a
+rollback.
 
-### Phase 3
-- Add a separate container-backed runtime/integration job if runtime orchestration bugs become a recurring problem worth paying for.
-- Add provider matrix variants (e.g., alpaca/ccxt/ib) only if third-party SDK regressions justify the cost.
+### 4. `clean-database-bootstrap`
 
-## Operational Rule
+Runner: `ubuntu-latest`, with a
+`timescale/timescaledb:2.14.2-pg15` service exposed on localhost port 5432. The
+service starts `quanttrad_bootstrap` for user `quanttrad` with trust
+authentication.
 
-If you change suite commands, update only `scripts/ci/run_test_suite.sh`.
-If you change profile membership or DB isolation guards, update `tests/conftest.py`.
-Workflow jobs should continue to call the suite script and avoid duplicating pytest arguments.
+The workflow steps are:
 
+1. `Checkout repository`;
+2. `Set up Python` 3.12;
+3. `Install dependencies` from `requirements.lock` and run `pip check`;
+4. `Prepare isolated database contracts` by creating `quanttrad_contracts` and
+   installing `timescaledb` and `pgcrypto` in both databases;
+5. `Prove clean current-schema bootstrap` against `quanttrad_bootstrap`; and
+6. `Run PostgreSQL-backed contract tests` against `quanttrad_contracts`, with
+   the clean-bootstrap test excluded from this second invocation.
 
-## Local Reproduction
+Clean bootstrap and PostgreSQL-marked verification are two sequential steps in
+this fourth job. They are not separate workflow jobs. Both set
+`RUN_DB_TESTS=1`, `QT_DB_TEST_ISOLATED=1`, disable Loki delivery, and use an
+explicit disposable DSN.
 
-To mimic the current GitHub job locally:
+The clean-bootstrap database begins from the service image's empty application
+schema. The DB-marked tests share `quanttrad_contracts` within the job; the
+current workflow does not claim a fresh database per individual test or test
+session.
 
-1. Install dependencies:
-   - `make deps`
-2. Run targeted suites exactly as CI does:
-   - `./scripts/ci/run_test_suite.sh pr`
+## What The Workflow Protects
 
-Useful local-only layers:
+The four-job workflow catches:
 
-- `./scripts/ci/run_test_suite.sh backend` is an explicit alias for the same
-  all-non-database test boundary as `pr`.
-- `./scripts/ci/run_test_suite.sh full` runs the full pytest suite, with DB tests skipped unless `RUN_DB_TESTS=1`.
-- `./scripts/ci/run_test_suite.sh db` runs DB-marked tests in the disposable Docker test stack. It never reuses the operator `PG_DSN`.
-- Direct `RUN_DB_TESTS=1 pytest ...` is rejected unless the isolated marker injected by the suite runner is present.
-- `./scripts/ci/run_test_suite.sh runtime` runs the runtime profile without DB-marked tests.
-- `./scripts/ci/run_test_suite.sh reports` runs the reporting profile without DB-marked tests.
-## Optional Container Reproduction
+- non-database backend import, logic, provider-wiring, runtime, accounting,
+  reporting, BotLens, CLI, MCP, and service-contract regressions;
+- failures discovered by the frontend package's current test command and Vite
+  production build;
+- server-script syntax errors, invalid server Compose configuration, source
+  attestation/build failures, and failures to build the four production images;
+- clean current-schema bootstrap failures on PostgreSQL 15 / TimescaleDB
+  2.14.2; and
+- tests currently marked `db` against the job's disposable contract database.
 
-If you want to debug container-specific issues locally, use the optional Docker path:
+## Honest Ceilings
 
-- `CI_USE_DOCKER=1 ./scripts/ci/run_test_suite.sh core`
-- `CI_USE_DOCKER=1 ./scripts/ci/run_test_suite.sh integration`
+A passing workflow does not by itself prove:
 
-This is a debugging path, not the current default PR gate.
+- composed-service networking or runtime behavior after containers start;
+- deployment, rollback, backup restoration, or server health on an actual host;
+- full backtest, paper, or live runtime orchestration;
+- browser-specific frontend behavior or frontend tests outside the current
+  package test discovery;
+- per-test database isolation within `quanttrad_contracts`;
+- behavior against an existing migrated operator database; or
+- external-provider availability, live order submission, production safety, an
+  attestation result, or guarantee activation.
 
-### Troubleshooting: wait script permission errors
+The workflow uses only its disposable GitHub-hosted environment. Shared
+development, live, and production databases are outside this topology.
 
-If you see `Permission denied` for `wait-for-db.sh` inside a bind-mounted container, invoke it through bash:
-- `bash /app/scripts/wait-for-db.sh ...`
+## Local Reproduction By Job
 
-This avoids dependency on executable bits from host mounts and matches the robust path used in the container wrapper path.
+Use a clean checkout of the revision under review. Match Python 3.12, Node.js
+20, the checked-in lockfiles, and Docker where the job requires it. Never point
+database reproduction at a shared development, live, or production database.
 
+### Reproduce `pr-suite`
 
-## Practical Rule
+```bash
+python -m pip install --upgrade pip
+pip install --no-deps -r requirements.lock
+python -m pip check
+./scripts/ci/run_test_suite.sh pr
+```
 
-Do not assume GitHub PR CI proves container/runtime correctness.
+The `backend` suite is an alias for the same non-database pytest boundary, but
+the workflow calls `pr`.
 
-It proves every non-database backend test passed on a clean runner host. That
-is still useful, but it is not evidence for database or composed-service
-behavior.
+### Reproduce `frontend`
 
-## Agent CI Preflight Checklist
+```bash
+npm --prefix portal/frontend ci
+make frontend-check
+```
 
-Before attempting local CI reproduction, run:
+### Reproduce `deployment-contract`
 
-- `bash -n scripts/ci/run_test_suite.sh`
-- `make deps`
+Run this only in a disposable checkout because `init-env` writes the named
+operator-environment file.
 
-Before optional container reproduction, also run:
+```bash
+export QT_SINGLE_NODE_ENV_FILE="$PWD/secrets.env"
+bash scripts/automation/server_deploy.sh init-env
+bash -n scripts/automation/server_deploy.sh
+bash -n scripts/automation/server_host_bootstrap.sh
 
-- `command -v docker`
+qt_ci_revision="$(git rev-parse HEAD)"
+qt_ci_tree_hash="$(
+  python3 scripts/provenance/source_tree_hash.py \
+    --root . \
+    --git-revision "$qt_ci_revision"
+)"
+export QT_RELEASE_REVISION="$qt_ci_revision"
+export QT_SOURCE_TREE_HASH="$qt_ci_tree_hash"
+
+docker compose \
+  --env-file secrets.env \
+  --file docker/docker-compose.server.yml \
+  config --quiet
+docker compose \
+  --env-file secrets.env \
+  --file docker/docker-compose.server.yml \
+  build tsdb backend frontend frontend-v2
+```
+
+The workflow computes revision/tree-hash material separately in each of its two
+validation/build steps; reusing the same values locally is equivalent only while
+the checkout remains unchanged between commands.
+
+### Reproduce `clean-database-bootstrap`
+
+There is no single local wrapper that exactly reproduces both CI database
+steps. For exact topology, provision a fresh disposable
+`timescale/timescaledb:2.14.2-pg15` service with user `quanttrad`, database
+`quanttrad_bootstrap`, trust authentication, and localhost port 5432. Create a
+second database named `quanttrad_contracts`, then install `timescaledb` and
+`pgcrypto` in both databases.
+
+After installing the Python dependencies as in `pr-suite`, run the two CI test
+steps separately:
+
+```bash
+QT_CI_BOOTSTRAP_DSN='postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_bootstrap'
+QT_CI_CONTRACT_DSN='postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_contracts'
+
+PG_DSN="$QT_CI_BOOTSTRAP_DSN" \
+QT_CLEAN_BOOTSTRAP_TEST_DSN="$QT_CI_BOOTSTRAP_DSN" \
+RUN_DB_TESTS=1 \
+QT_DB_TEST_ISOLATED=1 \
+QT_LOGGING_LOKI_URL='' \
+QT_LOGGING_DEBUG='false' \
+python -m pytest -q tests/test_portal/test_clean_database_bootstrap_db.py
+
+PG_DSN="$QT_CI_CONTRACT_DSN" \
+RUN_DB_TESTS=1 \
+QT_DB_TEST_ISOLATED=1 \
+QT_LOGGING_LOKI_URL='' \
+QT_LOGGING_DEBUG='false' \
+python -m pytest -q -m db \
+  --ignore=tests/test_portal/test_clean_database_bootstrap_db.py
+```
+
+`./scripts/ci/run_test_suite.sh db` remains the convenient repository-owned
+local DB profile. It uses the disposable test Compose stack, but it is not an
+exact reproduction of the fourth workflow job's pinned image, two-database
+layout, and separate clean-bootstrap invocation.
+
+## Ownership And Maintenance
+
+- [The workflow](../../../.github/workflows/test.yaml) owns job IDs, runner and
+  service definitions, and the direct commands for frontend, deployment, and
+  database jobs.
+- [`scripts/ci/run_test_suite.sh`](../../../scripts/ci/run_test_suite.sh) owns
+  the backend pytest suite commands called by `pr-suite` and local profiles.
+- [`portal/frontend/package.json`](../../../portal/frontend/package.json) and
+  [the Makefile](../../../Makefile) own `frontend-check` test/build composition.
+- [`tests/conftest.py`](../../../tests/conftest.py) owns DB opt-in and isolated
+  DSN guards; the workflow owns the two CI database invocations.
+- Update this document whenever workflow jobs or their step boundaries change.
+
+Do not infer full runtime, deployment, proof-attestation, or guarantee coverage
+from a job name. Read the commands and environment of the exact workflow step.
