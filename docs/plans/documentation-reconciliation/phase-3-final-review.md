@@ -19,9 +19,13 @@ Merging into `develop` and guarantee activation remain separate decisions.
 | Phase 2 classification | `f1381f4d2eaa10841e40db42fea32d4ac0844e8f` |
 | Frozen registry SHA-256 | `0f5f16e858ad06d32f0c67140baf2f70bdce7ea14702bc30ea3fd9e879bc54de` |
 | Approved decision packet | `7e2561eb34594bc8fcdcb5df56452c33e6337c57` |
-| Phase 3 source commit | `8029d9ab20ad559c4860a2ca1aed8d0328c99292` |
+| Phase 3 source commit | `1672f22fc269cb3e4b11d68505057932b088e9ed` |
 | Attestation state | `not_attested` |
 | Bound attestations | `0` |
+
+## Review Mode
+
+This packet is in `intermediate` mode.
 
 ## How QT Works After Phase 3
 
@@ -30,6 +34,10 @@ Merging into `develop` and guarantee activation remain separate decisions.
 - Strategies propose decisions from typed outputs; runtime owns execution, fills, accounting, lifecycle, and attained X0-X5 quality.
 - Reports, BotLens, observability, and the operator console explain or project owned truth and cannot rewrite it.
 - External order submission remains closed in every runtime mode, and no proof may use production or live systems.
+- Abrupt cleanup recovery cannot finalize or attest a session, and publication validates all three immutable staged attestations before copying evidence; both mechanisms remain cooperative, crash-consistent controls rather than hostile-process or multi-file transactional guarantees.
+- Phase 3 slice file lists retain each named commit's complete changed-file footprint plus explicitly consumed source inputs; they are evidence bindings, not authority declarations.
+- The commit that finalizes this policy cannot list its own future identity; exact policy bytes are instead bound through source commit S and the final review's source-material hash.
+- Proof results bind exact source, profile, runner, environment, cleanup, and attestation identities; missing prerequisites remain UNAVAILABLE, image identity alone does not prove a hermetic build, and results do not transfer to rewritten commits.
 - The registry and this final review are assurance indexes, not product authority, proof results, remediation closure, or activation decisions.
 
 ## Resulting Guarantee State
@@ -58,7 +66,7 @@ Only the following rows change relative to the frozen registry:
 
 ## Proof And Attestation Accounting
 
-The catalog contains **85** definitions: `{'active': 84, 'proposed': 1}`.
+The catalog contains **85** definitions: `{'active': 85}`.
 
 No immutable attestation is bound, so this review reports no invented PASS, FAIL, NOT_RUN, or UNAVAILABLE result.
 
@@ -95,20 +103,24 @@ Outcome accounting: `{'deferred': 11, 'implemented': 5, 'planned': 50, 'unavaila
 | `QT-RISK-P3-001` | `frozen_forward_lineage` | `high` | Frozen Phase 1/2 evidence and current Phase 3 evidence are different subjects and must never be silently retargeted. | Every forward row retains the frozen registry hash and commit-bound current evidence. |
 | `QT-RISK-P3-002` | `open_denominator` | `high` | Universal and absence claims remain limited by PDR-05 closed-denominator requirements; representative tests are insufficient. | Each claim has an owner-reviewed closed static/runtime denominator, narrowed wording, or remains partial. |
 | `QT-RISK-P3-003` | `proof_maturity` | `high` | Seventy-four guarantees retain partial proof maturity, so an all-green execution cannot become an uncapped guarantee PASS. | A reviewed proof-denominator change explicitly raises the affected registry proof maturity. |
-| `QT-RISK-P3-004` | `environment_unavailable` | `high` | Recovery has no provisioned source/target rehearsal and deployment has no admitted execution profile. | Approved isolated environments are admitted and exercised without production or live resources. |
+| `QT-RISK-P3-004` | `environment_unavailable` | `high` | Recovery has no provisioned source/target rehearsal. QT-PROOF-311 may execute its admitted static validation, but no approved isolated deployment-execution profile exists for clean deployment, negative migration, rollback, and recovery. | Approved isolated environments are admitted and exercised without production or live resources. |
 | `QT-RISK-P3-005` | `proof_catalog_trace` | `medium` | Several newly landed validators are not selected by their corresponding proof definitions and therefore remain validation-only evidence. | Catalog selectors are reviewed and updated, or the validation-only limitation remains explicit. |
 | `QT-RISK-P3-006` | `terminology_deferred` | `medium` | QT-TERM-035 and QT-TERM-055 remain deliberately deferred and block activation claims that depend on them. | The named semantic owners review and adopt or reject the two deferred distinctions. |
 | `QT-RISK-P3-007` | `remediation_open` | `high` | All 68 remediation records remain proposed, pending review, and open even where a bounded implementation slice landed. | Each record is separately reviewed against every acceptance criterion before any lifecycle closure. |
 | `QT-RISK-P3-008` | `attestation_and_activation_identity` | `high` | Local or commit-bound proof results do not establish protected-CI provenance or grant activation authority. | An immutable attestation is bound to protected source identity and a separate activation reviewer records an explicit decision. |
 | `QT-RISK-P3-009` | `external_submission_absence` | `critical` | External order submission remains normatively closed, while its repository-wide absence denominator remains open. | A reviewed repository-wide static denominator confirms the closed boundary without sending an external order. |
 | `QT-RISK-P3-010` | `historical_residue` | `low` | Unavailable BTC V1/V2 lineage and the source-less platform-flow SVG are retained explicitly as historical or unverified evidence. | Recovered provenance or a separately approved disposition replaces the explicit retained-unavailable labels. |
+| `QT-RISK-P3-011` | `runner_build_provenance` | `high` | The candidate Phase 3 runner can be bound immutably at execution, but the currently available build is not proven hermetic: requirements.lock pins versions without artifact hashes, no source-bound offline wheelhouse exists, and no retained build record proves the resolved artifacts. Any later admission establishes exact runtime and image identity only, not hermetic build provenance. | Bind a reviewed hash-complete offline wheelhouse and immutable build record to the source and profile, rebuild without network access, and retain the resulting image identity and build-definition binding. |
+| `QT-RISK-P3-012` | `runner_prerequisite_unavailable` | `high` | The candidate Phase 3 runner inspected for admission does not provide the declared PostgreSQL psql client. Unless a separately reviewed source-bound runner supplies it, QT-PROOF-002 and QT-PROOF-314 must be recorded UNAVAILABLE rather than PASS or product FAIL. | Admit a provenance-pinned PostgreSQL 15 psql client or a separately reviewed equivalent execution design, then execute both proofs in the approved isolated database profile; retain UNAVAILABLE until then. |
+| `QT-RISK-P3-013` | `integration_identity` | `high` | Attestations and the final packet bind exact feature-branch commit identities; rebasing, squashing, cherry-picking, or force-pushing would create a different subject, while integrating into a moved remote develop branch would add unassessed target state. | Verify the authoritative remote origin ref refs/heads/develop still equals frozen d46e40bf55caeea12f4ccbde640c71f271eaf9c4; after final approval, update that remote branch by fast-forward only to the exact reviewed feature head so S, P, and C remain exact ancestors. If the remote ref differs or cannot be verified, invalidate and refresh the packet and return for review. A stale local develop ref is not integration-target evidence. |
+| `QT-RISK-P3-014` | `assurance_lifecycle_concurrency` | `high` | Recovery and staged publication are crash-safe within cooperative same-user use, not transactional against a hostile same-UID process: file locks are advisory, Docker inspect/recheck/remove spans separate CLI calls, a create-only external receipt race can safely deny progress, and repository publication is pending-backed multi-file crash-consistent rather than atomic. | Run the approved campaign without overlapping same-user actors and retain these limits in the final packet. Eliminating the underlying risk requires OS-enforced exclusive runner isolation, a transactional daemon identity-and-removal primitive, and transactional artifact storage; safe receipt-race denial and resumable partial publication remain visible until then. |
 
 ## Proposed Integration Plan
 
-1. Finish isolated validations and bind any available results to one immutable source-commit attestation; preserve unavailable and unattempted states.
-2. Regenerate this final review against that exact source commit and optional attestation, then confirm the worktree is clean.
+1. Finish isolated validations and bind every available result to the sorted set of immutable same-source attestations; preserve unavailable and unattempted states.
+2. Regenerate this final review against that exact source commit, sorted attestation set, and immutable validation-result document from a clean packet-input commit.
 3. Request final owner approval for integration into develop; do not combine that approval with guarantee activation.
-4. After approval, integrate the bounded commits without rewriting frozen Phase 1/2 evidence and validate the resulting develop commit.
+4. After approval, first verify origin refs/heads/develop still equals frozen d46e40bf55caeea12f4ccbde640c71f271eaf9c4; then fast-forward only that remote branch to the exact reviewed feature head—no merge commit, rebase, squash, cherry-pick, or force-push. If it differs or cannot be verified, invalidate and refresh the packet and return for review.
 5. Handle any future guarantee activation through separate reviewed decisions and attestation bindings.
 
 ## Appendix A — All 75 Guarantees
@@ -208,7 +220,7 @@ Outcome accounting: `{'deferred': 11, 'implemented': 5, 'planned': 50, 'unavaila
 | `QT-PROOF-011` | `active` | `python-nondb` | `not_attested` | `—` | — | `QT-GUAR-RUNTIME-PERSISTENCE-FAILURE-BOUNDARY` |
 | `QT-PROOF-012` | `active` | `python-nondb` | `not_attested` | `—` | — | `QT-GUAR-SHARED-APPLICATION-CONTRACT` |
 | `QT-PROOF-013` | `active` | `python-nondb` | `not_attested` | `—` | — | `QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION` |
-| `QT-PROOF-014` | `proposed` | `manual-recovery` | `definition_only` | `—` | — | `QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION` |
+| `QT-PROOF-014` | `active` | `manual-recovery` | `not_attested` | `—` | — | `QT-GUAR-DESTRUCTIVE-RECOVERY-VERIFICATION` |
 | `QT-PROOF-015` | `active` | `python-nondb` | `not_attested` | `—` | — | `QT-GUAR-ARCHITECTURE-DOC-INDEX-INTEGRITY` |
 | `QT-PROOF-100` | `active` | `python-nondb` | `not_attested` | `—` | — | `QT-GUAR-DERIVED-OUTPUT-TIMELINE` |
 | `QT-PROOF-101` | `active` | `python-nondb` | `not_attested` | `—` | — | `QT-GUAR-BACKTEST-FROZEN-BINDING` |
