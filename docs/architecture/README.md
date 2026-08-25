@@ -104,6 +104,19 @@ For adding extension points:
 ## Rules
 
 - Contracts under `docs/contracts/platform/` remain the source of truth.
+- Follow the
+  [component documentation standard](../engineering/documentation/component-documentation-standard.md)
+  for versioned metadata, semantic-owner review routing, and source-module
+  contract discovery.
+- New component docs use metadata version 2. Migrate legacy metadata only as a
+  complete owner-reviewed change; do not infer ownership from existing paths or
+  audit routing.
+- The generated component index is a derived human view. Ownership metadata
+  routes review but does not create product semantics, prove approval, or
+  activate a guarantee.
+- Shared `code_paths` are navigation and coverage, not exclusive file
+  ownership. A discovered source-module contract remains subordinate to the
+  platform contracts.
 - Boundary docs should prefer supported current behavior over future language.
 - Diagrams should be budgeted. Add one only when it makes the intent easier to
   see than prose alone.

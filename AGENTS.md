@@ -229,20 +229,21 @@ When a change materially affects runtime/service/provider/storage/reporting arch
 Required workflow:
 1. Locate existing component docs via `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` before changing architecture.
 2. Update/create relevant component docs under `docs/architecture/<subsystem>/`.
-3. Ensure each affected architecture doc has frontmatter metadata with at least:
-   - `component`
-   - `subsystem`
-   - `layer`
-   - `tags`
-   - `code_paths`
-   - `doc_type`
-   - `status`
+3. Follow `docs/engineering/documentation/component-documentation-standard.md`.
+   New component docs use metadata version 2. Migrate a legacy document only
+   as a complete owner-reviewed change; never infer its owner or reviewers.
 4. Refresh the architecture index with:
    - `python scripts/docs/build_architecture_index.py`
 5. Run `make sync-docs` after doc updates.
 
 Agent expectation:
 - Prefer component-targeted doc updates over broad vague edits.
+- Treat frontmatter ownership as review routing, not product authority or
+  guarantee activation. `CODEOWNERS` cannot supply semantic authority.
+- A source-module contract is discoverable only through its owning component's
+  reviewed metadata and remains subordinate to platform contracts.
+- Treat shared `code_paths` as navigation and coverage, not exclusive file
+  ownership.
 - Runtime composition/wiring changes must keep docs and index in sync.
 - Runtime composition changes should preserve mode-aware seams (`backtest`/`paper`/`live`) even when only backtest is implemented today.
 - If you touch code paths listed in `code_paths`, verify corresponding docs remain accurate.

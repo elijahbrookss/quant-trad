@@ -142,10 +142,19 @@ Important current facts from those files were preserved in the relevant boundary
 
 - Keep contracts authoritative.
 - Prefer boundary docs over package docs.
+- Follow the
+  [component documentation standard](../engineering/documentation/component-documentation-standard.md)
+  for metadata, semantic-owner routing, and source-module contract discovery.
+- Keep architecture prose explanatory. Ownership metadata routes review; it
+  does not create product semantics, prove approval, or activate a guarantee.
+- Migrate legacy frontmatter to version 2 only as a complete owner-reviewed
+  change. Never infer owners from `subsystem`, source paths, audit records, or
+  `CODEOWNERS`.
 - Keep docs short enough to read, but complete enough to debug ownership and flow.
 - Keep explanatory docs intent-first. Avoid template sections that make a page
   look organized without making the system easier to understand.
 - Add diagrams lightly. They should reduce cognitive load, not decorate a page.
 - Use ADRs for durable cross-boundary decisions; keep operational or incident-specific narratives in incident docs.
-- Link to source paths through frontmatter `code_paths`.
+- Link to source paths through frontmatter `code_paths`; shared mappings remain
+  navigation and coverage rather than exclusive file ownership.
 - Rebuild [ARCHITECTURE_COMPONENT_INDEX.md](ARCHITECTURE_COMPONENT_INDEX.md) after frontmatter changes.

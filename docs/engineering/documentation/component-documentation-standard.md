@@ -62,16 +62,105 @@ Architecture docs should be boundary-first, but they should not read like
 policy binders. The reader should come away knowing what the boundary is trying
 to protect and why the rest of the implementation follows from that.
 
-Frontmatter is still required for architecture docs so the generated component
-index can find them:
+Frontmatter makes architecture docs discoverable and gives semantic changes an
+explicit review route. It does not turn explanatory architecture prose into a
+platform contract, prove that a reviewer approved a change, or activate a
+guarantee.
 
-- `component`
-- `subsystem`
-- `layer`
-- `doc_type`
-- `status`
-- `tags`
-- `code_paths`
+### Component Metadata Version 2
+
+New component docs and owner-reviewed metadata migrations use this shape:
+
+```yaml
+---
+metadata_version: 2
+component: indicator-runtime-boundary
+subsystem: indicator-runtime
+layer: boundary
+doc_type: architecture
+status: active
+semantic_owner: indicator-runtime
+required_reviewers:
+  - architecture-documentation-owner
+  - indicator-runtime-owner
+tags:
+  - indicators
+  - runtime
+code_paths:
+  - src/indicators
+module_contracts:
+  - src/indicators/market_profile/docs/timing_contract.md
+---
+```
+
+The fields mean:
+
+- `metadata_version` is `2` for this complete schema. Do not add version 2
+  fields piecemeal to a legacy document.
+- `component` is a repository-unique, stable kebab-case component slug.
+- `subsystem` and `layer` are kebab-case classification slugs.
+- `doc_type` is `architecture`, `adr`, or `validation`.
+- `status` is `active`, `accepted`, `draft`, `historical`, or `superseded`.
+- `semantic_owner` is the canonical boundary or role accountable for the
+  component's meaning. It is not inferred from the folder, `subsystem`, source
+  paths, implementation behavior, audit records, or `CODEOWNERS`.
+- `required_reviewers` is the sorted, unique, nonempty set of canonical role
+  slugs required to review semantic changes. The list is a routing requirement,
+  not evidence that a person holds the role or completed the review.
+- `tags` is a nonempty list of unique stable discovery slugs.
+- `code_paths` is a nonempty list of unique, normalized, existing
+  repository-relative paths used
+  for navigation and coverage. Shared paths are valid and do not make this
+  field a file-ownership registry.
+- `module_contracts` is a sorted, unique list of source-module contract paths
+  owned by this component. Use `module_contracts: []` when the component has
+  none.
+
+Role-to-person or role-to-team resolution belongs in repository governance.
+`CODEOWNERS` may help enforce review routing, but it is neither semantic
+ownership nor product authority. The generated architecture index is the human
+view of this metadata; it is derived and must not be edited as another source of
+truth.
+
+### Source-Module Contract Discovery
+
+A source-module contract is structurally discoverable only when its owning
+version 2 component doc lists it in `module_contracts` and the contract declares
+matching scope and ownership:
+
+```yaml
+---
+module_contract_version: 1
+contract_kind: source-module
+owning_component: indicator-runtime-boundary
+component_scope: market-profile
+semantic_owner: indicator-runtime
+status: active
+---
+```
+
+Only an active `doc_type: architecture` component doc may own a current module
+contract. The contract path must stay inside the repository and be equal to or
+beneath a path declared by the owning component in `code_paths`.
+`owning_component` and `semantic_owner` must exactly match that component's
+metadata, and one contract has one owning component. Draft, historical, and
+superseded contracts may stay linked for lineage, but they are not current
+contract authority.
+
+File placement, a contract-like filename, frontmatter without an owning link,
+or implemented behavior cannot qualify a source-module contract. A discovered
+and reviewed source-module contract remains subordinate to platform contracts.
+Discovery and remediation success still do not activate a guarantee.
+
+### Metadata Transition
+
+Existing unversioned architecture docs keep their legacy seven-field metadata
+until their semantic owner and required reviewers approve a complete migration.
+A migration adds all version 2 fields atomically; it never guesses ownership
+from the current subsystem or from Phase 1/Phase 2 audit routing. New component
+docs use version 2. The transition mechanism may grandfather only the exact
+pre-version-2 document paths, and each reviewed rollout removes its migrated
+paths rather than allowing legacy metadata to expand.
 
 After that, let the doc choose its own shape. Common useful moves are:
 
