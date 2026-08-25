@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -145,6 +146,7 @@ class ProvisionedProfile:
 
 
 CommandRunner = Callable[[Sequence[str], Mapping[str, str], int], CommandResult]
+CONTROL_REAP_TIMEOUT_SECONDS = 5
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -170,30 +172,76 @@ def _default_command_runner(
     argv: Sequence[str], env: Mapping[str, str], timeout_seconds: int
 ) -> CommandResult:
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             list(argv),
-            check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=dict(env),
-            timeout=timeout_seconds,
             shell=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return CommandResult(
-            exc.stdout or b"",
-            (exc.stderr or b"") + b"\nqt_assurance_docker_control:timeout\n",
-            124,
-            True,
+            start_new_session=True,
         )
     except OSError as exc:
         raise DockerLifecycleError(
             f"docker_control_start_failed:{type(exc).__name__}"
         ) from exc
-    return CommandResult(
-        completed.stdout, completed.stderr, int(completed.returncode), False
-    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr, reaped = _terminate_command_process(process)
+        if not stdout:
+            stdout = exc.stdout or b""
+        if not stderr:
+            stderr = exc.stderr or b""
+        reap_marker = (
+            b""
+            if reaped
+            else b"qt_assurance_docker_control:reap_incomplete\n"
+        )
+        return CommandResult(
+            stdout,
+            stderr + b"\nqt_assurance_docker_control:timeout\n" + reap_marker,
+            124,
+            True,
+        )
+    except BaseException:
+        # The lifecycle signal handler deliberately raises a BaseException.  A
+        # plain ``subprocess.run``/``Popen.__exit__`` can then wait forever for
+        # a stuck Docker CLI, preventing the outer cleanup gate from running.
+        # Kill the isolated control-process group and bound the reap before
+        # propagating the original interruption into that cleanup gate.
+        _terminate_command_process(process)
+        raise
+    return CommandResult(stdout, stderr, int(process.returncode), False)
+
+
+def _terminate_command_process(
+    process: subprocess.Popen[bytes],
+) -> tuple[bytes, bytes, bool]:
+    try:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (AttributeError, OSError):
+                process.kill()
+    except OSError:
+        # A concurrent exit is equivalent to the requested termination.  The
+        # bounded reap below remains the authority for whether it completed.
+        pass
+    try:
+        stdout, stderr = process.communicate(timeout=CONTROL_REAP_TIMEOUT_SECONDS)
+        return stdout, stderr, True
+    except subprocess.TimeoutExpired as exc:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=CONTROL_REAP_TIMEOUT_SECONDS)
+            reaped = True
+        except subprocess.TimeoutExpired:
+            reaped = False
+        return exc.stdout or b"", exc.stderr or b"", reaped
 
 
 def _safe_name(value: str, *, limit: int = 63) -> str:

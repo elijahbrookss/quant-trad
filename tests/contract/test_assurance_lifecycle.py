@@ -7,6 +7,8 @@ import signal
 import subprocess
 import sys
 import tarfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -89,6 +91,46 @@ def test_first_signal_enters_noninterruptible_cleanup_before_propagation() -> No
         # A repeated signal is durable state, not a second escape from cleanup.
         os.kill(os.getpid(), signal.SIGTERM)
         assert state.signals == [signal.SIGINT, signal.SIGTERM]
+
+
+def test_signal_during_stuck_docker_control_call_unwinds_promptly(
+    tmp_path: Path,
+) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    fake_control = tmp_path / "sleeping_control.py"
+    fake_control.write_text(
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    def interrupt_when_child_started() -> None:
+        deadline = time.monotonic() + 5
+        while not child_pid_path.exists():
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    sender = threading.Thread(target=interrupt_when_child_started, daemon=True)
+    sender.start()
+    started = time.monotonic()
+    with verifier._installed_interrupt_handlers() as state:
+        with pytest.raises(verifier._ExecutionInterrupted):
+            docker_lifecycle._default_command_runner(
+                [sys.executable, str(fake_control), str(child_pid_path)],
+                os.environ,
+                30,
+            )
+        assert state.cleanup_in_progress is True
+    sender.join(timeout=1)
+    assert not sender.is_alive()
+    assert time.monotonic() - started < 3
+
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
 
 
 def test_private_secret_target_is_reserved_before_first_write(tmp_path: Path) -> None:
