@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import signal
 import subprocess
 import sys
 import tarfile
@@ -78,6 +79,16 @@ def test_process_guard_strips_ambient_credentials_and_kills_timeout_group(
     assert completed.returncode == 124
     assert process_guard.TIMEOUT_MARKER in completed.stderr
     assert b"must-not-reach-child" not in completed.stdout + completed.stderr
+
+
+def test_first_signal_enters_noninterruptible_cleanup_before_propagation() -> None:
+    with verifier._installed_interrupt_handlers() as state:
+        with pytest.raises(verifier._ExecutionInterrupted):
+            os.kill(os.getpid(), signal.SIGINT)
+        assert state.cleanup_in_progress is True
+        # A repeated signal is durable state, not a second escape from cleanup.
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert state.signals == [signal.SIGINT, signal.SIGTERM]
 
 
 def test_private_secret_target_is_reserved_before_first_write(tmp_path: Path) -> None:
@@ -308,6 +319,7 @@ def test_database_runner_observation_retains_only_dsn_hash(tmp_path: Path) -> No
     )
     controller.root.mkdir()
     expected_env = controller._runner_environment(database=True)
+    expected_env["PYTHON_SHA256"] = "f" * 64
     dsn = "postgresql://user:private-password@db/session"
     expected_env["PG_DSN"] = dsn
     observed = {

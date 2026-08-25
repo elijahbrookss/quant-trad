@@ -335,6 +335,10 @@ def _installed_interrupt_handlers() -> Any:
         state.signals.append(signum)
         if state.cleanup_in_progress:
             return
+        # Set the non-interruptible cleanup phase before propagating the first
+        # signal. This closes the transition race into the outer cleanup
+        # ``finally`` and makes repeated signals record-only.
+        state.cleanup_in_progress = True
         raise _ExecutionInterrupted(signum)
 
     try:
@@ -2397,331 +2401,333 @@ def _run_cleanup_gated_session(
 
     with _installed_interrupt_handlers() as interrupt_state:
         try:
-            controller.register_source_snapshot(source_snapshot_sha256)
-            _extract_source_snapshot(source_archive, state["snapshot_root"])
-            service_definition = None
-            if profile["execution_class"] == "isolated_database":
-                service_definition = json.loads(
-                    guarantees._bound_material_bytes(
-                        root,
-                        profile["runtime_definition"],
-                        git_commit=source_commit,
-                    )
-                )["service"]
-            require_node = any(
-                proof["environment_profile_id"] == profile_id
-                and proof["runner"]["kind"] == "node_test"
-                for proof in active_proofs
-            )
-            state["prepared"] = controller.provision(
-                execution_class=profile["execution_class"],
-                require_node=require_node,
-                service_definition=service_definition,
-            )
+            try:
+                controller.register_source_snapshot(source_snapshot_sha256)
+                _extract_source_snapshot(source_archive, state["snapshot_root"])
+                service_definition = None
+                if profile["execution_class"] == "isolated_database":
+                    service_definition = json.loads(
+                        guarantees._bound_material_bytes(
+                            root,
+                            profile["runtime_definition"],
+                            git_commit=source_commit,
+                        )
+                    )["service"]
+                require_node = any(
+                    proof["environment_profile_id"] == profile_id
+                    and proof["runner"]["kind"] == "node_test"
+                    for proof in active_proofs
+                )
+                state["prepared"] = controller.provision(
+                    execution_class=profile["execution_class"],
+                    require_node=require_node,
+                    service_definition=service_definition,
+                )
 
-            for proof in active_proofs:
-                proof_profile_id = proof["environment_profile_id"]
-                if proof_profile_id not in selected:
+                for proof in active_proofs:
+                    proof_profile_id = proof["environment_profile_id"]
+                    if proof_profile_id not in selected:
+                        proof_results.append(
+                            {
+                                "proof_id": proof["id"],
+                                "environment_profile_id": proof_profile_id,
+                                "status": "NOT_RUN",
+                                "evidence_refs": [],
+                                "reason_code": "profile_not_selected",
+                            }
+                        )
+                        continue
+                    supported, unsupported_reason = _runner_supported(proof["runner"])
+                    if proof_profile_id != profile_id:
+                        proof_results.append(
+                            _unavailable_result(
+                                stage_root=stage_root,
+                                attestation_id=attestation_id,
+                                source_commit=source_commit,
+                                proof=proof,
+                                reason_code=(
+                                    unsupported_reason
+                                    if not supported
+                                    else "automated_profile_not_admitted"
+                                ),
+                                details=[
+                                    proof["runner"]["kind"]
+                                    if not supported
+                                    else proof_profile_id
+                                ],
+                            )
+                        )
+                        continue
+                    if not supported:
+                        proof_results.append(
+                            _unavailable_result(
+                                stage_root=stage_root,
+                                attestation_id=attestation_id,
+                                source_commit=source_commit,
+                                proof=proof,
+                                reason_code=unsupported_reason,
+                                details=[proof["runner"]["kind"]],
+                                admission_payload=archive_execution_admission_profile(
+                                    admissions[profile_id],
+                                    source_commit,
+                                    admission_hash,
+                                ),
+                            )
+                        )
+                        continue
+                    if _snapshot_tree_sha256(state["snapshot_root"]) != source_snapshot_sha256:
+                        raise AssuranceExecutionError(
+                            f"source_snapshot_changed_before_proof:{proof['id']}"
+                        )
+                    executable_failure: tuple[str, str] | None = None
+                    for executable, constraint in proof["runner"].get(
+                        "required_executables", {}
+                    ).items():
+                        observed_version = controller.probe_required_executable(executable)
+                        if observed_version is None:
+                            executable_failure = (
+                                "required_executable_unavailable",
+                                executable,
+                            )
+                            break
+                        try:
+                            guarantees._version_satisfies(
+                                observed_version,
+                                constraint,
+                                f"proof.{proof['id']}.required_executables.{executable}",
+                            )
+                        except guarantees.GuaranteeValidationError:
+                            executable_failure = (
+                                "required_executable_version_mismatch",
+                                executable,
+                            )
+                            break
+                    if executable_failure is not None:
+                        proof_results.append(
+                            _unavailable_result(
+                                stage_root=stage_root,
+                                attestation_id=attestation_id,
+                                source_commit=source_commit,
+                                proof=proof,
+                                reason_code=executable_failure[0],
+                                details=[executable_failure[1]],
+                                admission_payload=archive_execution_admission_profile(
+                                    admissions[profile_id],
+                                    source_commit,
+                                    admission_hash,
+                                ),
+                            )
+                        )
+                        continue
+                    inner_argv = guarantees._canonical_runner_argv(proof["runner"])
+                    if inner_argv is None:
+                        raise AssuranceExecutionError(
+                            f"runner_has_no_canonical_argv:{proof['id']}"
+                        )
+                    attempt_profile = PreparedProfile(
+                        profile_id=profile_id,
+                        environment={},
+                        process_env=controller.process_env(),
+                        admission_payload=archive_execution_admission_profile(
+                            admissions[profile_id], source_commit, admission_hash
+                        ),
+                        container_source_root=PurePosixPath("/workspace"),
+                    )
+                    proof_started = _utc_now()
+                    process = _run_process(
+                        controller.proof_argv(
+                            inner_argv, timeout_seconds=proof["timeout_seconds"]
+                        ),
+                        cwd=root,
+                        env=controller.process_env(),
+                        timeout_seconds=proof["timeout_seconds"] + 15,
+                    )
+                    safe_stdout, _ = controller.redact_durable_output(process.stdout)
+                    safe_stderr, _ = controller.redact_durable_output(process.stderr)
+                    process = ProcessResult(
+                        safe_stdout,
+                        safe_stderr,
+                        process.exit_code,
+                        process.timed_out,
+                    )
+                    proof_finished = _utc_now()
+                    guard_marker = (
+                        b"qt_assurance_process_guard:timeout_child_group_terminated\n"
+                    )
+                    if process.timed_out:
+                        controller.terminate_runner()
+                        raise AssuranceExecutionError(
+                            f"docker_exec_host_failsafe_timeout:{proof['id']}"
+                        )
+                    if process.exit_code == 124 and guard_marker in process.stderr:
+                        process = ProcessResult(
+                            process.stdout,
+                            process.stderr,
+                            process.exit_code,
+                            True,
+                        )
+                    proof_results.append(
+                        _attempt_result(
+                            stage_root=stage_root,
+                            attestation_id=attestation_id,
+                            proof=proof,
+                            profile=attempt_profile,
+                            root=root,
+                            started_at=proof_started,
+                            finished_at=proof_finished,
+                            process=process,
+                        )
+                    )
+                if _snapshot_tree_sha256(state["snapshot_root"]) != source_snapshot_sha256:
+                    raise AssuranceExecutionError(
+                        f"source_snapshot_changed_after_execution:{profile_id}"
+                    )
+                controller.verify_observed_configuration(state["prepared"])
+            except _ExecutionInterrupted as exc:
+                execution_state = "interrupted"
+                execution_error = exc
+            except BaseException as exc:
+                execution_state = "executor_error"
+                execution_error = exc
+            execution_finished = _utc_now()
+
+            # From this point until every cleanup attempt completes, signals are
+            # recorded but never allowed to bypass cleanup or later evidence writes.
+            interrupt_state.cleanup_in_progress = True
+            try:
+                completed_proof_ids = {item["proof_id"] for item in proof_results}
+                for proof in active_proofs:
+                    if proof["id"] in completed_proof_ids:
+                        continue
                     proof_results.append(
                         {
                             "proof_id": proof["id"],
-                            "environment_profile_id": proof_profile_id,
+                            "environment_profile_id": proof["environment_profile_id"],
                             "status": "NOT_RUN",
                             "evidence_refs": [],
-                            "reason_code": "profile_not_selected",
+                            "reason_code": (
+                                "execution_interrupted"
+                                if execution_state == "interrupted"
+                                else "executor_error_before_attempt"
+                            ),
                         }
                     )
-                    continue
-                supported, unsupported_reason = _runner_supported(proof["runner"])
-                if proof_profile_id != profile_id:
-                    proof_results.append(
-                        _unavailable_result(
-                            stage_root=stage_root,
-                            attestation_id=attestation_id,
-                            source_commit=source_commit,
-                            proof=proof,
-                            reason_code=(
-                                unsupported_reason
-                                if not supported
-                                else "automated_profile_not_admitted"
-                            ),
-                            details=[
-                                proof["runner"]["kind"]
-                                if not supported
-                                else proof_profile_id
-                            ],
+                proof_results.sort(key=lambda item: item["proof_id"])
+                results_hash = guarantees.proof_results_sha256(proof_results)
+                try:
+                    controller.discover_labeled_resources()
+                except BaseException as exc:
+                    if execution_error is None:
+                        execution_error = exc
+                    execution_state = "executor_error"
+                prepared = state["prepared"] or controller.partial_profile(
+                    profile["execution_class"]
+                )
+                state["prepared"] = prepared
+                executed_ids = sorted(
+                    item["proof_id"]
+                    for item in proof_results
+                    if item["environment_profile_id"] == profile_id
+                    and item["status"] in {"PASS", "FAIL", "PARTIAL"}
+                )
+                manifest_facts = {
+                    "record_schema_version": guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION,
+                    "attestation_id": attestation_id,
+                    "source_commit": source_commit,
+                    "source_snapshot_sha256": source_snapshot_sha256,
+                    "execution_admission_archive_sha256": state[
+                        "admission_archive_hash"
+                    ],
+                    "execution_draft_sha256": state["draft_hash"],
+                    "environment_instance_id": state["environment_instance_id"],
+                    "control_plane_identity_sha256": state["control_identity"],
+                    "execution_state": execution_state,
+                    "execution_started_at": _timestamp(execution_started),
+                    "execution_finished_at": _timestamp(execution_finished),
+                    "executed_proof_ids": executed_ids,
+                    "proof_results_sha256": results_hash,
+                    "resource_identities": prepared.sorted_resources(),
+                }
+                intended_execution_hash = _sha256_bytes(
+                    _canonical_json_bytes(
+                        _environment_evidence_payload(
+                            profile_id=profile_id,
+                            artifact_kind="execution_manifest",
+                            facts=manifest_facts,
                         )
                     )
-                    continue
-                if not supported:
-                    proof_results.append(
-                        _unavailable_result(
-                            stage_root=stage_root,
-                            attestation_id=attestation_id,
-                            source_commit=source_commit,
-                            proof=proof,
-                            reason_code=unsupported_reason,
-                            details=[proof["runner"]["kind"]],
-                            admission_payload=archive_execution_admission_profile(
-                                admissions[profile_id],
-                                source_commit,
-                                admission_hash,
-                            ),
-                        )
-                    )
-                    continue
-                if _snapshot_tree_sha256(state["snapshot_root"]) != source_snapshot_sha256:
-                    raise AssuranceExecutionError(
-                        f"source_snapshot_changed_before_proof:{proof['id']}"
-                    )
-                executable_failure: tuple[str, str] | None = None
-                for executable, constraint in proof["runner"].get(
-                    "required_executables", {}
-                ).items():
-                    observed_version = controller.probe_required_executable(executable)
-                    if observed_version is None:
-                        executable_failure = (
-                            "required_executable_unavailable",
-                            executable,
-                        )
-                        break
-                    try:
-                        guarantees._version_satisfies(
-                            observed_version,
-                            constraint,
-                            f"proof.{proof['id']}.required_executables.{executable}",
-                        )
-                    except guarantees.GuaranteeValidationError:
-                        executable_failure = (
-                            "required_executable_version_mismatch",
-                            executable,
-                        )
-                        break
-                if executable_failure is not None:
-                    proof_results.append(
-                        _unavailable_result(
-                            stage_root=stage_root,
-                            attestation_id=attestation_id,
-                            source_commit=source_commit,
-                            proof=proof,
-                            reason_code=executable_failure[0],
-                            details=[executable_failure[1]],
-                            admission_payload=archive_execution_admission_profile(
-                                admissions[profile_id],
-                                source_commit,
-                                admission_hash,
-                            ),
-                        )
-                    )
-                    continue
-                inner_argv = guarantees._canonical_runner_argv(proof["runner"])
-                if inner_argv is None:
-                    raise AssuranceExecutionError(
-                        f"runner_has_no_canonical_argv:{proof['id']}"
-                    )
-                attempt_profile = PreparedProfile(
+                )
+                execution_ref, execution_hash = _environment_evidence_ref(
+                    stage_root=stage_root,
+                    attestation_id=attestation_id,
                     profile_id=profile_id,
-                    environment={},
-                    process_env=controller.process_env(),
-                    admission_payload=archive_execution_admission_profile(
-                        admissions[profile_id], source_commit, admission_hash
-                    ),
-                    container_source_root=PurePosixPath("/workspace"),
+                    artifact_kind="execution_manifest",
+                    facts=manifest_facts,
                 )
-                proof_started = _utc_now()
-                process = _run_process(
-                    controller.proof_argv(
-                        inner_argv, timeout_seconds=proof["timeout_seconds"]
-                    ),
-                    cwd=root,
-                    env=controller.process_env(),
-                    timeout_seconds=proof["timeout_seconds"] + 15,
-                )
-                safe_stdout, _ = controller.redact_durable_output(process.stdout)
-                safe_stderr, _ = controller.redact_durable_output(process.stderr)
-                process = ProcessResult(
-                    safe_stdout,
-                    safe_stderr,
-                    process.exit_code,
-                    process.timed_out,
-                )
-                proof_finished = _utc_now()
-                guard_marker = (
-                    b"qt_assurance_process_guard:timeout_child_group_terminated\n"
-                )
-                if process.timed_out:
-                    controller.terminate_runner()
-                    raise AssuranceExecutionError(
-                        f"docker_exec_host_failsafe_timeout:{proof['id']}"
-                    )
-                if process.exit_code == 124 and guard_marker in process.stderr:
-                    process = ProcessResult(
-                        process.stdout,
-                        process.stderr,
-                        process.exit_code,
-                        True,
-                    )
-                proof_results.append(
-                    _attempt_result(
-                        stage_root=stage_root,
-                        attestation_id=attestation_id,
-                        proof=proof,
-                        profile=attempt_profile,
-                        root=root,
-                        started_at=proof_started,
-                        finished_at=proof_finished,
-                        process=process,
-                    )
-                )
-            if _snapshot_tree_sha256(state["snapshot_root"]) != source_snapshot_sha256:
-                raise AssuranceExecutionError(
-                    f"source_snapshot_changed_after_execution:{profile_id}"
-                )
-            controller.verify_observed_configuration(state["prepared"])
-        except _ExecutionInterrupted as exc:
-            execution_state = "interrupted"
-            execution_error = exc
-        except BaseException as exc:
-            execution_state = "executor_error"
-            execution_error = exc
-        execution_finished = _utc_now()
-
-        # From this point until every cleanup attempt completes, signals are
-        # recorded but never allowed to bypass cleanup or later evidence writes.
-        interrupt_state.cleanup_in_progress = True
-        try:
-            completed_proof_ids = {item["proof_id"] for item in proof_results}
-            for proof in active_proofs:
-                if proof["id"] in completed_proof_ids:
-                    continue
-                proof_results.append(
-                    {
-                        "proof_id": proof["id"],
-                        "environment_profile_id": proof["environment_profile_id"],
-                        "status": "NOT_RUN",
-                        "evidence_refs": [],
-                        "reason_code": (
-                            "execution_interrupted"
-                            if execution_state == "interrupted"
-                            else "executor_error_before_attempt"
-                        ),
-                    }
-                )
-            proof_results.sort(key=lambda item: item["proof_id"])
-            results_hash = guarantees.proof_results_sha256(proof_results)
-            try:
-                controller.discover_labeled_resources()
             except BaseException as exc:
+                manifest_error = exc
                 if execution_error is None:
                     execution_error = exc
                 execution_state = "executor_error"
-            prepared = state["prepared"] or controller.partial_profile(
-                profile["execution_class"]
-            )
-            state["prepared"] = prepared
-            executed_ids = sorted(
-                item["proof_id"]
-                for item in proof_results
-                if item["environment_profile_id"] == profile_id
-                and item["status"] in {"PASS", "FAIL", "PARTIAL"}
-            )
-            manifest_facts = {
-                "record_schema_version": guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION,
-                "attestation_id": attestation_id,
-                "source_commit": source_commit,
-                "source_snapshot_sha256": source_snapshot_sha256,
-                "execution_admission_archive_sha256": state[
-                    "admission_archive_hash"
-                ],
-                "execution_draft_sha256": state["draft_hash"],
-                "environment_instance_id": state["environment_instance_id"],
-                "control_plane_identity_sha256": state["control_identity"],
-                "execution_state": execution_state,
-                "execution_started_at": _timestamp(execution_started),
-                "execution_finished_at": _timestamp(execution_finished),
-                "executed_proof_ids": executed_ids,
-                "proof_results_sha256": results_hash,
-                "resource_identities": prepared.sorted_resources(),
-            }
-            intended_execution_hash = _sha256_bytes(
-                _canonical_json_bytes(
-                    _environment_evidence_payload(
-                        profile_id=profile_id,
-                        artifact_kind="execution_manifest",
-                        facts=manifest_facts,
-                    )
+                prepared = state["prepared"] or controller.partial_profile(
+                    profile["execution_class"]
                 )
-            )
-            execution_ref, execution_hash = _environment_evidence_ref(
-                stage_root=stage_root,
-                attestation_id=attestation_id,
-                profile_id=profile_id,
-                artifact_kind="execution_manifest",
-                facts=manifest_facts,
-            )
-        except BaseException as exc:
-            manifest_error = exc
-            if execution_error is None:
-                execution_error = exc
-            execution_state = "executor_error"
-            prepared = state["prepared"] or controller.partial_profile(
-                profile["execution_class"]
-            )
-            state["prepared"] = prepared
-            if results_hash is None:
-                results_hash = _sha256_bytes(
+                state["prepared"] = prepared
+                if results_hash is None:
+                    results_hash = _sha256_bytes(
+                        _canonical_json_bytes(
+                            sorted(
+                                proof_results,
+                                key=lambda item: str(item.get("proof_id", "")),
+                            )
+                        )
+                    )
+                fallback_manifest_facts = {
+                    "record_schema_version": guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION,
+                    "attestation_id": attestation_id,
+                    "source_commit": source_commit,
+                    "source_snapshot_sha256": source_snapshot_sha256,
+                    "execution_admission_archive_sha256": state[
+                        "admission_archive_hash"
+                    ],
+                    "execution_draft_sha256": state["draft_hash"],
+                    "environment_instance_id": state["environment_instance_id"],
+                    "control_plane_identity_sha256": state["control_identity"],
+                    "execution_state": "executor_error",
+                    "execution_started_at": _timestamp(execution_started),
+                    "execution_finished_at": _timestamp(_utc_now()),
+                    "executed_proof_ids": sorted(
+                        item["proof_id"]
+                        for item in proof_results
+                        if item.get("environment_profile_id") == profile_id
+                        and item.get("status") in {"PASS", "FAIL", "PARTIAL"}
+                    ),
+                    "proof_results_sha256": results_hash,
+                    "resource_identities": prepared.sorted_resources(),
+                }
+                intended_execution_hash = _sha256_bytes(
                     _canonical_json_bytes(
-                        sorted(
-                            proof_results,
-                            key=lambda item: str(item.get("proof_id", "")),
+                        _environment_evidence_payload(
+                            profile_id=profile_id,
+                            artifact_kind="execution_manifest",
+                            facts=fallback_manifest_facts,
                         )
                     )
                 )
-            fallback_manifest_facts = {
-                "record_schema_version": guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION,
-                "attestation_id": attestation_id,
-                "source_commit": source_commit,
-                "source_snapshot_sha256": source_snapshot_sha256,
-                "execution_admission_archive_sha256": state[
-                    "admission_archive_hash"
-                ],
-                "execution_draft_sha256": state["draft_hash"],
-                "environment_instance_id": state["environment_instance_id"],
-                "control_plane_identity_sha256": state["control_identity"],
-                "execution_state": "executor_error",
-                "execution_started_at": _timestamp(execution_started),
-                "execution_finished_at": _timestamp(_utc_now()),
-                "executed_proof_ids": sorted(
-                    item["proof_id"]
-                    for item in proof_results
-                    if item.get("environment_profile_id") == profile_id
-                    and item.get("status") in {"PASS", "FAIL", "PARTIAL"}
-                ),
-                "proof_results_sha256": results_hash,
-                "resource_identities": prepared.sorted_resources(),
-            }
-            intended_execution_hash = _sha256_bytes(
-                _canonical_json_bytes(
-                    _environment_evidence_payload(
-                        profile_id=profile_id,
-                        artifact_kind="execution_manifest",
-                        facts=fallback_manifest_facts,
-                    )
-                )
-            )
-            if execution_hash is None:
-                try:
-                    execution_ref, execution_hash = _environment_evidence_ref(
-                        stage_root=stage_root,
-                        attestation_id=attestation_id,
-                        profile_id=profile_id,
-                        artifact_kind="execution_manifest",
-                        facts=fallback_manifest_facts,
-                    )
-                except BaseException:
-                    # Cleanup still binds the intended immutable manifest hash.
-                    pass
+                if execution_hash is None:
+                    try:
+                        execution_ref, execution_hash = _environment_evidence_ref(
+                            stage_root=stage_root,
+                            attestation_id=attestation_id,
+                            profile_id=profile_id,
+                            artifact_kind="execution_manifest",
+                            facts=fallback_manifest_facts,
+                        )
+                    except BaseException:
+                        # Cleanup still binds the intended immutable manifest hash.
+                        pass
         finally:
+            interrupt_state.cleanup_in_progress = True
             prepared = state["prepared"] or controller.partial_profile(
                 profile["execution_class"]
             )
