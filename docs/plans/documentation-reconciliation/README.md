@@ -197,3 +197,15 @@ safety boundaries, required sequencing, bounded work packages, and the final
 approval gate. Phase 3 may change approved normative and product artifacts in
 that order, but it may not merge into `develop` or activate a guarantee without
 the separately required final review.
+
+### Phase 3 Terminology Artifacts
+
+- `phase-3-terminology-dispositions.json` is the non-normative, machine-readable
+  decision ledger for all 55 term candidates and 20 alias findings.
+- `phase-3-terminology-dispositions.md` is its generated readable audit view.
+- `../../contracts/platform/04_glossary.md` is the normative vocabulary index
+  for individually adopted terms and ratified alias rules.
+
+The frozen proposal remains byte-for-byte historical evidence. Vocabulary
+adoption remains separate from remediation, proof, attestation, guarantee
+reclassification, and activation.

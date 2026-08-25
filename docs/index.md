@@ -63,6 +63,7 @@ the first page for learning the system.
 - [Runtime contract](contracts/platform/01_runtime_contract.md)
 - [Execution and playback contract](contracts/platform/02_execution_playback_contract.md)
 - [Engineering contract](contracts/platform/03_engineering_contract.md)
+- [Platform glossary](contracts/platform/04_glossary.md)
 
 ## Deep Architecture
 

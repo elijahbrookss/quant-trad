@@ -44,6 +44,7 @@ Agents MUST understand these documents before making architectural or behavioral
 - `docs/contracts/platform/01_runtime_contract.md`
 - `docs/contracts/platform/02_execution_playback_contract.md`
 - `docs/contracts/platform/03_engineering_contract.md`
+- `docs/contracts/platform/04_glossary.md`
 
 These define the system contract.
 

@@ -30,8 +30,9 @@ hierarchy. Assurance registries, proof catalogs, attestations, and campaign
 records index authority and evidence; they are not an additional source of
 product requirements.
 
-An adopted glossary is a vocabulary index into these owners. It may qualify
-terms and aliases but cannot create or broaden behavioral authority.
+The [adopted platform glossary](platform/04_glossary.md) is a vocabulary
+index into these owners. It may qualify terms and aliases but cannot create
+or broaden behavioral authority.
 
 ## Read Order
 
@@ -39,6 +40,7 @@ terms and aliases but cannot create or broaden behavioral authority.
 2. `platform/01_runtime_contract.md`
 3. `platform/02_execution_playback_contract.md`
 4. `platform/03_engineering_contract.md`
+5. `platform/04_glossary.md`
 
 ## Writing Standard
 

@@ -32,9 +32,12 @@ mean that a claim is normative, adequately enforced, proven, or activated.
 - `scripts/docs/guarantees.py` validates the durable inputs and renders or
   checks the human view.
 
-The proposed glossary remains in the reconciliation campaign directory until a
-separate terminology-adoption review. Its location and status prevent
-vocabulary review from silently changing the normative read order.
+The adopted vocabulary index is
+[`docs/contracts/platform/04_glossary.md`](../../contracts/platform/04_glossary.md).
+The frozen [Phase 2 proposal](../../plans/documentation-reconciliation/proposed-glossary.md)
+remains historical campaign evidence and is not normative. Terminology
+adoption does not activate a guarantee, prove enforcement, execute proof, or
+resolve a remediation.
 
 ## Independent axes
 
