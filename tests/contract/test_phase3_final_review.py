@@ -9,7 +9,7 @@ import pytest
 from scripts.docs import build_phase3_final_review as final_review
 
 
-HISTORICAL_SOURCE_COMMIT = "8029d9ab20ad559c4860a2ca1aed8d0328c99292"
+HISTORICAL_SOURCE_COMMIT = "1672f22fc269cb3e4b11d68505057932b088e9ed"
 IMPLEMENTED = {
     "QT-REM-004",
     "QT-REM-207",
@@ -131,14 +131,22 @@ def test_forward_state_and_remediation_outcomes_are_exact(review: dict) -> None:
     )
 
 
-def test_checked_historical_pre_attestation_fixture_is_deterministic(
+def test_checked_intermediate_review_fixture_is_deterministic(
     historical_review: dict,
 ) -> None:
     checked = json.loads(final_review.REVIEW_PATH.read_text(encoding="utf-8"))
     assert checked == historical_review
     assert checked["assessment_subject"]["source_commit"] == HISTORICAL_SOURCE_COMMIT
-    assert "source_material" not in checked["assessment_subject"]
-    assert "final_gate" not in checked
+    assert {
+        row["path"] for row in checked["assessment_subject"]["source_material"]
+    } == final_review.SOURCE_MATERIAL_PATHS
+    assert checked["final_gate"] == {
+        "mode": "intermediate",
+        "repository_state": None,
+        "validation_results_source": None,
+        "validation_results": [],
+        "integration_approval_request": None,
+    }
     assert checked["attestation_binding"]["state"] == "not_attested"
     proof_014 = next(row for row in checked["proofs"] if row["id"] == "QT-PROOF-014")
     assert proof_014["lifecycle"] == "proposed"

@@ -663,11 +663,15 @@
         "9438f20cb27decf8e58faf39efd51d7115baa6af",
         "326ad101ee5a34c5ff4f5ece16ccf765db8f0b17",
         "cdafe2ad7f7870df630e09b62720b493b1fe15e2",
-        "f1aa4995e700eb53eff0d5b02bdc4620e8a29536"
+        "f1aa4995e700eb53eff0d5b02bdc4620e8a29536",
+        "1736052311405fbbab21c095d7a65aa116254ee0"
       ],
       "files": [
         "Makefile",
         "docker/assurance/README.md",
+        "docker/assurance/frontend-node.Dockerfile",
+        "docker/assurance/python-wheel-manifest.lock.json",
+        "docker/assurance/runner-build.profile.json",
         "docs/assurance/guarantees/EXECUTION_LIFECYCLE.md",
         "docs/assurance/guarantees/GUARANTEES.md",
         "docs/assurance/guarantees/README.md",
@@ -682,11 +686,16 @@
         "docs/assurance/guarantees/schemas/execution-manifest.v1.schema.json",
         "docs/assurance/guarantees/schemas/phase-3-final-review.v1.schema.json",
         "docs/assurance/guarantees/schemas/proof-catalog.v1.schema.json",
+        "docs/assurance/guarantees/schemas/python-wheel-manifest.v1.schema.json",
+        "docs/assurance/guarantees/schemas/runner-build-profile.v1.schema.json",
+        "docs/assurance/guarantees/schemas/runner-build-record.v1.schema.json",
+        "docs/assurance/guarantees/schemas/runner-materialization.v1.schema.json",
         "docs/plans/documentation-reconciliation/phase-3-authorization-and-plan.md",
         "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json",
         "docs/plans/documentation-reconciliation/phase-3-final-review.json",
         "docs/plans/documentation-reconciliation/phase-3-final-review.md",
         "scripts/assurance/__init__.py",
+        "scripts/assurance/build_runner.py",
         "scripts/assurance/docker_lifecycle.py",
         "scripts/assurance/node_test_reporter.mjs",
         "scripts/assurance/process_guard.py",
@@ -698,6 +707,7 @@
         "tests/contract/test_assurance_executor.py",
         "tests/contract/test_assurance_lifecycle.py",
         "tests/contract/test_assurance_publication.py",
+        "tests/contract/test_assurance_runner_build.py",
         "tests/contract/test_guarantee_registry.py",
         "tests/contract/test_phase3_final_review.py"
       ],
@@ -705,7 +715,7 @@
       "guarantee_ids": [],
       "remediation_selector": "all",
       "remediation_ids": [],
-      "effect": "Binds admitted proof profiles, typed Node results, structured environment admission, commit-bound and cleanup-gated isolated Docker execution, nonfinalizing abrupt-cleanup recovery, crash-consistent whole-campaign staged publication, conservative guarantee-result capping, and deterministic final-review accounting. It executes no campaign proof, supplies no proof result, closes no remediation, and activates no guarantee."
+      "effect": "Binds admitted proof profiles, typed Node results, structured environment admission, a source/profile-bound hash-complete external wheelhouse, deterministic offline runner materialization and immutable build records, build-record-derived candidate admission, commit-bound and cleanup-gated isolated Docker execution, nonfinalizing abrupt-cleanup recovery, crash-consistent whole-campaign staged publication, conservative guarantee-result capping, and deterministic final-review accounting. It executes no campaign proof, supplies no proof result, closes no remediation, and activates no guarantee."
     }
   ],
   "residual_risks": [
@@ -953,13 +963,13 @@
       "id": "QT-RISK-P3-011",
       "category": "runner_build_provenance",
       "severity": "high",
-      "summary": "The candidate Phase 3 runner can be bound immutably at execution, but the currently available build is not proven hermetic: requirements.lock pins versions without artifact hashes, no source-bound offline wheelhouse exists, and no retained build record proves the resolved artifacts. Any later admission establishes exact runtime and image identity only, not hermetic build provenance.",
+      "summary": "The source-bound runner build design now binds a reviewed hash-complete external wheelhouse, deterministic offline materialization, exact Docker invocation/tool/daemon/base identities, output labels and image identity, and an immutable build record to source and profile. The risk remains high and open until the newly frozen exact source is successfully rebuilt with no network or pulls, the record and image are retained, and the exact candidate receives the required owner admission; implementation and validation alone are not proof.",
       "guarantee_selector": "all",
       "guarantee_ids": [],
       "remediation_selector": "listed",
       "remediation_ids": [],
       "proof_ids": [],
-      "exit_criteria": "Bind a reviewed hash-complete offline wheelhouse and immutable build record to the source and profile, rebuild without network access, and retain the resulting image identity and build-definition binding."
+      "exit_criteria": "Build the newly frozen exact source through the reviewed profile with network disabled and pulls forbidden; retain the validated wheelhouse materialization, immutable build record, resulting image identity, build-definition binding, and explicit owner admission. Preserve UNAVAILABLE if any prerequisite or identity check fails."
     },
     {
       "id": "QT-RISK-P3-012",
@@ -1016,7 +1026,8 @@
     "Abrupt cleanup recovery cannot finalize or attest a session, and publication validates all three immutable staged attestations before copying evidence; both mechanisms remain cooperative, crash-consistent controls rather than hostile-process or multi-file transactional guarantees.",
     "Phase 3 slice file lists retain each named commit's complete changed-file footprint plus explicitly consumed source inputs; they are evidence bindings, not authority declarations.",
     "The commit that finalizes this policy cannot list its own future identity; exact policy bytes are instead bound through source commit S and the final review's source-material hash.",
-    "Proof results bind exact source, profile, runner, environment, cleanup, and attestation identities; missing prerequisites remain UNAVAILABLE, image identity alone does not prove a hermetic build, and results do not transfer to rewritten commits.",
+    "Wheel bytes remain outside Git; source-owned manifest hashes and recorded deterministic materialization bind the exact external artifacts without treating a host cache as authority.",
+    "Proof results bind exact source, profile, runner, environment, cleanup, and attestation identities; runner admission additionally requires the validated immutable offline build record. Missing prerequisites remain UNAVAILABLE, and results do not transfer to rewritten commits.",
     "The registry and this final review are assurance indexes, not product authority, proof results, remediation closure, or activation decisions."
   ],
   "integration_plan": [
