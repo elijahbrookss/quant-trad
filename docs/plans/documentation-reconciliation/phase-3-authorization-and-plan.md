@@ -154,9 +154,12 @@ A checked-in file cannot truthfully contain the hash of its own future commit,
 so the packet does not claim that `C` equals an embedded `HEAD`. The strict
 external final-gate check instead verifies that the current worktree is clean,
 the branch is the recorded feature branch, `C` has the single parent `P`, only
-the generated review pair changed in `C`, and `develop` is still the recorded
-commit. The exact `C` commit/tree and any post-commit validation results are
-reported to the owner outside the self-excluding packet at the approval gate.
+the generated review pair changed in `C`, and the authoritative remote
+`origin` ref `refs/heads/develop` is still the frozen baseline recorded in the
+packet and matches `refs/remotes/origin/develop`. A stale local `develop` ref is
+not integration-target evidence. The exact `C` commit/tree and any post-commit
+validation results are reported to the owner outside the self-excluding packet
+at the approval gate.
 
 The ordinary review check remains permissive for intermediate and historical
 pre-attestation packets. Only the explicit strict final-gate check requires a
