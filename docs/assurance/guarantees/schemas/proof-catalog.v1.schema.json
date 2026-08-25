@@ -56,6 +56,13 @@
     "environmentProfile": {
       "additionalProperties": false,
       "properties": {
+        "execution_class": {
+          "enum": [
+            "isolated_container",
+            "isolated_database",
+            "isolated_recovery"
+          ]
+        },
         "id": {
           "pattern": "^[a-z][a-z0-9-]*$",
           "type": "string"
@@ -83,10 +90,15 @@
           },
           "type": "array",
           "uniqueItems": true
+        },
+        "runtime_definition": {
+          "$ref": "#/$defs/repoPath"
         }
       },
       "required": [
         "id",
+        "execution_class",
+        "runtime_definition",
         "python",
         "lockfiles",
         "required_services"

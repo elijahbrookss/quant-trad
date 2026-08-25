@@ -162,6 +162,11 @@ PROOF_KINDS = {
     "static_validation",
     "manual_procedure",
 }
+EXECUTION_CLASSES = {
+    "isolated_container",
+    "isolated_database",
+    "isolated_recovery",
+}
 RUNNER_KINDS = {
     "pytest",
     "node_test",
@@ -1931,7 +1936,14 @@ def validate_proof_catalog_data(
         profile = _expect_object(raw, where)
         _exact_keys(
             profile,
-            required={"id", "python", "lockfiles", "required_services"},
+            required={
+                "id",
+                "execution_class",
+                "runtime_definition",
+                "python",
+                "lockfiles",
+                "required_services",
+            },
             optional={"node"},
             where=where,
         )
@@ -1939,6 +1951,14 @@ def validate_proof_catalog_data(
         if not PROFILE_ID_RE.fullmatch(profile_id):
             _fail(f"{where}.id:invalid_profile_id:{profile_id}")
         profile_ids.append(profile_id)
+        _enum(
+            profile["execution_class"], EXECUTION_CLASSES, f"{where}.execution_class"
+        )
+        runtime_definition, runtime_path = _repo_path(
+            root, profile["runtime_definition"], f"{where}.runtime_definition"
+        )
+        if not runtime_path.is_file():
+            _fail(f"{where}.runtime_definition:must_be_file:{runtime_definition}")
         python_constraint = _expect_string(profile["python"], f"{where}.python")
         _parse_version_constraint(python_constraint, f"{where}.python")
         if "node" in profile:
@@ -2307,6 +2327,12 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
         proof,
         ("$defs", "proof", "properties", "proof_kind", "enum"),
         PROOF_KINDS,
+        "schema.proof",
+    )
+    _schema_set(
+        proof,
+        ("$defs", "environmentProfile", "properties", "execution_class", "enum"),
+        EXECUTION_CLASSES,
         "schema.proof",
     )
     runner_kinds = {
@@ -2823,6 +2849,14 @@ def required_proof_material_hashes(
         components: list[tuple[str, bytes]] = [
             ("proof-definition", _canonical_json_bytes(proof)),
             ("environment-profile", _canonical_json_bytes(profile)),
+            (
+                f"runtime-definition:{profile['runtime_definition']}",
+                _bound_material_bytes(
+                    bundle.root,
+                    profile["runtime_definition"],
+                    git_commit=git_commit,
+                ),
+            ),
         ]
         components.extend(
             (
@@ -2966,6 +3000,7 @@ def assurance_material_sha256(
         paths.update(ref["path"] for ref in row["remediation_refs"])
     for profile in bundle.proof_catalog["environment_profiles"]:
         paths.update(profile["lockfiles"])
+        paths.add(profile["runtime_definition"])
     for proof in bundle.proof_catalog["proofs"]:
         runner = proof["runner"]
         if runner["kind"] == "pytest":

@@ -60,7 +60,22 @@ def test_catalog_profile_bindings_match_the_executable_profiles() -> None:
 
     assert profiles["frontend-node"]["python"] == ">=3.12,<3.13"
     assert profiles["frontend-node"]["node"] == ">=20,<21"
+    assert profiles["frontend-node"]["execution_class"] == "isolated_container"
+    assert (
+        profiles["frontend-node"]["runtime_definition"]
+        == "docker/assurance/frontend-node.Dockerfile"
+    )
     assert profiles["python-db-isolated"]["python"] == ">=3.12,<3.13"
+    assert profiles["python-db-isolated"]["execution_class"] == "isolated_database"
+    assert (
+        profiles["python-db-isolated"]["runtime_definition"]
+        == "docker/assurance/python-db-isolated.profile.json"
+    )
+    assert profiles["manual-recovery"]["execution_class"] == "isolated_recovery"
+    assert (
+        profiles["manual-recovery"]["runtime_definition"]
+        == "docs/assurance/guarantees/procedures/isolated-recovery-rehearsal.md"
+    )
     db_proofs = [
         proof
         for proof in catalog["proofs"]
@@ -68,4 +83,3 @@ def test_catalog_profile_bindings_match_the_executable_profiles() -> None:
     ]
     assert len(db_proofs) == 7
     assert all(proof["proof_kind"] == "database_integration" for proof in db_proofs)
-

@@ -3,6 +3,8 @@
   "environment_profiles": [
     {
       "id": "frontend-node",
+      "execution_class": "isolated_container",
+      "runtime_definition": "docker/assurance/frontend-node.Dockerfile",
       "python": ">=3.12,<3.13",
       "node": ">=20,<21",
       "lockfiles": [
@@ -13,6 +15,8 @@
     },
     {
       "id": "manual-recovery",
+      "execution_class": "isolated_recovery",
+      "runtime_definition": "docs/assurance/guarantees/procedures/isolated-recovery-rehearsal.md",
       "python": ">=3.12,<3.13",
       "lockfiles": [
         "requirements.lock"
@@ -24,6 +28,8 @@
     },
     {
       "id": "python-db-isolated",
+      "execution_class": "isolated_database",
+      "runtime_definition": "docker/assurance/python-db-isolated.profile.json",
       "python": ">=3.12,<3.13",
       "lockfiles": [
         "requirements.lock"
@@ -34,6 +40,8 @@
     },
     {
       "id": "python-nondb",
+      "execution_class": "isolated_container",
+      "runtime_definition": "docker/assurance/frontend-node.Dockerfile",
       "python": ">=3.12,<3.13",
       "lockfiles": [
         "requirements.lock"
@@ -362,17 +370,17 @@
     },
     {
       "id": "QT-PROOF-014",
-      "title": "Proposed isolated restore rehearsal",
-      "lifecycle": "proposed",
+      "title": "Isolated destructive recovery rehearsal",
+      "lifecycle": "active",
       "proof_kind": "manual_procedure",
       "environment_profile_id": "manual-recovery",
       "runner": {
         "kind": "manual",
         "procedure_ref": {
-          "path": "docs/plans/documentation-reconciliation/phase-2a-calibration.md",
+          "path": "docs/assurance/guarantees/procedures/isolated-recovery-rehearsal.md",
           "locator": {
             "kind": "heading",
-            "value": "`QT-GC-070` \u2014 Destructive recovery verification"
+            "value": "Result Semantics"
           }
         }
       },
@@ -926,7 +934,11 @@
         "selectors": [
           "tests/integration/runtime/test_bot_runtime_entry_execution.py::test_target_exit_uses_maker_fee_and_stop_exit_uses_taker_fee",
           "tests/integration/runtime/test_execution_contexts.py::test_explicit_fee_schedule_inherits_economic_status_and_requires_identity",
-          "tests/integration/runtime/test_execution_contexts.py::test_resolved_context_drives_entry_exit_fees_and_fill_provenance"
+          "tests/integration/runtime/test_execution_contexts.py::test_resolved_context_drives_entry_exit_fees_and_fill_provenance",
+          "tests/test_reports/test_report_contract_routes.py::test_materialized_report_compare_routes_reject_unimplemented_quality_classes",
+          "tests/test_reports/test_report_materialization.py::test_invalid_attained_quality_is_not_materialized",
+          "tests/test_reports/test_run_report_comparison.py::test_invalid_minimum_execution_quality_is_rejected_before_report_reads",
+          "tests/test_reports/test_run_report_comparison.py::test_run_report_dto_rejects_unimplemented_attained_quality_class"
         ]
       },
       "timeout_seconds": 180,
@@ -1682,6 +1694,7 @@
       "runner": {
         "kind": "pytest",
         "selectors": [
+          "tests/contract/test_documentation_reconciliation.py::test_observability_topologies_and_dashboard_operations_stay_aligned",
           "tests/test_observability_config.py::test_dev_config_does_not_enable_direct_loki_handler",
           "tests/test_observability_config.py::test_promtail_indexes_runtime_not_run_identity",
           "tests/test_server_deployment_config.py::test_server_alloy_preserves_bounded_loki_routing_labels"
@@ -1800,6 +1813,7 @@
       "runner": {
         "kind": "pytest",
         "selectors": [
+          "tests/contract/test_documentation_reconciliation.py::test_ci_topology_document_matches_the_exact_four_workflow_jobs",
           "tests/test_server_deployment_config.py::test_ci_builds_the_rendered_production_image_targets"
         ]
       },
@@ -1889,6 +1903,11 @@
         "selectors": [
           "tests/test_portal/test_series_builder_incremental.py::test_fetch_ohlcv_data_prefers_canonical_instrument_fetch",
           "tests/test_portal/test_series_builder_incremental.py::test_instrument_link_resolution_prefers_canonical_instrument_record",
+          "tests/test_portal/test_strategy_market_identity_contract.py::test_canonical_instrument_overwrites_slot_lookup_hints_before_service_write",
+          "tests/test_portal/test_strategy_market_identity_contract.py::test_controller_rejects_recursive_aliases_before_resolution_or_service_mutation",
+          "tests/test_portal/test_strategy_market_identity_contract.py::test_datasource_exchange_and_symbol_are_the_only_fallback_lookup_inputs",
+          "tests/test_portal/test_strategy_market_identity_contract.py::test_direct_service_writes_reject_recursive_aliases_before_registry_mutation",
+          "tests/test_portal/test_strategy_market_identity_contract.py::test_explicit_instrument_id_precedes_all_lookup_hints",
           "tests/test_portal/test_strategy_market_identity_contract.py::test_strategy_create_passes_canonical_market_identity_to_service",
           "tests/test_portal/test_strategy_market_identity_contract.py::test_strategy_read_contract_emits_only_canonical_market_identity",
           "tests/test_portal/test_strategy_market_identity_contract.py::test_strategy_writes_reject_provider_venue_aliases"

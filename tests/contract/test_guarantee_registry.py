@@ -29,6 +29,11 @@ def _base_repository(tmp_path: Path) -> tuple[dict, dict]:
     _write(tmp_path, "src/guard.py", "def enforce_known_at():\n    return True\n")
     _write(tmp_path, "tests/test_known_at.py", "def test_known_at():\n    assert True\n")
     _write(tmp_path, "requirements.lock", "pytest==8.4.2\n")
+    _write(
+        tmp_path,
+        "docker/assurance/python-nondb.profile.json",
+        '{"schema_version":"qt.assurance_environment_profile.v1"}\n',
+    )
     _write(tmp_path, "Makefile", "validate-docs:\n\t@true\n")
     _write(
         tmp_path,
@@ -119,6 +124,8 @@ def _base_repository(tmp_path: Path) -> tuple[dict, dict]:
         "environment_profiles": [
             {
                 "id": "python-nondb",
+                "execution_class": "isolated_container",
+                "runtime_definition": "docker/assurance/python-nondb.profile.json",
                 "python": ">=3.12",
                 "lockfiles": ["requirements.lock"],
                 "required_services": [],
@@ -1146,11 +1153,23 @@ def test_assurance_material_hash_covers_authority_and_proof_files(tmp_path: Path
     )
     bundle = _validate(tmp_path, registry, catalog)
     before = guarantees.assurance_material_sha256(bundle)
+    proof_before = guarantees.required_proof_material_hashes(bundle)["QT-PROOF-001"]
 
     authority = tmp_path / "docs/contracts/platform/00_system_contract.md"
     authority.write_text(authority.read_text(encoding="utf-8") + "More detail.\n", encoding="utf-8")
 
     assert guarantees.assurance_material_sha256(bundle) != before
+
+    runtime_definition = tmp_path / "docker/assurance/python-nondb.profile.json"
+    runtime_definition.write_text(
+        '{"schema_version":"qt.assurance_environment_profile.v2"}\n',
+        encoding="utf-8",
+    )
+    assert guarantees.assurance_material_sha256(bundle) != before
+    assert (
+        guarantees.required_proof_material_hashes(bundle)["QT-PROOF-001"]
+        != proof_before
+    )
 
 
 def test_attestation_derives_not_run_and_rejects_false_result_state(tmp_path: Path) -> None:
@@ -1318,6 +1337,8 @@ def test_attestation_composes_required_proofs_across_environment_profiles(
         0,
         {
             "id": "python-db-isolated",
+            "execution_class": "isolated_database",
+            "runtime_definition": "docker/assurance/python-nondb.profile.json",
             "python": ">=3.12,<3.13",
             "lockfiles": ["requirements.lock"],
             "required_services": [],
@@ -1840,6 +1861,8 @@ def test_native_node_result_uses_exact_names_typed_counts_and_three_hashes(
     catalog["environment_profiles"] = [
         {
             "id": "frontend-node",
+            "execution_class": "isolated_container",
+            "runtime_definition": "docker/assurance/python-nondb.profile.json",
             "python": ">=3.12,<3.13",
             "node": ">=20,<21",
             "lockfiles": [
@@ -2551,6 +2574,14 @@ def test_checked_in_schemas_match_executable_versions_and_enums() -> None:
     assert set(registry_schema["$defs"]["guarantee"]["properties"]["registry_disposition"]["enum"]) == guarantees.REGISTRY_DISPOSITIONS
     assert set(registry_schema["$defs"]["guarantee"]["properties"]["activation_status"]["enum"]) == guarantees.ACTIVATION_STATUSES
     assert set(proof_schema["$defs"]["proof"]["properties"]["proof_kind"]["enum"]) == guarantees.PROOF_KINDS
+    assert set(
+        proof_schema["$defs"]["environmentProfile"]["properties"][
+            "execution_class"
+        ]["enum"]
+    ) == guarantees.EXECUTION_CLASSES
+    assert "runtime_definition" in proof_schema["$defs"]["environmentProfile"][
+        "required"
+    ]
     assert set(attestation_schema["$defs"]["resultStatus"]["enum"]) == guarantees.ATTESTATION_RESULTS
     assert registry_schema["additionalProperties"] is False
     assert proof_schema["additionalProperties"] is False
