@@ -1,0 +1,920 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-trad.local/schemas/phase-3-final-review.v1.schema.json",
+  "title": "QT Phase 3 Final Review v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "authority",
+    "frozen_evidence",
+    "assessment_subject",
+    "attestation_binding",
+    "attestation_results",
+    "summary",
+    "system_summary",
+    "phase3_slices",
+    "guarantees",
+    "proof_accounting",
+    "proofs",
+    "remediations",
+    "residual_risks",
+    "integration_plan"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "qt.phase3_final_review.v1"
+    },
+    "authority": {
+      "const": "non_normative_final_review"
+    },
+    "frozen_evidence": {
+      "$ref": "#/$defs/frozenEvidence"
+    },
+    "assessment_subject": {
+      "$ref": "#/$defs/assessmentSubject"
+    },
+    "attestation_binding": {
+      "$ref": "#/$defs/attestationBinding"
+    },
+    "attestation_results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/attestationResultSet"
+      }
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "system_summary": {
+      "$ref": "#/$defs/nonemptyStrings"
+    },
+    "phase3_slices": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/phase3Slice"
+      },
+      "minItems": 1
+    },
+    "guarantees": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/guarantee"
+      },
+      "minItems": 75,
+      "maxItems": 75
+    },
+    "proof_accounting": {
+      "$ref": "#/$defs/proofAccounting"
+    },
+    "proofs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proof"
+      },
+      "minItems": 85,
+      "maxItems": 85
+    },
+    "remediations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/remediation"
+      },
+      "minItems": 68,
+      "maxItems": 68
+    },
+    "residual_risks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/residualRisk"
+      },
+      "minItems": 1
+    },
+    "integration_plan": {
+      "$ref": "#/$defs/nonemptyStrings"
+    }
+  },
+  "$defs": {
+    "hex40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "attestationId": {
+      "type": "string",
+      "pattern": "^QT-ATT-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8,40}-[a-z0-9-]+$"
+    },
+    "guaranteeId": {
+      "type": "string",
+      "pattern": "^QT-GUAR-[A-Z0-9]+(?:-[A-Z0-9]+)*$"
+    },
+    "candidateId": {
+      "type": "string",
+      "pattern": "^QT-GC-[0-9]{3}$"
+    },
+    "proofId": {
+      "type": "string",
+      "pattern": "^QT-PROOF-[0-9]{3}$"
+    },
+    "remediationId": {
+      "type": "string",
+      "pattern": "^QT-REM-[0-9]{3}$"
+    },
+    "termId": {
+      "type": "string",
+      "pattern": "^QT-TERM-[0-9]{3}$"
+    },
+    "sliceId": {
+      "type": "string",
+      "pattern": "^QT-P3-SLICE-[A-Z0-9-]+$"
+    },
+    "riskId": {
+      "type": "string",
+      "pattern": "^QT-RISK-P3-[0-9]{3}$"
+    },
+    "repoPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    },
+    "nonemptyStrings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "stringSet": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "guaranteeIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/guaranteeId"
+      },
+      "uniqueItems": true
+    },
+    "proofIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proofId"
+      },
+      "uniqueItems": true
+    },
+    "remediationIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/remediationId"
+      },
+      "uniqueItems": true
+    },
+    "sliceIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sliceId"
+      },
+      "uniqueItems": true
+    },
+    "riskIds": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/riskId"
+      },
+      "uniqueItems": true
+    },
+    "countMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "frozenEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_baseline_commit",
+        "classification_commit",
+        "decision_packet_commit",
+        "registry_path",
+        "registry_sha256"
+      ],
+      "properties": {
+        "audit_baseline_commit": {
+          "$ref": "#/$defs/hex40"
+        },
+        "classification_commit": {
+          "$ref": "#/$defs/hex40"
+        },
+        "decision_packet_commit": {
+          "$ref": "#/$defs/hex40"
+        },
+        "registry_path": {
+          "const": "docs/assurance/guarantees/registry.json"
+        },
+        "registry_sha256": {
+          "$ref": "#/$defs/hex64"
+        }
+      }
+    },
+    "assessmentSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_commit",
+        "source_tree_kind"
+      ],
+      "properties": {
+        "source_commit": {
+          "$ref": "#/$defs/hex40"
+        },
+        "source_tree_kind": {
+          "const": "committed_snapshot"
+        }
+      }
+    },
+    "attestationBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "attestations"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_attested",
+            "bound"
+          ]
+        },
+        "attestations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attestationBindingEntry"
+          },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "not_attested"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "attestations": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "bound"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "attestations": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "attestationBindingEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestation_id",
+        "path",
+        "sha256",
+        "environment_profile_ids"
+      ],
+      "properties": {
+        "attestation_id": {
+          "$ref": "#/$defs/attestationId"
+        },
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hex64"
+        },
+        "environment_profile_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "attestationResultSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestation_id",
+        "path",
+        "proof_results",
+        "guarantee_results"
+      ],
+      "properties": {
+        "attestation_id": {
+          "$ref": "#/$defs/attestationId"
+        },
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "proof_results": {
+          "type": "array",
+          "items": {
+            "$ref": "attestation.v1.schema.json#/$defs/proofResult"
+          },
+          "minItems": 1
+        },
+        "guarantee_results": {
+          "type": "array",
+          "items": {
+            "$ref": "attestation.v1.schema.json#/$defs/guaranteeResult"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guarantees",
+        "remediations",
+        "proof_definitions",
+        "claim_lifecycle",
+        "registry_disposition",
+        "conformance",
+        "enforcement_maturity",
+        "proof_maturity",
+        "activation_status",
+        "remediation_outcomes"
+      ],
+      "properties": {
+        "guarantees": {
+          "const": 75
+        },
+        "remediations": {
+          "const": 68
+        },
+        "proof_definitions": {
+          "const": 85
+        },
+        "claim_lifecycle": {
+          "$ref": "#/$defs/countMap"
+        },
+        "registry_disposition": {
+          "$ref": "#/$defs/countMap"
+        },
+        "conformance": {
+          "$ref": "#/$defs/countMap"
+        },
+        "enforcement_maturity": {
+          "$ref": "#/$defs/countMap"
+        },
+        "proof_maturity": {
+          "$ref": "#/$defs/countMap"
+        },
+        "activation_status": {
+          "$ref": "#/$defs/countMap"
+        },
+        "remediation_outcomes": {
+          "$ref": "#/$defs/countMap"
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_lifecycle",
+        "registry_disposition",
+        "conformance",
+        "enforcement_maturity",
+        "proof_maturity",
+        "activation_status"
+      ],
+      "properties": {
+        "claim_lifecycle": {
+          "enum": [
+            "current",
+            "proposed",
+            "superseded",
+            "historical",
+            "unclear"
+          ]
+        },
+        "registry_disposition": {
+          "enum": [
+            "enforced",
+            "partially_enforced",
+            "candidate",
+            "implementation_property",
+            "superseded",
+            "contradicted",
+            "unclear"
+          ]
+        },
+        "conformance": {
+          "enum": [
+            "static_aligned",
+            "partial",
+            "contradicted",
+            "unclear",
+            "not_assessed"
+          ]
+        },
+        "enforcement_maturity": {
+          "enum": [
+            "none",
+            "named",
+            "partial",
+            "adequate",
+            "defense_in_depth",
+            "unclear"
+          ]
+        },
+        "proof_maturity": {
+          "enum": [
+            "none",
+            "named",
+            "partial",
+            "adequate",
+            "unclear"
+          ]
+        },
+        "activation_status": {
+          "enum": [
+            "unactivated",
+            "active"
+          ]
+        }
+      }
+    },
+    "proofStatus": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_RUN",
+        "MANUAL",
+        "PARTIAL",
+        "UNAVAILABLE"
+      ]
+    },
+    "proofAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "attested_status",
+        "reported_status",
+        "proof_ids",
+        "reason_codes"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_attested",
+            "attested",
+            "unavailable"
+          ]
+        },
+        "attested_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/proofStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reported_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/proofStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proof_ids": {
+          "$ref": "#/$defs/proofIds"
+        },
+        "reason_codes": {
+          "$ref": "#/$defs/stringSet"
+        }
+      }
+    },
+    "guarantee": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "candidate_ids",
+        "frozen_state",
+        "forward_state",
+        "changed_fields",
+        "forward_reason_codes",
+        "active_required_proof_ids",
+        "proposed_required_proof_ids",
+        "proof_assessment",
+        "remediation_ids",
+        "deferred_term_ids",
+        "phase3_slice_ids",
+        "residual_risk_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/guaranteeId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "candidate_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/candidateId"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "frozen_state": {
+          "$ref": "#/$defs/state"
+        },
+        "forward_state": {
+          "$ref": "#/$defs/state"
+        },
+        "changed_fields": {
+          "$ref": "#/$defs/stringSet"
+        },
+        "forward_reason_codes": {
+          "$ref": "#/$defs/stringSet"
+        },
+        "active_required_proof_ids": {
+          "$ref": "#/$defs/proofIds"
+        },
+        "proposed_required_proof_ids": {
+          "$ref": "#/$defs/proofIds"
+        },
+        "proof_assessment": {
+          "$ref": "#/$defs/proofAssessment"
+        },
+        "remediation_ids": {
+          "$ref": "#/$defs/remediationIds"
+        },
+        "deferred_term_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/termId"
+          },
+          "uniqueItems": true
+        },
+        "phase3_slice_ids": {
+          "$ref": "#/$defs/sliceIds"
+        },
+        "residual_risk_ids": {
+          "$ref": "#/$defs/riskIds"
+        }
+      }
+    },
+    "phase3Slice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "commits",
+        "files",
+        "guarantee_ids",
+        "remediation_ids",
+        "effect"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/sliceId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hex40"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "guarantee_ids": {
+          "$ref": "#/$defs/guaranteeIds"
+        },
+        "remediation_ids": {
+          "$ref": "#/$defs/remediationIds"
+        },
+        "effect": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "proofAccounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "catalog_path",
+        "catalog_sha256",
+        "definition_count",
+        "lifecycle_counts",
+        "environment_counts",
+        "attestation_count",
+        "raw_result_counts",
+        "effective_result_counts"
+      ],
+      "properties": {
+        "catalog_path": {
+          "const": "docs/assurance/guarantees/proof-catalog.json"
+        },
+        "catalog_sha256": {
+          "$ref": "#/$defs/hex64"
+        },
+        "definition_count": {
+          "const": 85
+        },
+        "lifecycle_counts": {
+          "$ref": "#/$defs/countMap"
+        },
+        "environment_counts": {
+          "$ref": "#/$defs/countMap"
+        },
+        "attestation_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "raw_result_counts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/countMap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_result_counts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/countMap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "lifecycle",
+        "environment_profile_id",
+        "guarantee_ids",
+        "result_state",
+        "attested_status",
+        "effective_attestation_ids",
+        "raw_result_refs"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/proofId"
+        },
+        "lifecycle": {
+          "enum": [
+            "active",
+            "proposed",
+            "superseded",
+            "retired"
+          ]
+        },
+        "environment_profile_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "guarantee_ids": {
+          "$ref": "#/$defs/guaranteeIds"
+        },
+        "result_state": {
+          "enum": [
+            "not_attested",
+            "definition_only",
+            "not_run",
+            "profile_result",
+            "unavailable"
+          ]
+        },
+        "attested_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/proofStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_attestation_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/attestationId"
+          },
+          "uniqueItems": true
+        },
+        "raw_result_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rawResultRef"
+          }
+        }
+      }
+    },
+    "rawResultRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestation_id",
+        "status",
+        "profile_bound"
+      ],
+      "properties": {
+        "attestation_id": {
+          "$ref": "#/$defs/attestationId"
+        },
+        "status": {
+          "$ref": "#/$defs/proofStatus"
+        },
+        "profile_bound": {
+          "type": "boolean"
+        }
+      }
+    },
+    "remediation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "guarantee_ids",
+        "source_path",
+        "source_lifecycle",
+        "source_review_status",
+        "approved_phase2_disposition",
+        "phase3_action_outcome",
+        "acceptance_state",
+        "closure_state",
+        "proof_ids",
+        "phase3_slice_ids",
+        "residual_risk_ids"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/remediationId"
+        },
+        "guarantee_ids": {
+          "$ref": "#/$defs/guaranteeIds"
+        },
+        "source_path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "source_lifecycle": {
+          "const": "proposed"
+        },
+        "source_review_status": {
+          "const": "pending"
+        },
+        "approved_phase2_disposition": {
+          "enum": [
+            "retain_phase3",
+            "split_resolution_execution",
+            "defer_activation_priority",
+            "defer_owner_approval",
+            "defer_proof_environment"
+          ]
+        },
+        "phase3_action_outcome": {
+          "enum": [
+            "implemented",
+            "planned",
+            "deferred",
+            "blocked",
+            "unavailable"
+          ]
+        },
+        "acceptance_state": {
+          "enum": [
+            "not_assessed",
+            "partial",
+            "met",
+            "contradicted"
+          ]
+        },
+        "closure_state": {
+          "const": "open"
+        },
+        "proof_ids": {
+          "$ref": "#/$defs/proofIds"
+        },
+        "phase3_slice_ids": {
+          "$ref": "#/$defs/sliceIds"
+        },
+        "residual_risk_ids": {
+          "$ref": "#/$defs/riskIds"
+        }
+      }
+    },
+    "residualRisk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "category",
+        "severity",
+        "summary",
+        "guarantee_ids",
+        "remediation_ids",
+        "proof_ids",
+        "exit_criteria"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/riskId"
+        },
+        "category": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "severity": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "guarantee_ids": {
+          "$ref": "#/$defs/guaranteeIds"
+        },
+        "remediation_ids": {
+          "$ref": "#/$defs/remediationIds"
+        },
+        "proof_ids": {
+          "$ref": "#/$defs/proofIds"
+        },
+        "exit_criteria": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}
