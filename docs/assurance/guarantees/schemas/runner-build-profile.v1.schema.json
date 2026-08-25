@@ -1,0 +1,260 @@
+{
+  "$id": "https://quant-trad.local/schemas/assurance-runner-build-profile.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "base_images": {
+      "items": false,
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/nodeImage"
+        },
+        {
+          "$ref": "#/$defs/pythonImage"
+        }
+      ],
+      "type": "array"
+    },
+    "docker": {
+      "$ref": "#/$defs/docker"
+    },
+    "external_order_submission_enabled": {
+      "const": false
+    },
+    "id": {
+      "const": "phase3-python312-node20-offline"
+    },
+    "installation": {
+      "$ref": "#/$defs/installation"
+    },
+    "platform": {
+      "$ref": "#/$defs/platform"
+    },
+    "required_image_labels": {
+      "const": [
+        "com.quant-trad.assurance.source",
+        "com.quant-trad.assurance.source-tree",
+        "com.quant-trad.assurance.build-profile-sha256",
+        "com.quant-trad.assurance.build-definition-sha256",
+        "com.quant-trad.assurance.wheel-manifest-sha256",
+        "com.quant-trad.assurance.wheel-artifact-sha256",
+        "com.quant-trad.assurance.build-context-sha256"
+      ]
+    },
+    "schema_version": {
+      "const": "qt.assurance_runner_build_profile.v1"
+    },
+    "source_materials": {
+      "$ref": "#/$defs/sourceMaterials"
+    },
+    "wheelhouse": {
+      "$ref": "#/$defs/wheelhouse"
+    }
+  },
+  "required": [
+    "schema_version",
+    "id",
+    "platform",
+    "external_order_submission_enabled",
+    "source_materials",
+    "wheelhouse",
+    "docker",
+    "base_images",
+    "installation",
+    "required_image_labels"
+  ],
+  "title": "QT Assurance Runner Build Profile v1",
+  "type": "object",
+  "$defs": {
+    "docker": {
+      "additionalProperties": false,
+      "properties": {
+        "context_transport": {
+          "const": "verified_tar_stdin"
+        },
+        "network_mode": {
+          "const": "none"
+        },
+        "no_cache": {
+          "const": true
+        },
+        "pull": {
+          "const": false
+        },
+        "shell": {
+          "const": false
+        }
+      },
+      "required": [
+        "network_mode",
+        "pull",
+        "no_cache",
+        "shell",
+        "context_transport"
+      ],
+      "type": "object"
+    },
+    "imageDigest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "installation": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "const": [
+            "python",
+            "-m",
+            "pip",
+            "install",
+            "--no-cache-dir",
+            "--no-index",
+            "--no-deps",
+            "--only-binary=:all:",
+            "--require-hashes",
+            "--find-links=/opt/qt-assurance/wheelhouse",
+            "-r",
+            "/opt/qt-assurance/requirements.hashed.txt"
+          ]
+        },
+        "intentionally_unavailable_executables": {
+          "const": [
+            "psql"
+          ]
+        },
+        "pip_check_argv": {
+          "const": [
+            "python",
+            "-m",
+            "pip",
+            "check"
+          ]
+        }
+      },
+      "required": [
+        "argv",
+        "pip_check_argv",
+        "intentionally_unavailable_executables"
+      ],
+      "type": "object"
+    },
+    "nodeImage": {
+      "additionalProperties": false,
+      "properties": {
+        "argument": {
+          "const": "NODE_IMAGE"
+        },
+        "digest": {
+          "const": "sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
+        },
+        "reference": {
+          "const": "docker.io/library/node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
+        },
+        "stage": {
+          "const": "node_runtime"
+        }
+      },
+      "required": [
+        "argument",
+        "stage",
+        "reference",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "platform": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture": {
+          "const": "amd64"
+        },
+        "glibc_max": {
+          "const": "2.36"
+        },
+        "os": {
+          "const": "linux"
+        },
+        "python": {
+          "const": "3.12"
+        }
+      },
+      "required": [
+        "os",
+        "architecture",
+        "python",
+        "glibc_max"
+      ],
+      "type": "object"
+    },
+    "pythonImage": {
+      "additionalProperties": false,
+      "properties": {
+        "argument": {
+          "const": "PYTHON_IMAGE"
+        },
+        "digest": {
+          "const": "sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134"
+        },
+        "reference": {
+          "const": "docker.io/library/python@sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134"
+        },
+        "stage": {
+          "const": "runtime"
+        }
+      },
+      "required": [
+        "argument",
+        "stage",
+        "reference",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "sourceMaterials": {
+      "additionalProperties": false,
+      "properties": {
+        "dockerfile": {
+          "const": "docker/assurance/frontend-node.Dockerfile"
+        },
+        "materializer": {
+          "const": "scripts/assurance/build_runner.py"
+        },
+        "requirements_lock": {
+          "const": "requirements.lock"
+        },
+        "wheel_manifest": {
+          "const": "docker/assurance/python-wheel-manifest.lock.json"
+        }
+      },
+      "required": [
+        "dockerfile",
+        "requirements_lock",
+        "wheel_manifest",
+        "materializer"
+      ],
+      "type": "object"
+    },
+    "wheelhouse": {
+      "additionalProperties": false,
+      "properties": {
+        "context_prefix": {
+          "const": ".qt-assurance-wheelhouse"
+        },
+        "hashed_requirements_name": {
+          "const": "requirements.hashed.txt"
+        },
+        "manifest_name": {
+          "const": "python-wheel-manifest.lock.json"
+        }
+      },
+      "required": [
+        "context_prefix",
+        "hashed_requirements_name",
+        "manifest_name"
+      ],
+      "type": "object"
+    }
+  }
+}

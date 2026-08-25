@@ -338,7 +338,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
-	test-reporting test-reporting-api test-botlens test-runtime backend-check glossary-render guarantees-render phase3-final-review-render validate-glossary validate-guarantees validate-phase3-final-review validate-phase3-final-gate validate-docs frontend-test frontend-build frontend-check \
+	test-reporting test-reporting-api test-botlens test-runtime backend-check glossary-render guarantees-render phase3-final-review-render validate-glossary validate-guarantees validate-assurance-runner validate-phase3-final-review validate-phase3-final-gate validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check check-all
 
 status: ## Show service status without docker compose ps sandbox friction
@@ -483,6 +483,9 @@ validate-glossary: venv ## Validate terminology metadata and generated views
 validate-guarantees: venv ## Validate guarantee metadata and its generated human view
 	@$(PYTHON) scripts/docs/guarantees.py check
 	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_guarantee_registry.py
+
+validate-assurance-runner: venv ## Validate the source-bound offline runner model without Docker or network
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_assurance_environment_profiles.py tests/contract/test_assurance_runner_build.py
 
 validate-phase3-final-review: venv ## Validate the non-normative Phase 3 final-review model
 	@$(PYTHON) scripts/docs/build_phase3_final_review.py check

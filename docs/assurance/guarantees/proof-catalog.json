@@ -5,6 +5,7 @@
       "id": "frontend-node",
       "execution_class": "isolated_container",
       "runtime_definition": "docker/assurance/frontend-node.Dockerfile",
+      "runner_build_profile": "docker/assurance/runner-build.profile.json",
       "python": ">=3.12,<3.13",
       "node": ">=20,<21",
       "lockfiles": [
@@ -30,6 +31,7 @@
       "id": "python-db-isolated",
       "execution_class": "isolated_database",
       "runtime_definition": "docker/assurance/python-db-isolated.profile.json",
+      "runner_build_profile": "docker/assurance/runner-build.profile.json",
       "python": ">=3.12,<3.13",
       "lockfiles": [
         "requirements.lock"
@@ -42,6 +44,7 @@
       "id": "python-nondb",
       "execution_class": "isolated_container",
       "runtime_definition": "docker/assurance/frontend-node.Dockerfile",
+      "runner_build_profile": "docker/assurance/runner-build.profile.json",
       "python": ">=3.12,<3.13",
       "lockfiles": [
         "requirements.lock"

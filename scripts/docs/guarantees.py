@@ -14,6 +14,7 @@ import ast
 import hashlib
 import io
 import json
+import os
 import posixpath
 import re
 import subprocess
@@ -24,7 +25,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterator, Mapping, NoReturn, Sequence
 
 
@@ -57,6 +58,10 @@ SCHEMA_PATHS = {
     "proof-catalog": SCHEMA_DIR / "proof-catalog.v1.schema.json",
     "attestation": SCHEMA_DIR / "attestation.v1.schema.json",
     "execution-admission": SCHEMA_DIR / "execution-admission.v1.schema.json",
+    "python-wheel-manifest": SCHEMA_DIR / "python-wheel-manifest.v1.schema.json",
+    "runner-build-profile": SCHEMA_DIR / "runner-build-profile.v1.schema.json",
+    "runner-materialization": SCHEMA_DIR / "runner-materialization.v1.schema.json",
+    "runner-build-record": SCHEMA_DIR / "runner-build-record.v1.schema.json",
     "execution-draft": SCHEMA_DIR / "execution-draft.v1.schema.json",
     "execution-manifest": SCHEMA_DIR / "execution-manifest.v1.schema.json",
     "cleanup-manifest": SCHEMA_DIR / "cleanup-manifest.v1.schema.json",
@@ -79,6 +84,12 @@ EXECUTION_MANIFEST_SCHEMA_VERSION = "qt.assurance_execution_manifest.v1"
 CLEANUP_MANIFEST_SCHEMA_VERSION = "qt.assurance_cleanup_manifest.v1"
 CLEANUP_RECOVERY_INTENT_SCHEMA_VERSION = "qt.assurance_cleanup_recovery_intent.v1"
 CLEANUP_RECOVERY_REPORT_SCHEMA_VERSION = "qt.assurance_cleanup_recovery_report.v1"
+PYTHON_WHEEL_MANIFEST_SCHEMA_VERSION = "qt.assurance_python_wheel_manifest.v1"
+RUNNER_BUILD_PROFILE_SCHEMA_VERSION = "qt.assurance_runner_build_profile.v1"
+RUNNER_MATERIALIZATION_SCHEMA_VERSION = "qt.assurance_runner_materialization.v1"
+RUNNER_BUILD_RECORD_SCHEMA_VERSION = "qt.assurance_runner_build_record.v1"
+PYTHON_WHEEL_MANIFEST_PATH = ROOT / "docker/assurance/python-wheel-manifest.lock.json"
+RUNNER_BUILD_PROFILE_PATH = ROOT / "docker/assurance/runner-build.profile.json"
 
 GUARANTEE_ID_RE = re.compile(r"QT-GUAR-[A-Z0-9]+(?:-[A-Z0-9]+)*\Z")
 CANDIDATE_ID_RE = re.compile(r"QT-GC-(\d{3})\Z")
@@ -104,6 +115,18 @@ ATTESTATION_ID_RE = re.compile(
 )
 VERSION_CLAUSE_RE = re.compile(r"(>=|<=|==|>|<)\s*([0-9]+(?:\.[0-9]+)*)\Z")
 RFC2119_STRONG_RE = re.compile(r"\b(?:MUST(?: NOT)?|SHALL(?: NOT)?|REQUIRED)\b")
+
+
+def _git_env() -> dict[str, str]:
+    """Return a closed Git environment for historical object resolution."""
+
+    env = dict(os.environ)
+    for name in list(env):
+        if name.startswith("GIT_"):
+            env.pop(name, None)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["LC_ALL"] = "C"
+    return env
 
 CLAIM_KINDS = {
     "behavioral_invariant",
@@ -241,6 +264,7 @@ LIFECYCLE_BINDING_FACTS = {
     "execution_draft_sha256",
     "execution_manifest_sha256",
     "proof_results_sha256",
+    "runner_build_record_sha256",
     "source_snapshot_sha256",
 }
 NORMATIVE_AUTHORITY_KINDS = {
@@ -276,6 +300,7 @@ class ValidationBundle:
     registry: dict[str, Any]
     proof_catalog: dict[str, Any]
     root: Path
+    git_object_root: Path | None = None
 
 
 def _fail(message: str) -> NoReturn:
@@ -531,6 +556,7 @@ def _baseline_reference_text(
                 ],
                 check=True,
                 capture_output=True,
+                env=_git_env(),
             )
             object_type = subprocess.run(
                 [
@@ -544,6 +570,7 @@ def _baseline_reference_text(
                 check=True,
                 capture_output=True,
                 text=True,
+                env=_git_env(),
             ).stdout.strip()
             if object_type != "blob":
                 _fail(f"{where}:baseline_reference_must_be_file:{path}")
@@ -551,6 +578,7 @@ def _baseline_reference_text(
                 ["git", "-C", str(git_object_root), "show", f"{baseline_commit}:{path}"],
                 check=True,
                 capture_output=True,
+                env=_git_env(),
             ).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             _fail(f"{where}:baseline_git_reference_unavailable:{path}:{exc}")
@@ -2020,14 +2048,14 @@ def validate_proof_catalog_data(
                 "lockfiles",
                 "required_services",
             },
-            optional={"node"},
+            optional={"node", "runner_build_profile"},
             where=where,
         )
         profile_id = _expect_string(profile["id"], f"{where}.id")
         if not PROFILE_ID_RE.fullmatch(profile_id):
             _fail(f"{where}.id:invalid_profile_id:{profile_id}")
         profile_ids.append(profile_id)
-        _enum(
+        execution_class = _enum(
             profile["execution_class"], EXECUTION_CLASSES, f"{where}.execution_class"
         )
         runtime_definition, runtime_path = _repo_path(
@@ -2035,6 +2063,20 @@ def validate_proof_catalog_data(
         )
         if not runtime_path.is_file():
             _fail(f"{where}.runtime_definition:must_be_file:{runtime_definition}")
+        if execution_class in {"isolated_container", "isolated_database"}:
+            if "runner_build_profile" not in profile:
+                _fail(f"{where}.runner_build_profile:required_for_automated_profile")
+            build_profile, build_profile_path = _repo_path(
+                root,
+                profile["runner_build_profile"],
+                f"{where}.runner_build_profile",
+            )
+            if not build_profile_path.is_file():
+                _fail(
+                    f"{where}.runner_build_profile:must_be_file:{build_profile}"
+                )
+        elif "runner_build_profile" in profile:
+            _fail(f"{where}.runner_build_profile:forbidden_for_nonautomated_profile")
         python_constraint = _expect_string(profile["python"], f"{where}.python")
         _parse_version_constraint(python_constraint, f"{where}.python")
         if "node" in profile:
@@ -2258,6 +2300,22 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
             ("properties", "schema_version", "const"),
             CLEANUP_RECOVERY_INTENT_SCHEMA_VERSION,
         ),
+        "python-wheel-manifest": (
+            ("properties", "schema_version", "const"),
+            PYTHON_WHEEL_MANIFEST_SCHEMA_VERSION,
+        ),
+        "runner-build-profile": (
+            ("properties", "schema_version", "const"),
+            RUNNER_BUILD_PROFILE_SCHEMA_VERSION,
+        ),
+        "runner-materialization": (
+            ("properties", "schema_version", "const"),
+            RUNNER_MATERIALIZATION_SCHEMA_VERSION,
+        ),
+        "runner-build-record": (
+            ("properties", "schema_version", "const"),
+            RUNNER_BUILD_RECORD_SCHEMA_VERSION,
+        ),
     }
     for schema_name, (path, expected) in lifecycle_schema_versions.items():
         if _schema_value(
@@ -2443,6 +2501,12 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
         EXECUTION_CLASSES,
         "schema.proof",
     )
+    if _schema_value(
+        proof,
+        ("$defs", "environmentProfile", "properties", "runner_build_profile", "type"),
+        "schema.proof",
+    ) != "string":
+        _fail("schema.proof:runner_build_profile_shape_mismatch")
     runner_kinds = {
         _schema_value(proof, ("$defs", "pytestRunner", "properties", "kind", "const"), "schema.proof"),
         _schema_value(proof, ("$defs", "nodeRunner", "properties", "kind", "const"), "schema.proof"),
@@ -2541,6 +2605,120 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
         _fail("schema.attestation:node_event_transport_schema_version_mismatch")
 
 
+def _validate_runner_build_sources(
+    *, root: Path, proof_catalog: Mapping[str, Any]
+) -> None:
+    """Validate the source-owned portion of the offline runner closure.
+
+    Byte-level wheel and Docker environment checks stay in build_runner.py;
+    this standard-library check keeps routine docs validation tied to the exact
+    lock/profile model without performing cache discovery or a build.
+    """
+
+    manifest_path = root / PYTHON_WHEEL_MANIFEST_PATH.relative_to(ROOT)
+    profile_path = root / RUNNER_BUILD_PROFILE_PATH.relative_to(ROOT)
+    manifest_bytes = manifest_path.read_bytes()
+    profile_bytes = profile_path.read_bytes()
+    manifest = load_json_strict(manifest_path)
+    profile = load_json_strict(profile_path)
+    if manifest_bytes != _canonical_json_bytes(manifest):
+        _fail("runner_wheel_manifest:not_canonical_json")
+    if profile_bytes != _canonical_json_bytes(profile):
+        _fail("runner_build_profile:not_canonical_json")
+    if manifest.get("schema_version") != PYTHON_WHEEL_MANIFEST_SCHEMA_VERSION:
+        _fail("runner_wheel_manifest:schema_version_mismatch")
+    if profile.get("schema_version") != RUNNER_BUILD_PROFILE_SCHEMA_VERSION:
+        _fail("runner_build_profile:schema_version_mismatch")
+    if manifest.get("requirements_lock_path") != "requirements.lock":
+        _fail("runner_wheel_manifest:requirements_lock_path_mismatch")
+    entries = _expect_list(manifest.get("entries"), "runner_wheel_manifest.entries")
+    names: list[str] = []
+    filenames: list[str] = []
+    rows: list[str] = []
+    selected_bytes = 0
+    pins: list[tuple[str, str]] = []
+    for line_number, raw_line in enumerate(
+        (root / "requirements.lock").read_text(encoding="utf-8").splitlines(), 1
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(
+            r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*)",
+            line,
+        )
+        if match is None:
+            _fail(f"runner_requirements_lock:{line_number}:exact_pin_required")
+        pins.append((re.sub(r"[-_.]+", "-", match.group(1)).lower(), match.group(2)))
+    for index, raw in enumerate(entries):
+        where = f"runner_wheel_manifest.entries[{index}]"
+        entry = _expect_object(raw, where)
+        name = _expect_string(entry.get("name"), f"{where}.name")
+        version = _expect_string(entry.get("version"), f"{where}.version")
+        filename = _expect_string(entry.get("filename"), f"{where}.filename")
+        digest = _expect_string(entry.get("sha256"), f"{where}.sha256")
+        if not HEX64_RE.fullmatch(digest):
+            _fail(f"{where}.sha256:invalid")
+        size = entry.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            _fail(f"{where}.size:positive_integer_required")
+        names.append(name)
+        filenames.append(filename)
+        selected_bytes += size
+        rows.append(f"{name}=={version}\t{digest}\t{size}\t{filename}\n")
+    if names != sorted(names) or len(names) != len(set(names)):
+        _fail("runner_wheel_manifest.entries:names_not_unique_sorted")
+    folded_filenames = [item.casefold() for item in filenames]
+    if len(folded_filenames) != len(set(folded_filenames)):
+        _fail("runner_wheel_manifest.entries:filename_collision")
+    if [(item["name"], item["version"]) for item in entries] != pins:
+        _fail("runner_wheel_manifest.entries:requirements_closure_mismatch")
+    aggregate = _expect_object(
+        manifest.get("aggregate"), "runner_wheel_manifest.aggregate"
+    )
+    expected_aggregate = {
+        "entry_count": len(entries),
+        "selected_bytes": selected_bytes,
+        "entry_manifest_sha256": hashlib.sha256(
+            "".join(sorted(rows)).encode("utf-8")
+        ).hexdigest(),
+    }
+    if aggregate != expected_aggregate:
+        _fail("runner_wheel_manifest.aggregate:mismatch")
+    if expected_aggregate != {
+        "entry_count": 91,
+        "selected_bytes": 223452511,
+        "entry_manifest_sha256": (
+            "dbf015ad7ff4211cdb4a6fa311a66abc0b540026b502ab9c3eca2b7d487b6b86"
+        ),
+    }:
+        _fail("runner_wheel_manifest:reviewed_calibration_mismatch")
+    source_materials = _expect_object(
+        profile.get("source_materials"), "runner_build_profile.source_materials"
+    )
+    if source_materials != {
+        "dockerfile": "docker/assurance/frontend-node.Dockerfile",
+        "materializer": "scripts/assurance/build_runner.py",
+        "requirements_lock": "requirements.lock",
+        "wheel_manifest": "docker/assurance/python-wheel-manifest.lock.json",
+    }:
+        _fail("runner_build_profile.source_materials:mismatch")
+    if profile.get("external_order_submission_enabled") is not False:
+        _fail("runner_build_profile.external_order_submission_enabled:must_be_false")
+    expected_profile_path = RUNNER_BUILD_PROFILE_PATH.relative_to(ROOT).as_posix()
+    automated = {
+        "isolated_container",
+        "isolated_database",
+    }
+    for environment in proof_catalog["environment_profiles"]:
+        if environment["execution_class"] in automated:
+            if environment.get("runner_build_profile") != expected_profile_path:
+                _fail(
+                    f"proof_catalog.environment_profiles.{environment['id']}:"
+                    "runner_build_profile_mismatch"
+                )
+
+
 def validate_repository(
     *,
     root: Path = ROOT,
@@ -2552,6 +2730,7 @@ def validate_repository(
     proof_file = proof_catalog_path or root / PROOF_CATALOG_PATH.relative_to(ROOT)
     registry = validate_registry_data(load_json_strict(registry_file), root=root)
     catalog = validate_proof_catalog_data(load_json_strict(proof_file), registry, root=root)
+    _validate_runner_build_sources(root=root, proof_catalog=catalog)
     bundle = ValidationBundle(registry=registry, proof_catalog=catalog, root=root)
     validate_activation_evidence(bundle)
     return bundle
@@ -2829,6 +3008,7 @@ def _bound_material_bytes(
                 ["git", "-C", str(root), "show", f"{git_commit}:{relative}"],
                 check=True,
                 capture_output=True,
+                env=_git_env(),
             ).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             _fail(f"bound_material:git_blob_unavailable:{git_commit}:{relative}:{exc}")
@@ -2839,6 +3019,7 @@ def _bound_material_bytes(
                 check=True,
                 capture_output=True,
                 text=True,
+                env=_git_env(),
             ).stdout
             if not status.strip():
                 head = subprocess.run(
@@ -2846,11 +3027,13 @@ def _bound_material_bytes(
                     check=True,
                     capture_output=True,
                     text=True,
+                    env=_git_env(),
                 ).stdout.strip()
                 return subprocess.run(
                     ["git", "-C", str(root), "show", f"{head}:{relative}"],
                     check=True,
                     capture_output=True,
+                    env=_git_env(),
                 ).stdout
         except (OSError, subprocess.CalledProcessError):
             # An untracked current file has no blob; its actual bytes remain binding.
@@ -2867,6 +3050,24 @@ def _bound_material_sha256(
     return hashlib.sha256(
         _bound_material_bytes(root, relative, git_commit=git_commit)
     ).hexdigest()
+
+
+def _bound_source_tree(root: Path, git_commit: str) -> str:
+    """Resolve the exact Git tree object named by a bound source commit."""
+
+    try:
+        tree = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", f"{git_commit}^{{tree}}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=_git_env(),
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _fail(f"bound_source_tree:unavailable:{git_commit}:{exc}")
+    if not HEX40_RE.fullmatch(tree):
+        _fail(f"bound_source_tree:invalid:{git_commit}")
+    return tree
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -2905,6 +3106,7 @@ def source_snapshot_sha256(root: Path, git_commit: str) -> str:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=_git_env(),
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         _fail(f"source_snapshot:git_archive_failed:{exc}")
@@ -3034,6 +3236,47 @@ def required_proof_material_hashes(
                 ),
             ),
         ]
+        if "runner_build_profile" in profile:
+            runner_build_profile_bytes = _bound_material_bytes(
+                bundle.root,
+                profile["runner_build_profile"],
+                git_commit=git_commit,
+            )
+            components.append(
+                (
+                    f"runner-build-profile:{profile['runner_build_profile']}",
+                    runner_build_profile_bytes,
+                )
+            )
+            try:
+                runner_build_profile = json.loads(
+                    runner_build_profile_bytes.decode("utf-8"),
+                    object_pairs_hook=_unique_object,
+                    parse_constant=_reject_constant,
+                )
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                _fail(f"runner_build_profile:invalid_json:{exc}")
+            source_materials = _expect_object(
+                _expect_object(
+                    runner_build_profile, "runner_build_profile"
+                ).get("source_materials"),
+                "runner_build_profile.source_materials",
+            )
+            for material_name, material_path in sorted(source_materials.items()):
+                material_relative = _expect_string(
+                    material_path,
+                    f"runner_build_profile.source_materials.{material_name}",
+                )
+                components.append(
+                    (
+                        f"runner-build-material:{material_name}:{material_relative}",
+                        _bound_material_bytes(
+                            bundle.root,
+                            material_relative,
+                            git_commit=git_commit,
+                        ),
+                    )
+                )
         components.extend(
             (
                 f"lockfile:{path}",
@@ -3151,6 +3394,11 @@ def assurance_material_sha256(
     paths: set[str] = {
         PROOF_CATALOG_PATH.relative_to(ROOT).as_posix(),
         "scripts/docs/guarantees.py",
+        "scripts/assurance/build_runner.py",
+        "scripts/assurance/docker_lifecycle.py",
+        "scripts/assurance/verify_guarantees.py",
+        "docker/assurance/python-wheel-manifest.lock.json",
+        "docker/assurance/runner-build.profile.json",
     }
     for schema_path in SCHEMA_PATHS.values():
         relative = schema_path.relative_to(ROOT)
@@ -3177,6 +3425,8 @@ def assurance_material_sha256(
     for profile in bundle.proof_catalog["environment_profiles"]:
         paths.update(profile["lockfiles"])
         paths.add(profile["runtime_definition"])
+        if "runner_build_profile" in profile:
+            paths.add(profile["runner_build_profile"])
     for proof in bundle.proof_catalog["proofs"]:
         runner = proof["runner"]
         if runner["kind"] == "pytest":
@@ -3451,6 +3701,7 @@ def _validate_execution_admission_archive_facts(
             "runtime_definition",
             "docker_tool",
             "runner_image",
+            "runner_build_record",
             "service_images",
         },
         where=f"{where}.profile",
@@ -3532,6 +3783,55 @@ def _validate_execution_admission_archive_facts(
     if any(not IMAGE_DIGEST_RE.fullmatch(item) for item in base_digests):
         _fail(f"{where}.profile.runner_image.base_image_digests:invalid")
     definition(runner["build_definition"], f"{where}.profile.runner_image.build_definition")
+    build_record = _expect_object(
+        profile["runner_build_record"], f"{where}.profile.runner_build_record"
+    )
+    _exact_keys(
+        build_record,
+        required={
+            "sha256",
+            "record_basename",
+            "resolved_path_sha256",
+            "record",
+        },
+        where=f"{where}.profile.runner_build_record",
+    )
+    _lifecycle_hash(
+        build_record["sha256"], f"{where}.profile.runner_build_record.sha256"
+    )
+    _lifecycle_hash(
+        build_record["resolved_path_sha256"],
+        f"{where}.profile.runner_build_record.resolved_path_sha256",
+    )
+    record_basename = _expect_string(
+        build_record["record_basename"],
+        f"{where}.profile.runner_build_record.record_basename",
+    )
+    if (
+        Path(record_basename).name != record_basename
+        or "/" in record_basename
+        or "\\" in record_basename
+    ):
+        _fail(f"{where}.profile.runner_build_record.record_basename:invalid")
+    archived_record = _expect_object(
+        build_record["record"], f"{where}.profile.runner_build_record.record"
+    )
+    def reject_host_paths(item: Any, item_where: str) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                reject_host_paths(child, f"{item_where}.{key}")
+        elif isinstance(item, list):
+            for index, child in enumerate(item):
+                reject_host_paths(child, f"{item_where}[{index}]")
+        elif isinstance(item, str) and (
+            PurePosixPath(item).is_absolute()
+            or PureWindowsPath(item).is_absolute()
+        ):
+            _fail(f"{item_where}:absolute_host_path_forbidden")
+
+    reject_host_paths(
+        archived_record, f"{where}.profile.runner_build_record.record"
+    )
     services = _expect_object(profile["service_images"], f"{where}.profile.service_images")
     if list(services) != sorted(services):
         _fail(f"{where}.profile.service_images:must_be_sorted")
@@ -3575,6 +3875,7 @@ def _validate_lifecycle_evidence_facts(
             "runtime_definition_sha256",
             "execution_admission_sha256",
             "execution_admission_archive_sha256",
+            "runner_build_record_sha256",
             "external_order_submission_enabled",
             "planned_resources",
         }
@@ -3603,6 +3904,10 @@ def _validate_lifecycle_evidence_facts(
         _lifecycle_hash(
             facts["execution_admission_archive_sha256"],
             f"{where}.execution_admission_archive_sha256",
+        )
+        _lifecycle_hash(
+            facts["runner_build_record_sha256"],
+            f"{where}.runner_build_record_sha256",
         )
         if _expect_bool(
             facts["external_order_submission_enabled"],
@@ -3881,6 +4186,389 @@ def _require_evidence_fact(
         )
 
 
+def _validate_archived_runner_build_record(
+    value: Any,
+    *,
+    bundle: ValidationBundle,
+    git_commit: str,
+    build_profile_path: str,
+    dockerfile_binding: Mapping[str, Any],
+    where: str,
+) -> dict[str, Any]:
+    """Re-derive the complete v1 runner-build record from source-owned bytes."""
+
+    record = _expect_object(value, where)
+    _exact_keys(
+        record,
+        required={
+            "schema_version",
+            "build_id",
+            "status",
+            "source",
+            "source_materials",
+            "wheel_artifacts",
+            "build_context",
+            "docker_tool",
+            "base_images",
+            "invocation",
+            "started_at",
+            "finished_at",
+            "exit_code",
+            "log",
+            "output_image",
+            "external_order_submission_enabled",
+        },
+        where=where,
+    )
+    if record["schema_version"] != RUNNER_BUILD_RECORD_SCHEMA_VERSION:
+        _fail(f"{where}.schema_version:unsupported")
+    if record["status"] != "succeeded" or record["exit_code"] != 0:
+        _fail(f"{where}:successful_zero_exit_build_required")
+    if record["external_order_submission_enabled"] is not False:
+        _fail(f"{where}.external_order_submission_enabled:must_be_false")
+
+    source = _expect_object(record["source"], f"{where}.source")
+    expected_tree = _bound_source_tree(bundle.git_object_root or bundle.root, git_commit)
+    if source != {"commit": git_commit, "tree": expected_tree}:
+        _fail(f"{where}.source:mismatch")
+
+    profile_bytes = _bound_material_bytes(
+        bundle.root, build_profile_path, git_commit=git_commit
+    )
+    profile = _bound_json_object(
+        bundle.root,
+        build_profile_path,
+        git_commit=git_commit,
+        where=f"{where}.build_profile",
+    )
+    if profile_bytes != _canonical_json_bytes(profile):
+        _fail(f"{where}.build_profile:not_canonical_json")
+    required_labels = [
+        "com.quant-trad.assurance.source",
+        "com.quant-trad.assurance.source-tree",
+        "com.quant-trad.assurance.build-profile-sha256",
+        "com.quant-trad.assurance.build-definition-sha256",
+        "com.quant-trad.assurance.wheel-manifest-sha256",
+        "com.quant-trad.assurance.wheel-artifact-sha256",
+        "com.quant-trad.assurance.build-context-sha256",
+    ]
+    expected_profile_sources = {
+        "dockerfile": "docker/assurance/frontend-node.Dockerfile",
+        "requirements_lock": "requirements.lock",
+        "wheel_manifest": "docker/assurance/python-wheel-manifest.lock.json",
+        "materializer": "scripts/assurance/build_runner.py",
+    }
+    expected_bases = [
+        {
+            "argument": "NODE_IMAGE",
+            "stage": "node_runtime",
+            "reference": "docker.io/library/node@sha256:"
+            "2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0",
+            "digest": "sha256:"
+            "2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0",
+        },
+        {
+            "argument": "PYTHON_IMAGE",
+            "stage": "runtime",
+            "reference": "docker.io/library/python@sha256:"
+            "a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134",
+            "digest": "sha256:"
+            "a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134",
+        },
+    ]
+    expected_installation = {
+        "argv": [
+            "python",
+            "-m",
+            "pip",
+            "install",
+            "--no-cache-dir",
+            "--no-index",
+            "--no-deps",
+            "--only-binary=:all:",
+            "--require-hashes",
+            "--find-links=/opt/qt-assurance/wheelhouse",
+            "-r",
+            "/opt/qt-assurance/requirements.hashed.txt",
+        ],
+        "pip_check_argv": ["python", "-m", "pip", "check"],
+        "intentionally_unavailable_executables": ["psql"],
+    }
+    expected_profile = {
+        "schema_version": RUNNER_BUILD_PROFILE_SCHEMA_VERSION,
+        "id": "phase3-python312-node20-offline",
+        "platform": {
+            "os": "linux",
+            "architecture": "amd64",
+            "python": "3.12",
+            "glibc_max": "2.36",
+        },
+        "external_order_submission_enabled": False,
+        "source_materials": expected_profile_sources,
+        "wheelhouse": {
+            "context_prefix": ".qt-assurance-wheelhouse",
+            "hashed_requirements_name": "requirements.hashed.txt",
+            "manifest_name": "python-wheel-manifest.lock.json",
+        },
+        "docker": {
+            "network_mode": "none",
+            "pull": False,
+            "no_cache": True,
+            "shell": False,
+            "context_transport": "verified_tar_stdin",
+        },
+        "base_images": expected_bases,
+        "installation": expected_installation,
+        "required_image_labels": required_labels,
+    }
+    if profile != expected_profile:
+        _fail(f"{where}.build_profile:reviewed_profile_mismatch")
+
+    material_paths = {"build_profile": build_profile_path, **expected_profile_sources}
+    expected_materials = {
+        name: {
+            "path": path,
+            "sha256": _bound_material_sha256(
+                bundle.root, path, git_commit=git_commit
+            ),
+        }
+        for name, path in sorted(material_paths.items())
+    }
+    materials = _expect_object(record["source_materials"], f"{where}.source_materials")
+    if materials != expected_materials:
+        _fail(f"{where}.source_materials:mismatch")
+    if dockerfile_binding != expected_materials["dockerfile"]:
+        _fail(f"{where}.source_materials.dockerfile:admission_mismatch")
+
+    manifest_path = expected_profile_sources["wheel_manifest"]
+    manifest_bytes = _bound_material_bytes(
+        bundle.root, manifest_path, git_commit=git_commit
+    )
+    manifest = _bound_json_object(
+        bundle.root,
+        manifest_path,
+        git_commit=git_commit,
+        where=f"{where}.wheel_manifest",
+    )
+    if manifest_bytes != _canonical_json_bytes(manifest):
+        _fail(f"{where}.wheel_manifest:not_canonical_json")
+    entries = _expect_list(manifest.get("entries"), f"{where}.wheel_manifest.entries")
+    aggregate = _expect_object(
+        manifest.get("aggregate"), f"{where}.wheel_manifest.aggregate"
+    )
+    wheel_artifacts = _expect_object(
+        record["wheel_artifacts"], f"{where}.wheel_artifacts"
+    )
+    _exact_keys(
+        wheel_artifacts,
+        required={"entries", "aggregate", "tar"},
+        where=f"{where}.wheel_artifacts",
+    )
+    if wheel_artifacts["entries"] != entries or wheel_artifacts["aggregate"] != aggregate:
+        _fail(f"{where}.wheel_artifacts:manifest_mismatch")
+    wheel_tar = _expect_object(
+        wheel_artifacts["tar"], f"{where}.wheel_artifacts.tar"
+    )
+    _exact_keys(
+        wheel_tar,
+        required={"basename", "sha256", "size"},
+        where=f"{where}.wheel_artifacts.tar",
+    )
+    if wheel_tar["basename"] != "wheelhouse.tar":
+        _fail(f"{where}.wheel_artifacts.tar.basename:mismatch")
+    _lifecycle_hash(wheel_tar["sha256"], f"{where}.wheel_artifacts.tar.sha256")
+    _expect_int(wheel_tar["size"], f"{where}.wheel_artifacts.tar.size", minimum=1)
+
+    context = _expect_object(record["build_context"], f"{where}.build_context")
+    _exact_keys(
+        context,
+        required={"tar", "inventory"},
+        where=f"{where}.build_context",
+    )
+    context_tar = _expect_object(context["tar"], f"{where}.build_context.tar")
+    _exact_keys(
+        context_tar,
+        required={"basename", "sha256", "size"},
+        where=f"{where}.build_context.tar",
+    )
+    if context_tar["basename"] != "build-context.tar":
+        _fail(f"{where}.build_context.tar.basename:mismatch")
+    _lifecycle_hash(context_tar["sha256"], f"{where}.build_context.tar.sha256")
+    _expect_int(context_tar["size"], f"{where}.build_context.tar.size", minimum=1)
+
+    hashed_requirements = "".join(
+        f"{entry['name']}=={entry['version']} --hash=sha256:{entry['sha256']}\n"
+        for entry in entries
+    ).encode("utf-8")
+    prefix = profile["wheelhouse"]["context_prefix"]
+    dockerfile_bytes = _bound_material_bytes(
+        bundle.root, expected_profile_sources["dockerfile"], git_commit=git_commit
+    )
+    expected_inventory = [
+        {
+            "path": expected_profile_sources["dockerfile"],
+            "sha256": expected_materials["dockerfile"]["sha256"],
+            "size": len(dockerfile_bytes),
+        },
+        {
+            "path": f"{prefix}/requirements.hashed.txt",
+            "sha256": hashlib.sha256(hashed_requirements).hexdigest(),
+            "size": len(hashed_requirements),
+        },
+        {
+            "path": f"{prefix}/python-wheel-manifest.lock.json",
+            "sha256": expected_materials["wheel_manifest"]["sha256"],
+            "size": len(manifest_bytes),
+        },
+        *(
+            {
+                "path": f"{prefix}/wheelhouse/{entry['filename']}",
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+            }
+            for entry in entries
+        ),
+    ]
+    expected_inventory.sort(key=lambda item: item["path"])
+    if context["inventory"] != expected_inventory:
+        _fail(f"{where}.build_context.inventory:mismatch")
+
+    tool = _expect_object(record["docker_tool"], f"{where}.docker_tool")
+    _exact_keys(
+        tool,
+        required={
+            "executable_basename",
+            "executable_sha256",
+            "resolved_path_sha256",
+            "version",
+            "daemon_identity_sha256",
+        },
+        where=f"{where}.docker_tool",
+    )
+    basename = _expect_string(
+        tool["executable_basename"], f"{where}.docker_tool.executable_basename"
+    )
+    if Path(basename).name != basename or "/" in basename or "\\" in basename:
+        _fail(f"{where}.docker_tool.executable_basename:invalid")
+    for key in ("executable_sha256", "resolved_path_sha256", "daemon_identity_sha256"):
+        _lifecycle_hash(tool[key], f"{where}.docker_tool.{key}")
+    _expect_string(tool["version"], f"{where}.docker_tool.version")
+
+    base_images = _expect_list(record["base_images"], f"{where}.base_images")
+    if len(base_images) != len(expected_bases):
+        _fail(f"{where}.base_images:exact_pair_required")
+    for index, (raw_base, expected_base) in enumerate(zip(base_images, expected_bases)):
+        base = _expect_object(raw_base, f"{where}.base_images[{index}]")
+        _exact_keys(
+            base,
+            required={"argument", "stage", "reference", "digest", "image_id", "platform"},
+            where=f"{where}.base_images[{index}]",
+        )
+        if any(base.get(key) != expected_base[key] for key in expected_base):
+            _fail(f"{where}.base_images[{index}]:profile_mismatch")
+        if not IMAGE_DIGEST_RE.fullmatch(
+            _expect_string(base["image_id"], f"{where}.base_images[{index}].image_id")
+        ):
+            _fail(f"{where}.base_images[{index}].image_id:invalid")
+        if base["platform"] != "linux/amd64":
+            _fail(f"{where}.base_images[{index}].platform:mismatch")
+
+    expected_labels = {
+        required_labels[0]: git_commit,
+        required_labels[1]: expected_tree,
+        required_labels[2]: expected_materials["build_profile"]["sha256"],
+        required_labels[3]: expected_materials["dockerfile"]["sha256"],
+        required_labels[4]: expected_materials["wheel_manifest"]["sha256"],
+        required_labels[5]: wheel_tar["sha256"],
+        required_labels[6]: context_tar["sha256"],
+    }
+    output = _expect_object(record["output_image"], f"{where}.output_image")
+    _exact_keys(
+        output,
+        required={"image_id", "platform", "labels"},
+        where=f"{where}.output_image",
+    )
+    if not IMAGE_DIGEST_RE.fullmatch(
+        _expect_string(output["image_id"], f"{where}.output_image.image_id")
+    ) or output["platform"] != "linux/amd64":
+        _fail(f"{where}.output_image:identity_mismatch")
+    labels = _expect_object(output["labels"], f"{where}.output_image.labels")
+    if any(labels.get(key) != expected for key, expected in expected_labels.items()):
+        _fail(f"{where}.output_image.labels:derived_binding_mismatch")
+    if any(not isinstance(key, str) or not isinstance(item, str) for key, item in labels.items()):
+        _fail(f"{where}.output_image.labels:string_map_required")
+
+    invocation = _expect_object(record["invocation"], f"{where}.invocation")
+    _exact_keys(
+        invocation,
+        required={
+            "argv",
+            "argv_sha256",
+            "context_stdin_sha256",
+            "output_tag",
+            "timeout_seconds",
+        },
+        where=f"{where}.invocation",
+    )
+    output_tag = _expect_string(invocation["output_tag"], f"{where}.invocation.output_tag")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+:-]{0,255}", output_tag) or "@" in output_tag:
+        _fail(f"{where}.invocation.output_tag:invalid")
+    expected_argv = [
+        basename,
+        "build",
+        "--platform=linux/amd64",
+        "--network=none",
+        "--pull=false",
+        "--no-cache",
+        "--progress=plain",
+    ]
+    for base in expected_bases:
+        expected_argv.extend(["--build-arg", f"{base['argument']}={base['reference']}"])
+    for label in required_labels:
+        expected_argv.extend(["--label", f"{label}={expected_labels[label]}"])
+    expected_argv.extend(
+        [
+            "--tag",
+            output_tag,
+            "--file",
+            expected_profile_sources["dockerfile"],
+            "-",
+        ]
+    )
+    if invocation["argv"] != expected_argv:
+        _fail(f"{where}.invocation.argv:mismatch")
+    expected_argv_sha256 = hashlib.sha256(
+        _canonical_json_bytes(expected_argv)
+    ).hexdigest()
+    if invocation["argv_sha256"] != expected_argv_sha256:
+        _fail(f"{where}.invocation.argv_sha256:mismatch")
+    if invocation["context_stdin_sha256"] != context_tar["sha256"]:
+        _fail(f"{where}.invocation.context_stdin_sha256:mismatch")
+    if invocation["timeout_seconds"] != 7200:
+        _fail(f"{where}.invocation.timeout_seconds:mismatch")
+
+    log = _expect_object(record["log"], f"{where}.log")
+    _exact_keys(
+        log,
+        required={"basename", "sha256", "size"},
+        where=f"{where}.log",
+    )
+    if log["basename"] != "runner-build.log":
+        _fail(f"{where}.log.basename:mismatch")
+    _lifecycle_hash(log["sha256"], f"{where}.log.sha256")
+    _expect_int(log["size"], f"{where}.log.size", minimum=0)
+    started = _parse_timestamp(record["started_at"], f"{where}.started_at")
+    finished = _parse_timestamp(record["finished_at"], f"{where}.finished_at")
+    if finished < started:
+        _fail(f"{where}:timestamp_order_invalid")
+    build_id = _expect_string(record["build_id"], f"{where}.build_id")
+    if not re.fullmatch(
+        r"QT-RUNNER-BUILD-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}", build_id
+    ):
+        _fail(f"{where}.build_id:invalid")
+    return record
+
+
 def _validate_lifecycle_binding(
     *,
     admission: Mapping[str, Any],
@@ -3936,6 +4624,7 @@ def _validate_lifecycle_binding(
         "execution_manifest_sha256": execution_hash,
         "cleanup_manifest_sha256": cleanup_hash,
         "proof_results_sha256": result_hash,
+        "runner_build_record_sha256": draft["runner_build_record_sha256"],
         "source_snapshot_sha256": draft["source_snapshot_sha256"],
     }
     facts = admission["facts"]
@@ -3984,6 +4673,12 @@ def _validate_lifecycle_binding(
             "source_binding_mismatch"
         )
     archived_runner = archived_profile["runner_image"]
+    archived_build_binding = archived_profile["runner_build_record"]
+    if archived_build_binding["sha256"] != draft["runner_build_record_sha256"]:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "sha256:draft_mismatch"
+        )
     build_definition = archived_runner["build_definition"]
     if build_definition["sha256"] != _bound_material_sha256(
         bundle.root, build_definition["path"], git_commit=git_commit
@@ -4006,6 +4701,104 @@ def _validate_lifecycle_binding(
             f"{where}.execution_admission_archive.profile.runner_image."
             "base_image_digests:source_binding_mismatch"
         )
+    archived_build_record = _expect_object(
+        archived_build_binding["record"],
+        f"{where}.execution_admission_archive.profile.runner_build_record.record",
+    )
+    if hashlib.sha256(_canonical_json_bytes(archived_build_record)).hexdigest() != (
+        archived_build_binding["sha256"]
+    ):
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record:canonical_sha256_mismatch"
+        )
+    expected_build_profile_path = profile.get("runner_build_profile")
+    if not isinstance(expected_build_profile_path, str):
+        _fail(f"{where}.runner_build_profile:missing")
+    archived_build_record = _validate_archived_runner_build_record(
+        archived_build_record,
+        bundle=bundle,
+        git_commit=git_commit,
+        build_profile_path=expected_build_profile_path,
+        dockerfile_binding=build_definition,
+        where=(
+            f"{where}.execution_admission_archive.profile.runner_build_record.record"
+        ),
+    )
+    if archived_build_record.get("status") != "succeeded":
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.status:not_success"
+        )
+    archived_build_source = _expect_object(
+        archived_build_record.get("source"),
+        f"{where}.execution_admission_archive.profile.runner_build_record.record.source",
+    )
+    if archived_build_source.get("commit") != git_commit:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.source.commit:mismatch"
+        )
+    if archived_build_source.get("tree") != _bound_source_tree(
+        bundle.git_object_root or bundle.root, git_commit
+    ):
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.source.tree:mismatch"
+        )
+    archived_materials = _expect_object(
+        archived_build_record.get("source_materials"),
+        f"{where}.execution_admission_archive.profile.runner_build_record."
+        "record.source_materials",
+    )
+    archived_build_profile = _expect_object(
+        archived_materials.get("build_profile"),
+        f"{where}.execution_admission_archive.profile.runner_build_record."
+        "record.source_materials.build_profile",
+    )
+    if (
+        archived_build_profile.get("path") != expected_build_profile_path
+        or archived_build_profile.get("sha256")
+        != _bound_material_sha256(
+            bundle.root, expected_build_profile_path, git_commit=git_commit
+        )
+    ):
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.source_materials.build_profile:mismatch"
+        )
+    if archived_materials.get("dockerfile") != build_definition:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.source_materials.dockerfile:mismatch"
+        )
+    archived_bases = _expect_list(
+        archived_build_record.get("base_images"),
+        f"{where}.execution_admission_archive.profile.runner_build_record."
+        "record.base_images",
+    )
+    archived_base_digests = sorted(
+        _expect_string(
+            _expect_object(
+                item,
+                f"{where}.execution_admission_archive.profile.runner_build_record."
+                f"record.base_images[{index}]",
+            ).get("digest"),
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            f"record.base_images[{index}].digest",
+        )
+        for index, item in enumerate(archived_bases)
+    )
+    if archived_base_digests != expected_base_digests:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.base_images:mismatch"
+        )
+    if archived_build_record.get("external_order_submission_enabled") is not False:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.external_order_submission_enabled:must_be_false"
+        )
     if set(archived_profile["service_images"]) != set(profile["required_services"]):
         _fail(
             f"{where}.execution_admission_archive.profile.service_images:"
@@ -4017,6 +4810,16 @@ def _validate_lifecycle_binding(
         _fail(
             f"{where}.execution_admission_archive.profile.docker_tool."
             "daemon_identity_sha256:mismatch"
+        )
+    archived_build_tool = _expect_object(
+        archived_build_record.get("docker_tool"),
+        f"{where}.execution_admission_archive.profile.runner_build_record."
+        "record.docker_tool",
+    )
+    if archived_build_tool != archived_profile["docker_tool"]:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.docker_tool:admission_mismatch"
         )
     runner_image_id = archived_runner["image_id"]
     final_runner_image_id = (
@@ -4127,6 +4930,29 @@ def _validate_lifecycle_binding(
         _fail(f"{where}.image_digest:exactly_one_required")
     if image_rows[0].get("build_definition_sha256") != build_definition["sha256"]:
         _fail(f"{where}.image_digest.build_definition_sha256:mismatch")
+    if (
+        image_rows[0].get("runner_build_record_sha256")
+        != archived_build_binding["sha256"]
+    ):
+        _fail(f"{where}.image_digest.runner_build_record_sha256:mismatch")
+    archived_build_record = _expect_object(
+        archived_build_binding["record"],
+        f"{where}.execution_admission_archive.profile.runner_build_record.record",
+    )
+    archived_build_output = _expect_object(
+        archived_build_record.get("output_image"),
+        f"{where}.execution_admission_archive.profile.runner_build_record."
+        "record.output_image",
+    )
+    if image_rows[0].get("runner_build_labels") != archived_build_output.get(
+        "labels"
+    ):
+        _fail(f"{where}.image_digest.runner_build_labels:mismatch")
+    if archived_build_output.get("image_id") != runner_image_id:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_build_record."
+            "record.output_image.image_id:mismatch"
+        )
     if profile["execution_class"] == "isolated_database":
         definition_payload = _bound_json_object(
             bundle.root,
@@ -5085,16 +5911,19 @@ def _verify_local_git_source(
             check=True,
             capture_output=True,
             text=True,
+            env=_git_env(),
         ).stdout.strip()
         subprocess.run(
             ["git", "-C", str(root), "cat-file", "-e", f"{git_commit}^{{commit}}"],
             check=True,
             capture_output=True,
+            env=_git_env(),
         )
         subprocess.run(
             ["git", "-C", str(root), "merge-base", "--is-ancestor", git_commit, head],
             check=True,
             capture_output=True,
+            env=_git_env(),
         )
         if publication_allowed_untracked_paths is None:
             status = subprocess.run(
@@ -5112,6 +5941,7 @@ def _verify_local_git_source(
                 check=True,
                 capture_output=True,
                 text=True,
+                env=_git_env(),
             ).stdout
             observed_clean = not status.strip()
         else:
@@ -5127,6 +5957,7 @@ def _verify_local_git_source(
                 ],
                 check=True,
                 capture_output=True,
+                env=_git_env(),
             ).stdout
             unexpected: list[bytes] = []
             for entry in raw_status.split(b"\0"):
@@ -5991,6 +6822,7 @@ def _historical_repository(root: Path, git_commit: str) -> Iterator[Path]:
             ],
             check=True,
             capture_output=True,
+            env=_git_env(),
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
         _fail(f"activation_attestation:git_archive_failed:{exc}")
@@ -6050,10 +6882,15 @@ def validate_attestation_historically(
                 historical_registry,
                 root=historical_root,
             )
+            _validate_runner_build_sources(
+                root=historical_root,
+                proof_catalog=historical_catalog,
+            )
             historical_bundle = ValidationBundle(
                 registry=historical_registry,
                 proof_catalog=historical_catalog,
                 root=historical_root,
+                git_object_root=current_bundle.root,
             )
         return validate_attestation_data(
             attestation,

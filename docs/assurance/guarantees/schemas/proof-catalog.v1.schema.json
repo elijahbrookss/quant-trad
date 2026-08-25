@@ -55,6 +55,32 @@
     },
     "environmentProfile": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "execution_class": {
+                "const": "isolated_recovery"
+              }
+            },
+            "required": [
+              "execution_class"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "runner_build_profile"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "runner_build_profile"
+            ]
+          }
+        }
+      ],
       "properties": {
         "execution_class": {
           "enum": [
@@ -93,6 +119,10 @@
         },
         "runtime_definition": {
           "$ref": "#/$defs/repoPath"
+        },
+        "runner_build_profile": {
+          "$ref": "#/$defs/repoPath",
+          "type": "string"
         }
       },
       "required": [

@@ -124,6 +124,9 @@
         "runner_image": {
           "$ref": "#/$defs/image"
         },
+        "runner_build_record": {
+          "$ref": "#/$defs/runnerBuildRecord"
+        },
         "runtime_definition": {
           "$ref": "#/$defs/runtimeDefinition"
         },
@@ -146,6 +149,7 @@
         "runtime_definition",
         "docker_tool",
         "runner_image",
+        "runner_build_record",
         "service_images"
       ],
       "type": "object"
@@ -166,6 +170,23 @@
       },
       "required": [
         "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "runnerBuildRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "resolved_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "resolved_path",
         "sha256"
       ],
       "type": "object"

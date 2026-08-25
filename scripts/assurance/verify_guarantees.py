@@ -49,6 +49,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.assurance import pytest_result_plugin  # noqa: E402
 from scripts.assurance import docker_lifecycle  # noqa: E402
+from scripts.assurance import build_runner  # noqa: E402
 from scripts.docs import guarantees  # noqa: E402
 
 
@@ -894,6 +895,7 @@ def _validate_execution_admission_profile(raw: Any, where: str) -> dict[str, Any
             "runtime_definition",
             "docker_tool",
             "runner_image",
+            "runner_build_record",
             "service_images",
         },
         where,
@@ -954,6 +956,27 @@ def _validate_execution_admission_profile(raw: Any, where: str) -> dict[str, Any
         or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", item or "") for item in base_digests)
     ):
         raise AssuranceExecutionError(f"{where}.runner_image.base_image_digests:invalid")
+    build_record_ref = raw["runner_build_record"]
+    if not isinstance(build_record_ref, dict):
+        raise AssuranceExecutionError(f"{where}.runner_build_record:object_required")
+    _exact_keys(
+        build_record_ref,
+        {"resolved_path", "sha256"},
+        f"{where}.runner_build_record",
+    )
+    build_record_path = _string(
+        build_record_ref["resolved_path"],
+        f"{where}.runner_build_record.resolved_path",
+    )
+    if not Path(build_record_path).is_absolute() or "\x00" in build_record_path:
+        raise AssuranceExecutionError(
+            f"{where}.runner_build_record.resolved_path:absolute_required"
+        )
+    build_record_sha256 = _string(
+        build_record_ref["sha256"], f"{where}.runner_build_record.sha256"
+    )
+    if not HEX64_RE.fullmatch(build_record_sha256):
+        raise AssuranceExecutionError(f"{where}.runner_build_record.sha256:invalid")
     service_images = raw["service_images"]
     if not isinstance(service_images, dict):
         raise AssuranceExecutionError(f"{where}.service_images:object_required")
@@ -1000,6 +1023,10 @@ def _validate_execution_admission_profile(raw: Any, where: str) -> dict[str, Any
             "build_definition": _relative_definition(
                 runner["build_definition"], f"{where}.runner_image.build_definition"
             ),
+        },
+        "runner_build_record": {
+            "resolved_path": build_record_path,
+            "sha256": build_record_sha256,
         },
         "service_images": normalized_services,
     }
@@ -1055,6 +1082,18 @@ def archive_execution_admission_profile(
     profile["docker_tool"]["executable_basename"] = Path(resolved_path).name
     profile["docker_tool"]["resolved_path_sha256"] = _sha256_bytes(
         resolved_path.encode("utf-8")
+    )
+    build_record_ref = profile["runner_build_record"]
+    build_record_path = build_record_ref.pop("resolved_path")
+    validated_record = build_record_ref.pop("validated_record", None)
+    if not isinstance(validated_record, dict):
+        raise AssuranceExecutionError("runner_build_record_not_validated_before_archive")
+    build_record_ref["record_basename"] = Path(build_record_path).name
+    build_record_ref["resolved_path_sha256"] = _sha256_bytes(
+        build_record_path.encode("utf-8")
+    )
+    build_record_ref["record"] = build_runner.archivable_build_record(
+        validated_record
     )
     payload = {
         "record_schema_version": EXECUTION_ADMISSION_ARCHIVE_SCHEMA_VERSION,
@@ -2114,6 +2153,53 @@ def _align_execution_admission(
         raise AssuranceExecutionError(
             f"execution_admission_runtime_definition_hash_mismatch:{profile_id}"
         )
+    build_record_ref = admission["runner_build_record"]
+    build_record_path = Path(build_record_ref["resolved_path"]).resolve()
+    if _is_within(build_record_path, root):
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_build_record_inside_source:{profile_id}"
+        )
+    try:
+        build_record, build_record_bytes = build_runner.load_build_record(
+            build_record_path,
+            root=root,
+            source_commit=source_commit,
+            require_success=True,
+            verify_external=True,
+        )
+    except build_runner.RunnerBuildError as exc:
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_build_record_invalid:{profile_id}:{exc}"
+        ) from exc
+    if _sha256_bytes(build_record_bytes) != build_record_ref["sha256"]:
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_build_record_hash_mismatch:{profile_id}"
+        )
+    if not isinstance(admission, dict) or not isinstance(build_record_ref, dict):
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_build_record_not_mutable:{profile_id}"
+        )
+    build_record_ref["validated_record"] = build_record
+    expected_profile_path = profile.get("runner_build_profile")
+    build_materials = build_record.get("source_materials")
+    if not isinstance(expected_profile_path, str) or not isinstance(
+        build_materials, dict
+    ):
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_build_profile_missing:{profile_id}"
+        )
+    admitted_build_profile = build_materials.get("build_profile")
+    if (
+        not isinstance(admitted_build_profile, dict)
+        or admitted_build_profile.get("path") != expected_profile_path
+        or admitted_build_profile.get("sha256")
+        != guarantees._bound_material_sha256(
+            root, expected_profile_path, git_commit=source_commit
+        )
+    ):
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_build_profile_mismatch:{profile_id}"
+        )
     build = admission["runner_image"]["build_definition"]
     expected_build_hash = guarantees._bound_material_sha256(
         root, build["path"], git_commit=source_commit
@@ -2134,6 +2220,46 @@ def _align_execution_admission(
     if admission["runner_image"]["base_image_digests"] != expected_base_digests:
         raise AssuranceExecutionError(
             f"execution_admission_runner_base_digest_mismatch:{profile_id}"
+        )
+    recorded_dockerfile = build_materials.get("dockerfile")
+    if not isinstance(recorded_dockerfile, dict) or recorded_dockerfile != build:
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_build_definition_record_mismatch:{profile_id}"
+        )
+    output_image = build_record.get("output_image")
+    if (
+        not isinstance(output_image, dict)
+        or output_image.get("image_id") != admission["runner_image"]["image_id"]
+        or output_image.get("platform") != admission["runner_image"]["platform"]
+    ):
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_output_record_mismatch:{profile_id}"
+        )
+    recorded_bases = build_record.get("base_images")
+    if not isinstance(recorded_bases, list) or sorted(
+        item.get("digest") for item in recorded_bases if isinstance(item, dict)
+    ) != expected_base_digests:
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_base_record_mismatch:{profile_id}"
+        )
+    record_tool = build_record.get("docker_tool")
+    admitted_docker_path = admission["docker_tool"]["resolved_path"]
+    if (
+        not isinstance(record_tool, dict)
+        or record_tool.get("executable_basename") != Path(admitted_docker_path).name
+        or record_tool.get("resolved_path_sha256")
+        != _sha256_bytes(admitted_docker_path.encode("utf-8"))
+        or any(
+            record_tool.get(key) != admission["docker_tool"].get(key)
+            for key in (
+                "version",
+                "executable_sha256",
+                "daemon_identity_sha256",
+            )
+        )
+    ):
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_docker_record_mismatch:{profile_id}"
         )
     required_services = set(_required_service_ids(profile))
     if set(admission["service_images"]) != required_services:
@@ -2215,6 +2341,7 @@ def _build_final_environment(
         "execution_draft_sha256": draft_hash,
         "execution_manifest_sha256": execution_hash,
         "proof_results_sha256": proof_results_hash,
+        "runner_build_record_sha256": admission["runner_build_record"]["sha256"],
         "source_snapshot_sha256": source_snapshot_sha256,
     }
     evidence_refs: list[dict[str, str]] = [
@@ -2257,6 +2384,12 @@ def _build_final_environment(
                     "build_definition"
                 ]["sha256"],
                 "image_digest": prepared.runner_image_id,
+                "runner_build_record_sha256": admission["runner_build_record"][
+                    "sha256"
+                ],
+                "runner_build_labels": admission["runner_build_record"][
+                    "validated_record"
+                ]["output_image"]["labels"],
             },
             "network_mode": {"network_mode": "none"},
             "runtime_probe": {
@@ -2299,6 +2432,12 @@ def _build_final_environment(
                     "build_definition"
                 ]["sha256"],
                 "runner_image_digest": prepared.runner_image_id,
+                "runner_build_record_sha256": admission["runner_build_record"][
+                    "sha256"
+                ],
+                "runner_build_labels": admission["runner_build_record"][
+                    "validated_record"
+                ]["output_image"]["labels"],
             },
             "network_mode": {"runner_network_mode": "isolated_internal_bridge"},
             "runtime_probe": {
@@ -2492,6 +2631,18 @@ def run_attestation(
             "execution_admission_unselected_profile:" + ",".join(extra_admissions)
         )
     for profile_id in automated_profile_ids:
+        build_record_path = Path(
+            admissions[profile_id]["runner_build_record"]["resolved_path"]
+        ).resolve()
+        if (
+            _is_within(build_record_path, root)
+            or _is_within(build_record_path, stage_root)
+            or _is_within(build_record_path, private_root)
+            or build_record_path == execution_admission
+        ):
+            raise AssuranceExecutionError(
+                f"runner_build_record_must_be_external_and_disjoint:{profile_id}"
+            )
         _align_execution_admission(
             admission=admissions[profile_id],
             profile=profile_by_id[profile_id],
@@ -2619,6 +2770,7 @@ def _prepare_and_run_locked_session(
             "runtime_definition_sha256": admission["runtime_definition"]["sha256"],
             "execution_admission_sha256": admission_hash,
             "execution_admission_archive_sha256": admission_archive_hash,
+            "runner_build_record_sha256": admission["runner_build_record"]["sha256"],
             "external_order_submission_enabled": False,
             "planned_resources": controller.planned_resources(
                 profile["execution_class"]
@@ -3432,6 +3584,16 @@ def recover_cleanup(
     if set(admissions) != {profile_id}:
         raise AssuranceExecutionError("recovery_admission_profile_set_mismatch")
     admission = admissions[profile_id]
+    build_record_path = Path(
+        admission["runner_build_record"]["resolved_path"]
+    ).resolve()
+    if (
+        any(_is_within(build_record_path, item) for item in disjoint)
+        or build_record_path == execution_admission
+    ):
+        raise AssuranceExecutionError(
+            "recovery_runner_build_record_must_be_external_and_disjoint"
+        )
     _align_execution_admission(
         admission=admission,
         profile=profile,
@@ -4546,8 +4708,7 @@ def inspect_execution_admission(
     root: Path,
     source_commit: str,
     docker_path: Path,
-    runner_image: str,
-    runner_build_definition: str,
+    runner_build_record: Path,
     selected_profile_ids: Sequence[str],
     output_path: Path,
 ) -> Path:
@@ -4583,18 +4744,60 @@ def inspect_execution_admission(
     resolved_docker = docker_path.resolve()
     if not resolved_docker.is_file():
         raise AssuranceExecutionError("admission_inspection_docker_unavailable")
-    build_hash = guarantees._bound_material_sha256(
-        root, runner_build_definition, git_commit=source_commit
-    )
-    build_bytes = guarantees._bound_material_bytes(
-        root, runner_build_definition, git_commit=source_commit
-    )
-    base_digests = sorted(
-        {
-            f"sha256:{digest.decode('ascii')}"
-            for digest in re.findall(rb"@sha256:([0-9a-f]{64})", build_bytes)
-        }
-    )
+    resolved_build_record = runner_build_record.resolve()
+    if _is_within(resolved_build_record, root):
+        raise AssuranceExecutionError(
+            "admission_inspection_runner_build_record_must_be_external"
+        )
+    try:
+        build_record, build_record_bytes = build_runner.load_build_record(
+            resolved_build_record,
+            root=root,
+            source_commit=source_commit,
+            require_success=True,
+            verify_external=True,
+        )
+        build_runner.validate_live_build_record(
+            build_record,
+            docker_path=resolved_docker,
+            root=root,
+            private_root=output_path.parent,
+        )
+    except build_runner.RunnerBuildError as exc:
+        raise AssuranceExecutionError(
+            f"admission_inspection_runner_build_record_invalid:{exc}"
+        ) from exc
+    source_materials = build_record["source_materials"]
+    build_definition = source_materials["dockerfile"]
+    admitted_build_profile = source_materials["build_profile"]
+    for profile_id in selected:
+        expected_profile_path = profile_by_id[profile_id].get(
+            "runner_build_profile"
+        )
+        if (
+            expected_profile_path != admitted_build_profile.get("path")
+            or admitted_build_profile.get("sha256")
+            != guarantees._bound_material_sha256(
+                root, expected_profile_path, git_commit=source_commit
+            )
+        ):
+            raise AssuranceExecutionError(
+                f"admission_inspection_runner_build_profile_mismatch:{profile_id}"
+            )
+    build_hash = build_definition["sha256"]
+    runner_output = build_record["output_image"]
+    runner_image_id = runner_output["image_id"]
+    runner_platform = runner_output["platform"]
+    base_digests = sorted(item["digest"] for item in build_record["base_images"])
+    record_tool = build_record["docker_tool"]
+    if (
+        record_tool["executable_basename"] != resolved_docker.name
+        or record_tool["resolved_path_sha256"]
+        != _sha256_bytes(str(resolved_docker).encode("utf-8"))
+    ):
+        raise AssuranceExecutionError(
+            "admission_inspection_docker_path_build_record_mismatch"
+        )
     probe = docker_lifecycle.DockerController(
         admission={"docker_tool": {"resolved_path": str(resolved_docker)}},
         root=root,
@@ -4605,19 +4808,13 @@ def inspect_execution_admission(
         environment_instance_id="qt-admission-inspection",
     )
     _, daemon_identity, docker_version = probe.control_plane()
-    runner = probe._image_inspect(runner_image)
-    runner_image_id = runner.get("Id")
-    runner_platform = f"{runner.get('Os')}/{runner.get('Architecture')}"
-    if not isinstance(runner_image_id, str) or not re.fullmatch(
-        r"sha256:[0-9a-f]{64}", runner_image_id
+    if (
+        daemon_identity != record_tool["daemon_identity_sha256"]
+        or docker_version != record_tool["version"]
+        or _sha256_file_binary(resolved_docker) != record_tool["executable_sha256"]
     ):
-        raise AssuranceExecutionError("admission_inspection_runner_image_id_invalid")
-    if runner_platform != "linux/amd64":
-        raise AssuranceExecutionError("admission_inspection_runner_platform_unsupported")
-    labels = (runner.get("Config") or {}).get("Labels") or {}
-    if labels.get(docker_lifecycle.BUILD_DEFINITION_LABEL) != build_hash:
         raise AssuranceExecutionError(
-            "admission_inspection_runner_build_definition_label_mismatch"
+            "admission_inspection_docker_build_record_mismatch"
         )
     profiles: list[dict[str, Any]] = []
     for profile_id in selected:
@@ -4670,18 +4867,24 @@ def inspect_execution_admission(
                 },
                 "docker_tool": {
                     "resolved_path": str(resolved_docker),
-                    "version": docker_version,
-                    "executable_sha256": _sha256_file_binary(resolved_docker),
-                    "daemon_identity_sha256": daemon_identity,
+                    "version": record_tool["version"],
+                    "executable_sha256": record_tool["executable_sha256"],
+                    "daemon_identity_sha256": record_tool[
+                        "daemon_identity_sha256"
+                    ],
                 },
                 "runner_image": {
                     "image_id": runner_image_id,
                     "platform": runner_platform,
                     "base_image_digests": base_digests,
                     "build_definition": {
-                        "path": runner_build_definition,
+                        "path": build_definition["path"],
                         "sha256": build_hash,
                     },
+                },
+                "runner_build_record": {
+                    "resolved_path": str(resolved_build_record),
+                    "sha256": _sha256_bytes(build_record_bytes),
                 },
                 "service_images": service_images,
             }
@@ -4726,8 +4929,7 @@ def _cli() -> int:
     )
     inspect_parser.add_argument("--source-commit", required=True)
     inspect_parser.add_argument("--docker", type=Path, required=True)
-    inspect_parser.add_argument("--runner-image", required=True)
-    inspect_parser.add_argument("--runner-build-definition", required=True)
+    inspect_parser.add_argument("--runner-build-record", type=Path, required=True)
     inspect_parser.add_argument("--profile", action="append", required=True)
     inspect_parser.add_argument("--output", type=Path, required=True)
     validate_parser = subparsers.add_parser(
@@ -4771,8 +4973,7 @@ def _cli() -> int:
                 root=args.root,
                 source_commit=args.source_commit,
                 docker_path=args.docker,
-                runner_image=args.runner_image,
-                runner_build_definition=args.runner_build_definition,
+                runner_build_record=args.runner_build_record,
                 selected_profile_ids=args.profile,
                 output_path=args.output,
             )

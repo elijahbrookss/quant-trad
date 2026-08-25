@@ -11,9 +11,9 @@ The pre-execution admission and the post-cleanup attestation admission are
 different records:
 
 - `qt.assurance_execution_admission.v1` is an operator-supplied, source-bound
-  permission to use an exact local Docker tool, daemon, runner image, and any
-  service images. It contains no DSN, credential, proof result, or cleanup
-  claim.
+  permission to use an exact validated runner-build record, local Docker tool,
+  daemon, immutable runner image, and any service images. It contains no DSN,
+  credential, proof result, or cleanup claim.
 - the attestation's `profile_admission` is built only after the executor has
   observed the actual session, collected typed evidence, and proven cleanup.
 
@@ -23,7 +23,10 @@ as an execution admission.
 The supported entry points are explicit about every output and private path:
 
 ```text
-python scripts/assurance/verify_guarantees.py inspect-admission --source-commit S --docker ABS_DOCKER --runner-image LOCAL_TAG_OR_ID --runner-build-definition docker/assurance/frontend-node.Dockerfile --profile PROFILE --output ABS_REVIEW_PACKET
+python scripts/assurance/build_runner.py materialize --source-commit S --cache-root ABS_EXISTING_CACHE --cache-root ABS_OTHER_CACHE --output-root ABS_MATERIALIZED_ROOT
+python scripts/assurance/build_runner.py build --source-commit S --materialized-root ABS_MATERIALIZED_ROOT --docker-path ABS_DOCKER --private-root ABS_PRIVATE --output-tag LOCAL_TAG
+python scripts/assurance/build_runner.py validate-record --source-commit S --record ABS_MATERIALIZED_ROOT/runner-build-record.json --docker-path ABS_DOCKER --private-root ABS_PRIVATE
+python scripts/assurance/verify_guarantees.py inspect-admission --source-commit S --docker ABS_DOCKER --runner-build-record ABS_SUCCESSFUL_BUILD_RECORD --profile PROFILE --output ABS_REVIEW_PACKET
 python scripts/assurance/verify_guarantees.py run --source-commit S --stage-root ABS_STAGE --private-root ABS_PRIVATE --execution-admission ABS_REVIEWED_ADMISSION --profile PROFILE --profile manual-recovery
 python scripts/assurance/verify_guarantees.py validate-staged --attestation ABS_ATTESTATION --evidence-root ABS_STAGE
 python scripts/assurance/verify_guarantees.py recover-cleanup --source-commit S --stage-root ABS_STAGE --private-root ABS_PRIVATE --execution-admission ABS_REVIEWED_ADMISSION --execution-draft ABS_DRAFT --output ABS_RECOVERY_REPORT
@@ -81,22 +84,39 @@ The executor uses the Docker CLI as an argv array with `shell=False`. It never
 invokes Compose, loads a repository `.env`, inherits provider credentials,
 pulls an image, or builds an image during proof execution.
 
-The execution admission names an exact local runner image and expected Docker
-daemon. Before the draft, the executor resolves every admitted image to an
-immutable `sha256:...` image ID and verifies the daemon/context. Docker
+The execution admission hash-binds a separately validated successful
+`qt.assurance_runner_build_record.v1`, names its exact local runner image, and
+records the expected Docker daemon. The inspector derives the image,
+Dockerfile, build profile, manifest, context, base images, and labels from that
+record; callers cannot nominate an alternate image or build definition.
+Before the draft, the executor resolves every admitted image to an immutable
+`sha256:...` image ID and verifies the daemon/context. Docker
 create/exec uses that immutable image ID, never the mutable tag. The exact
 daemon/context and image-ID checks are repeated before every provision. The
 TimescaleDB admission records both its catalog-bound repository digest and the
 locally resolved image ID; both must match and only the image ID is passed to
 Docker create.
-The runner image also carries an externally applied, inspected
-`com.quant-trad.assurance.build-definition-sha256` image-config label equal to
-the bound runner-build definition digest. This build definition is distinct
-from a profile runtime definition (notably the database profile JSON), so one
-content-addressed runner may truthfully serve multiple profiles. The Dockerfile
-does not attempt to contain its own digest. An admission may not merely list an
-unrelated local image ID and definition side by side; the retained image
-inspection binds the label through the immutable image ID.
+The runner image carries inspected image-config labels for the source commit
+and tree, runner-build profile, Dockerfile, wheel manifest, deterministic wheel
+artifact, and exact build context. Their expected values come only from the
+validated build record. Both pinned base references, repository digests, and
+local image IDs are re-inspected before execution. This build definition is
+distinct from a profile runtime definition (notably the database profile JSON),
+so one content-addressed runner may truthfully serve multiple profiles. An
+unlabeled, relabeled, default-network, caller-selected, out-of-band, or
+record-mismatched image fails admission.
+
+Runner construction is a separate source-bound operation. It accepts only the
+canonical source-owned build profile and 91-entry wheel manifest, validates
+existing external cache bytes into immutable snapshots, and writes a
+create-only deterministic wheelhouse/materialization receipt outside the
+source tree. The build consumes the verified context tar through shell-free
+Docker argv and its canonical hash, with network disabled, pulling disabled,
+and cache reuse disabled.
+The Dockerfile installs only the hash-complete binary wheel closure with no
+index, dependency resolution, source distribution, or network fallback. The
+immutable build record contains no cache or materialization absolute paths and
+is not a proof result or activation signal.
 
 An `isolated_container` runner has no network, a read-only source bind, a
 read-only root filesystem, and writable temporary storage outside the source.

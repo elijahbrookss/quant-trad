@@ -1,0 +1,157 @@
+{
+  "$id": "https://quant-trad.local/schemas/assurance-python-wheel-manifest.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "aggregate": {
+      "$ref": "#/$defs/aggregate"
+    },
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/wheelEntry"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "requirements_lock_path": {
+      "const": "requirements.lock"
+    },
+    "schema_version": {
+      "const": "qt.assurance_python_wheel_manifest.v1"
+    },
+    "target": {
+      "$ref": "#/$defs/target"
+    }
+  },
+  "required": [
+    "schema_version",
+    "target",
+    "requirements_lock_path",
+    "entries",
+    "aggregate"
+  ],
+  "title": "QT Assurance Python Wheel Manifest v1",
+  "type": "object",
+  "$defs": {
+    "aggregate": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_count": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "entry_manifest_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "selected_bytes": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entry_count",
+        "selected_bytes",
+        "entry_manifest_sha256"
+      ],
+      "type": "object"
+    },
+    "hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "requiresPython": {
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "target": {
+      "additionalProperties": false,
+      "properties": {
+        "abi": {
+          "const": "cp312"
+        },
+        "glibc_max": {
+          "const": "2.36"
+        },
+        "implementation": {
+          "const": "cp"
+        },
+        "platform": {
+          "const": "linux/amd64"
+        },
+        "python_version": {
+          "const": "3.12"
+        }
+      },
+      "required": [
+        "implementation",
+        "python_version",
+        "abi",
+        "platform",
+        "glibc_max"
+      ],
+      "type": "object"
+    },
+    "wheelEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "filename": {
+          "pattern": "^[^/\\\\]+\\.whl$",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "requires_python": {
+          "$ref": "#/$defs/requiresPython"
+        },
+        "selected_tag": {
+          "$ref": "#/$defs/wheelTag"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "version": {
+          "minLength": 1,
+          "pattern": "^[^\\s/\\\\]+$",
+          "type": "string"
+        },
+        "wheel_tags": {
+          "items": {
+            "$ref": "#/$defs/wheelTag"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "filename",
+        "sha256",
+        "size",
+        "selected_tag",
+        "wheel_tags",
+        "requires_python"
+      ],
+      "type": "object"
+    },
+    "wheelTag": {
+      "pattern": "^[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+$",
+      "type": "string"
+    }
+  }
+}

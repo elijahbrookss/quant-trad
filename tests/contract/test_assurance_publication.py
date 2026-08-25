@@ -98,7 +98,11 @@ def _stage(
 def _install_fakes(monkeypatch: pytest.MonkeyPatch, destination: Path) -> None:
     catalog = {
         "environment_profiles": [
-            {"id": profile_id, "execution_class": "isolated_container"}
+            {
+                "id": profile_id,
+                "execution_class": "isolated_container",
+                "runner_build_profile": "docker/assurance/runner-build.profile.json",
+            }
             for profile_id in PROFILES
         ]
     }
@@ -971,7 +975,11 @@ def test_publish_staged_real_git_resume_authenticates_exact_dirt_before_validati
     ]
     catalog = {
         "environment_profiles": [
-            {"id": profile_id, "execution_class": "isolated_container"}
+            {
+                "id": profile_id,
+                "execution_class": "isolated_container",
+                "runner_build_profile": "docker/assurance/runner-build.profile.json",
+            }
             for profile_id in PROFILES
         ]
     }

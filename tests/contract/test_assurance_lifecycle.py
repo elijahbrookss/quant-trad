@@ -48,6 +48,152 @@ def _controller(
     )
 
 
+def _runner_image_controller(tmp_path: Path) -> tuple[
+    docker_lifecycle.DockerController,
+    dict[str, dict[str, object]],
+]:
+    docker = tmp_path / "docker"
+    docker.write_bytes(b"fake docker executable\n")
+    docker.chmod(0o700)
+    private = tmp_path / "private"
+    private.mkdir()
+    private.chmod(0o700)
+    runner_id = "sha256:" + "1" * 64
+    base_rows = [
+        {
+            "reference": "docker.io/library/node@sha256:" + "2" * 64,
+            "digest": "sha256:" + "2" * 64,
+            "image_id": "sha256:" + "3" * 64,
+        },
+        {
+            "reference": "docker.io/library/python@sha256:" + "4" * 64,
+            "digest": "sha256:" + "4" * 64,
+            "image_id": "sha256:" + "5" * 64,
+        },
+    ]
+    labels = {
+        docker_lifecycle.BUILD_SOURCE_LABEL: "a" * 40,
+        docker_lifecycle.BUILD_SOURCE_TREE_LABEL: "b" * 40,
+        docker_lifecycle.BUILD_PROFILE_LABEL: "c" * 64,
+        docker_lifecycle.BUILD_DEFINITION_LABEL: "d" * 64,
+        docker_lifecycle.WHEEL_MANIFEST_LABEL: "e" * 64,
+        docker_lifecycle.WHEEL_ARTIFACT_LABEL: "f" * 64,
+        docker_lifecycle.BUILD_CONTEXT_LABEL: "0" * 64,
+    }
+    admission = {
+        "docker_tool": {"resolved_path": str(docker)},
+        "runner_image": {
+            "image_id": runner_id,
+            "platform": "linux/amd64",
+            "build_definition": {
+                "path": "docker/assurance/frontend-node.Dockerfile",
+                "sha256": labels[docker_lifecycle.BUILD_DEFINITION_LABEL],
+            },
+        },
+        "runner_build_record": {
+            "validated_record": {
+                "output_image": {
+                    "image_id": runner_id,
+                    "platform": "linux/amd64",
+                    "labels": labels,
+                },
+                "base_images": base_rows,
+            }
+        },
+        "service_images": {},
+    }
+    controller = docker_lifecycle.DockerController(
+        admission=admission,
+        root=tmp_path / "source",
+        private_root=private,
+        source_commit="a" * 40,
+        attestation_id="QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb",
+        profile_id="python-nondb",
+        environment_instance_id="qt-12345678",
+        command_runner=lambda argv, env, timeout: docker_lifecycle.CommandResult(
+            b"", b"", 0
+        ),
+    )
+    images: dict[str, dict[str, object]] = {
+        runner_id: {
+            "Id": runner_id,
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Config": {"Labels": dict(labels)},
+        }
+    }
+    for base in base_rows:
+        observed = {
+            "Id": base["image_id"],
+            "Os": "linux",
+            "Architecture": "amd64",
+            "RepoDigests": [base["reference"]],
+        }
+        images[str(base["reference"])] = observed
+        images[str(base["image_id"])] = observed
+    controller._image_inspect = lambda token: images[token]  # type: ignore[method-assign]
+    return controller, images
+
+
+def test_runner_image_requires_validated_record_labels_and_exact_local_bases(
+    tmp_path: Path,
+) -> None:
+    controller, images = _runner_image_controller(tmp_path)
+    runner_id = controller.admission["runner_image"]["image_id"]
+    assert controller.verify_runner_image() == runner_id
+
+    labels = images[runner_id]["Config"]["Labels"]
+    assert isinstance(labels, dict)
+    labels.pop(docker_lifecycle.WHEEL_ARTIFACT_LABEL)
+    with pytest.raises(
+        docker_lifecycle.DockerLifecycleError,
+        match="runner_build_labels_mismatch",
+    ):
+        controller.verify_runner_image()
+
+
+def test_execution_admission_archive_forwards_exact_path_free_build_record(
+    tmp_path: Path,
+) -> None:
+    record = {
+        "schema_version": "qt.assurance_runner_build_record.v1",
+        "status": "succeeded",
+        "source": {"commit": "a" * 40, "tree": "b" * 40},
+    }
+    record_path = tmp_path / "runner-build-record.json"
+    docker_path = tmp_path / "docker"
+    admission = {
+        "docker_tool": {
+            "resolved_path": str(docker_path),
+            "version": "client=1;server=1",
+            "executable_sha256": "c" * 64,
+            "daemon_identity_sha256": "d" * 64,
+        },
+        "runner_build_record": {
+            "resolved_path": str(record_path),
+            "sha256": "e" * 64,
+            "validated_record": record,
+        },
+    }
+    archived = verifier.archive_execution_admission_profile(
+        admission,
+        "a" * 40,
+        "f" * 64,
+    )
+    profile = archived["profile"]
+    assert profile["runner_build_record"] == {
+        "sha256": "e" * 64,
+        "record_basename": record_path.name,
+        "resolved_path_sha256": hashlib.sha256(
+            str(record_path).encode("utf-8")
+        ).hexdigest(),
+        "record": record,
+    }
+    assert profile["docker_tool"]["executable_basename"] == docker_path.name
+    assert "resolved_path" not in profile["docker_tool"]
+    assert str(tmp_path) not in json.dumps(archived, sort_keys=True)
+
+
 def test_process_guard_strips_ambient_credentials_and_kills_timeout_group(
     tmp_path: Path,
 ) -> None:
@@ -546,9 +692,10 @@ def test_recovery_draft_rejects_unbound_admission_archive_hash(
                     "environment_instance_id": "qt-12345678",
                     "control_plane_identity_sha256": "c" * 64,
                     "runtime_definition_sha256": "d" * 64,
-                    "execution_admission_sha256": "e" * 64,
-                    "execution_admission_archive_sha256": "f" * 64,
-                    "external_order_submission_enabled": False,
+                        "execution_admission_sha256": "e" * 64,
+                        "execution_admission_archive_sha256": "f" * 64,
+                        "runner_build_record_sha256": "9" * 64,
+                        "external_order_submission_enabled": False,
                     "planned_resources": [
                         {
                             "kind": "source_snapshot",
@@ -618,6 +765,7 @@ def _install_recovery_fakes(
     runtime_definition_sha256 = "d" * 64
     execution_admission_sha256 = "e" * 64
     archive_sha256 = "f" * 64
+    runner_build_record_sha256 = "9" * 64
     planned_resources = [
         {"kind": "source_snapshot", "logical_name": "exact-source-snapshot"},
         {"kind": "temporary_secret_file", "logical_name": "proof-runner-env"},
@@ -636,6 +784,7 @@ def _install_recovery_fakes(
             "0" * 64 if binding_tamper else execution_admission_sha256
         ),
         "execution_admission_archive_sha256": archive_sha256,
+        "runner_build_record_sha256": runner_build_record_sha256,
         "planned_resources": planned_resources,
     }
     admission = {
@@ -643,6 +792,12 @@ def _install_recovery_fakes(
         "runtime_definition": {"sha256": runtime_definition_sha256},
         "docker_tool": {
             "daemon_identity_sha256": control_identity_sha256,
+        },
+        "runner_build_record": {
+            "resolved_path": str(
+                paths["admission"].parent / "runner-build-record.json"
+            ),
+            "sha256": runner_build_record_sha256,
         },
     }
     archive_facts = {

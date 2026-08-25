@@ -14,23 +14,48 @@ closures, or guarantee-activation decisions.
   `python@sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134`.
 
 The image copies the Node executable into the Python image and installs the
-Python distributions pinned by `requirements.lock`. This repository does not
-yet contain a bound offline wheelhouse, so a cold build cannot truthfully claim
-network-disabled dependency resolution. The assurance executor never builds or
-pulls this image: it accepts only a prebuilt local image whose immutable ID and
-externally applied build-definition label were reviewed before execution. Any
-controlled networked build step and its retained provenance remain a separate
-environment input and residual risk until an offline artifact set is bound.
+Python distributions pinned by `requirements.lock`. The source-owned
+`python-wheel-manifest.lock.json` binds the reviewed 91-wheel closure by
+normalized distribution/version, safe canonical filename, byte size, SHA-256,
+wheel tags, and Python compatibility. Wheel bytes are deliberately external to
+Git.
+
+`runner-build.profile.json` and `scripts/assurance/build_runner.py` own the
+only admitted construction path. The materializer finds matching existing
+cache bytes by content, snapshots each selected artifact once, validates its
+ZIP/metadata/tag/RECORD integrity, and creates closed deterministic wheelhouse
+and build-context tars outside the source tree. Durable output contains no
+cache paths. The builder passes the verified context tar on standard input to
+an exact shell-free Docker argv with `--network=none`, `--pull=false`, and
+`--no-cache`. Pip uses `--no-index`, `--no-deps`,
+`--only-binary=:all:`, and `--require-hashes`; there is no network or source
+distribution fallback.
+
+The immutable successful build record binds the source commit/tree, all build
+source hashes, exact wheel and context identities, Docker executable and daemon,
+both pinned local base-image identities, exact invocation and canonical argv
+hash, log, output image ID, and the complete required label set. Build and
+materialization are separate from
+proof execution. The assurance executor never builds, pulls, tags, or relabels
+the image: it accepts only a separately owner-reviewed execution admission that
+hash-binds the validated build record and exact immutable local image.
 
 Proof execution itself uses no network, a read-only mount of the exact clean
 source commit, and a writable temporary directory outside that source mount.
-The attestation records the inspected image ID/build-definition binding,
-base-image digests, Docker version, Node and Python versions, source-mount mode,
-network mode, container identity, and cleanup.
+The attestation records the exact build-record hash and archived record,
+inspected image labels/ID, base-image digests and IDs, Docker version, Node and
+Python versions, source-mount mode, network mode, container identity, and
+cleanup.
 
 The profile supplies only the native `node --test` assurance runner. The
 separately supported Vitest/jsdom component suite is validation, not one of the
 eight cataloged Node proof definitions.
+
+The runner intentionally does not add `psql`. `QT-PROOF-002` and
+`QT-PROOF-314` therefore remain honestly `UNAVAILABLE` unless a separately
+reviewed source-bound runner prerequisite is approved. A successful runner
+build is not a proof result, remediation closure, attestation, or guarantee
+activation.
 
 ## Disposable Database Profile
 

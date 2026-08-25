@@ -81,6 +81,9 @@
         "runtime_definition_sha256": {
           "$ref": "#/$defs/hash"
         },
+        "runner_build_record_sha256": {
+          "$ref": "#/$defs/hash"
+        },
         "source_commit": {
           "$ref": "#/$defs/commit"
         },
@@ -104,6 +107,7 @@
         "runtime_definition_sha256",
         "execution_admission_sha256",
         "execution_admission_archive_sha256",
+        "runner_build_record_sha256",
         "external_order_submission_enabled",
         "planned_resources"
       ],

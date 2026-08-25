@@ -33,6 +33,12 @@ The document must conform to `../schemas/attestation.v1.schema.json` and bind:
   its exact runtime-definition path and commit-bound hash, isolated environment
   class, disposable/session isolation, explicit closed external-order boundary,
   observed runtime facts, and hashed environment evidence;
+- for every automated profile, the exact canonical successful runner-build
+  record and record SHA-256 archived through execution-admission evidence. The
+  record binds the source tree, fixed build profile and source materials,
+  complete 91-wheel artifact closure, deterministic contexts, offline Docker
+  invocation, daemon and both base-image identities, immutable output image,
+  and all required labels. It is environment provenance, not a proof result;
 - structured service admissions rather than free-form service strings. Database
   admission binds the pinned image, server and extension versions, loopback-only
   ephemeral endpoint, unique session database identity, synthetic credentials,
@@ -55,7 +61,8 @@ artifact kind, facts, path, and hash are cross-checked. Frontend/container
 execution cannot produce PASS, FAIL, or PARTIAL evidence unless the admission
 records Linux/amd64, the catalog-bound pinned base digests, no network, a
 read-only source mount, a writable temporary directory outside that mount, the
-built image and container identities, bootstrap, and cleanup. Database execution
+built image and container identities, validated runner-build-record hash,
+source/profile/manifest/artifact/context labels, bootstrap, and cleanup. Database execution
 likewise
 fails closed when the exact service contract, bootstrap evidence, or post-run
 cleanup evidence is missing or disagrees with the admitted identities.
@@ -66,6 +73,9 @@ first side effect, an `execution_manifest` created when proof execution stops,
 and a `cleanup_manifest` containing the typed exact-absence inventory. These
 records use a source-bound `qt.assurance_execution_admission.v1` input; that
 pre-execution input is not the post-cleanup `profile_admission` embedded here.
+The draft directly binds the runner-build-record SHA before any Docker resource
+is created, and historical validation recomputes the canonical archived record
+hash rather than trusting a summary or mutable external path.
 An attestation is never emitted before all bound automated environments have a
 complete execution manifest and successful cleanup manifest.
 

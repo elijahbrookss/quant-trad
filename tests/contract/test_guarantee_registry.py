@@ -29,12 +29,41 @@ def _base_repository(tmp_path: Path) -> tuple[dict, dict]:
     )
     _write(tmp_path, "src/guard.py", "def enforce_known_at():\n    return True\n")
     _write(tmp_path, "tests/test_known_at.py", "def test_known_at():\n    assert True\n")
-    _write(tmp_path, "requirements.lock", "pytest==8.4.2\n")
+    _write(
+        tmp_path,
+        "requirements.lock",
+        (guarantees.ROOT / "requirements.lock").read_text(encoding="utf-8"),
+    )
     _write(
         tmp_path,
         "docker/assurance/python-nondb.profile.json",
         '{"schema_version":"qt.assurance_environment_profile.v1"}\n',
     )
+    _write(
+        tmp_path,
+        "docker/assurance/runner-build.profile.json",
+        (guarantees.ROOT / "docker/assurance/runner-build.profile.json").read_text(
+            encoding="utf-8"
+        ),
+    )
+    _write(
+        tmp_path,
+        "docker/assurance/python-wheel-manifest.lock.json",
+        (
+            guarantees.ROOT
+            / "docker/assurance/python-wheel-manifest.lock.json"
+        ).read_text(encoding="utf-8"),
+    )
+    _write(
+        tmp_path,
+        "docker/assurance/frontend-node.Dockerfile",
+        (guarantees.ROOT / "docker/assurance/frontend-node.Dockerfile").read_text(
+            encoding="utf-8"
+        ),
+    )
+    _write(tmp_path, "scripts/assurance/build_runner.py", "# runner builder\n")
+    _write(tmp_path, "scripts/assurance/docker_lifecycle.py", "# Docker lifecycle\n")
+    _write(tmp_path, "scripts/assurance/verify_guarantees.py", "# executor\n")
     _write(tmp_path, "Makefile", "validate-docs:\n\t@true\n")
     _write(
         tmp_path,
@@ -127,6 +156,7 @@ def _base_repository(tmp_path: Path) -> tuple[dict, dict]:
                 "id": "python-nondb",
                 "execution_class": "isolated_container",
                 "runtime_definition": "docker/assurance/python-nondb.profile.json",
+                "runner_build_profile": "docker/assurance/runner-build.profile.json",
                 "python": ">=3.12",
                 "lockfiles": ["requirements.lock"],
                 "required_services": [],
@@ -1628,6 +1658,248 @@ def test_historical_attestation_validation_requires_git_metadata(tmp_path: Path)
         )
 
 
+def test_historical_bundle_resolves_source_tree_from_preserved_git_object_root(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "qt@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "QT contract"],
+        check=True,
+    )
+    (repository / "source.txt").write_text("bound source\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "source.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "--quiet", "-m", "source"],
+        check=True,
+    )
+    commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    expected_tree = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", f"{commit}^{{tree}}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    historical_root = tmp_path / "archive-snapshot"
+    historical_root.mkdir()
+    bundle = guarantees.ValidationBundle({}, {}, historical_root, repository)
+    assert guarantees._bound_source_tree(
+        bundle.git_object_root or bundle.root, commit
+    ) == expected_tree
+
+
+def test_historical_git_reads_ignore_caller_object_redirection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed["argv"] = argv
+        observed["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(argv, 0, stdout="b" * 40 + "\n", stderr="")
+
+    monkeypatch.setenv("GIT_DIR", "/attacker/repository")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", "/attacker/objects")
+    monkeypatch.setattr(guarantees.subprocess, "run", run)
+    assert guarantees._bound_source_tree(tmp_path, "a" * 40) == "b" * 40
+    env = observed["env"]
+    assert isinstance(env, dict)
+    assert "GIT_DIR" not in env
+    assert "GIT_OBJECT_DIRECTORY" not in env
+    assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
+
+
+def test_historical_runner_record_rederives_network_policy_after_rehash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "a" * 40
+    tree = "b" * 40
+    paths = {
+        "build_profile": "docker/assurance/runner-build.profile.json",
+        "dockerfile": "docker/assurance/frontend-node.Dockerfile",
+        "requirements_lock": "requirements.lock",
+        "wheel_manifest": "docker/assurance/python-wheel-manifest.lock.json",
+        "materializer": "scripts/assurance/build_runner.py",
+    }
+    source_bytes = {
+        relative: guarantees.ROOT.joinpath(*relative.split("/")).read_bytes()
+        for relative in paths.values()
+    }
+
+    def bound_bytes(
+        root: Path, relative: str, *, git_commit: str | None = None
+    ) -> bytes:
+        assert git_commit == commit
+        return source_bytes[relative]
+
+    monkeypatch.setattr(guarantees, "_bound_material_bytes", bound_bytes)
+    monkeypatch.setattr(guarantees, "_bound_source_tree", lambda root, value: tree)
+    profile = json.loads(source_bytes[paths["build_profile"]])
+    manifest = json.loads(source_bytes[paths["wheel_manifest"]])
+    materials = {
+        name: {
+            "path": relative,
+            "sha256": hashlib.sha256(source_bytes[relative]).hexdigest(),
+        }
+        for name, relative in sorted(paths.items())
+    }
+    entries = manifest["entries"]
+    hashed_requirements = "".join(
+        f"{entry['name']}=={entry['version']} --hash=sha256:{entry['sha256']}\n"
+        for entry in entries
+    ).encode("utf-8")
+    prefix = profile["wheelhouse"]["context_prefix"]
+    inventory = [
+        {
+            "path": paths["dockerfile"],
+            "sha256": materials["dockerfile"]["sha256"],
+            "size": len(source_bytes[paths["dockerfile"]]),
+        },
+        {
+            "path": f"{prefix}/requirements.hashed.txt",
+            "sha256": hashlib.sha256(hashed_requirements).hexdigest(),
+            "size": len(hashed_requirements),
+        },
+        {
+            "path": f"{prefix}/python-wheel-manifest.lock.json",
+            "sha256": materials["wheel_manifest"]["sha256"],
+            "size": len(source_bytes[paths["wheel_manifest"]]),
+        },
+        *[
+            {
+                "path": f"{prefix}/wheelhouse/{entry['filename']}",
+                "sha256": entry["sha256"],
+                "size": entry["size"],
+            }
+            for entry in entries
+        ],
+    ]
+    inventory.sort(key=lambda item: item["path"])
+    wheel_tar_sha = "c" * 64
+    context_tar_sha = "d" * 64
+    labels = {
+        profile["required_image_labels"][0]: commit,
+        profile["required_image_labels"][1]: tree,
+        profile["required_image_labels"][2]: materials["build_profile"]["sha256"],
+        profile["required_image_labels"][3]: materials["dockerfile"]["sha256"],
+        profile["required_image_labels"][4]: materials["wheel_manifest"]["sha256"],
+        profile["required_image_labels"][5]: wheel_tar_sha,
+        profile["required_image_labels"][6]: context_tar_sha,
+    }
+    output_tag = "qt-assurance-runtime:test"
+    argv = [
+        "docker",
+        "build",
+        "--platform=linux/amd64",
+        "--network=none",
+        "--pull=false",
+        "--no-cache",
+        "--progress=plain",
+    ]
+    for base in profile["base_images"]:
+        argv.extend(["--build-arg", f"{base['argument']}={base['reference']}"])
+    for label in profile["required_image_labels"]:
+        argv.extend(["--label", f"{label}={labels[label]}"])
+    argv.extend(
+        ["--tag", output_tag, "--file", paths["dockerfile"], "-"]
+    )
+    record = {
+        "schema_version": guarantees.RUNNER_BUILD_RECORD_SCHEMA_VERSION,
+        "build_id": "QT-RUNNER-BUILD-20260825T120000Z-0123456789abcdef",
+        "status": "succeeded",
+        "source": {"commit": commit, "tree": tree},
+        "source_materials": materials,
+        "wheel_artifacts": {
+            "entries": entries,
+            "aggregate": manifest["aggregate"],
+            "tar": {
+                "basename": "wheelhouse.tar",
+                "sha256": wheel_tar_sha,
+                "size": 1,
+            },
+        },
+        "build_context": {
+            "tar": {
+                "basename": "build-context.tar",
+                "sha256": context_tar_sha,
+                "size": 1,
+            },
+            "inventory": inventory,
+        },
+        "docker_tool": {
+            "executable_basename": "docker",
+            "executable_sha256": "e" * 64,
+            "resolved_path_sha256": "f" * 64,
+            "version": "client=27.0.0;server=27.0.0",
+            "daemon_identity_sha256": "1" * 64,
+        },
+        "base_images": [
+            {
+                **base,
+                "image_id": "sha256:" + index * 64,
+                "platform": "linux/amd64",
+            }
+            for index, base in zip(("2", "3"), profile["base_images"])
+        ],
+        "invocation": {
+            "argv": argv,
+            "argv_sha256": hashlib.sha256(
+                guarantees._canonical_json_bytes(argv)
+            ).hexdigest(),
+            "context_stdin_sha256": context_tar_sha,
+            "output_tag": output_tag,
+            "timeout_seconds": 7200,
+        },
+        "started_at": "2026-08-25T12:00:00Z",
+        "finished_at": "2026-08-25T12:01:00Z",
+        "exit_code": 0,
+        "log": {"basename": "runner-build.log", "sha256": "4" * 64, "size": 0},
+        "output_image": {
+            "image_id": "sha256:" + "9" * 64,
+            "platform": "linux/amd64",
+            "labels": labels,
+        },
+        "external_order_submission_enabled": False,
+    }
+    bundle = guarantees.ValidationBundle({}, {}, tmp_path, tmp_path)
+    guarantees._validate_archived_runner_build_record(
+        record,
+        bundle=bundle,
+        git_commit=commit,
+        build_profile_path=paths["build_profile"],
+        dockerfile_binding=materials["dockerfile"],
+        where="historical.runner_build_record",
+    )
+
+    tampered = copy.deepcopy(record)
+    index = tampered["invocation"]["argv"].index("--network=none")
+    tampered["invocation"]["argv"][index] = "--network=host"
+    tampered["invocation"]["argv_sha256"] = hashlib.sha256(
+        guarantees._canonical_json_bytes(tampered["invocation"]["argv"])
+    ).hexdigest()
+    with pytest.raises(
+        guarantees.GuaranteeValidationError, match="invocation.argv:mismatch"
+    ):
+        guarantees._validate_archived_runner_build_record(
+            tampered,
+            bundle=bundle,
+            git_commit=commit,
+            build_profile_path=paths["build_profile"],
+            dockerfile_binding=materials["dockerfile"],
+            where="historical.runner_build_record",
+        )
+
+
 def test_attestation_composes_required_proofs_across_environment_profiles(
     tmp_path: Path,
 ) -> None:
@@ -1648,6 +1920,7 @@ def test_attestation_composes_required_proofs_across_environment_profiles(
             "id": "python-db-isolated",
             "execution_class": "isolated_container",
             "runtime_definition": "docker/assurance/python-nondb.profile.json",
+            "runner_build_profile": "docker/assurance/runner-build.profile.json",
             "python": ">=3.12,<3.13",
             "lockfiles": ["requirements.lock"],
             "required_services": [],
@@ -2300,6 +2573,7 @@ def test_native_node_result_uses_exact_names_typed_counts_and_three_hashes(
             "id": "frontend-node",
             "execution_class": "isolated_container",
             "runtime_definition": "docker/assurance/frontend-node.Dockerfile",
+            "runner_build_profile": "docker/assurance/runner-build.profile.json",
             "python": ">=3.12,<3.13",
             "node": ">=20,<21",
             "lockfiles": [

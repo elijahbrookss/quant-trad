@@ -29,6 +29,21 @@ PROFILE_LABEL = "com.quant-trad.assurance.profile"
 SOURCE_LABEL = "com.quant-trad.assurance.source"
 INSTANCE_LABEL = "com.quant-trad.assurance.instance"
 BUILD_DEFINITION_LABEL = "com.quant-trad.assurance.build-definition-sha256"
+BUILD_SOURCE_LABEL = "com.quant-trad.assurance.source"
+BUILD_SOURCE_TREE_LABEL = "com.quant-trad.assurance.source-tree"
+BUILD_PROFILE_LABEL = "com.quant-trad.assurance.build-profile-sha256"
+WHEEL_MANIFEST_LABEL = "com.quant-trad.assurance.wheel-manifest-sha256"
+WHEEL_ARTIFACT_LABEL = "com.quant-trad.assurance.wheel-artifact-sha256"
+BUILD_CONTEXT_LABEL = "com.quant-trad.assurance.build-context-sha256"
+RUNNER_BUILD_LABELS = (
+    BUILD_SOURCE_LABEL,
+    BUILD_SOURCE_TREE_LABEL,
+    BUILD_PROFILE_LABEL,
+    BUILD_DEFINITION_LABEL,
+    WHEEL_MANIFEST_LABEL,
+    WHEEL_ARTIFACT_LABEL,
+    BUILD_CONTEXT_LABEL,
+)
 RUNNER_CONTAINER_ENV_ALLOWLIST = {
     "GPG_KEY",
     "HOME",
@@ -650,6 +665,12 @@ class DockerController:
 
     def verify_runner_image(self) -> str:
         expected = self.admission["runner_image"]
+        build_binding = self.admission.get("runner_build_record")
+        if not isinstance(build_binding, dict):
+            raise DockerLifecycleError("admitted_runner_build_record_missing")
+        build_record = build_binding.get("validated_record")
+        if not isinstance(build_record, dict):
+            raise DockerLifecycleError("admitted_runner_build_record_not_validated")
         image_id = expected["image_id"]
         if not HEX_IMAGE_RE.fullmatch(image_id):
             raise DockerLifecycleError("admitted_runner_image_id_invalid")
@@ -661,10 +682,49 @@ class DockerController:
             raise DockerLifecycleError("admitted_runner_image_platform_mismatch")
         config = observed.get("Config") or {}
         labels = config.get("Labels") or {}
-        if not isinstance(labels, dict) or labels.get(BUILD_DEFINITION_LABEL) != expected[
-            "build_definition"
-        ]["sha256"]:
+        output = build_record.get("output_image")
+        if not isinstance(output, dict) or output.get("image_id") != image_id:
+            raise DockerLifecycleError("admitted_runner_build_output_mismatch")
+        expected_labels = output.get("labels")
+        if (
+            not isinstance(labels, dict)
+            or not isinstance(expected_labels, dict)
+            or set(RUNNER_BUILD_LABELS) - set(expected_labels)
+            or any(labels.get(key) != expected_labels.get(key) for key in RUNNER_BUILD_LABELS)
+        ):
+            raise DockerLifecycleError("admitted_runner_build_labels_mismatch")
+        if labels.get(BUILD_DEFINITION_LABEL) != expected["build_definition"]["sha256"]:
             raise DockerLifecycleError("admitted_runner_build_definition_label_mismatch")
+        base_images = build_record.get("base_images")
+        if not isinstance(base_images, list) or len(base_images) != 2:
+            raise DockerLifecycleError("admitted_runner_base_images_invalid")
+        for base in base_images:
+            if not isinstance(base, dict):
+                raise DockerLifecycleError("admitted_runner_base_image_invalid")
+            reference = base.get("reference")
+            base_id = base.get("image_id")
+            digest = base.get("digest")
+            if (
+                not isinstance(reference, str)
+                or not isinstance(base_id, str)
+                or not isinstance(digest, str)
+                or not HEX_IMAGE_RE.fullmatch(base_id)
+                or not HEX_IMAGE_RE.fullmatch(digest)
+                or not reference.endswith("@" + digest)
+            ):
+                raise DockerLifecycleError("admitted_runner_base_image_identity_invalid")
+            base_observed = self._image_inspect(reference)
+            repo_digests = base_observed.get("RepoDigests") or []
+            if (
+                base_observed.get("Id") != base_id
+                or not isinstance(repo_digests, list)
+                or not any(
+                    isinstance(item, str) and item.endswith("@" + digest)
+                    for item in repo_digests
+                )
+                or self._image_inspect(base_id).get("Id") != base_id
+            ):
+                raise DockerLifecycleError("admitted_runner_base_image_changed")
         return image_id
 
     def verify_service_image(self, service_id: str) -> str:

@@ -1,0 +1,336 @@
+{
+  "$id": "https://quant-trad.local/schemas/assurance-runner-materialization.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "build_context": {
+      "$ref": "#/$defs/buildContext"
+    },
+    "external_order_submission_enabled": {
+      "const": false
+    },
+    "profile": {
+      "$ref": "#/$defs/profile"
+    },
+    "schema_version": {
+      "const": "qt.assurance_runner_materialization.v1"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "source_materials": {
+      "$ref": "#/$defs/sourceMaterials"
+    },
+    "wheel_artifacts": {
+      "$ref": "#/$defs/wheelArtifacts"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source",
+    "profile",
+    "source_materials",
+    "wheel_artifacts",
+    "build_context",
+    "external_order_submission_enabled"
+  ],
+  "title": "QT Assurance Runner Materialization v1",
+  "type": "object",
+  "$defs": {
+    "aggregate": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_count": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "entry_manifest_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "selected_bytes": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entry_count",
+        "selected_bytes",
+        "entry_manifest_sha256"
+      ],
+      "type": "object"
+    },
+    "buildContext": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory": {
+          "$ref": "#/$defs/inventory"
+        },
+        "tar": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/namedFile"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "build-context.tar"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "tar",
+        "inventory"
+      ],
+      "type": "object"
+    },
+    "commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "inventory": {
+      "items": {
+        "$ref": "#/$defs/inventoryEntry"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "inventoryEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "size": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "size"
+      ],
+      "type": "object"
+    },
+    "namedFile": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "pattern": "^[^/\\\\]+$",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "size": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "sha256",
+        "size"
+      ],
+      "type": "object"
+    },
+    "profile": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "const": "phase3-python312-node20-offline"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "id",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "repoPath": {
+      "minLength": 1,
+      "not": {
+        "pattern": "(?:^/|\\\\|(?:^|/)\\.\\.(?:/|$))"
+      },
+      "type": "string"
+    },
+    "requiresPython": {
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "tree": {
+          "$ref": "#/$defs/commit"
+        }
+      },
+      "required": [
+        "commit",
+        "tree"
+      ],
+      "type": "object"
+    },
+    "sourceMaterial": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "sourceMaterials": {
+      "additionalProperties": false,
+      "properties": {
+        "build_profile": {
+          "$ref": "#/$defs/sourceMaterial"
+        },
+        "dockerfile": {
+          "$ref": "#/$defs/sourceMaterial"
+        },
+        "materializer": {
+          "$ref": "#/$defs/sourceMaterial"
+        },
+        "requirements_lock": {
+          "$ref": "#/$defs/sourceMaterial"
+        },
+        "wheel_manifest": {
+          "$ref": "#/$defs/sourceMaterial"
+        }
+      },
+      "required": [
+        "build_profile",
+        "dockerfile",
+        "requirements_lock",
+        "wheel_manifest",
+        "materializer"
+      ],
+      "type": "object"
+    },
+    "wheelArtifacts": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate": {
+          "$ref": "#/$defs/aggregate"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/wheelEntry"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "inventory": {
+          "$ref": "#/$defs/inventory"
+        },
+        "tar": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/namedFile"
+            },
+            {
+              "properties": {
+                "name": {
+                  "const": "wheelhouse.tar"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "entries",
+        "aggregate",
+        "tar",
+        "inventory"
+      ],
+      "type": "object"
+    },
+    "wheelEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "filename": {
+          "pattern": "^[^/\\\\]+\\.whl$",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "type": "string"
+        },
+        "requires_python": {
+          "$ref": "#/$defs/requiresPython"
+        },
+        "selected_tag": {
+          "$ref": "#/$defs/wheelTag"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "size": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "version": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "wheel_tags": {
+          "items": {
+            "$ref": "#/$defs/wheelTag"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "filename",
+        "sha256",
+        "size",
+        "selected_tag",
+        "wheel_tags",
+        "requires_python"
+      ],
+      "type": "object"
+    },
+    "wheelTag": {
+      "pattern": "^[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+$",
+      "type": "string"
+    }
+  }
+}
