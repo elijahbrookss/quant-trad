@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from data_providers.utils.ohlcv import interval_to_timedelta
+from engines.bot_runtime.core.execution_assumptions import ExecutionQualityClass
 from utils.log_context import build_log_context, with_log_context
 
 import logging
@@ -1249,8 +1250,13 @@ def _candle_continuity_status(candle_gaps: Mapping[str, Any]) -> str:
 
 def _research_status(readiness: Mapping[str, Any]) -> str:
     reproducible = str(readiness.get("golden_candidate_status") or "").strip().lower() == "certified"
-    execution_class = str(readiness.get("execution_quality_class") or "X0").upper()
-    if reproducible and execution_class in {"X1", "X2", "X3", "X4", "X5", "X6", "X7"}:
+    try:
+        execution_class = ExecutionQualityClass(
+            str(readiness.get("execution_quality_class") or "X0").strip().upper()
+        )
+    except ValueError:
+        execution_class = None
+    if reproducible and execution_class not in {None, ExecutionQualityClass.X0}:
         return "reproducible_economic_evidence"
     if reproducible:
         return "reproducible"

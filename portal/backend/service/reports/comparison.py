@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Optional
 
-from engines.bot_runtime.core.execution_assumptions import execution_quality_meets
+from engines.bot_runtime.core.execution_assumptions import (
+    execution_quality_meets,
+    normalize_execution_quality_class,
+)
 
 from .materialization import (
     RunReportMaterializationNotTerminal,
@@ -40,6 +43,10 @@ def compare_materialized_run_reports(
 ) -> RunComparisonDTO:
     """Compare two ready materialized RunReportDTO artifacts without building them."""
 
+    minimum_execution_quality_class = normalize_execution_quality_class(
+        minimum_execution_quality_class,
+        field="minimum_execution_quality_class",
+    )
     left_status = _status_payload(left_run_id)
     right_status = _status_payload(right_run_id)
     blocked_reason = _blocked_reason(left_status, right_status)
@@ -61,7 +68,7 @@ def compare_materialized_run_reports(
             return _blocked_comparison(
                 left_run_id,
                 right_run_id,
-                f"{side}_execution_quality_below_{str(minimum_execution_quality_class).upper()}",
+                f"{side}_execution_quality_below_{minimum_execution_quality_class}",
                 left_status,
                 right_status,
             )

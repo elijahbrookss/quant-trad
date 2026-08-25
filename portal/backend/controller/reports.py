@@ -181,7 +181,7 @@ async def compare_materialized_reports(
     right_run_id: str = Query(..., alias="right_run_id"),
     include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
     require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
-    minimum_execution_quality_class: str = Query("X0", pattern="^X[0-7]$"),
+    minimum_execution_quality_class: str = Query("X0", pattern="^X[0-5]$"),
 ) -> RunComparisonDTO:
     """Compare two ready materialized RunReportDTO contract (`run_report.v2`) artifacts without building reports."""
 
@@ -222,7 +222,7 @@ async def compare_materialized_reports_summary(
     right_run_id: str = Query(..., alias="right_run_id"),
     include_golden: bool = Query(True, description="Read existing golden comparison evidence when available."),
     require_golden: bool = Query(False, description="Block comparison when existing golden evidence is unavailable."),
-    minimum_execution_quality_class: str = Query("X0", pattern="^X[0-7]$"),
+    minimum_execution_quality_class: str = Query("X0", pattern="^X[0-5]$"),
 ) -> Dict[str, Any]:
     """Return a compact materialized report comparison for CLI/research workflows."""
 

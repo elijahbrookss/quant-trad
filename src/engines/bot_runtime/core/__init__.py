@@ -50,6 +50,7 @@ from .execution_assumptions import (
     EconomicClaimIntent,
     ExecutionQualityClass,
     ResolvedExecutionAssumptions,
+    normalize_execution_quality_class,
     resolve_execution_assumptions,
 )
 from .execution_context import (
@@ -244,6 +245,7 @@ __all__ = [
     "EconomicClaimIntent",
     "ExecutionQualityClass",
     "ResolvedExecutionAssumptions",
+    "normalize_execution_quality_class",
     "resolve_execution_assumptions",
     "Candle",
     "CandleSnapshot",

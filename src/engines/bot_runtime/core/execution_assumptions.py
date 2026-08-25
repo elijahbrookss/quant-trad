@@ -101,12 +101,35 @@ def normalize_economic_claim_intent(value: Any) -> str:
         raise ValueError(f"economic_claim_intent is required and must be one of: {supported}") from exc
 
 
+def normalize_execution_quality_class(
+    value: Any,
+    *,
+    field: str = "execution_quality_class",
+) -> str:
+    """Return one canonical implemented X-class or fail closed."""
+
+    if isinstance(value, ExecutionQualityClass):
+        return value.value
+    normalized = str(value or "").strip().upper()
+    try:
+        return ExecutionQualityClass(normalized).value
+    except ValueError as exc:
+        supported = ", ".join(item.value for item in ExecutionQualityClass)
+        raise ValueError(f"{field} must be one of: {supported}") from exc
+
+
 def execution_quality_meets(actual: Any, minimum: Any) -> bool:
     """Return whether an implemented X-class satisfies a required X-class."""
 
-    return _QUALITY_RANK.get(str(actual or "").upper(), -1) >= _QUALITY_RANK.get(
-        str(minimum or "").upper(), len(_QUALITY_RANK)
-    )
+    try:
+        actual_class = normalize_execution_quality_class(actual)
+        minimum_class = normalize_execution_quality_class(
+            minimum,
+            field="minimum_execution_quality_class",
+        )
+    except ValueError:
+        return False
+    return _QUALITY_RANK[actual_class] >= _QUALITY_RANK[minimum_class]
 
 
 def _number(value: Any, *, field: str, required: bool = False) -> float | None:
@@ -328,5 +351,6 @@ __all__ = [
     "execution_quality_meets",
     "legacy_execution_assumptions",
     "normalize_economic_claim_intent",
+    "normalize_execution_quality_class",
     "resolve_execution_assumptions",
 ]

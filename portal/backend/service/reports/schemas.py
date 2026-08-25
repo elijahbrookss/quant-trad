@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from engines.bot_runtime.core.execution_assumptions import ExecutionQualityClass
+
 from ..provenance import (
     REPORT_CONTRACT_VERSION,
     REPORT_DATASET_SCHEMA_VERSION,
@@ -93,7 +95,7 @@ class ResearchTrustDTO(BaseModel):
     golden_candidate_status: str = "unknown"
     research_status: str = "unknown"
     reproducibility_status: str = "unknown"
-    execution_quality_class: str = "X0"
+    execution_quality_class: ExecutionQualityClass = ExecutionQualityClass.X0
     scientific_quality_class: str = "S0"
     instrument_economics_class: str = "unknown"
     promotion_eligibility: str = "ineligible"
