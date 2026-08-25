@@ -235,12 +235,16 @@
       "id": "QT-P3-SLICE-AUTHORITY",
       "title": "Authority and schema hierarchy",
       "commits": [
+        "d958fe41c23ac9e0d09e1d0f123f2d4ed74f27c1",
         "f09cef3d971ddefa251a03989a7b340a0d3f8081"
       ],
       "files": [
         "AGENTS.md",
+        "docs/architecture/research-orchestration/AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md",
         "docs/contracts/README.md",
-        "docs/contracts/platform/03_engineering_contract.md"
+        "docs/contracts/platform/03_engineering_contract.md",
+        "docs/plans/documentation-reconciliation/README.md",
+        "docs/plans/documentation-reconciliation/phase-3-authorization-and-plan.md"
       ],
       "guarantee_ids": [
         "QT-GUAR-AGENT-WORKFLOW-BOUNDARIES",
@@ -254,7 +258,7 @@
         "QT-REM-305",
         "QT-REM-315"
       ],
-      "effect": "Records the approved authority hierarchy and layered relational-schema ownership without making agent guidance product authority."
+      "effect": "Records the owner's Phase 3 authorization, the approved authority hierarchy, and layered relational-schema ownership without making agent guidance product authority."
     },
     {
       "id": "QT-P3-SLICE-CHECK-ADMISSION",
@@ -263,7 +267,9 @@
         "1091ad0550ec82e5a76174cb57044cf75e713959"
       ],
       "files": [
+        "docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md",
         "docs/architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md",
+        "docs/architecture/decisions/README.md",
         "docs/architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md"
       ],
       "guarantee_ids": [
@@ -312,9 +318,14 @@
         "8022ba2831e98bf982b6421a8ddf3cc909c01fda"
       ],
       "files": [
+        "AGENTS.md",
         "docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md",
         "docs/architecture/ARCHITECTURE_DOCS_MODEL.md",
+        "docs/architecture/ARCHITECTURE_METADATA_V1_ALLOWLIST.txt",
+        "docs/architecture/README.md",
+        "docs/engineering/documentation/component-documentation-standard.md",
         "scripts/docs/build_architecture_index.py",
+        "tests/contract/test_architecture_docs_index.py",
         "tests/contract/test_architecture_metadata_schema.py"
       ],
       "guarantee_ids": [
@@ -354,12 +365,22 @@
         "fb5814de8998736fe57121db708e2b32903b16a3",
         "18d4fa19b16b6426b34879db112866b8d0db18ba",
         "d9b08928a8c58c4aa5be45827da5fa3a9c3378f3",
-        "c64398f74b567414c22c66d3781e20f431ae52ad"
+        "c64398f74b567414c22c66d3781e20f431ae52ad",
+        "a89b0dfd7eb8c2a0c37e2aa197cfb57026417e3f"
       ],
       "files": [
+        "AGENTS.md",
+        "Makefile",
+        "docs/assurance/guarantees/README.md",
+        "docs/contracts/README.md",
         "docs/contracts/platform/04_glossary.md",
+        "docs/index.md",
+        "docs/plans/documentation-reconciliation/README.md",
         "docs/plans/documentation-reconciliation/phase-3-terminology-dispositions.json",
         "docs/plans/documentation-reconciliation/phase-3-terminology-dispositions.md",
+        "scripts/docs/glossary.py",
+        "tests/conftest.py",
+        "tests/contract/test_guarantee_registry.py",
         "tests/contract/test_platform_glossary.py"
       ],
       "guarantee_ids": [
@@ -378,6 +399,7 @@
       ],
       "files": [
         "docs/architecture/data/MARKET_STRUCTURE_DATA_PLANE.md",
+        "docs/plans/documentation-reconciliation/README.md",
         "docs/plans/documentation-reconciliation/phase-3-forward-corrections.md"
       ],
       "guarantee_ids": [
@@ -406,9 +428,24 @@
         "eee427593d7f297bc104744438f9e895c3c686c5"
       ],
       "files": [
+        "Makefile",
+        "docs/architecture/ARCHITECTURE_DOCS_MODEL.md",
         "docs/architecture/README.md",
+        "docs/architecture/decisions/README.md",
+        "docs/assets/README.md",
+        "docs/engineering/canonical-fact-migration-backup.md",
+        "docs/engineering/canonical-fact-migration-discovery.md",
+        "docs/engineering/canonical-fact-migration-validation.md",
+        "docs/engineering/collector-operations-discovery.md",
+        "docs/engineering/collector-operations-validation.md",
+        "docs/engineering/frontend-v2-operator-validation.md",
         "docs/engineering/testing/ci-test-topology.md",
         "docs/index.md",
+        "docs/plans/backtest-dataset-boundary.md",
+        "docs/plans/platform-baseline-cleanup.md",
+        "docs/research-campaigns/CHAINLINK_ETH_USD_BREAKOUT_V2_DOSSIER.md",
+        "docs/research-campaigns/CHAINLINK_ETH_USD_BREAKOUT_V3_SIX_MONTH_DOSSIER.md",
+        "tests/conftest.py",
         "tests/contract/test_documentation_reconciliation.py"
       ],
       "guarantee_ids": [
@@ -428,6 +465,8 @@
         "2d8f0d9d064b1620468cead02a4a34d5c8d0944a"
       ],
       "files": [
+        "docker/grafana/provisioning/dashboards/README.md",
+        "docs/architecture/data/CONTINUOUS_COLLECTOR_RUNTIME.md",
         "docs/architecture/decisions/0033-use-promtail-as-runtime-loki-ingress.md",
         "docs/architecture/observability/OBSERVABILITY_BOUNDARY.md",
         "docs/contracts/platform/03_engineering_contract.md",
@@ -450,6 +489,8 @@
       ],
       "files": [
         "docs/architecture/decision-layer/DECISION_LAYER_BOUNDARY.md",
+        "portal/backend/controller/strategies.py",
+        "portal/backend/service/strategies/strategy_service/facade.py",
         "portal/backend/service/strategies/strategy_service/market_identity.py",
         "tests/test_portal/test_strategy_market_identity_contract.py"
       ],
@@ -470,8 +511,16 @@
       ],
       "files": [
         "docs/architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md",
+        "docs/architecture/reporting/REPORTING_BOUNDARY.md",
+        "portal/backend/controller/reports.py",
+        "portal/backend/service/reports/comparison.py",
         "portal/backend/service/reports/contract.py",
+        "portal/backend/service/reports/materialization.py",
+        "portal/backend/service/reports/schemas.py",
+        "src/engines/bot_runtime/core/__init__.py",
         "src/engines/bot_runtime/core/execution_assumptions.py",
+        "tests/test_reports/test_report_contract_routes.py",
+        "tests/test_reports/test_report_materialization.py",
         "tests/test_reports/test_run_report_comparison.py"
       ],
       "guarantee_ids": [
@@ -487,14 +536,24 @@
       "title": "Supported nonauthoritative operator surface",
       "commits": [
         "204dcf8368d986670ccd64f4832203cab88c549c",
+        "fe696032a07431a6cce0c198c0f3321483e4ac25",
         "73b85ebbc5b413a09d30b4b6134df6a00916db52",
         "b5175ad0181b951a84bcd5d91eee63d131fa7e3c"
       ],
       "files": [
+        "Makefile",
+        "docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md",
         "docs/architecture/frontend/OPERATOR_CONSOLE_V2.md",
         "docs/contracts/platform/00_system_contract.md",
+        "docs/engineering/testing/ci-test-topology.md",
+        "portal/frontend/README.md",
+        "portal/frontend/package-lock.json",
         "portal/frontend/package.json",
-        "portal/frontend/tests/v2ReadOnlySurface.test.js"
+        "portal/frontend/src/components/__tests__/DeleteIndicatorModal.test.jsx",
+        "portal/frontend/src/components/__tests__/IndicatorCard.test.jsx",
+        "portal/frontend/tests/setupVitest.js",
+        "portal/frontend/tests/v2ReadOnlySurface.test.js",
+        "portal/frontend/vitest.config.js"
       ],
       "guarantee_ids": [
         "QT-GUAR-BOT-RUN-CONTAINER-IDENTITY-SEPARATION",
@@ -552,12 +611,14 @@
       "id": "QT-P3-SLICE-PROFILES",
       "title": "Pinned frontend and disposable database proof runtimes",
       "commits": [
-        "8029d9ab20ad559c4860a2ca1aed8d0328c99292"
+        "8029d9ab20ad559c4860a2ca1aed8d0328c99292",
+        "5b5a23c4c72909d9c52c85564007ff31cac0d2e8"
       ],
       "files": [
         "docker/assurance/README.md",
         "docker/assurance/frontend-node.Dockerfile",
         "docker/assurance/python-db-isolated.profile.json",
+        "requirements.lock",
         "tests/contract/test_assurance_environment_profiles.py"
       ],
       "guarantee_ids": [
@@ -584,30 +645,59 @@
       "id": "QT-P3-SLICE-ASSURANCE-FINALIZATION",
       "title": "Profile-bound assurance and non-normative final-review machinery",
       "commits": [
-        "33fc3221dbd8be39f7f88dfb94c25211961b5eb3",
+        "8380f1781741535b97f6db8e4facb0cbc98550b1",
+        "d587f4941ad6b316af87562501cb52be39109db9",
         "a10a3f95b03abcb466847f547b9a307d4b37ef67",
+        "33fc3221dbd8be39f7f88dfb94c25211961b5eb3",
         "6aa02eada499968e29238ea304f1ca2f633268b3",
         "991fe2dc8dc152d9919160fcda6312fffbaf17de",
-        "f882ac8037f8d96292c6c35d620c95042db4413f"
+        "f882ac8037f8d96292c6c35d620c95042db4413f",
+        "259155bfffb69cd68804d0aa25c3bb185abb28ef",
+        "1f861dec346b6bcb164dff98c124d27a34d79632",
+        "5281ad373efa698d042e8c86fb563b7ed3df9a84",
+        "bbddfda81f6a6421c09663087fcad2f024d3b4ef",
+        "4d3c6ae91496919f3d9a8571032005b25c6589df",
+        "6daf0b0bce721030313014f369a3716ce10171cd",
+        "63a1fa63fc71f0e2d3c3ed9f6e13625133a10dcc",
+        "e470413e8048a5a4e6eb4ecbef2a73bc66f4a74d",
+        "9438f20cb27decf8e58faf39efd51d7115baa6af",
+        "326ad101ee5a34c5ff4f5ece16ccf765db8f0b17",
+        "cdafe2ad7f7870df630e09b62720b493b1fe15e2",
+        "f1aa4995e700eb53eff0d5b02bdc4620e8a29536"
       ],
       "files": [
         "Makefile",
+        "docker/assurance/README.md",
+        "docs/assurance/guarantees/EXECUTION_LIFECYCLE.md",
         "docs/assurance/guarantees/GUARANTEES.md",
+        "docs/assurance/guarantees/README.md",
+        "docs/assurance/guarantees/attestations/README.md",
         "docs/assurance/guarantees/proof-catalog.json",
         "docs/assurance/guarantees/schemas/attestation.v1.schema.json",
+        "docs/assurance/guarantees/schemas/cleanup-manifest.v1.schema.json",
+        "docs/assurance/guarantees/schemas/cleanup-recovery-intent.v1.schema.json",
+        "docs/assurance/guarantees/schemas/cleanup-recovery-report.v1.schema.json",
+        "docs/assurance/guarantees/schemas/execution-admission.v1.schema.json",
+        "docs/assurance/guarantees/schemas/execution-draft.v1.schema.json",
+        "docs/assurance/guarantees/schemas/execution-manifest.v1.schema.json",
         "docs/assurance/guarantees/schemas/phase-3-final-review.v1.schema.json",
         "docs/assurance/guarantees/schemas/proof-catalog.v1.schema.json",
+        "docs/plans/documentation-reconciliation/phase-3-authorization-and-plan.md",
         "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json",
         "docs/plans/documentation-reconciliation/phase-3-final-review.json",
         "docs/plans/documentation-reconciliation/phase-3-final-review.md",
         "scripts/assurance/__init__.py",
+        "scripts/assurance/docker_lifecycle.py",
         "scripts/assurance/node_test_reporter.mjs",
+        "scripts/assurance/process_guard.py",
         "scripts/assurance/pytest_result_plugin.py",
         "scripts/assurance/verify_guarantees.py",
         "scripts/docs/build_phase3_final_review.py",
         "scripts/docs/guarantees.py",
         "tests/contract/test_assurance_environment_profiles.py",
         "tests/contract/test_assurance_executor.py",
+        "tests/contract/test_assurance_lifecycle.py",
+        "tests/contract/test_assurance_publication.py",
         "tests/contract/test_guarantee_registry.py",
         "tests/contract/test_phase3_final_review.py"
       ],
@@ -615,7 +705,7 @@
       "guarantee_ids": [],
       "remediation_selector": "all",
       "remediation_ids": [],
-      "effect": "Binds admitted proof profiles, typed Node results, commit-bound execution, conservative guarantee-result capping, and deterministic final-review accounting. It executes no campaign proof, supplies no proof result, closes no remediation, and activates no guarantee."
+      "effect": "Binds admitted proof profiles, typed Node results, structured environment admission, commit-bound and cleanup-gated isolated Docker execution, nonfinalizing abrupt-cleanup recovery, crash-consistent whole-campaign staged publication, conservative guarantee-result capping, and deterministic final-review accounting. It executes no campaign proof, supplies no proof result, closes no remediation, and activates no guarantee."
     }
   ],
   "residual_risks": [
@@ -741,7 +831,7 @@
       "id": "QT-RISK-P3-004",
       "category": "environment_unavailable",
       "severity": "high",
-      "summary": "Recovery has no provisioned source/target rehearsal and deployment has no admitted execution profile.",
+      "summary": "Recovery has no provisioned source/target rehearsal. QT-PROOF-311 may execute its admitted static validation, but no approved isolated deployment-execution profile exists for clean deployment, negative migration, rollback, and recovery.",
       "guarantee_selector": "listed",
       "guarantee_ids": [
         "QT-GUAR-ATTESTED-SINGLE-NODE-DEPLOYMENT",
@@ -858,6 +948,63 @@
       "remediation_ids": [],
       "proof_ids": [],
       "exit_criteria": "Recovered provenance or a separately approved disposition replaces the explicit retained-unavailable labels."
+    },
+    {
+      "id": "QT-RISK-P3-011",
+      "category": "runner_build_provenance",
+      "severity": "high",
+      "summary": "The candidate Phase 3 runner can be bound immutably at execution, but the currently available build is not proven hermetic: requirements.lock pins versions without artifact hashes, no source-bound offline wheelhouse exists, and no retained build record proves the resolved artifacts. Any later admission establishes exact runtime and image identity only, not hermetic build provenance.",
+      "guarantee_selector": "all",
+      "guarantee_ids": [],
+      "remediation_selector": "listed",
+      "remediation_ids": [],
+      "proof_ids": [],
+      "exit_criteria": "Bind a reviewed hash-complete offline wheelhouse and immutable build record to the source and profile, rebuild without network access, and retain the resulting image identity and build-definition binding."
+    },
+    {
+      "id": "QT-RISK-P3-012",
+      "category": "runner_prerequisite_unavailable",
+      "severity": "high",
+      "summary": "The candidate Phase 3 runner inspected for admission does not provide the declared PostgreSQL psql client. Unless a separately reviewed source-bound runner supplies it, QT-PROOF-002 and QT-PROOF-314 must be recorded UNAVAILABLE rather than PASS or product FAIL.",
+      "guarantee_selector": "listed",
+      "guarantee_ids": [
+        "QT-GUAR-CANONICAL-FACT-APPEND-ONLY",
+        "QT-GUAR-PR-VERIFICATION-TOPOLOGY"
+      ],
+      "remediation_selector": "listed",
+      "remediation_ids": [
+        "QT-REM-002",
+        "QT-REM-313"
+      ],
+      "proof_ids": [
+        "QT-PROOF-002",
+        "QT-PROOF-314"
+      ],
+      "exit_criteria": "Admit a provenance-pinned PostgreSQL 15 psql client or a separately reviewed equivalent execution design, then execute both proofs in the approved isolated database profile; retain UNAVAILABLE until then."
+    },
+    {
+      "id": "QT-RISK-P3-013",
+      "category": "integration_identity",
+      "severity": "high",
+      "summary": "Attestations and the final packet bind exact feature-branch commit identities; rebasing, squashing, cherry-picking, or force-pushing would create a different subject, while integrating into a moved remote develop branch would add unassessed target state.",
+      "guarantee_selector": "all",
+      "guarantee_ids": [],
+      "remediation_selector": "all",
+      "remediation_ids": [],
+      "proof_ids": [],
+      "exit_criteria": "Verify the authoritative remote origin ref refs/heads/develop still equals frozen d46e40bf55caeea12f4ccbde640c71f271eaf9c4; after final approval, update that remote branch by fast-forward only to the exact reviewed feature head so S, P, and C remain exact ancestors. If the remote ref differs or cannot be verified, invalidate and refresh the packet and return for review. A stale local develop ref is not integration-target evidence."
+    },
+    {
+      "id": "QT-RISK-P3-014",
+      "category": "assurance_lifecycle_concurrency",
+      "severity": "high",
+      "summary": "Recovery and staged publication are crash-safe within cooperative same-user use, not transactional against a hostile same-UID process: file locks are advisory, Docker inspect/recheck/remove spans separate CLI calls, a create-only external receipt race can safely deny progress, and repository publication is pending-backed multi-file crash-consistent rather than atomic.",
+      "guarantee_selector": "all",
+      "guarantee_ids": [],
+      "remediation_selector": "listed",
+      "remediation_ids": [],
+      "proof_ids": [],
+      "exit_criteria": "Run the approved campaign without overlapping same-user actors and retain these limits in the final packet. Eliminating the underlying risk requires OS-enforced exclusive runner isolation, a transactional daemon identity-and-removal primitive, and transactional artifact storage; safe receipt-race denial and resumable partial publication remain visible until then."
     }
   ],
   "system_summary": [
@@ -866,13 +1013,17 @@
     "Strategies propose decisions from typed outputs; runtime owns execution, fills, accounting, lifecycle, and attained X0-X5 quality.",
     "Reports, BotLens, observability, and the operator console explain or project owned truth and cannot rewrite it.",
     "External order submission remains closed in every runtime mode, and no proof may use production or live systems.",
+    "Abrupt cleanup recovery cannot finalize or attest a session, and publication validates all three immutable staged attestations before copying evidence; both mechanisms remain cooperative, crash-consistent controls rather than hostile-process or multi-file transactional guarantees.",
+    "Phase 3 slice file lists retain each named commit's complete changed-file footprint plus explicitly consumed source inputs; they are evidence bindings, not authority declarations.",
+    "The commit that finalizes this policy cannot list its own future identity; exact policy bytes are instead bound through source commit S and the final review's source-material hash.",
+    "Proof results bind exact source, profile, runner, environment, cleanup, and attestation identities; missing prerequisites remain UNAVAILABLE, image identity alone does not prove a hermetic build, and results do not transfer to rewritten commits.",
     "The registry and this final review are assurance indexes, not product authority, proof results, remediation closure, or activation decisions."
   ],
   "integration_plan": [
     "Finish isolated validations and bind every available result to the sorted set of immutable same-source attestations; preserve unavailable and unattempted states.",
     "Regenerate this final review against that exact source commit, sorted attestation set, and immutable validation-result document from a clean packet-input commit.",
     "Request final owner approval for integration into develop; do not combine that approval with guarantee activation.",
-    "After approval, integrate the bounded commits without rewriting frozen Phase 1/2 evidence and validate the resulting develop commit.",
+    "After approval, first verify origin refs/heads/develop still equals frozen d46e40bf55caeea12f4ccbde640c71f271eaf9c4; then fast-forward only that remote branch to the exact reviewed feature head—no merge commit, rebase, squash, cherry-pick, or force-push. If it differs or cannot be verified, invalidate and refresh the packet and return for review.",
     "Handle any future guarantee activation through separate reviewed decisions and attestation bindings."
   ]
 }
