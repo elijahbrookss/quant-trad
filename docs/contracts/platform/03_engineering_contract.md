@@ -58,8 +58,29 @@ be the entire schema authority by itself.
 
 ## Observability Contract
 
-Lifecycle boundaries should be observable via structured logs.
-Correlation fields should include IDs and timing context when available.
+Lifecycle boundaries must be observable through structured logs with relevant
+identities and timing context.
+
+Backend, worker, and bot-runtime application logs write to their normal
+stdout/stderr process streams. Each supported topology has exactly one normal
+out-of-process shipper from those streams into Loki:
+
+- the local-development composition uses Promtail;
+- the native-Linux server composition uses Grafana Alloy.
+
+Promtail remains a supported local-development component. Alloy is the supported
+native-server shipper. A topology must not run both against the same application
+container stream or otherwise create duplicate normal ingress.
+
+Application processes must not synchronously post ordinary logs to Loki or
+enable an in-process Loki handler on the runtime hot path. Configuration,
+transport failure, or shipper absence must not silently activate a second
+ingress path.
+
+Loki and Grafana are observability projections, not runtime, execution, or
+persistence truth. Missing ingestion remains explicit operational
+unavailability; it must not be replaced with invented log evidence or inferred
+healthy state.
 
 ## API Execution Contract
 
