@@ -1,101 +1,141 @@
 # Grafana Dashboard Provisioning
 
-This directory contains Grafana dashboards that are automatically loaded when Grafana starts.
+The checked-in JSON files in this directory are Quant-Trad's supported Grafana
+dashboard source for local development and the native-Linux server.
 
-## How It Works
+## Provisioning Contract
 
-- Dashboard JSON files in this directory are automatically provisioned to Grafana
-- Changes to files are detected and applied within 10 seconds (see `updateIntervalSeconds` in `dashboard.yml`)
-- You can edit dashboards in the Grafana UI (changes are allowed with `allowUiUpdates: true`)
+[`dashboard.yml`](dashboard.yml) configures Grafana's file provider:
 
-## Backing Up Dashboards
+- the source directory is `/etc/grafana/provisioning/dashboards`;
+- Grafana polls for file changes every 10 seconds;
+- `allowUiUpdates` is `false`, so a provisioned dashboard cannot acquire a
+  competing durable definition through the UI; and
+- the repository directory is mounted read-only into Grafana in both supported
+  Compose topologies.
 
-### Manual Backup
+Edit or replace the checked-in JSON, review the diff, and deliver it through the
+normal source workflow. A dashboard displayed from Grafana's data volume or
+created only in the UI is not a replacement for the reviewed file source.
+
+There are no supported `make grafana-backup` or `make grafana-restore` targets.
+The repository also provides no Grafana backup hook, cron entry, systemd timer,
+or other automatic export/restore scheduler.
+
+## Export A Candidate Backup
+
+The tracked
+[`scripts/backup-grafana-dashboards.sh`](../../../../scripts/backup-grafana-dashboards.sh)
+script exports every dashboard returned by Grafana's dashboard-search API. It
+extracts each bare dashboard model from the API wrapper and writes a slug-named
+JSON file to `OUTPUT_DIR`.
+
+Prerequisites:
+
+- Bash, `curl`, and `jq`;
+- a running, reachable Grafana API;
+- valid Grafana credentials; and
+- a writable output directory.
+
+From the project root, set the actual credentials for the target Grafana and
+run:
+
 ```bash
-# From project root
-make grafana-backup
+export GRAFANA_URL='http://localhost:3000'
+export GRAFANA_USER='admin'
+export GRAFANA_PASSWORD='<current-admin-password>'
+export OUTPUT_DIR='./docker/grafana/provisioning/dashboards'
+bash scripts/backup-grafana-dashboards.sh
 ```
 
-### Automatic Backup Options
+Do not commit credentials. The script's `admin`/`admin` defaults are only
+fallback values and should not be assumed to match a configured stack.
 
-#### 1. Git Pre-Commit Hook (Recommended)
+The script overwrites matching output filenames but does not delete stale JSON,
+identify which dashboards are provisioned, validate repository intent, or prove
+that its output can restore a loss. After export:
+
 ```bash
-# Install the hook (one-time setup)
-ln -sf ../../scripts/git-hooks/pre-commit-grafana .git/hooks/pre-commit
-
-# Now dashboards are backed up automatically before each commit
+jq empty docker/grafana/provisioning/dashboards/*.json
+git diff -- docker/grafana/provisioning/dashboards
 ```
 
-#### 2. Cron Job (Every Hour)
-```bash
-# Edit your crontab
-crontab -e
+Review additions, replacements, and stale files explicitly before committing.
+An export is a candidate source update, not an automatic backup acceptance or
+restore attestation.
 
-# Add this line (adjust path to your project):
-0 * * * * cd /home/elijah/dev/quant-trad && make grafana-backup >/dev/null 2>&1
+## Reapply Checked-In Dashboards Locally
+
+The restore source is the reviewed JSON in this directory. With the local
+observability profile already running, Grafana should reconcile a changed file
+within one 10-second polling interval. Verify the expected dashboard UID and
+content in Grafana after the poll.
+
+If the observability profile is stopped, start it with the normal stack command.
+If the provider needs a bounded reload, recreate the local observability profile:
+
+```bash
+# Start the profile if it is stopped:
+make STACK_PROFILES=observability stack-up
+
+# Or recreate it when a bounded reload is needed:
+make STACK_PROFILES=observability stack-restart
 ```
 
-#### 3. Systemd Timer (Linux)
+The local composition uses the supported Promtail shipper. Do not start Alloy
+against the same application containers during a dashboard reload; dashboard
+provisioning never requires a second log shipper.
+
+## Reapply Checked-In Dashboards On A Native Server
+
+Commit dashboard JSON through normal review and deploy the exact reviewed
+revision with the supported server helper:
+
 ```bash
-# Create ~/.config/systemd/user/grafana-backup.service
-[Unit]
-Description=Backup Grafana Dashboards
-
-[Service]
-Type=oneshot
-WorkingDirectory=/home/elijah/dev/quant-trad
-ExecStart=/usr/bin/make grafana-backup
-
-# Create ~/.config/systemd/user/grafana-backup.timer
-[Unit]
-Description=Backup Grafana Dashboards Hourly
-
-[Timer]
-OnCalendar=hourly
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-
-# Enable and start
-systemctl --user enable --now grafana-backup.timer
+bash scripts/automation/server_deploy.sh doctor
+bash scripts/automation/server_deploy.sh deploy <reviewed-commit-sha>
 ```
 
-## Restoring Dashboards
+The server composition mounts the reviewed provisioning directory read-only and
+uses Alloy as its only normal Docker-to-Loki shipper. Do not copy dashboard files
+directly into a running server container, save a competing UI version, or start
+Promtail beside Alloy.
 
-Dashboards are automatically loaded from this directory when Grafana starts.
+Local polling, stack restart, and reviewed-commit deployment reapply the
+checked-in source. They are not evidence that a destructive dashboard-loss and
+restore rehearsal passed. No such restore proof or automatic recovery workflow
+is claimed here; verify the expected UIDs and content after each operator action.
 
-To reload without restarting:
-```bash
-make grafana-restore
-```
+For the complete native-server promotion boundary, see
+[Portable Single-Node Deployment](../../../../docs/engineering/server-deployment.md).
 
-## Exporting from Grafana UI
+## Authoring And File Format
 
-1. Go to Dashboard → Settings → JSON Model
-2. Copy the JSON
-3. Save to a file: `docker/grafana/provisioning/dashboards/my-dashboard.json`
-4. Commit to git
-
-Or use the backup script to export all dashboards at once.
-
-## File Format
-
-Each JSON file should contain a Grafana dashboard model. The filename will be used as the slug.
-
-Example: `system-metrics.json` → Dashboard available at `/d/<uid>/system-metrics`
+Each JSON file is a bare Grafana dashboard model, not the API response wrapper.
+Keep its `uid` stable when updating an existing dashboard. Author changes in the
+file directly, or export a candidate model from Grafana and review it before
+replacement. Because `allowUiUpdates` is false, UI-only edits to a provisioned
+dashboard are not the supported authoring path.
 
 ## Recommended Entry Dashboards
 
 Primary operator dashboards:
 
-- `runtime-hotpath-control.json` (`uid=qt-runtime-hotpath-control`) — per-bar runtime attribution and worst-bar context
-- `botlens-transport-control.json` (`uid=qt-botlens-transport-control`) — bounded BotLens transport, payload, replay, and queue pressure
-- `observability-cost-control.json` (`uid=qt-observability-cost-control`) — exporter write cost, rollup reduction, and DB pressure
+- `runtime-hotpath-control.json` (`uid=qt-runtime-hotpath-control`) — per-bar
+  runtime attribution and worst-bar context;
+- `botlens-transport-control.json` (`uid=qt-botlens-transport-control`) —
+  bounded BotLens transport, payload, replay, and queue pressure; and
+- `observability-cost-control.json` (`uid=qt-observability-cost-control`) —
+  exporter write cost, rollup reduction, and database pressure.
 
 Focused supporting dashboards:
 
-- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`) — candle continuity and projection failure inspection
-- `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`) — process/thread health outside BotLens backend observability
+- `botlens-diagnostics-failure-analysis.json` (`uid=qt-botlens-diagnostics`) —
+  candle continuity and projection failure inspection; and
+- `runtime-process-control-tower.json` (`uid=qt-runtime-control-tower`) —
+  process/thread health outside BotLens backend observability.
 
-The older playground-style BotLens overview, queue, pipeline, per-run, attribution, and IO/DB dashboards were removed in favor of dashboards that map directly to runtime hot path, transport budget, and observability cost questions.
+The older playground-style BotLens overview, queue, pipeline, per-run,
+attribution, and I/O/database dashboards were removed in favor of dashboards
+that map directly to runtime hot-path, transport-budget, and observability-cost
+questions.
