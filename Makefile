@@ -483,7 +483,7 @@ validate-docs: venv ## Refresh indexes and run docs contract validation
 	@$(PYTHON) scripts/docs/build_architecture_index.py
 	@$(PYTHON) scripts/docs/glossary.py check
 	@$(PYTHON) scripts/docs/guarantees.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_documentation_reconciliation.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py
 
 frontend-test: ## Run frontend unit tests
 	@$(NPM) --prefix $(FRONT_DIR) test

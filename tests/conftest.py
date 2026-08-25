@@ -131,6 +131,7 @@ def _ci_profile_markers_for_path(path: str) -> set[str]:
             or name
             in {
                 "test_architecture_metadata_schema.py",
+                "test_documentation_reconciliation.py",
                 "test_platform_glossary.py",
             }
         )
