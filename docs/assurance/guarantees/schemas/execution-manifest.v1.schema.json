@@ -1,0 +1,147 @@
+{
+  "$id": "https://quant-trad.local/schemas/assurance-execution-manifest.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifact_kind": {
+      "const": "execution_manifest"
+    },
+    "facts": {
+      "$ref": "#/$defs/facts"
+    },
+    "profile_id": {
+      "$ref": "#/$defs/profileId"
+    },
+    "schema_version": {
+      "const": "qt.assurance_environment_evidence.v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "profile_id",
+    "artifact_kind",
+    "facts"
+  ],
+  "title": "QT Assurance Execution Manifest v1",
+  "type": "object",
+  "$defs": {
+    "facts": {
+      "additionalProperties": false,
+      "properties": {
+        "attestation_id": {
+          "$ref": "#/$defs/attestationId"
+        },
+        "control_plane_identity_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "environment_instance_id": {
+          "pattern": "^[a-z][a-z0-9-]{7,127}$",
+          "type": "string"
+        },
+        "executed_proof_ids": {
+          "items": {
+            "pattern": "^QT-PROOF-[0-9]{3}$",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "execution_draft_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "execution_finished_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "execution_started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "execution_state": {
+          "enum": [
+            "complete",
+            "executor_error",
+            "interrupted"
+          ]
+        },
+        "proof_results_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "record_schema_version": {
+          "const": "qt.assurance_execution_manifest.v1"
+        },
+        "resource_identities": {
+          "items": {
+            "$ref": "#/$defs/resourceIdentity"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "source_commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_schema_version",
+        "attestation_id",
+        "source_commit",
+        "execution_draft_sha256",
+        "environment_instance_id",
+        "control_plane_identity_sha256",
+        "execution_state",
+        "execution_started_at",
+        "execution_finished_at",
+        "executed_proof_ids",
+        "proof_results_sha256",
+        "resource_identities"
+      ],
+      "type": "object"
+    },
+    "attestationId": {
+      "pattern": "^QT-ATT-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8,40}-[a-z0-9-]+$",
+      "type": "string"
+    },
+    "hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "profileId": {
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "type": "string"
+    },
+    "resourceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "container",
+            "database",
+            "network",
+            "published_endpoint",
+            "temporary_secret_file",
+            "volume"
+          ]
+        },
+        "logical_name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "runtime_identity": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "logical_name",
+        "runtime_identity"
+      ],
+      "type": "object"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "pattern": "Z$",
+      "type": "string"
+    }
+  }
+}

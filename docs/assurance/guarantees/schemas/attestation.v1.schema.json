@@ -124,9 +124,12 @@
           "enum": [
             "base_image_digests",
             "bootstrap_log",
+            "cleanup_manifest",
             "cleanup_log",
             "container_identity",
             "database_identity",
+            "execution_draft",
+            "execution_manifest",
             "extension_versions",
             "image_digest",
             "network_mode",

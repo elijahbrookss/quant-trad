@@ -56,6 +56,10 @@ SCHEMA_PATHS = {
     "registry": SCHEMA_DIR / "registry.v1.schema.json",
     "proof-catalog": SCHEMA_DIR / "proof-catalog.v1.schema.json",
     "attestation": SCHEMA_DIR / "attestation.v1.schema.json",
+    "execution-admission": SCHEMA_DIR / "execution-admission.v1.schema.json",
+    "execution-draft": SCHEMA_DIR / "execution-draft.v1.schema.json",
+    "execution-manifest": SCHEMA_DIR / "execution-manifest.v1.schema.json",
+    "cleanup-manifest": SCHEMA_DIR / "cleanup-manifest.v1.schema.json",
 }
 
 REGISTRY_SCHEMA_VERSION = "qt.guarantee_registry.v1"
@@ -63,6 +67,10 @@ PROOF_CATALOG_SCHEMA_VERSION = "qt.guarantee_proof_catalog.v1"
 ATTESTATION_SCHEMA_VERSION = "qt.guarantee_attestation.v1"
 NODE_TEST_EVENT_SCHEMA_VERSION = "qt.node_test_events.v1"
 NODE_TEST_RESULT_SCHEMA_VERSION = "qt.node_test_result.v1"
+EXECUTION_ADMISSION_SCHEMA_VERSION = "qt.assurance_execution_admission.v1"
+EXECUTION_DRAFT_SCHEMA_VERSION = "qt.assurance_execution_draft.v1"
+EXECUTION_MANIFEST_SCHEMA_VERSION = "qt.assurance_execution_manifest.v1"
+CLEANUP_MANIFEST_SCHEMA_VERSION = "qt.assurance_cleanup_manifest.v1"
 
 GUARANTEE_ID_RE = re.compile(r"QT-GUAR-[A-Z0-9]+(?:-[A-Z0-9]+)*\Z")
 CANDIDATE_ID_RE = re.compile(r"QT-GC-(\d{3})\Z")
@@ -197,9 +205,12 @@ EVIDENCE_ARTIFACT_KINDS = {
 ENVIRONMENT_EVIDENCE_ARTIFACT_KINDS = {
     "base_image_digests",
     "bootstrap_log",
+    "cleanup_manifest",
     "cleanup_log",
     "container_identity",
     "database_identity",
+    "execution_draft",
+    "execution_manifest",
     "extension_versions",
     "image_digest",
     "network_mode",
@@ -2178,6 +2189,30 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
             _fail(f"schema.{name}:expected_draft_2020_12")
         if schema.get("additionalProperties") is not False:
             _fail(f"schema.{name}:top_level_must_be_strict")
+
+    lifecycle_schema_versions = {
+        "execution-admission": (
+            ("properties", "schema_version", "const"),
+            EXECUTION_ADMISSION_SCHEMA_VERSION,
+        ),
+        "execution-draft": (
+            ("$defs", "facts", "properties", "record_schema_version", "const"),
+            EXECUTION_DRAFT_SCHEMA_VERSION,
+        ),
+        "execution-manifest": (
+            ("$defs", "facts", "properties", "record_schema_version", "const"),
+            EXECUTION_MANIFEST_SCHEMA_VERSION,
+        ),
+        "cleanup-manifest": (
+            ("$defs", "facts", "properties", "record_schema_version", "const"),
+            CLEANUP_MANIFEST_SCHEMA_VERSION,
+        ),
+    }
+    for schema_name, (path, expected) in lifecycle_schema_versions.items():
+        if _schema_value(
+            schemas[schema_name], path, f"schema.{schema_name}"
+        ) != expected:
+            _fail(f"schema.{schema_name}:schema_version_mismatch")
 
     registry = schemas["registry"]
     if _schema_value(registry, ("properties", "schema_version", "const"), "schema.registry") != REGISTRY_SCHEMA_VERSION:

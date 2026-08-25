@@ -1,0 +1,187 @@
+{
+  "$id": "https://quant-trad.local/schemas/assurance-execution-admission.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "profiles": {
+      "items": {
+        "$ref": "#/$defs/profile"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema_version": {
+      "const": "qt.assurance_execution_admission.v1"
+    },
+    "source_commit": {
+      "$ref": "#/$defs/commit"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_commit",
+    "profiles"
+  ],
+  "title": "QT Assurance Execution Admission v1",
+  "type": "object",
+  "$defs": {
+    "commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "dockerTool": {
+      "additionalProperties": false,
+      "properties": {
+        "daemon_identity_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "executable_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "resolved_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "resolved_path",
+        "version",
+        "executable_sha256",
+        "daemon_identity_sha256"
+      ],
+      "type": "object"
+    },
+    "hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "image": {
+      "additionalProperties": false,
+      "properties": {
+        "base_image_digests": {
+          "items": {
+            "$ref": "#/$defs/imageDigest"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "image_id": {
+          "$ref": "#/$defs/imageDigest"
+        },
+        "platform": {
+          "const": "linux/amd64"
+        }
+      },
+      "required": [
+        "image_id",
+        "platform",
+        "base_image_digests"
+      ],
+      "type": "object"
+    },
+    "imageDigest": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "profile": {
+      "additionalProperties": false,
+      "properties": {
+        "admission_id": {
+          "pattern": "^[a-z][a-z0-9-]{2,127}$",
+          "type": "string"
+        },
+        "docker_tool": {
+          "$ref": "#/$defs/dockerTool"
+        },
+        "environment_class": {
+          "enum": [
+            "ephemeral_ci",
+            "isolated_test"
+          ]
+        },
+        "external_order_submission_enabled": {
+          "const": false
+        },
+        "isolation": {
+          "enum": [
+            "disposable",
+            "session_scoped"
+          ]
+        },
+        "profile_id": {
+          "pattern": "^[a-z][a-z0-9-]*$",
+          "type": "string"
+        },
+        "runner_image": {
+          "$ref": "#/$defs/image"
+        },
+        "runtime_definition": {
+          "$ref": "#/$defs/runtimeDefinition"
+        },
+        "service_images": {
+          "additionalProperties": {
+            "$ref": "#/$defs/serviceImage"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "profile_id",
+        "admission_id",
+        "environment_class",
+        "isolation",
+        "external_order_submission_enabled",
+        "runtime_definition",
+        "docker_tool",
+        "runner_image",
+        "service_images"
+      ],
+      "type": "object"
+    },
+    "runtimeDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "not": {
+            "pattern": "(?:^/|\\\\|(?:^|/)\\.\\.(?:/|$))"
+          },
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "serviceImage": {
+      "additionalProperties": false,
+      "properties": {
+        "image_digest": {
+          "$ref": "#/$defs/imageDigest"
+        },
+        "reference": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference",
+        "image_digest"
+      ],
+      "type": "object"
+    }
+  }
+}

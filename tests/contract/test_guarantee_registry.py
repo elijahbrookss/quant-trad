@@ -3060,6 +3060,18 @@ def test_checked_in_schemas_match_executable_versions_and_enums() -> None:
     registry_schema = json.loads((schema_dir / "registry.v1.schema.json").read_text())
     proof_schema = json.loads((schema_dir / "proof-catalog.v1.schema.json").read_text())
     attestation_schema = json.loads((schema_dir / "attestation.v1.schema.json").read_text())
+    execution_admission_schema = json.loads(
+        (schema_dir / "execution-admission.v1.schema.json").read_text()
+    )
+    execution_draft_schema = json.loads(
+        (schema_dir / "execution-draft.v1.schema.json").read_text()
+    )
+    execution_manifest_schema = json.loads(
+        (schema_dir / "execution-manifest.v1.schema.json").read_text()
+    )
+    cleanup_manifest_schema = json.loads(
+        (schema_dir / "cleanup-manifest.v1.schema.json").read_text()
+    )
 
     assert registry_schema["properties"]["schema_version"]["const"] == guarantees.REGISTRY_SCHEMA_VERSION
     assert set(registry_schema["$defs"]["guarantee"]["properties"]["registry_disposition"]["enum"]) == guarantees.REGISTRY_DISPOSITIONS
@@ -3077,6 +3089,34 @@ def test_checked_in_schemas_match_executable_versions_and_enums() -> None:
     assert registry_schema["additionalProperties"] is False
     assert proof_schema["additionalProperties"] is False
     assert attestation_schema["additionalProperties"] is False
+    assert (
+        execution_admission_schema["properties"]["schema_version"]["const"]
+        == guarantees.EXECUTION_ADMISSION_SCHEMA_VERSION
+    )
+    assert (
+        execution_draft_schema["$defs"]["facts"]["properties"][
+            "record_schema_version"
+        ]["const"]
+        == guarantees.EXECUTION_DRAFT_SCHEMA_VERSION
+    )
+    assert (
+        execution_manifest_schema["$defs"]["facts"]["properties"][
+            "record_schema_version"
+        ]["const"]
+        == guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION
+    )
+    assert (
+        cleanup_manifest_schema["$defs"]["facts"]["properties"][
+            "record_schema_version"
+        ]["const"]
+        == guarantees.CLEANUP_MANIFEST_SCHEMA_VERSION
+    )
+    assert (
+        cleanup_manifest_schema["$defs"]["facts"]["properties"][
+            "label_query_remaining"
+        ]["maxItems"]
+        == 0
+    )
     assert "environments" in attestation_schema["required"]
     assert "environment" not in attestation_schema["properties"]
     assert "profile_admission" in attestation_schema["$defs"]["environment"][

@@ -25,7 +25,11 @@ mean that a claim is normative, adequately enforced, proven, or activated.
   It contains no execution result.
 - `GUARANTEES.md` is the deterministic human view generated from those two
   files. Do not edit it by hand.
-- `schemas/*.v1.schema.json` document the three versioned interchange models.
+- `schemas/*.v1.schema.json` document the versioned interchange models.
+- `EXECUTION_LIFECYCLE.md` separates pre-execution Docker admission from the
+  cleanup-verified environment admission embedded in an attestation and defines
+  the immutable draft, execution, cleanup, interruption, and finalization
+  boundary.
 - `attestations/README.md` defines result semantics and the rules for creating
   immutable, commit-bound attestations. Phase 2A and Phase 2B create no
   synthetic PASS attestation.
@@ -73,11 +77,13 @@ proof mappings, activation prerequisites, and Gate 2 constraints. `render`
 updates the human view deterministically. `check` validates and byte-compares
 the checked-in view without changing files.
 
-Phase 3 may add `verify-guarantees`; Phase 2A and Phase 2B do not execute
-arbitrary proof recipes or treat test presence as a fresh result. In
-particular, Node proof definitions cannot produce an automated PASS under the
-current attestation model, and database or manual-recovery proof remains bound
-to its separately approved environment.
+Phase 3 verification is implemented by `scripts/assurance/verify_guarantees.py`
+and remains separately authorized from registry activation. Automated Docker
+execution requires the versioned execution-admission and lifecycle records in
+`EXECUTION_LIFECYCLE.md`. A missing local image, isolation prerequisite, or
+cleanup proof is reported honestly rather than replaced by a weaker
+environment. Manual recovery remains bound to its separately reviewed
+procedure.
 
 ## Review boundary
 

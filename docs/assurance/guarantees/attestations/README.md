@@ -60,6 +60,15 @@ likewise
 fails closed when the exact service contract, bootstrap evidence, or post-run
 cleanup evidence is missing or disagrees with the admitted identities.
 
+Automated environments additionally bind the immutable lifecycle records
+defined in `../EXECUTION_LIFECYCLE.md`: an `execution_draft` created before the
+first side effect, an `execution_manifest` created when proof execution stops,
+and a `cleanup_manifest` containing the typed exact-absence inventory. These
+records use a source-bound `qt.assurance_execution_admission.v1` input; that
+pre-execution input is not the post-cleanup `profile_admission` embedded here.
+An attestation is never emitted before all bound automated environments have a
+complete execution manifest and successful cleanup manifest.
+
 The registry-semantics projection deliberately excludes activation status and
 its decision/attestation references. This lets a clean pre-activation commit be
 attested and then cited by a later reviewed activation decision without a hash
