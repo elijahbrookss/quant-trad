@@ -242,6 +242,7 @@ def _attach_result_summary(
         "stdout_sha256",
         "stderr_sha256",
         "reason_code",
+        "node_test_result",
     }
     summary = {key: result[key] for key in summary_keys if key in result}
     ref, digest = _runner_artifact(
@@ -1055,6 +1056,35 @@ def test_proposed_required_proof_caps_attestation_and_cannot_be_attempted(
         )
 
 
+def test_guarantee_pass_requires_an_adequate_complete_proof_model() -> None:
+    derive = guarantees._aggregate_guarantee_status
+
+    assert derive(
+        ["PASS"],
+        proof_maturity="adequate",
+        required_strengths=["complete"],
+        has_proposed_required_proof=False,
+    ) == "PASS"
+    assert derive(
+        ["PASS"],
+        proof_maturity="partial",
+        required_strengths=["partial"],
+        has_proposed_required_proof=False,
+    ) == "PARTIAL"
+    assert derive(
+        ["PASS"],
+        proof_maturity="adequate",
+        required_strengths=["complete", "partial"],
+        has_proposed_required_proof=False,
+    ) == "PARTIAL"
+    assert derive(
+        ["PASS"],
+        proof_maturity="adequate",
+        required_strengths=["complete"],
+        has_proposed_required_proof=True,
+    ) == "PARTIAL"
+
+
 def test_manual_runner_cannot_be_disguised_as_automated(tmp_path: Path) -> None:
     registry, catalog = _base_repository(tmp_path)
     catalog["proofs"][0]["proof_kind"] = "automated_test"
@@ -1761,7 +1791,7 @@ def test_non_pytest_partial_requires_zero_exit_and_reason(tmp_path: Path) -> Non
     false_pass["guarantee_results"][0]["status"] = "PASS"
     with pytest.raises(
         guarantees.GuaranteeValidationError,
-        match="automated_PASS_requires_pytest_runner_in_v1",
+        match="automated_PASS_requires_admitted_runner_in_v1",
     ):
         guarantees.validate_attestation_data(
             false_pass,
@@ -1782,6 +1812,225 @@ def test_non_pytest_partial_requires_zero_exit_and_reason(tmp_path: Path) -> Non
             registry_path=registry_path,
             proof_catalog_path=catalog_path,
         )
+
+
+def test_native_node_result_uses_exact_names_typed_counts_and_three_hashes(
+    tmp_path: Path,
+) -> None:
+    registry, catalog = _base_repository(tmp_path)
+    _write(
+        tmp_path,
+        "tests/test_known_at.test.js",
+        "import test from 'node:test'\n"
+        "test('selected alpha', () => {})\n"
+        "test('selected beta', () => {})\n"
+        "test('excluded gamma', () => {})\n",
+    )
+    reporter_path = _write(
+        tmp_path,
+        "scripts/assurance/node_test_reporter.mjs",
+        "export const TRANSPORT_SCHEMA_VERSION = 'qt.node_test_events.v1'\n",
+    )
+    package_lock = _write(
+        tmp_path,
+        "portal/frontend/package-lock.json",
+        '{"lockfileVersion": 3}\n',
+    )
+    _write(tmp_path, "scripts/docs/guarantees.py", "# validator v1\n")
+    catalog["environment_profiles"] = [
+        {
+            "id": "frontend-node",
+            "python": ">=3.12,<3.13",
+            "node": ">=20,<21",
+            "lockfiles": [
+                "portal/frontend/package-lock.json",
+                "requirements.lock",
+            ],
+            "required_services": [],
+        }
+    ]
+    proof = catalog["proofs"][0]
+    proof["environment_profile_id"] = "frontend-node"
+    proof["runner"] = {
+        "kind": "node_test",
+        "event_transport": {
+            "path": reporter_path.relative_to(tmp_path).as_posix(),
+            "schema_version": guarantees.NODE_TEST_EVENT_SCHEMA_VERSION,
+        },
+        "files": ["tests/test_known_at.test.js"],
+        "expected_test_names": ["selected alpha", "selected beta"],
+        "expected_excluded_nonmatch_count": 1,
+        "name_patterns": ["^(?:selected alpha|selected beta)$"],
+    }
+    registry_path = _write(
+        tmp_path,
+        "docs/assurance/guarantees/registry.json",
+        json.dumps(registry, indent=2) + "\n",
+    )
+    catalog_path = _write(
+        tmp_path,
+        "docs/assurance/guarantees/proof-catalog.json",
+        json.dumps(catalog, indent=2) + "\n",
+    )
+    bundle = _validate(tmp_path, registry, catalog)
+    attestation_id = "QT-ATT-20260823T120000Z-aaaaaaaa-frontend-node"
+    stdout_ref, stdout_hash = _runner_artifact(
+        tmp_path,
+        "node-events.jsonl",
+        '{"schema_version":"qt.node_test_events.v1","sequence":0,'
+        '"event_type":"test:pass","data":{"name":"selected alpha"}}\n',
+        attestation_id=attestation_id,
+    )
+    stderr_ref, stderr_hash = _runner_artifact(
+        tmp_path,
+        "node.stderr",
+        "",
+        artifact_kind="stderr",
+        attestation_id=attestation_id,
+    )
+    node_result = {
+        "schema_version": guarantees.NODE_TEST_RESULT_SCHEMA_VERSION,
+        "transport_schema_version": guarantees.NODE_TEST_EVENT_SCHEMA_VERSION,
+        "reporter_path": "scripts/assurance/node_test_reporter.mjs",
+        "collected_files": ["tests/test_known_at.test.js"],
+        "selected_test_names": ["selected alpha", "selected beta"],
+        "excluded_nonmatch_test_names": ["excluded gamma"],
+        "cancelled_count": 0,
+        "todo_count": 0,
+        "explicitly_skipped_count": 0,
+    }
+    proof_result = {
+        "proof_id": "QT-PROOF-001",
+        "environment_profile_id": "frontend-node",
+        "status": "PASS",
+        "started_at": "2026-08-23T12:00:00Z",
+        "finished_at": "2026-08-23T12:00:01Z",
+        "executed_argv": guarantees._canonical_runner_argv(proof["runner"]),
+        "exit_code": 0,
+        "collected_count": 2,
+        "passed_count": 2,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "stdout_sha256": stdout_hash,
+        "stderr_sha256": stderr_hash,
+        "node_test_result": node_result,
+        "evidence_refs": sorted(
+            [stdout_ref, stderr_ref], key=lambda item: item["path"]
+        ),
+    }
+    _attach_result_summary(tmp_path, attestation_id, proof_result)
+    attestation = {
+        "schema_version": guarantees.ATTESTATION_SCHEMA_VERSION,
+        "attestation_id": attestation_id,
+        "source": {
+            "git_commit": "a" * 40,
+            "clean": True,
+            "assurance_material_sha256": guarantees.assurance_material_sha256(bundle),
+        },
+        "inputs": _attestation_inputs(bundle, catalog_path),
+        "environments": [
+            {
+                "profile_id": "frontend-node",
+                "os": "test",
+                "architecture": "test",
+                "tool_versions": {"node": "20.20.2", "python": "3.12.4"},
+                "lockfile_hashes": {
+                    "portal/frontend/package-lock.json": guarantees._sha256_file(
+                        package_lock
+                    ),
+                    "requirements.lock": guarantees._sha256_file(
+                        tmp_path / "requirements.lock"
+                    ),
+                },
+                "services": {},
+            }
+        ],
+        "started_at": "2026-08-23T12:00:00Z",
+        "finished_at": "2026-08-23T12:00:01Z",
+        "proof_results": [proof_result],
+        "guarantee_results": [
+            {
+                "guarantee_id": "QT-GUAR-KNOWN-AT",
+                "status": "PASS",
+                "proof_ids": ["QT-PROOF-001"],
+            }
+        ],
+    }
+    validate_kwargs = {
+        "registry_path": registry_path,
+        "proof_catalog_path": catalog_path,
+    }
+    guarantees.validate_attestation_data(attestation, bundle, **validate_kwargs)
+
+    partial = copy.deepcopy(attestation)
+    partial_result = partial["proof_results"][0]
+    partial_result.update(
+        status="PARTIAL",
+        passed_count=1,
+        skipped_count=1,
+        reason_code="selected_test_explicitly_skipped",
+    )
+    partial_result["node_test_result"]["explicitly_skipped_count"] = 1
+    partial["guarantee_results"][0]["status"] = "PARTIAL"
+    _attach_result_summary(tmp_path, attestation_id, partial_result)
+    guarantees.validate_attestation_data(partial, bundle, **validate_kwargs)
+
+    false_pass = copy.deepcopy(partial)
+    false_pass["proof_results"][0]["status"] = "PASS"
+    false_pass["proof_results"][0].pop("reason_code")
+    false_pass["guarantee_results"][0]["status"] = "PASS"
+    _attach_result_summary(tmp_path, attestation_id, false_pass["proof_results"][0])
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="expected_node_derived:PARTIAL",
+    ):
+        guarantees.validate_attestation_data(false_pass, bundle, **validate_kwargs)
+
+    hidden_nonmatch = copy.deepcopy(attestation)
+    hidden_nonmatch["proof_results"][0]["node_test_result"][
+        "excluded_nonmatch_test_names"
+    ] = []
+    _attach_result_summary(tmp_path, attestation_id, hidden_nonmatch["proof_results"][0])
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="expected_node_derived:PARTIAL",
+    ):
+        guarantees.validate_attestation_data(hidden_nonmatch, bundle, **validate_kwargs)
+
+    missing_stderr = copy.deepcopy(attestation)
+    missing_stderr_result = missing_stderr["proof_results"][0]
+    missing_stderr_result.pop("stderr_sha256")
+    missing_stderr_result["evidence_refs"] = [
+        ref
+        for ref in missing_stderr_result["evidence_refs"]
+        if ref["artifact_kind"] != "stderr"
+    ]
+    _attach_result_summary(tmp_path, attestation_id, missing_stderr_result)
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="node_test_result_requires_stderr_sha256",
+    ):
+        guarantees.validate_attestation_data(missing_stderr, bundle, **validate_kwargs)
+
+    failed = copy.deepcopy(attestation)
+    failed_result = failed["proof_results"][0]
+    failed_result.update(status="FAIL", exit_code=1, passed_count=1, failed_count=1)
+    failed["guarantee_results"][0]["status"] = "FAIL"
+    _attach_result_summary(tmp_path, attestation_id, failed_result)
+    guarantees.validate_attestation_data(failed, bundle, **validate_kwargs)
+
+    proof_hash_before = guarantees.required_proof_material_hashes(bundle)[
+        "QT-PROOF-001"
+    ]
+    reporter_path.write_text(
+        reporter_path.read_text(encoding="utf-8") + "// changed transport\n",
+        encoding="utf-8",
+    )
+    assert (
+        guarantees.required_proof_material_hashes(bundle)["QT-PROOF-001"]
+        != proof_hash_before
+    )
+
 
 def test_active_reference_validates_historical_attestation_after_head_advances(
     tmp_path: Path,
@@ -2313,6 +2562,29 @@ def test_checked_in_schemas_match_executable_versions_and_enums() -> None:
     assert "guarantee_material_sha256" in attestation_schema["$defs"]["inputs"]["required"]
     assert "pytest" in attestation_schema["$defs"]["proofResult"]["properties"]["status"][
         "description"
+    ]
+    assert "node_test" in attestation_schema["$defs"]["proofResult"]["properties"]["status"][
+        "description"
+    ]
+    assert (
+        proof_schema["$defs"]["eventTransport"]["properties"]["schema_version"][
+            "const"
+        ]
+        == guarantees.NODE_TEST_EVENT_SCHEMA_VERSION
+    )
+    assert set(proof_schema["$defs"]["nodeRunner"]["required"]) >= {
+        "event_transport",
+        "expected_test_names",
+        "expected_excluded_nonmatch_count",
+    }
+    assert (
+        attestation_schema["$defs"]["nodeTestResult"]["properties"][
+            "schema_version"
+        ]["const"]
+        == guarantees.NODE_TEST_RESULT_SCHEMA_VERSION
+    )
+    assert "node_test_result" in attestation_schema["$defs"]["proofResult"][
+        "properties"
     ]
     assert "executed_argv" in attestation_schema["$defs"]["proofResult"]["properties"]
     assert "passed_count" in attestation_schema["$defs"]["proofResult"]["properties"]

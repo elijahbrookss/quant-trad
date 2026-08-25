@@ -61,6 +61,8 @@ SCHEMA_PATHS = {
 REGISTRY_SCHEMA_VERSION = "qt.guarantee_registry.v1"
 PROOF_CATALOG_SCHEMA_VERSION = "qt.guarantee_proof_catalog.v1"
 ATTESTATION_SCHEMA_VERSION = "qt.guarantee_attestation.v1"
+NODE_TEST_EVENT_SCHEMA_VERSION = "qt.node_test_events.v1"
+NODE_TEST_RESULT_SCHEMA_VERSION = "qt.node_test_result.v1"
 
 GUARANTEE_ID_RE = re.compile(r"QT-GUAR-[A-Z0-9]+(?:-[A-Z0-9]+)*\Z")
 CANDIDATE_ID_RE = re.compile(r"QT-GC-(\d{3})\Z")
@@ -1751,7 +1753,72 @@ def _validate_runner(root: Path, raw: Any, where: str) -> str:
         selectors = _string_list(runner["selectors"], f"{where}.selectors", nonempty=True)
         for index, selector in enumerate(selectors):
             _validate_pytest_selector(root, selector, f"{where}.selectors[{index}]")
-    elif kind in {"node_test", "vitest"}:
+    elif kind == "node_test":
+        _exact_keys(
+            runner,
+            required={
+                "kind",
+                "files",
+                "event_transport",
+                "expected_test_names",
+                "expected_excluded_nonmatch_count",
+            },
+            optional={"name_patterns"},
+            where=where,
+        )
+        files = _string_list(runner["files"], f"{where}.files", nonempty=True)
+        for index, file_name in enumerate(files):
+            _, path = _repo_path(root, file_name, f"{where}.files[{index}]")
+            if path.suffix not in {".js", ".mjs", ".cjs"} or not path.is_file():
+                _fail(f"{where}.files[{index}]:node_test_requires_javascript_file")
+        expected_names = _string_list(
+            runner["expected_test_names"],
+            f"{where}.expected_test_names",
+            nonempty=True,
+        )
+        expected_excluded_count = _expect_int(
+            runner["expected_excluded_nonmatch_count"],
+            f"{where}.expected_excluded_nonmatch_count",
+            minimum=0,
+        )
+        if "name_patterns" in runner:
+            patterns = _string_list(
+                runner["name_patterns"], f"{where}.name_patterns", nonempty=True
+            )
+            try:
+                compiled_patterns = [re.compile(pattern) for pattern in patterns]
+            except re.error as exc:
+                _fail(f"{where}.name_patterns:invalid_regular_expression:{exc}")
+            for expected_name in expected_names:
+                if not any(pattern.fullmatch(expected_name) for pattern in compiled_patterns):
+                    _fail(
+                        f"{where}.expected_test_names:not_selected_by_pattern:"
+                        f"{expected_name}"
+                    )
+        elif expected_excluded_count:
+            _fail(
+                f"{where}.expected_excluded_nonmatch_count:"
+                "requires_name_patterns"
+            )
+        transport = _expect_object(runner["event_transport"], f"{where}.event_transport")
+        _exact_keys(
+            transport,
+            required={"path", "schema_version"},
+            where=f"{where}.event_transport",
+        )
+        transport_path, resolved_transport = _repo_path(
+            root, transport["path"], f"{where}.event_transport.path"
+        )
+        if resolved_transport.suffix != ".mjs" or not resolved_transport.is_file():
+            _fail(
+                f"{where}.event_transport.path:requires_mjs_file:{transport_path}"
+            )
+        if transport["schema_version"] != NODE_TEST_EVENT_SCHEMA_VERSION:
+            _fail(
+                f"{where}.event_transport.schema_version:expected:"
+                f"{NODE_TEST_EVENT_SCHEMA_VERSION}"
+            )
+    elif kind == "vitest":
         _exact_keys(runner, required={"kind", "files"}, optional={"name_patterns"}, where=where)
         files = _string_list(runner["files"], f"{where}.files", nonempty=True)
         for index, file_name in enumerate(files):
@@ -1806,7 +1873,8 @@ def _canonical_runner_argv(runner: Mapping[str, Any]) -> list[str] | None:
     if kind == "pytest":
         argv = ["python", "-m", "pytest", *runner["selectors"]]
     elif kind == "node_test":
-        argv = ["node", "--test"]
+        reporter_path = runner["event_transport"]["path"]
+        argv = ["node", "--test", f"--test-reporter=./{reporter_path}"]
         for pattern in runner.get("name_patterns", []):
             argv.extend(["--test-name-pattern", pattern])
         argv.extend(runner["files"])
@@ -1831,7 +1899,9 @@ def _canonical_runner_argv(runner: Mapping[str, Any]) -> list[str] | None:
 def _minimum_collected_count(runner: Mapping[str, Any]) -> int:
     if runner["kind"] == "pytest":
         return len(runner["selectors"])
-    if runner["kind"] in {"node_test", "vitest"}:
+    if runner["kind"] == "node_test":
+        return len(runner["expected_test_names"])
+    if runner["kind"] == "vitest":
         return len(runner["files"])
     return 1
 
@@ -2241,13 +2311,20 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
     )
     runner_kinds = {
         _schema_value(proof, ("$defs", "pytestRunner", "properties", "kind", "const"), "schema.proof"),
-        *_schema_value(proof, ("$defs", "nodeRunner", "properties", "kind", "enum"), "schema.proof"),
+        _schema_value(proof, ("$defs", "nodeRunner", "properties", "kind", "const"), "schema.proof"),
+        _schema_value(proof, ("$defs", "vitestRunner", "properties", "kind", "const"), "schema.proof"),
         _schema_value(proof, ("$defs", "pythonRunner", "properties", "kind", "const"), "schema.proof"),
         _schema_value(proof, ("$defs", "makeRunner", "properties", "kind", "const"), "schema.proof"),
         _schema_value(proof, ("$defs", "manualRunner", "properties", "kind", "const"), "schema.proof"),
     }
     if runner_kinds != RUNNER_KINDS:
         _fail("schema.proof:runner_kind_mismatch")
+    if _schema_value(
+        proof,
+        ("$defs", "eventTransport", "properties", "schema_version", "const"),
+        "schema.proof",
+    ) != NODE_TEST_EVENT_SCHEMA_VERSION:
+        _fail("schema.proof:node_event_transport_schema_version_mismatch")
 
     attestation = schemas["attestation"]
     if _schema_value(attestation, ("properties", "schema_version", "const"), "schema.attestation") != ATTESTATION_SCHEMA_VERSION:
@@ -2310,6 +2387,24 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
         "schema.attestation",
     ) != "array":
         _fail("schema.attestation:executed_argv_shape_mismatch")
+    if _schema_value(
+        attestation,
+        ("$defs", "nodeTestResult", "properties", "schema_version", "const"),
+        "schema.attestation",
+    ) != NODE_TEST_RESULT_SCHEMA_VERSION:
+        _fail("schema.attestation:node_test_result_schema_version_mismatch")
+    if _schema_value(
+        attestation,
+        (
+            "$defs",
+            "nodeTestResult",
+            "properties",
+            "transport_schema_version",
+            "const",
+        ),
+        "schema.attestation",
+    ) != NODE_TEST_EVENT_SCHEMA_VERSION:
+        _fail("schema.attestation:node_event_transport_schema_version_mismatch")
 
 
 def validate_repository(
@@ -2366,7 +2461,20 @@ def _runner_target_label(runner: Mapping[str, Any]) -> str:
     kind = runner["kind"]
     if kind == "pytest":
         return "; ".join(f"`{selector}`" for selector in runner["selectors"])
-    if kind in {"node_test", "vitest"}:
+    if kind == "node_test":
+        files = "; ".join(f"`{path}`" for path in runner["files"])
+        names = "; ".join(runner["expected_test_names"])
+        patterns = "; ".join(runner.get("name_patterns", []))
+        reporter = runner["event_transport"]["path"]
+        details = [
+            f"expected names: {names}",
+            f"excluded nonmatches: {runner['expected_excluded_nonmatch_count']}",
+            f"reporter: `{reporter}`",
+        ]
+        if patterns:
+            details.insert(0, f"patterns: {patterns}")
+        return files + "; " + "; ".join(details)
+    if kind == "vitest":
         files = "; ".join(f"`{path}`" for path in runner["files"])
         patterns = "; ".join(runner.get("name_patterns", []))
         return files + (f"; names: {patterns}" if patterns else "")
@@ -2406,8 +2514,8 @@ def render_markdown(registry: Mapping[str, Any], catalog: Mapping[str, Any]) -> 
         "Artifact validation proves structure, integrity, and internal consistency, not",
         "execution authenticity; external activation review verifies provenance and binds",
         "its decision to the exact attestation digest.",
-        "Automated PASS is a pytest-only result in v1; other automated runner kinds cannot",
-        "produce an activation-qualifying PASS until typed result semantics are added.",
+        "Automated PASS is admitted only for pytest and the catalog-bound native Node",
+        "runner in v1; other runner kinds require reviewed typed result semantics.",
         "",
         "## Scope",
         "",
@@ -2674,6 +2782,8 @@ def _proof_runner_material(
         paths.update(selector.split("::", 1)[0] for selector in runner["selectors"])
     elif kind in {"node_test", "vitest"}:
         paths.update(runner["files"])
+        if kind == "node_test":
+            paths.add(runner["event_transport"]["path"])
     elif kind == "python_script":
         paths.add(runner["path"])
     elif kind == "manual":
@@ -2862,6 +2972,8 @@ def assurance_material_sha256(
             paths.update(selector.split("::", 1)[0] for selector in runner["selectors"])
         elif runner["kind"] in {"node_test", "vitest"}:
             paths.update(runner["files"])
+            if runner["kind"] == "node_test":
+                paths.add(runner["event_transport"]["path"])
         elif runner["kind"] == "python_script":
             paths.add(runner["path"])
         elif runner["kind"] == "make_target":
@@ -2908,6 +3020,27 @@ def _aggregate_status(statuses: Sequence[str]) -> str:
         if all(item == status for item in statuses):
             return status
     return "PARTIAL"
+
+
+def _aggregate_guarantee_status(
+    statuses: Sequence[str],
+    *,
+    proof_maturity: str,
+    required_strengths: Sequence[str],
+    has_proposed_required_proof: bool,
+) -> str:
+    """Derive a guarantee result without promoting an incomplete proof model."""
+
+    status = _aggregate_status(statuses)
+    if status != "PASS":
+        return status
+    if (
+        proof_maturity != "adequate"
+        or any(strength != "complete" for strength in required_strengths)
+        or has_proposed_required_proof
+    ):
+        return "PARTIAL"
+    return "PASS"
 
 
 def _version_tuple(value: str, where: str) -> tuple[int, ...]:
@@ -2999,6 +3132,120 @@ def _verify_local_git_source(root: Path, git_commit: str, clean: bool) -> None:
             "attestation.source.clean:worktree_mismatch:"
             f"declared={str(clean).lower()}:observed={str(observed_clean).lower()}"
         )
+
+
+def _validate_node_test_result(
+    result: Mapping[str, Any],
+    runner: Mapping[str, Any],
+    status: str,
+    where: str,
+) -> None:
+    """Validate the admitted native Node result without parsing console prose."""
+
+    node_where = f"{where}.node_test_result"
+    node_result = _expect_object(result.get("node_test_result"), node_where)
+    _exact_keys(
+        node_result,
+        required={
+            "schema_version",
+            "transport_schema_version",
+            "reporter_path",
+            "collected_files",
+            "selected_test_names",
+            "excluded_nonmatch_test_names",
+            "cancelled_count",
+            "todo_count",
+            "explicitly_skipped_count",
+        },
+        where=node_where,
+    )
+    if node_result["schema_version"] != NODE_TEST_RESULT_SCHEMA_VERSION:
+        _fail(
+            f"{node_where}.schema_version:expected:{NODE_TEST_RESULT_SCHEMA_VERSION}"
+        )
+    transport = runner["event_transport"]
+    if node_result["transport_schema_version"] != transport["schema_version"]:
+        _fail(f"{node_where}.transport_schema_version:runner_definition_mismatch")
+    if node_result["reporter_path"] != transport["path"]:
+        _fail(f"{node_where}.reporter_path:runner_definition_mismatch")
+
+    collected_files = _string_list(
+        node_result["collected_files"], f"{node_where}.collected_files"
+    )
+    expected_files = runner["files"]
+    if not set(collected_files) <= set(expected_files):
+        _fail(f"{node_where}.collected_files:outside_runner_targets")
+    selected_names = _string_list(
+        node_result["selected_test_names"], f"{node_where}.selected_test_names"
+    )
+    excluded_names = _string_list(
+        node_result["excluded_nonmatch_test_names"],
+        f"{node_where}.excluded_nonmatch_test_names",
+    )
+    if set(selected_names) & set(excluded_names):
+        _fail(f"{node_where}:selected_and_excluded_names_overlap")
+
+    for count_key in (
+        "cancelled_count",
+        "todo_count",
+        "explicitly_skipped_count",
+    ):
+        _expect_int(node_result[count_key], f"{node_where}.{count_key}", minimum=0)
+    required_result_counts = {
+        "collected_count",
+        "passed_count",
+        "failed_count",
+        "skipped_count",
+        "exit_code",
+    }
+    if missing_counts := sorted(required_result_counts - set(result)):
+        _fail(f"{where}:node_test_result_missing_fields:{','.join(missing_counts)}")
+    if {"xfailed_count", "xpassed_count"} & set(result):
+        _fail(f"{where}:node_test_result_forbids_pytest_expected_outcomes")
+
+    collected_count = _expect_int(
+        result["collected_count"], f"{where}.collected_count", minimum=0
+    )
+    passed_count = _expect_int(
+        result["passed_count"], f"{where}.passed_count", minimum=0
+    )
+    failed_count = _expect_int(
+        result["failed_count"], f"{where}.failed_count", minimum=0
+    )
+    skipped_count = _expect_int(
+        result["skipped_count"], f"{where}.skipped_count", minimum=0
+    )
+    cancelled_count = node_result["cancelled_count"]
+    todo_count = node_result["todo_count"]
+    if node_result["explicitly_skipped_count"] != skipped_count:
+        _fail(f"{node_where}.explicitly_skipped_count:skipped_count_mismatch")
+    if len(selected_names) != collected_count:
+        _fail(f"{node_where}.selected_test_names:collected_count_mismatch")
+    if (
+        passed_count
+        + failed_count
+        + skipped_count
+        + cancelled_count
+        + todo_count
+        != collected_count
+    ):
+        _fail(f"{where}:node_test_counts_do_not_equal_collected_count")
+
+    exit_code = _expect_int(result["exit_code"], f"{where}.exit_code", minimum=0)
+    pass_eligible = (
+        exit_code == 0
+        and collected_files == expected_files
+        and selected_names == runner["expected_test_names"]
+        and len(excluded_names) == runner["expected_excluded_nonmatch_count"]
+        and passed_count == collected_count == len(runner["expected_test_names"])
+        and failed_count == 0
+        and skipped_count == 0
+        and cancelled_count == 0
+        and todo_count == 0
+    )
+    expected_status = "FAIL" if exit_code else ("PASS" if pass_eligible else "PARTIAL")
+    if status != expected_status:
+        _fail(f"{where}.status:expected_node_derived:{expected_status}")
 
 
 def validate_attestation_data(
@@ -3274,6 +3521,7 @@ def validate_attestation_data(
                 "operator_identity",
                 "reviewer_identity",
                 "executed_argv",
+                "node_test_result",
             },
             where=where,
         )
@@ -3286,6 +3534,8 @@ def validate_attestation_data(
         proof_statuses[proof_id] = status
         proof_definition = proof_by_id[proof_id]
         runner_kind = proof_definition["runner"]["kind"]
+        if runner_kind != "node_test" and "node_test_result" in result:
+            _fail(f"{where}:node_test_result_requires_node_test_runner")
         result_profile_id = _expect_string(
             result["environment_profile_id"], f"{where}.environment_profile_id"
         )
@@ -3303,8 +3553,8 @@ def validate_attestation_data(
             _fail(f"{where}:attempted_result_requires_matching_environment_profile")
         if status == "MANUAL" and runner_kind != "manual":
             _fail(f"{where}:MANUAL_requires_manual_runner")
-        if status == "PASS" and runner_kind not in {"pytest", "manual"}:
-            _fail(f"{where}:automated_PASS_requires_pytest_runner_in_v1")
+        if status == "PASS" and runner_kind not in {"pytest", "node_test", "manual"}:
+            _fail(f"{where}:automated_PASS_requires_admitted_runner_in_v1")
         if runner_kind == "manual" and status not in {
             "PASS",
             "FAIL",
@@ -3412,7 +3662,7 @@ def validate_attestation_data(
             _expect_int(result["exit_code"], f"{where}.exit_code", minimum=0)
         if "collected_count" in result:
             collected_count = _expect_int(
-                result["collected_count"], f"{where}.collected_count", minimum=1
+                result["collected_count"], f"{where}.collected_count", minimum=0
             )
             if status == "PASS" and collected_count < _minimum_collected_count(
                 proof_definition["runner"]
@@ -3465,6 +3715,8 @@ def validate_attestation_data(
                 result["failed_count"] != 0 or result["xpassed_count"] != 0
             ):
                 _fail(f"{where}:pytest_PARTIAL_forbids_failed_or_xpassed_tests")
+        elif runner_kind == "node_test" and attempted_automated:
+            _validate_node_test_result(result, proof_definition["runner"], status, where)
         elif runner_kind != "pytest" and attempted_automated and status == "PARTIAL":
             if "collected_count" not in result:
                 _fail(f"{where}:automated_PARTIAL_requires_executed_step_count")
@@ -3484,7 +3736,17 @@ def validate_attestation_data(
                 result[hash_key]
             ]:
                 _fail(f"{where}.{hash_key}:runner_artifact_mismatch")
-        if attempted_automated and status in {"PASS", "FAIL"}:
+        if runner_kind == "node_test" and attempted_automated:
+            for hash_key, artifact_kind in artifact_hash_fields.items():
+                if hash_key not in result:
+                    _fail(f"{where}:node_test_result_requires_{hash_key}")
+                if len(evidence_hashes_by_kind.get(artifact_kind, [])) != 1:
+                    _fail(
+                        f"{where}:node_test_result_requires_unique_{artifact_kind}_artifact"
+                    )
+        if attempted_automated and (
+            status in {"PASS", "FAIL"} or runner_kind == "node_test"
+        ):
             summary_files = evidence_files_by_kind.get("result_summary", [])
             if len(summary_files) != 1 or len(
                 evidence_hashes_by_kind.get("result_summary", [])
@@ -3508,6 +3770,7 @@ def validate_attestation_data(
                 "stdout_sha256",
                 "stderr_sha256",
                 "reason_code",
+                "node_test_result",
             }
             expected_summary = {
                 key: result[key] for key in summary_keys if key in result
@@ -3562,6 +3825,7 @@ def validate_attestation_data(
                 "stdout_sha256",
                 "stderr_sha256",
                 "result_summary_sha256",
+                "node_test_result",
             }
             if forbidden_manual_execution & set(result):
                 _fail(f"{where}:manual_{status}_forbids_automated_execution_fields")
@@ -3581,6 +3845,7 @@ def validate_attestation_data(
             "stderr_sha256",
             "result_summary_sha256",
             "executed_argv",
+            "node_test_result",
         }:
             _fail(f"{where}:{status}_forbids_execution_evidence")
         if status in {"MANUAL", "PARTIAL"} and result_started is None:
@@ -3599,17 +3864,24 @@ def validate_attestation_data(
         _fail("attestation.proof_results:active_proof_set_mismatch")
 
     required_by_guarantee: dict[str, list[str]] = defaultdict(list)
+    required_strengths_by_guarantee: dict[str, list[str]] = defaultdict(list)
     proposed_required_by_guarantee: dict[str, list[str]] = defaultdict(list)
     for proof in bundle.proof_catalog["proofs"]:
         for link in proof["coverage"]:
             if link["required_for_full_attestation"]:
                 if proof["lifecycle"] == "active":
                     required_by_guarantee[link["guarantee_id"]].append(proof["id"])
+                    required_strengths_by_guarantee[link["guarantee_id"]].append(
+                        link["strength"]
+                    )
                 elif proof["lifecycle"] == "proposed":
                     proposed_required_by_guarantee[link["guarantee_id"]].append(
                         proof["id"]
                     )
     guarantee_results = _expect_list(attestation["guarantee_results"], "attestation.guarantee_results")
+    guarantee_by_id = {
+        row["id"]: row for row in bundle.registry["guarantees"]
+    }
     guarantee_ids: list[str] = []
     for index, raw in enumerate(guarantee_results):
         where = f"attestation.guarantee_results[{index}]"
@@ -3627,12 +3899,14 @@ def validate_attestation_data(
         missing_results = [proof_id for proof_id in proof_ids if proof_id not in proof_statuses]
         if missing_results:
             _fail(f"{where}:missing_proof_results:{','.join(missing_results)}")
-        expected_status = _aggregate_status([proof_statuses[proof_id] for proof_id in proof_ids])
-        if (
-            expected_status == "PASS"
-            and proposed_required_by_guarantee.get(guarantee_id)
-        ):
-            expected_status = "PARTIAL"
+        expected_status = _aggregate_guarantee_status(
+            [proof_statuses[proof_id] for proof_id in proof_ids],
+            proof_maturity=guarantee_by_id[guarantee_id]["proof_maturity"],
+            required_strengths=required_strengths_by_guarantee[guarantee_id],
+            has_proposed_required_proof=bool(
+                proposed_required_by_guarantee.get(guarantee_id)
+            ),
+        )
         observed_status = _enum(result["status"], ATTESTATION_RESULTS, f"{where}.status")
         if observed_status != expected_status:
             _fail(f"{where}.status:expected_derived:{expected_status}")

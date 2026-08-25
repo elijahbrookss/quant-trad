@@ -388,6 +388,7 @@
                 { "required": ["skipped_count"] },
                 { "required": ["xfailed_count"] },
                 { "required": ["xpassed_count"] },
+                { "required": ["node_test_result"] },
                 { "required": ["stdout_sha256"] },
                 { "required": ["stderr_sha256"] },
                 { "required": ["result_summary_sha256"] },
@@ -454,7 +455,7 @@
       ],
       "properties": {
         "collected_count": {
-          "minimum": 1,
+          "minimum": 0,
           "type": "integer"
         },
         "evidence_refs": {
@@ -476,6 +477,9 @@
         "failed_count": {
           "minimum": 0,
           "type": "integer"
+        },
+        "node_test_result": {
+          "$ref": "#/$defs/nodeTestResult"
         },
         "environment_profile_id": {
           "pattern": "^[a-z][a-z0-9-]*$",
@@ -517,7 +521,7 @@
         },
         "status": {
           "$ref": "#/$defs/resultStatus",
-          "description": "Cross-file executable validation permits automated PASS only for a pytest proof-catalog runner in v1; manual PASS follows the reviewed-manual branch."
+          "description": "Cross-file executable validation permits automated PASS only for admitted pytest or native node_test proof-catalog runners in v1; manual PASS follows the reviewed-manual branch."
         },
         "stderr_sha256": {
           "$ref": "#/$defs/hash"
@@ -544,6 +548,74 @@
         "evidence_refs"
       ],
       "type": "object"
+    },
+    "nodeTestResult": {
+      "additionalProperties": false,
+      "properties": {
+        "cancelled_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "collected_files": {
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "excluded_nonmatch_test_names": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "explicitly_skipped_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reporter_path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "schema_version": {
+          "const": "qt.node_test_result.v1"
+        },
+        "selected_test_names": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "todo_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "transport_schema_version": {
+          "const": "qt.node_test_events.v1"
+        }
+      },
+      "required": [
+        "schema_version",
+        "transport_schema_version",
+        "reporter_path",
+        "collected_files",
+        "selected_test_names",
+        "excluded_nonmatch_test_names",
+        "explicitly_skipped_count",
+        "cancelled_count",
+        "todo_count"
+      ],
+      "type": "object"
+    },
+    "repoPath": {
+      "minLength": 1,
+      "not": {
+        "pattern": "(?:^/|\\\\|(?:^|/)\\.\\.(?:/|$))"
+      },
+      "type": "string"
     },
     "resultStatus": {
       "enum": [

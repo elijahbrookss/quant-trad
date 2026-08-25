@@ -1117,9 +1117,17 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/botlensRuntimeState.test.js"
         ],
+        "expected_test_names": [
+          "selected-symbol snapshot unavailable is tracked explicitly instead of fabricating base state"
+        ],
+        "expected_excluded_nonmatch_count": 20,
         "name_patterns": [
           "^selected-symbol snapshot unavailable is tracked explicitly instead of fabricating base state$"
         ]
@@ -1164,9 +1172,18 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/botlensProjection.test.js"
         ],
+        "expected_test_names": [
+          "selected-symbol handoff applies bootstrap at seq N and live deltas from N+1 onward",
+          "stale overlay commit delta is ignored even with a newer stream sequence"
+        ],
+        "expected_excluded_nonmatch_count": 20,
         "name_patterns": [
           "^(?:selected-symbol handoff applies bootstrap at seq N and live deltas from N\\+1 onward|stale overlay commit delta is ignored even with a newer stream sequence)$"
         ]
@@ -1210,9 +1227,17 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/botlensRuntimeState.test.js"
         ],
+        "expected_test_names": [
+          "run bootstrap creates separated runtime and retrieval ownership"
+        ],
+        "expected_excluded_nonmatch_count": 20,
         "name_patterns": [
           "^run bootstrap creates separated runtime and retrieval ownership$"
         ]
@@ -1256,10 +1281,20 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/botlensProjection.test.js",
           "portal/frontend/tests/botlensRuntimeState.test.js"
         ],
+        "expected_test_names": [
+          "chart history is a bounded sliding window and focused replacements discard unrelated history",
+          "ordered live candle appends stay bounded without reordering the hot tail",
+          "selectSymbol retains bounded client state and waits for explicit bootstrap on cache miss"
+        ],
+        "expected_excluded_nonmatch_count": 40,
         "name_patterns": [
           "^(?:chart history is a bounded sliding window and focused replacements discard unrelated history|ordered live candle appends stay bounded without reordering the hot tail|selectSymbol retains bounded client state and waits for explicit bootstrap on cache miss)$"
         ]
@@ -1304,9 +1339,17 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/botlensRuntimeState.test.js"
         ],
+        "expected_test_names": [
+          "valid candle and trade history becomes ready even when overlay evidence is incomplete"
+        ],
+        "expected_excluded_nonmatch_count": 20,
         "name_patterns": [
           "^valid candle and trade history becomes ready even when overlay evidence is incomplete$"
         ]
@@ -1350,9 +1393,18 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/operationsViewModel.test.js"
         ],
+        "expected_test_names": [
+          "current run rows come from live bot projections and exclude terminal definitions",
+          "run inventory keeps definition identity and run instance identity separate"
+        ],
+        "expected_excluded_nonmatch_count": 4,
         "name_patterns": [
           "^(?:current run rows come from live bot projections and exclude terminal definitions|run inventory keeps definition identity and run instance identity separate)$"
         ]
@@ -1374,11 +1426,22 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/v2ReadOnlySurface.test.js"
         ],
+        "expected_test_names": [
+          "run-scoped BotLens always performs authoritative exact-run and research-evidence reads",
+          "v2 UI surface never imports bot-mutation adapter functions",
+          "v2 market mutations use only the audited canonical collector action path",
+          "v2 scan-root discovery fails loud when a declaration is absent"
+        ],
+        "expected_excluded_nonmatch_count": 3,
         "name_patterns": [
-          "^(?:run-scoped BotLens always performs authoritative exact-run and research-evidence reads|v2 market mutations use only the audited canonical collector action path|v2 UI surface never imports bot-mutation adapter functions)$"
+          "^(?:run-scoped BotLens always performs authoritative exact-run and research-evidence reads|v2 market mutations use only the audited canonical collector action path|v2 scan-root discovery fails loud when a declaration is absent|v2 UI surface never imports bot-mutation adapter functions)$"
         ]
       },
       "timeout_seconds": 180,
@@ -1398,9 +1461,19 @@
       "environment_profile_id": "frontend-node",
       "runner": {
         "kind": "node_test",
+        "event_transport": {
+          "path": "scripts/assurance/node_test_reporter.mjs",
+          "schema_version": "qt.node_test_events.v1"
+        },
         "files": [
           "portal/frontend/tests/tradeMarkers.test.js"
         ],
+        "expected_test_names": [
+          "between-bar markers use containing candle time while retaining stable evidence identity",
+          "events outside the loaded candle window produce no fabricated marker",
+          "trade event projection is exact, containing-candle, or unavailable without nearest snapping"
+        ],
+        "expected_excluded_nonmatch_count": 7,
         "name_patterns": [
           "^(?:between-bar markers use containing candle time while retaining stable evidence identity|events outside the loaded candle window produce no fabricated marker|trade event projection is exact, containing-candle, or unavailable without nearest snapping)$"
         ]

@@ -93,6 +93,29 @@
       ],
       "type": "object"
     },
+    "eventTransport": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/repoPath"
+            },
+            {
+              "pattern": "\\.mjs$"
+            }
+          ]
+        },
+        "schema_version": {
+          "const": "qt.node_test_events.v1"
+        }
+      },
+      "required": [
+        "path",
+        "schema_version"
+      ],
+      "type": "object"
+    },
     "heading": {
       "additionalProperties": false,
       "properties": {
@@ -200,6 +223,22 @@
     "nodeRunner": {
       "additionalProperties": false,
       "properties": {
+        "event_transport": {
+          "$ref": "#/$defs/eventTransport"
+        },
+        "expected_test_names": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "expected_excluded_nonmatch_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "files": {
           "items": {
             "$ref": "#/$defs/repoPath"
@@ -209,10 +248,7 @@
           "uniqueItems": true
         },
         "kind": {
-          "enum": [
-            "node_test",
-            "vitest"
-          ]
+          "const": "node_test"
         },
         "name_patterns": {
           "items": {
@@ -226,7 +262,10 @@
       },
       "required": [
         "kind",
-        "files"
+        "files",
+        "event_transport",
+        "expected_test_names",
+        "expected_excluded_nonmatch_count"
       ],
       "type": "object"
     },
@@ -357,6 +396,9 @@
           "$ref": "#/$defs/nodeRunner"
         },
         {
+          "$ref": "#/$defs/vitestRunner"
+        },
+        {
           "$ref": "#/$defs/pythonRunner"
         },
         {
@@ -366,6 +408,36 @@
           "$ref": "#/$defs/manualRunner"
         }
       ]
+    },
+    "vitestRunner": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "kind": {
+          "const": "vitest"
+        },
+        "name_patterns": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "kind",
+        "files"
+      ],
+      "type": "object"
     }
   }
 }
