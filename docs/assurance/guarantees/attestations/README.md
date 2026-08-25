@@ -29,6 +29,14 @@ The document must conform to `../schemas/attestation.v1.schema.json` and bind:
   `guarantee_material_sha256` bindings over cited authority/enforcement
   material, and per-required-proof `required_proof_material_sha256` bindings;
 - tool and required-service identities for every bound environment;
+- a structured `profile_admission` for every runtime-bound environment, including
+  its exact runtime-definition path and commit-bound hash, isolated environment
+  class, disposable/session isolation, explicit closed external-order boundary,
+  observed runtime facts, and hashed environment evidence;
+- structured service admissions rather than free-form service strings. Database
+  admission binds the pinned image, server and extension versions, loopback-only
+  ephemeral endpoint, unique session database identity, synthetic credentials,
+  bootstrap record, and cleanup record for the same resource identities;
 - start/end timestamps and per-proof collection, exit, and output evidence,
   including the exact shell-free `executed_argv` for attempted automated runs,
   explicit pass/fail/skip/xfail/xpass counts for pytest, and the admitted
@@ -39,6 +47,18 @@ The document must conform to `../schemas/attestation.v1.schema.json` and bind:
 - an operator identity for manual work and an independent reviewer identity
   for manual PASS or FAIL;
 - conservative, derived per-guarantee results.
+
+Environment evidence is session-scoped under
+`docs/assurance/guarantees/evidence/<attestation-id>/_environments/<profile-id>/`.
+Each reference points to a typed JSON envelope whose profile, optional service,
+artifact kind, facts, path, and hash are cross-checked. Frontend/container
+execution cannot produce PASS, FAIL, or PARTIAL evidence unless the admission
+records Linux/amd64, the catalog-bound pinned base digests, no network, a
+read-only source mount, a writable temporary directory outside that mount, the
+built image and container identities, bootstrap, and cleanup. Database execution
+likewise
+fails closed when the exact service contract, bootstrap evidence, or post-run
+cleanup evidence is missing or disagrees with the admitted identities.
 
 The registry-semantics projection deliberately excludes activation status and
 its decision/attestation references. This lets a clean pre-activation commit be

@@ -74,6 +74,11 @@ REMEDIATION_ID_RE = re.compile(r"QT-REM-(\d{3})\Z")
 HEX40_RE = re.compile(r"[0-9a-f]{40}\Z")
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
 PROFILE_ID_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
+ADMISSION_ID_RE = re.compile(r"[a-z][a-z0-9-]{2,127}\Z")
+IMAGE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+SECRET_FACT_KEY_RE = re.compile(
+    r"(?:^|_)(?:credential|dsn|password|secret|token)s?(?:_|$)", re.IGNORECASE
+)
 OWNER_SLUG_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 MAKE_TARGET_RE = re.compile(r"[a-zA-Z0-9_.-]+\Z")
 MAKE_VARIABLE_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
@@ -189,6 +194,23 @@ EVIDENCE_ARTIFACT_KINDS = {
     "result_summary",
     "manual_evidence",
 }
+ENVIRONMENT_EVIDENCE_ARTIFACT_KINDS = {
+    "base_image_digests",
+    "bootstrap_log",
+    "cleanup_log",
+    "container_identity",
+    "database_identity",
+    "extension_versions",
+    "image_digest",
+    "network_mode",
+    "published_endpoint",
+    "recovery_manifest",
+    "runtime_probe",
+    "server_version",
+    "source_mount",
+}
+ISOLATED_ENVIRONMENT_CLASSES = {"isolated_test", "ephemeral_ci"}
+ISOLATION_MODES = {"disposable", "session_scoped"}
 NORMATIVE_AUTHORITY_KINDS = {
     "normative_platform_contract",
 }
@@ -3121,6 +3143,736 @@ def _version_satisfies(observed: str, constraint: str, where: str) -> None:
             )
 
 
+def _validate_admission_fact_value(value: Any, where: str) -> None:
+    if value is None or type(value) in {bool, int}:
+        return
+    if isinstance(value, str):
+        if not value or any(character in value for character in "\x00\r\n"):
+            _fail(f"{where}:invalid_string_fact")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_admission_fact_value(item, f"{where}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            fact_key = _expect_string(key, f"{where}.key")
+            if SECRET_FACT_KEY_RE.search(fact_key) and not fact_key.endswith(
+                ("_sha256", "_scope", "_mode")
+            ):
+                if not (
+                    fact_key == "credentials" and item == "synthetic_session_only"
+                ):
+                    _fail(f"{where}.{fact_key}:secret_fact_forbidden")
+            _validate_admission_fact_value(item, f"{where}.{fact_key}")
+        return
+    _fail(f"{where}:unsupported_fact_type")
+
+
+def _validate_admission_facts(value: Any, where: str) -> dict[str, Any]:
+    facts = _expect_object(value, where)
+    if not facts:
+        _fail(f"{where}:must_not_be_empty")
+    _validate_admission_fact_value(facts, where)
+    return facts
+
+
+def _environment_evidence_payload(path: Path, where: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+        )
+    except GuaranteeValidationError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        _fail(f"{where}:invalid_environment_evidence_json:{exc}")
+    return _expect_object(payload, where)
+
+
+def _validate_environment_evidence_refs(
+    value: Any,
+    *,
+    where: str,
+    bundle: ValidationBundle,
+    evidence_root: Path | None,
+    attestation_id: str,
+    profile_id: str,
+    binding_facts: Mapping[str, Any],
+    service_id: str | None,
+    used_paths: set[str],
+) -> dict[str, list[dict[str, Any]]]:
+    refs = _expect_list(value, where)
+    if not refs:
+        _fail(f"{where}:must_not_be_empty")
+    paths: list[str] = []
+    evidence_by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for index, raw in enumerate(refs):
+        ref_where = f"{where}[{index}]"
+        ref = _expect_object(raw, ref_where)
+        _exact_keys(
+            ref,
+            required={"artifact_kind", "path", "sha256"},
+            where=ref_where,
+        )
+        artifact_kind = _enum(
+            ref["artifact_kind"],
+            ENVIRONMENT_EVIDENCE_ARTIFACT_KINDS,
+            f"{ref_where}.artifact_kind",
+        )
+        resolved_root = evidence_root or bundle.root
+        relative, resolved = _repo_path(
+            resolved_root, ref["path"], f"{ref_where}.path"
+        )
+        parts = PurePosixPath(relative).parts
+        expected_prefix = (
+            "docs",
+            "assurance",
+            "guarantees",
+            "evidence",
+            attestation_id,
+            "_environments",
+            profile_id,
+        )
+        if len(parts) != 8 or parts[:7] != expected_prefix:
+            _fail(f"{ref_where}.path:outside_attestation_environment_evidence_layout")
+        filename = parts[-1]
+        if not filename.startswith(f"{artifact_kind}-") or not filename.endswith(
+            ".json"
+        ):
+            _fail(f"{ref_where}.path:artifact_kind_filename_mismatch")
+        observed_hash = _expect_string(ref["sha256"], f"{ref_where}.sha256")
+        if not HEX64_RE.fullmatch(observed_hash) or observed_hash != _sha256_file(
+            resolved
+        ):
+            _fail(f"{ref_where}.sha256:mismatch")
+        if relative in used_paths:
+            _fail(f"{where}:duplicate_environment_evidence_path:{relative}")
+        used_paths.add(relative)
+        paths.append(relative)
+
+        payload_where = f"{ref_where}.payload"
+        payload = _environment_evidence_payload(resolved, payload_where)
+        _exact_keys(
+            payload,
+            required={"schema_version", "profile_id", "artifact_kind", "facts"},
+            optional={"service_id"},
+            where=payload_where,
+        )
+        if payload["schema_version"] != "qt.assurance_environment_evidence.v1":
+            _fail(f"{payload_where}.schema_version:unsupported")
+        if payload["profile_id"] != profile_id:
+            _fail(f"{payload_where}.profile_id:mismatch")
+        if payload["artifact_kind"] != artifact_kind:
+            _fail(f"{payload_where}.artifact_kind:mismatch")
+        observed_service_id = payload.get("service_id")
+        if observed_service_id != service_id:
+            _fail(f"{payload_where}.service_id:mismatch")
+        payload_facts = _validate_admission_facts(
+            payload["facts"], f"{payload_where}.facts"
+        )
+        for fact_key in set(payload_facts) & set(binding_facts):
+            if payload_facts[fact_key] != binding_facts[fact_key]:
+                _fail(f"{payload_where}.facts.{fact_key}:admission_mismatch")
+        evidence_by_kind[artifact_kind].append(payload_facts)
+    if paths != sorted(paths):
+        _fail(f"{where}:must_be_sorted_by_path")
+    if len(paths) != len(set(paths)):
+        _fail(f"{where}:duplicate_path")
+    return evidence_by_kind
+
+
+def _require_evidence_kinds(
+    evidence: Mapping[str, Sequence[Mapping[str, Any]]],
+    required: set[str],
+    where: str,
+) -> None:
+    if missing := sorted(required - set(evidence)):
+        _fail(f"{where}:missing_required_kinds:{','.join(missing)}")
+
+
+def _require_evidence_fact(
+    evidence: Mapping[str, Sequence[Mapping[str, Any]]],
+    artifact_kind: str,
+    fact_key: str,
+    expected: Any,
+    where: str,
+) -> None:
+    rows = evidence.get(artifact_kind, ())
+    if not rows or not any(row.get(fact_key) == expected for row in rows):
+        _fail(
+            f"{where}.{artifact_kind}:missing_matching_fact:{fact_key}"
+        )
+
+
+def _normalized_architecture(value: str) -> str:
+    normalized = value.strip().lower()
+    return {"x86_64": "amd64", "aarch64": "arm64"}.get(normalized, normalized)
+
+
+def _bound_json_object(
+    root: Path, relative: str, *, git_commit: str | None, where: str
+) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            _bound_material_bytes(root, relative, git_commit=git_commit).decode(
+                "utf-8"
+            ),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_constant,
+        )
+    except GuaranteeValidationError:
+        raise
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        _fail(f"{where}:invalid_json:{exc}")
+    return _expect_object(value, where)
+
+
+def _validate_container_profile_admission(
+    *,
+    admission: Mapping[str, Any],
+    evidence: Mapping[str, Sequence[Mapping[str, Any]]],
+    environment: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    bundle: ValidationBundle,
+    git_commit: str,
+    where: str,
+) -> None:
+    facts = admission["facts"]
+    required_facts = {
+        "base_image_digests",
+        "cleanup_completed",
+        "container_identity",
+        "docker_version",
+        "image_digest",
+        "network_mode",
+        "platform",
+        "source_commit",
+        "source_mount_mode",
+        "writable_temp_outside_source",
+    }
+    _exact_keys(facts, required=required_facts, where=f"{where}.facts")
+    for key in ("container_identity", "docker_version"):
+        _expect_string(facts[key], f"{where}.facts.{key}")
+    if not IMAGE_DIGEST_RE.fullmatch(
+        _expect_string(facts["image_digest"], f"{where}.facts.image_digest")
+    ):
+        _fail(f"{where}.facts.image_digest:invalid")
+    if facts["network_mode"] != "none":
+        _fail(f"{where}.facts.network_mode:must_be_none")
+    if facts["source_mount_mode"] != "read_only":
+        _fail(f"{where}.facts.source_mount_mode:must_be_read_only")
+    if facts["platform"] != "linux/amd64":
+        _fail(f"{where}.facts.platform:must_be_linux_amd64")
+    if facts["source_commit"] != git_commit:
+        _fail(f"{where}.facts.source_commit:mismatch")
+    for key in ("cleanup_completed", "writable_temp_outside_source"):
+        if facts[key] is not True:
+            _fail(f"{where}.facts.{key}:must_be_true")
+    base_digests = _string_list(
+        facts["base_image_digests"],
+        f"{where}.facts.base_image_digests",
+        sorted_values=True,
+    )
+    if any(not IMAGE_DIGEST_RE.fullmatch(item) for item in base_digests):
+        _fail(f"{where}.facts.base_image_digests:invalid_digest")
+    runtime_bytes = _bound_material_bytes(
+        bundle.root, profile["runtime_definition"], git_commit=git_commit
+    )
+    expected_base_digests = sorted(
+        {
+            f"sha256:{digest.decode('ascii')}"
+            for digest in re.findall(rb"@sha256:([0-9a-f]{64})", runtime_bytes)
+        }
+    )
+    if expected_base_digests and base_digests != expected_base_digests:
+        _fail(f"{where}.facts.base_image_digests:runtime_definition_mismatch")
+    if not str(environment["os"]).lower().startswith("linux"):
+        _fail(f"{where}:os_must_be_linux")
+    if _normalized_architecture(str(environment["architecture"])) != "amd64":
+        _fail(f"{where}:architecture_must_be_amd64")
+    required_evidence = {
+        "bootstrap_log",
+        "cleanup_log",
+        "container_identity",
+        "image_digest",
+        "network_mode",
+        "runtime_probe",
+        "source_mount",
+    }
+    if expected_base_digests:
+        required_evidence.add("base_image_digests")
+    _require_evidence_kinds(evidence, required_evidence, f"{where}.evidence_refs")
+    _require_evidence_fact(
+        evidence, "bootstrap_log", "bootstrap_completed", True, where
+    )
+    for artifact_kind, fact_key in (
+        ("cleanup_log", "cleanup_completed"),
+        ("container_identity", "container_identity"),
+        ("image_digest", "image_digest"),
+        ("network_mode", "network_mode"),
+        ("source_mount", "source_mount_mode"),
+    ):
+        _require_evidence_fact(
+            evidence, artifact_kind, fact_key, facts[fact_key], where
+        )
+    _require_evidence_fact(
+        evidence,
+        "bootstrap_log",
+        "container_identity",
+        facts["container_identity"],
+        where,
+    )
+    _require_evidence_fact(
+        evidence,
+        "cleanup_log",
+        "container_identity",
+        facts["container_identity"],
+        where,
+    )
+    if expected_base_digests:
+        _require_evidence_fact(
+            evidence,
+            "base_image_digests",
+            "base_image_digests",
+            base_digests,
+            where,
+        )
+
+
+def _validate_database_profile_admission(
+    *,
+    admission: Mapping[str, Any],
+    evidence: Mapping[str, Sequence[Mapping[str, Any]]],
+    environment: Mapping[str, Any],
+    services: Mapping[str, Mapping[str, Any]],
+    service_evidence: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    profile: Mapping[str, Any],
+    bundle: ValidationBundle,
+    git_commit: str,
+    where: str,
+) -> None:
+    facts = admission["facts"]
+    _exact_keys(
+        facts,
+        required={"environment_identity", "source_commit", "source_mount_mode"},
+        where=f"{where}.facts",
+    )
+    _expect_string(facts["environment_identity"], f"{where}.facts.environment_identity")
+    if facts["source_commit"] != git_commit:
+        _fail(f"{where}.facts.source_commit:mismatch")
+    if facts["source_mount_mode"] != "read_only":
+        _fail(f"{where}.facts.source_mount_mode:must_be_read_only")
+    _require_evidence_kinds(
+        evidence, {"runtime_probe", "source_mount"}, f"{where}.evidence_refs"
+    )
+    _require_evidence_fact(
+        evidence, "source_mount", "source_mount_mode", "read_only", where
+    )
+
+    definition = _bound_json_object(
+        bundle.root,
+        profile["runtime_definition"],
+        git_commit=git_commit,
+        where=f"{where}.runtime_definition_payload",
+    )
+    service_contract = _expect_object(
+        definition.get("service"), f"{where}.runtime_definition_payload.service"
+    )
+    isolation_contract = _expect_object(
+        definition.get("isolation"), f"{where}.runtime_definition_payload.isolation"
+    )
+    service_id = _expect_string(
+        service_contract.get("id"), f"{where}.runtime_definition_payload.service.id"
+    )
+    if set(services) != {service_id}:
+        _fail(f"{where}.services:runtime_definition_mismatch")
+    service = services[service_id]
+    service_where = f"{where}.services.{service_id}"
+    service_facts = service["facts"]
+    required_service_facts = {
+        "cleanup_completed",
+        "container_identity",
+        "credentials",
+        "database_identity",
+        "database_identity_scope",
+        "extension_versions",
+        "image_digest",
+        "live_database",
+        "network_mode",
+        "pg_dsn_sha256",
+        "postgresql_version",
+        "production_database",
+        "publish_host",
+        "publish_port_mode",
+        "published_port",
+        "session_isolation_key_sha256",
+        "shared_development_database",
+        "timescaledb_version",
+    }
+    _exact_keys(
+        service_facts,
+        required=required_service_facts,
+        where=f"{service_where}.facts",
+    )
+    expected_image = "sha256:" + _expect_string(
+        service_contract.get("image"),
+        f"{where}.runtime_definition_payload.service.image",
+    ).rsplit("@sha256:", 1)[-1]
+    if service_facts["image_digest"] != expected_image:
+        _fail(f"{service_where}.facts.image_digest:runtime_definition_mismatch")
+    _version_satisfies(
+        _expect_string(
+            service_facts["postgresql_version"],
+            f"{service_where}.facts.postgresql_version",
+        ),
+        _expect_string(
+            service_contract.get("postgresql"),
+            f"{where}.runtime_definition_payload.service.postgresql",
+        ),
+        f"{service_where}.facts.postgresql_version",
+    )
+    _version_satisfies(
+        _expect_string(
+            service_facts["timescaledb_version"],
+            f"{service_where}.facts.timescaledb_version",
+        ),
+        _expect_string(
+            service_contract.get("timescaledb"),
+            f"{where}.runtime_definition_payload.service.timescaledb",
+        ),
+        f"{service_where}.facts.timescaledb_version",
+    )
+    required_extensions = set(
+        _string_list(
+            service_contract.get("required_extensions"),
+            f"{where}.runtime_definition_payload.service.required_extensions",
+            nonempty=True,
+        )
+    )
+    extension_versions = _expect_object(
+        service_facts["extension_versions"],
+        f"{service_where}.facts.extension_versions",
+    )
+    if set(extension_versions) != required_extensions:
+        _fail(f"{service_where}.facts.extension_versions:required_set_mismatch")
+    for extension, version in extension_versions.items():
+        _expect_string(version, f"{service_where}.facts.extension_versions.{extension}")
+    if extension_versions.get("timescaledb") != service_facts["timescaledb_version"]:
+        _fail(f"{service_where}.facts.extension_versions.timescaledb:mismatch")
+    expected_scalars = {
+        "network_mode": service_contract.get("network_mode"),
+        "publish_host": service_contract.get("publish_host"),
+        "publish_port_mode": service_contract.get("publish_port"),
+        "database_identity_scope": isolation_contract.get("database_identity"),
+        "credentials": isolation_contract.get("credentials"),
+    }
+    for key, expected in expected_scalars.items():
+        if service_facts[key] != expected:
+            _fail(f"{service_where}.facts.{key}:runtime_definition_mismatch")
+    _expect_int(
+        service_facts["published_port"],
+        f"{service_where}.facts.published_port",
+        minimum=1,
+    )
+    for key in ("container_identity", "database_identity"):
+        _expect_string(service_facts[key], f"{service_where}.facts.{key}")
+    for key in ("pg_dsn_sha256", "session_isolation_key_sha256"):
+        value = _expect_string(service_facts[key], f"{service_where}.facts.{key}")
+        if not HEX64_RE.fullmatch(value):
+            _fail(f"{service_where}.facts.{key}:invalid_hash")
+    for key in (
+        "shared_development_database",
+        "live_database",
+        "production_database",
+    ):
+        if service_facts[key] is not False:
+            _fail(f"{service_where}.facts.{key}:must_be_false")
+    if service_facts["cleanup_completed"] is not True:
+        _fail(f"{service_where}.facts.cleanup_completed:must_be_true")
+    if not str(environment["os"]).lower().startswith("linux"):
+        _fail(f"{where}:os_must_be_linux")
+    expected_arch = _normalized_architecture(
+        _expect_string(
+            _expect_object(
+                definition.get("platform"),
+                f"{where}.runtime_definition_payload.platform",
+            ).get("architecture"),
+            f"{where}.runtime_definition_payload.platform.architecture",
+        )
+    )
+    if _normalized_architecture(str(environment["architecture"])) != expected_arch:
+        _fail(f"{where}:architecture_runtime_definition_mismatch")
+    expected_evidence = set(
+        _string_list(
+            definition.get("required_environment_evidence"),
+            f"{where}.runtime_definition_payload.required_environment_evidence",
+            nonempty=True,
+        )
+    )
+    bound_evidence = service_evidence[service_id]
+    _require_evidence_kinds(
+        bound_evidence, expected_evidence, f"{service_where}.evidence_refs"
+    )
+    for artifact_kind, fact_key in (
+        ("container_identity", "container_identity"),
+        ("database_identity", "database_identity"),
+        ("extension_versions", "extension_versions"),
+        ("image_digest", "image_digest"),
+        ("server_version", "postgresql_version"),
+    ):
+        _require_evidence_fact(
+            bound_evidence,
+            artifact_kind,
+            fact_key,
+            service_facts[fact_key],
+            service_where,
+        )
+    _require_evidence_fact(
+        bound_evidence,
+        "published_endpoint",
+        "publish_host",
+        service_facts["publish_host"],
+        service_where,
+    )
+    for artifact_kind, completed_key in (
+        ("bootstrap_log", "bootstrap_completed"),
+        ("cleanup_log", "cleanup_completed"),
+    ):
+        _require_evidence_fact(
+            bound_evidence, artifact_kind, completed_key, True, service_where
+        )
+        for identity_key in ("container_identity", "database_identity"):
+            _require_evidence_fact(
+                bound_evidence,
+                artifact_kind,
+                identity_key,
+                service_facts[identity_key],
+                service_where,
+            )
+
+
+def _validate_recovery_profile_admission(
+    *,
+    admission: Mapping[str, Any],
+    evidence: Mapping[str, Sequence[Mapping[str, Any]]],
+    services: Mapping[str, Mapping[str, Any]],
+    service_evidence: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    git_commit: str,
+    where: str,
+) -> None:
+    facts = admission["facts"]
+    _exact_keys(
+        facts,
+        required={"environment_identity", "non_production", "source_commit"},
+        where=f"{where}.facts",
+    )
+    _expect_string(facts["environment_identity"], f"{where}.facts.environment_identity")
+    if facts["non_production"] is not True:
+        _fail(f"{where}.facts.non_production:must_be_true")
+    if facts["source_commit"] != git_commit:
+        _fail(f"{where}.facts.source_commit:mismatch")
+    _require_evidence_kinds(
+        evidence, {"recovery_manifest"}, f"{where}.evidence_refs"
+    )
+    for service_id, service in services.items():
+        service_where = f"{where}.services.{service_id}"
+        service_facts = service["facts"]
+        _exact_keys(
+            service_facts,
+            required={"cleanup_completed", "non_production", "resource_identity"},
+            where=f"{service_where}.facts",
+        )
+        _expect_string(
+            service_facts["resource_identity"],
+            f"{service_where}.facts.resource_identity",
+        )
+        if service_facts["non_production"] is not True:
+            _fail(f"{service_where}.facts.non_production:must_be_true")
+        if service_facts["cleanup_completed"] is not True:
+            _fail(f"{service_where}.facts.cleanup_completed:must_be_true")
+        bound_evidence = service_evidence[service_id]
+        _require_evidence_kinds(
+            bound_evidence, {"cleanup_log"}, f"{service_where}.evidence_refs"
+        )
+        _require_evidence_fact(
+            bound_evidence,
+            "cleanup_log",
+            "resource_identity",
+            service_facts["resource_identity"],
+            service_where,
+        )
+        _require_evidence_fact(
+            bound_evidence,
+            "cleanup_log",
+            "cleanup_completed",
+            True,
+            service_where,
+        )
+
+
+def _validate_profile_admission(
+    environment: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    bundle: ValidationBundle,
+    evidence_root: Path | None,
+    attestation_id: str,
+    git_commit: str,
+    where: str,
+) -> None:
+    profile_id = profile["id"]
+    admission_where = f"{where}.profile_admission"
+    admission = _expect_object(environment["profile_admission"], admission_where)
+    _exact_keys(
+        admission,
+        required={
+            "admission_id",
+            "environment_class",
+            "isolation",
+            "external_order_submission_enabled",
+            "runtime_definition",
+            "facts",
+            "evidence_refs",
+        },
+        where=admission_where,
+    )
+    admission_id = _expect_string(
+        admission["admission_id"], f"{admission_where}.admission_id"
+    )
+    if not ADMISSION_ID_RE.fullmatch(admission_id):
+        _fail(f"{admission_where}.admission_id:invalid")
+    _enum(
+        admission["environment_class"],
+        ISOLATED_ENVIRONMENT_CLASSES,
+        f"{admission_where}.environment_class",
+    )
+    _enum(
+        admission["isolation"], ISOLATION_MODES, f"{admission_where}.isolation"
+    )
+    if _expect_bool(
+        admission["external_order_submission_enabled"],
+        f"{admission_where}.external_order_submission_enabled",
+    ):
+        _fail(f"{admission_where}.external_order_submission_enabled:must_be_false")
+    runtime = _expect_object(
+        admission["runtime_definition"], f"{admission_where}.runtime_definition"
+    )
+    _exact_keys(
+        runtime,
+        required={"path", "sha256"},
+        where=f"{admission_where}.runtime_definition",
+    )
+    if runtime["path"] != profile["runtime_definition"]:
+        _fail(f"{admission_where}.runtime_definition.path:profile_mismatch")
+    expected_runtime_hash = _bound_material_sha256(
+        bundle.root, profile["runtime_definition"], git_commit=git_commit
+    )
+    if runtime["sha256"] != expected_runtime_hash:
+        _fail(f"{admission_where}.runtime_definition.sha256:mismatch")
+    facts = _validate_admission_facts(admission["facts"], f"{admission_where}.facts")
+    used_paths: set[str] = set()
+    profile_evidence = _validate_environment_evidence_refs(
+        admission["evidence_refs"],
+        where=f"{admission_where}.evidence_refs",
+        bundle=bundle,
+        evidence_root=evidence_root,
+        attestation_id=attestation_id,
+        profile_id=profile_id,
+        binding_facts=facts,
+        service_id=None,
+        used_paths=used_paths,
+    )
+    services = _expect_object(environment["services"], f"{where}.services")
+    expected_services = set(profile["required_services"])
+    if set(services) != expected_services:
+        _fail(f"{where}.services:profile_mismatch")
+    normalized_services: dict[str, Mapping[str, Any]] = {}
+    service_evidence: dict[
+        str, Mapping[str, Sequence[Mapping[str, Any]]]
+    ] = {}
+    for service_id in sorted(services):
+        if not PROFILE_ID_RE.fullmatch(service_id):
+            _fail(f"{where}.services.key:invalid:{service_id}")
+        service_where = f"{where}.services.{service_id}"
+        service = _expect_object(services[service_id], service_where)
+        _exact_keys(
+            service,
+            required={
+                "environment_class",
+                "isolation",
+                "external_order_submission_enabled",
+                "facts",
+                "evidence_refs",
+            },
+            where=service_where,
+        )
+        _enum(
+            service["environment_class"],
+            ISOLATED_ENVIRONMENT_CLASSES,
+            f"{service_where}.environment_class",
+        )
+        _enum(
+            service["isolation"], ISOLATION_MODES, f"{service_where}.isolation"
+        )
+        if _expect_bool(
+            service["external_order_submission_enabled"],
+            f"{service_where}.external_order_submission_enabled",
+        ):
+            _fail(f"{service_where}.external_order_submission_enabled:must_be_false")
+        service_facts = _validate_admission_facts(
+            service["facts"], f"{service_where}.facts"
+        )
+        normalized_services[service_id] = {**service, "facts": service_facts}
+        service_evidence[service_id] = _validate_environment_evidence_refs(
+            service["evidence_refs"],
+            where=f"{service_where}.evidence_refs",
+            bundle=bundle,
+            evidence_root=evidence_root,
+            attestation_id=attestation_id,
+            profile_id=profile_id,
+            binding_facts=service_facts,
+            service_id=service_id,
+            used_paths=used_paths,
+        )
+    normalized_admission = {**admission, "facts": facts}
+    execution_class = profile["execution_class"]
+    if execution_class == "isolated_container":
+        _validate_container_profile_admission(
+            admission=normalized_admission,
+            evidence=profile_evidence,
+            environment=environment,
+            profile=profile,
+            bundle=bundle,
+            git_commit=git_commit,
+            where=admission_where,
+        )
+    elif execution_class == "isolated_database":
+        _validate_database_profile_admission(
+            admission=normalized_admission,
+            evidence=profile_evidence,
+            environment=environment,
+            services=normalized_services,
+            service_evidence=service_evidence,
+            profile=profile,
+            bundle=bundle,
+            git_commit=git_commit,
+            where=admission_where,
+        )
+    elif execution_class == "isolated_recovery":
+        _validate_recovery_profile_admission(
+            admission=normalized_admission,
+            evidence=profile_evidence,
+            services=normalized_services,
+            service_evidence=service_evidence,
+            git_commit=git_commit,
+            where=admission_where,
+        )
+    else:
+        _fail(f"{admission_where}:unsupported_execution_class:{execution_class}")
+
+
 def _verify_local_git_source(root: Path, git_commit: str, clean: bool) -> None:
     """Verify source assertions when the attestation is checked in a Git worktree."""
 
@@ -3452,6 +4204,7 @@ def validate_attestation_data(
                 "architecture",
                 "tool_versions",
                 "lockfile_hashes",
+                "profile_admission",
                 "services",
             },
             where=environment_where,
@@ -3501,13 +4254,15 @@ def validate_attestation_data(
             )
             if _expect_string(value, f"{environment_where}.lockfile_hashes.{relative}") != expected:
                 _fail(f"{environment_where}.lockfile_hashes:{relative}:mismatch")
-        services = _expect_object(environment["services"], f"{environment_where}.services")
-        expected_services = set(profiles[profile_id]["required_services"])
-        if set(services) != expected_services:
-            _fail(f"{environment_where}.services:profile_mismatch")
-        for key, value in services.items():
-            _expect_string(key, f"{environment_where}.services.key")
-            _expect_string(value, f"{environment_where}.services.{key}")
+        _validate_profile_admission(
+            environment,
+            profiles[profile_id],
+            bundle=bundle,
+            evidence_root=evidence_root,
+            attestation_id=attestation_id,
+            git_commit=git_commit,
+            where=environment_where,
+        )
     if len(bound_environment_ids) != len(set(bound_environment_ids)):
         _fail("attestation.environments:duplicate_profile_ids")
     if bound_environment_ids != sorted(bound_environment_ids):

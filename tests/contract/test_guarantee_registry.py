@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -187,6 +188,326 @@ def _attestation_inputs(
         "glossary_inputs": guarantees.glossary_inputs(
             bundle, git_commit=git_commit
         ),
+    }
+
+
+def _environment_evidence_ref(
+    root: Path,
+    *,
+    attestation_id: str,
+    profile_id: str,
+    artifact_kind: str,
+    facts: dict,
+    service_id: str | None = None,
+) -> dict[str, str]:
+    scope = service_id or "profile"
+    payload = {
+        "schema_version": "qt.assurance_environment_evidence.v1",
+        "profile_id": profile_id,
+        "artifact_kind": artifact_kind,
+        "facts": facts,
+    }
+    if service_id is not None:
+        payload["service_id"] = service_id
+    path = _write(
+        root,
+        "docs/assurance/guarantees/evidence/"
+        f"{attestation_id}/_environments/{profile_id}/"
+        f"{artifact_kind}-{scope}.json",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    )
+    return {
+        "artifact_kind": artifact_kind,
+        "path": path.relative_to(root).as_posix(),
+        "sha256": guarantees._sha256_file(path),
+    }
+
+
+def _profile_environment(
+    root: Path,
+    bundle: guarantees.ValidationBundle,
+    *,
+    attestation_id: str,
+    profile_id: str,
+    source_commit: str = "a" * 40,
+) -> dict:
+    profile = next(
+        item
+        for item in bundle.proof_catalog["environment_profiles"]
+        if item["id"] == profile_id
+    )
+    runtime_definition = {
+        "path": profile["runtime_definition"],
+        "sha256": guarantees._bound_material_sha256(
+            root, profile["runtime_definition"], git_commit=source_commit
+        ),
+    }
+    tool_versions = {"python": "3.12.4"}
+    if "node" in profile:
+        tool_versions["node"] = "20.20.2"
+    lockfile_hashes = {
+        relative: guarantees._bound_material_sha256(
+            root, relative, git_commit=source_commit
+        )
+        for relative in profile["lockfiles"]
+    }
+
+    if profile["execution_class"] == "isolated_container":
+        runtime_bytes = guarantees._bound_material_bytes(
+            root, profile["runtime_definition"], git_commit=source_commit
+        )
+        base_digests = sorted(
+            {
+                f"sha256:{digest.decode('ascii')}"
+                for digest in re.findall(rb"@sha256:([0-9a-f]{64})", runtime_bytes)
+            }
+        )
+        facts = {
+            "base_image_digests": base_digests,
+            "cleanup_completed": True,
+            "container_identity": f"container-{profile_id}",
+            "docker_version": "28.1.1",
+            "image_digest": f"sha256:{'1' * 64}",
+            "network_mode": "none",
+            "platform": "linux/amd64",
+            "source_commit": source_commit,
+            "source_mount_mode": "read_only",
+            "writable_temp_outside_source": True,
+        }
+        evidence_facts = {
+            "bootstrap_log": {
+                "bootstrap_completed": True,
+                "container_identity": facts["container_identity"],
+            },
+            "cleanup_log": {
+                "cleanup_completed": True,
+                "container_identity": facts["container_identity"],
+            },
+            "container_identity": {
+                "container_identity": facts["container_identity"]
+            },
+            "image_digest": {"image_digest": facts["image_digest"]},
+            "network_mode": {"network_mode": "none"},
+            "runtime_probe": {
+                "docker_version": facts["docker_version"],
+                "platform": facts["platform"],
+                "source_commit": source_commit,
+            },
+            "source_mount": {"source_mount_mode": "read_only"},
+        }
+        if base_digests:
+            evidence_facts["base_image_digests"] = {
+                "base_image_digests": base_digests
+            }
+        evidence_refs = sorted(
+            (
+                _environment_evidence_ref(
+                    root,
+                    attestation_id=attestation_id,
+                    profile_id=profile_id,
+                    artifact_kind=kind,
+                    facts=evidence_fact,
+                )
+                for kind, evidence_fact in evidence_facts.items()
+            ),
+            key=lambda item: item["path"],
+        )
+        return {
+            "profile_id": profile_id,
+            "os": "Linux",
+            "architecture": "x86_64",
+            "tool_versions": tool_versions,
+            "lockfile_hashes": lockfile_hashes,
+            "profile_admission": {
+                "admission_id": f"fixture-{profile_id}",
+                "environment_class": "isolated_test",
+                "isolation": "disposable",
+                "external_order_submission_enabled": False,
+                "runtime_definition": runtime_definition,
+                "facts": facts,
+                "evidence_refs": evidence_refs,
+            },
+            "services": {},
+        }
+
+    if profile["execution_class"] == "isolated_database":
+        definition = json.loads(
+            guarantees._bound_material_bytes(
+                root, profile["runtime_definition"], git_commit=source_commit
+            )
+        )
+        contract = definition["service"]
+        service_id = contract["id"]
+        facts = {
+            "environment_identity": f"environment-{profile_id}",
+            "source_commit": source_commit,
+            "source_mount_mode": "read_only",
+        }
+        profile_evidence = sorted(
+            [
+                _environment_evidence_ref(
+                    root,
+                    attestation_id=attestation_id,
+                    profile_id=profile_id,
+                    artifact_kind="runtime_probe",
+                    facts={"environment_identity": facts["environment_identity"]},
+                ),
+                _environment_evidence_ref(
+                    root,
+                    attestation_id=attestation_id,
+                    profile_id=profile_id,
+                    artifact_kind="source_mount",
+                    facts={"source_mount_mode": "read_only"},
+                ),
+            ],
+            key=lambda item: item["path"],
+        )
+        service_facts = {
+            "cleanup_completed": True,
+            "container_identity": "db-container-fixture",
+            "credentials": definition["isolation"]["credentials"],
+            "database_identity": "qt_attestation_fixture",
+            "database_identity_scope": definition["isolation"]["database_identity"],
+            "extension_versions": {
+                "pgcrypto": "1.3",
+                "timescaledb": "2.14.2",
+            },
+            "image_digest": "sha256:" + contract["image"].rsplit("@sha256:", 1)[-1],
+            "live_database": False,
+            "network_mode": contract["network_mode"],
+            "pg_dsn_sha256": "2" * 64,
+            "postgresql_version": "15.6",
+            "production_database": False,
+            "publish_host": contract["publish_host"],
+            "publish_port_mode": contract["publish_port"],
+            "published_port": 6543,
+            "session_isolation_key_sha256": "3" * 64,
+            "shared_development_database": False,
+            "timescaledb_version": "2.14.2",
+        }
+        evidence_facts = {
+            "bootstrap_log": {
+                "bootstrap_completed": True,
+                "container_identity": service_facts["container_identity"],
+                "database_identity": service_facts["database_identity"],
+            },
+            "cleanup_log": {
+                "cleanup_completed": True,
+                "container_identity": service_facts["container_identity"],
+                "database_identity": service_facts["database_identity"],
+            },
+            "container_identity": {
+                "container_identity": service_facts["container_identity"]
+            },
+            "database_identity": {
+                "database_identity": service_facts["database_identity"]
+            },
+            "extension_versions": {
+                "extension_versions": service_facts["extension_versions"]
+            },
+            "image_digest": {"image_digest": service_facts["image_digest"]},
+            "published_endpoint": {
+                "publish_host": service_facts["publish_host"],
+                "published_port": service_facts["published_port"],
+            },
+            "server_version": {
+                "postgresql_version": service_facts["postgresql_version"]
+            },
+        }
+        service_refs = sorted(
+            (
+                _environment_evidence_ref(
+                    root,
+                    attestation_id=attestation_id,
+                    profile_id=profile_id,
+                    artifact_kind=kind,
+                    facts=evidence_fact,
+                    service_id=service_id,
+                )
+                for kind, evidence_fact in evidence_facts.items()
+            ),
+            key=lambda item: item["path"],
+        )
+        return {
+            "profile_id": profile_id,
+            "os": "Linux",
+            "architecture": "x86_64",
+            "tool_versions": tool_versions,
+            "lockfile_hashes": lockfile_hashes,
+            "profile_admission": {
+                "admission_id": f"fixture-{profile_id}",
+                "environment_class": "isolated_test",
+                "isolation": "session_scoped",
+                "external_order_submission_enabled": False,
+                "runtime_definition": runtime_definition,
+                "facts": facts,
+                "evidence_refs": profile_evidence,
+            },
+            "services": {
+                service_id: {
+                    "environment_class": "isolated_test",
+                    "isolation": "disposable",
+                    "external_order_submission_enabled": False,
+                    "facts": service_facts,
+                    "evidence_refs": service_refs,
+                }
+            },
+        }
+
+    recovery_facts = {
+        "environment_identity": f"environment-{profile_id}",
+        "non_production": True,
+        "source_commit": source_commit,
+    }
+    recovery_ref = _environment_evidence_ref(
+        root,
+        attestation_id=attestation_id,
+        profile_id=profile_id,
+        artifact_kind="recovery_manifest",
+        facts={"non_production": True},
+    )
+    services = {}
+    for service_id in profile["required_services"]:
+        service_facts = {
+            "cleanup_completed": True,
+            "non_production": True,
+            "resource_identity": f"resource-{service_id}",
+        }
+        services[service_id] = {
+            "environment_class": "isolated_test",
+            "isolation": "disposable",
+            "external_order_submission_enabled": False,
+            "facts": service_facts,
+            "evidence_refs": [
+                _environment_evidence_ref(
+                    root,
+                    attestation_id=attestation_id,
+                    profile_id=profile_id,
+                    artifact_kind="cleanup_log",
+                    facts={
+                        "cleanup_completed": True,
+                        "resource_identity": service_facts["resource_identity"],
+                    },
+                    service_id=service_id,
+                )
+            ],
+        }
+    return {
+        "profile_id": profile_id,
+        "os": "Linux",
+        "architecture": "x86_64",
+        "tool_versions": tool_versions,
+        "lockfile_hashes": lockfile_hashes,
+        "profile_admission": {
+            "admission_id": f"fixture-{profile_id}",
+            "environment_class": "isolated_test",
+            "isolation": "session_scoped",
+            "external_order_submission_enabled": False,
+            "runtime_definition": runtime_definition,
+            "facts": recovery_facts,
+            "evidence_refs": [recovery_ref],
+        },
+        "services": services,
     }
 
 
@@ -973,18 +1294,12 @@ def test_proposed_required_proof_caps_attestation_and_cannot_be_attempted(
         },
         "inputs": _attestation_inputs(bundle, catalog_path),
         "environments": [
-            {
-                "profile_id": "python-nondb",
-                "os": "test",
-                "architecture": "test",
-                "tool_versions": {"python": "3.12.4"},
-                "lockfile_hashes": {
-                    "requirements.lock": hashlib.sha256(
-                        (tmp_path / "requirements.lock").read_bytes()
-                    ).hexdigest()
-                },
-                "services": {},
-            }
+            _profile_environment(
+                tmp_path,
+                bundle,
+                attestation_id="QT-ATT-20260823T120000Z-aaaaaaaa-python-nondb",
+                profile_id="python-nondb",
+            )
         ],
         "started_at": "2026-08-23T12:00:00Z",
         "finished_at": "2026-08-23T12:00:01Z",
@@ -1198,18 +1513,12 @@ def test_attestation_derives_not_run_and_rejects_false_result_state(tmp_path: Pa
         },
         "inputs": _attestation_inputs(bundle, catalog_path),
         "environments": [
-            {
-                "profile_id": "python-nondb",
-                "os": "test",
-                "architecture": "test",
-                "tool_versions": {"python": "3.12"},
-                "lockfile_hashes": {
-                    "requirements.lock": hashlib.sha256(
-                        (tmp_path / "requirements.lock").read_bytes()
-                    ).hexdigest()
-                },
-                "services": {},
-            },
+            _profile_environment(
+                tmp_path,
+                bundle,
+                attestation_id="QT-ATT-20260823T120000Z-aaaaaaaa-python-nondb",
+                profile_id="python-nondb",
+            )
         ],
         "started_at": "2026-08-23T12:00:00Z",
         "finished_at": "2026-08-23T12:00:01Z",
@@ -1337,7 +1646,7 @@ def test_attestation_composes_required_proofs_across_environment_profiles(
         0,
         {
             "id": "python-db-isolated",
-            "execution_class": "isolated_database",
+            "execution_class": "isolated_container",
             "runtime_definition": "docker/assurance/python-nondb.profile.json",
             "python": ">=3.12,<3.13",
             "lockfiles": ["requirements.lock"],
@@ -1414,14 +1723,12 @@ def test_attestation_composes_required_proofs_across_environment_profiles(
         },
         "inputs": _attestation_inputs(bundle, catalog_path),
         "environments": [
-            {
-                "profile_id": profile_id,
-                "os": "test",
-                "architecture": "test",
-                "tool_versions": {"python": "3.12.4"},
-                "lockfile_hashes": {"requirements.lock": lock_hash},
-                "services": {},
-            }
+            _profile_environment(
+                tmp_path,
+                bundle,
+                attestation_id=multi_attestation_id,
+                profile_id=profile_id,
+            )
             for profile_id in ("python-db-isolated", "python-nondb")
         ],
         "started_at": "2026-08-23T12:00:00Z",
@@ -1603,6 +1910,140 @@ def test_attestation_composes_required_proofs_across_environment_profiles(
     _attach_result_summary(tmp_path, multi_attestation_id, attestation["proof_results"][0])
 
 
+def test_database_profile_admission_binds_exact_service_and_cleanup_evidence(
+    tmp_path: Path,
+) -> None:
+    registry, catalog = _base_repository(tmp_path)
+    timescale_digest = "0698d9bf8cfd81e042f653ff3be767682b376bf0e95b431b2922e2d8a72195d1"
+    runtime_path = "docker/assurance/python-db-isolated.profile.json"
+    _write(
+        tmp_path,
+        runtime_path,
+        json.dumps(
+            {
+                "schema_version": "qt.assurance_environment_profile.v1",
+                "id": "python-db-isolated",
+                "platform": {"os": "linux", "architecture": "amd64"},
+                "runtime": {"python": ">=3.12,<3.13"},
+                "service": {
+                    "id": "isolated-postgresql-timescaledb",
+                    "image": f"timescale/timescaledb@sha256:{timescale_digest}",
+                    "postgresql": ">=15,<16",
+                    "timescaledb": "==2.14.2",
+                    "required_extensions": ["pgcrypto", "timescaledb"],
+                    "network_mode": "isolated_bridge",
+                    "publish_host": "127.0.0.1",
+                    "publish_port": "ephemeral",
+                },
+                "isolation": {
+                    "database_identity": "unique_per_attestation_session",
+                    "credentials": "synthetic_session_only",
+                    "shared_development_database_forbidden": True,
+                    "live_database_forbidden": True,
+                    "production_database_forbidden": True,
+                    "cleanup_evidence_required": True,
+                },
+                "required_environment_evidence": [
+                    "bootstrap_log",
+                    "cleanup_log",
+                    "container_identity",
+                    "database_identity",
+                    "extension_versions",
+                    "image_digest",
+                    "published_endpoint",
+                    "server_version",
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    profile = catalog["environment_profiles"][0]
+    profile.update(
+        id="python-db-isolated",
+        execution_class="isolated_database",
+        runtime_definition=runtime_path,
+        python=">=3.12,<3.13",
+        required_services=["isolated-postgresql-timescaledb"],
+    )
+    catalog["proofs"][0]["environment_profile_id"] = "python-db-isolated"
+    bundle = _validate(tmp_path, registry, catalog)
+    attestation_id = "QT-ATT-20260823T120000Z-aaaaaaaa-python-db-isolated"
+    environment = _profile_environment(
+        tmp_path,
+        bundle,
+        attestation_id=attestation_id,
+        profile_id="python-db-isolated",
+    )
+    validate_kwargs = {
+        "bundle": bundle,
+        "evidence_root": None,
+        "attestation_id": attestation_id,
+        "git_commit": "a" * 40,
+        "where": "attestation.environments[0]",
+    }
+    guarantees._validate_profile_admission(environment, profile, **validate_kwargs)
+
+    missing_bootstrap = copy.deepcopy(environment)
+    service = missing_bootstrap["services"]["isolated-postgresql-timescaledb"]
+    service["evidence_refs"] = [
+        ref
+        for ref in service["evidence_refs"]
+        if ref["artifact_kind"] != "bootstrap_log"
+    ]
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="missing_required_kinds:bootstrap_log",
+    ):
+        guarantees._validate_profile_admission(
+            missing_bootstrap, profile, **validate_kwargs
+        )
+
+    missing_cleanup = copy.deepcopy(environment)
+    service = missing_cleanup["services"]["isolated-postgresql-timescaledb"]
+    service["evidence_refs"] = [
+        ref
+        for ref in service["evidence_refs"]
+        if ref["artifact_kind"] != "cleanup_log"
+    ]
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="missing_required_kinds:cleanup_log",
+    ):
+        guarantees._validate_profile_admission(
+            missing_cleanup, profile, **validate_kwargs
+        )
+
+    shared_database = copy.deepcopy(environment)
+    shared_database["services"]["isolated-postgresql-timescaledb"]["facts"][
+        "shared_development_database"
+    ] = True
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="shared_development_database:must_be_false",
+    ):
+        guarantees._validate_profile_admission(
+            shared_database, profile, **validate_kwargs
+        )
+
+    wrong_image = copy.deepcopy(environment)
+    wrong_image["services"]["isolated-postgresql-timescaledb"]["facts"][
+        "image_digest"
+    ] = f"sha256:{'f' * 64}"
+    with pytest.raises(guarantees.GuaranteeValidationError):
+        guarantees._validate_profile_admission(wrong_image, profile, **validate_kwargs)
+
+    free_form_service = copy.deepcopy(environment)
+    free_form_service["services"]["isolated-postgresql-timescaledb"] = "present"
+    with pytest.raises(
+        guarantees.GuaranteeValidationError, match="services.*expected_object"
+    ):
+        guarantees._validate_profile_admission(
+            free_form_service, profile, **validate_kwargs
+        )
+
+
 def test_reviewed_manual_pass_can_satisfy_required_proof(tmp_path: Path) -> None:
     registry, catalog = _base_repository(tmp_path)
     registry["guarantees"][0]["proof_mode"] = "manual"
@@ -1644,18 +2085,12 @@ def test_reviewed_manual_pass_can_satisfy_required_proof(tmp_path: Path) -> None
         },
         "inputs": _attestation_inputs(bundle, catalog_path),
         "environments": [
-            {
-                "profile_id": "python-nondb",
-                "os": "test",
-                "architecture": "test",
-                "tool_versions": {"python": "3.12.4"},
-                "lockfile_hashes": {
-                    "requirements.lock": hashlib.sha256(
-                        (tmp_path / "requirements.lock").read_bytes()
-                    ).hexdigest()
-                },
-                "services": {},
-            }
+            _profile_environment(
+                tmp_path,
+                bundle,
+                attestation_id="QT-ATT-20260823T120000Z-aaaaaaaa-python-nondb",
+                profile_id="python-nondb",
+            )
         ],
         "started_at": "2026-08-23T12:00:00Z",
         "finished_at": "2026-08-23T12:00:01Z",
@@ -1762,18 +2197,12 @@ def test_non_pytest_partial_requires_zero_exit_and_reason(tmp_path: Path) -> Non
         },
         "inputs": _attestation_inputs(bundle, catalog_path),
         "environments": [
-            {
-                "profile_id": "python-nondb",
-                "os": "test",
-                "architecture": "test",
-                "tool_versions": {"python": "3.12.4"},
-                "lockfile_hashes": {
-                    "requirements.lock": guarantees._sha256_file(
-                        tmp_path / "requirements.lock"
-                    )
-                },
-                "services": {},
-            }
+            _profile_environment(
+                tmp_path,
+                bundle,
+                attestation_id=attestation_id,
+                profile_id="python-nondb",
+            )
         ],
         "started_at": "2026-08-23T12:00:00Z",
         "finished_at": "2026-08-23T12:00:01Z",
@@ -1857,12 +2286,20 @@ def test_native_node_result_uses_exact_names_typed_counts_and_three_hashes(
         "portal/frontend/package-lock.json",
         '{"lockfileVersion": 3}\n',
     )
+    _write(
+        tmp_path,
+        "docker/assurance/frontend-node.Dockerfile",
+        "ARG NODE_IMAGE=docker.io/library/node@sha256:"
+        + "2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0\n"
+        "ARG PYTHON_IMAGE=docker.io/library/python@sha256:"
+        + "a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134\n",
+    )
     _write(tmp_path, "scripts/docs/guarantees.py", "# validator v1\n")
     catalog["environment_profiles"] = [
         {
             "id": "frontend-node",
             "execution_class": "isolated_container",
-            "runtime_definition": "docker/assurance/python-nondb.profile.json",
+            "runtime_definition": "docker/assurance/frontend-node.Dockerfile",
             "python": ">=3.12,<3.13",
             "node": ">=20,<21",
             "lockfiles": [
@@ -1952,21 +2389,12 @@ def test_native_node_result_uses_exact_names_typed_counts_and_three_hashes(
         },
         "inputs": _attestation_inputs(bundle, catalog_path),
         "environments": [
-            {
-                "profile_id": "frontend-node",
-                "os": "test",
-                "architecture": "test",
-                "tool_versions": {"node": "20.20.2", "python": "3.12.4"},
-                "lockfile_hashes": {
-                    "portal/frontend/package-lock.json": guarantees._sha256_file(
-                        package_lock
-                    ),
-                    "requirements.lock": guarantees._sha256_file(
-                        tmp_path / "requirements.lock"
-                    ),
-                },
-                "services": {},
-            }
+            _profile_environment(
+                tmp_path,
+                bundle,
+                attestation_id=attestation_id,
+                profile_id="frontend-node",
+            )
         ],
         "started_at": "2026-08-23T12:00:00Z",
         "finished_at": "2026-08-23T12:00:01Z",
@@ -1984,6 +2412,74 @@ def test_native_node_result_uses_exact_names_typed_counts_and_three_hashes(
         "proof_catalog_path": catalog_path,
     }
     guarantees.validate_attestation_data(attestation, bundle, **validate_kwargs)
+
+    missing_admission = copy.deepcopy(attestation)
+    missing_admission["environments"][0].pop("profile_admission")
+    with pytest.raises(
+        guarantees.GuaranteeValidationError, match="missing_keys:profile_admission"
+    ):
+        guarantees.validate_attestation_data(
+            missing_admission, bundle, **validate_kwargs
+        )
+
+    wrong_runtime = copy.deepcopy(attestation)
+    wrong_runtime["environments"][0]["profile_admission"]["runtime_definition"][
+        "sha256"
+    ] = "0" * 64
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="runtime_definition.sha256:mismatch",
+    ):
+        guarantees.validate_attestation_data(wrong_runtime, bundle, **validate_kwargs)
+
+    networked_frontend = copy.deepcopy(attestation)
+    networked_frontend["environments"][0]["profile_admission"]["facts"][
+        "network_mode"
+    ] = "bridge"
+    with pytest.raises(guarantees.GuaranteeValidationError):
+        guarantees.validate_attestation_data(
+            networked_frontend, bundle, **validate_kwargs
+        )
+
+    missing_cleanup = copy.deepcopy(attestation)
+    admission_refs = missing_cleanup["environments"][0]["profile_admission"][
+        "evidence_refs"
+    ]
+    missing_cleanup["environments"][0]["profile_admission"]["evidence_refs"] = [
+        ref for ref in admission_refs if ref["artifact_kind"] != "cleanup_log"
+    ]
+    with pytest.raises(
+        guarantees.GuaranteeValidationError, match="missing_required_kinds:cleanup_log"
+    ):
+        guarantees.validate_attestation_data(
+            missing_cleanup, bundle, **validate_kwargs
+        )
+
+    missing_bootstrap = copy.deepcopy(attestation)
+    admission_refs = missing_bootstrap["environments"][0]["profile_admission"][
+        "evidence_refs"
+    ]
+    missing_bootstrap["environments"][0]["profile_admission"]["evidence_refs"] = [
+        ref for ref in admission_refs if ref["artifact_kind"] != "bootstrap_log"
+    ]
+    with pytest.raises(
+        guarantees.GuaranteeValidationError, match="missing_required_kinds:bootstrap_log"
+    ):
+        guarantees.validate_attestation_data(
+            missing_bootstrap, bundle, **validate_kwargs
+        )
+
+    external_submission = copy.deepcopy(attestation)
+    external_submission["environments"][0]["profile_admission"][
+        "external_order_submission_enabled"
+    ] = True
+    with pytest.raises(
+        guarantees.GuaranteeValidationError,
+        match="external_order_submission_enabled:must_be_false",
+    ):
+        guarantees.validate_attestation_data(
+            external_submission, bundle, **validate_kwargs
+        )
 
     partial = copy.deepcopy(attestation)
     partial_result = partial["proof_results"][0]
@@ -2142,18 +2638,13 @@ def test_active_reference_validates_historical_attestation_after_head_advances(
             source_bundle, catalog_path, git_commit=source_commit
         ),
         "environments": [
-            {
-                "profile_id": "python-nondb",
-                "os": "test",
-                "architecture": "test",
-                "tool_versions": {"python": "3.12.4"},
-                "lockfile_hashes": {
-                    "requirements.lock": guarantees._bound_material_sha256(
-                        tmp_path, "requirements.lock", git_commit=source_commit
-                    )
-                },
-                "services": {},
-            }
+            _profile_environment(
+                tmp_path,
+                source_bundle,
+                attestation_id=attestation_id,
+                profile_id="python-nondb",
+                source_commit=source_commit,
+            )
         ],
         "started_at": "2026-08-23T12:00:00Z",
         "finished_at": "2026-08-23T12:00:01Z",
@@ -2588,6 +3079,29 @@ def test_checked_in_schemas_match_executable_versions_and_enums() -> None:
     assert attestation_schema["additionalProperties"] is False
     assert "environments" in attestation_schema["required"]
     assert "environment" not in attestation_schema["properties"]
+    assert "profile_admission" in attestation_schema["$defs"]["environment"][
+        "required"
+    ]
+    assert (
+        attestation_schema["$defs"]["environment"]["properties"]["services"][
+            "additionalProperties"
+        ]["$ref"]
+        == "#/$defs/serviceAdmission"
+    )
+    assert (
+        attestation_schema["$defs"]["profileAdmission"]["properties"][
+            "external_order_submission_enabled"
+        ]["const"]
+        is False
+    )
+    assert "_environments" in attestation_schema["$defs"][
+        "environmentEvidenceRef"
+    ]["properties"]["path"]["pattern"]
+    assert set(
+        attestation_schema["$defs"]["environmentEvidenceRef"]["properties"][
+            "artifact_kind"
+        ]["enum"]
+    ) == guarantees.ENVIRONMENT_EVIDENCE_ARTIFACT_KINDS
     assert "environment_profile_id" in attestation_schema["$defs"]["proofResult"]["required"]
     assert "runtime_source_tree_sha256" not in attestation_schema["$defs"]["source"]["properties"]
     assert "guarantee_material_sha256" in attestation_schema["$defs"]["inputs"]["required"]

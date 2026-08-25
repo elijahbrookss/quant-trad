@@ -79,10 +79,15 @@
           "pattern": "^[a-z][a-z0-9-]*$",
           "type": "string"
         },
+        "profile_admission": {
+          "$ref": "#/$defs/profileAdmission"
+        },
         "services": {
           "additionalProperties": {
-            "minLength": 1,
-            "type": "string"
+            "$ref": "#/$defs/serviceAdmission"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9-]*$"
           },
           "type": "object"
         },
@@ -100,7 +105,50 @@
         "architecture",
         "tool_versions",
         "lockfile_hashes",
+        "profile_admission",
         "services"
+      ],
+      "type": "object"
+    },
+    "admissionFacts": {
+      "additionalProperties": {
+        "$ref": "#/$defs/factValue"
+      },
+      "minProperties": 1,
+      "type": "object"
+    },
+    "environmentEvidenceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_kind": {
+          "enum": [
+            "base_image_digests",
+            "bootstrap_log",
+            "cleanup_log",
+            "container_identity",
+            "database_identity",
+            "extension_versions",
+            "image_digest",
+            "network_mode",
+            "published_endpoint",
+            "recovery_manifest",
+            "runtime_probe",
+            "server_version",
+            "source_mount"
+          ]
+        },
+        "path": {
+          "pattern": "^docs/assurance/guarantees/evidence/QT-ATT-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8,40}-[a-z0-9-]+/_environments/[a-z][a-z0-9-]*/[^/]+$",
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "artifact_kind",
+        "path",
+        "sha256"
       ],
       "type": "object"
     },
@@ -124,6 +172,34 @@
         "sha256"
       ],
       "type": "object"
+    },
+    "factValue": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/factValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/factValue"
+          },
+          "type": "object"
+        }
+      ]
     },
     "guaranteeResult": {
       "additionalProperties": false,
@@ -206,6 +282,48 @@
         "guarantee_material_sha256",
         "required_proof_material_sha256",
         "glossary_inputs"
+      ],
+      "type": "object"
+    },
+    "profileAdmission": {
+      "additionalProperties": false,
+      "properties": {
+        "admission_id": {
+          "pattern": "^[a-z][a-z0-9-]{2,127}$",
+          "type": "string"
+        },
+        "environment_class": {
+          "enum": ["ephemeral_ci", "isolated_test"]
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/environmentEvidenceRef"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "external_order_submission_enabled": {
+          "const": false
+        },
+        "facts": {
+          "$ref": "#/$defs/admissionFacts"
+        },
+        "isolation": {
+          "enum": ["disposable", "session_scoped"]
+        },
+        "runtime_definition": {
+          "$ref": "#/$defs/runtimeDefinition"
+        }
+      },
+      "required": [
+        "admission_id",
+        "environment_class",
+        "isolation",
+        "external_order_submission_enabled",
+        "runtime_definition",
+        "facts",
+        "evidence_refs"
       ],
       "type": "object"
     },
@@ -616,6 +734,52 @@
         "pattern": "(?:^/|\\\\|(?:^|/)\\.\\.(?:/|$))"
       },
       "type": "string"
+    },
+    "runtimeDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": ["path", "sha256"],
+      "type": "object"
+    },
+    "serviceAdmission": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_class": {
+          "enum": ["ephemeral_ci", "isolated_test"]
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/environmentEvidenceRef"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "external_order_submission_enabled": {
+          "const": false
+        },
+        "facts": {
+          "$ref": "#/$defs/admissionFacts"
+        },
+        "isolation": {
+          "enum": ["disposable", "session_scoped"]
+        }
+      },
+      "required": [
+        "environment_class",
+        "isolation",
+        "external_order_submission_enabled",
+        "facts",
+        "evidence_refs"
+      ],
+      "type": "object"
     },
     "resultStatus": {
       "enum": [
