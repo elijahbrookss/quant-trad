@@ -2908,7 +2908,7 @@
           "path": "docs/engineering/testing/ci-test-topology.md",
           "locator": {
             "kind": "heading",
-            "value": "Current CI Flow"
+            "value": "Current Workflow Topology"
           },
           "authority_kind": "supporting_architecture",
           "role": "supporting"
@@ -2917,7 +2917,7 @@
           "path": "docs/engineering/testing/ci-test-topology.md",
           "locator": {
             "kind": "heading",
-            "value": "Operational Rule"
+            "value": "Ownership And Maintenance"
           },
           "authority_kind": "supporting_architecture",
           "role": "supporting"
