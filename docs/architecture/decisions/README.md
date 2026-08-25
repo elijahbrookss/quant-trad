@@ -89,3 +89,5 @@ respect.
 | [0061](0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md) | Use provider-neutral exact numeric facts and bounded acquisition | Accepted |
 | [0062](0062-use-frozen-bindings-for-durable-check-evidence.md) | Use frozen bindings for durable Check evidence | Accepted |
 | [0063](0063-use-schema-registered-canonical-facts.md) | Use schema-registered canonical Facts | Accepted |
+| [0064](0064-use-one-code-owned-collector-operations-contract.md) | Use one code-owned Collector Operations contract | Accepted |
+| [0065](0065-use-explicit-frozen-check-admission-for-new-research-observations.md) | Use explicit frozen-Check admission for new Research Observations | Accepted |

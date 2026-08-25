@@ -88,6 +88,13 @@ hashes. Only evidence classified as observation-eligible may support a durable
 Observation. Replay requires the exact clean producing source revision and the
 same canonical execution path.
 
+For new records,
+[ADR 0065](../decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md)
+supersedes ADR 0034's automatic Observation-creation rule. Persisting an
+eligible V2 evidence Check does not itself create or require a Research
+Observation. A separate operation must revalidate the completed frozen evidence
+before creating an Observation and linking the Check to it with `supports`.
+
 `event_fact_analysis` is the generic durable market-data Check. It consumes
 typed fact aliases and registered Indicator events, performs causal alignment,
 outcomes, statistics, and optional assertions, and contains no provider-specific
@@ -116,6 +123,10 @@ The legacy raw source check runner is intentionally bounded:
    observation with the normalized scope when needed,
 8. persist the check result as a research-memory item,
 9. link the check back to the observation.
+
+Steps 7 through 9 describe only the retained V1 compatibility path. They are not
+the admission model for new V2 Check records, and failure of V2 evidence
+admission must not fall back to this automatic-Observation behavior.
 
 The raw source check family is `raw_forward_outcome`. It supports detector
 trees over known-at source fields only: `open`, `high`, `low`, `close`,
@@ -154,11 +165,14 @@ research checks and sweeps may be submitted as async research jobs:
 
 Async research jobs use the shared `portal_async_jobs` table for queue state,
 attempts, fenced ownership, heartbeats, result storage, and failure visibility.
-Queued research-check evaluation uses the same service contract as synchronous
-routes, then persists its observation, check, links, and terminal result under
-one current-claim transaction. Sweeps remain read-only until their terminal
-result. The job layer is orchestration only; it does not introduce a new
-detector, indicator, candle, report, or strategy truth path.
+Queued evidence-mode evaluation uses the same service contract as synchronous
+evidence execution, then persists the Check, its exact evidence link, and the
+terminal job result under the current fenced claim. It does not automatically
+create a Research Observation. Observation creation remains a separate explicit
+operation over completed, frozen, replayable, Observation-eligible evidence.
+Sweeps remain read-only previews. The job layer is orchestration only; it does
+not introduce a new detector, indicator, candle, report, strategy, or
+Observation-admission path.
 
 Job status responses are compact operator read models. Completed job results
 carry the original research check or sweep contract so downstream analysis can
@@ -252,10 +266,12 @@ report evidence. Completed run datasets may also expose `candidate_lifecycle`
 rows from lifecycle typed outputs captured in report artifacts, so future
 report-backed checks can inspect setup funnels without replaying indicators.
 
-Report-backed checks hydrate run context from `RunResearchDataset` before
-creating ad hoc observations. Caller-supplied observations are linked as-is.
-Auto-created observations inherit the analyzed run id, bot id, strategy id,
-symbols, timeframe, and simulated window when those fields are available.
+Report-backed evidence Checks hydrate run context from `RunResearchDataset`
+before producing their frozen evidence. The persisted V2 Check links to the
+analyzed run through its evidence relation and does not automatically create an
+Observation. A later explicit Observation-creation operation may carry the
+validated run, bot, strategy, symbol, timeframe, and simulated-window context
+forward only after the Check is confirmed eligible.
 
 Failure semantics are intentionally narrow. Missing or blocked source/report
 evidence may be stored as a blocked check result because that is valid research
@@ -315,16 +331,18 @@ The storage model is intentionally small:
 - `portal_research_links` stores directed links from a research item to another
   research item or platform artifact.
 
-Every research check is a research item. A check must link to an observation.
-If the caller does not supply an observation, the service creates an ad hoc
-observation after the check scope has been normalized or report context has
-been hydrated, so analytical work is never orphaned or stripped of available
-context. Report-backed checks also link to the analyzed run so later research
-can traverse observation -> check -> run without scraping reports.
+Every Research Check is a research-memory item. New V2 Checks link directly to
+their exact Dataset or run evidence and may exist without a Research
+Observation. A completed frozen Check may support a new Observation only
+through the explicit admission operation defined by ADR 0065. Historical V1
+Checks retain their existing `tests` links and automatically created
+Observations as compatibility-readable evidence; those records are not upgraded
+or used as the model for new writes.
 
 Useful relations include:
 
 - `tests`
+- `supports`
 - `derived_from`
 - `supported_by`
 - `contradicted_by`
@@ -354,8 +372,10 @@ Useful relations include:
   fallback ranking.
 - Report-backed checks must read `RunResearchDataset` and must not reconstruct
   runtime state from logs, frontend projections, or indicator internals.
-- Report-backed auto observations must be created after the dataset is read so
-  they inherit run/report context.
+- Report-backed evidence Checks hydrate run context before evidence persistence.
+  Neither report hydration nor Check persistence automatically creates a
+  Research Observation; explicit creation occurs only after evidence
+  eligibility is revalidated.
 - Unsupported detector semantics must fail loud before any new research item is
   created.
 - Check outputs must preserve data quality, sample counts, caveats,
@@ -371,3 +391,5 @@ Useful relations include:
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)
 - [ADR 0034: Use Research Checks as Analytical Memory Evidence](../decisions/0034-use-research-checks-as-analytical-memory-evidence.md)
 - [ADR 0037: Keep Research Presentations Metric-Contract Driven](../decisions/0037-keep-research-presentations-metric-contract-driven.md)
+- [ADR 0062: Use Frozen Bindings For Durable Check Evidence](../decisions/0062-use-frozen-bindings-for-durable-check-evidence.md)
+- [ADR 0065: Use Explicit Frozen-Check Admission For New Research Observations](../decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md)
