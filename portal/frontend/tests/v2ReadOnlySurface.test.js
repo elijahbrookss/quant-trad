@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -12,7 +12,7 @@ const SCAN_DIRS = [
   path.join('features', 'overview'),
   path.join('features', 'operations'),
   path.join('features', 'collectors'),
-  path.join('features', 'market-structure'),
+  path.join('features', 'bots', 'botlens'),
 ]
 const FORBIDDEN_IMPORTS = ['createBot', 'updateBot', 'deleteBot', 'startBot', 'stopBot']
 
@@ -30,22 +30,31 @@ function source(relative) {
   return readFileSync(path.join(srcRoot, relative), 'utf8')
 }
 
+function filesForDeclaredRoots(root, declaredDirs) {
+  const files = []
+  for (const dir of declaredDirs) {
+    const absDir = path.join(root, dir)
+    assert.ok(existsSync(absDir), `declared V2 scan root does not exist: ${dir}`)
+    assert.ok(statSync(absDir).isDirectory(), `declared V2 scan root is not a directory: ${dir}`)
+    walk(absDir, files)
+  }
+  return files
+}
+
+test('v2 scan-root discovery fails loud when a declaration is absent', () => {
+  assert.throws(
+    () => filesForDeclaredRoots(srcRoot, ['missing-v2-root']),
+    /declared V2 scan root does not exist: missing-v2-root/,
+  )
+})
+
 test('v2 UI surface never imports bot-mutation adapter functions', () => {
   const offenders = []
-  for (const dir of SCAN_DIRS) {
-    const absDir = path.join(srcRoot, dir)
-    let files
-    try {
-      files = walk(absDir)
-    } catch {
-      continue
-    }
-    for (const file of files) {
-      const content = readFileSync(file, 'utf8')
-      for (const name of FORBIDDEN_IMPORTS) {
-        const importPattern = new RegExp('import\\s*{[^}]*\\b' + name + '\\b[^}]*}\\s*from')
-        if (importPattern.test(content)) offenders.push(path.relative(srcRoot, file) + ' imports ' + name)
-      }
+  for (const file of filesForDeclaredRoots(srcRoot, SCAN_DIRS)) {
+    const content = readFileSync(file, 'utf8')
+    for (const name of FORBIDDEN_IMPORTS) {
+      const importPattern = new RegExp('import\\s*{[^}]*\\b' + name + '\\b[^}]*}\\s*from')
+      if (importPattern.test(content)) offenders.push(path.relative(srcRoot, file) + ' imports ' + name)
     }
   }
   assert.deepEqual(offenders, [])

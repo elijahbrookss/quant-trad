@@ -485,13 +485,13 @@ validate-docs: venv ## Refresh indexes and run docs contract validation
 	@$(PYTHON) scripts/docs/guarantees.py check
 	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_documentation_reconciliation.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py
 
-frontend-test: ## Run frontend unit tests
+frontend-test: ## Run frontend Node and JSX tests
 	@$(NPM) --prefix $(FRONT_DIR) test
 
 frontend-build: ## Build frontend assets
 	@$(NPM) --prefix $(FRONT_DIR) run build
 
-frontend-check: frontend-test frontend-build ## Run frontend tests and build
+frontend-check: frontend-test frontend-build ## Run frontend Node/JSX tests and build
 
 git-status: ## Show short git status
 	@git status --short

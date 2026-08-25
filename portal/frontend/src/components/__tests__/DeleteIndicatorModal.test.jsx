@@ -1,10 +1,7 @@
 /**
  * DeleteIndicatorModal Component Tests
  *
- * These tests require a testing library setup. To run:
- * 1. Install: npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom
- * 2. Configure vitest.config.js with jsdom environment
- * 3. Run: npm test
+ * Runs in the pinned Vitest/jsdom profile via `npm run test:jsx`.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -35,7 +32,7 @@ describe('DeleteIndicatorModal', () => {
   describe('Basic Rendering', () => {
     it('renders modal when open is true', async () => {
       render(<DeleteIndicatorModal {...defaultProps} />);
-      expect(screen.getByText('Delete Indicator')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Delete Indicator' })).toBeInTheDocument();
     });
 
     it('shows indicator name in confirmation text', async () => {
