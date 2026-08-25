@@ -266,15 +266,32 @@
       "adopted_label": "Runtime fact, qualified",
       "owner": "execution-runtime",
       "required_reviewers": [
+        "data",
         "execution-runtime",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "platform"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
+          "path": "docs/contracts/platform/01_runtime_contract.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Shared-Wallet Entry Ordering"
+          },
+          "authority_kind": "normative_platform_contract",
+          "role": "primary"
+        },
+        {
           "path": "docs/architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md",
           "locator": {
             "kind": "heading",
             "value": "Decision"
@@ -284,8 +301,8 @@
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "A specifically named runtime/lifecycle fact",
-      "usage_boundary": "Does not inhabit `market.fact_versions`; bare “canonical fact” is unsafe",
+      "definition": "`Runtime fact` is qualified vocabulary for a fact owned by a named runtime boundary, such as a lifecycle event or Wallet Ledger fact.",
+      "usage_boundary": "A runtime fact is not a Canonical Fact. Always retain the owning qualifier; this term does not create a universal runtime-fact store or authority.",
       "conflict_dispositions": [
         {
           "id": "QT-CONFLICT-009",
@@ -309,11 +326,10 @@
       "owner": "research-memory",
       "required_reviewers": [
         "platform-contract",
-        "research-memory"
-      ],
-      "consulted_boundaries": [
+        "research-memory",
         "research-orchestration"
       ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md",
@@ -385,11 +401,20 @@
           },
           "authority_kind": "accepted_adr",
           "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Dataset And Research Semantics"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
         }
       ],
       "reviewed_evidence_refs": [],
       "definition": "Immutable `market_dataset.v1` manifest over exact Fact revisions, ranges, sources, hashes, gaps, and watermark",
-      "usage_boundary": "Prefer over unqualified Dataset for source data",
+      "usage_boundary": "Use the qualified label for the immutable source-data manifest; bare `Dataset` does not identify an owner or scope.",
       "conflict_dispositions": [
         {
           "id": "QT-CONFLICT-008",
@@ -413,11 +438,11 @@
       "owner": "data",
       "required_reviewers": [
         "data",
-        "platform-contract"
+        "platform-contract",
+        "research-orchestration"
       ],
       "consulted_boundaries": [
-        "execution-runtime",
-        "research-orchestration"
+        "execution-runtime"
       ],
       "authority_refs": [
         {
@@ -582,6 +607,7 @@
       "owner": "research-orchestration",
       "required_reviewers": [
         "platform-contract",
+        "research-memory",
         "research-orchestration"
       ],
       "consulted_boundaries": [],
@@ -1129,14 +1155,14 @@
       "adopted_label": "Run, qualified",
       "owner": "platform",
       "required_reviewers": [
-        "platform",
-        "platform-contract"
-      ],
-      "consulted_boundaries": [
         "data",
         "execution-runtime",
+        "platform",
+        "platform-contract",
+        "reporting",
         "research-orchestration"
       ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0030-keep-portal-bots-definition-only.md",
@@ -1164,11 +1190,20 @@
           },
           "authority_kind": "accepted_adr",
           "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0031-fingerprint-reports-and-slim-runtime-storage.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "Bot Run, ingestion run, Check execution, or report build",
-      "usage_boundary": "Bare Run is ambiguous",
+      "definition": "`Run` has no universal platform object; qualify the owning operation, for example Bot Run, Research Check execution, collection attempt, or report materialization.",
+      "usage_boundary": "A shared identifier or time range does not merge lifecycle, evidence, or authority between those operations.",
       "conflict_dispositions": [],
       "alias_refs": [],
       "normative_anchor": "qt-term-023",
@@ -1287,24 +1322,14 @@
       "adopted_label": "Evidence, qualified",
       "owner": "platform",
       "required_reviewers": [
-        "platform",
-        "platform-contract"
-      ],
-      "consulted_boundaries": [
         "data",
-        "reporting",
-        "research-memory"
+        "execution-runtime",
+        "platform",
+        "platform-contract",
+        "research-orchestration"
       ],
+      "consulted_boundaries": [],
       "authority_refs": [
-        {
-          "path": "docs/architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md",
-          "locator": {
-            "kind": "heading",
-            "value": "Decision"
-          },
-          "authority_kind": "accepted_adr",
-          "role": "primary"
-        },
         {
           "path": "docs/architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md",
           "locator": {
@@ -1315,7 +1340,25 @@
           "role": "primary"
         },
         {
-          "path": "docs/architecture/decisions/0010-use-run-research-dataset-as-reporting-contract.md",
+          "path": "docs/architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md",
           "locator": {
             "kind": "heading",
             "value": "Decision"
@@ -1325,8 +1368,8 @@
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "Source, receipt, gap/quality, runtime-ledger, Check, or scientific evidence",
-      "usage_boundary": "Bare Evidence hides authority boundaries",
+      "definition": "`Evidence` has no universal platform meaning. Qualify source/receipt evidence, source-data quality or gap evidence, runtime-lifecycle evidence, Check evidence, and scientific evidence by their owning boundary.",
+      "usage_boundary": "Evidence in one boundary grants no readiness, certification, or authority owned by another boundary.",
       "conflict_dispositions": [],
       "alias_refs": [],
       "normative_anchor": "qt-term-026",
@@ -1341,15 +1384,16 @@
       "entry_kind": "contrast_set",
       "term_lifecycle": "current",
       "disposition": "adopted",
-      "adopted_label": "Provider ID / Venue ID / exchange slug",
+      "adopted_label": "Provider ID / Venue ID / strategy datasource and exchange",
       "owner": "data",
       "required_reviewers": [
         "data",
+        "decision-layer",
+        "execution-runtime",
+        "identity",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "execution-runtime"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/contracts/platform/01_runtime_contract.md",
@@ -1359,20 +1403,11 @@
           },
           "authority_kind": "normative_platform_contract",
           "role": "primary"
-        },
-        {
-          "path": "docs/architecture/decisions/0027-use-execution-profiles-as-runtime-instrument-authority.md",
-          "locator": {
-            "kind": "heading",
-            "value": "Decision"
-          },
-          "authority_kind": "accepted_adr",
-          "role": "primary"
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "Provider ID selects an implementation and capability/auth contract; Venue ID selects one concrete market route; an exchange slug is an adapter translation",
-      "usage_boundary": "Provider, venue, datasource, and exchange are not interchangeable",
+      "definition": "Provider ID and Venue ID belong to provider selection, credentials, and instrument admission. At the Strategy boundary, `datasource` and `exchange` are compatibility defaults and lookup hints only.",
+      "usage_boundary": "Compatibility fields cannot override a linked canonical instrument or its source routing; this entry does not define provider/venue identity internals or an exchange-slug translation contract.",
       "conflict_dispositions": [
         {
           "id": "QT-CONFLICT-011",
@@ -1398,12 +1433,13 @@
       "adopted_label": "Canonical Instrument / provider product identity",
       "owner": "identity",
       "required_reviewers": [
+        "data",
+        "decision-layer",
+        "execution-runtime",
         "identity",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "data"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/contracts/platform/01_runtime_contract.md",
@@ -1422,11 +1458,20 @@
           },
           "authority_kind": "accepted_adr",
           "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "Canonical Instrument is the platform identity keyed by `instrument_id`; symbol and product ID are provider/venue-facing identifiers resolved against it",
-      "usage_boundary": "Never use a display symbol as a globally stable instrument key",
+      "definition": "A Canonical Instrument is the linked platform instrument referenced by `instrument_id`. Provider product IDs and display symbols remain provider/venue-facing lookup identities and do not replace that canonical link.",
+      "usage_boundary": "Resolve compatibility symbols or product IDs to the linked canonical instrument before runtime routing; do not treat a display symbol as a globally stable instrument key.",
       "conflict_dispositions": [
         {
           "id": "QT-CONFLICT-012",
@@ -1452,11 +1497,12 @@
       "owner": "data",
       "required_reviewers": [
         "data",
+        "decision-layer",
+        "execution-runtime",
+        "identity",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "identity"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md",
@@ -1617,15 +1663,13 @@
         "data",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "reporting"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
-          "path": "docs/architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md",
+          "path": "docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md",
           "locator": {
             "kind": "heading",
-            "value": "Invariants"
+            "value": "Provenance And Causal Time"
           },
           "authority_kind": "accepted_adr",
           "role": "primary"
@@ -1650,8 +1694,8 @@
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "Acquisition coverage, stream coverage interval, archive coverage, Dataset coverage, and reporting coverage are separately owned evidence",
-      "usage_boundary": "Complete in one coverage namespace does not certify another",
+      "definition": "Acquisition coverage, trade-stream coverage intervals, archive-complete mapping evidence, and Frozen Dataset scope are distinct evidence.",
+      "usage_boundary": "Completeness in one named evidence boundary does not certify another.",
       "conflict_dispositions": [
         {
           "id": "QT-CONFLICT-014",
@@ -1728,11 +1772,10 @@
       "owner": "data",
       "required_reviewers": [
         "data",
+        "execution-runtime",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "execution-runtime"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md",
@@ -1993,11 +2036,10 @@
       "owner": "decision-layer",
       "required_reviewers": [
         "decision-layer",
+        "execution-runtime",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "execution-runtime"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0005-keep-strategy-decisions-separate-from-execution.md",
@@ -2144,6 +2186,7 @@
       "owner": "execution-runtime",
       "required_reviewers": [
         "execution-runtime",
+        "identity",
         "platform-contract"
       ],
       "consulted_boundaries": [],
@@ -2159,6 +2202,15 @@
         },
         {
           "path": "docs/architecture/decisions/0027-use-execution-profiles-as-runtime-instrument-authority.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0056-pin-venue-neutral-execution-contexts-per-run.md",
           "locator": {
             "kind": "heading",
             "value": "Decision"
@@ -2193,6 +2245,7 @@
       "owner": "execution-runtime",
       "required_reviewers": [
         "execution-runtime",
+        "identity",
         "platform-contract"
       ],
       "consulted_boundaries": [],
@@ -2465,12 +2518,12 @@
       "adopted_label": "Qualified Cursor",
       "owner": "identity",
       "required_reviewers": [
+        "botlens-projections",
+        "execution-runtime",
         "identity",
         "platform-contract"
       ],
-      "consulted_boundaries": [
-        "botlens-projections"
-      ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0007-use-scoped-causal-clocks-for-runtime-replay.md",
@@ -2482,27 +2535,18 @@
           "role": "primary"
         },
         {
-          "path": "docs/architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md",
+          "path": "docs/contracts/platform/01_runtime_contract.md",
           "locator": {
             "kind": "heading",
-            "value": "Decision"
+            "value": "Shared-Wallet Entry Ordering"
           },
-          "authority_kind": "accepted_adr",
-          "role": "primary"
-        },
-        {
-          "path": "docs/architecture/decisions/0038-decouple-visual-overlay-projection-from-runtime-push.md",
-          "locator": {
-            "kind": "heading",
-            "value": "Decision"
-          },
-          "authority_kind": "accepted_adr",
+          "authority_kind": "normative_platform_contract",
           "role": "primary"
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "`run_seq`, stream `base_seq`, `after_seq`/`after_row_id`, overlay commit sequence, and trade revision are distinct ordered positions",
-      "usage_boundary": "Bare Cursor or Sequence invites cross-clock comparison",
+      "definition": "`run_seq`, `wallet_commit_seq`, `position_commit_seq`, `indicator_commit_seq`, `overlay_commit_seq`, and selected-symbol stream `base_seq` are distinct owner-scoped ordered positions.",
+      "usage_boundary": "Bare `cursor` or `sequence` is contextual shorthand only; do not compare or substitute positions from different owners.",
       "conflict_dispositions": [
         {
           "id": "QT-CONFLICT-022",
@@ -2531,15 +2575,13 @@
       "adopted_label": "Readiness, qualified",
       "owner": "platform",
       "required_reviewers": [
-        "platform",
-        "platform-contract"
-      ],
-      "consulted_boundaries": [
         "botlens-projections",
-        "data",
         "indicator-runtime",
+        "platform",
+        "platform-contract",
         "reporting"
       ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/contracts/platform/01_runtime_contract.md",
@@ -2570,8 +2612,8 @@
         }
       ],
       "reviewed_evidence_refs": [],
-      "definition": "Runtime readiness, output readiness, BotLens projection readiness, reporting readiness, comparison safety, golden eligibility, and deployment readiness are independent states",
-      "usage_boundary": "“Ready” must name the boundary and must not imply certification or authority",
+      "definition": "Indicator output readiness, BotLens projection readiness, reporting readiness, comparison readiness, and golden-candidate readiness are distinct owner-scoped states.",
+      "usage_boundary": "`Ready` must name its owning boundary; one readiness result does not confer certification or authority at another.",
       "conflict_dispositions": [
         {
           "id": "QT-CONFLICT-008",
@@ -2608,12 +2650,12 @@
       "adopted_label": "Lease / claim / ownership fence",
       "owner": "persistence",
       "required_reviewers": [
+        "execution-runtime",
         "persistence",
-        "platform-contract"
-      ],
-      "consulted_boundaries": [
+        "platform-contract",
         "research-orchestration"
       ],
+      "consulted_boundaries": [],
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0047-fence-async-job-ownership.md",
@@ -2757,6 +2799,15 @@
       "authority_refs": [
         {
           "path": "docs/architecture/decisions/0031-fingerprint-reports-and-slim-runtime-storage.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md",
           "locator": {
             "kind": "heading",
             "value": "Decision"
@@ -3024,7 +3075,8 @@
       "owner": "research-memory",
       "required_reviewers": [
         "platform-contract",
-        "research-memory"
+        "research-memory",
+        "research-orchestration"
       ],
       "scope_and_handling": "Compatibility-readable legacy Check states only; never describe them as current replayable evidence.",
       "automatic_replacement": false,
@@ -3059,7 +3111,7 @@
       "source_finding": "`qt experiments run-bot`",
       "source_classification": "deprecated CLI alias",
       "disposition": "ratified",
-      "classification": "discouraged",
+      "classification": "compatibility",
       "labels": [
         "qt experiments run-bot"
       ],
@@ -3069,10 +3121,11 @@
       ],
       "owner": "research-orchestration",
       "required_reviewers": [
+        "execution-runtime",
         "platform-contract",
         "research-orchestration"
       ],
-      "scope_and_handling": "Historical CLI spelling; use the current explicit Bot-start and collection operations.",
+      "scope_and_handling": "Treat `qt experiments run-bot` as a deprecated compatibility spelling. Prefer the current explicit Bot-start and collection workflow; the alias does not merge Check and Bot Run semantics.",
       "automatic_replacement": false,
       "replacement_term_id": null,
       "authority_refs": [
@@ -3244,9 +3297,12 @@
       "owner": "data",
       "required_reviewers": [
         "data",
+        "decision-layer",
+        "execution-runtime",
+        "identity",
         "platform-contract"
       ],
-      "scope_and_handling": "Use only as an input default or lookup hint at the reviewed boundary; it is not Provider ID or canonical Source Identity.",
+      "scope_and_handling": "`datasource` may remain a Strategy input default or lookup hint. It is neither Provider ID nor canonical Source Identity and cannot override a linked canonical instrument.",
       "automatic_replacement": false,
       "replacement_term_id": null,
       "authority_refs": [
@@ -3280,9 +3336,12 @@
       "owner": "data",
       "required_reviewers": [
         "data",
+        "decision-layer",
+        "execution-runtime",
+        "identity",
         "platform-contract"
       ],
-      "scope_and_handling": "Use only as adapter-facing/default vocabulary; it is not canonical Venue ID authority.",
+      "scope_and_handling": "`exchange` may remain a Strategy input default or lookup hint. It is not canonical Venue ID authority and cannot override a linked canonical instrument.",
       "automatic_replacement": false,
       "replacement_term_id": null,
       "authority_refs": [
@@ -3316,10 +3375,13 @@
       ],
       "owner": "identity",
       "required_reviewers": [
+        "data",
+        "decision-layer",
+        "execution-runtime",
         "identity",
         "platform-contract"
       ],
-      "scope_and_handling": "Resolve through canonical instrument_id while preserving provider product identity separately.",
+      "scope_and_handling": "Resolve a symbol or provider product ID through the linked canonical instrument; neither is accepted as canonical `instrument_id`.",
       "automatic_replacement": false,
       "replacement_term_id": null,
       "authority_refs": [
@@ -3334,6 +3396,15 @@
         },
         {
           "path": "docs/architecture/decisions/0027-use-execution-profiles-as-runtime-instrument-authority.md",
+          "locator": {
+            "kind": "heading",
+            "value": "Decision"
+          },
+          "authority_kind": "accepted_adr",
+          "role": "primary"
+        },
+        {
+          "path": "docs/architecture/decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md",
           "locator": {
             "kind": "heading",
             "value": "Decision"

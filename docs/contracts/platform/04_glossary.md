@@ -57,7 +57,7 @@ definition here.
 | [`QT-TERM-024`](#qt-term-024) | Report, qualified | `contrast_set` | `reporting` |
 | [`QT-TERM-025`](#qt-term-025) | Live runtime/composition | `qualification_rule` | `execution-runtime` |
 | [`QT-TERM-026`](#qt-term-026) | Evidence, qualified | `qualification_rule` | `platform` |
-| [`QT-TERM-027`](#qt-term-027) | Provider ID / Venue ID / exchange slug | `contrast_set` | `data` |
+| [`QT-TERM-027`](#qt-term-027) | Provider ID / Venue ID / strategy datasource and exchange | `contrast_set` | `data` |
 | [`QT-TERM-028`](#qt-term-028) | Canonical Instrument / provider product identity | `contrast_set` | `identity` |
 | [`QT-TERM-029`](#qt-term-029) | Source Identity / Series Identity | `contrast_set` | `data` |
 | [`QT-TERM-030`](#qt-term-030) | Collector Definition / collector adapter / collector worker | `contrast_set` | `data` |
@@ -148,12 +148,13 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `qualification_rule`
 - Owner: `execution-runtime`
-- Required reviewers: `execution-runtime`, `platform-contract`
-- Consulted boundaries: `platform`
+- Required reviewers: `data`, `execution-runtime`, `platform-contract`
 - Authority clauses:
+  - `normative_platform_contract` — [01_runtime_contract.md — Shared-Wallet Entry Ordering](01_runtime_contract.md#shared-wallet-entry-ordering)
   - `accepted_adr` — [0042-use-runtime-event-ledger-as-lifecycle-truth.md — Decision](../../architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md#decision)
-- Definition: A specifically named runtime/lifecycle fact
-- Usage boundary: Does not inhabit `market.fact_versions`; bare “canonical fact” is unsafe
+  - `accepted_adr` — [0063-use-schema-registered-canonical-facts.md — Decision](../../architecture/decisions/0063-use-schema-registered-canonical-facts.md#decision)
+- Definition: `Runtime fact` is qualified vocabulary for a fact owned by a named runtime boundary, such as a lifecycle event or Wallet Ledger fact.
+- Usage boundary: A runtime fact is not a Canonical Fact. Always retain the owning qualifier; this term does not create a universal runtime-fact store or authority.
 - Conflict disposition: `QT-CONFLICT-009` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
 
 <a id="qt-term-006"></a>
@@ -162,8 +163,7 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `domain_term`
 - Owner: `research-memory`
-- Required reviewers: `platform-contract`, `research-memory`
-- Consulted boundaries: `research-orchestration`
+- Required reviewers: `platform-contract`, `research-memory`, `research-orchestration`
 - Authority clauses:
   - `accepted_adr` — [0065-use-explicit-frozen-check-admission-for-new-research-observations.md — Decision](../../architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md#decision)
   - `accepted_adr` — [0065-use-explicit-frozen-check-admission-for-new-research-observations.md — Supersession Scope](../../architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md#supersession-scope)
@@ -181,8 +181,9 @@ definition here.
 - Required reviewers: `data`, `platform-contract`
 - Authority clauses:
   - `accepted_adr` — [0051-require-frozen-datasets-for-canonical-backtests.md — Decision](../../architecture/decisions/0051-require-frozen-datasets-for-canonical-backtests.md#decision)
+  - `accepted_adr` — [0063-use-schema-registered-canonical-facts.md — Dataset And Research Semantics](../../architecture/decisions/0063-use-schema-registered-canonical-facts.md#dataset-and-research-semantics)
 - Definition: Immutable `market_dataset.v1` manifest over exact Fact revisions, ranges, sources, hashes, gaps, and watermark
-- Usage boundary: Prefer over unqualified Dataset for source data
+- Usage boundary: Use the qualified label for the immutable source-data manifest; bare `Dataset` does not identify an owner or scope.
 - Conflict disposition: `QT-CONFLICT-008` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
 
 <a id="qt-term-008"></a>
@@ -191,8 +192,8 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `domain_term`
 - Owner: `data`
-- Required reviewers: `data`, `platform-contract`
-- Consulted boundaries: `execution-runtime`, `research-orchestration`
+- Required reviewers: `data`, `platform-contract`, `research-orchestration`
+- Consulted boundaries: `execution-runtime`
 - Authority clauses:
   - `accepted_adr` — [0062-use-frozen-bindings-for-durable-check-evidence.md — Decision](../../architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md#decision)
 - Definition: Exact consumer binding to a Frozen Dataset and its subjects/ranges/revisions/hashes/gaps
@@ -245,7 +246,7 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `domain_term`
 - Owner: `research-orchestration`
-- Required reviewers: `platform-contract`, `research-orchestration`
+- Required reviewers: `platform-contract`, `research-memory`, `research-orchestration`
 - Authority clauses:
   - `accepted_adr` — [0065-use-explicit-frozen-check-admission-for-new-research-observations.md — Decision](../../architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md#decision)
   - `accepted_adr` — [0065-use-explicit-frozen-check-admission-for-new-research-observations.md — Supersession Scope](../../architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md#supersession-scope)
@@ -402,14 +403,14 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `qualification_rule`
 - Owner: `platform`
-- Required reviewers: `platform`, `platform-contract`
-- Consulted boundaries: `data`, `execution-runtime`, `research-orchestration`
+- Required reviewers: `data`, `execution-runtime`, `platform`, `platform-contract`, `reporting`, `research-orchestration`
 - Authority clauses:
   - `accepted_adr` — [0030-keep-portal-bots-definition-only.md — Decision](../../architecture/decisions/0030-keep-portal-bots-definition-only.md#decision)
   - `accepted_adr` — [0039-use-shared-async-jobs-for-research-dispatch.md — Decision](../../architecture/decisions/0039-use-shared-async-jobs-for-research-dispatch.md#decision)
   - `accepted_adr` — [0052-use-typed-fact-collectors-and-explicit-instrument-roles.md — Decision](../../architecture/decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md#decision)
-- Definition: Bot Run, ingestion run, Check execution, or report build
-- Usage boundary: Bare Run is ambiguous
+  - `accepted_adr` — [0031-fingerprint-reports-and-slim-runtime-storage.md — Decision](../../architecture/decisions/0031-fingerprint-reports-and-slim-runtime-storage.md#decision)
+- Definition: `Run` has no universal platform object; qualify the owning operation, for example Bot Run, Research Check execution, collection attempt, or report materialization.
+- Usage boundary: A shared identifier or time range does not merge lifecycle, evidence, or authority between those operations.
 - Conflict disposition: none recorded for this term.
 
 <a id="qt-term-024"></a>
@@ -446,29 +447,27 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `qualification_rule`
 - Owner: `platform`
-- Required reviewers: `platform`, `platform-contract`
-- Consulted boundaries: `data`, `reporting`, `research-memory`
+- Required reviewers: `data`, `execution-runtime`, `platform`, `platform-contract`, `research-orchestration`
 - Authority clauses:
-  - `accepted_adr` — [0062-use-frozen-bindings-for-durable-check-evidence.md — Decision](../../architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md#decision)
   - `accepted_adr` — [0053-use-tiered-market-structure-archive-and-replay-boundary.md — Decision](../../architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md#decision)
-  - `accepted_adr` — [0010-use-run-research-dataset-as-reporting-contract.md — Decision](../../architecture/decisions/0010-use-run-research-dataset-as-reporting-contract.md#decision)
-- Definition: Source, receipt, gap/quality, runtime-ledger, Check, or scientific evidence
-- Usage boundary: Bare Evidence hides authority boundaries
+  - `accepted_adr` — [0042-use-runtime-event-ledger-as-lifecycle-truth.md — Decision](../../architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md#decision)
+  - `accepted_adr` — [0062-use-frozen-bindings-for-durable-check-evidence.md — Decision](../../architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md#decision)
+  - `accepted_adr` — [0059-use-first-class-scientific-research-objects.md — Decision](../../architecture/decisions/0059-use-first-class-scientific-research-objects.md#decision)
+- Definition: `Evidence` has no universal platform meaning. Qualify source/receipt evidence, source-data quality or gap evidence, runtime-lifecycle evidence, Check evidence, and scientific evidence by their owning boundary.
+- Usage boundary: Evidence in one boundary grants no readiness, certification, or authority owned by another boundary.
 - Conflict disposition: none recorded for this term.
 
 <a id="qt-term-027"></a>
-### `QT-TERM-027` — Provider ID / Venue ID / exchange slug
+### `QT-TERM-027` — Provider ID / Venue ID / strategy datasource and exchange
 
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `data`
-- Required reviewers: `data`, `platform-contract`
-- Consulted boundaries: `execution-runtime`
+- Required reviewers: `data`, `decision-layer`, `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — Instrument Source vs Execution Semantics](01_runtime_contract.md#instrument-source-vs-execution-semantics)
-  - `accepted_adr` — [0027-use-execution-profiles-as-runtime-instrument-authority.md — Decision](../../architecture/decisions/0027-use-execution-profiles-as-runtime-instrument-authority.md#decision)
-- Definition: Provider ID selects an implementation and capability/auth contract; Venue ID selects one concrete market route; an exchange slug is an adapter translation
-- Usage boundary: Provider, venue, datasource, and exchange are not interchangeable
+- Definition: Provider ID and Venue ID belong to provider selection, credentials, and instrument admission. At the Strategy boundary, `datasource` and `exchange` are compatibility defaults and lookup hints only.
+- Usage boundary: Compatibility fields cannot override a linked canonical instrument or its source routing; this entry does not define provider/venue identity internals or an exchange-slug translation contract.
 - Conflict disposition: `QT-CONFLICT-011` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
 
 <a id="qt-term-028"></a>
@@ -477,13 +476,13 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `identity`
-- Required reviewers: `identity`, `platform-contract`
-- Consulted boundaries: `data`
+- Required reviewers: `data`, `decision-layer`, `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — Instrument Source vs Execution Semantics](01_runtime_contract.md#instrument-source-vs-execution-semantics)
   - `accepted_adr` — [0027-use-execution-profiles-as-runtime-instrument-authority.md — Decision](../../architecture/decisions/0027-use-execution-profiles-as-runtime-instrument-authority.md#decision)
-- Definition: Canonical Instrument is the platform identity keyed by `instrument_id`; symbol and product ID are provider/venue-facing identifiers resolved against it
-- Usage boundary: Never use a display symbol as a globally stable instrument key
+  - `accepted_adr` — [0052-use-typed-fact-collectors-and-explicit-instrument-roles.md — Decision](../../architecture/decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md#decision)
+- Definition: A Canonical Instrument is the linked platform instrument referenced by `instrument_id`. Provider product IDs and display symbols remain provider/venue-facing lookup identities and do not replace that canonical link.
+- Usage boundary: Resolve compatibility symbols or product IDs to the linked canonical instrument before runtime routing; do not treat a display symbol as a globally stable instrument key.
 - Conflict disposition: `QT-CONFLICT-012` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
 
 <a id="qt-term-029"></a>
@@ -492,8 +491,7 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `data`
-- Required reviewers: `data`, `platform-contract`
-- Consulted boundaries: `identity`
+- Required reviewers: `data`, `decision-layer`, `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `accepted_adr` — [0050-use-one-canonical-append-only-market-data-store.md — Decision](../../architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md#decision)
   - `accepted_adr` — [0063-use-schema-registered-canonical-facts.md — Decision](../../architecture/decisions/0063-use-schema-registered-canonical-facts.md#decision)
@@ -538,13 +536,12 @@ definition here.
 - Entry kind: `qualification_rule`
 - Owner: `data`
 - Required reviewers: `data`, `platform-contract`
-- Consulted boundaries: `reporting`
 - Authority clauses:
-  - `accepted_adr` — [0050-use-one-canonical-append-only-market-data-store.md — Invariants](../../architecture/decisions/0050-use-one-canonical-append-only-market-data-store.md#invariants)
+  - `accepted_adr` — [0063-use-schema-registered-canonical-facts.md — Provenance And Causal Time](../../architecture/decisions/0063-use-schema-registered-canonical-facts.md#provenance-and-causal-time)
   - `accepted_adr` — [0053-use-tiered-market-structure-archive-and-replay-boundary.md — Invariants](../../architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md#invariants)
   - `accepted_adr` — [0063-use-schema-registered-canonical-facts.md — Dataset And Research Semantics](../../architecture/decisions/0063-use-schema-registered-canonical-facts.md#dataset-and-research-semantics)
-- Definition: Acquisition coverage, stream coverage interval, archive coverage, Dataset coverage, and reporting coverage are separately owned evidence
-- Usage boundary: Complete in one coverage namespace does not certify another
+- Definition: Acquisition coverage, trade-stream coverage intervals, archive-complete mapping evidence, and Frozen Dataset scope are distinct evidence.
+- Usage boundary: Completeness in one named evidence boundary does not certify another.
 - Conflict disposition: `QT-CONFLICT-014` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
 
 <a id="qt-term-033"></a>
@@ -567,8 +564,7 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `data`
-- Required reviewers: `data`, `platform-contract`
-- Consulted boundaries: `execution-runtime`
+- Required reviewers: `data`, `execution-runtime`, `platform-contract`
 - Authority clauses:
   - `accepted_adr` — [0053-use-tiered-market-structure-archive-and-replay-boundary.md — Decision](../../architecture/decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md#decision)
   - `accepted_adr` — [0058-use-replay-certified-execution-book-tapes.md — Decision](../../architecture/decisions/0058-use-replay-certified-execution-book-tapes.md#decision)
@@ -627,8 +623,7 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `decision-layer`
-- Required reviewers: `decision-layer`, `platform-contract`
-- Consulted boundaries: `execution-runtime`
+- Required reviewers: `decision-layer`, `execution-runtime`, `platform-contract`
 - Authority clauses:
   - `accepted_adr` — [0005-keep-strategy-decisions-separate-from-execution.md — Decision](../../architecture/decisions/0005-keep-strategy-decisions-separate-from-execution.md#decision)
   - `accepted_adr` — [0041-use-canonical-execution-plan-and-order-fill-semantics.md — Decision](../../architecture/decisions/0041-use-canonical-execution-plan-and-order-fill-semantics.md#decision)
@@ -670,10 +665,11 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `domain_term`
 - Owner: `execution-runtime`
-- Required reviewers: `execution-runtime`, `platform-contract`
+- Required reviewers: `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — Instrument Source vs Execution Semantics](01_runtime_contract.md#instrument-source-vs-execution-semantics)
   - `accepted_adr` — [0027-use-execution-profiles-as-runtime-instrument-authority.md — Decision](../../architecture/decisions/0027-use-execution-profiles-as-runtime-instrument-authority.md#decision)
+  - `accepted_adr` — [0056-pin-venue-neutral-execution-contexts-per-run.md — Decision](../../architecture/decisions/0056-pin-venue-neutral-execution-contexts-per-run.md#decision)
 - Definition: `SeriesExecutionProfile` is the compatibility compiler for current instrument, risk, margin, and legacy fee inputs. It is not `InstrumentExecutionContract` or the immutable run-scoped `ResolvedExecutionContext`.
 - Usage boundary: Reject Instrument Execution Profile as an umbrella. `InstrumentExecutionContract` remains one distinct constituent of the resolved context, and `ResolvedExecutionContext` is the final immutable run authority.
 - Conflict disposition: `QT-CONFLICT-020` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
@@ -684,7 +680,7 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `execution-runtime`
-- Required reviewers: `execution-runtime`, `platform-contract`
+- Required reviewers: `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — Instrument Source vs Execution Semantics](01_runtime_contract.md#instrument-source-vs-execution-semantics)
   - `accepted_adr` — [0056-pin-venue-neutral-execution-contexts-per-run.md — Decision](../../architecture/decisions/0056-pin-venue-neutral-execution-contexts-per-run.md#decision)
@@ -757,14 +753,12 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `qualification_rule`
 - Owner: `identity`
-- Required reviewers: `identity`, `platform-contract`
-- Consulted boundaries: `botlens-projections`
+- Required reviewers: `botlens-projections`, `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `accepted_adr` — [0007-use-scoped-causal-clocks-for-runtime-replay.md — Decision](../../architecture/decisions/0007-use-scoped-causal-clocks-for-runtime-replay.md#decision)
-  - `accepted_adr` — [0042-use-runtime-event-ledger-as-lifecycle-truth.md — Decision](../../architecture/decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md#decision)
-  - `accepted_adr` — [0038-decouple-visual-overlay-projection-from-runtime-push.md — Decision](../../architecture/decisions/0038-decouple-visual-overlay-projection-from-runtime-push.md#decision)
-- Definition: `run_seq`, stream `base_seq`, `after_seq`/`after_row_id`, overlay commit sequence, and trade revision are distinct ordered positions
-- Usage boundary: Bare Cursor or Sequence invites cross-clock comparison
+  - `normative_platform_contract` — [01_runtime_contract.md — Shared-Wallet Entry Ordering](01_runtime_contract.md#shared-wallet-entry-ordering)
+- Definition: `run_seq`, `wallet_commit_seq`, `position_commit_seq`, `indicator_commit_seq`, `overlay_commit_seq`, and selected-symbol stream `base_seq` are distinct owner-scoped ordered positions.
+- Usage boundary: Bare `cursor` or `sequence` is contextual shorthand only; do not compare or substitute positions from different owners.
 - Conflict disposition: `QT-CONFLICT-022` is `qualified_nonblocking`; `QT-CONFLICT-024` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
 
 <a id="qt-term-049"></a>
@@ -773,14 +767,13 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `qualification_rule`
 - Owner: `platform`
-- Required reviewers: `platform`, `platform-contract`
-- Consulted boundaries: `botlens-projections`, `data`, `indicator-runtime`, `reporting`
+- Required reviewers: `botlens-projections`, `indicator-runtime`, `platform`, `platform-contract`, `reporting`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — BotLens Readiness Semantics](01_runtime_contract.md#botlens-readiness-semantics)
   - `accepted_adr` — [0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md — Guardrails](../../architecture/decisions/0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md#guardrails)
   - `accepted_adr` — [0010-use-run-research-dataset-as-reporting-contract.md — Decision](../../architecture/decisions/0010-use-run-research-dataset-as-reporting-contract.md#decision)
-- Definition: Runtime readiness, output readiness, BotLens projection readiness, reporting readiness, comparison safety, golden eligibility, and deployment readiness are independent states
-- Usage boundary: “Ready” must name the boundary and must not imply certification or authority
+- Definition: Indicator output readiness, BotLens projection readiness, reporting readiness, comparison readiness, and golden-candidate readiness are distinct owner-scoped states.
+- Usage boundary: `Ready` must name its owning boundary; one readiness result does not confer certification or authority at another.
 - Conflict disposition: `QT-CONFLICT-008` is `qualified_nonblocking`; `QT-CONFLICT-014` is `qualified_nonblocking`; `QT-CONFLICT-022` is `qualified_nonblocking`; `QT-CONFLICT-026` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
 
 <a id="qt-term-050"></a>
@@ -789,8 +782,7 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `persistence`
-- Required reviewers: `persistence`, `platform-contract`
-- Consulted boundaries: `research-orchestration`
+- Required reviewers: `execution-runtime`, `persistence`, `platform-contract`, `research-orchestration`
 - Authority clauses:
   - `accepted_adr` — [0047-fence-async-job-ownership.md — Decision](../../architecture/decisions/0047-fence-async-job-ownership.md#decision)
   - `accepted_adr` — [0025-use-per-run-leases.md — Decision](../../architecture/decisions/0025-use-per-run-leases.md#decision)
@@ -831,9 +823,10 @@ definition here.
 - Adoption status: `adopted`
 - Entry kind: `contrast_set`
 - Owner: `reporting`
-- Required reviewers: `platform-contract`, `reporting`
+- Required reviewers: `platform`, `reporting`
 - Authority clauses:
   - `accepted_adr` — [0031-fingerprint-reports-and-slim-runtime-storage.md — Decision](../../architecture/decisions/0031-fingerprint-reports-and-slim-runtime-storage.md#decision)
+  - `accepted_adr` — [0046-use-replay-bundles-for-execution-reproduction.md — Decision](../../architecture/decisions/0046-use-replay-bundles-for-execution-reproduction.md#decision)
 - Definition: Input fingerprint validates one report materialization against durable run inputs; data snapshot hash identifies exact runtime-consumed data material
 - Usage boundary: Neither is the semantic or operational fingerprint
 - Conflict disposition: `QT-CONFLICT-024` is `qualified_nonblocking`. Historical evidence and separate documentation repairs remain preserved.
@@ -906,7 +899,7 @@ evidence and are never automatic replacements.
 - Classification: `compatibility`
 - Canonical term references: [`QT-TERM-012`](#qt-term-012), [`QT-TERM-013`](#qt-term-013)
 - Owner: `research-memory`
-- Required reviewers: `platform-contract`, `research-memory`
+- Required reviewers: `platform-contract`, `research-memory`, `research-orchestration`
 - Authority clauses:
   - `accepted_adr` — [0065-use-explicit-frozen-check-admission-for-new-research-observations.md — Supersession Scope](../../architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-research-observations.md#supersession-scope)
   - `accepted_adr` — [0062-use-frozen-bindings-for-durable-check-evidence.md — Rejected Alternatives](../../architecture/decisions/0062-use-frozen-bindings-for-durable-check-evidence.md#rejected-alternatives)
@@ -917,14 +910,14 @@ evidence and are never automatic replacements.
 ### `QT-ALIAS-005` — `qt experiments run-bot`
 
 - Review status: `ratified`
-- Classification: `discouraged`
+- Classification: `compatibility`
 - Canonical term references: [`QT-TERM-011`](#qt-term-011), [`QT-TERM-022`](#qt-term-022)
 - Owner: `research-orchestration`
-- Required reviewers: `platform-contract`, `research-orchestration`
+- Required reviewers: `execution-runtime`, `platform-contract`, `research-orchestration`
 - Authority clauses:
   - `accepted_adr` — [0060-use-capability-native-research-and-collection-contracts.md — Decision](../../architecture/decisions/0060-use-capability-native-research-and-collection-contracts.md#decision)
   - `accepted_adr` — [0030-keep-portal-bots-definition-only.md — Decision](../../architecture/decisions/0030-keep-portal-bots-definition-only.md#decision)
-- Scope and handling: Historical CLI spelling; use the current explicit Bot-start and collection operations.
+- Scope and handling: Treat `qt experiments run-bot` as a deprecated compatibility spelling. Prefer the current explicit Bot-start and collection workflow; the alias does not merge Check and Bot Run semantics.
 - Automatic replacement: `false`
 
 <a id="qt-alias-006"></a>
@@ -975,10 +968,10 @@ evidence and are never automatic replacements.
 - Classification: `compatibility`
 - Canonical term references: [`QT-TERM-027`](#qt-term-027), [`QT-TERM-029`](#qt-term-029)
 - Owner: `data`
-- Required reviewers: `data`, `platform-contract`
+- Required reviewers: `data`, `decision-layer`, `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — Instrument Source vs Execution Semantics](01_runtime_contract.md#instrument-source-vs-execution-semantics)
-- Scope and handling: Use only as an input default or lookup hint at the reviewed boundary; it is not Provider ID or canonical Source Identity.
+- Scope and handling: `datasource` may remain a Strategy input default or lookup hint. It is neither Provider ID nor canonical Source Identity and cannot override a linked canonical instrument.
 - Automatic replacement: `false`
 
 <a id="qt-alias-010"></a>
@@ -988,10 +981,10 @@ evidence and are never automatic replacements.
 - Classification: `compatibility`
 - Canonical term references: [`QT-TERM-027`](#qt-term-027)
 - Owner: `data`
-- Required reviewers: `data`, `platform-contract`
+- Required reviewers: `data`, `decision-layer`, `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — Instrument Source vs Execution Semantics](01_runtime_contract.md#instrument-source-vs-execution-semantics)
-- Scope and handling: Use only as adapter-facing/default vocabulary; it is not canonical Venue ID authority.
+- Scope and handling: `exchange` may remain a Strategy input default or lookup hint. It is not canonical Venue ID authority and cannot override a linked canonical instrument.
 - Automatic replacement: `false`
 
 <a id="qt-alias-011"></a>
@@ -1001,11 +994,12 @@ evidence and are never automatic replacements.
 - Classification: `rejected`
 - Canonical term references: [`QT-TERM-028`](#qt-term-028)
 - Owner: `identity`
-- Required reviewers: `identity`, `platform-contract`
+- Required reviewers: `data`, `decision-layer`, `execution-runtime`, `identity`, `platform-contract`
 - Authority clauses:
   - `normative_platform_contract` — [01_runtime_contract.md — Instrument Source vs Execution Semantics](01_runtime_contract.md#instrument-source-vs-execution-semantics)
   - `accepted_adr` — [0027-use-execution-profiles-as-runtime-instrument-authority.md — Decision](../../architecture/decisions/0027-use-execution-profiles-as-runtime-instrument-authority.md#decision)
-- Scope and handling: Resolve through canonical instrument_id while preserving provider product identity separately.
+  - `accepted_adr` — [0052-use-typed-fact-collectors-and-explicit-instrument-roles.md — Decision](../../architecture/decisions/0052-use-typed-fact-collectors-and-explicit-instrument-roles.md#decision)
+- Scope and handling: Resolve a symbol or provider product ID through the linked canonical instrument; neither is accepted as canonical `instrument_id`.
 - Automatic replacement: `false`
 
 <a id="qt-alias-012"></a>
