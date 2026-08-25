@@ -13,12 +13,20 @@ closures, or guarantee-activation decisions.
 - Python 3.12.14 from
   `python@sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b317694e7882a1c52aa15a78134`.
 
-The image adds no downloaded package and copies only the Node executable into
-the Python image. Build it with network access disabled. Proof execution must
-also use no network, a read-only mount of the exact clean source commit, and a
-writable temporary directory outside that source mount. The attestation records
-the built image digest, base-image digests, Docker version, Node and Python
-versions, source-mount mode, network mode, container identity, and cleanup.
+The image copies the Node executable into the Python image and installs the
+Python distributions pinned by `requirements.lock`. This repository does not
+yet contain a bound offline wheelhouse, so a cold build cannot truthfully claim
+network-disabled dependency resolution. The assurance executor never builds or
+pulls this image: it accepts only a prebuilt local image whose immutable ID and
+externally applied build-definition label were reviewed before execution. Any
+controlled networked build step and its retained provenance remain a separate
+environment input and residual risk until an offline artifact set is bound.
+
+Proof execution itself uses no network, a read-only mount of the exact clean
+source commit, and a writable temporary directory outside that source mount.
+The attestation records the inspected image ID/build-definition binding,
+base-image digests, Docker version, Node and Python versions, source-mount mode,
+network mode, container identity, and cleanup.
 
 The profile supplies only the native `node --test` assurance runner. The
 separately supported Vitest/jsdom component suite is validation, not one of the

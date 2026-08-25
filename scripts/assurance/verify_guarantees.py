@@ -14,15 +14,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -35,11 +39,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.assurance import pytest_result_plugin  # noqa: E402
+from scripts.assurance import docker_lifecycle  # noqa: E402
 from scripts.docs import guarantees  # noqa: E402
 
 
 ADMISSION_SCHEMA_VERSION = "qt.assurance_profile_admission.v1"
+EXECUTION_ADMISSION_SCHEMA_VERSION = "qt.assurance_execution_admission.v1"
 ARCHIVED_ADMISSION_SCHEMA_VERSION = "qt.assurance_profile_admission_archive.v1"
+EXECUTION_ADMISSION_ARCHIVE_SCHEMA_VERSION = (
+    "qt.assurance_execution_admission_archive.v1"
+)
 UNAVAILABILITY_SCHEMA_VERSION = "qt.assurance_unavailability.v1"
 NODE_RESULT_SCHEMA_VERSION = "qt.node_test_result.v1"
 NODE_TRANSPORT_SCHEMA_VERSION = "qt.node_test_events.v1"
@@ -85,6 +94,7 @@ class PreparedProfile:
     admission_payload: dict[str, Any]
 
     admission_artifacts: tuple[AdmissionArtifact, ...] = ()
+    container_source_root: PurePosixPath | None = None
 
 @dataclass(frozen=True)
 class UnavailableProfile:
@@ -160,6 +170,181 @@ def require_exact_clean_source(root: Path, source_commit: str, stage_root: Path)
         _git(root, "cat-file", "-e", f"{source_commit}^{{commit}}")
     except AssuranceExecutionError as exc:
         raise AssuranceExecutionError("source_commit_not_available_locally") from exc
+
+
+def _git_archive_bytes(root: Path, source_commit: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "archive", "--format=tar", source_commit],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AssuranceExecutionError("exact_source_archive_failed") from exc
+    if not completed.stdout:
+        raise AssuranceExecutionError("exact_source_archive_empty")
+    return completed.stdout
+
+
+def _source_tree_digest(rows: Sequence[tuple[str, bool, bytes]]) -> str:
+    digest = hashlib.sha256()
+    for relative, executable, content in sorted(rows, key=lambda item: item[0]):
+        path_bytes = relative.encode("utf-8")
+        digest.update(len(path_bytes).to_bytes(8, "big"))
+        digest.update(path_bytes)
+        digest.update(b"x" if executable else b"-")
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _archive_tree_sha256(archive: bytes) -> str:
+    rows: list[tuple[str, bool, bytes]] = []
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as handle:
+        for member in handle.getmembers():
+            pure = PurePosixPath(member.name)
+            if (
+                pure.is_absolute()
+                or not pure.parts
+                or any(part in {"", ".", ".."} for part in pure.parts)
+                or member.issym()
+                or member.islnk()
+            ):
+                raise AssuranceExecutionError("source_snapshot_unsafe_member")
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise AssuranceExecutionError("source_snapshot_unsupported_member")
+            extracted = handle.extractfile(member)
+            if extracted is None:
+                raise AssuranceExecutionError("source_snapshot_member_unreadable")
+            rows.append((pure.as_posix(), bool(member.mode & 0o111), extracted.read()))
+    if not rows:
+        raise AssuranceExecutionError("source_snapshot_has_no_files")
+    return _source_tree_digest(rows)
+
+
+def _snapshot_tree_sha256(root: Path) -> str:
+    rows: list[tuple[str, bool, bytes]] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise AssuranceExecutionError("source_snapshot_symlink_forbidden")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        rows.append((relative, bool(path.stat().st_mode & 0o111), path.read_bytes()))
+    if not rows:
+        raise AssuranceExecutionError("source_snapshot_has_no_files")
+    return _source_tree_digest(rows)
+
+
+def _make_snapshot_host_read_only(root: Path) -> None:
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_symlink():
+            raise AssuranceExecutionError("source_snapshot_symlink_forbidden")
+        if path.is_file():
+            path.chmod(0o555 if path.stat().st_mode & 0o111 else 0o444)
+        elif path.is_dir():
+            path.chmod(0o555)
+    root.chmod(0o555)
+
+
+def _extract_source_snapshot(archive: bytes, destination: Path) -> None:
+    if destination.exists():
+        raise AssuranceExecutionError("source_snapshot_destination_exists")
+    destination.mkdir(parents=True, exist_ok=False)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as handle:
+            for member in handle.getmembers():
+                pure = PurePosixPath(member.name)
+                if (
+                    pure.is_absolute()
+                    or not pure.parts
+                    or any(part in {"", ".", ".."} for part in pure.parts)
+                    or member.issym()
+                    or member.islnk()
+                ):
+                    raise AssuranceExecutionError("source_snapshot_unsafe_member")
+            handle.extractall(destination, filter="data")
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    if (destination / ".git").exists():
+        shutil.rmtree(destination, ignore_errors=True)
+        raise AssuranceExecutionError("source_snapshot_git_metadata_forbidden")
+    expected = _archive_tree_sha256(archive)
+    if _snapshot_tree_sha256(destination) != expected:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise AssuranceExecutionError("source_snapshot_tree_hash_mismatch")
+    _make_snapshot_host_read_only(destination)
+    if _snapshot_tree_sha256(destination) != expected:
+        raise AssuranceExecutionError("source_snapshot_changed_during_hardening")
+
+
+def _write_immutable_bytes(path: Path, content: bytes) -> str:
+    """Publish bytes durably with no overwrite, including concurrent writers."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise AssuranceExecutionError(f"immutable_artifact_already_exists:{path}") from exc
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return _sha256_file_binary(path)
+
+
+class _ExecutionInterrupted(BaseException):
+    def __init__(self, signum: int):
+        super().__init__(f"signal:{signum}")
+        self.signum = signum
+
+
+@dataclass
+class _InterruptState:
+    signals: list[int]
+    cleanup_in_progress: bool = False
+
+
+@contextmanager
+def _installed_interrupt_handlers() -> Any:
+    previous: dict[int, Any] = {}
+    state = _InterruptState([])
+
+    def interrupt(signum: int, frame: Any) -> None:
+        del frame
+        state.signals.append(signum)
+        if state.cleanup_in_progress:
+            return
+        raise _ExecutionInterrupted(signum)
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, interrupt)
+        yield state
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def _exact_keys(
@@ -374,6 +559,213 @@ def load_admission_manifest(path: Path, source_commit: str) -> dict[str, dict[st
     if profile_ids != sorted(profile_ids) or len(profile_ids) != len(set(profile_ids)):
         raise AssuranceExecutionError("admission.profiles:must_be_unique_and_sorted")
     return {item["profile_id"]: item for item in profiles}
+
+
+def _relative_definition(value: Any, where: str) -> dict[str, str]:
+    raw = value
+    if not isinstance(raw, dict):
+        raise AssuranceExecutionError(f"{where}:object_required")
+    _exact_keys(raw, {"path", "sha256"}, where)
+    relative = _string(raw["path"], f"{where}.path")
+    pure = PurePosixPath(relative)
+    if (
+        "\\" in relative
+        or pure.is_absolute()
+        or not pure.parts
+        or any(part in {"", ".", ".."} for part in pure.parts)
+    ):
+        raise AssuranceExecutionError(f"{where}.path:relative_safe_path_required")
+    digest = _string(raw["sha256"], f"{where}.sha256")
+    if not HEX64_RE.fullmatch(digest):
+        raise AssuranceExecutionError(f"{where}.sha256:invalid")
+    return {"path": relative, "sha256": digest}
+
+
+def _validate_execution_admission_profile(raw: Any, where: str) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise AssuranceExecutionError(f"{where}:object_required")
+    _exact_keys(
+        raw,
+        {
+            "profile_id",
+            "admission_id",
+            "environment_class",
+            "isolation",
+            "external_order_submission_enabled",
+            "runtime_definition",
+            "docker_tool",
+            "runner_image",
+            "service_images",
+        },
+        where,
+    )
+    profile_id = _string(raw["profile_id"], f"{where}.profile_id")
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", profile_id):
+        raise AssuranceExecutionError(f"{where}.profile_id:invalid")
+    admission_id = _string(raw["admission_id"], f"{where}.admission_id")
+    if not ADMISSION_ID_RE.fullmatch(admission_id):
+        raise AssuranceExecutionError(f"{where}.admission_id:invalid")
+    if raw["environment_class"] not in {"isolated_test", "ephemeral_ci"}:
+        raise AssuranceExecutionError(f"{where}.environment_class:not_isolated")
+    if raw["isolation"] not in {"disposable", "session_scoped"}:
+        raise AssuranceExecutionError(f"{where}.isolation:not_disposable")
+    if raw["external_order_submission_enabled"] is not False:
+        raise AssuranceExecutionError(
+            f"{where}.external_order_submission_enabled:must_be_false"
+        )
+    docker_tool = raw["docker_tool"]
+    if not isinstance(docker_tool, dict):
+        raise AssuranceExecutionError(f"{where}.docker_tool:object_required")
+    _exact_keys(
+        docker_tool,
+        {"resolved_path", "version", "executable_sha256", "daemon_identity_sha256"},
+        f"{where}.docker_tool",
+    )
+    resolved_path = _string(
+        docker_tool["resolved_path"], f"{where}.docker_tool.resolved_path"
+    )
+    if not Path(resolved_path).is_absolute():
+        raise AssuranceExecutionError(f"{where}.docker_tool.resolved_path:absolute_required")
+    normalized_tool = {
+        "resolved_path": resolved_path,
+        "version": _string(docker_tool["version"], f"{where}.docker_tool.version"),
+    }
+    for key in ("executable_sha256", "daemon_identity_sha256"):
+        digest = _string(docker_tool[key], f"{where}.docker_tool.{key}")
+        if not HEX64_RE.fullmatch(digest):
+            raise AssuranceExecutionError(f"{where}.docker_tool.{key}:invalid")
+        normalized_tool[key] = digest
+    runner = raw["runner_image"]
+    if not isinstance(runner, dict):
+        raise AssuranceExecutionError(f"{where}.runner_image:object_required")
+    _exact_keys(
+        runner,
+        {"image_id", "platform", "base_image_digests", "build_definition"},
+        f"{where}.runner_image",
+    )
+    image_id = _string(runner["image_id"], f"{where}.runner_image.image_id")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        raise AssuranceExecutionError(f"{where}.runner_image.image_id:invalid")
+    if runner["platform"] != "linux/amd64":
+        raise AssuranceExecutionError(f"{where}.runner_image.platform:unsupported")
+    base_digests = runner["base_image_digests"]
+    if (
+        not isinstance(base_digests, list)
+        or base_digests != sorted(set(base_digests))
+        or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", item or "") for item in base_digests)
+    ):
+        raise AssuranceExecutionError(f"{where}.runner_image.base_image_digests:invalid")
+    service_images = raw["service_images"]
+    if not isinstance(service_images, dict):
+        raise AssuranceExecutionError(f"{where}.service_images:object_required")
+    normalized_services: dict[str, dict[str, str]] = {}
+    for service_id, service in sorted(service_images.items()):
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", service_id):
+            raise AssuranceExecutionError(f"{where}.service_images.key:invalid")
+        if not isinstance(service, dict):
+            raise AssuranceExecutionError(f"{where}.service_images.{service_id}:object_required")
+        _exact_keys(
+            service,
+            {"reference", "image_id", "image_digest"},
+            f"{where}.service_images.{service_id}",
+        )
+        normalized = {
+            "reference": _string(
+                service["reference"], f"{where}.service_images.{service_id}.reference"
+            )
+        }
+        for key in ("image_id", "image_digest"):
+            digest = _string(
+                service[key], f"{where}.service_images.{service_id}.{key}"
+            )
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise AssuranceExecutionError(
+                    f"{where}.service_images.{service_id}.{key}:invalid"
+                )
+            normalized[key] = digest
+        normalized_services[service_id] = normalized
+    return {
+        "profile_id": profile_id,
+        "admission_id": admission_id,
+        "environment_class": raw["environment_class"],
+        "isolation": raw["isolation"],
+        "external_order_submission_enabled": False,
+        "runtime_definition": _relative_definition(
+            raw["runtime_definition"], f"{where}.runtime_definition"
+        ),
+        "docker_tool": normalized_tool,
+        "runner_image": {
+            "image_id": image_id,
+            "platform": "linux/amd64",
+            "base_image_digests": base_digests,
+            "build_definition": _relative_definition(
+                runner["build_definition"], f"{where}.runner_image.build_definition"
+            ),
+        },
+        "service_images": normalized_services,
+    }
+
+
+def load_execution_admission(
+    path: Path, source_commit: str
+) -> tuple[dict[str, dict[str, Any]], str]:
+    try:
+        source_bytes = path.read_bytes()
+        raw = json.loads(
+            source_bytes.decode("utf-8"),
+            object_pairs_hook=guarantees._unique_object,
+            parse_constant=guarantees._reject_constant,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AssuranceExecutionError(
+            f"execution_admission:invalid_json:{type(exc).__name__}"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise AssuranceExecutionError("execution_admission:object_required")
+    _exact_keys(raw, {"schema_version", "source_commit", "profiles"}, "execution_admission")
+    if raw["schema_version"] != EXECUTION_ADMISSION_SCHEMA_VERSION:
+        if raw["schema_version"] == ADMISSION_SCHEMA_VERSION:
+            raise AssuranceExecutionError("execution_admission:legacy_profile_admission_rejected")
+        raise AssuranceExecutionError("execution_admission.schema_version:unsupported")
+    if raw["source_commit"] != source_commit:
+        raise AssuranceExecutionError("execution_admission.source_commit:mismatch")
+    if not isinstance(raw["profiles"], list) or not raw["profiles"]:
+        raise AssuranceExecutionError("execution_admission.profiles:nonempty_array_required")
+    profiles = [
+        _validate_execution_admission_profile(item, f"execution_admission.profiles[{index}]")
+        for index, item in enumerate(raw["profiles"])
+    ]
+    profile_ids = [item["profile_id"] for item in profiles]
+    if profile_ids != sorted(profile_ids) or len(profile_ids) != len(set(profile_ids)):
+        raise AssuranceExecutionError(
+            "execution_admission.profiles:must_be_unique_and_sorted"
+        )
+    return (
+        {item["profile_id"]: item for item in profiles},
+        _sha256_bytes(source_bytes),
+    )
+
+
+def archive_execution_admission_profile(
+    admission: Mapping[str, Any],
+    source_commit: str,
+    execution_admission_sha256: str,
+) -> dict[str, Any]:
+    profile = json.loads(json.dumps(admission))
+    resolved_path = profile["docker_tool"].pop("resolved_path")
+    profile["docker_tool"]["executable_basename"] = Path(resolved_path).name
+    profile["docker_tool"]["resolved_path_sha256"] = _sha256_bytes(
+        resolved_path.encode("utf-8")
+    )
+    payload = {
+        "record_schema_version": EXECUTION_ADMISSION_ARCHIVE_SCHEMA_VERSION,
+        "source_admission_schema_version": EXECUTION_ADMISSION_SCHEMA_VERSION,
+        "source_commit": source_commit,
+        "execution_admission_sha256": execution_admission_sha256,
+        "profile": profile,
+    }
+    _assert_archive_has_no_absolute_paths(payload)
+    return payload
 
 
 def _tool_path_identity(resolved_path: str) -> tuple[str, str]:
@@ -749,6 +1141,13 @@ def _run_process(
         stdout, stderr = process.communicate()
         marker = f"\nqt_assurance_executor:timeout_after:{timeout_seconds}s\n".encode()
         return ProcessResult(stdout, stderr + marker, 124, True)
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (AttributeError, OSError):
+            process.kill()
+        process.communicate()
+        raise
 
 
 def _parse_json_lines(stdout: bytes, *, prefix: str | None = None) -> list[dict[str, Any]]:
@@ -788,6 +1187,15 @@ def parse_pytest_result(
         and event.get("event") == "session_result"
     ]
     if len(sessions) != 1:
+        if process.timed_out:
+            return {
+                "collected_count": 0,
+                "passed_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "xfailed_count": 0,
+                "xpassed_count": 0,
+            }, "runner_timeout_unattributed"
         if process.exit_code == 0:
             counts = {
                 "collected_count": len(runner["selectors"]),
@@ -862,10 +1270,25 @@ def parse_pytest_result(
     return normalized, None
 
 
-def _node_file(value: Any, root: Path) -> str:
+def _node_file(
+    value: Any,
+    root: Path,
+    *,
+    container_source_root: PurePosixPath | None = None,
+) -> str:
     raw = _string(value, "node_event.data.file")
     parsed = urlparse(raw)
-    path = Path(unquote(parsed.path)) if parsed.scheme == "file" else Path(raw)
+    decoded = unquote(parsed.path) if parsed.scheme == "file" else raw
+    if container_source_root is not None:
+        pure = PurePosixPath(decoded)
+        try:
+            relative = pure.relative_to(container_source_root)
+        except ValueError as exc:
+            raise AssuranceExecutionError("node_event_file_outside_container_source") from exc
+        if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            raise AssuranceExecutionError("node_event_file_outside_container_source")
+        return relative.as_posix()
+    path = Path(decoded)
     if not path.is_absolute():
         path = root / path
     try:
@@ -883,6 +1306,7 @@ def parse_node_result(
     runner: Mapping[str, Any],
     *,
     root: Path,
+    container_source_root: PurePosixPath | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     events = _parse_json_lines(process.stdout)
     transport = [
@@ -891,6 +1315,24 @@ def parse_node_result(
         if event.get("schema_version") == NODE_TRANSPORT_SCHEMA_VERSION
     ]
     if not transport:
+        if process.timed_out:
+            return {
+                "collected_count": 0,
+                "passed_count": 0,
+                "failed_count": 0,
+                "skipped_count": 0,
+                "node_test_result": {
+                    "schema_version": NODE_RESULT_SCHEMA_VERSION,
+                    "transport_schema_version": runner["event_transport"]["schema_version"],
+                    "reporter_path": runner["event_transport"]["path"],
+                    "collected_files": [],
+                    "selected_test_names": [],
+                    "excluded_nonmatch_test_names": [],
+                    "explicitly_skipped_count": 0,
+                    "cancelled_count": 0,
+                    "todo_count": 0,
+                },
+            }, "runner_timeout_unattributed"
         raise AssuranceExecutionError("node_typed_transport_missing")
     sequences = [event.get("sequence") for event in transport]
     if sequences != list(range(len(transport))):
@@ -907,7 +1349,7 @@ def parse_node_result(
             top_level_plans.append(event)
     if len(top_level_plans) > 1:
         raise AssuranceExecutionError("node_transport_top_level_plan_duplicate")
-    if not summaries and not top_level_plans:
+    if not summaries and not top_level_plans and not process.timed_out:
         raise AssuranceExecutionError("node_transport_terminal_accounting_missing")
     plan_count: int | None = None
     if top_level_plans:
@@ -925,7 +1367,9 @@ def parse_node_result(
         if not isinstance(data, dict):
             raise AssuranceExecutionError("node_transport_event_data_invalid")
         name = _string(data.get("name"), "node_event.data.name")
-        file_name = _node_file(data.get("file"), root)
+        file_name = _node_file(
+            data.get("file"), root, container_source_root=container_source_root
+        )
         all_files.add(file_name)
         if _is_nonmatch_skip(data.get("skip")):
             excluded.append(name)
@@ -1000,6 +1444,8 @@ def parse_node_result(
         or typed_result["collected_files"] != expected_files
         or len(excluded) != runner["expected_excluded_nonmatch_count"]
     )
+    if process.timed_out:
+        return generic, "runner_timeout_unattributed"
     if mismatch:
         return generic, "node_expected_selection_mismatch"
     if process.exit_code == 0 and any(counts[name] for name in ("skipped", "cancelled", "todo")):
@@ -1012,8 +1458,10 @@ def _classify_attempt(
     counts: Mapping[str, Any],
     incomplete_reason: str | None,
 ) -> tuple[str, str | None]:
+    if process.timed_out:
+        return "PARTIAL", "runner_timeout_unattributed"
     if process.exit_code != 0:
-        return "FAIL", "runner_timeout" if process.timed_out else None
+        return "FAIL", None
     if counts.get("failed_count", 0) or counts.get("xpassed_count", 0):
         raise AssuranceExecutionError("zero_exit_with_failure_outcome_not_representable")
     if incomplete_reason is not None:
@@ -1047,10 +1495,7 @@ def _write_artifact(
 ) -> tuple[dict[str, str], str]:
     proof_dir.mkdir(parents=True, exist_ok=True)
     path = proof_dir / filename
-    if path.exists():
-        raise AssuranceExecutionError(f"staged_artifact_already_exists:{path}")
-    path.write_bytes(content)
-    digest = guarantees._sha256_file(path)
+    digest = _write_immutable_bytes(path, content)
     return (
         {
             "artifact_kind": artifact_kind,
@@ -1160,12 +1605,18 @@ def _attempt_result(
     if runner["kind"] == "pytest":
         counts, incomplete_reason = parse_pytest_result(process, runner)
     elif runner["kind"] == "node_test":
-        counts, incomplete_reason = parse_node_result(process, runner, root=root)
+        counts, incomplete_reason = parse_node_result(
+            process,
+            runner,
+            root=root,
+            container_source_root=profile.container_source_root,
+        )
     else:
         raise AssuranceExecutionError(f"unsupported_attempted_runner:{runner['kind']}")
     if (
         runner["kind"] == "pytest"
         and process.exit_code != 0
+        and not process.timed_out
         and counts.get("failed_count", 0) == 0
     ):
         counts = dict(counts)
@@ -1284,32 +1735,424 @@ def _attestation_inputs(
     }
 
 
+def _environment_evidence_ref(
+    *,
+    stage_root: Path,
+    attestation_id: str,
+    profile_id: str,
+    artifact_kind: str,
+    facts: Mapping[str, Any],
+    service_id: str | None = None,
+    suffix: str = "001",
+) -> tuple[dict[str, str], str]:
+    payload = _environment_evidence_payload(
+        profile_id=profile_id,
+        artifact_kind=artifact_kind,
+        facts=facts,
+        service_id=service_id,
+    )
+    scope = "profile" if service_id is None else f"service-{service_id}"
+    filename = f"{artifact_kind}-{suffix}-{scope}.json"
+    path = (
+        stage_root
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "evidence"
+        / attestation_id
+        / "_environments"
+        / profile_id
+        / filename
+    )
+    digest = _write_immutable_bytes(path, _canonical_json_bytes(payload))
+    return (
+        {
+            "artifact_kind": artifact_kind,
+            "path": path.relative_to(stage_root).as_posix(),
+            "sha256": digest,
+        },
+        digest,
+    )
+
+
+def _environment_evidence_payload(
+    *,
+    profile_id: str,
+    artifact_kind: str,
+    facts: Mapping[str, Any],
+    service_id: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema_version": "qt.assurance_environment_evidence.v1",
+        "profile_id": profile_id,
+        "artifact_kind": artifact_kind,
+        "facts": dict(facts),
+    }
+    if service_id is not None:
+        payload["service_id"] = service_id
+    return payload
+
+
+def _align_execution_admission(
+    *,
+    admission: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    root: Path,
+    source_commit: str,
+) -> None:
+    profile_id = profile["id"]
+    if admission["profile_id"] != profile_id:
+        raise AssuranceExecutionError(f"execution_admission_profile_mismatch:{profile_id}")
+    runtime = admission["runtime_definition"]
+    if runtime["path"] != profile["runtime_definition"]:
+        raise AssuranceExecutionError(
+            f"execution_admission_runtime_definition_path_mismatch:{profile_id}"
+        )
+    expected_runtime_hash = guarantees._bound_material_sha256(
+        root, profile["runtime_definition"], git_commit=source_commit
+    )
+    if runtime["sha256"] != expected_runtime_hash:
+        raise AssuranceExecutionError(
+            f"execution_admission_runtime_definition_hash_mismatch:{profile_id}"
+        )
+    build = admission["runner_image"]["build_definition"]
+    expected_build_hash = guarantees._bound_material_sha256(
+        root, build["path"], git_commit=source_commit
+    )
+    if build["sha256"] != expected_build_hash:
+        raise AssuranceExecutionError(
+            f"execution_admission_build_definition_hash_mismatch:{profile_id}"
+        )
+    build_bytes = guarantees._bound_material_bytes(
+        root, build["path"], git_commit=source_commit
+    )
+    expected_base_digests = sorted(
+        {
+            f"sha256:{digest.decode('ascii')}"
+            for digest in re.findall(rb"@sha256:([0-9a-f]{64})", build_bytes)
+        }
+    )
+    if admission["runner_image"]["base_image_digests"] != expected_base_digests:
+        raise AssuranceExecutionError(
+            f"execution_admission_runner_base_digest_mismatch:{profile_id}"
+        )
+    required_services = set(_required_service_ids(profile))
+    if set(admission["service_images"]) != required_services:
+        raise AssuranceExecutionError(
+            f"execution_admission_service_image_set_mismatch:{profile_id}"
+        )
+    if profile["execution_class"] == "isolated_database":
+        definition = json.loads(
+            guarantees._bound_material_bytes(
+                root, profile["runtime_definition"], git_commit=source_commit
+            )
+        )
+        service = definition["service"]
+        admitted_service = admission["service_images"][service["id"]]
+        expected_reference = service["image"]
+        expected_digest = "sha256:" + expected_reference.rsplit("@sha256:", 1)[-1]
+        if admitted_service["reference"] != expected_reference:
+            raise AssuranceExecutionError(
+                f"execution_admission_service_reference_mismatch:{profile_id}"
+            )
+        if admitted_service["image_digest"] != expected_digest:
+            raise AssuranceExecutionError(
+                f"execution_admission_service_digest_mismatch:{profile_id}"
+            )
+
+
+def _profile_lockfile_hashes(
+    root: Path, profile: Mapping[str, Any], source_commit: str
+) -> dict[str, str]:
+    return {
+        relative: guarantees._bound_material_sha256(
+            root, relative, git_commit=source_commit
+        )
+        for relative in profile["lockfiles"]
+    }
+
+
+def _resource_identity(
+    prepared: docker_lifecycle.ProvisionedProfile, kind: str, logical_name: str
+) -> str:
+    for item in prepared.resources:
+        if item.kind == kind and item.logical_name == logical_name:
+            return item.runtime_identity
+    raise AssuranceExecutionError(f"lifecycle_resource_identity_missing:{kind}:{logical_name}")
+
+
+def _build_final_environment(
+    *,
+    root: Path,
+    source_commit: str,
+    stage_root: Path,
+    attestation_id: str,
+    profile: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    prepared: docker_lifecycle.ProvisionedProfile,
+    docker_version: str,
+    source_snapshot_sha256: str,
+    execution_admission_sha256: str,
+    execution_admission_archive_ref: Mapping[str, str],
+    execution_admission_archive_hash: str,
+    draft_ref: Mapping[str, str],
+    draft_hash: str,
+    execution_ref: Mapping[str, str],
+    execution_hash: str,
+    cleanup_ref: Mapping[str, str],
+    cleanup_hash: str,
+    proof_results_hash: str,
+    environment_instance_id: str,
+    control_plane_identity_sha256: str,
+) -> dict[str, Any]:
+    profile_id = profile["id"]
+    common_binding = {
+        "attestation_id": attestation_id,
+        "cleanup_manifest_sha256": cleanup_hash,
+        "control_plane_identity_sha256": control_plane_identity_sha256,
+        "environment_instance_id": environment_instance_id,
+        "execution_admission_sha256": execution_admission_sha256,
+        "execution_admission_archive_sha256": execution_admission_archive_hash,
+        "execution_draft_sha256": draft_hash,
+        "execution_manifest_sha256": execution_hash,
+        "proof_results_sha256": proof_results_hash,
+        "source_snapshot_sha256": source_snapshot_sha256,
+    }
+    evidence_refs: list[dict[str, str]] = [
+        dict(execution_admission_archive_ref),
+        dict(draft_ref),
+        dict(execution_ref),
+        dict(cleanup_ref),
+    ]
+    runner_identity = _resource_identity(prepared, "container", "proof-runner")
+    execution_class = profile["execution_class"]
+    if execution_class == "isolated_container":
+        facts = {
+            **common_binding,
+            "base_image_digests": admission["runner_image"]["base_image_digests"],
+            "cleanup_completed": True,
+            "container_identity": runner_identity,
+            "docker_version": docker_version,
+            "image_digest": prepared.runner_image_id,
+            "network_mode": "none",
+            "platform": "linux/amd64",
+            "source_commit": source_commit,
+            "source_mount_mode": "read_only",
+            "writable_temp_outside_source": True,
+        }
+        evidence_facts = {
+            "base_image_digests": {
+                "base_image_digests": facts["base_image_digests"]
+            },
+            "bootstrap_log": {
+                "bootstrap_completed": True,
+                "container_identity": runner_identity,
+            },
+            "cleanup_log": {
+                "cleanup_completed": True,
+                "container_identity": runner_identity,
+            },
+            "container_identity": {"container_identity": runner_identity},
+            "image_digest": {
+                "build_definition_sha256": admission["runner_image"][
+                    "build_definition"
+                ]["sha256"],
+                "image_digest": prepared.runner_image_id,
+            },
+            "network_mode": {"network_mode": "none"},
+            "runtime_probe": {
+                "docker_version": docker_version,
+                "observed_configuration": prepared.observed_configuration,
+                "platform": "linux/amd64",
+                "source_commit": source_commit,
+            },
+            "source_mount": {
+                "source_mount_mode": "read_only",
+                "source_snapshot_sha256": source_snapshot_sha256,
+            },
+        }
+        for kind, evidence_fact in evidence_facts.items():
+            ref, _ = _environment_evidence_ref(
+                stage_root=stage_root,
+                attestation_id=attestation_id,
+                profile_id=profile_id,
+                artifact_kind=kind,
+                facts=evidence_fact,
+            )
+            evidence_refs.append(ref)
+        services: dict[str, Any] = {}
+    else:
+        facts = {
+            **common_binding,
+            "environment_identity": environment_instance_id,
+            "runner_container_identity": runner_identity,
+            "runner_image_digest": prepared.runner_image_id,
+            "runner_network_mode": "isolated_internal_bridge",
+            "runner_root_filesystem_mode": "read_only",
+            "source_commit": source_commit,
+            "source_mount_mode": "read_only",
+            "writable_temp_outside_source": True,
+        }
+        for kind, evidence_fact in {
+            "container_identity": {"runner_container_identity": runner_identity},
+            "image_digest": {
+                "build_definition_sha256": admission["runner_image"][
+                    "build_definition"
+                ]["sha256"],
+                "runner_image_digest": prepared.runner_image_id,
+            },
+            "network_mode": {"runner_network_mode": "isolated_internal_bridge"},
+            "runtime_probe": {
+                "docker_version": docker_version,
+                "environment_identity": environment_instance_id,
+                "observed_configuration": prepared.observed_configuration,
+                "source_commit": source_commit,
+            },
+            "source_mount": {
+                "source_mount_mode": "read_only",
+                "source_snapshot_sha256": source_snapshot_sha256,
+            },
+        }.items():
+            ref, _ = _environment_evidence_ref(
+                stage_root=stage_root,
+                attestation_id=attestation_id,
+                profile_id=profile_id,
+                artifact_kind=kind,
+                facts=evidence_fact,
+            )
+            evidence_refs.append(ref)
+        definition = json.loads(
+            guarantees._bound_material_bytes(
+                root, profile["runtime_definition"], git_commit=source_commit
+            )
+        )
+        service_contract = definition["service"]
+        service_id = service_contract["id"]
+        observed = prepared.service_facts
+        service_facts = {
+            "cleanup_completed": True,
+            "container_identity": observed["container_identity"],
+            "credentials": definition["isolation"]["credentials"],
+            "database_identity": observed["database_identity"],
+            "database_identity_scope": definition["isolation"]["database_identity"],
+            "extension_versions": observed["extension_versions"],
+            "image_digest": observed["image_digest"],
+            "live_database": False,
+            "network_mode": service_contract["network_mode"],
+            "pg_dsn_sha256": observed["pg_dsn_sha256"],
+            "postgresql_version": observed["postgresql_version"],
+            "production_database": False,
+            "publish_host": service_contract["publish_host"],
+            "publish_port_mode": service_contract["publish_port"],
+            "published_port": observed["published_port"],
+            "session_isolation_key_sha256": observed[
+                "session_isolation_key_sha256"
+            ],
+            "shared_development_database": False,
+            "timescaledb_version": observed["timescaledb_version"],
+        }
+        service_refs: list[dict[str, str]] = []
+        service_evidence = {
+            "bootstrap_log": {
+                "bootstrap_completed": True,
+                "container_identity": service_facts["container_identity"],
+                "database_identity": service_facts["database_identity"],
+            },
+            "cleanup_log": {
+                "cleanup_completed": True,
+                "container_identity": service_facts["container_identity"],
+                "database_identity": service_facts["database_identity"],
+            },
+            "container_identity": {
+                "container_identity": service_facts["container_identity"]
+            },
+            "database_identity": {
+                "database_identity": service_facts["database_identity"]
+            },
+            "extension_versions": {
+                "extension_versions": service_facts["extension_versions"]
+            },
+            "image_digest": {"image_digest": service_facts["image_digest"]},
+            "published_endpoint": {
+                "publish_host": service_facts["publish_host"],
+                "published_port": service_facts["published_port"],
+            },
+            "server_version": {
+                "postgresql_version": service_facts["postgresql_version"]
+            },
+        }
+        for kind, evidence_fact in service_evidence.items():
+            ref, _ = _environment_evidence_ref(
+                stage_root=stage_root,
+                attestation_id=attestation_id,
+                profile_id=profile_id,
+                artifact_kind=kind,
+                facts=evidence_fact,
+                service_id=service_id,
+            )
+            service_refs.append(ref)
+        services = {
+            service_id: {
+                "environment_class": admission["environment_class"],
+                "isolation": "disposable",
+                "external_order_submission_enabled": False,
+                "facts": service_facts,
+                "evidence_refs": sorted(service_refs, key=lambda item: item["path"]),
+            }
+        }
+    return {
+        "profile_id": profile_id,
+        "os": "Linux",
+        "architecture": "amd64",
+        "tool_versions": prepared.tool_versions,
+        "lockfile_hashes": _profile_lockfile_hashes(root, profile, source_commit),
+        "profile_admission": {
+            "admission_id": admission["admission_id"],
+            "environment_class": admission["environment_class"],
+            "isolation": admission["isolation"],
+            "external_order_submission_enabled": False,
+            "runtime_definition": admission["runtime_definition"],
+            "facts": facts,
+            "evidence_refs": sorted(evidence_refs, key=lambda item: item["path"]),
+        },
+        "services": services,
+    }
+
+
 def run_attestation(
     *,
     root: Path,
     source_commit: str,
     stage_root: Path,
-    admission_evidence_root: Path,
-    admission_manifest: Path,
+    private_root: Path,
+    execution_admission: Path,
     selected_profile_ids: Sequence[str],
 ) -> Path:
+    """Execute admitted Docker profiles and publish only after exact cleanup."""
+
     root = root.resolve()
     stage_root = stage_root.resolve()
-    admission_evidence_root = admission_evidence_root.resolve()
-    admission_manifest = admission_manifest.resolve()
+    private_root = private_root.resolve()
+    execution_admission = execution_admission.resolve()
     require_exact_clean_source(root, source_commit, stage_root)
-    if _is_within(admission_manifest, root):
-        raise AssuranceExecutionError("admission_manifest_must_be_outside_source_tree")
-    if not admission_evidence_root.is_dir():
-        raise AssuranceExecutionError("admission_evidence_root_must_be_directory")
-    if _is_within(admission_evidence_root, root):
-        raise AssuranceExecutionError("admission_evidence_root_must_be_outside_source_tree")
-    if _is_within(admission_evidence_root, stage_root) or _is_within(
-        stage_root, admission_evidence_root
-    ):
+    if _is_within(execution_admission, root):
+        raise AssuranceExecutionError("execution_admission_must_be_outside_source_tree")
+    if _is_within(execution_admission, stage_root):
+        raise AssuranceExecutionError("execution_admission_must_be_outside_stage_tree")
+    if not private_root.is_dir():
+        raise AssuranceExecutionError("private_root_must_be_existing_directory")
+    if private_root.stat().st_mode & 0o077:
+        raise AssuranceExecutionError("private_root_must_be_owner_private_0700")
+    disjoint_pairs = (
+        (private_root, root),
+        (private_root, stage_root),
+    )
+    if any(_is_within(left, right) or _is_within(right, left) for left, right in disjoint_pairs):
         raise AssuranceExecutionError(
-            "admission_evidence_root_and_stage_root_must_be_disjoint"
+            "private_root_must_be_disjoint_from_source_stage_and_admission"
         )
+    if _is_within(execution_admission, private_root):
+        raise AssuranceExecutionError("execution_admission_must_be_outside_private_root")
     bundle = guarantees.validate_repository(root=root)
     require_execution_model_ready(bundle.proof_catalog)
     profile_by_id = {
@@ -1321,139 +2164,700 @@ def run_attestation(
     unknown = sorted(set(selected) - set(profile_by_id))
     if unknown:
         raise AssuranceExecutionError(f"selected_profile_unknown:{','.join(unknown)}")
-    admissions = load_admission_manifest(admission_manifest, source_commit)
-    prepared: dict[str, PreparedProfile] = {}
-    unavailable: dict[str, UnavailableProfile] = {}
-    for profile_id in selected:
-        if profile_id not in admissions:
-            unavailable[profile_id] = UnavailableProfile(
-                profile_id, "profile_admission_missing", (profile_id,)
-            )
-            continue
-        admission = admissions[profile_id]
-        admission_artifacts = resolve_admission_artifacts(
-            admission, admission_evidence_root
-        )
-        admission_payload = archive_admission_payload(admission, source_commit)
-        try:
-            prepared[profile_id] = prepare_profile(
-                profile_by_id[profile_id],
-                admissions[profile_id],
-                source_commit=source_commit,
-                admission_artifacts=admission_artifacts,
-                root=root,
-            )
-        except _PrerequisiteUnavailable as exc:
-            unavailable[profile_id] = UnavailableProfile(
-                profile_id,
-                exc.reason_code,
-                exc.details,
-                admission_payload,
-                admission_artifacts,
-            )
-    active_proofs = [
-        proof for proof in bundle.proof_catalog["proofs"] if proof["lifecycle"] == "active"
+    automated_profile_ids = [
+        profile_id
+        for profile_id in selected
+        if profile_by_id[profile_id]["execution_class"]
+        in {"isolated_container", "isolated_database"}
     ]
-    used_profile_ids = sorted(
-        {
-            proof["environment_profile_id"]
-            for proof in active_proofs
-            if proof["environment_profile_id"] in prepared
-            and _runner_supported(proof["runner"])[0]
-        }
-    )
-    if not used_profile_ids:
+    if not automated_profile_ids:
         raise AssuranceExecutionError(
-            "no_admitted_executable_profile:cannot_emit_schema_valid_attestation"
+            "manual_recovery_only:unavailable_without_finalizable_automated_environment"
         )
+    if len(automated_profile_ids) != 1:
+        raise AssuranceExecutionError(
+            "one_automated_profile_per_attestation_required:"
+            "final_review_accepts_multiple_independent_attestations"
+        )
+    admissions, admission_hash = load_execution_admission(
+        execution_admission, source_commit
+    )
+    missing_admissions = sorted(set(automated_profile_ids) - set(admissions))
+    if missing_admissions:
+        raise AssuranceExecutionError(
+            "execution_admission_profile_missing:" + ",".join(missing_admissions)
+        )
+    extra_admissions = sorted(set(admissions) - set(automated_profile_ids))
+    if extra_admissions:
+        raise AssuranceExecutionError(
+            "execution_admission_unselected_profile:" + ",".join(extra_admissions)
+        )
+    for profile_id in automated_profile_ids:
+        _align_execution_admission(
+            admission=admissions[profile_id],
+            profile=profile_by_id[profile_id],
+            root=root,
+            source_commit=source_commit,
+        )
+
+    source_archive = _git_archive_bytes(root, source_commit)
+    source_snapshot_sha256 = _archive_tree_sha256(source_archive)
     session_started = _utc_now()
-    suffix = used_profile_ids[0] if len(used_profile_ids) == 1 else "multi"
+    suffix = (
+        automated_profile_ids[0]
+        if len(automated_profile_ids) == 1
+        else "multi"
+    )
     attestation_id = (
         f"QT-ATT-{session_started.strftime('%Y%m%dT%H%M%SZ')}-"
         f"{source_commit[:12]}-{suffix}"
     )
     session_evidence = (
-        stage_root / "docs" / "assurance" / "guarantees" / "evidence" / attestation_id
+        stage_root
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "evidence"
+        / attestation_id
     )
     if session_evidence.exists():
         raise AssuranceExecutionError(f"staged_session_already_exists:{attestation_id}")
-    proof_results: list[dict[str, Any]] = []
-    for proof in sorted(active_proofs, key=lambda item: item["id"]):
-        profile_id = proof["environment_profile_id"]
-        if profile_id not in selected:
-            proof_results.append(
-                {
-                    "proof_id": proof["id"],
-                    "environment_profile_id": profile_id,
-                    "status": "NOT_RUN",
-                    "evidence_refs": [],
-                    "reason_code": "profile_not_selected",
-                }
-            )
-            continue
-        if profile_id in unavailable:
-            item = unavailable[profile_id]
-            proof_results.append(
-                _unavailable_result(
-                    stage_root=stage_root,
-                    attestation_id=attestation_id,
-                    source_commit=source_commit,
-                    proof=proof,
-                    reason_code=item.reason_code,
-                    details=item.details,
-                    admission_payload=item.admission_payload,
-                    admission_artifacts=item.admission_artifacts,
-                )
-            )
-            continue
-        supported, unsupported_reason = _runner_supported(proof["runner"])
-        if not supported:
-            proof_results.append(
-                _unavailable_result(
-                    stage_root=stage_root,
-                    attestation_id=attestation_id,
-                    source_commit=source_commit,
-                    proof=proof,
-                    reason_code=unsupported_reason,
-                    details=[proof["runner"]["kind"]],
-                    admission_payload=prepared[profile_id].admission_payload,
-                    admission_artifacts=prepared[profile_id].admission_artifacts,
-                )
-            )
-            continue
-        profile = prepared[profile_id]
-        argv = guarantees._canonical_runner_argv(proof["runner"])
-        if argv is None:
-            raise AssuranceExecutionError(f"runner_has_no_canonical_argv:{proof['id']}")
-        process_env = dict(profile.process_env)
-        if proof["runner"]["kind"] == "pytest":
-            configured_plugins = process_env.get("PYTEST_PLUGINS", "")
-            plugin = "scripts.assurance.pytest_result_plugin"
-            process_env["PYTEST_PLUGINS"] = ",".join(
-                item for item in (configured_plugins, plugin) if item
-            )
-        proof_started = _utc_now()
-        process = _run_process(
-            argv,
-            cwd=root,
-            env=process_env,
-            timeout_seconds=proof["timeout_seconds"],
+    private_session_root = private_root / attestation_id
+    if private_session_root.exists():
+        raise AssuranceExecutionError("private_session_already_exists")
+
+    states: dict[str, dict[str, Any]] = {}
+    requested_profile_ids = list(selected)
+    # Read-only daemon/image checks happen before the immutable draft. No
+    # Docker create/network/volume command is permitted before every draft.
+    for profile_id in automated_profile_ids:
+        profile = profile_by_id[profile_id]
+        admission = admissions[profile_id]
+        environment_instance_id = f"qt-{secrets.token_hex(16)}"
+        private_profile_root = private_session_root / profile_id
+        snapshot_root = private_profile_root / "source"
+        controller = docker_lifecycle.DockerController(
+            admission=admission,
+            root=snapshot_root,
+            private_root=private_profile_root,
+            source_commit=source_commit,
+            attestation_id=attestation_id,
+            profile_id=profile_id,
+            environment_instance_id=environment_instance_id,
         )
-        proof_finished = _utc_now()
-        proof_results.append(
-            _attempt_result(
+        try:
+            control_identity, docker_version = controller.verify_admission()
+            controller.verify_runner_image()
+            for service_id in sorted(admission["service_images"]):
+                controller.verify_service_image(service_id)
+        except docker_lifecycle.DockerLifecycleError as exc:
+            raise AssuranceExecutionError(f"profile_preflight_unavailable:{profile_id}:{exc}") from exc
+        admission_archive_payload = archive_execution_admission_profile(
+            admission, source_commit, admission_hash
+        )
+        admission_archive_ref, admission_archive_hash = _environment_evidence_ref(
+            stage_root=stage_root,
+            attestation_id=attestation_id,
+            profile_id=profile_id,
+            artifact_kind="execution_admission_archive",
+            facts=admission_archive_payload,
+        )
+        draft_facts = {
+            "record_schema_version": guarantees.EXECUTION_DRAFT_SCHEMA_VERSION,
+            "attestation_id": attestation_id,
+            "source_commit": source_commit,
+            "source_snapshot_sha256": source_snapshot_sha256,
+            "requested_profile_ids": requested_profile_ids,
+            "started_at": _timestamp(session_started),
+            "admission_id": admission["admission_id"],
+            "environment_instance_id": environment_instance_id,
+            "control_plane_identity_sha256": control_identity,
+            "runtime_definition_sha256": admission["runtime_definition"]["sha256"],
+            "execution_admission_sha256": admission_hash,
+            "execution_admission_archive_sha256": admission_archive_hash,
+            "external_order_submission_enabled": False,
+            "planned_resources": controller.planned_resources(
+                profile["execution_class"]
+            ),
+        }
+        draft_ref, draft_hash = _environment_evidence_ref(
+            stage_root=stage_root,
+            attestation_id=attestation_id,
+            profile_id=profile_id,
+            artifact_kind="execution_draft",
+            facts=draft_facts,
+        )
+        states[profile_id] = {
+            "profile": profile,
+            "admission": admission,
+            "controller": controller,
+            "environment_instance_id": environment_instance_id,
+            "control_identity": control_identity,
+            "docker_version": docker_version,
+            "draft_ref": draft_ref,
+            "draft_hash": draft_hash,
+            "admission_archive_ref": admission_archive_ref,
+            "admission_archive_hash": admission_archive_hash,
+            "snapshot_root": snapshot_root,
+            "prepared": None,
+        }
+
+    return _run_cleanup_gated_session(
+        root=root,
+        source_commit=source_commit,
+        stage_root=stage_root,
+        private_session_root=private_session_root,
+        session_started=session_started,
+        attestation_id=attestation_id,
+        source_archive=source_archive,
+        source_snapshot_sha256=source_snapshot_sha256,
+        selected_profile_ids=selected,
+        automated_profile_ids=automated_profile_ids,
+        states=states,
+        admissions=admissions,
+        admission_hash=admission_hash,
+        bundle=bundle,
+    )
+
+
+def _run_cleanup_gated_session(
+    *,
+    root: Path,
+    source_commit: str,
+    stage_root: Path,
+    private_session_root: Path,
+    session_started: datetime,
+    attestation_id: str,
+    source_archive: bytes,
+    source_snapshot_sha256: str,
+    selected_profile_ids: Sequence[str],
+    automated_profile_ids: Sequence[str],
+    states: Mapping[str, dict[str, Any]],
+    admissions: Mapping[str, Mapping[str, Any]],
+    admission_hash: str,
+    bundle: guarantees.ValidationBundle,
+) -> Path:
+    """Run one admitted profile and make cleanup the outermost side-effect guard."""
+
+    if len(automated_profile_ids) != 1:
+        raise AssuranceExecutionError("cleanup_gated_session_requires_one_profile")
+    profile_id = automated_profile_ids[0]
+    state = states[profile_id]
+    profile = state["profile"]
+    controller: docker_lifecycle.DockerController = state["controller"]
+    active_proofs = sorted(
+        (
+            proof
+            for proof in bundle.proof_catalog["proofs"]
+            if proof["lifecycle"] == "active"
+        ),
+        key=lambda item: item["id"],
+    )
+    selected = set(selected_profile_ids)
+    proof_results: list[dict[str, Any]] = []
+    execution_state = "complete"
+    execution_error: BaseException | None = None
+    execution_started = _utc_now()
+    execution_finished = execution_started
+    results_hash: str | None = None
+    execution_ref: dict[str, str] | None = None
+    execution_hash: str | None = None
+    intended_execution_hash: str | None = None
+    cleanup_ref: dict[str, str] | None = None
+    cleanup_hash: str | None = None
+    cleanup: docker_lifecycle.CleanupReport | None = None
+    cleanup_finished = execution_started
+    manifest_error: BaseException | None = None
+    cleanup_record_error: BaseException | None = None
+    draft_only_manifest = {
+        "record_schema_version": guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION,
+        "attestation_id": attestation_id,
+        "source_commit": source_commit,
+        "source_snapshot_sha256": source_snapshot_sha256,
+        "execution_admission_archive_sha256": state["admission_archive_hash"],
+        "execution_draft_sha256": state["draft_hash"],
+        "environment_instance_id": state["environment_instance_id"],
+        "control_plane_identity_sha256": state["control_identity"],
+        "execution_state": "executor_error",
+        "execution_started_at": _timestamp(execution_started),
+        "execution_finished_at": _timestamp(execution_started),
+        "executed_proof_ids": [],
+        "proof_results_sha256": _sha256_bytes(_canonical_json_bytes([])),
+        "resource_identities": [],
+    }
+    intended_execution_hash = _sha256_bytes(
+        _canonical_json_bytes(
+            _environment_evidence_payload(
+                profile_id=profile_id,
+                artifact_kind="execution_manifest",
+                facts=draft_only_manifest,
+            )
+        )
+    )
+
+    with _installed_interrupt_handlers() as interrupt_state:
+        try:
+            controller.register_source_snapshot(source_snapshot_sha256)
+            _extract_source_snapshot(source_archive, state["snapshot_root"])
+            service_definition = None
+            if profile["execution_class"] == "isolated_database":
+                service_definition = json.loads(
+                    guarantees._bound_material_bytes(
+                        root,
+                        profile["runtime_definition"],
+                        git_commit=source_commit,
+                    )
+                )["service"]
+            require_node = any(
+                proof["environment_profile_id"] == profile_id
+                and proof["runner"]["kind"] == "node_test"
+                for proof in active_proofs
+            )
+            state["prepared"] = controller.provision(
+                execution_class=profile["execution_class"],
+                require_node=require_node,
+                service_definition=service_definition,
+            )
+
+            for proof in active_proofs:
+                proof_profile_id = proof["environment_profile_id"]
+                if proof_profile_id not in selected:
+                    proof_results.append(
+                        {
+                            "proof_id": proof["id"],
+                            "environment_profile_id": proof_profile_id,
+                            "status": "NOT_RUN",
+                            "evidence_refs": [],
+                            "reason_code": "profile_not_selected",
+                        }
+                    )
+                    continue
+                supported, unsupported_reason = _runner_supported(proof["runner"])
+                if proof_profile_id != profile_id:
+                    proof_results.append(
+                        _unavailable_result(
+                            stage_root=stage_root,
+                            attestation_id=attestation_id,
+                            source_commit=source_commit,
+                            proof=proof,
+                            reason_code=(
+                                unsupported_reason
+                                if not supported
+                                else "automated_profile_not_admitted"
+                            ),
+                            details=[
+                                proof["runner"]["kind"]
+                                if not supported
+                                else proof_profile_id
+                            ],
+                        )
+                    )
+                    continue
+                if not supported:
+                    proof_results.append(
+                        _unavailable_result(
+                            stage_root=stage_root,
+                            attestation_id=attestation_id,
+                            source_commit=source_commit,
+                            proof=proof,
+                            reason_code=unsupported_reason,
+                            details=[proof["runner"]["kind"]],
+                            admission_payload=archive_execution_admission_profile(
+                                admissions[profile_id],
+                                source_commit,
+                                admission_hash,
+                            ),
+                        )
+                    )
+                    continue
+                if _snapshot_tree_sha256(state["snapshot_root"]) != source_snapshot_sha256:
+                    raise AssuranceExecutionError(
+                        f"source_snapshot_changed_before_proof:{proof['id']}"
+                    )
+                executable_failure: tuple[str, str] | None = None
+                for executable, constraint in proof["runner"].get(
+                    "required_executables", {}
+                ).items():
+                    observed_version = controller.probe_required_executable(executable)
+                    if observed_version is None:
+                        executable_failure = (
+                            "required_executable_unavailable",
+                            executable,
+                        )
+                        break
+                    try:
+                        guarantees._version_satisfies(
+                            observed_version,
+                            constraint,
+                            f"proof.{proof['id']}.required_executables.{executable}",
+                        )
+                    except guarantees.GuaranteeValidationError:
+                        executable_failure = (
+                            "required_executable_version_mismatch",
+                            executable,
+                        )
+                        break
+                if executable_failure is not None:
+                    proof_results.append(
+                        _unavailable_result(
+                            stage_root=stage_root,
+                            attestation_id=attestation_id,
+                            source_commit=source_commit,
+                            proof=proof,
+                            reason_code=executable_failure[0],
+                            details=[executable_failure[1]],
+                            admission_payload=archive_execution_admission_profile(
+                                admissions[profile_id],
+                                source_commit,
+                                admission_hash,
+                            ),
+                        )
+                    )
+                    continue
+                inner_argv = guarantees._canonical_runner_argv(proof["runner"])
+                if inner_argv is None:
+                    raise AssuranceExecutionError(
+                        f"runner_has_no_canonical_argv:{proof['id']}"
+                    )
+                attempt_profile = PreparedProfile(
+                    profile_id=profile_id,
+                    environment={},
+                    process_env=controller.process_env(),
+                    admission_payload=archive_execution_admission_profile(
+                        admissions[profile_id], source_commit, admission_hash
+                    ),
+                    container_source_root=PurePosixPath("/workspace"),
+                )
+                proof_started = _utc_now()
+                process = _run_process(
+                    controller.proof_argv(
+                        inner_argv, timeout_seconds=proof["timeout_seconds"]
+                    ),
+                    cwd=root,
+                    env=controller.process_env(),
+                    timeout_seconds=proof["timeout_seconds"] + 15,
+                )
+                safe_stdout, _ = controller.redact_durable_output(process.stdout)
+                safe_stderr, _ = controller.redact_durable_output(process.stderr)
+                process = ProcessResult(
+                    safe_stdout,
+                    safe_stderr,
+                    process.exit_code,
+                    process.timed_out,
+                )
+                proof_finished = _utc_now()
+                guard_marker = (
+                    b"qt_assurance_process_guard:timeout_child_group_terminated\n"
+                )
+                if process.timed_out:
+                    controller.terminate_runner()
+                    raise AssuranceExecutionError(
+                        f"docker_exec_host_failsafe_timeout:{proof['id']}"
+                    )
+                if process.exit_code == 124 and guard_marker in process.stderr:
+                    process = ProcessResult(
+                        process.stdout,
+                        process.stderr,
+                        process.exit_code,
+                        True,
+                    )
+                proof_results.append(
+                    _attempt_result(
+                        stage_root=stage_root,
+                        attestation_id=attestation_id,
+                        proof=proof,
+                        profile=attempt_profile,
+                        root=root,
+                        started_at=proof_started,
+                        finished_at=proof_finished,
+                        process=process,
+                    )
+                )
+            if _snapshot_tree_sha256(state["snapshot_root"]) != source_snapshot_sha256:
+                raise AssuranceExecutionError(
+                    f"source_snapshot_changed_after_execution:{profile_id}"
+                )
+            controller.verify_observed_configuration(state["prepared"])
+        except _ExecutionInterrupted as exc:
+            execution_state = "interrupted"
+            execution_error = exc
+        except BaseException as exc:
+            execution_state = "executor_error"
+            execution_error = exc
+        execution_finished = _utc_now()
+
+        # From this point until every cleanup attempt completes, signals are
+        # recorded but never allowed to bypass cleanup or later evidence writes.
+        interrupt_state.cleanup_in_progress = True
+        try:
+            completed_proof_ids = {item["proof_id"] for item in proof_results}
+            for proof in active_proofs:
+                if proof["id"] in completed_proof_ids:
+                    continue
+                proof_results.append(
+                    {
+                        "proof_id": proof["id"],
+                        "environment_profile_id": proof["environment_profile_id"],
+                        "status": "NOT_RUN",
+                        "evidence_refs": [],
+                        "reason_code": (
+                            "execution_interrupted"
+                            if execution_state == "interrupted"
+                            else "executor_error_before_attempt"
+                        ),
+                    }
+                )
+            proof_results.sort(key=lambda item: item["proof_id"])
+            results_hash = guarantees.proof_results_sha256(proof_results)
+            try:
+                controller.discover_labeled_resources()
+            except BaseException as exc:
+                if execution_error is None:
+                    execution_error = exc
+                execution_state = "executor_error"
+            prepared = state["prepared"] or controller.partial_profile(
+                profile["execution_class"]
+            )
+            state["prepared"] = prepared
+            executed_ids = sorted(
+                item["proof_id"]
+                for item in proof_results
+                if item["environment_profile_id"] == profile_id
+                and item["status"] in {"PASS", "FAIL", "PARTIAL"}
+            )
+            manifest_facts = {
+                "record_schema_version": guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION,
+                "attestation_id": attestation_id,
+                "source_commit": source_commit,
+                "source_snapshot_sha256": source_snapshot_sha256,
+                "execution_admission_archive_sha256": state[
+                    "admission_archive_hash"
+                ],
+                "execution_draft_sha256": state["draft_hash"],
+                "environment_instance_id": state["environment_instance_id"],
+                "control_plane_identity_sha256": state["control_identity"],
+                "execution_state": execution_state,
+                "execution_started_at": _timestamp(execution_started),
+                "execution_finished_at": _timestamp(execution_finished),
+                "executed_proof_ids": executed_ids,
+                "proof_results_sha256": results_hash,
+                "resource_identities": prepared.sorted_resources(),
+            }
+            intended_execution_hash = _sha256_bytes(
+                _canonical_json_bytes(
+                    _environment_evidence_payload(
+                        profile_id=profile_id,
+                        artifact_kind="execution_manifest",
+                        facts=manifest_facts,
+                    )
+                )
+            )
+            execution_ref, execution_hash = _environment_evidence_ref(
                 stage_root=stage_root,
                 attestation_id=attestation_id,
-                proof=proof,
-                profile=profile,
-                root=root,
-                started_at=proof_started,
-                finished_at=proof_finished,
-                process=process,
+                profile_id=profile_id,
+                artifact_kind="execution_manifest",
+                facts=manifest_facts,
             )
+        except BaseException as exc:
+            manifest_error = exc
+            if execution_error is None:
+                execution_error = exc
+            execution_state = "executor_error"
+            prepared = state["prepared"] or controller.partial_profile(
+                profile["execution_class"]
+            )
+            state["prepared"] = prepared
+            if results_hash is None:
+                results_hash = _sha256_bytes(
+                    _canonical_json_bytes(
+                        sorted(
+                            proof_results,
+                            key=lambda item: str(item.get("proof_id", "")),
+                        )
+                    )
+                )
+            fallback_manifest_facts = {
+                "record_schema_version": guarantees.EXECUTION_MANIFEST_SCHEMA_VERSION,
+                "attestation_id": attestation_id,
+                "source_commit": source_commit,
+                "source_snapshot_sha256": source_snapshot_sha256,
+                "execution_admission_archive_sha256": state[
+                    "admission_archive_hash"
+                ],
+                "execution_draft_sha256": state["draft_hash"],
+                "environment_instance_id": state["environment_instance_id"],
+                "control_plane_identity_sha256": state["control_identity"],
+                "execution_state": "executor_error",
+                "execution_started_at": _timestamp(execution_started),
+                "execution_finished_at": _timestamp(_utc_now()),
+                "executed_proof_ids": sorted(
+                    item["proof_id"]
+                    for item in proof_results
+                    if item.get("environment_profile_id") == profile_id
+                    and item.get("status") in {"PASS", "FAIL", "PARTIAL"}
+                ),
+                "proof_results_sha256": results_hash,
+                "resource_identities": prepared.sorted_resources(),
+            }
+            intended_execution_hash = _sha256_bytes(
+                _canonical_json_bytes(
+                    _environment_evidence_payload(
+                        profile_id=profile_id,
+                        artifact_kind="execution_manifest",
+                        facts=fallback_manifest_facts,
+                    )
+                )
+            )
+            if execution_hash is None:
+                try:
+                    execution_ref, execution_hash = _environment_evidence_ref(
+                        stage_root=stage_root,
+                        attestation_id=attestation_id,
+                        profile_id=profile_id,
+                        artifact_kind="execution_manifest",
+                        facts=fallback_manifest_facts,
+                    )
+                except BaseException:
+                    # Cleanup still binds the intended immutable manifest hash.
+                    pass
+        finally:
+            prepared = state["prepared"] or controller.partial_profile(
+                profile["execution_class"]
+            )
+            state["prepared"] = prepared
+            cleanup_started = _utc_now()
+            try:
+                cleanup = controller.cleanup(prepared)
+            except BaseException as exc:
+                cleanup = docker_lifecycle.CleanupReport(
+                    stdout="",
+                    stderr=f"cleanup controller error:{type(exc).__name__}\n",
+                    exit_code=1,
+                    resources=tuple(
+                        docker_lifecycle.CleanupResource(
+                            item.kind,
+                            item.logical_name,
+                            item.runtime_identity,
+                            False,
+                        )
+                        for item in sorted(
+                            prepared.resources,
+                            key=lambda value: (value.kind, value.logical_name),
+                        )
+                    ),
+                    label_query_remaining=("cleanup-controller-error",),
+                )
+                if execution_error is None:
+                    execution_error = exc
+            cleanup_finished = _utc_now()
+            cleanup_stdout, _ = controller.redact_durable_output(
+                cleanup.stdout.encode("utf-8")
+            )
+            cleanup_stderr, _ = controller.redact_durable_output(
+                cleanup.stderr.encode("utf-8")
+            )
+            cleanup_execution_hash = execution_hash or intended_execution_hash
+            if cleanup_execution_hash is not None:
+                cleanup_facts = {
+                    "record_schema_version": guarantees.CLEANUP_MANIFEST_SCHEMA_VERSION,
+                    "attestation_id": attestation_id,
+                    "source_commit": source_commit,
+                    "source_snapshot_sha256": source_snapshot_sha256,
+                    "execution_admission_archive_sha256": state[
+                        "admission_archive_hash"
+                    ],
+                    "execution_draft_sha256": state["draft_hash"],
+                    "execution_manifest_sha256": cleanup_execution_hash,
+                    "environment_instance_id": state["environment_instance_id"],
+                    "control_plane_identity_sha256": state["control_identity"],
+                    "cleanup_started_at": _timestamp(cleanup_started),
+                    "cleanup_finished_at": _timestamp(cleanup_finished),
+                    "attempt_number": 1,
+                    "cleanup_state": (
+                        "interrupted"
+                        if interrupt_state.signals
+                        else ("passed" if cleanup.completed else "failed")
+                    ),
+                    "exit_code": cleanup.exit_code,
+                    "stdout": cleanup_stdout.decode("utf-8", errors="replace"),
+                    "stdout_sha256": _sha256_bytes(cleanup_stdout),
+                    "stderr": cleanup_stderr.decode("utf-8", errors="replace"),
+                    "stderr_sha256": _sha256_bytes(cleanup_stderr),
+                    "cleanup_completed": cleanup.completed,
+                    "resources": [item.as_record() for item in cleanup.resources],
+                    "label_query_remaining": list(cleanup.label_query_remaining),
+                }
+                try:
+                    cleanup_ref, cleanup_hash = _environment_evidence_ref(
+                        stage_root=stage_root,
+                        attestation_id=attestation_id,
+                        profile_id=profile_id,
+                        artifact_kind="cleanup_manifest",
+                        facts=cleanup_facts,
+                        suffix="attempt-001",
+                    )
+                except BaseException as exc:
+                    cleanup_record_error = exc
+                    if execution_error is None:
+                        execution_error = exc
+
+    if interrupt_state.signals and execution_state == "complete":
+        execution_state = "interrupted"
+        execution_error = _ExecutionInterrupted(interrupt_state.signals[0])
+    finalizable = (
+        execution_state == "complete"
+        and manifest_error is None
+        and cleanup_record_error is None
+        and execution_ref is not None
+        and execution_hash is not None
+        and cleanup_ref is not None
+        and cleanup_hash is not None
+        and cleanup is not None
+        and cleanup.completed
+        and not interrupt_state.signals
+    )
+    if not finalizable:
+        reason = (
+            f"{type(execution_error).__name__}:{execution_error}"
+            if execution_error is not None
+            else "cleanup_or_manifest_not_proven"
         )
-        require_exact_clean_source(root, source_commit, stage_root)
-    session_finished = _utc_now()
+        reason_bytes = reason.encode("utf-8", errors="replace")
+        reason_bytes, _ = controller.redact_durable_output(reason_bytes)
+        raise AssuranceExecutionError(
+            f"session_not_finalizable:{execution_state}:"
+            f"{reason_bytes.decode('utf-8', errors='replace')}"
+        )
+
+    assert results_hash is not None
+    assert execution_ref is not None and execution_hash is not None
+    assert cleanup_ref is not None and cleanup_hash is not None
+    environments = [
+        _build_final_environment(
+            root=root,
+            source_commit=source_commit,
+            stage_root=stage_root,
+            attestation_id=attestation_id,
+            profile=profile,
+            admission=state["admission"],
+            prepared=state["prepared"],
+            docker_version=state["docker_version"],
+            source_snapshot_sha256=source_snapshot_sha256,
+            execution_admission_sha256=admission_hash,
+            execution_admission_archive_ref=state["admission_archive_ref"],
+            execution_admission_archive_hash=state["admission_archive_hash"],
+            draft_ref=state["draft_ref"],
+            draft_hash=state["draft_hash"],
+            execution_ref=execution_ref,
+            execution_hash=execution_hash,
+            cleanup_ref=cleanup_ref,
+            cleanup_hash=cleanup_hash,
+            proof_results_hash=results_hash,
+            environment_instance_id=state["environment_instance_id"],
+            control_plane_identity_sha256=state["control_identity"],
+        )
+    ]
     attestation = {
         "schema_version": guarantees.ATTESTATION_SCHEMA_VERSION,
         "attestation_id": attestation_id,
@@ -1465,9 +2869,9 @@ def run_attestation(
             ),
         },
         "inputs": _attestation_inputs(bundle, source_commit),
-        "environments": [prepared[item].environment for item in used_profile_ids],
+        "environments": environments,
         "started_at": _timestamp(session_started),
-        "finished_at": _timestamp(session_finished),
+        "finished_at": _timestamp(cleanup_finished),
         "proof_results": proof_results,
         "guarantee_results": derive_guarantee_results(
             bundle.registry, bundle.proof_catalog, proof_results
@@ -1486,13 +2890,18 @@ def run_attestation(
         / source_commit
         / f"{attestation_id}.json"
     )
-    attestation_path.parent.mkdir(parents=True, exist_ok=True)
-    if attestation_path.exists():
-        raise AssuranceExecutionError(f"staged_attestation_already_exists:{attestation_path}")
-    attestation_path.write_bytes(
-        json.dumps(attestation, indent=2, ensure_ascii=False, sort_keys=False).encode("utf-8")
-        + b"\n"
+    _write_immutable_bytes(
+        attestation_path,
+        json.dumps(
+            attestation, indent=2, ensure_ascii=False, sort_keys=False
+        ).encode("utf-8")
+        + b"\n",
     )
+    for directory in (private_session_root / profile_id, private_session_root):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
     return attestation_path
 
 
@@ -1505,6 +2914,165 @@ def validate_staged(
     )
 
 
+def inspect_execution_admission(
+    *,
+    root: Path,
+    source_commit: str,
+    docker_path: Path,
+    runner_image: str,
+    runner_build_definition: str,
+    selected_profile_ids: Sequence[str],
+    output_path: Path,
+) -> Path:
+    """Emit a read-only, deliberately non-approvable admission review packet."""
+
+    root = root.resolve()
+    output_path = output_path.resolve()
+    if _is_within(output_path, root):
+        raise AssuranceExecutionError("admission_inspection_output_must_be_outside_source")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise AssuranceExecutionError("admission_inspection_source_commit_invalid")
+    require_exact_clean_source(root, source_commit, output_path.parent)
+    bundle = guarantees.validate_repository(root=root)
+    profile_by_id = {
+        item["id"]: item for item in bundle.proof_catalog["environment_profiles"]
+    }
+    selected = sorted(set(selected_profile_ids))
+    if not selected:
+        raise AssuranceExecutionError("admission_inspection_profile_required")
+    unknown = sorted(set(selected) - set(profile_by_id))
+    if unknown:
+        raise AssuranceExecutionError(
+            "admission_inspection_profile_unknown:" + ",".join(unknown)
+        )
+    if any(
+        profile_by_id[item]["execution_class"]
+        not in {"isolated_container", "isolated_database"}
+        for item in selected
+    ):
+        raise AssuranceExecutionError(
+            "admission_inspection_automated_profiles_only"
+        )
+    resolved_docker = docker_path.resolve()
+    if not resolved_docker.is_file():
+        raise AssuranceExecutionError("admission_inspection_docker_unavailable")
+    build_hash = guarantees._bound_material_sha256(
+        root, runner_build_definition, git_commit=source_commit
+    )
+    build_bytes = guarantees._bound_material_bytes(
+        root, runner_build_definition, git_commit=source_commit
+    )
+    base_digests = sorted(
+        {
+            f"sha256:{digest.decode('ascii')}"
+            for digest in re.findall(rb"@sha256:([0-9a-f]{64})", build_bytes)
+        }
+    )
+    probe = docker_lifecycle.DockerController(
+        admission={"docker_tool": {"resolved_path": str(resolved_docker)}},
+        root=root,
+        private_root=output_path.parent,
+        source_commit=source_commit,
+        attestation_id="QT-ATT-19700101T000000Z-000000000000-inspect",
+        profile_id=selected[0],
+        environment_instance_id="qt-admission-inspection",
+    )
+    _, daemon_identity, docker_version = probe.control_plane()
+    runner = probe._image_inspect(runner_image)
+    runner_image_id = runner.get("Id")
+    runner_platform = f"{runner.get('Os')}/{runner.get('Architecture')}"
+    if not isinstance(runner_image_id, str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", runner_image_id
+    ):
+        raise AssuranceExecutionError("admission_inspection_runner_image_id_invalid")
+    if runner_platform != "linux/amd64":
+        raise AssuranceExecutionError("admission_inspection_runner_platform_unsupported")
+    labels = (runner.get("Config") or {}).get("Labels") or {}
+    if labels.get(docker_lifecycle.BUILD_DEFINITION_LABEL) != build_hash:
+        raise AssuranceExecutionError(
+            "admission_inspection_runner_build_definition_label_mismatch"
+        )
+    profiles: list[dict[str, Any]] = []
+    for profile_id in selected:
+        profile = profile_by_id[profile_id]
+        service_images: dict[str, dict[str, str]] = {}
+        if profile["execution_class"] == "isolated_database":
+            definition = json.loads(
+                guarantees._bound_material_bytes(
+                    root,
+                    profile["runtime_definition"],
+                    git_commit=source_commit,
+                )
+            )
+            service = definition["service"]
+            reference = service["image"]
+            image_digest = "sha256:" + reference.rsplit("@sha256:", 1)[-1]
+            observed = probe._image_inspect(reference)
+            observed_id = observed.get("Id")
+            repo_digests = observed.get("RepoDigests") or []
+            if (
+                not isinstance(observed_id, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", observed_id)
+                or not any(
+                    isinstance(item, str) and item.endswith("@" + image_digest)
+                    for item in repo_digests
+                )
+            ):
+                raise AssuranceExecutionError(
+                    f"admission_inspection_service_image_unbound:{service['id']}"
+                )
+            service_images[service["id"]] = {
+                "reference": reference,
+                "image_id": observed_id,
+                "image_digest": image_digest,
+            }
+        profiles.append(
+            {
+                "profile_id": profile_id,
+                "admission_id": "<OWNER-REVIEW-REQUIRED>",
+                "environment_class": "isolated_test",
+                "isolation": "session_scoped",
+                "external_order_submission_enabled": False,
+                "runtime_definition": {
+                    "path": profile["runtime_definition"],
+                    "sha256": guarantees._bound_material_sha256(
+                        root,
+                        profile["runtime_definition"],
+                        git_commit=source_commit,
+                    ),
+                },
+                "docker_tool": {
+                    "resolved_path": str(resolved_docker),
+                    "version": docker_version,
+                    "executable_sha256": _sha256_file_binary(resolved_docker),
+                    "daemon_identity_sha256": daemon_identity,
+                },
+                "runner_image": {
+                    "image_id": runner_image_id,
+                    "platform": runner_platform,
+                    "base_image_digests": base_digests,
+                    "build_definition": {
+                        "path": runner_build_definition,
+                        "sha256": build_hash,
+                    },
+                },
+                "service_images": service_images,
+            }
+        )
+    packet = {
+        "schema_version": "qt.assurance_execution_admission_inspection.v1",
+        "review_required": True,
+        "generated_at": _timestamp(_utc_now()),
+        "candidate_execution_admission": {
+            "schema_version": EXECUTION_ADMISSION_SCHEMA_VERSION,
+            "source_commit": source_commit,
+            "profiles": profiles,
+        },
+    }
+    _write_immutable_bytes(output_path, _canonical_json_bytes(packet))
+    return output_path
+
+
 def _cli() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
@@ -1512,9 +3080,19 @@ def _cli() -> int:
     run_parser = subparsers.add_parser("run", help="execute selected admitted profiles")
     run_parser.add_argument("--source-commit", required=True)
     run_parser.add_argument("--stage-root", type=Path, required=True)
-    run_parser.add_argument("--admission-evidence-root", type=Path, required=True)
-    run_parser.add_argument("--admission-manifest", type=Path, required=True)
+    run_parser.add_argument("--private-root", type=Path, required=True)
+    run_parser.add_argument("--execution-admission", type=Path, required=True)
     run_parser.add_argument("--profile", action="append", required=True)
+    inspect_parser = subparsers.add_parser(
+        "inspect-admission",
+        help="write a read-only, owner-review-required execution-admission skeleton",
+    )
+    inspect_parser.add_argument("--source-commit", required=True)
+    inspect_parser.add_argument("--docker", type=Path, required=True)
+    inspect_parser.add_argument("--runner-image", required=True)
+    inspect_parser.add_argument("--runner-build-definition", required=True)
+    inspect_parser.add_argument("--profile", action="append", required=True)
+    inspect_parser.add_argument("--output", type=Path, required=True)
     validate_parser = subparsers.add_parser(
         "validate-staged", help="historically validate an externally staged attestation"
     )
@@ -1527,9 +3105,20 @@ def _cli() -> int:
                 root=args.root,
                 source_commit=args.source_commit,
                 stage_root=args.stage_root,
-                admission_evidence_root=args.admission_evidence_root,
-                admission_manifest=args.admission_manifest,
+                private_root=args.private_root,
+                execution_admission=args.execution_admission,
                 selected_profile_ids=args.profile,
+            )
+            print(path)
+        elif args.command == "inspect-admission":
+            path = inspect_execution_admission(
+                root=args.root,
+                source_commit=args.source_commit,
+                docker_path=args.docker,
+                runner_image=args.runner_image,
+                runner_build_definition=args.runner_build_definition,
+                selected_profile_ids=args.profile,
+                output_path=args.output,
             )
             print(path)
         else:
@@ -1542,7 +3131,11 @@ def _cli() -> int:
                 "staged attestation valid: "
                 f"{validated['attestation_id']} at {validated['source']['git_commit']}"
             )
-    except (AssuranceExecutionError, guarantees.GuaranteeValidationError) as exc:
+    except (
+        AssuranceExecutionError,
+        docker_lifecycle.DockerLifecycleError,
+        guarantees.GuaranteeValidationError,
+    ) as exc:
         print(f"assurance_execution_failed:{exc}", file=sys.stderr)
         return 1
     return 0
