@@ -2043,10 +2043,20 @@ def _output_tag_absent(
         result = controller._call(["image", "inspect", output_tag], check=False)
     except docker_lifecycle.DockerLifecycleError as exc:
         raise RunnerBuildError(f"output_tag_preflight_failed:{exc}") from exc
-    if result.exit_code == 0:
+    if type(result.exit_code) is int and result.exit_code == 0:
         raise RunnerBuildError("output_tag_preexisting")
-    stderr = result.stderr.decode("utf-8", errors="replace")
-    if result.exit_code != 1 or result.stdout or "No such image" not in stderr:
+    expected_stderr = (
+        b"Error response from daemon: No such image: "
+        + output_tag.encode("ascii")
+        + b"\n"
+    )
+    if (
+        result.timed_out is not False
+        or type(result.exit_code) is not int
+        or result.exit_code != 1
+        or result.stdout != b"[]\n"
+        or result.stderr != expected_stderr
+    ):
         raise RunnerBuildError("output_tag_absence_ambiguous")
 
 

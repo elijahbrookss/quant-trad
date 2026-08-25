@@ -27,6 +27,7 @@ from scripts.assurance import docker_lifecycle
 SOURCE_COMMIT = "a" * 40
 SOURCE_TREE = "b" * 40
 OUTPUT_IMAGE_ID = "sha256:" + "9" * 64
+OUTPUT_TAG = "qt-assurance-runtime:test"
 
 
 def test_cli_help_is_directly_executable() -> None:
@@ -658,11 +659,13 @@ def _fake_docker_control(
     labels: Mapping[str, str],
     daemon_ids: list[str] | None = None,
     preexisting: bool = False,
+    ambiguous_absence_call: int | None = None,
 ) -> tuple[dict[str, Any], docker_lifecycle.CommandRunner]:
     state: dict[str, Any] = {
         "built": preexisting,
         "info_calls": 0,
         "commands": [],
+        "output_absence_calls": 0,
     }
     base_by_reference = {
         base["reference"]: {
@@ -716,8 +719,18 @@ def _fake_docker_control(
                     "Config": {"Labels": dict(labels)},
                 }
             else:
+                if token == output_tag:
+                    state["output_absence_calls"] += 1
+                    if state["output_absence_calls"] == ambiguous_absence_call:
+                        return docker_lifecycle.CommandResult(
+                            b"",
+                            f"Error response from daemon: No such image: {token}\n".encode(),
+                            1,
+                        )
                 return docker_lifecycle.CommandResult(
-                    b"", f"Error: No such image: {token}\n".encode(), 1
+                    b"[]\n",
+                    f"Error response from daemon: No such image: {token}\n".encode(),
+                    1,
                 )
             return docker_lifecycle.CommandResult(
                 json.dumps([payload]).encode(), b"", 0
@@ -816,16 +829,18 @@ def _build_bundle(
     preexisting: bool = False,
     daemon_ids: list[str] | None = None,
     mutate_context_during_build: bool = False,
+    ambiguous_absence_call: int | None = None,
 ) -> tuple[dict[str, Any], Path, Path, dict[str, Any], dict[str, Any]]:
     contract, materialized, _, receipt = _materialize(tmp_path, monkeypatch)
     labels = build_runner._expected_build_labels(contract, receipt)
-    output_tag = "qt-assurance-runtime:test"
+    output_tag = OUTPUT_TAG
     state, control_runner = _fake_docker_control(
         contract=contract,
         output_tag=output_tag,
         labels=labels,
         daemon_ids=daemon_ids,
         preexisting=preexisting,
+        ambiguous_absence_call=ambiguous_absence_call,
     )
     monkeypatch.setattr(docker_lifecycle, "_default_command_runner", control_runner)
     docker = tmp_path / "docker"
@@ -1015,6 +1030,77 @@ def test_build_rejects_preexisting_output_tag_before_mutation(
         _build_bundle(tmp_path, monkeypatch, preexisting=True)
 
 
+def test_output_tag_absence_accepts_exact_docker_not_found() -> None:
+    class Controller:
+        def _call(
+            self, args: list[str], *, check: bool
+        ) -> docker_lifecycle.CommandResult:
+            assert args == ["image", "inspect", OUTPUT_TAG]
+            assert check is False
+            return docker_lifecycle.CommandResult(
+                b"[]\n",
+                f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(),
+                1,
+            )
+
+    build_runner._output_tag_absent(Controller(), OUTPUT_TAG)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "exit_code", "timed_out"),
+    [
+        (b"", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 1, False),
+        (b"[]", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 1, False),
+        (b" []\n", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 1, False),
+        (b"{}", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 1, False),
+        (b"[]\n", f"Error: No such image: {OUTPUT_TAG}\n".encode(), 1, False),
+        (b"[]\n", b"Error response from daemon: No such image: another:tag\n", 1, False),
+        (b"[]\n", f"Error response from daemon: No such image: {OUTPUT_TAG}".encode(), 1, False),
+        (
+            b"[]\n",
+            f"Error response from daemon: No such image: {OUTPUT_TAG}\nextra\n".encode(),
+            1,
+            False,
+        ),
+        (b"[]\n", b"\xff", 1, False),
+        (b"[]\n", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 2, False),
+        (b"[]\n", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 125, False),
+        (b"[]\n", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 127, False),
+        (b"[]\n", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), 1, True),
+        (b"[]\n", f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(), False, False),
+    ],
+)
+def test_output_tag_absence_rejects_ambiguous_responses(
+    stdout: bytes, stderr: bytes, exit_code: int | bool, timed_out: bool
+) -> None:
+    class Controller:
+        def _call(
+            self, _args: list[str], *, check: bool
+        ) -> docker_lifecycle.CommandResult:
+            assert check is False
+            return docker_lifecycle.CommandResult(stdout, stderr, exit_code, timed_out)
+
+    with pytest.raises(build_runner.RunnerBuildError, match="output_tag_absence_ambiguous"):
+        build_runner._output_tag_absent(Controller(), OUTPUT_TAG)
+
+
+def test_output_tag_exit_zero_is_preexisting_even_with_absence_payload() -> None:
+    class Controller:
+        def _call(
+            self, args: list[str], *, check: bool
+        ) -> docker_lifecycle.CommandResult:
+            assert args == ["image", "inspect", OUTPUT_TAG]
+            assert check is False
+            return docker_lifecycle.CommandResult(
+                b"[]\n",
+                f"Error response from daemon: No such image: {OUTPUT_TAG}\n".encode(),
+                0,
+            )
+
+    with pytest.raises(build_runner.RunnerBuildError, match="output_tag_preexisting"):
+        build_runner._output_tag_absent(Controller(), OUTPUT_TAG)
+
+
 def test_build_rejects_daemon_change_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1065,6 +1151,23 @@ def test_failed_build_is_recorded_only_without_partial_tag(
             require_success=True,
             verify_external=False,
         )
+
+
+@pytest.mark.parametrize("ambiguous_absence_call", [3, 4])
+def test_failed_build_with_ambiguous_postbuild_absence_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ambiguous_absence_call: int,
+) -> None:
+    with pytest.raises(build_runner.RunnerBuildError, match="output_tag_absence_ambiguous"):
+        _build_bundle(
+            tmp_path,
+            monkeypatch,
+            build_exit=1,
+            ambiguous_absence_call=ambiguous_absence_call,
+        )
+    assert not list(tmp_path.rglob(build_runner.DEFAULT_BUILD_RECORD_NAME))
+    assert not list(tmp_path.rglob(build_runner.DEFAULT_BUILD_LOG_NAME))
 
 
 def test_failed_build_with_partial_tag_is_rejected_without_record(
