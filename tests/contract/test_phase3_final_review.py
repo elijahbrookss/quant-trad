@@ -531,6 +531,44 @@ def test_remote_develop_ref_rejects_stale_tracking_state(monkeypatch) -> None:
         )
 
 
+def test_slice_evidence_requires_complete_named_commit_footprint(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        final_review.subprocess,
+        "run",
+        lambda *args, **kwargs: object(),
+    )
+
+    def git_text(_root, *args, where):
+        assert args[:6] == (
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "b" * 40,
+        ), where
+        return "docs/one.md\ndocs/two.md"
+
+    monkeypatch.setattr(final_review, "_git_text", git_text)
+    with pytest.raises(
+        final_review.FinalReviewError,
+        match="missing_commit_footprint:docs/two.md",
+    ):
+        final_review._verify_slice_evidence(
+            final_review.ROOT,
+            "a" * 40,
+            [
+                {
+                    "id": "QT-P3-SLICE-TEST",
+                    "commits": ["b" * 40],
+                    "files": ["docs/one.md"],
+                }
+            ],
+        )
+
+
 def test_multiple_attestations_resolve_only_the_owning_profile_result() -> None:
     catalog = [
         {

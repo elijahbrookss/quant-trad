@@ -553,6 +553,9 @@ def _verify_slice_evidence(root: Path, source_commit: str, slices: Sequence[Mapp
         return
     for slice_row in slices:
         slice_id = slice_row["id"]
+        listed_files = set(slice_row["files"])
+        changed_files: set[str] = set()
+        previous_commit: str | None = None
         for commit in slice_row["commits"]:
             try:
                 subprocess.run(
@@ -571,6 +574,34 @@ def _verify_slice_evidence(root: Path, source_commit: str, slices: Sequence[Mapp
                 )
             except (OSError, subprocess.CalledProcessError) as exc:
                 _fail(f"{slice_id}:commit_not_in_source_lineage:{commit}:{exc}")
+            if previous_commit is not None:
+                _is_ancestor(
+                    root,
+                    previous_commit,
+                    commit,
+                    f"{slice_id}:commit_order",
+                )
+            changed_files.update(
+                line
+                for line in _git_text(
+                    root,
+                    "diff-tree",
+                    "--root",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    commit,
+                    where=f"{slice_id}:commit_footprint:{commit}",
+                ).splitlines()
+                if line
+            )
+            previous_commit = commit
+        missing_changed_files = sorted(changed_files - listed_files)
+        if missing_changed_files:
+            _fail(
+                f"{slice_id}:files:missing_commit_footprint:"
+                + ",".join(missing_changed_files)
+            )
         for repo_path in slice_row["files"]:
             try:
                 subprocess.run(
@@ -788,9 +819,11 @@ def _validate_policy(
             for commit in commits
         ):
             _fail(f"{where}.commits:invalid")
+        if len(commits) != len(set(commits)):
+            _fail(f"{where}.commits:duplicate")
         files = _expect_list(row["files"], f"{where}.files")
-        if not files or files != sorted(files):
-            _fail(f"{where}.files:must_be_nonempty_sorted")
+        if not files or files != sorted(files) or len(files) != len(set(files)):
+            _fail(f"{where}.files:must_be_nonempty_sorted_unique")
         guarantee_selector = row.get("guarantee_selector", "listed")
         remediation_selector = row.get("remediation_selector", "listed")
         if guarantee_selector not in {"listed", "all"}:
