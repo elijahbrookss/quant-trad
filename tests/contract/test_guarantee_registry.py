@@ -2203,7 +2203,9 @@ def test_checked_in_phase_2b_snapshot_preserves_authorization_ceiling() -> None:
     assert sum(entry["status"] == "proposed" for entry in term_entries.values()) == 34
     assert sum(entry["status"] == "blocked" for entry in term_entries.values()) == 2
     assert sum(entry["status"] == "deferred" for entry in term_entries.values()) == 19
-    assert guarantees._adopted_term_entries(guarantees.ROOT) == {}
+    adopted_term_entries = guarantees._adopted_term_entries(guarantees.ROOT)
+    assert len(adopted_term_entries) == 53
+    assert set(term_entries) - set(adopted_term_entries) == {"QT-TERM-035", "QT-TERM-055"}
 
 
 def test_checked_in_phase_2b_review_map_is_complete_and_nonactivating() -> None:
