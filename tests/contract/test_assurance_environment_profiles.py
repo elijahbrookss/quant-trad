@@ -24,7 +24,10 @@ def test_frontend_profile_uses_only_pinned_node_and_python_images() -> None:
     assert f"node@sha256:{NODE_DIGEST}" in dockerfile
     assert f"python@sha256:{PYTHON_DIGEST}" in dockerfile
     assert "COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node" in dockerfile
-    assert "RUN python --version && node --version" in dockerfile
+    assert "COPY requirements.lock /opt/qt-assurance/requirements.lock" in dockerfile
+    assert "python -m pip install --no-cache-dir --no-deps" in dockerfile
+    assert "python -m pip check" in dockerfile
+    assert "node --version" in dockerfile
     assert "apt-get" not in dockerfile
     assert "curl" not in dockerfile
     assert "wget" not in dockerfile

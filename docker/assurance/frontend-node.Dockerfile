@@ -7,9 +7,18 @@ FROM ${PYTHON_IMAGE}
 
 COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 WORKDIR /workspace
 
-RUN python --version && node --version
+COPY requirements.lock /opt/qt-assurance/requirements.lock
+RUN python -m pip install --no-cache-dir --no-deps \
+      -r /opt/qt-assurance/requirements.lock \
+    && python -m pip check \
+    && python --version \
+    && node --version
 
 ENTRYPOINT []
 CMD ["node", "--version"]
