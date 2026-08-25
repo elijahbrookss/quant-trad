@@ -141,6 +141,26 @@ The split read surface is for agents, CLI, MCP, and UI inspection. Runtime truth
 still comes from compiled strategy specs and run snapshots, not from frontend
 state or ad hoc route joins.
 
+## Strategy Market Identity
+
+Canonical linked instrument records and their canonical source identities
+control runtime market-data routing. Strategy `datasource` and `exchange`
+values are input defaults and lookup hints only; they never override a linked
+canonical instrument.
+
+Strategy create, update, and clone writes reject `provider_id` and `venue_id`
+at every depth, including inside instrument-slot metadata. Those identifiers
+belong to provider selection, credential scope, and instrument admission, not
+to Strategy persistence or API contracts.
+
+Aliases may assist instrument lookup only at an explicit adapter boundary.
+Alias translation must not replace, rewrite, or take precedence over a linked
+canonical instrument or its source identity.
+
+Historical persisted rows and bootstrap paths may continue to read legacy
+market-identity aliases for compatibility. That read compatibility does not
+make the aliases valid on a current Strategy write path.
+
 The full preview artifact remains the inspection surface. CLI and agent
 workflows should default to `strategy_preview_summary.v1`; consumers should ask
 for the full preview only when they need machine decisions, overlays, or signal
