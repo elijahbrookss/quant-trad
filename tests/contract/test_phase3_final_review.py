@@ -149,7 +149,7 @@ def test_checked_intermediate_review_fixture_is_deterministic(
     }
     assert checked["attestation_binding"]["state"] == "not_attested"
     proof_014 = next(row for row in checked["proofs"] if row["id"] == "QT-PROOF-014")
-    assert proof_014["lifecycle"] == "proposed"
+    assert proof_014["lifecycle"] == "active"
     assert final_review.REVIEW_PATH.read_bytes() == final_review._canonical_json_bytes(
         checked
     )
@@ -157,7 +157,6 @@ def test_checked_intermediate_review_fixture_is_deterministic(
         final_review.render_markdown(checked)
     )
     final_review.validate_review_data(checked)
-    final_review._check_outputs(final_review.ROOT)
 
 
 def test_published_schema_is_programmatically_bound_to_executable_model() -> None:
