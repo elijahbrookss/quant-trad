@@ -76,6 +76,30 @@ The v2 adapters used by the primary rooms issue GET requests only. A rerun
 option copies the canonical `qt bots start ... --dataset-id ...` command; it
 does not start a run from the browser.
 
+## Supported Source And Validation Topology
+
+The V2 read-only-surface scan covers the exact routed source roots:
+
+- `portal/frontend/src/v2`;
+- `portal/frontend/src/features/overview`;
+- `portal/frontend/src/features/operations`;
+- `portal/frontend/src/features/collectors`;
+- `portal/frontend/src/features/bots/botlens`.
+
+A declared root that does not exist is a contract failure, not an empty surface.
+The primary Overview and Operations rooms remain GET/read-only. A routed
+collector lens requests lifecycle actions only through the canonical backend
+collector-operation endpoint owned by `CollectorOperationsService`; the
+frontend does not acquire lifecycle authority by presenting that action.
+
+Frontend validation keeps two explicit test families. `npm run test:node` runs
+the Node-native model, adapter, and source-contract suites. `npm run test:jsx`
+runs the two tracked React component suites through the pinned Vitest/jsdom
+profile. `npm test` runs both families, and `make frontend-check` adds the Vite
+production build. These are bounded source, component, and compile checks. They
+do not provide a real backend, browser/E2E coverage, production or live-system
+proof, or guarantee activation.
+
 ## Navigation And Visual Language
 
 The shell uses a persistent left rail with only **Overview** and **Operations**.

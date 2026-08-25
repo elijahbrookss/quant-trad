@@ -55,9 +55,12 @@ The workflow steps are:
    `npm --prefix portal/frontend ci`; and
 4. `Test and build production frontend` with `make frontend-check`.
 
-`frontend-check` invokes the package's current `npm test` command and the Vite
-production build. It does not run lint, a browser, or tests that the current
-package test command does not discover.
+`frontend-check` invokes the package's `npm test` command and the Vite
+production build. `npm test` runs the shell-free Node-native suite and the two
+explicitly tracked React component suites through the pinned Vitest/jsdom
+profile. It does not run lint, a real backend, a browser or cross-browser/E2E
+suite, production deployment, live collector or order activity, or
+accessibility conformance.
 
 ### 3. `deployment-contract`
 
