@@ -101,6 +101,20 @@ Runtime separates source identity from execution modeling:
   It may carry sparse-source classifications into diagnostics, but it must not
   accept a truncated replay as a completed backtest window.
 
+## Execution-Quality Vocabulary
+
+X0 through X5 are QT's complete execution-model quality vocabulary. A pinned
+execution-model artifact declares only the highest class its mechanics can
+support; it never grants that class by itself. Runtime emits the immutable
+context and fill evidence from which reporting assigns the attained class at
+the weakest required evidence boundary. Missing or contradictory context
+forces X0.
+
+X3 and X4 require causal, replay-certified book evidence for spread and visible
+depth respectively. X5 additionally requires that the pinned bounded passive
+queue and latency model was actually exercised. No X class claims
+venue-realized fill probability, calibrated live behavior, or live realism.
+
 ## Position Lifecycle And Order Semantics
 
 ATM templates declare position lifecycle intent; runtime executes that intent.
