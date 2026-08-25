@@ -5,8 +5,12 @@ This file is the **entry point for all agents and contributors**.
 It defines the expectations, principles, and engineering discipline required
 to work safely inside the Quant-Trad codebase.
 
-If behavior conflicts with this document or the docs under `docs/contracts/`,
-the code is wrong.
+This file owns contributor and agent workflow. Product behavior is owned by the
+platform contracts under `docs/contracts/`. This file may summarize those
+rules, but it cannot override a platform contract or independently activate a
+guarantee. If code conflicts with either source inside that source's scope, the
+code is wrong; if workflow guidance and a platform contract disagree about
+product behavior, the platform contract wins.
 
 ---
 
@@ -150,10 +154,15 @@ Avoid switch statements in core services.
 Use registries and explicit registration instead.
 
 ### Schema Expectations
-- No runtime migrations or backfills live in the codebase.
-- If a table is missing, create it once and log a WARN so operators know it was provisioned.
-- If columns are missing, fail loud with an actionable error; do not attempt to patch or alter in-place.
-- All schema changes must come from clean table definitions (drop/recreate out-of-band if needed).
+- Runtime must not perform implicit migrations or data backfills.
+- Current ORM/model definitions are the canonical clean-schema description.
+  Startup bootstrap may create missing clean-model tables and enforce only the
+  explicitly reviewed bootstrap clauses owned by the persistence boundary.
+- If existing columns disagree with the current contract, fail loud with an
+  actionable error; do not silently patch or alter them in place.
+- Existing deployments change through explicit, reviewed operator cutovers
+  outside runtime. Preserve their manual SQL and runbooks as historical and
+  operational evidence; they do not outrank the current model contract.
 
 ---
 

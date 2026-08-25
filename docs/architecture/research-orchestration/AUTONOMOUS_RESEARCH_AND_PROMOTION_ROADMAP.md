@@ -37,11 +37,13 @@ code_paths:
 
 ## Status and assessment boundary
 
-This is the ratified governing cross-boundary roadmap. Unimplemented phases
-remain direction rather than implementation truth, and this document is never an
-authorization to submit external orders. It records the repository state
-inspected on 2026-08-05 and defines the evidence and enforcement that must exist
-before permissions expand.
+This is a ratified explanatory cross-boundary roadmap. Unimplemented phases
+remain direction rather than implementation truth, and this document is never
+product authority or an authorization to submit external orders. Platform
+contracts own product behavior; accepted ADRs record reviewed decisions within
+that hierarchy. This roadmap records the repository state inspected on
+2026-08-05 and proposes the evidence and enforcement that would have to be
+approved before permissions expand.
 
 The assessment treated documentation as intent and traced executable paths,
 composition roots, persisted contracts, reports, experiment orchestration, and
@@ -950,10 +952,11 @@ promotion states are structurally absent.
 
 ## Autonomy ladder
 
-This matrix is normative. Existing endpoints that technically allow more do not
-grant authority; they are enforcement gaps to close in Phase 6. “Certify” below
-always means request an independent deterministic certifier, never write or sign
-one's own certificate.
+This matrix is an explanatory planning model, not a normative permission
+source. Existing endpoints that technically allow more do not grant authority;
+future expansion requires a separately approved contract/decision and its
+enforcement. “Certify” below always means request an independent deterministic
+certifier, never write or sign one's own certificate.
 
 | Boundary | Observe | Propose | Create | Mutate | Execute | Compare | Certify | Promote | Deploy |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
