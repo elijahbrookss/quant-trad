@@ -48,8 +48,10 @@ which identifiers carry meaning across boundaries.
 - [Creating a strategy](guides/creating-a-strategy.md): typed-output decision flow and test expectations.
 - [Adding a provider](guides/adding-a-provider.md): adapter, explicit intake, known-at, provider-gap, and test expectations.
 - [Binance futures public data setup](guides/binance-futures-public-data.md): target setup and ingestion contract for archive-backed USD-M perpetual research data.
-- [BTC PERP market-structure campaign V1](research-campaigns/BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V1.md): invalidated and archived pre-trial activation record.
-- [BTC PERP market-structure campaign V2](research-campaigns/BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V2.md): replacement sealed, provider-free charter for QT's first bounded autonomous research operation.
+- BTC PERP market-structure campaigns V1/V2: the historical source documents are
+  unavailable in this repository. Their absence is retained as a lineage gap;
+  [the V3 historical postmortem](research-campaigns/BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V3_DOSSIER.md)
+  is the retained successor record and does not reconstruct V1 or V2.
 - [Coinbase derivatives paper setup](guides/coinbase-derivatives-paper-setup.md): target setup for Coinbase product metadata, WebSockets, and provider-backed paper runs.
 
 ## Contracts

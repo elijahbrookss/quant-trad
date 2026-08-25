@@ -71,6 +71,8 @@ docs/architecture/
   data/
     DATA_BOUNDARY.md
     diagrams/
+  cli/
+    CLI_SETUP_BOUNDARY.md
   indicator-runtime/
     INDICATOR_RUNTIME_BOUNDARY.md
     diagrams/
@@ -86,12 +88,16 @@ docs/architecture/
   botlens-projections/
     BOTLENS_PROJECTION_BOUNDARY.md
     diagrams/
+  frontend/
+    OPERATOR_CONSOLE_V2.md
   persistence/
     PERSISTENCE_BOUNDARY.md
     diagrams/
   reporting/
     REPORTING_BOUNDARY.md
     diagrams/
+  research-memory/
+    RESEARCH_MEMORY_BOUNDARY.md
   observability/
     OBSERVABILITY_BOUNDARY.md
     diagrams/
@@ -109,11 +115,18 @@ through `make architecture-svgs`, which writes each SVG beside its `.mmd` source
 in the local `diagrams/` folder. The source `.mmd` files remain canonical; the
 nearby SVGs are for quick reference while reading.
 
+Repository-level assets whose source or generator is not established are
+tracked separately in [documentation asset lineage](../assets/README.md). Their
+presence does not make them generated architecture derivatives.
+
 ## Entry Points
 
 - [Architecture README](README.md) is the navigation hub.
 - [System model](system/SYSTEM_MODEL.md) is the end-to-end architecture overview.
 - [Engine state model](engine/ENGINE_STATE_MODEL.md) explains the deterministic walk-forward contract.
+- [CLI setup boundary](cli/CLI_SETUP_BOUNDARY.md) explains local readiness and provider onboarding.
+- [Operator Console v2](frontend/OPERATOR_CONSOLE_V2.md) explains the bounded human inspection surface.
+- [Research memory boundary](research-memory/RESEARCH_MEMORY_BOUNDARY.md) explains the reasoning trail around research and runtime artifacts.
 - [Architecture decision records](decisions/README.md) explain durable decisions and tradeoffs.
 - [Architecture component index](ARCHITECTURE_COMPONENT_INDEX.md) is generated from frontmatter and should not be edited by hand.
 
@@ -132,7 +145,6 @@ Important current facts from those files were preserved in the relevant boundary
 
 ## Remaining Gaps
 
-- Frontend operator surfaces beyond BotLens are not modeled as a dedicated architecture boundary yet.
 - Paper/live runtime mode behavior is documented only as a composition seam because backtest is the implemented runtime shape today.
 - Identity keys are spread across strategy, runtime events, database rows, and projection code. The new identity doc explains current relationships, but the code does not yet have a single identity registry.
 - Provider session/calendar truth is still limited. Unknown gaps should remain unknown until explicit session evidence exists.

@@ -73,7 +73,7 @@ respect.
 | [0045](0045-require-explicit-execution-and-exit-policy.md) | Require explicit execution and exit policy | Accepted, retroactive cleanup |
 | [0046](0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md) | Fingerprint exact candle inputs and keep quality separate | Accepted, retroactive cleanup |
 | [0047](0047-fence-async-job-ownership.md) | Fence async job ownership | Accepted |
-| [0048](0048-gate-agent-mutation-and-research-promotion.md) | Gate agent mutation and research promotion | Proposed |
+| [0048](0048-gate-agent-mutation-and-research-promotion.md) | Gate agent mutation and research promotion | Accepted |
 | [0049](0049-keep-live-order-submission-closed.md) | Keep live order submission closed | Accepted, retroactive cleanup |
 | [0050](0050-use-one-canonical-append-only-market-data-store.md) | Use one canonical append-only market-data store | Accepted, retroactive cleanup |
 | [0051](0051-require-frozen-datasets-for-canonical-backtests.md) | Require frozen datasets for canonical backtests | Accepted |

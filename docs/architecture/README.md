@@ -50,6 +50,9 @@ Generated architecture SVGs are written beside the `.mmd` files in each local
 `diagrams/` folder. The `.mmd` files remain the diagram sources of record; the
 SVGs are the quick-reference files to open while reading nearby docs.
 
+Repository-wide asset lineage, including retained files with unknown sources,
+is recorded in [documentation asset lineage](../assets/README.md).
+
 ## Boundary Map
 
 | Boundary | Canonical Entry | Owns |
@@ -58,6 +61,7 @@ SVGs are the quick-reference files to open while reading nearby docs.
 | Engine | [engine/ENGINE_STATE_MODEL.md](engine/ENGINE_STATE_MODEL.md) | Known-at state-machine discipline across indicators, decisions, and runtime |
 | Identity | [identity/IDENTITY_AND_CORRELATION_BOUNDARY.md](identity/IDENTITY_AND_CORRELATION_BOUNDARY.md) | Stable IDs, event correlation, lineage keys |
 | Data | [data/DATA_BOUNDARY.md](data/DATA_BOUNDARY.md) | Providers, candles, instruments, cache, continuity, source gaps |
+| CLI setup | [cli/CLI_SETUP_BOUNDARY.md](cli/CLI_SETUP_BOUNDARY.md) | Local readiness, provider onboarding, and operator-facing command composition |
 | Indicator runtime | [indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md](indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md) | Indicator state, typed outputs, overlays, detail projections |
 | Decision layer | [decision-layer/DECISION_LAYER_BOUNDARY.md](decision-layer/DECISION_LAYER_BOUNDARY.md) | Strategy compilation/evaluation, signals, guards, decision artifacts |
 | Regime context | [decision-layer/REGIME_CONTEXT_BOUNDARY.md](decision-layer/REGIME_CONTEXT_BOUNDARY.md) | Regime as indicator-produced decision context |
@@ -68,9 +72,11 @@ SVGs are the quick-reference files to open while reading nearby docs.
 | Runtime composition | [execution-runtime/RUNTIME_COMPOSITION_ROOT.md](execution-runtime/RUNTIME_COMPOSITION_ROOT.md) | Backend runtime wiring and mode-aware collaborator selection |
 | Wallet and capital | [execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md](execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md) | Capital reservation, fees, margin, settlement, shared-wallet ordering |
 | BotLens projections | [botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md](botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md) | Debug/read models over runtime truth |
+| Operator console | [frontend/OPERATOR_CONSOLE_V2.md](frontend/OPERATOR_CONSOLE_V2.md) | Bounded human inspection over backend read models, not alternate workflow truth |
 | Persistence | [persistence/PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) | Durable ledgers, repositories, replay support |
 | Reporting | [reporting/REPORTING_BOUNDARY.md](reporting/REPORTING_BOUNDARY.md) | RunResearchDataset, reports, compare, exports, diagnostics |
 | Research orchestration | [research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md](research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md) | API-backed CLI and future agent research workflows |
+| Research memory | [research-memory/RESEARCH_MEMORY_BOUNDARY.md](research-memory/RESEARCH_MEMORY_BOUNDARY.md) | Observations, hypotheses, studies, and linked check evidence as a reasoning trail, not runtime truth |
 | Security | [security/SECURITY_LAYER.md](security/SECURITY_LAYER.md) | Credential references, trust boundaries, hardening backlog |
 | Observability | [observability/OBSERVABILITY_BOUNDARY.md](observability/OBSERVABILITY_BOUNDARY.md) | Logs, metrics, diagnostics, Grafana/Loki surfaces |
 
