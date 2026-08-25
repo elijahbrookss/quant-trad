@@ -346,6 +346,9 @@
         "kind": {
           "const": "pytest"
         },
+        "required_executables": {
+          "$ref": "#/$defs/requiredExecutables"
+        },
         "selectors": {
           "items": {
             "pattern": "^[^:]+\\.py::.+$",
@@ -360,6 +363,17 @@
         "kind",
         "selectors"
       ],
+      "type": "object"
+    },
+    "requiredExecutables": {
+      "additionalProperties": {
+        "pattern": "^(?:>=|<=|==|>|<)[0-9]+(?:\\.[0-9]+)*(?:,(?:>=|<=|==|>|<)[0-9]+(?:\\.[0-9]+)*)*$",
+        "type": "string"
+      },
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-zA-Z0-9_.+-]+$"
+      },
       "type": "object"
     },
     "pythonRunner": {

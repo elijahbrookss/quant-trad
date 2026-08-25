@@ -75,12 +75,16 @@
         },
         "platform": {
           "const": "linux/amd64"
+        },
+        "build_definition": {
+          "$ref": "#/$defs/runtimeDefinition"
         }
       },
       "required": [
         "image_id",
         "platform",
-        "base_image_digests"
+        "base_image_digests",
+        "build_definition"
       ],
       "type": "object"
     },
@@ -169,6 +173,9 @@
     "serviceImage": {
       "additionalProperties": false,
       "properties": {
+        "image_id": {
+          "$ref": "#/$defs/imageDigest"
+        },
         "image_digest": {
           "$ref": "#/$defs/imageDigest"
         },
@@ -179,6 +186,7 @@
       },
       "required": [
         "reference",
+        "image_id",
         "image_digest"
       ],
       "type": "object"

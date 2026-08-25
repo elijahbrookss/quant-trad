@@ -49,6 +49,9 @@
         "execution_draft_sha256": {
           "$ref": "#/$defs/hash"
         },
+        "execution_admission_archive_sha256": {
+          "$ref": "#/$defs/hash"
+        },
         "execution_finished_at": {
           "$ref": "#/$defs/timestamp"
         },
@@ -78,12 +81,17 @@
         "source_commit": {
           "pattern": "^[0-9a-f]{40}$",
           "type": "string"
+        },
+        "source_snapshot_sha256": {
+          "$ref": "#/$defs/hash"
         }
       },
       "required": [
         "record_schema_version",
         "attestation_id",
         "source_commit",
+        "source_snapshot_sha256",
+        "execution_admission_archive_sha256",
         "execution_draft_sha256",
         "environment_instance_id",
         "control_plane_identity_sha256",
@@ -117,6 +125,7 @@
             "database",
             "network",
             "published_endpoint",
+            "source_snapshot",
             "temporary_secret_file",
             "volume"
           ]

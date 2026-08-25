@@ -128,6 +128,7 @@
             "cleanup_log",
             "container_identity",
             "database_identity",
+            "execution_admission_archive",
             "execution_draft",
             "execution_manifest",
             "extension_versions",

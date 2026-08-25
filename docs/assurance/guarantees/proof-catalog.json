@@ -56,9 +56,9 @@
       "lifecycle": "active",
       "proof_kind": "automated_test",
       "environment_profile_id": "python-nondb",
-      "runner": {
-        "kind": "pytest",
-        "selectors": [
+    "runner": {
+      "kind": "pytest",
+      "selectors": [
           "tests/integration/runtime/test_reference_execution_scenarios.py::test_known_at_pipeline_backtest_and_paper_semantics_agree",
           "tests/integration/runtime/test_reference_execution_scenarios.py::test_known_at_pipeline_is_invariant_to_future_candle_suffix",
           "tests/test_portal/test_report_data.py::test_report_decision_ledger_preserves_deterministic_known_at",
@@ -80,9 +80,12 @@
       "lifecycle": "active",
       "proof_kind": "database_integration",
       "environment_profile_id": "python-db-isolated",
-      "runner": {
-        "kind": "pytest",
-        "selectors": [
+    "runner": {
+      "kind": "pytest",
+      "required_executables": {
+        "psql": ">=15,<16"
+      },
+      "selectors": [
           "tests/test_market_data/test_canonical_fact_store_migration_db.py::test_canonical_fact_store_migration_is_explicit_strict_and_idempotent",
           "tests/test_market_data/test_repository_db.py::test_frozen_dataset_cannot_observe_post_freeze_correction"
         ]
@@ -1834,6 +1837,9 @@
       "environment_profile_id": "python-db-isolated",
       "runner": {
         "kind": "pytest",
+        "required_executables": {
+          "psql": ">=15,<16"
+        },
         "selectors": [
           "tests/test_market_data/test_canonical_fact_store_migration_db.py::test_canonical_fact_store_migration_is_explicit_strict_and_idempotent"
         ]

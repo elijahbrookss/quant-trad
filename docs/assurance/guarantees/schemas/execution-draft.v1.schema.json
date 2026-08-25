@@ -53,6 +53,9 @@
         "execution_admission_sha256": {
           "$ref": "#/$defs/hash"
         },
+        "execution_admission_archive_sha256": {
+          "$ref": "#/$defs/hash"
+        },
         "external_order_submission_enabled": {
           "const": false
         },
@@ -81,6 +84,9 @@
         "source_commit": {
           "$ref": "#/$defs/commit"
         },
+        "source_snapshot_sha256": {
+          "$ref": "#/$defs/hash"
+        },
         "started_at": {
           "$ref": "#/$defs/timestamp"
         }
@@ -89,6 +95,7 @@
         "record_schema_version",
         "attestation_id",
         "source_commit",
+        "source_snapshot_sha256",
         "requested_profile_ids",
         "started_at",
         "admission_id",
@@ -96,6 +103,7 @@
         "control_plane_identity_sha256",
         "runtime_definition_sha256",
         "execution_admission_sha256",
+        "execution_admission_archive_sha256",
         "external_order_submission_enabled",
         "planned_resources"
       ],
@@ -114,6 +122,7 @@
             "database",
             "network",
             "published_endpoint",
+            "source_snapshot",
             "temporary_secret_file",
             "volume"
           ]

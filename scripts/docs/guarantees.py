@@ -68,6 +68,9 @@ ATTESTATION_SCHEMA_VERSION = "qt.guarantee_attestation.v1"
 NODE_TEST_EVENT_SCHEMA_VERSION = "qt.node_test_events.v1"
 NODE_TEST_RESULT_SCHEMA_VERSION = "qt.node_test_result.v1"
 EXECUTION_ADMISSION_SCHEMA_VERSION = "qt.assurance_execution_admission.v1"
+EXECUTION_ADMISSION_ARCHIVE_SCHEMA_VERSION = (
+    "qt.assurance_execution_admission_archive.v1"
+)
 EXECUTION_DRAFT_SCHEMA_VERSION = "qt.assurance_execution_draft.v1"
 EXECUTION_MANIFEST_SCHEMA_VERSION = "qt.assurance_execution_manifest.v1"
 CLEANUP_MANIFEST_SCHEMA_VERSION = "qt.assurance_cleanup_manifest.v1"
@@ -210,6 +213,7 @@ ENVIRONMENT_EVIDENCE_ARTIFACT_KINDS = {
     "container_identity",
     "database_identity",
     "execution_draft",
+    "execution_admission_archive",
     "execution_manifest",
     "extension_versions",
     "image_digest",
@@ -222,6 +226,18 @@ ENVIRONMENT_EVIDENCE_ARTIFACT_KINDS = {
 }
 ISOLATED_ENVIRONMENT_CLASSES = {"isolated_test", "ephemeral_ci"}
 ISOLATION_MODES = {"disposable", "session_scoped"}
+LIFECYCLE_BINDING_FACTS = {
+    "attestation_id",
+    "cleanup_manifest_sha256",
+    "control_plane_identity_sha256",
+    "environment_instance_id",
+    "execution_admission_sha256",
+    "execution_admission_archive_sha256",
+    "execution_draft_sha256",
+    "execution_manifest_sha256",
+    "proof_results_sha256",
+    "source_snapshot_sha256",
+}
 NORMATIVE_AUTHORITY_KINDS = {
     "normative_platform_contract",
 }
@@ -1787,10 +1803,32 @@ def _validate_runner(root: Path, raw: Any, where: str) -> str:
     runner = _expect_object(raw, where)
     kind = _enum(runner.get("kind"), RUNNER_KINDS, f"{where}.kind")
     if kind == "pytest":
-        _exact_keys(runner, required={"kind", "selectors"}, where=where)
+        _exact_keys(
+            runner,
+            required={"kind", "selectors"},
+            optional={"required_executables"},
+            where=where,
+        )
         selectors = _string_list(runner["selectors"], f"{where}.selectors", nonempty=True)
         for index, selector in enumerate(selectors):
             _validate_pytest_selector(root, selector, f"{where}.selectors[{index}]")
+        if "required_executables" in runner:
+            requirements = _expect_object(
+                runner["required_executables"], f"{where}.required_executables"
+            )
+            if not requirements:
+                _fail(f"{where}.required_executables:must_not_be_empty")
+            if list(requirements) != sorted(requirements):
+                _fail(f"{where}.required_executables:must_be_sorted")
+            for executable, constraint in requirements.items():
+                if not re.fullmatch(r"[a-zA-Z0-9_.+-]+", executable):
+                    _fail(f"{where}.required_executables.key:invalid:{executable}")
+                _parse_version_constraint(
+                    _expect_string(
+                        constraint, f"{where}.required_executables.{executable}"
+                    ),
+                    f"{where}.required_executables.{executable}",
+                )
     elif kind == "node_test":
         _exact_keys(
             runner,
@@ -2825,6 +2863,74 @@ def _canonical_json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def proof_results_sha256(value: Any) -> str:
+    """Hash the complete final proof-result set in canonical proof-id order."""
+
+    rows = _expect_list(value, "attestation.proof_results")
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(rows):
+        row = _expect_object(raw, f"attestation.proof_results[{index}]")
+        proof_id = _expect_string(
+            row.get("proof_id"), f"attestation.proof_results[{index}].proof_id"
+        )
+        if not PROOF_ID_RE.fullmatch(proof_id):
+            _fail(f"attestation.proof_results[{index}].proof_id:invalid")
+        normalized.append(dict(row))
+    normalized.sort(key=lambda item: _id_sort_key(item["proof_id"]))
+    if len({item["proof_id"] for item in normalized}) != len(normalized):
+        _fail("attestation.proof_results:duplicate_proof_id")
+    return hashlib.sha256(_canonical_json_bytes(normalized)).hexdigest()
+
+
+def source_snapshot_sha256(root: Path, git_commit: str) -> str:
+    """Hash exact Git-archive file paths, executable bits, and bytes."""
+
+    try:
+        archive = subprocess.run(
+            ["git", "-C", str(root), "archive", "--format=tar", git_commit],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _fail(f"source_snapshot:git_archive_failed:{exc}")
+    rows: list[tuple[str, bool, bytes]] = []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as handle:
+            for member in handle.getmembers():
+                pure = PurePosixPath(member.name)
+                if (
+                    pure.is_absolute()
+                    or not pure.parts
+                    or any(part in {"", ".", ".."} for part in pure.parts)
+                    or member.issym()
+                    or member.islnk()
+                ):
+                    _fail("source_snapshot:unsafe_archive_member")
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    _fail("source_snapshot:unsupported_archive_member")
+                stream = handle.extractfile(member)
+                if stream is None:
+                    _fail("source_snapshot:archive_member_unreadable")
+                rows.append(
+                    (pure.as_posix(), bool(member.mode & 0o111), stream.read())
+                )
+    except (OSError, tarfile.TarError) as exc:
+        _fail(f"source_snapshot:archive_invalid:{exc}")
+    digest = hashlib.sha256()
+    for relative, executable, content in sorted(rows, key=lambda item: item[0]):
+        path_bytes = relative.encode("utf-8")
+        digest.update(len(path_bytes).to_bytes(8, "big"))
+        digest.update(path_bytes)
+        digest.update(b"x" if executable else b"-")
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
 def _framed_sha256(components: Sequence[tuple[str, bytes]]) -> str:
     digest = hashlib.sha256()
     for label, content in sorted(components, key=lambda item: item[0]):
@@ -3226,6 +3332,411 @@ def _environment_evidence_payload(path: Path, where: str) -> dict[str, Any]:
     return _expect_object(payload, where)
 
 
+_LIFECYCLE_RESOURCE_KINDS = {
+    "container",
+    "database",
+    "network",
+    "published_endpoint",
+    "source_snapshot",
+    "temporary_secret_file",
+    "volume",
+}
+
+
+def _lifecycle_hash(value: Any, where: str) -> str:
+    digest = _expect_string(value, where)
+    if not HEX64_RE.fullmatch(digest):
+        _fail(f"{where}:invalid_hash")
+    return digest
+
+
+def _lifecycle_identity(value: Any, where: str) -> str:
+    identity = _expect_string(value, where)
+    if not re.fullmatch(r"[a-z][a-z0-9-]{7,127}", identity):
+        _fail(f"{where}:invalid_identity")
+    return identity
+
+
+def _lifecycle_resources(
+    value: Any,
+    where: str,
+    *,
+    runtime_identity: bool,
+    disposition: bool = False,
+) -> list[dict[str, Any]]:
+    rows = _expect_list(value, where)
+    if not rows:
+        _fail(f"{where}:must_not_be_empty")
+    normalized: list[dict[str, Any]] = []
+    required = {"kind", "logical_name"}
+    if runtime_identity:
+        required.add("runtime_identity")
+    if disposition:
+        required.add("absent")
+    for index, raw in enumerate(rows):
+        item_where = f"{where}[{index}]"
+        item = _expect_object(raw, item_where)
+        _exact_keys(item, required=required, where=item_where)
+        normalized_item: dict[str, Any] = {
+            "kind": _enum(item["kind"], _LIFECYCLE_RESOURCE_KINDS, f"{item_where}.kind"),
+            "logical_name": _expect_string(
+                item["logical_name"], f"{item_where}.logical_name"
+            ),
+        }
+        if runtime_identity:
+            normalized_item["runtime_identity"] = _expect_string(
+                item["runtime_identity"], f"{item_where}.runtime_identity"
+            )
+        if disposition:
+            normalized_item["absent"] = _expect_bool(
+                item["absent"], f"{item_where}.absent"
+            )
+        normalized.append(normalized_item)
+    keys = [(item["kind"], item["logical_name"]) for item in normalized]
+    if keys != sorted(keys):
+        _fail(f"{where}:must_be_sorted_by_kind_and_logical_name")
+    if len(keys) != len(set(keys)):
+        _fail(f"{where}:duplicate_resource_key")
+    return normalized
+
+
+def _validate_execution_admission_archive_facts(
+    value: Any, where: str
+) -> dict[str, Any]:
+    facts = _expect_object(value, where)
+    _exact_keys(
+        facts,
+        required={
+            "record_schema_version",
+            "source_admission_schema_version",
+            "source_commit",
+            "execution_admission_sha256",
+            "profile",
+        },
+        where=where,
+    )
+    if facts["record_schema_version"] != EXECUTION_ADMISSION_ARCHIVE_SCHEMA_VERSION:
+        _fail(f"{where}.record_schema_version:unsupported")
+    if facts["source_admission_schema_version"] != EXECUTION_ADMISSION_SCHEMA_VERSION:
+        _fail(f"{where}.source_admission_schema_version:unsupported")
+    source_commit = _expect_string(facts["source_commit"], f"{where}.source_commit")
+    if not HEX40_RE.fullmatch(source_commit):
+        _fail(f"{where}.source_commit:invalid")
+    _lifecycle_hash(
+        facts["execution_admission_sha256"],
+        f"{where}.execution_admission_sha256",
+    )
+    profile = _expect_object(facts["profile"], f"{where}.profile")
+    _exact_keys(
+        profile,
+        required={
+            "profile_id",
+            "admission_id",
+            "environment_class",
+            "isolation",
+            "external_order_submission_enabled",
+            "runtime_definition",
+            "docker_tool",
+            "runner_image",
+            "service_images",
+        },
+        where=f"{where}.profile",
+    )
+    profile_id = _expect_string(profile["profile_id"], f"{where}.profile.profile_id")
+    if not PROFILE_ID_RE.fullmatch(profile_id):
+        _fail(f"{where}.profile.profile_id:invalid")
+    admission_id = _expect_string(
+        profile["admission_id"], f"{where}.profile.admission_id"
+    )
+    if not ADMISSION_ID_RE.fullmatch(admission_id):
+        _fail(f"{where}.profile.admission_id:invalid")
+    _enum(
+        profile["environment_class"],
+        ISOLATED_ENVIRONMENT_CLASSES,
+        f"{where}.profile.environment_class",
+    )
+    _enum(profile["isolation"], ISOLATION_MODES, f"{where}.profile.isolation")
+    if profile["external_order_submission_enabled"] is not False:
+        _fail(f"{where}.profile.external_order_submission_enabled:must_be_false")
+
+    def definition(raw: Any, item_where: str) -> None:
+        item = _expect_object(raw, item_where)
+        _exact_keys(item, required={"path", "sha256"}, where=item_where)
+        relative = _expect_string(item["path"], f"{item_where}.path")
+        pure = PurePosixPath(relative)
+        if (
+            "\\" in relative
+            or pure.is_absolute()
+            or not pure.parts
+            or any(part in {"", ".", ".."} for part in pure.parts)
+        ):
+            _fail(f"{item_where}.path:relative_safe_path_required")
+        _lifecycle_hash(item["sha256"], f"{item_where}.sha256")
+
+    definition(profile["runtime_definition"], f"{where}.profile.runtime_definition")
+    docker_tool = _expect_object(profile["docker_tool"], f"{where}.profile.docker_tool")
+    _exact_keys(
+        docker_tool,
+        required={
+            "executable_basename",
+            "executable_sha256",
+            "resolved_path_sha256",
+            "daemon_identity_sha256",
+            "version",
+        },
+        where=f"{where}.profile.docker_tool",
+    )
+    basename = _expect_string(
+        docker_tool["executable_basename"],
+        f"{where}.profile.docker_tool.executable_basename",
+    )
+    if Path(basename).name != basename or "/" in basename or "\\" in basename:
+        _fail(f"{where}.profile.docker_tool.executable_basename:invalid")
+    _expect_string(docker_tool["version"], f"{where}.profile.docker_tool.version")
+    for key in (
+        "executable_sha256",
+        "resolved_path_sha256",
+        "daemon_identity_sha256",
+    ):
+        _lifecycle_hash(docker_tool[key], f"{where}.profile.docker_tool.{key}")
+    runner = _expect_object(profile["runner_image"], f"{where}.profile.runner_image")
+    _exact_keys(
+        runner,
+        required={"image_id", "platform", "base_image_digests", "build_definition"},
+        where=f"{where}.profile.runner_image",
+    )
+    if not IMAGE_DIGEST_RE.fullmatch(
+        _expect_string(runner["image_id"], f"{where}.profile.runner_image.image_id")
+    ):
+        _fail(f"{where}.profile.runner_image.image_id:invalid")
+    if runner["platform"] != "linux/amd64":
+        _fail(f"{where}.profile.runner_image.platform:unsupported")
+    base_digests = _string_list(
+        runner["base_image_digests"],
+        f"{where}.profile.runner_image.base_image_digests",
+        sorted_values=True,
+    )
+    if any(not IMAGE_DIGEST_RE.fullmatch(item) for item in base_digests):
+        _fail(f"{where}.profile.runner_image.base_image_digests:invalid")
+    definition(runner["build_definition"], f"{where}.profile.runner_image.build_definition")
+    services = _expect_object(profile["service_images"], f"{where}.profile.service_images")
+    if list(services) != sorted(services):
+        _fail(f"{where}.profile.service_images:must_be_sorted")
+    for service_id, raw_service in services.items():
+        if not PROFILE_ID_RE.fullmatch(service_id):
+            _fail(f"{where}.profile.service_images.key:invalid")
+        service = _expect_object(raw_service, f"{where}.profile.service_images.{service_id}")
+        _exact_keys(
+            service,
+            required={"reference", "image_id", "image_digest"},
+            where=f"{where}.profile.service_images.{service_id}",
+        )
+        _expect_string(service["reference"], f"{where}.profile.service_images.{service_id}.reference")
+        for key in ("image_id", "image_digest"):
+            if not IMAGE_DIGEST_RE.fullmatch(
+                _expect_string(service[key], f"{where}.profile.service_images.{service_id}.{key}")
+            ):
+                _fail(f"{where}.profile.service_images.{service_id}.{key}:invalid")
+    return facts
+
+
+def _validate_lifecycle_evidence_facts(
+    artifact_kind: str, value: Any, where: str
+) -> dict[str, Any]:
+    if artifact_kind == "execution_admission_archive":
+        return _validate_execution_admission_archive_facts(value, where)
+    facts = _expect_object(value, where)
+    common = {
+        "attestation_id",
+        "control_plane_identity_sha256",
+        "environment_instance_id",
+        "source_commit",
+        "source_snapshot_sha256",
+    }
+    if artifact_kind == "execution_draft":
+        required = common | {
+            "record_schema_version",
+            "requested_profile_ids",
+            "started_at",
+            "admission_id",
+            "runtime_definition_sha256",
+            "execution_admission_sha256",
+            "execution_admission_archive_sha256",
+            "external_order_submission_enabled",
+            "planned_resources",
+        }
+        _exact_keys(facts, required=required, where=where)
+        if facts["record_schema_version"] != EXECUTION_DRAFT_SCHEMA_VERSION:
+            _fail(f"{where}.record_schema_version:unsupported")
+        requested = _string_list(
+            facts["requested_profile_ids"],
+            f"{where}.requested_profile_ids",
+            nonempty=True,
+        )
+        if any(not PROFILE_ID_RE.fullmatch(item) for item in requested):
+            _fail(f"{where}.requested_profile_ids:invalid_profile_id")
+        admission_id = _expect_string(facts["admission_id"], f"{where}.admission_id")
+        if not ADMISSION_ID_RE.fullmatch(admission_id):
+            _fail(f"{where}.admission_id:invalid")
+        _parse_timestamp(facts["started_at"], f"{where}.started_at")
+        _lifecycle_hash(
+            facts["runtime_definition_sha256"],
+            f"{where}.runtime_definition_sha256",
+        )
+        _lifecycle_hash(
+            facts["execution_admission_sha256"],
+            f"{where}.execution_admission_sha256",
+        )
+        _lifecycle_hash(
+            facts["execution_admission_archive_sha256"],
+            f"{where}.execution_admission_archive_sha256",
+        )
+        if _expect_bool(
+            facts["external_order_submission_enabled"],
+            f"{where}.external_order_submission_enabled",
+        ):
+            _fail(f"{where}.external_order_submission_enabled:must_be_false")
+        _lifecycle_resources(
+            facts["planned_resources"],
+            f"{where}.planned_resources",
+            runtime_identity=False,
+        )
+    elif artifact_kind == "execution_manifest":
+        required = common | {
+            "record_schema_version",
+            "execution_draft_sha256",
+            "execution_admission_archive_sha256",
+            "execution_state",
+            "execution_started_at",
+            "execution_finished_at",
+            "executed_proof_ids",
+            "proof_results_sha256",
+            "resource_identities",
+        }
+        _exact_keys(facts, required=required, where=where)
+        if facts["record_schema_version"] != EXECUTION_MANIFEST_SCHEMA_VERSION:
+            _fail(f"{where}.record_schema_version:unsupported")
+        _lifecycle_hash(
+            facts["execution_draft_sha256"], f"{where}.execution_draft_sha256"
+        )
+        _lifecycle_hash(
+            facts["execution_admission_archive_sha256"],
+            f"{where}.execution_admission_archive_sha256",
+        )
+        _lifecycle_hash(
+            facts["proof_results_sha256"], f"{where}.proof_results_sha256"
+        )
+        _enum(
+            facts["execution_state"],
+            {"complete", "executor_error", "interrupted"},
+            f"{where}.execution_state",
+        )
+        execution_started = _parse_timestamp(
+            facts["execution_started_at"], f"{where}.execution_started_at"
+        )
+        execution_finished = _parse_timestamp(
+            facts["execution_finished_at"], f"{where}.execution_finished_at"
+        )
+        if execution_finished < execution_started:
+            _fail(f"{where}:execution_finished_before_started")
+        proof_ids = _string_list(
+            facts["executed_proof_ids"], f"{where}.executed_proof_ids"
+        )
+        if any(not PROOF_ID_RE.fullmatch(item) for item in proof_ids):
+            _fail(f"{where}.executed_proof_ids:invalid_proof_id")
+        resources = _expect_list(
+            facts["resource_identities"], f"{where}.resource_identities"
+        )
+        if facts["execution_state"] == "complete" and not resources:
+            _fail(f"{where}.resource_identities:complete_requires_resources")
+        if resources:
+            _lifecycle_resources(
+                resources,
+                f"{where}.resource_identities",
+                runtime_identity=True,
+            )
+    elif artifact_kind == "cleanup_manifest":
+        required = common | {
+            "record_schema_version",
+            "execution_draft_sha256",
+            "execution_manifest_sha256",
+            "execution_admission_archive_sha256",
+            "cleanup_started_at",
+            "cleanup_finished_at",
+            "attempt_number",
+            "cleanup_state",
+            "exit_code",
+            "stdout",
+            "stdout_sha256",
+            "stderr",
+            "stderr_sha256",
+            "cleanup_completed",
+            "resources",
+            "label_query_remaining",
+        }
+        _exact_keys(facts, required=required, where=where)
+        if facts["record_schema_version"] != CLEANUP_MANIFEST_SCHEMA_VERSION:
+            _fail(f"{where}.record_schema_version:unsupported")
+        for key in (
+            "execution_admission_archive_sha256",
+            "execution_draft_sha256",
+            "execution_manifest_sha256",
+        ):
+            _lifecycle_hash(facts[key], f"{where}.{key}")
+        cleanup_started = _parse_timestamp(
+            facts["cleanup_started_at"], f"{where}.cleanup_started_at"
+        )
+        cleanup_finished = _parse_timestamp(
+            facts["cleanup_finished_at"], f"{where}.cleanup_finished_at"
+        )
+        if cleanup_finished < cleanup_started:
+            _fail(f"{where}:cleanup_finished_before_started")
+        _expect_int(facts["attempt_number"], f"{where}.attempt_number", minimum=1)
+        _enum(
+            facts["cleanup_state"],
+            {"failed", "interrupted", "passed"},
+            f"{where}.cleanup_state",
+        )
+        _expect_int(facts["exit_code"], f"{where}.exit_code", minimum=0)
+        stdout = _expect_string(facts["stdout"], f"{where}.stdout", nonempty=False)
+        stderr = _expect_string(facts["stderr"], f"{where}.stderr", nonempty=False)
+        for key, raw in (("stdout_sha256", stdout), ("stderr_sha256", stderr)):
+            digest = _lifecycle_hash(facts[key], f"{where}.{key}")
+            if digest != hashlib.sha256(raw.encode("utf-8")).hexdigest():
+                _fail(f"{where}.{key}:content_mismatch")
+        _expect_bool(facts["cleanup_completed"], f"{where}.cleanup_completed")
+        _lifecycle_resources(
+            facts["resources"],
+            f"{where}.resources",
+            runtime_identity=True,
+            disposition=True,
+        )
+        _string_list(
+            facts["label_query_remaining"], f"{where}.label_query_remaining"
+        )
+    else:  # pragma: no cover - caller has a closed lifecycle-kind set
+        _fail(f"{where}:unsupported_lifecycle_artifact_kind:{artifact_kind}")
+
+    if not ATTESTATION_ID_RE.fullmatch(
+        _expect_string(facts["attestation_id"], f"{where}.attestation_id")
+    ):
+        _fail(f"{where}.attestation_id:invalid")
+    source_commit = _expect_string(facts["source_commit"], f"{where}.source_commit")
+    if not HEX40_RE.fullmatch(source_commit):
+        _fail(f"{where}.source_commit:invalid")
+    _lifecycle_identity(
+        facts["environment_instance_id"], f"{where}.environment_instance_id"
+    )
+    _lifecycle_hash(
+        facts["control_plane_identity_sha256"],
+        f"{where}.control_plane_identity_sha256",
+    )
+    _lifecycle_hash(
+        facts["source_snapshot_sha256"], f"{where}.source_snapshot_sha256"
+    )
+    return facts
+
+
 def _validate_environment_evidence_refs(
     value: Any,
     *,
@@ -3304,13 +3815,29 @@ def _validate_environment_evidence_refs(
         observed_service_id = payload.get("service_id")
         if observed_service_id != service_id:
             _fail(f"{payload_where}.service_id:mismatch")
-        payload_facts = _validate_admission_facts(
-            payload["facts"], f"{payload_where}.facts"
-        )
+        if artifact_kind in {
+            "execution_admission_archive",
+            "execution_draft",
+            "execution_manifest",
+            "cleanup_manifest",
+        }:
+            payload_facts = _validate_lifecycle_evidence_facts(
+                artifact_kind, payload["facts"], f"{payload_where}.facts"
+            )
+        else:
+            payload_facts = _validate_admission_facts(
+                payload["facts"], f"{payload_where}.facts"
+            )
         for fact_key in set(payload_facts) & set(binding_facts):
             if payload_facts[fact_key] != binding_facts[fact_key]:
                 _fail(f"{payload_where}.facts.{fact_key}:admission_mismatch")
-        evidence_by_kind[artifact_kind].append(payload_facts)
+        evidence_by_kind[artifact_kind].append(
+            {
+                **payload_facts,
+                "__artifact_path": relative,
+                "__artifact_sha256": observed_hash,
+            }
+        )
     if paths != sorted(paths):
         _fail(f"{where}:must_be_sorted_by_path")
     if len(paths) != len(set(paths)):
@@ -3339,6 +3866,472 @@ def _require_evidence_fact(
         _fail(
             f"{where}.{artifact_kind}:missing_matching_fact:{fact_key}"
         )
+
+
+def _validate_lifecycle_binding(
+    *,
+    admission: Mapping[str, Any],
+    evidence: Mapping[str, Sequence[Mapping[str, Any]]],
+    profile_id: str,
+    attestation_id: str,
+    git_commit: str,
+    proof_results: Sequence[Mapping[str, Any]],
+    expected_source_snapshot_sha256: str | None,
+    profile: Mapping[str, Any],
+    bundle: ValidationBundle,
+    services: Mapping[str, Mapping[str, Any]],
+    service_evidence: Mapping[
+        str, Mapping[str, Sequence[Mapping[str, Any]]]
+    ],
+    where: str,
+) -> datetime:
+    """Require one cleanup-gated, cross-hashed execution chain for a profile."""
+
+    required_kinds = {
+        "execution_admission_archive",
+        "execution_draft",
+        "execution_manifest",
+        "cleanup_manifest",
+    }
+    _require_evidence_kinds(evidence, required_kinds, f"{where}.evidence_refs")
+    for artifact_kind in required_kinds:
+        if len(evidence[artifact_kind]) != 1:
+            _fail(f"{where}.{artifact_kind}:exactly_one_required")
+    archived_admission = evidence["execution_admission_archive"][0]
+    draft = evidence["execution_draft"][0]
+    execution = evidence["execution_manifest"][0]
+    cleanup = evidence["cleanup_manifest"][0]
+    draft_hash = draft["__artifact_sha256"]
+    execution_hash = execution["__artifact_sha256"]
+    cleanup_hash = cleanup["__artifact_sha256"]
+    result_hash = proof_results_sha256(proof_results)
+    if (
+        expected_source_snapshot_sha256 is not None
+        and draft["source_snapshot_sha256"] != expected_source_snapshot_sha256
+    ):
+        _fail(f"{where}.execution_draft.source_snapshot_sha256:source_commit_mismatch")
+
+    binding_values = {
+        "attestation_id": attestation_id,
+        "control_plane_identity_sha256": draft["control_plane_identity_sha256"],
+        "environment_instance_id": draft["environment_instance_id"],
+        "execution_admission_sha256": draft["execution_admission_sha256"],
+        "execution_admission_archive_sha256": archived_admission[
+            "__artifact_sha256"
+        ],
+        "execution_draft_sha256": draft_hash,
+        "execution_manifest_sha256": execution_hash,
+        "cleanup_manifest_sha256": cleanup_hash,
+        "proof_results_sha256": result_hash,
+        "source_snapshot_sha256": draft["source_snapshot_sha256"],
+    }
+    facts = admission["facts"]
+    for key, expected in binding_values.items():
+        observed = facts.get(key)
+        if observed != expected:
+            _fail(f"{where}.facts.{key}:lifecycle_mismatch")
+    if facts.get("source_commit") != git_commit:
+        _fail(f"{where}.facts.source_commit:lifecycle_mismatch")
+    if archived_admission["source_commit"] != git_commit:
+        _fail(f"{where}.execution_admission_archive.source_commit:mismatch")
+    if (
+        archived_admission["execution_admission_sha256"]
+        != draft["execution_admission_sha256"]
+    ):
+        _fail(
+            f"{where}.execution_admission_archive.execution_admission_sha256:mismatch"
+        )
+    if (
+        draft["execution_admission_archive_sha256"]
+        != archived_admission["__artifact_sha256"]
+    ):
+        _fail(
+            f"{where}.execution_draft.execution_admission_archive_sha256:mismatch"
+        )
+    archived_profile = archived_admission["profile"]
+    archive_pairs = {
+        "profile_id": profile_id,
+        "admission_id": admission["admission_id"],
+        "environment_class": admission["environment_class"],
+        "isolation": admission["isolation"],
+        "external_order_submission_enabled": False,
+        "runtime_definition": admission["runtime_definition"],
+    }
+    for key, expected in archive_pairs.items():
+        if archived_profile[key] != expected:
+            _fail(f"{where}.execution_admission_archive.profile.{key}:mismatch")
+    archived_runtime = archived_profile["runtime_definition"]
+    if archived_runtime["path"] != profile["runtime_definition"] or archived_runtime[
+        "sha256"
+    ] != _bound_material_sha256(
+        bundle.root, profile["runtime_definition"], git_commit=git_commit
+    ):
+        _fail(
+            f"{where}.execution_admission_archive.profile.runtime_definition:"
+            "source_binding_mismatch"
+        )
+    archived_runner = archived_profile["runner_image"]
+    build_definition = archived_runner["build_definition"]
+    if build_definition["sha256"] != _bound_material_sha256(
+        bundle.root, build_definition["path"], git_commit=git_commit
+    ):
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_image."
+            "build_definition:source_binding_mismatch"
+        )
+    build_bytes = _bound_material_bytes(
+        bundle.root, build_definition["path"], git_commit=git_commit
+    )
+    expected_base_digests = sorted(
+        {
+            f"sha256:{digest.decode('ascii')}"
+            for digest in re.findall(rb"@sha256:([0-9a-f]{64})", build_bytes)
+        }
+    )
+    if archived_runner["base_image_digests"] != expected_base_digests:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_image."
+            "base_image_digests:source_binding_mismatch"
+        )
+    if set(archived_profile["service_images"]) != set(profile["required_services"]):
+        _fail(
+            f"{where}.execution_admission_archive.profile.service_images:"
+            "profile_mismatch"
+        )
+    if archived_profile["docker_tool"]["daemon_identity_sha256"] != draft[
+        "control_plane_identity_sha256"
+    ]:
+        _fail(
+            f"{where}.execution_admission_archive.profile.docker_tool."
+            "daemon_identity_sha256:mismatch"
+        )
+    runner_image_id = archived_runner["image_id"]
+    final_runner_image_id = (
+        facts.get("image_digest")
+        if profile["execution_class"] == "isolated_container"
+        else facts.get("runner_image_digest")
+    )
+    if runner_image_id != final_runner_image_id:
+        _fail(
+            f"{where}.execution_admission_archive.profile.runner_image.image_id:"
+            "final_environment_mismatch"
+        )
+    runtime_rows = evidence.get("runtime_probe", ())
+    if len(runtime_rows) != 1:
+        _fail(f"{where}.runtime_probe:exactly_one_required")
+    observed_configuration = _expect_object(
+        runtime_rows[0].get("observed_configuration"),
+        f"{where}.runtime_probe.observed_configuration",
+    )
+    observed_runner = _expect_object(
+        observed_configuration.get("runner"),
+        f"{where}.runtime_probe.observed_configuration.runner",
+    )
+    observed_runner_required = {
+            "assurance_mode",
+            "container_identity",
+            "external_order_submission_enabled",
+            "image_id",
+            "network_identity",
+            "network_mode",
+            "proof_child_environment_keys",
+            "root_filesystem_mode",
+            "source_mount_mode",
+            "writable_tmpfs",
+        }
+    if profile["execution_class"] == "isolated_database":
+        observed_runner_required.add("pg_dsn_sha256")
+    _exact_keys(
+        observed_runner,
+        required=observed_runner_required,
+        where=f"{where}.runtime_probe.observed_configuration.runner",
+    )
+    if observed_runner.get("image_id") != runner_image_id:
+        _fail(
+            f"{where}.runtime_probe.observed_configuration.runner.image_id:mismatch"
+        )
+    if (
+        observed_runner["assurance_mode"] != "1"
+        or observed_runner["external_order_submission_enabled"] != "0"
+    ):
+        _fail(
+            f"{where}.runtime_probe.observed_configuration.runner:"
+            "assurance_flags_mismatch"
+        )
+    expected_runner = {
+        "container_identity": facts.get(
+            "container_identity", facts.get("runner_container_identity")
+        ),
+        "network_mode": facts.get("network_mode", facts.get("runner_network_mode")),
+        "root_filesystem_mode": facts.get(
+            "runner_root_filesystem_mode", "read_only"
+        ),
+        "source_mount_mode": facts.get("source_mount_mode"),
+        "writable_tmpfs": "/tmp",
+    }
+    for key, expected in expected_runner.items():
+        if observed_runner.get(key) != expected:
+            _fail(
+                f"{where}.runtime_probe.observed_configuration.runner.{key}:mismatch"
+            )
+    child_environment_keys = _string_list(
+        observed_runner["proof_child_environment_keys"],
+        f"{where}.runtime_probe.observed_configuration.runner."
+        "proof_child_environment_keys",
+        sorted_values=True,
+    )
+    expected_child_keys = {
+        "HOME",
+        "LANG",
+        "NO_COLOR",
+        "PATH",
+        "PYTHONHASHSEED",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTEST_ADDOPTS",
+        "PYTEST_PLUGINS",
+        "PYTHONPATH",
+        "QT_ASSURANCE_MODE",
+        "QT_EXTERNAL_ORDER_SUBMISSION_ENABLED",
+        "TMPDIR",
+        "TZ",
+    }
+    if profile["execution_class"] == "isolated_database":
+        expected_child_keys |= {"PG_DSN", "QT_DB_TEST_ISOLATED", "RUN_DB_TESTS"}
+        if observed_runner["pg_dsn_sha256"] != services[
+            next(iter(services))
+        ]["facts"].get("pg_dsn_sha256"):
+            _fail(
+                f"{where}.runtime_probe.observed_configuration.runner."
+                "pg_dsn_sha256:service_mismatch"
+            )
+    if set(child_environment_keys) != expected_child_keys:
+        _fail(
+            f"{where}.runtime_probe.observed_configuration.runner."
+            "proof_child_environment_keys:mismatch"
+        )
+    image_rows = evidence.get("image_digest", ())
+    if len(image_rows) != 1:
+        _fail(f"{where}.image_digest:exactly_one_required")
+    if image_rows[0].get("build_definition_sha256") != build_definition["sha256"]:
+        _fail(f"{where}.image_digest.build_definition_sha256:mismatch")
+    if profile["execution_class"] == "isolated_database":
+        definition_payload = _bound_json_object(
+            bundle.root,
+            profile["runtime_definition"],
+            git_commit=git_commit,
+            where=f"{where}.runtime_definition_payload",
+        )
+        service_contract = _expect_object(
+            definition_payload.get("service"),
+            f"{where}.runtime_definition_payload.service",
+        )
+        service_id = _expect_string(
+            service_contract.get("id"),
+            f"{where}.runtime_definition_payload.service.id",
+        )
+        archived_service = archived_profile["service_images"][service_id]
+        expected_reference = _expect_string(
+            service_contract.get("image"),
+            f"{where}.runtime_definition_payload.service.image",
+        )
+        expected_digest = "sha256:" + expected_reference.rsplit("@sha256:", 1)[-1]
+        if (
+            archived_service["reference"] != expected_reference
+            or archived_service["image_digest"] != expected_digest
+        ):
+            _fail(
+                f"{where}.execution_admission_archive.profile.service_images."
+                f"{service_id}:runtime_definition_mismatch"
+            )
+        if services[service_id]["facts"].get("image_digest") != expected_digest:
+            _fail(f"{where}.services.{service_id}.facts.image_digest:archive_mismatch")
+        observed_database = _expect_object(
+            observed_configuration.get("database_service"),
+            f"{where}.runtime_probe.observed_configuration.database_service",
+        )
+        _exact_keys(
+            observed_database,
+            required={
+                "container_identity",
+                "image_id",
+                "network_identity",
+                "network_internal",
+                "publish_host",
+                "published_port",
+                "volume_identity",
+            },
+            where=f"{where}.runtime_probe.observed_configuration.database_service",
+        )
+        if observed_database.get("image_id") != archived_service["image_id"]:
+            _fail(
+                f"{where}.runtime_probe.observed_configuration.database_service."
+                "image_id:mismatch"
+            )
+        service_facts = services[service_id]["facts"]
+        if (
+            observed_database.get("container_identity")
+            != service_facts.get("container_identity")
+            or observed_database.get("publish_host") != "127.0.0.1"
+            or observed_database.get("published_port")
+            != service_facts.get("published_port")
+            or observed_database.get("network_internal") is not True
+        ):
+            _fail(
+                f"{where}.runtime_probe.observed_configuration.database_service:"
+                "final_environment_mismatch"
+            )
+    if draft["attestation_id"] != attestation_id:
+        _fail(f"{where}.execution_draft.attestation_id:mismatch")
+    if profile_id not in draft["requested_profile_ids"]:
+        _fail(f"{where}.execution_draft.requested_profile_ids:profile_missing")
+    if draft["admission_id"] != admission["admission_id"]:
+        _fail(f"{where}.execution_draft.admission_id:mismatch")
+    if draft["runtime_definition_sha256"] != admission["runtime_definition"]["sha256"]:
+        _fail(f"{where}.execution_draft.runtime_definition_sha256:mismatch")
+
+    identity_keys = {
+        "attestation_id",
+        "source_commit",
+        "source_snapshot_sha256",
+        "environment_instance_id",
+        "control_plane_identity_sha256",
+    }
+    for record_name, record in (("execution_manifest", execution), ("cleanup_manifest", cleanup)):
+        for key in identity_keys:
+            if record[key] != draft[key]:
+                _fail(f"{where}.{record_name}.{key}:draft_mismatch")
+        if (
+            record["execution_admission_archive_sha256"]
+            != archived_admission["__artifact_sha256"]
+        ):
+            _fail(
+                f"{where}.{record_name}.execution_admission_archive_sha256:mismatch"
+            )
+    if execution["execution_draft_sha256"] != draft_hash:
+        _fail(f"{where}.execution_manifest.execution_draft_sha256:mismatch")
+    if execution["proof_results_sha256"] != result_hash:
+        _fail(f"{where}.execution_manifest.proof_results_sha256:mismatch")
+    if execution["execution_state"] != "complete":
+        _fail(f"{where}.execution_manifest.execution_state:not_complete")
+    if cleanup["execution_draft_sha256"] != draft_hash:
+        _fail(f"{where}.cleanup_manifest.execution_draft_sha256:mismatch")
+    if cleanup["execution_manifest_sha256"] != execution_hash:
+        _fail(f"{where}.cleanup_manifest.execution_manifest_sha256:mismatch")
+    if cleanup["attempt_number"] != 1:
+        _fail(f"{where}.cleanup_manifest:only_first_attempt_finalizable")
+    if (
+        cleanup["cleanup_state"] != "passed"
+        or cleanup["cleanup_completed"] is not True
+        or cleanup["exit_code"] != 0
+    ):
+        _fail(f"{where}.cleanup_manifest:not_successful")
+    if cleanup["label_query_remaining"]:
+        _fail(f"{where}.cleanup_manifest.label_query_remaining:not_empty")
+
+    planned = {
+        (item["kind"], item["logical_name"])
+        for item in draft["planned_resources"]
+    }
+    observed = {
+        (item["kind"], item["logical_name"]): item["runtime_identity"]
+        for item in execution["resource_identities"]
+    }
+    cleaned = {
+        (item["kind"], item["logical_name"]): item
+        for item in cleanup["resources"]
+    }
+    if planned != set(observed):
+        _fail(f"{where}.execution_manifest.resource_identities:planned_set_mismatch")
+    if planned != set(cleaned):
+        _fail(f"{where}.cleanup_manifest.resources:planned_set_mismatch")
+    for key in sorted(planned):
+        if cleaned[key]["runtime_identity"] != observed[key]:
+            _fail(f"{where}.cleanup_manifest.resources:runtime_identity_mismatch")
+        if cleaned[key]["absent"] is not True:
+            _fail(f"{where}.cleanup_manifest.resources:not_absent")
+    if observed.get(("container", "proof-runner")) != observed_runner[
+        "container_identity"
+    ]:
+        _fail(
+            f"{where}.runtime_probe.observed_configuration.runner."
+            "container_identity:inventory_mismatch"
+        )
+    if observed.get(("source_snapshot", "exact-source-snapshot")) != (
+        "git-archive:" + draft["source_snapshot_sha256"]
+    ):
+        _fail(f"{where}.source_snapshot:inventory_mismatch")
+    if profile["execution_class"] == "isolated_container":
+        if observed_runner["network_identity"] != "none":
+            _fail(
+                f"{where}.runtime_probe.observed_configuration.runner."
+                "network_identity:mismatch"
+            )
+    else:
+        inventory_network = observed.get(("network", "session-network"))
+        if (
+            observed_runner["network_identity"] != inventory_network
+            or observed_database["network_identity"] != inventory_network
+        ):
+            _fail(f"{where}.runtime_probe.observed_configuration:network_inventory_mismatch")
+        if observed_database["container_identity"] != observed.get(
+            ("container", "database-service")
+        ):
+            _fail(
+                f"{where}.runtime_probe.observed_configuration.database_service."
+                "container_identity:inventory_mismatch"
+            )
+        if observed_database["volume_identity"] != observed.get(
+            ("volume", "database-data")
+        ):
+            _fail(
+                f"{where}.runtime_probe.observed_configuration.database_service."
+                "volume_identity:inventory_mismatch"
+            )
+        if service_facts["database_identity"] != observed.get(
+            ("database", "session-database")
+        ):
+            _fail(f"{where}.services.database_identity:inventory_mismatch")
+        endpoint_identity = (
+            f"{observed_database['publish_host']}:"
+            f"{observed_database['published_port']}"
+        )
+        if endpoint_identity != observed.get(
+            ("published_endpoint", "database-loopback-endpoint")
+        ):
+            _fail(f"{where}.services.published_endpoint:inventory_mismatch")
+
+    attempted_ids = sorted(
+        (
+            item["proof_id"]
+            for item in proof_results
+            if item.get("environment_profile_id") == profile_id
+            and item.get("status") in {"PASS", "FAIL", "PARTIAL"}
+        ),
+        key=_id_sort_key,
+    )
+    if execution["executed_proof_ids"] != attempted_ids:
+        _fail(f"{where}.execution_manifest.executed_proof_ids:mismatch")
+
+    draft_started = _parse_timestamp(draft["started_at"], f"{where}.execution_draft.started_at")
+    execution_started = _parse_timestamp(
+        execution["execution_started_at"],
+        f"{where}.execution_manifest.execution_started_at",
+    )
+    execution_finished = _parse_timestamp(
+        execution["execution_finished_at"],
+        f"{where}.execution_manifest.execution_finished_at",
+    )
+    cleanup_started = _parse_timestamp(
+        cleanup["cleanup_started_at"], f"{where}.cleanup_manifest.cleanup_started_at"
+    )
+    cleanup_finished = _parse_timestamp(
+        cleanup["cleanup_finished_at"], f"{where}.cleanup_manifest.cleanup_finished_at"
+    )
+    if not (
+        draft_started <= execution_started <= execution_finished <= cleanup_started <= cleanup_finished
+    ):
+        _fail(f"{where}:lifecycle_timestamps_out_of_order")
+    return cleanup_finished
 
 
 def _normalized_architecture(value: str) -> str:
@@ -3372,6 +4365,7 @@ def _validate_container_profile_admission(
     profile: Mapping[str, Any],
     bundle: ValidationBundle,
     git_commit: str,
+    lifecycle_required: bool,
     where: str,
 ) -> None:
     facts = admission["facts"]
@@ -3386,7 +4380,7 @@ def _validate_container_profile_admission(
         "source_commit",
         "source_mount_mode",
         "writable_temp_outside_source",
-    }
+    } | (LIFECYCLE_BINDING_FACTS if lifecycle_required else set())
     _exact_keys(facts, required=required_facts, where=f"{where}.facts")
     for key in ("container_identity", "docker_version"):
         _expect_string(facts[key], f"{where}.facts.{key}")
@@ -3436,6 +4430,13 @@ def _validate_container_profile_admission(
         "runtime_probe",
         "source_mount",
     }
+    if lifecycle_required:
+        required_evidence |= {
+            "execution_admission_archive",
+            "execution_draft",
+            "execution_manifest",
+            "cleanup_manifest",
+        }
     if expected_base_digests:
         required_evidence.add("base_image_digests")
     _require_evidence_kinds(evidence, required_evidence, f"{where}.evidence_refs")
@@ -3486,25 +4487,91 @@ def _validate_database_profile_admission(
     profile: Mapping[str, Any],
     bundle: ValidationBundle,
     git_commit: str,
+    lifecycle_required: bool,
     where: str,
 ) -> None:
     facts = admission["facts"]
+    required_profile_facts = {
+        "environment_identity",
+        "source_commit",
+        "source_mount_mode",
+    }
+    if lifecycle_required:
+        required_profile_facts |= {
+            "runner_container_identity",
+            "runner_image_digest",
+            "runner_network_mode",
+            "runner_root_filesystem_mode",
+            "writable_temp_outside_source",
+        } | LIFECYCLE_BINDING_FACTS
     _exact_keys(
         facts,
-        required={"environment_identity", "source_commit", "source_mount_mode"},
+        required=required_profile_facts,
         where=f"{where}.facts",
     )
     _expect_string(facts["environment_identity"], f"{where}.facts.environment_identity")
+    if lifecycle_required:
+        _expect_string(
+            facts["runner_container_identity"],
+            f"{where}.facts.runner_container_identity",
+        )
+        if not IMAGE_DIGEST_RE.fullmatch(
+            _expect_string(
+                facts["runner_image_digest"], f"{where}.facts.runner_image_digest"
+            )
+        ):
+            _fail(f"{where}.facts.runner_image_digest:invalid")
+        if facts["runner_network_mode"] != "isolated_internal_bridge":
+            _fail(f"{where}.facts.runner_network_mode:must_be_isolated_internal_bridge")
+        if facts["runner_root_filesystem_mode"] != "read_only":
+            _fail(f"{where}.facts.runner_root_filesystem_mode:must_be_read_only")
+        if facts["writable_temp_outside_source"] is not True:
+            _fail(f"{where}.facts.writable_temp_outside_source:must_be_true")
     if facts["source_commit"] != git_commit:
         _fail(f"{where}.facts.source_commit:mismatch")
     if facts["source_mount_mode"] != "read_only":
         _fail(f"{where}.facts.source_mount_mode:must_be_read_only")
+    required_profile_evidence = {"runtime_probe", "source_mount"}
+    if lifecycle_required:
+        required_profile_evidence |= {
+            "container_identity",
+            "image_digest",
+            "network_mode",
+            "execution_admission_archive",
+            "execution_draft",
+            "execution_manifest",
+            "cleanup_manifest",
+        }
     _require_evidence_kinds(
-        evidence, {"runtime_probe", "source_mount"}, f"{where}.evidence_refs"
+        evidence,
+        required_profile_evidence,
+        f"{where}.evidence_refs",
     )
     _require_evidence_fact(
         evidence, "source_mount", "source_mount_mode", "read_only", where
     )
+    if lifecycle_required:
+        _require_evidence_fact(
+            evidence,
+            "container_identity",
+            "runner_container_identity",
+            facts["runner_container_identity"],
+            where,
+        )
+        _require_evidence_fact(
+            evidence,
+            "image_digest",
+            "runner_image_digest",
+            facts["runner_image_digest"],
+            where,
+        )
+        _require_evidence_fact(
+            evidence,
+            "network_mode",
+            "runner_network_mode",
+            "isolated_internal_bridge",
+            where,
+        )
 
     definition = _bound_json_object(
         bundle.root,
@@ -3756,7 +4823,9 @@ def _validate_profile_admission(
     attestation_id: str,
     git_commit: str,
     where: str,
-) -> None:
+    proof_results: Sequence[Mapping[str, Any]] = (),
+    expected_source_snapshot_sha256: str | None = None,
+) -> datetime | None:
     profile_id = profile["id"]
     admission_where = f"{where}.profile_admission"
     admission = _expect_object(environment["profile_admission"], admission_where)
@@ -3873,6 +4942,7 @@ def _validate_profile_admission(
         )
     normalized_admission = {**admission, "facts": facts}
     execution_class = profile["execution_class"]
+    lifecycle_required = bool(set(facts) & LIFECYCLE_BINDING_FACTS)
     if execution_class == "isolated_container":
         _validate_container_profile_admission(
             admission=normalized_admission,
@@ -3881,6 +4951,23 @@ def _validate_profile_admission(
             profile=profile,
             bundle=bundle,
             git_commit=git_commit,
+            lifecycle_required=lifecycle_required,
+            where=admission_where,
+        )
+        if not lifecycle_required:
+            return None
+        return _validate_lifecycle_binding(
+            admission=normalized_admission,
+            evidence=profile_evidence,
+            profile_id=profile_id,
+            attestation_id=attestation_id,
+            git_commit=git_commit,
+            proof_results=proof_results,
+            expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+            profile=profile,
+            bundle=bundle,
+            services=normalized_services,
+            service_evidence=service_evidence,
             where=admission_where,
         )
     elif execution_class == "isolated_database":
@@ -3893,6 +4980,23 @@ def _validate_profile_admission(
             profile=profile,
             bundle=bundle,
             git_commit=git_commit,
+            lifecycle_required=lifecycle_required,
+            where=admission_where,
+        )
+        if not lifecycle_required:
+            return None
+        return _validate_lifecycle_binding(
+            admission=normalized_admission,
+            evidence=profile_evidence,
+            profile_id=profile_id,
+            attestation_id=attestation_id,
+            git_commit=git_commit,
+            proof_results=proof_results,
+            expected_source_snapshot_sha256=expected_source_snapshot_sha256,
+            profile=profile,
+            bundle=bundle,
+            services=normalized_services,
+            service_evidence=service_evidence,
             where=admission_where,
         )
     elif execution_class == "isolated_recovery":
@@ -3904,6 +5008,7 @@ def _validate_profile_admission(
             git_commit=git_commit,
             where=admission_where,
         )
+        return None
     else:
         _fail(f"{admission_where}:unsupported_execution_class:{execution_class}")
 
@@ -4065,7 +5170,10 @@ def _validate_node_test_result(
         and cancelled_count == 0
         and todo_count == 0
     )
-    expected_status = "FAIL" if exit_code else ("PASS" if pass_eligible else "PARTIAL")
+    if exit_code == 124 and result.get("reason_code") == "runner_timeout_unattributed":
+        expected_status = "PARTIAL"
+    else:
+        expected_status = "FAIL" if exit_code else ("PASS" if pass_eligible else "PARTIAL")
     if status != expected_status:
         _fail(f"{where}.status:expected_node_derived:{expected_status}")
 
@@ -4077,6 +5185,7 @@ def validate_attestation_data(
     registry_path: Path | None = None,
     proof_catalog_path: Path | None = None,
     evidence_root: Path | None = None,
+    expected_source_snapshot_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Validate a result-bearing attestation against durable definitions."""
 
@@ -4223,11 +5332,16 @@ def validate_attestation_data(
                 f"material_mismatch:{proof_id}"
             )
 
+    proof_results = _expect_list(attestation["proof_results"], "attestation.proof_results")
+    # Compute this before environment validation so every profile lifecycle can
+    # bind the complete final result set, not a transitive or profile-local view.
+    proof_results_sha256(proof_results)
     profiles = {profile["id"]: profile for profile in bundle.proof_catalog["environment_profiles"]}
     environments = _expect_list(attestation["environments"], "attestation.environments")
     if not environments:
         _fail("attestation.environments:must_not_be_empty")
     bound_environment_ids: list[str] = []
+    cleanup_finished_times: list[datetime] = []
     for index, raw_environment in enumerate(environments):
         environment_where = f"attestation.environments[{index}]"
         environment = _expect_object(raw_environment, environment_where)
@@ -4289,7 +5403,7 @@ def validate_attestation_data(
             )
             if _expect_string(value, f"{environment_where}.lockfile_hashes.{relative}") != expected:
                 _fail(f"{environment_where}.lockfile_hashes:{relative}:mismatch")
-        _validate_profile_admission(
+        cleanup_finished = _validate_profile_admission(
             environment,
             profiles[profile_id],
             bundle=bundle,
@@ -4297,7 +5411,11 @@ def validate_attestation_data(
             attestation_id=attestation_id,
             git_commit=git_commit,
             where=environment_where,
+            proof_results=proof_results,
+            expected_source_snapshot_sha256=expected_source_snapshot_sha256,
         )
+        if cleanup_finished is not None:
+            cleanup_finished_times.append(cleanup_finished)
     if len(bound_environment_ids) != len(set(bound_environment_ids)):
         _fail("attestation.environments:duplicate_profile_ids")
     if bound_environment_ids != sorted(bound_environment_ids):
@@ -4313,6 +5431,8 @@ def validate_attestation_data(
         _fail("attestation:finished_before_started")
     if started.strftime("%Y%m%dT%H%M%SZ") != attestation_id_match.group("timestamp"):
         _fail("attestation.attestation_id:started_at_mismatch")
+    if cleanup_finished_times and max(cleanup_finished_times) != finished:
+        _fail("attestation.finished_at:must_equal_last_cleanup_verification")
 
     proof_by_id = {proof["id"]: proof for proof in bundle.proof_catalog["proofs"]}
     expected_active_proof_ids = sorted(
@@ -4321,7 +5441,6 @@ def validate_attestation_data(
     )
     if not expected_active_proof_ids:
         _fail("attestation:no_active_proofs_to_attest")
-    proof_results = _expect_list(attestation["proof_results"], "attestation.proof_results")
     proof_statuses: dict[str, str] = {}
     for index, raw in enumerate(proof_results):
         where = f"attestation.proof_results[{index}]"
@@ -4513,7 +5632,13 @@ def validate_attestation_data(
                 for key in count_keys
             )
             collected_count = _expect_int(
-                result["collected_count"], f"{where}.collected_count", minimum=1
+                result["collected_count"],
+                f"{where}.collected_count",
+                minimum=(
+                    0
+                    if result.get("reason_code") == "runner_timeout_unattributed"
+                    else 1
+                ),
             )
             if status in {"PASS", "FAIL"} and accounted_count != collected_count:
                 _fail(f"{where}:pytest_counts_do_not_equal_collected_count")
@@ -4627,7 +5752,11 @@ def validate_attestation_data(
                 _fail(f"{where}:FAIL_requires_nonzero_exit_code")
         elif status == "PARTIAL" and runner_kind != "manual":
             if "exit_code" in result and result["exit_code"] != 0:
-                _fail(f"{where}:automated_PARTIAL_forbids_nonzero_exit_code")
+                if not (
+                    result["exit_code"] == 124
+                    and result.get("reason_code") == "runner_timeout_unattributed"
+                ):
+                    _fail(f"{where}:automated_PARTIAL_forbids_nonzero_exit_code")
         elif status in {"PASS", "FAIL"}:
             for key in ("started_at", "finished_at", "operator_identity", "reviewer_identity"):
                 if key not in result:
@@ -4802,6 +5931,9 @@ def validate_attestation_historically(
     clean = _expect_bool(source.get("clean"), "attestation.source.clean")
     _verify_local_git_source(current_bundle.root, git_commit, clean)
     with _historical_repository(current_bundle.root, git_commit) as historical_root:
+        expected_source_snapshot = source_snapshot_sha256(
+            current_bundle.root, git_commit
+        )
         historical_bundle = current_bundle
         if historical_root != current_bundle.root:
             validate_schema_contracts(root=historical_root)
@@ -4828,6 +5960,7 @@ def validate_attestation_historically(
             registry_path=historical_root / REGISTRY_PATH.relative_to(ROOT),
             proof_catalog_path=historical_root / PROOF_CATALOG_PATH.relative_to(ROOT),
             evidence_root=evidence_root or current_bundle.root,
+            expected_source_snapshot_sha256=expected_source_snapshot,
         )
 
 
