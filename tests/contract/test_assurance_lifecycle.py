@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import signal
 import subprocess
@@ -10,6 +11,7 @@ import tarfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -189,6 +191,7 @@ def test_cleanup_attempts_all_resources_after_one_removal_failure(
 
     controller = _controller(tmp_path, command)
     controller.verify_admission = lambda: ("a" * 64, "docker-test")  # type: ignore[method-assign]
+    controller._docker_cleanup_target_present = lambda resource, target: True  # type: ignore[method-assign]
     resources = [
         docker_lifecycle.ResourceIdentity("container", "a-fails", "first"),
         docker_lifecycle.ResourceIdentity("container", "z-still-attempted", "second"),
@@ -212,6 +215,60 @@ def test_cleanup_attempts_all_resources_after_one_removal_failure(
     assert ["rm", "--force", "second"] in calls
     assert report.completed is False
     assert all(item.absent for item in report.resources)
+
+
+def test_cleanup_rechecks_admitted_daemon_immediately_before_docker_rm(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+    inspected = False
+
+    def command(
+        argv: list[str] | tuple[str, ...], env: object, timeout: int
+    ) -> docker_lifecycle.CommandResult:
+        del env, timeout
+        args = list(argv)[1:]
+        calls.append(args)
+        return docker_lifecycle.CommandResult(b"", b"", 0)
+
+    controller = _controller(tmp_path, command)
+
+    def verify() -> tuple[str, str]:
+        if inspected:
+            raise docker_lifecycle.DockerLifecycleError("daemon changed after inspect")
+        return "a" * 64, "docker-test"
+
+    def inspect_target(resource: object, target: object) -> bool:
+        nonlocal inspected
+        del resource, target
+        inspected = True
+        return True
+
+    controller.verify_admission = verify  # type: ignore[method-assign]
+    controller.discover_labeled_resources = lambda: []  # type: ignore[method-assign]
+    controller._docker_cleanup_target_present = inspect_target  # type: ignore[method-assign]
+    resource = docker_lifecycle.ResourceIdentity(
+        "container", "proof-runner", "runner-id"
+    )
+    prepared = docker_lifecycle.ProvisionedProfile(
+        profile_id="python-nondb",
+        execution_class="isolated_container",
+        runner_container_id="runner-id",
+        runner_image_id="sha256:" + "1" * 64,
+        resources=[resource],
+        resource_targets={("container", "proof-runner"): "runner-id"},
+        tool_versions={},
+        bootstrap_stdout="",
+        bootstrap_stderr="",
+    )
+
+    report = controller.cleanup(prepared)
+
+    assert inspected is True
+    assert ["rm", "--force", "runner-id"] not in calls
+    assert report.completed is False
+    assert report.resources[0].absent is False
+    assert "control-plane-identity-unverified" in report.label_query_remaining
 
 
 def test_control_plane_mismatch_cannot_prove_replacement_daemon_absence(
@@ -282,6 +339,642 @@ def test_label_discovery_uses_full_session_profile_instance_identity(
         f"label={docker_lifecycle.INSTANCE_LABEL}={controller.environment_instance_id}"
         in text
     )
+    assert f"label={docker_lifecycle.SOURCE_LABEL}={controller.source_commit}" in text
+    assert any(
+        item[1:4] == ["ps", "-aq", "--no-trunc"] for item in calls
+    )
+    assert any(
+        item[1:5] == ["network", "ls", "-q", "--no-trunc"]
+        for item in calls
+    )
+
+
+def test_discovery_rejects_resource_missing_exact_source_label(tmp_path: Path) -> None:
+    def command(argv: object, env: object, timeout: int) -> docker_lifecycle.CommandResult:
+        del env, timeout
+        args = list(argv)[1:]
+        if args[:2] == ["ps", "-aq"]:
+            return docker_lifecycle.CommandResult(b"container-id\n", b"", 0)
+        if args[:3] == ["container", "inspect", "container-id"]:
+            payload = [
+                {
+                    "Id": "container-id",
+                    "Name": "/unexpected",
+                    "Config": {
+                        "Labels": {
+                            docker_lifecycle.SESSION_LABEL: (
+                                "QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb"
+                            ),
+                            docker_lifecycle.PROFILE_LABEL: "python-nondb",
+                            docker_lifecycle.INSTANCE_LABEL: "qt-12345678",
+                        }
+                    },
+                }
+            ]
+            return docker_lifecycle.CommandResult(json.dumps(payload).encode(), b"", 0)
+        return docker_lifecycle.CommandResult(b"", b"", 0)
+
+    controller = _controller(tmp_path, command)
+    controller.verify_admission = lambda: ("a" * 64, "docker-test")  # type: ignore[method-assign]
+    with pytest.raises(
+        docker_lifecycle.DockerLifecycleError,
+        match="identity_labels_mismatch",
+    ):
+        controller.discover_labeled_resources()
+
+
+def test_recovery_registers_only_exact_private_secret_patterns_and_redaction(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        lambda argv, env, timeout: docker_lifecycle.CommandResult(b"", b"", 0),
+    )
+    secret = controller.private_root / "proof-runner-env-0123456789abcdef.env"
+    secret.write_text(
+        "PG_DSN=postgresql://synthetic:private-value@db/session\n",
+        encoding="utf-8",
+    )
+    secret.chmod(0o600)
+    unrelated = controller.private_root / "unrelated.env"
+    unrelated.write_text("TOKEN=must-remain\n", encoding="utf-8")
+    unrelated.chmod(0o600)
+    controller.register_recovery_local_resources(
+        source_snapshot_sha256="b" * 64,
+        planned_resources=[
+            {"kind": "source_snapshot", "logical_name": "exact-source-snapshot"},
+            {"kind": "temporary_secret_file", "logical_name": "proof-runner-env"},
+        ],
+    )
+    prepared = controller.partial_profile("isolated_database")
+    registered = {
+        (item.kind, item.logical_name) for item in prepared.resources
+    }
+    assert ("temporary_secret_file", "proof-runner-env") in registered
+    assert all("unrelated" not in logical_name for _, logical_name in registered)
+    redacted, changed = controller.redact_durable_output(
+        b"postgresql://synthetic:private-value@db/session"
+    )
+    assert changed is True
+    assert b"private-value" not in redacted
+    controller.verify_admission = lambda: ("a" * 64, "docker-test")  # type: ignore[method-assign]
+    prepared = controller.partial_profile("isolated_database")
+    report = controller.cleanup(prepared)
+    assert secret.exists() is False
+    assert unrelated.read_text(encoding="utf-8") == "TOKEN=must-remain\n"
+    assert report.completed is False
+    assert "local-residue:unrecognized" in report.label_query_remaining
+    residue = [item for item in report.resources if item.kind == "private_residue"]
+    assert len(residue) == 1
+    assert residue[0].logical_name == "unrecognized-private-residue-001"
+    assert residue[0].runtime_identity.startswith("path-name-sha256:")
+    assert "unrelated" not in residue[0].runtime_identity
+    assert residue[0].absent is False
+
+
+def test_recovery_source_symlink_cannot_delete_private_sibling(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        lambda argv, env, timeout: docker_lifecycle.CommandResult(b"", b"", 0),
+    )
+    sibling = controller.private_root / "must-remain"
+    sibling.mkdir()
+    marker = sibling / "marker.txt"
+    marker.write_text("preserve\n", encoding="utf-8")
+    controller.root.symlink_to(sibling, target_is_directory=True)
+    planned = [
+        {"kind": "source_snapshot", "logical_name": "exact-source-snapshot"}
+    ]
+    with pytest.raises(
+        docker_lifecycle.DockerLifecycleError,
+        match="source_snapshot_invalid",
+    ):
+        controller.register_recovery_local_resources(
+            source_snapshot_sha256="b" * 64,
+            planned_resources=planned,
+        )
+    assert marker.read_text(encoding="utf-8") == "preserve\n"
+
+    prepared = docker_lifecycle.ProvisionedProfile(
+        profile_id="python-nondb",
+        execution_class="isolated_container",
+        runner_container_id="absent",
+        runner_image_id="sha256:" + "1" * 64,
+        resources=[
+            docker_lifecycle.ResourceIdentity(
+                "source_snapshot",
+                "exact-source-snapshot",
+                "git-archive:" + "b" * 64,
+            )
+        ],
+        resource_targets={
+            ("source_snapshot", "exact-source-snapshot"): controller.root
+        },
+        tool_versions={},
+        bootstrap_stdout="",
+        bootstrap_stderr="",
+    )
+    controller.verify_admission = lambda: ("a" * 64, "docker-test")  # type: ignore[method-assign]
+    report = controller.cleanup(prepared)
+    assert report.completed is False
+    assert report.resources[0].absent is False
+    assert marker.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_session_profile_lock_is_nonblocking_and_crash_reusable(
+    tmp_path: Path,
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    private.chmod(0o700)
+    first = verifier._SessionProfileLock(
+        private_root=private,
+        attestation_id="QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb",
+        profile_id="python-nondb",
+    )
+    second = verifier._SessionProfileLock(
+        private_root=private,
+        attestation_id="QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb",
+        profile_id="python-nondb",
+    )
+    first.acquire()
+    try:
+        with pytest.raises(verifier.AssuranceExecutionError, match="lock_busy"):
+            second.acquire()
+    finally:
+        first.release()
+    second.acquire()
+    second.release()
+
+
+def test_recovery_draft_rejects_unbound_admission_archive_hash(
+    tmp_path: Path,
+) -> None:
+    source_commit = "a" * 40
+    attestation_id = "QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb"
+    profile_id = "python-nondb"
+    environment_dir = (
+        tmp_path
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "evidence"
+        / attestation_id
+        / "_environments"
+        / profile_id
+    )
+    environment_dir.mkdir(parents=True)
+    archive = environment_dir / "execution_admission_archive-001-profile.json"
+    archive.write_text("{}\n", encoding="utf-8")
+    draft = environment_dir / "execution_draft-001-profile.json"
+    draft.write_text(
+        json.dumps(
+            {
+                "schema_version": "qt.assurance_environment_evidence.v1",
+                "profile_id": profile_id,
+                "artifact_kind": "execution_draft",
+                "facts": {
+                    "record_schema_version": "qt.assurance_execution_draft.v1",
+                    "attestation_id": attestation_id,
+                    "source_commit": source_commit,
+                    "source_snapshot_sha256": "b" * 64,
+                    "requested_profile_ids": [profile_id],
+                    "started_at": "2026-08-25T12:00:00Z",
+                    "admission_id": "owner-reviewed-admission",
+                    "environment_instance_id": "qt-12345678",
+                    "control_plane_identity_sha256": "c" * 64,
+                    "runtime_definition_sha256": "d" * 64,
+                    "execution_admission_sha256": "e" * 64,
+                    "execution_admission_archive_sha256": "f" * 64,
+                    "external_order_submission_enabled": False,
+                    "planned_resources": [
+                        {
+                            "kind": "source_snapshot",
+                            "logical_name": "exact-source-snapshot",
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        verifier.AssuranceExecutionError,
+        match="admission_archive_hash_mismatch",
+    ):
+        verifier._load_recovery_draft(
+            stage_root=tmp_path,
+            draft_path=draft,
+            source_commit=source_commit,
+        )
+
+
+def _install_recovery_fakes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    binding_tamper: bool,
+    cleanup_raises: bool = False,
+    cleanup_completed: bool = True,
+) -> tuple[dict[str, Path], list[str]]:
+    source_commit = "a" * 40
+    profile_id = "python-nondb"
+    attestation_id = (
+        "QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb"
+    )
+    paths = {
+        "root": tmp_path / "source-repository",
+        "stage": tmp_path / "external-stage",
+        "private": tmp_path / "private-runtime",
+        "admission": tmp_path / "owner-input" / "admission.json",
+        "report": tmp_path / "operator-records" / "recovery-report.json",
+    }
+    for key in ("root", "stage", "private"):
+        paths[key].mkdir()
+    paths["private"].chmod(0o700)
+    paths["admission"].parent.mkdir()
+    paths["admission"].write_text("{}\n", encoding="utf-8")
+    paths["report"].parent.mkdir()
+    draft_path = (
+        paths["stage"]
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "evidence"
+        / attestation_id
+        / "_environments"
+        / profile_id
+        / "execution_draft-001-profile.json"
+    )
+    draft_path.parent.mkdir(parents=True)
+    draft_path.write_text("{}\n", encoding="utf-8")
+    paths["draft"] = draft_path
+
+    source_snapshot_sha256 = "b" * 64
+    control_identity_sha256 = "c" * 64
+    runtime_definition_sha256 = "d" * 64
+    execution_admission_sha256 = "e" * 64
+    archive_sha256 = "f" * 64
+    planned_resources = [
+        {"kind": "source_snapshot", "logical_name": "exact-source-snapshot"},
+        {"kind": "temporary_secret_file", "logical_name": "proof-runner-env"},
+        {"kind": "container", "logical_name": "proof-runner"},
+    ]
+    facts = {
+        "attestation_id": attestation_id,
+        "source_commit": source_commit,
+        "source_snapshot_sha256": source_snapshot_sha256,
+        "requested_profile_ids": [profile_id],
+        "admission_id": "owner-reviewed-admission",
+        "environment_instance_id": "qt-12345678",
+        "control_plane_identity_sha256": control_identity_sha256,
+        "runtime_definition_sha256": runtime_definition_sha256,
+        "execution_admission_sha256": (
+            "0" * 64 if binding_tamper else execution_admission_sha256
+        ),
+        "execution_admission_archive_sha256": archive_sha256,
+        "planned_resources": planned_resources,
+    }
+    admission = {
+        "admission_id": "owner-reviewed-admission",
+        "runtime_definition": {"sha256": runtime_definition_sha256},
+        "docker_tool": {
+            "daemon_identity_sha256": control_identity_sha256,
+        },
+    }
+    archive_facts = {
+        "normalized": "exact-owner-reviewed-admission",
+    }
+    mutations: list[str] = []
+
+    class FakeController:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            mutations.append("controller-created")
+
+        def planned_resources(self, execution_class: str) -> list[dict[str, str]]:
+            assert execution_class == "isolated_container"
+            return planned_resources
+
+        def register_recovery_local_resources(self, **kwargs: object) -> None:
+            del kwargs
+            mutations.append("recovery-targets-registered")
+
+        def partial_profile(self, execution_class: str) -> object:
+            assert execution_class == "isolated_container"
+            return object()
+
+        def cleanup(self, prepared: object) -> docker_lifecycle.CleanupReport:
+            del prepared
+            assert paths["report"].with_name(
+                paths["report"].name + ".pending"
+            ).is_file()
+            mutations.append("cleanup-called")
+            if cleanup_raises:
+                raise RuntimeError("injected recovery crash")
+            return docker_lifecycle.CleanupReport(
+                stdout="private cleanup token",
+                stderr="",
+                exit_code=0 if cleanup_completed else 1,
+                resources=tuple(
+                    docker_lifecycle.CleanupResource(
+                        kind=item["kind"],
+                        logical_name=item["logical_name"],
+                        runtime_identity=f"recovered:{item['logical_name']}",
+                        absent=cleanup_completed,
+                    )
+                    for item in planned_resources
+                ),
+                label_query_remaining=(
+                    () if cleanup_completed else ("container:proof-runner",)
+                ),
+            )
+
+        def redact_durable_output(self, content: bytes) -> tuple[bytes, bool]:
+            if b"private cleanup token" in content:
+                return b"[QT-ASSURANCE-REDACTED]", True
+            return content, False
+
+    bundle = SimpleNamespace(
+        proof_catalog={
+            "environment_profiles": [
+                {"id": profile_id, "execution_class": "isolated_container"}
+            ]
+        }
+    )
+    monkeypatch.setattr(verifier, "require_exact_clean_source", lambda *args: None)
+    monkeypatch.setattr(
+        verifier.guarantees, "validate_repository", lambda root: bundle
+    )
+    monkeypatch.setattr(
+        verifier,
+        "_load_recovery_draft",
+        lambda **kwargs: (facts, "1" * 64, archive_facts, archive_sha256),
+    )
+    monkeypatch.setattr(
+        verifier,
+        "load_execution_admission",
+        lambda path, commit: ({profile_id: admission}, execution_admission_sha256),
+    )
+    monkeypatch.setattr(verifier, "_align_execution_admission", lambda **kwargs: None)
+    monkeypatch.setattr(
+        verifier,
+        "archive_execution_admission_profile",
+        lambda item, commit, digest: archive_facts,
+    )
+    monkeypatch.setattr(verifier, "_git_archive_bytes", lambda root, commit: b"archive")
+    monkeypatch.setattr(
+        verifier,
+        "_archive_tree_sha256",
+        lambda archive: source_snapshot_sha256,
+    )
+    monkeypatch.setattr(
+        verifier.docker_lifecycle, "DockerController", FakeController
+    )
+    return paths, mutations
+
+
+def test_recovery_binding_tamper_causes_no_cleanup_mutation_or_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, mutations = _install_recovery_fakes(
+        tmp_path, monkeypatch, binding_tamper=True
+    )
+    with pytest.raises(
+        verifier.AssuranceExecutionError,
+        match="recovery_execution_admission_sha256_mismatch",
+    ):
+        verifier.recover_cleanup(
+            root=paths["root"],
+            source_commit="a" * 40,
+            stage_root=paths["stage"],
+            private_root=paths["private"],
+            execution_admission=paths["admission"],
+            draft_path=paths["draft"],
+            output_path=paths["report"],
+        )
+    assert mutations == []
+    assert not paths["report"].exists()
+    assert not paths["report"].with_name(
+        paths["report"].name + ".pending"
+    ).exists()
+
+
+def test_recovery_success_is_immutable_redacted_and_permanently_nonfinalizing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, mutations = _install_recovery_fakes(
+        tmp_path, monkeypatch, binding_tamper=False
+    )
+    result = verifier.recover_cleanup(
+        root=paths["root"],
+        source_commit="a" * 40,
+        stage_root=paths["stage"],
+        private_root=paths["private"],
+        execution_admission=paths["admission"],
+        draft_path=paths["draft"],
+        output_path=paths["report"],
+    )
+    assert result == paths["report"]
+    report = json.loads(result.read_text(encoding="utf-8"))
+    assert report["schema_version"] == verifier.RECOVERY_REPORT_SCHEMA_VERSION
+    assert report["recovery_state"] == "cleanup_verified"
+    assert report["finalizable"] is False
+    assert report["nonfinalizable"] is True
+    assert report["attestation_emitted"] is False
+    assert report["cleanup"]["cleanup_completed"] is True
+    assert report["cleanup"]["redaction_applied"] is True
+    assert "private cleanup token" not in result.read_text(encoding="utf-8")
+    assert report["cleanup"]["stdout"] == "[QT-ASSURANCE-REDACTED]"
+    immutable_bytes = result.read_bytes()
+    intent_path = result.with_name(result.name + ".pending")
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert intent["schema_version"] == verifier.RECOVERY_INTENT_SCHEMA_VERSION
+    assert intent["recovery_state"] == "cleanup_pending"
+    assert intent["finalizable"] is False
+    assert intent["attestation_emitted"] is False
+    assert intent["recovery_attempt_id"] == report["recovery_attempt_id"]
+    assert report["recovery_intent"] == {
+        "file_name": intent_path.name,
+        "sha256": verifier._sha256_file_binary(intent_path),
+    }
+    final_attestation = (
+        paths["stage"]
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "attestations"
+        / ("a" * 40)
+        / (
+            "QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb.json"
+        )
+    )
+    assert not final_attestation.exists()
+    assert mutations == [
+        "controller-created",
+        "controller-created",
+        "recovery-targets-registered",
+        "cleanup-called",
+    ]
+    with pytest.raises(
+        verifier.AssuranceExecutionError,
+        match="recovery_report:already_exists",
+    ):
+        verifier.recover_cleanup(
+            root=paths["root"],
+            source_commit="a" * 40,
+            stage_root=paths["stage"],
+            private_root=paths["private"],
+            execution_admission=paths["admission"],
+            draft_path=paths["draft"],
+            output_path=paths["report"],
+        )
+    assert result.read_bytes() == immutable_bytes
+    assert mutations == [
+        "controller-created",
+        "controller-created",
+        "recovery-targets-registered",
+        "cleanup-called",
+    ]
+
+
+def test_recovery_crash_retains_intent_and_requires_a_new_attempt_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, mutations = _install_recovery_fakes(
+        tmp_path,
+        monkeypatch,
+        binding_tamper=False,
+        cleanup_raises=True,
+    )
+    arguments = {
+        "root": paths["root"],
+        "source_commit": "a" * 40,
+        "stage_root": paths["stage"],
+        "private_root": paths["private"],
+        "execution_admission": paths["admission"],
+        "draft_path": paths["draft"],
+    }
+    with pytest.raises(RuntimeError, match="injected recovery crash"):
+        verifier.recover_cleanup(
+            **arguments,
+            output_path=paths["report"],
+        )
+    first_intent = paths["report"].with_name(paths["report"].name + ".pending")
+    first_bytes = first_intent.read_bytes()
+    assert not paths["report"].exists()
+    assert json.loads(first_bytes)["recovery_state"] == "cleanup_pending"
+
+    with pytest.raises(
+        verifier.AssuranceExecutionError,
+        match="recovery_intent:already_exists",
+    ):
+        verifier.recover_cleanup(
+            **arguments,
+            output_path=paths["report"],
+        )
+    assert first_intent.read_bytes() == first_bytes
+
+    second_report = paths["report"].with_name("recovery-report-attempt-2.json")
+    paths["report"] = second_report
+    with pytest.raises(RuntimeError, match="injected recovery crash"):
+        verifier.recover_cleanup(
+            **arguments,
+            output_path=second_report,
+        )
+    second_intent = second_report.with_name(second_report.name + ".pending")
+    assert second_intent.is_file()
+    assert second_intent.read_bytes() != first_bytes
+    assert mutations.count("cleanup-called") == 2
+
+
+def test_recovery_incomplete_writes_nonfinalizable_report_then_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, mutations = _install_recovery_fakes(
+        tmp_path,
+        monkeypatch,
+        binding_tamper=False,
+        cleanup_completed=False,
+    )
+    with pytest.raises(
+        verifier.AssuranceExecutionError,
+        match="recovery_cleanup_incomplete_report",
+    ):
+        verifier.recover_cleanup(
+            root=paths["root"],
+            source_commit="a" * 40,
+            stage_root=paths["stage"],
+            private_root=paths["private"],
+            execution_admission=paths["admission"],
+            draft_path=paths["draft"],
+            output_path=paths["report"],
+        )
+    report = json.loads(paths["report"].read_text(encoding="utf-8"))
+    assert report["recovery_state"] == "cleanup_incomplete"
+    assert report["finalizable"] is False
+    assert report["nonfinalizable"] is True
+    assert report["attestation_emitted"] is False
+    assert report["cleanup"]["cleanup_completed"] is False
+    assert report["cleanup"]["label_query_remaining"] == [
+        "container:proof-runner"
+    ]
+    assert mutations[-1] == "cleanup-called"
+
+
+def test_recovery_rechecks_final_attestation_after_acquiring_session_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths, mutations = _install_recovery_fakes(
+        tmp_path,
+        monkeypatch,
+        binding_tamper=False,
+    )
+    final_attestation = (
+        paths["stage"]
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "attestations"
+        / ("a" * 40)
+        / "QT-ATT-20260825T120000Z-aaaaaaaaaaaa-python-nondb.json"
+    )
+
+    class FinalizingRaceLock:
+        def __enter__(self) -> object:
+            final_attestation.parent.mkdir(parents=True)
+            final_attestation.write_text("{}\n", encoding="utf-8")
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            del exc_type, exc, traceback
+
+    monkeypatch.setattr(
+        verifier,
+        "_SessionProfileLock",
+        lambda **kwargs: FinalizingRaceLock(),
+    )
+    with pytest.raises(
+        verifier.AssuranceExecutionError,
+        match="recovery_finalized_attestation_already_exists",
+    ):
+        verifier.recover_cleanup(
+            root=paths["root"],
+            source_commit="a" * 40,
+            stage_root=paths["stage"],
+            private_root=paths["private"],
+            execution_admission=paths["admission"],
+            draft_path=paths["draft"],
+            output_path=paths["report"],
+        )
+    assert mutations == ["controller-created", "controller-created"]
+    assert not paths["report"].exists()
+    assert not paths["report"].with_name(
+        paths["report"].name + ".pending"
+    ).exists()
 
 
 def test_exact_archive_snapshot_detects_post_extract_mutation(tmp_path: Path) -> None:

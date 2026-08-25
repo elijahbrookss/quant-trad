@@ -13,6 +13,7 @@ or infers that a remediation or passing proof activates a guarantee.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import io
 import json
@@ -22,16 +23,24 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
+import unicodedata
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlparse
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Docker proof execution is Linux-only
+    fcntl = None  # type: ignore[assignment]
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,6 +61,10 @@ EXECUTION_ADMISSION_ARCHIVE_SCHEMA_VERSION = (
 UNAVAILABILITY_SCHEMA_VERSION = "qt.assurance_unavailability.v1"
 NODE_RESULT_SCHEMA_VERSION = "qt.node_test_result.v1"
 NODE_TRANSPORT_SCHEMA_VERSION = "qt.node_test_events.v1"
+RECOVERY_REPORT_SCHEMA_VERSION = guarantees.CLEANUP_RECOVERY_REPORT_SCHEMA_VERSION
+RECOVERY_INTENT_SCHEMA_VERSION = guarantees.CLEANUP_RECOVERY_INTENT_SCHEMA_VERSION
+PUBLICATION_PENDING_SCHEMA_VERSION = "qt.assurance_staged_publication_pending.v1"
+PUBLICATION_RECEIPT_SCHEMA_VERSION = "qt.assurance_staged_publication_receipt.v1"
 RESULT_STATUSES = {"PASS", "FAIL", "NOT_RUN", "MANUAL", "PARTIAL", "UNAVAILABLE"}
 SAFE_ENVIRONMENT_CLASSES = {"isolated_test", "ephemeral_ci", "local_test"}
 SAFE_SERVICE_ENVIRONMENT_CLASSES = {"isolated_test", "ephemeral_ci"}
@@ -64,6 +77,14 @@ NONMATCH_REASON_RE = re.compile(
     r"(?:test name does not match pattern|does not match (?:the )?test name pattern)",
     re.I,
 )
+WINDOWS_RESERVED_COMPONENTS = {
+    "aux",
+    "con",
+    "nul",
+    "prn",
+    *(f"com{index}" for index in range(1, 10)),
+    *(f"lpt{index}" for index in range(1, 10)),
+}
 
 
 class AssuranceExecutionError(RuntimeError):
@@ -113,6 +134,68 @@ class ProcessResult:
     timed_out: bool
 
 
+class _SessionProfileLock:
+    """A crash-releasing, nonblocking lock shared by execution and recovery."""
+
+    def __init__(
+        self, *, private_root: Path, attestation_id: str, profile_id: str
+    ) -> None:
+        token = _sha256_bytes(f"{attestation_id}\n{profile_id}\n".encode("utf-8"))
+        self.path = private_root / ".qt-assurance-locks" / f"{token}.lock"
+        self._descriptor: int | None = None
+
+    def acquire(self) -> None:
+        if fcntl is None:
+            raise AssuranceExecutionError("session_profile_lock_unavailable")
+        _ensure_private_directory(self.path.parent, self.path.parent.parent)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise AssuranceExecutionError(
+                f"session_profile_lock_open_failed:{type(exc).__name__}"
+            ) from exc
+        try:
+            observed = os.fstat(descriptor)
+            if not stat.S_ISREG(observed.st_mode) or observed.st_mode & 0o077:
+                raise AssuranceExecutionError("session_profile_lock_not_private_regular")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise AssuranceExecutionError("session_profile_lock_busy") from exc
+                raise AssuranceExecutionError(
+                    f"session_profile_lock_failed:{type(exc).__name__}"
+                ) from exc
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._descriptor = descriptor
+
+    def release(self) -> None:
+        if self._descriptor is None:
+            return
+        descriptor = self._descriptor
+        self._descriptor = None
+        if fcntl is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        else:  # pragma: no cover - acquire fails when flock is unavailable
+            os.close(descriptor)
+
+    def __enter__(self) -> _SessionProfileLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        self.release()
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -122,6 +205,218 @@ def _canonical_json_bytes(value: Any) -> bytes:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _strict_json_bytes(content: bytes, where: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            content.decode("utf-8"),
+            object_pairs_hook=guarantees._unique_object,
+            parse_constant=guarantees._reject_constant,
+        )
+    except guarantees.GuaranteeValidationError:
+        raise
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AssuranceExecutionError(f"{where}:invalid_json") from exc
+    if not isinstance(value, dict):
+        raise AssuranceExecutionError(f"{where}:object_required")
+    return value
+
+
+def _portable_component(value: str, where: str) -> str:
+    if (
+        not value
+        or value in {".", ".."}
+        or value[-1:] in {" ", "."}
+        or any(character in value for character in '<>:"\\|?*\x00\r\n')
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+        or _portable_identity(value.split(".", 1)[0])
+        in WINDOWS_RESERVED_COMPONENTS
+    ):
+        raise AssuranceExecutionError(f"{where}:nonportable_path_component")
+    return value
+
+
+def _portable_identity(value: str) -> str:
+    """Return the Windows/WSL-safe comparison key for one path or component."""
+
+    return unicodedata.normalize("NFC", value).casefold()
+
+
+def _portable_relative(value: str, where: str) -> PurePosixPath:
+    pure = PurePosixPath(value)
+    if (
+        "\\" in value
+        or pure.is_absolute()
+        or not pure.parts
+        or any(part in {"", ".", ".."} for part in pure.parts)
+    ):
+        raise AssuranceExecutionError(f"{where}:safe_relative_path_required")
+    for index, part in enumerate(pure.parts):
+        _portable_component(part, f"{where}[{index}]")
+    return pure
+
+
+def _assert_existing_components_safe(
+    path: Path, *, anchor: Path, final_kind: str | None = None
+) -> None:
+    anchor = anchor.resolve()
+    path = path.absolute()
+    try:
+        relative = path.relative_to(anchor)
+    except ValueError as exc:
+        raise AssuranceExecutionError("path_outside_expected_anchor") from exc
+    current = anchor
+    for index, part in enumerate(relative.parts):
+        _portable_component(part, "path.component")
+        if current.is_dir():
+            matches = [
+                child.name
+                for child in current.iterdir()
+                if _portable_identity(child.name) == _portable_identity(part)
+            ]
+            if len(matches) > 1 or (matches and matches[0] != part):
+                raise AssuranceExecutionError("path_casefold_component_collision")
+        current = current / part
+        if not current.exists() and not current.is_symlink():
+            continue
+        observed = os.lstat(current)
+        if stat.S_ISLNK(observed.st_mode):
+            raise AssuranceExecutionError("path_symlink_forbidden")
+        is_final = index == len(relative.parts) - 1
+        if not is_final and not stat.S_ISDIR(observed.st_mode):
+            raise AssuranceExecutionError("path_parent_not_directory")
+        if is_final and final_kind == "file" and not stat.S_ISREG(observed.st_mode):
+            raise AssuranceExecutionError("path_not_regular_file")
+        if is_final and final_kind == "directory" and not stat.S_ISDIR(observed.st_mode):
+            raise AssuranceExecutionError("path_not_directory")
+
+
+def _require_absolute_safe_existing(
+    path: Path,
+    *,
+    where: str,
+    final_kind: str,
+) -> Path:
+    if not path.is_absolute():
+        raise AssuranceExecutionError(f"{where}:absolute_path_required")
+    absolute = path.absolute()
+    anchor = Path(absolute.anchor)
+    if not anchor.is_dir():
+        raise AssuranceExecutionError(f"{where}:filesystem_anchor_unavailable")
+    _assert_existing_components_safe(
+        absolute, anchor=anchor, final_kind=final_kind
+    )
+    if absolute.resolve() != absolute:
+        raise AssuranceExecutionError(f"{where}:symlink_component_forbidden")
+    return absolute
+
+
+def _read_stable_regular_bytes(
+    path: Path,
+    *,
+    anchor: Path,
+    where: str,
+) -> bytes:
+    """Read one exact regular-file identity once, without following the leaf."""
+
+    _assert_existing_components_safe(path, anchor=anchor, final_kind="file")
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise AssuranceExecutionError(f"{where}:regular_file_required")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AssuranceExecutionError(f"{where}:stable_open_failed") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise AssuranceExecutionError(f"{where}:identity_changed_before_read")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            content = handle.read()
+            after_read = os.fstat(handle.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        after_path = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise AssuranceExecutionError(f"{where}:identity_changed_after_read") from exc
+    identity = (opened.st_dev, opened.st_ino)
+    if (
+        (after_read.st_dev, after_read.st_ino) != identity
+        or (after_path.st_dev, after_path.st_ino) != identity
+        or after_read.st_size != len(content)
+    ):
+        raise AssuranceExecutionError(f"{where}:identity_changed_after_read")
+    return content
+
+
+def _ensure_private_directory(path: Path, anchor: Path) -> None:
+    anchor = anchor.resolve()
+    if not anchor.is_dir() or anchor.stat().st_mode & 0o077:
+        raise AssuranceExecutionError("private_root_must_be_owner_private_0700")
+    try:
+        relative = path.absolute().relative_to(anchor)
+    except ValueError as exc:
+        raise AssuranceExecutionError("private_directory_outside_private_root") from exc
+    current = anchor
+    for part in relative.parts:
+        _portable_component(part, "private_directory.component")
+        if current.is_dir():
+            matches = [
+                child.name
+                for child in current.iterdir()
+                if _portable_identity(child.name) == _portable_identity(part)
+            ]
+            if len(matches) > 1 or (matches and matches[0] != part):
+                raise AssuranceExecutionError(
+                    "private_directory_casefold_component_collision"
+                )
+        current = current / part
+        try:
+            os.mkdir(current, 0o700)
+        except FileExistsError:
+            pass
+        observed = os.lstat(current)
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+            raise AssuranceExecutionError("private_directory_component_unsafe")
+        if observed.st_mode & 0o077:
+            raise AssuranceExecutionError("private_directory_component_not_private")
+
+
+def _require_external_record_path(
+    path: Path, *, where: str, allow_existing: bool
+) -> Path:
+    if not path.is_absolute():
+        raise AssuranceExecutionError(f"{where}:absolute_path_required")
+    _portable_component(path.name, f"{where}.name")
+    parent = path.parent
+    if (
+        not parent.is_dir()
+        or parent.is_symlink()
+        or parent.resolve() != parent.absolute()
+    ):
+        raise AssuranceExecutionError(f"{where}:safe_existing_parent_required")
+    _assert_existing_components_safe(
+        parent,
+        anchor=Path(parent.anchor),
+        final_kind="directory",
+    )
+    if path.exists() or path.is_symlink():
+        observed = os.lstat(path)
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+            raise AssuranceExecutionError(f"{where}:regular_file_required")
+        if not allow_existing:
+            raise AssuranceExecutionError(f"{where}:already_exists")
+    return path.absolute()
 
 
 def _utc_now() -> datetime:
@@ -2230,8 +2525,51 @@ def run_attestation(
     if private_session_root.exists():
         raise AssuranceExecutionError("private_session_already_exists")
 
+    lock = _SessionProfileLock(
+        private_root=private_root,
+        attestation_id=attestation_id,
+        profile_id=automated_profile_ids[0],
+    )
+    with lock:
+        return _prepare_and_run_locked_session(
+            root=root,
+            source_commit=source_commit,
+            stage_root=stage_root,
+            private_session_root=private_session_root,
+            session_started=session_started,
+            attestation_id=attestation_id,
+            source_archive=source_archive,
+            source_snapshot_sha256=source_snapshot_sha256,
+            selected_profile_ids=selected,
+            automated_profile_ids=automated_profile_ids,
+            profile_by_id=profile_by_id,
+            admissions=admissions,
+            admission_hash=admission_hash,
+            bundle=bundle,
+        )
+
+
+def _prepare_and_run_locked_session(
+    *,
+    root: Path,
+    source_commit: str,
+    stage_root: Path,
+    private_session_root: Path,
+    session_started: datetime,
+    attestation_id: str,
+    source_archive: bytes,
+    source_snapshot_sha256: str,
+    selected_profile_ids: Sequence[str],
+    automated_profile_ids: Sequence[str],
+    profile_by_id: Mapping[str, Mapping[str, Any]],
+    admissions: Mapping[str, Mapping[str, Any]],
+    admission_hash: str,
+    bundle: guarantees.ValidationBundle,
+) -> Path:
+    """Write the draft and execute while the caller holds the session lock."""
+
     states: dict[str, dict[str, Any]] = {}
-    requested_profile_ids = list(selected)
+    requested_profile_ids = list(selected_profile_ids)
     # Read-only daemon/image checks happen before the immutable draft. No
     # Docker create/network/volume command is permitted before every draft.
     for profile_id in automated_profile_ids:
@@ -2255,7 +2593,9 @@ def run_attestation(
             for service_id in sorted(admission["service_images"]):
                 controller.verify_service_image(service_id)
         except docker_lifecycle.DockerLifecycleError as exc:
-            raise AssuranceExecutionError(f"profile_preflight_unavailable:{profile_id}:{exc}") from exc
+            raise AssuranceExecutionError(
+                f"profile_preflight_unavailable:{profile_id}:{exc}"
+            ) from exc
         admission_archive_payload = archive_execution_admission_profile(
             admission, source_commit, admission_hash
         )
@@ -2305,7 +2645,6 @@ def run_attestation(
             "snapshot_root": snapshot_root,
             "prepared": None,
         }
-
     return _run_cleanup_gated_session(
         root=root,
         source_commit=source_commit,
@@ -2315,7 +2654,7 @@ def run_attestation(
         attestation_id=attestation_id,
         source_archive=source_archive,
         source_snapshot_sha256=source_snapshot_sha256,
-        selected_profile_ids=selected,
+        selected_profile_ids=selected_profile_ids,
         automated_profile_ids=automated_profile_ids,
         states=states,
         admissions=admissions,
@@ -2911,13 +3250,1295 @@ def _run_cleanup_gated_session(
     return attestation_path
 
 
+def _load_recovery_draft(
+    *,
+    stage_root: Path,
+    draft_path: Path,
+    source_commit: str,
+) -> tuple[dict[str, Any], str, dict[str, Any], str]:
+    draft_bytes = _read_stable_regular_bytes(
+        draft_path,
+        anchor=stage_root,
+        where="cleanup_recovery.execution_draft",
+    )
+    draft_hash = _sha256_bytes(draft_bytes)
+    payload = _strict_json_bytes(
+        draft_bytes, "cleanup_recovery.execution_draft"
+    )
+    _exact_keys(
+        payload,
+        {"schema_version", "profile_id", "artifact_kind", "facts"},
+        "cleanup_recovery.execution_draft",
+    )
+    if payload["schema_version"] != "qt.assurance_environment_evidence.v1":
+        raise AssuranceExecutionError("recovery_draft_schema_unsupported")
+    if payload["artifact_kind"] != "execution_draft":
+        raise AssuranceExecutionError("recovery_draft_artifact_kind_mismatch")
+    profile_id = _string(payload["profile_id"], "cleanup_recovery.profile_id")
+    facts = guarantees._validate_lifecycle_evidence_facts(
+        "execution_draft",
+        payload["facts"],
+        "cleanup_recovery.execution_draft.facts",
+    )
+    if facts["source_commit"] != source_commit:
+        raise AssuranceExecutionError("recovery_draft_source_commit_mismatch")
+    if profile_id not in facts["requested_profile_ids"]:
+        raise AssuranceExecutionError("recovery_draft_profile_not_requested")
+    expected = (
+        stage_root
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "evidence"
+        / facts["attestation_id"]
+        / "_environments"
+        / profile_id
+        / "execution_draft-001-profile.json"
+    )
+    if draft_path != expected:
+        raise AssuranceExecutionError("recovery_draft_path_identity_mismatch")
+    archive_path = expected.with_name("execution_admission_archive-001-profile.json")
+    archive_bytes = _read_stable_regular_bytes(
+        archive_path,
+        anchor=stage_root,
+        where="cleanup_recovery.execution_admission_archive",
+    )
+    archive_hash = _sha256_bytes(archive_bytes)
+    if archive_hash != facts["execution_admission_archive_sha256"]:
+        raise AssuranceExecutionError("recovery_admission_archive_hash_mismatch")
+    archive_payload = _strict_json_bytes(
+        archive_bytes, "cleanup_recovery.execution_admission_archive"
+    )
+    _exact_keys(
+        archive_payload,
+        {"schema_version", "profile_id", "artifact_kind", "facts"},
+        "cleanup_recovery.execution_admission_archive",
+    )
+    if (
+        archive_payload["schema_version"]
+        != "qt.assurance_environment_evidence.v1"
+        or archive_payload["profile_id"] != profile_id
+        or archive_payload["artifact_kind"] != "execution_admission_archive"
+    ):
+        raise AssuranceExecutionError("recovery_admission_archive_envelope_mismatch")
+    archive_facts = guarantees._validate_execution_admission_archive_facts(
+        archive_payload["facts"],
+        "cleanup_recovery.execution_admission_archive.facts",
+    )
+    return facts, draft_hash, archive_facts, archive_hash
+
+
+def recover_cleanup(
+    *,
+    root: Path,
+    source_commit: str,
+    stage_root: Path,
+    private_root: Path,
+    execution_admission: Path,
+    draft_path: Path,
+    output_path: Path,
+) -> Path:
+    """Clean an abruptly abandoned session without finalizing or attesting it."""
+
+    root = _require_absolute_safe_existing(
+        root, where="recovery_root", final_kind="directory"
+    ).resolve()
+    stage_root = _require_absolute_safe_existing(
+        stage_root, where="recovery_stage_root", final_kind="directory"
+    ).resolve()
+    private_root = _require_absolute_safe_existing(
+        private_root, where="recovery_private_root", final_kind="directory"
+    ).resolve()
+    execution_admission = _require_absolute_safe_existing(
+        execution_admission,
+        where="recovery_execution_admission",
+        final_kind="file",
+    ).resolve()
+    draft_path = _require_absolute_safe_existing(
+        draft_path,
+        where="recovery_execution_draft",
+        final_kind="file",
+    ).resolve()
+    output_path = _require_external_record_path(
+        output_path, where="recovery_report", allow_existing=False
+    )
+    intent_path = _require_external_record_path(
+        output_path.with_name(output_path.name + ".pending"),
+        where="recovery_intent",
+        allow_existing=False,
+    )
+    require_exact_clean_source(root, source_commit, stage_root)
+    if not stage_root.is_dir():
+        raise AssuranceExecutionError("recovery_stage_root_must_exist")
+    if not private_root.is_dir() or private_root.stat().st_mode & 0o077:
+        raise AssuranceExecutionError("private_root_must_be_owner_private_0700")
+    disjoint = (root, stage_root, private_root)
+    for index, left in enumerate(disjoint):
+        for right in disjoint[index + 1 :]:
+            if _is_within(left, right) or _is_within(right, left):
+                raise AssuranceExecutionError("recovery_roots_must_be_pairwise_disjoint")
+    if any(_is_within(execution_admission, item) for item in disjoint):
+        raise AssuranceExecutionError("recovery_admission_must_be_external")
+    if any(
+        _is_within(output_path, item) or _is_within(item, output_path)
+        for item in (*disjoint, execution_admission)
+    ):
+        raise AssuranceExecutionError("recovery_report_must_be_external_and_disjoint")
+    bundle = guarantees.validate_repository(root=root)
+    facts, draft_hash, archive_facts, archive_hash = _load_recovery_draft(
+        stage_root=stage_root,
+        draft_path=draft_path,
+        source_commit=source_commit,
+    )
+    profile_id = draft_path.parent.name
+    attestation_id = facts["attestation_id"]
+    final_attestation = (
+        stage_root
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "attestations"
+        / source_commit
+        / f"{attestation_id}.json"
+    )
+    if final_attestation.exists() or final_attestation.is_symlink():
+        raise AssuranceExecutionError("recovery_finalized_attestation_already_exists")
+    profile_by_id = {
+        item["id"]: item for item in bundle.proof_catalog["environment_profiles"]
+    }
+    if profile_id not in profile_by_id:
+        raise AssuranceExecutionError("recovery_profile_unknown")
+    profile = profile_by_id[profile_id]
+    if profile["execution_class"] not in {"isolated_container", "isolated_database"}:
+        raise AssuranceExecutionError("recovery_profile_not_automated")
+    requested = facts["requested_profile_ids"]
+    if requested != sorted(set(requested)):
+        raise AssuranceExecutionError("recovery_requested_profiles_not_sorted_unique")
+    unknown = sorted(set(requested) - set(profile_by_id))
+    if unknown:
+        raise AssuranceExecutionError("recovery_requested_profile_unknown")
+    automated = [
+        item
+        for item in requested
+        if profile_by_id[item]["execution_class"]
+        in {"isolated_container", "isolated_database"}
+    ]
+    if automated != [profile_id]:
+        raise AssuranceExecutionError("recovery_draft_automated_profile_set_mismatch")
+
+    admissions, admission_hash = load_execution_admission(
+        execution_admission, source_commit
+    )
+    if set(admissions) != {profile_id}:
+        raise AssuranceExecutionError("recovery_admission_profile_set_mismatch")
+    admission = admissions[profile_id]
+    _align_execution_admission(
+        admission=admission,
+        profile=profile,
+        root=root,
+        source_commit=source_commit,
+    )
+    expected_archive = archive_execution_admission_profile(
+        admission, source_commit, admission_hash
+    )
+    cross_bindings = {
+        "execution_admission_sha256": (
+            facts["execution_admission_sha256"],
+            admission_hash,
+        ),
+        "execution_admission_archive_sha256": (
+            facts["execution_admission_archive_sha256"],
+            archive_hash,
+        ),
+        "admission_id": (facts["admission_id"], admission["admission_id"]),
+        "runtime_definition_sha256": (
+            facts["runtime_definition_sha256"],
+            admission["runtime_definition"]["sha256"],
+        ),
+        "control_plane_identity_sha256": (
+            facts["control_plane_identity_sha256"],
+            admission["docker_tool"]["daemon_identity_sha256"],
+        ),
+    }
+    for name, (observed, expected) in cross_bindings.items():
+        if observed != expected:
+            raise AssuranceExecutionError(f"recovery_{name}_mismatch")
+    if archive_facts != expected_archive:
+        raise AssuranceExecutionError("recovery_normalized_admission_archive_mismatch")
+    source_snapshot_sha256 = _archive_tree_sha256(
+        _git_archive_bytes(root, source_commit)
+    )
+    if facts["source_snapshot_sha256"] != source_snapshot_sha256:
+        raise AssuranceExecutionError("recovery_source_snapshot_hash_mismatch")
+
+    expected_planned = docker_lifecycle.DockerController(
+        admission=admission,
+        root=private_root / attestation_id / profile_id / "source",
+        private_root=private_root / attestation_id / profile_id,
+        source_commit=source_commit,
+        attestation_id=attestation_id,
+        profile_id=profile_id,
+        environment_instance_id=facts["environment_instance_id"],
+    ).planned_resources(profile["execution_class"])
+    if facts["planned_resources"] != expected_planned:
+        raise AssuranceExecutionError("recovery_planned_resources_mismatch")
+
+    private_profile_root = private_root / attestation_id / profile_id
+    _assert_existing_components_safe(
+        private_profile_root, anchor=private_root, final_kind="directory"
+    )
+    controller = docker_lifecycle.DockerController(
+        admission=admission,
+        root=private_profile_root / "source",
+        private_root=private_profile_root,
+        source_commit=source_commit,
+        attestation_id=attestation_id,
+        profile_id=profile_id,
+        environment_instance_id=facts["environment_instance_id"],
+    )
+    lock = _SessionProfileLock(
+        private_root=private_root,
+        attestation_id=attestation_id,
+        profile_id=profile_id,
+    )
+    with lock:
+        if final_attestation.exists() or final_attestation.is_symlink():
+            raise AssuranceExecutionError(
+                "recovery_finalized_attestation_already_exists"
+            )
+        recovery_attempt_id = f"QT-REC-{secrets.token_hex(12)}"
+        intent = {
+            "schema_version": RECOVERY_INTENT_SCHEMA_VERSION,
+            "recovery_attempt_id": recovery_attempt_id,
+            "created_at": _timestamp(_utc_now()),
+            "source_commit": source_commit,
+            "attestation_id": attestation_id,
+            "profile_id": profile_id,
+            "admission_id": admission["admission_id"],
+            "environment_instance_id": facts["environment_instance_id"],
+            "control_plane_identity_sha256": facts[
+                "control_plane_identity_sha256"
+            ],
+            "source_snapshot_sha256": source_snapshot_sha256,
+            "execution_admission_sha256": admission_hash,
+            "execution_admission_archive_sha256": archive_hash,
+            "execution_draft": {
+                "path": draft_path.relative_to(stage_root).as_posix(),
+                "sha256": draft_hash,
+            },
+            "planned_resources": facts["planned_resources"],
+            "report_file_name": output_path.name,
+            "recovery_state": "cleanup_pending",
+            "finalizable": False,
+            "attestation_emitted": False,
+        }
+        intent_hash = _write_immutable_bytes(
+            intent_path, _canonical_json_bytes(intent)
+        )
+        controller.register_recovery_local_resources(
+            source_snapshot_sha256=source_snapshot_sha256,
+            planned_resources=facts["planned_resources"],
+        )
+        started_at = _utc_now()
+        prepared = controller.partial_profile(profile["execution_class"])
+        cleanup = controller.cleanup(prepared)
+        finished_at = _utc_now()
+        stdout_raw, stdout_redacted = controller.redact_durable_output(
+            cleanup.stdout.encode("utf-8")
+        )
+        stderr_raw, stderr_redacted = controller.redact_durable_output(
+            cleanup.stderr.encode("utf-8")
+        )
+        stdout = stdout_raw.decode("utf-8", errors="replace")
+        stderr = stderr_raw.decode("utf-8", errors="replace")
+        report = {
+            "schema_version": RECOVERY_REPORT_SCHEMA_VERSION,
+            "source_commit": source_commit,
+            "attestation_id": attestation_id,
+            "profile_id": profile_id,
+            "admission_id": admission["admission_id"],
+            "environment_instance_id": facts["environment_instance_id"],
+            "control_plane_identity_sha256": facts[
+                "control_plane_identity_sha256"
+            ],
+            "source_snapshot_sha256": source_snapshot_sha256,
+            "execution_admission_sha256": admission_hash,
+            "execution_admission_archive_sha256": archive_hash,
+            "execution_draft": {
+                "path": draft_path.relative_to(stage_root).as_posix(),
+                "sha256": draft_hash,
+            },
+            "recovery_attempt_id": recovery_attempt_id,
+            "recovery_intent": {
+                "file_name": intent_path.name,
+                "sha256": intent_hash,
+            },
+            "finalizable": False,
+            "nonfinalizable": True,
+            "attestation_emitted": False,
+            "recovery_state": (
+                "cleanup_verified" if cleanup.completed else "cleanup_incomplete"
+            ),
+            "cleanup": {
+                "started_at": _timestamp(started_at),
+                "finished_at": _timestamp(finished_at),
+                "exit_code": cleanup.exit_code,
+                "cleanup_completed": cleanup.completed,
+                "stdout": stdout,
+                "stdout_sha256": _sha256_bytes(stdout.encode("utf-8")),
+                "stderr": stderr,
+                "stderr_sha256": _sha256_bytes(stderr.encode("utf-8")),
+                "redaction_applied": stdout_redacted or stderr_redacted,
+                "resources": [item.as_record() for item in cleanup.resources],
+                "label_query_remaining": list(cleanup.label_query_remaining),
+            },
+        }
+        _write_immutable_bytes(output_path, _canonical_json_bytes(report))
+        if not cleanup.completed:
+            raise AssuranceExecutionError(
+                f"recovery_cleanup_incomplete_report:{output_path}"
+            )
+    return output_path
+
+
 def validate_staged(
-    *, root: Path, attestation_path: Path, evidence_root: Path
+    *,
+    root: Path,
+    attestation_path: Path,
+    evidence_root: Path,
+    publication_allowed_untracked_paths: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     bundle = guarantees.validate_repository(root=root.resolve())
     return guarantees.validate_attestation_file_historically(
-        attestation_path.resolve(), bundle, evidence_root=evidence_root.resolve()
+        attestation_path.resolve(),
+        bundle,
+        evidence_root=evidence_root.resolve(),
+        publication_allowed_untracked_paths=publication_allowed_untracked_paths,
     )
+
+
+@dataclass(frozen=True)
+class StagedPublication:
+    attestation_id: str
+    profile_id: str
+    attestation_relative_path: str
+    attestation_snapshot: Path
+    attestation_sha256: str
+    evidence_snapshot_root: Path
+    evidence_files: tuple[tuple[str, Path, str], ...]
+
+
+class _PublicationRootLock:
+    """Serialize every publication transaction for one destination worktree."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.path: Path | None = None
+        self._descriptor: int | None = None
+
+    def acquire(self) -> None:
+        if fcntl is None:
+            raise AssuranceExecutionError("publication_root_lock_unavailable")
+        self.path = _publication_lock_path(self.root)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise AssuranceExecutionError(
+                f"publication_root_lock_open_failed:{type(exc).__name__}"
+            ) from exc
+        try:
+            observed = os.fstat(descriptor)
+            if not stat.S_ISREG(observed.st_mode):
+                raise AssuranceExecutionError("publication_root_lock_not_regular")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise AssuranceExecutionError("publication_root_lock_busy") from exc
+                raise AssuranceExecutionError(
+                    f"publication_root_lock_failed:{type(exc).__name__}"
+                ) from exc
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._descriptor = descriptor
+
+    def release(self) -> None:
+        if self._descriptor is None:
+            return
+        descriptor = self._descriptor
+        self._descriptor = None
+        if fcntl is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+        else:  # pragma: no cover - acquire fails when flock is unavailable
+            os.close(descriptor)
+
+    def __enter__(self) -> _PublicationRootLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        del exc_type, exc, traceback
+        self.release()
+
+
+def _attestation_referenced_evidence(
+    attestation: Mapping[str, Any], attestation_id: str
+) -> dict[str, str]:
+    refs: list[Any] = []
+    proof_results = attestation.get("proof_results")
+    environments = attestation.get("environments")
+    if not isinstance(proof_results, list) or not isinstance(environments, list):
+        raise AssuranceExecutionError("publication_attestation_shape_invalid")
+    for result in proof_results:
+        if not isinstance(result, dict) or not isinstance(
+            result.get("evidence_refs"), list
+        ):
+            raise AssuranceExecutionError("publication_proof_evidence_refs_invalid")
+        refs.extend(result["evidence_refs"])
+    for environment in environments:
+        if not isinstance(environment, dict):
+            raise AssuranceExecutionError("publication_environment_invalid")
+        admission = environment.get("profile_admission")
+        services = environment.get("services")
+        if not isinstance(admission, dict) or not isinstance(
+            admission.get("evidence_refs"), list
+        ):
+            raise AssuranceExecutionError("publication_profile_evidence_refs_invalid")
+        refs.extend(admission["evidence_refs"])
+        if not isinstance(services, dict):
+            raise AssuranceExecutionError("publication_services_invalid")
+        for service in services.values():
+            if not isinstance(service, dict) or not isinstance(
+                service.get("evidence_refs"), list
+            ):
+                raise AssuranceExecutionError(
+                    "publication_service_evidence_refs_invalid"
+                )
+            refs.extend(service["evidence_refs"])
+    result: dict[str, str] = {}
+    expected_prefix = (
+        f"docs/assurance/guarantees/evidence/{attestation_id}/"
+    )
+    casefold_paths: dict[str, str] = {}
+    for index, raw in enumerate(refs):
+        where = f"publication.evidence_refs[{index}]"
+        if not isinstance(raw, dict):
+            raise AssuranceExecutionError(f"{where}:object_required")
+        _exact_keys(raw, {"artifact_kind", "path", "sha256"}, where)
+        path = _string(raw["path"], f"{where}.path")
+        _portable_relative(path, f"{where}.path")
+        if not path.startswith(expected_prefix):
+            raise AssuranceExecutionError(f"{where}.path:session_mismatch")
+        digest = _string(raw["sha256"], f"{where}.sha256")
+        if not HEX64_RE.fullmatch(digest):
+            raise AssuranceExecutionError(f"{where}.sha256:invalid")
+        if path in result:
+            raise AssuranceExecutionError("publication_duplicate_evidence_reference")
+        folded = _portable_identity(path)
+        if folded in casefold_paths:
+            raise AssuranceExecutionError("publication_casefold_path_collision")
+        casefold_paths[folded] = path
+        result[path] = digest
+    if not result:
+        raise AssuranceExecutionError("publication_evidence_allowlist_empty")
+    return result
+
+
+def _session_tree_files(session_root: Path, evidence_root: Path) -> set[str]:
+    _assert_existing_components_safe(
+        session_root, anchor=evidence_root, final_kind="directory"
+    )
+    if not session_root.is_dir() or session_root.is_symlink():
+        raise AssuranceExecutionError("publication_session_evidence_directory_required")
+    files: set[str] = set()
+    casefold_paths: dict[str, str] = {}
+    for path in sorted(session_root.rglob("*")):
+        observed = os.lstat(path)
+        if stat.S_ISLNK(observed.st_mode):
+            raise AssuranceExecutionError("publication_staged_symlink_forbidden")
+        if stat.S_ISDIR(observed.st_mode):
+            continue
+        if not stat.S_ISREG(observed.st_mode):
+            raise AssuranceExecutionError("publication_staged_special_file_forbidden")
+        relative = path.relative_to(evidence_root).as_posix()
+        _portable_relative(relative, "publication.staged_file")
+        folded = _portable_identity(relative)
+        if folded in casefold_paths:
+            raise AssuranceExecutionError("publication_staged_casefold_collision")
+        casefold_paths[folded] = relative
+        files.add(relative)
+    return files
+
+
+def _snapshot_staged_publication(
+    *,
+    root: Path,
+    source_commit: str,
+    attestation_path: Path,
+    evidence_root: Path,
+    snapshot_root: Path,
+) -> StagedPublication:
+    evidence_root = _require_absolute_safe_existing(
+        evidence_root,
+        where="publication_evidence_root",
+        final_kind="directory",
+    ).resolve()
+    attestation_path = _require_absolute_safe_existing(
+        attestation_path,
+        where="publication_attestation",
+        final_kind="file",
+    ).resolve()
+    if _is_within(evidence_root, root) or _is_within(root, evidence_root):
+        raise AssuranceExecutionError("publication_evidence_root_must_be_external")
+    _assert_existing_components_safe(
+        attestation_path, anchor=evidence_root, final_kind="file"
+    )
+    attestation_bytes = _read_stable_regular_bytes(
+        attestation_path,
+        anchor=evidence_root,
+        where="publication.attestation",
+    )
+    attestation = _strict_json_bytes(
+        attestation_bytes, "publication.attestation"
+    )
+    attestation_id = _string(
+        attestation.get("attestation_id"), "publication.attestation_id"
+    )
+    source = attestation.get("source")
+    if not isinstance(source, dict) or source.get("git_commit") != source_commit:
+        raise AssuranceExecutionError("publication_attestation_source_mismatch")
+    expected_attestation_relative = (
+        f"docs/assurance/guarantees/attestations/{source_commit}/"
+        f"{attestation_id}.json"
+    )
+    observed_relative = attestation_path.relative_to(evidence_root).as_posix()
+    if observed_relative != expected_attestation_relative:
+        raise AssuranceExecutionError("publication_attestation_path_mismatch")
+    _portable_relative(observed_relative, "publication.attestation_path")
+    referenced = _attestation_referenced_evidence(attestation, attestation_id)
+    session_root = (
+        evidence_root
+        / "docs"
+        / "assurance"
+        / "guarantees"
+        / "evidence"
+        / attestation_id
+    )
+    actual = _session_tree_files(session_root, evidence_root)
+    if actual != set(referenced):
+        missing = sorted(set(referenced) - actual)
+        extra = sorted(actual - set(referenced))
+        detail = "missing=" + ",".join(missing) + ";extra=" + ",".join(extra)
+        raise AssuranceExecutionError(
+            "publication_session_inventory_not_exact:" + detail
+        )
+
+    snapshot_evidence_root = snapshot_root / attestation_id
+    evidence_files: list[tuple[str, Path, str]] = []
+    for relative, expected_hash in sorted(referenced.items()):
+        source_path = evidence_root / PurePosixPath(relative)
+        _assert_existing_components_safe(
+            source_path, anchor=evidence_root, final_kind="file"
+        )
+        content = _read_stable_regular_bytes(
+            source_path,
+            anchor=evidence_root,
+            where=f"publication.evidence:{relative}",
+        )
+        if _sha256_bytes(content) != expected_hash:
+            raise AssuranceExecutionError(
+                f"publication_evidence_hash_mismatch:{relative}"
+            )
+        snapshot_path = snapshot_evidence_root / PurePosixPath(relative)
+        copied_hash = _write_immutable_bytes(snapshot_path, content)
+        if copied_hash != expected_hash:
+            raise AssuranceExecutionError(
+                f"publication_snapshot_hash_mismatch:{relative}"
+            )
+        evidence_files.append((relative, snapshot_path, expected_hash))
+    if _session_tree_files(session_root, evidence_root) != actual:
+        raise AssuranceExecutionError(
+            "publication_session_inventory_changed_during_snapshot"
+        )
+    snapshot_attestation = snapshot_evidence_root / PurePosixPath(
+        expected_attestation_relative
+    )
+    attestation_hash = _write_immutable_bytes(
+        snapshot_attestation, attestation_bytes
+    )
+    environments = attestation.get("environments")
+    if not isinstance(environments, list) or len(environments) != 1:
+        raise AssuranceExecutionError(
+            "publication_one_environment_per_attestation_required"
+        )
+    profile_id = _string(
+        environments[0].get("profile_id") if isinstance(environments[0], dict) else None,
+        "publication.profile_id",
+    )
+    return StagedPublication(
+        attestation_id=attestation_id,
+        profile_id=profile_id,
+        attestation_relative_path=expected_attestation_relative,
+        attestation_snapshot=snapshot_attestation,
+        attestation_sha256=attestation_hash,
+        evidence_snapshot_root=snapshot_evidence_root,
+        evidence_files=tuple(evidence_files),
+    )
+
+
+def _write_identical_or_new(path: Path, content: bytes) -> bool:
+    if path.exists() or path.is_symlink():
+        observed = os.lstat(path)
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+            raise AssuranceExecutionError("publication_destination_not_regular_file")
+        if _read_stable_regular_bytes(
+            path,
+            anchor=path.parent,
+            where="publication.external_record",
+        ) != content:
+            raise AssuranceExecutionError(
+                f"publication_destination_differs:{path}"
+            )
+        return False
+    _write_immutable_bytes(path, content)
+    return True
+
+
+def _publication_scratch_paths(
+    root: Path,
+    batch_id: str,
+    planned_paths: Sequence[str],
+) -> tuple[Path, dict[str, Path]]:
+    scratch_root = root / ".qt-assurance-publication" / batch_id
+    result = {
+        relative: scratch_root
+        / f"{_sha256_bytes(relative.encode('utf-8'))}.pending"
+        for relative in planned_paths
+    }
+    identities: dict[str, str] = {}
+    for destination, scratch in result.items():
+        relative = scratch.relative_to(root).as_posix()
+        _portable_relative(relative, "publication.scratch_path")
+        identity = _portable_identity(relative)
+        if identity in identities:
+            raise AssuranceExecutionError("publication_scratch_path_collision")
+        identities[identity] = destination
+    return scratch_root, result
+
+
+def _remove_publication_scratch(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    observed = os.lstat(path)
+    if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+        raise AssuranceExecutionError("publication_scratch_not_regular_file")
+    path.unlink()
+
+
+def _write_publication_destination(
+    *,
+    root: Path,
+    destination: Path,
+    scratch: Path,
+    content: bytes,
+) -> bool:
+    """Create one destination via deterministic, crash-recoverable scratch."""
+
+    if destination.exists() or destination.is_symlink():
+        observed = os.lstat(destination)
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+            raise AssuranceExecutionError("publication_destination_not_regular_file")
+        if _read_stable_regular_bytes(
+            destination,
+            anchor=root,
+            where="publication.destination",
+        ) != content:
+            raise AssuranceExecutionError(
+                f"publication_destination_differs:{destination}"
+            )
+        _remove_publication_scratch(scratch)
+        return False
+
+    _remove_publication_scratch(scratch)
+    _assert_existing_components_safe(destination.parent, anchor=root)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _assert_existing_components_safe(
+        destination.parent, anchor=root, final_kind="directory"
+    )
+    _assert_existing_components_safe(scratch.parent, anchor=root)
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    _assert_existing_components_safe(
+        scratch.parent, anchor=root, final_kind="directory"
+    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(scratch, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(scratch, destination)
+        except FileExistsError:
+            observed = os.lstat(destination)
+            if (
+                stat.S_ISLNK(observed.st_mode)
+                or not stat.S_ISREG(observed.st_mode)
+                or _read_stable_regular_bytes(
+                    destination,
+                    anchor=root,
+                    where="publication.destination",
+                )
+                != content
+            ):
+                raise AssuranceExecutionError(
+                    f"publication_destination_differs:{destination}"
+                )
+        for directory in (destination.parent, scratch.parent):
+            try:
+                descriptor = os.open(directory, os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        scratch.unlink(missing_ok=True)
+        try:
+            descriptor = os.open(scratch.parent, os.O_RDONLY)
+        except OSError:
+            descriptor = None
+        if descriptor is not None:
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    except BaseException:
+        # The deterministic scratch is intentionally retained on abrupt or
+        # ordinary failure. A matching pending manifest authorizes only this
+        # exact scratch path to be resumed or replaced.
+        raise
+    return True
+
+
+def _publication_git_status(root: Path) -> list[tuple[str, str]]:
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AssuranceExecutionError("publication_git_status_failed") from exc
+    rows: list[tuple[str, str]] = []
+    for raw in completed.stdout.splitlines():
+        if len(raw) < 4:
+            raise AssuranceExecutionError("publication_git_status_unparseable")
+        status_code = raw[:2]
+        path = raw[3:]
+        if " -> " in path or path.startswith('"'):
+            raise AssuranceExecutionError("publication_git_status_unparseable")
+        rows.append((status_code, path))
+    return rows
+
+
+def _publication_lock_path(root: Path) -> Path:
+    raw = _git(root, "rev-parse", "--git-path", "qt-assurance-publication.lock")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = root / path
+    path = path.absolute()
+    _portable_component(path.name, "publication.lock.name")
+    if (
+        not path.parent.is_dir()
+        or path.parent.is_symlink()
+        or path.parent.resolve() != path.parent.absolute()
+    ):
+        raise AssuranceExecutionError("publication_git_lock_parent_unsafe")
+    if path.exists() or path.is_symlink():
+        observed = os.lstat(path)
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+            raise AssuranceExecutionError("publication_git_lock_not_regular")
+    return path
+
+
+def _assert_publication_scratch_untracked(
+    root: Path,
+    source_commit: str,
+    relative: str,
+) -> None:
+    if _git(root, "ls-tree", "--name-only", source_commit, "--", relative):
+        raise AssuranceExecutionError("publication_scratch_tracked_at_source")
+    try:
+        ignored = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--quiet", "--", relative],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise AssuranceExecutionError("publication_git_ignore_check_failed") from exc
+    if ignored.returncode == 0:
+        raise AssuranceExecutionError("publication_scratch_path_ignored")
+    if ignored.returncode != 1:
+        raise AssuranceExecutionError("publication_git_ignore_check_failed")
+
+
+def _publication_head_is_source(root: Path, source_commit: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+        raise AssuranceExecutionError("publication_source_commit_invalid")
+    if not (root / ".git").exists():
+        raise AssuranceExecutionError("publication_git_metadata_required")
+    if _git(root, "rev-parse", "HEAD") != source_commit:
+        raise AssuranceExecutionError("publication_source_commit_must_equal_head")
+    try:
+        _git(root, "cat-file", "-e", f"{source_commit}^{{commit}}")
+    except AssuranceExecutionError as exc:
+        raise AssuranceExecutionError("publication_source_commit_unavailable") from exc
+
+
+def _destination_inventory(
+    root: Path, session_ids: Sequence[str]
+) -> set[str]:
+    result: set[str] = set()
+    for attestation_id in session_ids:
+        session_root = (
+            root
+            / "docs"
+            / "assurance"
+            / "guarantees"
+            / "evidence"
+            / attestation_id
+        )
+        if not session_root.exists() and not session_root.is_symlink():
+            continue
+        result.update(_session_tree_files(session_root, root))
+    return result
+
+
+def _authenticate_publication_destination_state(
+    *,
+    root: Path,
+    attestation_ids: Sequence[str],
+    planned_paths: set[str],
+    files: Mapping[str, tuple[str, Path, str]],
+    scratch_paths: Mapping[str, Path],
+    scratch_relative_to_destination: Mapping[str, str],
+    pending_path: Path,
+    pending_bytes: bytes,
+) -> tuple[tuple[tuple[str, str], ...], frozenset[str]]:
+    """Read-only authenticate an initial or exact pending-bound resume state."""
+
+    existing_inventory = _destination_inventory(root, attestation_ids)
+    if not existing_inventory <= planned_paths:
+        raise AssuranceExecutionError("publication_destination_session_has_extras")
+    for relative, (_, _, digest) in files.items():
+        destination = root / PurePosixPath(relative)
+        _assert_existing_components_safe(destination, anchor=root)
+        if destination.exists() or destination.is_symlink():
+            observed = os.lstat(destination)
+            if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+                raise AssuranceExecutionError(
+                    "publication_destination_not_regular_file"
+                )
+            if _sha256_file_binary(destination) != digest:
+                raise AssuranceExecutionError(
+                    f"publication_destination_differs:{relative}"
+                )
+
+    existing_scratch: set[str] = set()
+    for scratch in scratch_paths.values():
+        _assert_existing_components_safe(scratch, anchor=root)
+        if scratch.exists() or scratch.is_symlink():
+            observed = os.lstat(scratch)
+            if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+                raise AssuranceExecutionError("publication_scratch_not_regular_file")
+            existing_scratch.add(scratch.relative_to(root).as_posix())
+
+    status = tuple(_publication_git_status(root))
+    expected_dirty_paths = frozenset(
+        {relative for _, relative in status if relative in planned_paths}
+        | {
+            relative
+            for relative in planned_paths
+            if not (root / PurePosixPath(relative)).exists()
+        }
+    )
+    pending_exists = pending_path.exists() or pending_path.is_symlink()
+    if pending_exists:
+        if pending_path.is_symlink() or not pending_path.is_file():
+            raise AssuranceExecutionError("publication_pending_not_regular_file")
+        if _read_stable_regular_bytes(
+            pending_path,
+            anchor=pending_path.parent,
+            where="publication.pending",
+        ) != pending_bytes:
+            raise AssuranceExecutionError("publication_pending_batch_mismatch")
+    elif status or existing_scratch:
+        raise AssuranceExecutionError(
+            "publication_destination_not_clean_and_no_matching_pending_batch"
+        )
+    for status_code, relative in status:
+        if status_code != "??":
+            raise AssuranceExecutionError(
+                "publication_resume_has_unrelated_worktree_change"
+            )
+        if relative in planned_paths:
+            destination = root / PurePosixPath(relative)
+            if (
+                not destination.is_file()
+                or destination.is_symlink()
+                or _sha256_file_binary(destination) != files[relative][2]
+            ):
+                raise AssuranceExecutionError(
+                    "publication_resume_file_identity_mismatch"
+                )
+        elif relative in scratch_relative_to_destination:
+            scratch = root / PurePosixPath(relative)
+            if not scratch.is_file() or scratch.is_symlink():
+                raise AssuranceExecutionError(
+                    "publication_resume_scratch_identity_mismatch"
+                )
+        else:
+            raise AssuranceExecutionError(
+                "publication_resume_has_unrelated_worktree_change"
+            )
+    return status, expected_dirty_paths
+
+
+def publish_staged(
+    *,
+    root: Path,
+    source_commit: str,
+    attestation_paths: Sequence[Path],
+    evidence_roots: Sequence[Path],
+    receipt_path: Path,
+) -> Path:
+    """Validate and publish one complete three-profile batch without overwrite."""
+
+    if len(attestation_paths) != 3 or len(evidence_roots) != 3:
+        raise AssuranceExecutionError(
+            "publication_requires_exactly_three_attestation_evidence_pairs"
+        )
+    if any(not path.is_absolute() for path in (*attestation_paths, *evidence_roots)):
+        raise AssuranceExecutionError("publication_inputs_must_be_absolute_paths")
+    root = _require_absolute_safe_existing(
+        root, where="publication_root", final_kind="directory"
+    ).resolve()
+    receipt_path = _require_external_record_path(
+        receipt_path, where="publication_receipt", allow_existing=True
+    )
+    pending_path = receipt_path.with_name(receipt_path.name + ".pending")
+    _require_external_record_path(
+        pending_path, where="publication_pending", allow_existing=True
+    )
+    _publication_head_is_source(root, source_commit)
+    resolved_roots = [
+        _require_absolute_safe_existing(
+            path,
+            where="publication_evidence_root",
+            final_kind="directory",
+        ).resolve()
+        for path in evidence_roots
+    ]
+    if any(
+        _is_within(receipt_path, item)
+        or _is_within(item, receipt_path)
+        or _is_within(receipt_path, root)
+        or _is_within(root, receipt_path)
+        for item in resolved_roots
+    ):
+        raise AssuranceExecutionError("publication_receipt_must_be_external_and_disjoint")
+
+    bundle = guarantees.validate_repository(root=root)
+    expected_profiles = sorted(
+        item["id"]
+        for item in bundle.proof_catalog["environment_profiles"]
+        if item["execution_class"] in {"isolated_container", "isolated_database"}
+    )
+    if len(expected_profiles) != 3:
+        raise AssuranceExecutionError(
+            "publication_catalog_must_define_exactly_three_automated_profiles"
+        )
+    with tempfile.TemporaryDirectory(
+        prefix="qt-assurance-publication-"
+    ) as temporary, ExitStack() as transaction:
+        snapshot_root = Path(temporary)
+        publications = [
+            _snapshot_staged_publication(
+                root=root,
+                source_commit=source_commit,
+                attestation_path=attestation,
+                evidence_root=evidence_root,
+                snapshot_root=snapshot_root / f"input-{index:03d}",
+            )
+            for index, (attestation, evidence_root) in enumerate(
+                zip(attestation_paths, evidence_roots, strict=True), start=1
+            )
+        ]
+        publications.sort(key=lambda item: item.profile_id)
+        if [item.profile_id for item in publications] != expected_profiles:
+            raise AssuranceExecutionError("publication_profile_set_mismatch")
+        attestation_ids = [item.attestation_id for item in publications]
+        if len(attestation_ids) != len(set(attestation_ids)):
+            raise AssuranceExecutionError("publication_attestation_id_duplicate")
+
+        files: dict[str, tuple[str, Path, str]] = {}
+        casefold_paths: dict[str, str] = {}
+        for publication in publications:
+            for relative, snapshot, digest in publication.evidence_files:
+                if relative in files:
+                    raise AssuranceExecutionError("publication_path_collision")
+                folded = _portable_identity(relative)
+                if folded in casefold_paths:
+                    raise AssuranceExecutionError("publication_casefold_path_collision")
+                casefold_paths[folded] = relative
+                files[relative] = ("evidence", snapshot, digest)
+            relative = publication.attestation_relative_path
+            folded = _portable_identity(relative)
+            if relative in files or folded in casefold_paths:
+                raise AssuranceExecutionError("publication_attestation_path_collision")
+            casefold_paths[folded] = relative
+            files[relative] = (
+                "attestation",
+                publication.attestation_snapshot,
+                publication.attestation_sha256,
+            )
+
+        file_manifest = [
+            {"kind": kind, "path": relative, "sha256": digest}
+            for relative, (kind, _, digest) in sorted(files.items())
+        ]
+        snapshot_bytes: dict[str, bytes] = {}
+        for relative, (_, snapshot, digest) in sorted(files.items()):
+            content = _read_stable_regular_bytes(
+                snapshot,
+                anchor=snapshot_root,
+                where=f"publication.snapshot:{relative}",
+            )
+            if _sha256_bytes(content) != digest:
+                raise AssuranceExecutionError(
+                    f"publication_snapshot_changed:{relative}"
+                )
+            snapshot_bytes[relative] = content
+        batch_id = _sha256_bytes(
+            _canonical_json_bytes(
+                {"source_commit": source_commit, "files": file_manifest}
+            )
+        )
+        pending = {
+            "schema_version": PUBLICATION_PENDING_SCHEMA_VERSION,
+            "source_commit": source_commit,
+            "batch_id": batch_id,
+            "files": file_manifest,
+        }
+        planned_paths = set(files)
+        scratch_root, scratch_paths = _publication_scratch_paths(
+            root, batch_id, sorted(planned_paths)
+        )
+        scratch_relative_to_destination = {
+            path.relative_to(root).as_posix(): relative
+            for relative, path in scratch_paths.items()
+        }
+        for reserved in (
+            ".qt-assurance-publication",
+            scratch_root.relative_to(root).as_posix(),
+        ):
+            _assert_publication_scratch_untracked(root, source_commit, reserved)
+        for scratch_relative in sorted(scratch_relative_to_destination):
+            if _portable_identity(scratch_relative) in casefold_paths:
+                raise AssuranceExecutionError(
+                    "publication_scratch_destination_path_collision"
+                )
+            _assert_publication_scratch_untracked(
+                root, source_commit, scratch_relative
+            )
+        pending["scratch_files"] = [
+            {
+                "destination": relative,
+                "path": scratch_paths[relative].relative_to(root).as_posix(),
+            }
+            for relative in sorted(planned_paths)
+        ]
+        pending_bytes = _canonical_json_bytes(pending)
+        evidence_paths = sorted(
+            relative for relative, (kind, _, _) in files.items() if kind == "evidence"
+        )
+        attestation_destinations = sorted(
+            relative
+            for relative, (kind, _, _) in files.items()
+            if kind == "attestation"
+        )
+        receipt = {
+            "schema_version": PUBLICATION_RECEIPT_SCHEMA_VERSION,
+            "publication_state": "verified",
+            "source_commit": source_commit,
+            "batch_id": batch_id,
+            "pending_manifest_sha256": _sha256_bytes(pending_bytes),
+            "attestations": [
+                {
+                    "attestation_id": item.attestation_id,
+                    "profile_id": item.profile_id,
+                    "path": item.attestation_relative_path,
+                    "sha256": item.attestation_sha256,
+                }
+                for item in publications
+            ],
+            "evidence_file_count": len(evidence_paths),
+            "published_file_count": len(files),
+            "create_only_or_identical": True,
+            "evidence_published_before_attestations": True,
+            "crash_resume_supported": True,
+            "multi_file_atomicity": False,
+        }
+        receipt_bytes = _canonical_json_bytes(receipt)
+        if receipt_path.exists() or receipt_path.is_symlink():
+            if _read_stable_regular_bytes(
+                receipt_path,
+                anchor=receipt_path.parent,
+                where="publication.receipt",
+            ) != receipt_bytes:
+                raise AssuranceExecutionError("publication_receipt_batch_mismatch")
+
+        _publication_head_is_source(root, source_commit)
+        status, expected_dirty_paths = _authenticate_publication_destination_state(
+            root=root,
+            attestation_ids=attestation_ids,
+            planned_paths=planned_paths,
+            files=files,
+            scratch_paths=scratch_paths,
+            scratch_relative_to_destination=scratch_relative_to_destination,
+            pending_path=pending_path,
+            pending_bytes=pending_bytes,
+        )
+
+        # At this point an interrupted batch is authenticated by the exact
+        # external pending bytes, destination hashes, scratch allowlist, and
+        # complete Git dirt inventory.  Historical validation may ignore only
+        # those exact untracked paths; it still evaluates immutable staged
+        # snapshots against source S, and every attestation is validated before
+        # this invocation creates or links any repository byte.
+        allowed_publication_dirt = frozenset(
+            {*planned_paths, *scratch_relative_to_destination}
+        )
+        for publication in publications:
+            validated = validate_staged(
+                root=root,
+                attestation_path=publication.attestation_snapshot,
+                evidence_root=publication.evidence_snapshot_root,
+                publication_allowed_untracked_paths=allowed_publication_dirt,
+            )
+            environments = validated.get("environments")
+            if (
+                not isinstance(environments, list)
+                or len(environments) != 1
+                or not isinstance(environments[0], dict)
+                or environments[0].get("profile_id") != publication.profile_id
+            ):
+                raise AssuranceExecutionError(
+                    "publication_validated_profile_identity_mismatch"
+                )
+        transaction.enter_context(_PublicationRootLock(root))
+        _publication_head_is_source(root, source_commit)
+        locked_status, locked_expected_dirty_paths = (
+            _authenticate_publication_destination_state(
+                root=root,
+                attestation_ids=attestation_ids,
+                planned_paths=planned_paths,
+                files=files,
+                scratch_paths=scratch_paths,
+                scratch_relative_to_destination=scratch_relative_to_destination,
+                pending_path=pending_path,
+                pending_bytes=pending_bytes,
+            )
+        )
+        if (
+            locked_status != status
+            or locked_expected_dirty_paths != expected_dirty_paths
+        ):
+            raise AssuranceExecutionError(
+                "publication_destination_changed_during_validation"
+            )
+        _write_identical_or_new(pending_path, pending_bytes)
+
+        existing_attestations = {
+            relative
+            for relative in attestation_destinations
+            if (root / PurePosixPath(relative)).exists()
+        }
+        if existing_attestations and any(
+            not (root / PurePosixPath(relative)).exists()
+            for relative in evidence_paths
+        ):
+            raise AssuranceExecutionError(
+                "publication_resume_attestation_precedes_complete_evidence"
+            )
+        for relative in [*evidence_paths, *attestation_destinations]:
+            _, snapshot, digest = files[relative]
+            content = snapshot_bytes[relative]
+            if _sha256_bytes(content) != digest:
+                raise AssuranceExecutionError(
+                    f"publication_snapshot_changed_before_copy:{relative}"
+                )
+            _write_publication_destination(
+                root=root,
+                destination=root / PurePosixPath(relative),
+                scratch=scratch_paths[relative],
+                content=content,
+            )
+
+        if scratch_root.exists() or scratch_root.is_symlink():
+            _assert_existing_components_safe(
+                scratch_root, anchor=root, final_kind="directory"
+            )
+            if any(scratch_root.iterdir()):
+                raise AssuranceExecutionError("publication_scratch_not_empty")
+            scratch_root.rmdir()
+        try:
+            scratch_root.parent.rmdir()
+        except OSError:
+            pass
+
+        _publication_head_is_source(root, source_commit)
+        final_status = _publication_git_status(root)
+        if any(
+            status_code != "??" or relative not in planned_paths
+            for status_code, relative in final_status
+        ):
+            raise AssuranceExecutionError(
+                "publication_final_worktree_contains_unrelated_change"
+            )
+        if {relative for _, relative in final_status} != expected_dirty_paths:
+            raise AssuranceExecutionError("publication_final_inventory_incomplete")
+        for relative, (_, _, digest) in files.items():
+            destination = root / PurePosixPath(relative)
+            if (
+                not destination.is_file()
+                or destination.is_symlink()
+                or _sha256_file_binary(destination) != digest
+            ):
+                raise AssuranceExecutionError(
+                    f"publication_final_hash_mismatch:{relative}"
+                )
+        _write_identical_or_new(receipt_path, receipt_bytes)
+    return receipt_path
 
 
 def inspect_execution_admission(
@@ -3089,6 +4710,16 @@ def _cli() -> int:
     run_parser.add_argument("--private-root", type=Path, required=True)
     run_parser.add_argument("--execution-admission", type=Path, required=True)
     run_parser.add_argument("--profile", action="append", required=True)
+    recover_parser = subparsers.add_parser(
+        "recover-cleanup",
+        help="clean an abruptly abandoned Docker session without finalization",
+    )
+    recover_parser.add_argument("--source-commit", required=True)
+    recover_parser.add_argument("--stage-root", type=Path, required=True)
+    recover_parser.add_argument("--private-root", type=Path, required=True)
+    recover_parser.add_argument("--execution-admission", type=Path, required=True)
+    recover_parser.add_argument("--execution-draft", type=Path, required=True)
+    recover_parser.add_argument("--output", type=Path, required=True)
     inspect_parser = subparsers.add_parser(
         "inspect-admission",
         help="write a read-only, owner-review-required execution-admission skeleton",
@@ -3104,6 +4735,14 @@ def _cli() -> int:
     )
     validate_parser.add_argument("--attestation", type=Path, required=True)
     validate_parser.add_argument("--evidence-root", type=Path, required=True)
+    publish_parser = subparsers.add_parser(
+        "publish-staged",
+        help="validate and create-only publish the complete three-profile batch",
+    )
+    publish_parser.add_argument("--source-commit", required=True)
+    publish_parser.add_argument("--attestation", type=Path, action="append", required=True)
+    publish_parser.add_argument("--evidence-root", type=Path, action="append", required=True)
+    publish_parser.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "run":
@@ -3114,6 +4753,17 @@ def _cli() -> int:
                 private_root=args.private_root,
                 execution_admission=args.execution_admission,
                 selected_profile_ids=args.profile,
+            )
+            print(path)
+        elif args.command == "recover-cleanup":
+            path = recover_cleanup(
+                root=args.root,
+                source_commit=args.source_commit,
+                stage_root=args.stage_root,
+                private_root=args.private_root,
+                execution_admission=args.execution_admission,
+                draft_path=args.execution_draft,
+                output_path=args.output,
             )
             print(path)
         elif args.command == "inspect-admission":
@@ -3127,7 +4777,7 @@ def _cli() -> int:
                 output_path=args.output,
             )
             print(path)
-        else:
+        elif args.command == "validate-staged":
             validated = validate_staged(
                 root=args.root,
                 attestation_path=args.attestation,
@@ -3137,6 +4787,15 @@ def _cli() -> int:
                 "staged attestation valid: "
                 f"{validated['attestation_id']} at {validated['source']['git_commit']}"
             )
+        else:
+            path = publish_staged(
+                root=args.root,
+                source_commit=args.source_commit,
+                attestation_paths=args.attestation,
+                evidence_roots=args.evidence_root,
+                receipt_path=args.receipt,
+            )
+            print(path)
     except (
         AssuranceExecutionError,
         docker_lifecycle.DockerLifecycleError,

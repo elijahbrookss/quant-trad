@@ -15,6 +15,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -320,6 +321,7 @@ class DockerController:
         self._partial_resources: list[ResourceIdentity] = []
         self._partial_targets: dict[tuple[str, str], Any] = {}
         self._secret_tokens: list[bytes] = []
+        self._recovery_local_inventory_required = False
 
     def _docker_control_env(self) -> dict[str, str]:
         env = {
@@ -702,6 +704,18 @@ class DockerController:
             result.extend(["--label", f"{key}={value}"])
         return result
 
+    def _label_filters(self) -> list[str]:
+        values = {
+            SESSION_LABEL: self.attestation_id,
+            PROFILE_LABEL: self.profile_id,
+            SOURCE_LABEL: self.source_commit,
+            INSTANCE_LABEL: self.environment_instance_id,
+        }
+        result: list[str] = []
+        for key, value in sorted(values.items()):
+            result.extend(["--filter", f"label={key}={value}"])
+        return result
+
     def planned_resources(self, execution_class: str) -> list[dict[str, str]]:
         if execution_class == "isolated_container":
             rows = [
@@ -731,13 +745,20 @@ class DockerController:
         """Track the extracted exact Git archive before Docker mutation."""
 
         try:
-            self.root.relative_to(self.private_root)
+            relative = self.root.absolute().relative_to(self.private_root.absolute())
         except ValueError as exc:
             raise DockerLifecycleError("source_snapshot_must_be_inside_private_root") from exc
-        if self.root.exists() and (
-            not self.root.is_dir() or (self.root / ".git").exists()
-        ):
-            raise DockerLifecycleError("source_snapshot_invalid")
+        if relative != Path("source"):
+            raise DockerLifecycleError("source_snapshot_path_not_exact")
+        try:
+            observed = os.lstat(self.root)
+        except FileNotFoundError:
+            observed = None
+        if observed is not None:
+            if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+                raise DockerLifecycleError("source_snapshot_invalid")
+            if (self.root / ".git").exists() or (self.root / ".git").is_symlink():
+                raise DockerLifecycleError("source_snapshot_invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha256):
             raise DockerLifecycleError("source_snapshot_hash_invalid")
         resource = ResourceIdentity(
@@ -745,6 +766,97 @@ class DockerController:
         )
         self._partial_resources.append(resource)
         self._partial_targets[(resource.kind, resource.logical_name)] = self.root
+
+    def register_recovery_local_resources(
+        self,
+        *,
+        source_snapshot_sha256: str,
+        planned_resources: Sequence[Mapping[str, str]],
+    ) -> None:
+        """Register only executor-created local targets for cleanup recovery.
+
+        The recovery caller derives ``private_root`` and ``root`` from the
+        immutable draft identities.  This method never recursively scans a
+        caller path: it considers only the exact source child and the two
+        private env-file patterns created by this controller.  Secret values
+        are loaded into the in-memory redaction set before cleanup output can
+        be made durable.
+        """
+
+        planned = {
+            (str(item.get("kind", "")), str(item.get("logical_name", "")))
+            for item in planned_resources
+        }
+        source_key = ("source_snapshot", "exact-source-snapshot")
+        if source_key not in planned:
+            raise DockerLifecycleError("recovery_source_snapshot_not_planned")
+        expected_root = self.private_root / "source"
+        if self.root != expected_root:
+            raise DockerLifecycleError("recovery_source_snapshot_path_mismatch")
+        self.register_source_snapshot(source_snapshot_sha256)
+
+        secret_names = sorted(
+            logical_name
+            for kind, logical_name in planned
+            if kind == "temporary_secret_file"
+        )
+        unexpected = set(secret_names) - {
+            "database-service-env",
+            "proof-runner-env",
+        }
+        if unexpected:
+            raise DockerLifecycleError(
+                "recovery_secret_resource_unknown:" + ",".join(sorted(unexpected))
+            )
+        self._recovery_local_inventory_required = True
+        if not self.private_root.exists():
+            return
+        root_stat = os.lstat(self.private_root)
+        if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+            raise DockerLifecycleError("recovery_private_profile_not_directory")
+        entries = list(self.private_root.iterdir())
+        expected_keys = {
+            "database-service-env": {
+                b"POSTGRES_DB",
+                b"POSTGRES_PASSWORD",
+                b"POSTGRES_USER",
+            },
+            "proof-runner-env": {b"PG_DSN"},
+        }
+        for logical_name in secret_names:
+            prefix = _safe_name(logical_name)
+            pattern = re.compile(rf"{re.escape(prefix)}-[0-9a-f]{{16}}\.env\Z")
+            candidates = sorted(path for path in entries if pattern.fullmatch(path.name))
+            for index, path in enumerate(candidates, start=1):
+                observed = os.lstat(path)
+                if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+                    raise DockerLifecycleError("recovery_secret_target_not_regular_file")
+                if observed.st_size > 64 * 1024:
+                    raise DockerLifecycleError("recovery_secret_target_too_large")
+                if observed.st_mode & 0o077:
+                    raise DockerLifecycleError("recovery_secret_permissions_not_private")
+                raw = path.read_bytes()
+                values: dict[bytes, bytes] = {}
+                for line in raw.splitlines():
+                    if b"=" not in line:
+                        raise DockerLifecycleError("recovery_secret_file_invalid")
+                    key, value = line.split(b"=", 1)
+                    if (
+                        not re.fullmatch(rb"[A-Z][A-Z0-9_]*", key)
+                        or not value
+                        or key in values
+                    ):
+                        raise DockerLifecycleError("recovery_secret_file_invalid")
+                    values[key] = value
+                if set(values) != expected_keys[logical_name]:
+                    raise DockerLifecycleError("recovery_secret_file_keys_mismatch")
+                self._secret_tokens.extend(values.values())
+                recovered_name = (
+                    logical_name
+                    if len(candidates) == 1
+                    else f"{logical_name}-recovered-{index:03d}"
+                )
+                self._reserve_secret_file(recovered_name, path)
 
     def _reserve_secret_file(self, logical_name: str, path: Path) -> None:
         """Track the cleanup target before the first possible file-system write."""
@@ -1232,36 +1344,109 @@ class DockerController:
         known = {
             (item.kind, item.runtime_identity) for item in self._partial_resources
         }
-        label_filters = [
-            "--filter",
-            f"label={SESSION_LABEL}={self.attestation_id}",
-            "--filter",
-            f"label={PROFILE_LABEL}={self.profile_id}",
-            "--filter",
-            f"label={INSTANCE_LABEL}={self.environment_instance_id}",
-        ]
+        label_filters = self._label_filters()
         discovered: list[ResourceIdentity] = []
         for kind, args in (
-            ("container", ["ps", "-aq", *label_filters]),
-            ("network", ["network", "ls", "-q", *label_filters]),
+            ("container", ["ps", "-aq", "--no-trunc", *label_filters]),
+            ("network", ["network", "ls", "-q", "--no-trunc", *label_filters]),
             ("volume", ["volume", "ls", "-q", *label_filters]),
         ):
             result = self._call(args)
             if result.exit_code != 0:
-                continue
+                raise DockerLifecycleError(f"docker_{kind}_label_query_failed")
             for raw_identity in result.stdout.decode(
                 "utf-8", errors="strict"
             ).splitlines():
                 identity = raw_identity.strip()
                 if not identity or (kind, identity) in known:
                     continue
-                logical_name = f"discovered-{kind}-{identity[:12].lower()}"
+                observed = self._resource_inspect(kind, identity)
+                self._verify_labels(observed, f"discovered_{kind}")
+                logical_name = self._verified_resource_logical_name(
+                    kind, identity, observed
+                )
+                existing = next(
+                    (
+                        item
+                        for item in self._partial_resources
+                        if item.kind == kind and item.logical_name == logical_name
+                    ),
+                    None,
+                )
+                if existing is not None and existing.runtime_identity != identity:
+                    raise DockerLifecycleError(
+                        f"discovered_{kind}:logical_identity_collision"
+                    )
                 item = ResourceIdentity(kind, logical_name, identity)
                 self._partial_resources.append(item)
                 self._partial_targets[(kind, logical_name)] = identity
                 known.add((kind, identity))
                 discovered.append(item)
         return discovered
+
+    def _verified_resource_logical_name(
+        self, kind: str, identity: str, observed: Mapping[str, Any]
+    ) -> str:
+        prefix = _safe_name(
+            f"qt-assurance-{self.environment_instance_id}-{self.profile_id}",
+            limit=55,
+        )
+        expected_names = {
+            "container": {
+                f"{prefix}-runner": "proof-runner",
+                f"{prefix}-db": "database-service",
+            },
+            "network": {f"{prefix}-network": "session-network"},
+            "volume": {f"{prefix}-data": "database-data"},
+        }
+        if kind == "container":
+            observed_identity = observed.get("Id")
+            observed_name = str(observed.get("Name", "")).removeprefix("/")
+        elif kind == "network":
+            observed_identity = observed.get("Id")
+            observed_name = observed.get("Name")
+        elif kind == "volume":
+            observed_identity = observed.get("Name")
+            observed_name = observed.get("Name")
+        else:  # pragma: no cover - caller owns the closed Docker-kind set
+            raise DockerLifecycleError(f"discovered_resource_kind_unsupported:{kind}")
+        if observed_identity != identity:
+            raise DockerLifecycleError(f"discovered_{kind}:identity_mismatch")
+        logical_name = expected_names[kind].get(str(observed_name))
+        if logical_name is None:
+            raise DockerLifecycleError(f"discovered_{kind}:name_mismatch")
+        return logical_name
+
+    def _docker_cleanup_target_present(
+        self, resource: ResourceIdentity, target: Any
+    ) -> bool:
+        self._assert_control_before_mutation()
+        result = self._call([resource.kind, "inspect", str(target)])
+        if self._not_found(result):
+            return False
+        if result.exit_code != 0:
+            raise DockerLifecycleError(
+                f"cleanup_{resource.kind}_inspect_failed:{resource.logical_name}"
+            )
+        payload = self._json(result.stdout, f"cleanup_{resource.kind}_inspect")
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 1
+            or not isinstance(payload[0], dict)
+        ):
+            raise DockerLifecycleError(
+                f"cleanup_{resource.kind}_inspect_shape_invalid"
+            )
+        observed = payload[0]
+        self._verify_labels(observed, f"cleanup_{resource.kind}")
+        logical_name = self._verified_resource_logical_name(
+            resource.kind, str(target), observed
+        )
+        if logical_name != resource.logical_name:
+            raise DockerLifecycleError(
+                f"cleanup_{resource.kind}:logical_name_mismatch"
+            )
+        return True
 
     @staticmethod
     def _not_found(result: CommandResult) -> bool:
@@ -1288,7 +1473,11 @@ class DockerController:
             result = self._call(["volume", "inspect", str(target)])
             return self._not_found(result)
         if resource.kind in {"temporary_secret_file", "source_snapshot"}:
-            return not Path(target).exists()
+            try:
+                os.lstat(Path(target))
+            except FileNotFoundError:
+                return True
+            return False
         if resource.kind == "database":
             container_id, _ = target
             return bool(container_absence.get(container_id))
@@ -1300,6 +1489,37 @@ class DockerController:
                 probe.settimeout(0.2)
                 return probe.connect_ex((host, int(port))) != 0
         return False
+
+    def _recovery_local_residue_dispositions(self) -> list[CleanupResource]:
+        """Describe, but never traverse or remove, unknown private-root children."""
+
+        if not self._recovery_local_inventory_required:
+            return []
+        try:
+            observed = os.lstat(self.private_root)
+        except FileNotFoundError:
+            return []
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+            raise DockerLifecycleError("recovery_private_profile_not_directory")
+        dispositions: list[CleanupResource] = []
+        for index, child in enumerate(
+            sorted(self.private_root.iterdir(), key=lambda path: os.fsencode(path.name)),
+            start=1,
+        ):
+            # This is deliberately a top-level lstat only.  Unknown content is
+            # never opened, traversed, or deleted, and its raw name is not
+            # emitted into the durable recovery report.
+            os.lstat(child)
+            name_hash = _sha256_bytes(os.fsencode(child.name))
+            dispositions.append(
+                CleanupResource(
+                    kind="private_residue",
+                    logical_name=f"unrecognized-private-residue-{index:03d}",
+                    runtime_identity=f"path-name-sha256:{name_hash}",
+                    absent=False,
+                )
+            )
+        return dispositions
 
     def cleanup(self, prepared: ProvisionedProfile) -> CleanupReport:
         stdout_rows: list[str] = []
@@ -1315,7 +1535,13 @@ class DockerController:
                 f"admitted control plane unavailable before cleanup:{type(exc).__name__}\n"
             )
         if control_plane_valid:
-            self.discover_labeled_resources()
+            try:
+                self.discover_labeled_resources()
+            except DockerLifecycleError as exc:
+                removal_failed = True
+                stderr_rows.append(
+                    f"labeled resource discovery failed:{type(exc).__name__}\n"
+                )
         if prepared.resources is not self._partial_resources:
             known = {
                 (item.kind, item.runtime_identity) for item in prepared.resources
@@ -1358,20 +1584,39 @@ class DockerController:
             if resource.kind in {"temporary_secret_file", "source_snapshot"}:
                 try:
                     if resource.kind == "source_snapshot":
-                        resolved = Path(target).resolve()
-                        resolved.relative_to(self.private_root)
-                        if resolved.exists():
-                            for child in resolved.rglob("*"):
-                                if not child.is_symlink():
-                                    child.chmod(0o700 if child.is_dir() else 0o600)
-                            resolved.chmod(0o700)
-                            shutil.rmtree(resolved)
+                        exact_target = self.private_root / "source"
+                        target_path = Path(target)
+                        if target_path.absolute() != exact_target.absolute():
+                            raise DockerLifecycleError(
+                                "cleanup_source_snapshot_path_not_exact"
+                            )
+                        try:
+                            observed = os.lstat(target_path)
+                        except FileNotFoundError:
+                            observed = None
+                        if observed is not None:
+                            if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(
+                                observed.st_mode
+                            ):
+                                raise DockerLifecycleError(
+                                    "cleanup_source_snapshot_target_unsafe"
+                                )
+                            for child in target_path.rglob("*"):
+                                child_stat = os.lstat(child)
+                                if stat.S_ISLNK(child_stat.st_mode):
+                                    continue
+                                if stat.S_ISDIR(child_stat.st_mode):
+                                    child.chmod(0o700)
+                                elif stat.S_ISREG(child_stat.st_mode):
+                                    child.chmod(0o600)
+                            target_path.chmod(0o700)
+                            shutil.rmtree(target_path)
                     else:
                         Path(target).unlink(missing_ok=True)
                     stdout_rows.append(
                         f"removed {resource.kind} {resource.logical_name}\n"
                     )
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, DockerLifecycleError) as exc:
                     removal_failed = True
                     stderr_rows.append(
                         f"remove failed {resource.kind} {resource.logical_name}:"
@@ -1384,11 +1629,37 @@ class DockerController:
                     "admitted-control-plane-unavailable\n"
                 )
                 continue
+            try:
+                if not self._docker_cleanup_target_present(resource, target):
+                    stdout_rows.append(
+                        f"already absent {resource.kind} {resource.logical_name}\n"
+                    )
+                    continue
+            except DockerLifecycleError as exc:
+                removal_failed = True
+                stderr_rows.append(
+                    f"cleanup target verification failed {resource.kind} "
+                    f"{resource.logical_name}:{type(exc).__name__}\n"
+                )
+                continue
             command = {
                 "container": ["rm", "--force", str(target)],
                 "volume": ["volume", "rm", "--force", str(target)],
                 "network": ["network", "rm", str(target)],
             }[resource.kind]
+            try:
+                # The admitted daemon may change after target inspection.  Bind
+                # the control plane again at the final boundary before every rm.
+                self.verify_admission()
+            except DockerLifecycleError as exc:
+                control_plane_valid = False
+                removal_failed = True
+                stderr_rows.append(
+                    f"remove control-plane recheck failed {resource.kind} "
+                    f"{resource.logical_name}:"
+                    f"{type(exc).__name__}\n"
+                )
+                continue
             try:
                 result = self._call(command)
             except DockerLifecycleError as exc:
@@ -1450,17 +1721,8 @@ class DockerController:
                     absent,
                 )
             )
-        dispositions = tuple(dispositions_list)
-
         remaining: list[str] = []
-        label_filters = [
-            "--filter",
-            f"label={SESSION_LABEL}={self.attestation_id}",
-            "--filter",
-            f"label={PROFILE_LABEL}={self.profile_id}",
-            "--filter",
-            f"label={INSTANCE_LABEL}={self.environment_instance_id}",
-        ]
+        label_filters = self._label_filters()
         if control_plane_valid:
             try:
                 self.verify_admission()
@@ -1497,6 +1759,20 @@ class DockerController:
                         remaining.append(f"{kind}:{identity.strip()}")
         else:
             remaining.append("control-plane-identity-unverified")
+        if self._recovery_local_inventory_required:
+            try:
+                residue_dispositions = self._recovery_local_residue_dispositions()
+                if residue_dispositions:
+                    dispositions_list.extend(residue_dispositions)
+                    remaining.append("local-residue:unrecognized")
+                    removal_failed = True
+            except (OSError, DockerLifecycleError) as exc:
+                removal_failed = True
+                remaining.append("query-error:local-residue")
+                stderr_rows.append(
+                    "private recovery residue query failed:"
+                    f"{type(exc).__name__}\n"
+                )
         if control_plane_valid:
             try:
                 self.verify_admission()
@@ -1508,6 +1784,7 @@ class DockerController:
                     f"{type(exc).__name__}\n"
                 )
         remaining.sort()
+        dispositions = tuple(dispositions_list)
         all_absent = all(item.absent for item in dispositions)
         exit_code = 0 if all_absent and not remaining and not removal_failed else 1
         return CleanupReport(

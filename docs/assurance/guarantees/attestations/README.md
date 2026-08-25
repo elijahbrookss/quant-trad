@@ -69,6 +69,16 @@ pre-execution input is not the post-cleanup `profile_admission` embedded here.
 An attestation is never emitted before all bound automated environments have a
 complete execution manifest and successful cleanup manifest.
 
+An abrupt-death cleanup recovery report is deliberately outside this
+attestation evidence chain. Even when it proves exact resource absence, it
+records both `finalizable: false` and `nonfinalizable: true` and cannot supply
+the missing complete execution or first cleanup manifest. Its create-only
+`.pending` intent is written before cleanup mutation and retained as an attempt
+trace; it is not proof or attestation evidence. The staged publisher accepts
+only already finalized, historically validated attestations and their exact
+transitive evidence allowlists; it does not transform a recovery report,
+recovery intent, or incomplete session into an attestation.
+
 The registry-semantics projection deliberately excludes activation status and
 its decision/attestation references. This lets a clean pre-activation commit be
 attested and then cited by a later reviewed activation decision without a hash

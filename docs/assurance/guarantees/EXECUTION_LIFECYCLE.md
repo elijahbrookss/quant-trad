@@ -26,6 +26,8 @@ The supported entry points are explicit about every output and private path:
 python scripts/assurance/verify_guarantees.py inspect-admission --source-commit S --docker ABS_DOCKER --runner-image LOCAL_TAG_OR_ID --runner-build-definition docker/assurance/frontend-node.Dockerfile --profile PROFILE --output ABS_REVIEW_PACKET
 python scripts/assurance/verify_guarantees.py run --source-commit S --stage-root ABS_STAGE --private-root ABS_PRIVATE --execution-admission ABS_REVIEWED_ADMISSION --profile PROFILE --profile manual-recovery
 python scripts/assurance/verify_guarantees.py validate-staged --attestation ABS_ATTESTATION --evidence-root ABS_STAGE
+python scripts/assurance/verify_guarantees.py recover-cleanup --source-commit S --stage-root ABS_STAGE --private-root ABS_PRIVATE --execution-admission ABS_REVIEWED_ADMISSION --execution-draft ABS_DRAFT --output ABS_RECOVERY_REPORT
+python scripts/assurance/verify_guarantees.py publish-staged --source-commit S --attestation ABS_FRONTEND_ATTESTATION --evidence-root ABS_FRONTEND_STAGE --attestation ABS_PYTHON_ATTESTATION --evidence-root ABS_PYTHON_STAGE --attestation ABS_DATABASE_ATTESTATION --evidence-root ABS_DATABASE_STAGE --receipt ABS_PUBLICATION_RECEIPT
 ```
 
 The shell-free `inspect-admission` command writes an explicit output file
@@ -65,6 +67,13 @@ Only a `complete` execution with a successful first cleanup and exact absence
 inventory is finalizable. A proof assertion may still be attested as `FAIL`;
 cleanup failure is an environment-lifecycle failure and is not rewritten as a
 product contradiction.
+
+Normal execution holds a nonblocking lock keyed by the attestation session and
+profile before its draft is published and through cleanup and final assembly.
+The cleanup-recovery command must acquire that same lock. A live executor or a
+second recovery therefore makes recovery fail closed rather than race Docker
+mutation. The lock is advisory state in the owner-private root, not evidence or
+an activation signal.
 
 ## Docker Isolation
 
@@ -114,19 +123,81 @@ host fail-safe fires, the runner itself is stopped and no later proof runs.
 Signal handlers remain installed through manifest publication and every
 cleanup attempt. Repeated signals are recorded but cannot bypass cleanup.
 
-An abrupt host/process death that prevents this handler from running is not
-automatically recoverable by this command version. Its immutable draft and
-full session/profile/instance Docker labels support owner inspection, but the
-session is non-finalizable and must stop for separately reviewed cleanup. The
-executor does not claim a later finalize/cleanup-resume command that it does
-not yet provide. An interrupted or executor-error session cannot emit an
-attestation.
+An abrupt host/process death that prevents the signal handler from running is
+cleanup-recoverable, but never finalizable. `recover-cleanup` accepts the exact
+source, external stage, original owner-private root, raw reviewed admission,
+immutable draft, and an external create-only report path. Before removal it
+cross-binds the draft envelope and digest, raw and archived admission digests,
+normalized archived profile, source/profile/session/environment/daemon
+identities, exact source snapshot, runtime definition, and planned resource
+set. It refuses a finalized session or a live session lock.
+
+Recovery discovers Docker objects with all four source/session/profile/instance
+labels and then inspects their labels, kind, immutable identity, and generated
+name. Immediately after that target inspection and before every Docker `rm`, it
+reasserts the admitted daemon identity; a changed or unavailable daemon makes
+the removal fail closed. It considers local files only at the exact derived
+profile root: the source snapshot child and the two executor-generated random
+env-file patterns. Those files must be private regular files; their
+known keys are loaded into the in-memory redaction set before cleanup. It never
+recursively deletes a CLI-supplied path. After exact known-target removal it
+performs a nonrecursive `lstat` inventory of the derived private profile root.
+Every unrecognized child is left untouched and recorded only as a hashed,
+non-absent `private_residue` disposition; raw names and contents never enter the
+report, and any such residue makes cleanup incomplete. After all bindings and
+the session lock are verified, but before the first cleanup mutation, recovery
+writes a create-only `qt.assurance_cleanup_recovery_intent.v1` sibling using the
+report name plus `.pending`. The intent binds the attempt, draft, admissions,
+source, daemon, environment, and exact planned resources. It remains as the durable
+attempt trace whether recovery completes or crashes. Repeating recovery is safe
+when objects are already absent, but every attempt must use a new report path;
+neither a prior intent nor a prior report is overwritten.
+
+The resulting `qt.assurance_cleanup_recovery_report.v1` is redacted, records
+the intent hash, every disposition, and remaining label query, and always
+states `finalizable: false`, `nonfinalizable: true`, and
+`attestation_emitted: false`. Even a
+`cleanup_verified` report is not an execution manifest, attestation, proof
+result, remediation closure, or guarantee activation. An interrupted or
+executor-error session cannot emit an attestation. `cleanup_incomplete` is
+written just as durably, but the command then exits nonzero so automation cannot
+mistake recorded residual resources for successful recovery.
 
 The final attestation is assembled only from cleanup-verified records, checked
 against the historical source model, and atomically and exclusively published
-with flushed file and directory state. Existing final paths are never
-overwritten. Publishing staged evidence into the repository is a separate,
-reviewed mechanical copy; this executor neither copies nor commits it.
+into its external stage with flushed file and directory state. Existing final
+paths are never overwritten.
+
+`publish-staged` is the separate reviewed mechanical-copy boundary. It requires
+the complete set of three automated-profile attestations for the same exact
+clean source commit. Before any repository write it snapshots the input bytes,
+derives the transitive allowlist of proof, profile, and service evidence
+references, rejects missing or unreferenced session files, symlinks, special
+files, nonportable names, case-fold collisions, and path/hash collisions, and
+historically validates all three snapshots. It copies only those allowlisted
+bytes at identical repository-relative paths, all evidence for all sessions
+first and attestations last. Destinations are create-only or must already be
+byte-identical.
+
+Publication is deliberately not described as multi-file atomic. Before the
+first worktree write it preflights the exact receipt and read-only authenticates
+either a clean destination or the exact pending manifest, destination hashes,
+scratch allowlist, and complete Git dirt of a prior attempt. Historical source
+cleanliness may ignore only those exact untracked publisher paths. All three
+immutable snapshots must validate before the command acquires its nonblocking
+Git-metadata lock. Under that lock it rechecks `HEAD` and repeats the complete
+destination, pending, and Git-dirt authentication before creating or resuming
+the external pending manifest. Each destination is linked from a deterministic pending-bound scratch file in the reserved untracked
+`.qt-assurance-publication` namespace. That namespace must be absent and
+unignored at the source commit. A crash can be resumed only when `HEAD` is still
+the exact source commit, every worktree change is an allowlisted destination or
+recorded scratch file, and no attestation precedes an incomplete evidence set.
+Partial scratch is rebuilt under the matching pending manifest; scratch is
+empty and removed before final status. After rechecking the final inventory it
+writes the already-preflighted deterministic external receipt, which explicitly
+records `multi_file_atomicity: false`. The command never copies private roots,
+image build contexts, reviewed admissions, recovery reports, unrelated
+sessions, or incomplete material, and it never commits the resulting files.
 
 One run admits exactly one automated profile. A final review may validate
 multiple independent attestations. To retain the honest recovery result, a run

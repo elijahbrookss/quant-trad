@@ -28,8 +28,10 @@ mean that a claim is normative, adequately enforced, proven, or activated.
 - `schemas/*.v1.schema.json` document the versioned interchange models.
 - `EXECUTION_LIFECYCLE.md` separates pre-execution Docker admission from the
   cleanup-verified environment admission embedded in an attestation and defines
-  the immutable draft, execution, cleanup, interruption, and finalization
-  boundary.
+  the immutable draft, execution, cleanup, interruption, abrupt-death recovery,
+  staged publication, and finalization boundaries. Cleanup recovery remains
+  explicitly nonfinalizable and leaves a create-only intent record before its
+  first cleanup mutation.
 - `attestations/README.md` defines result semantics and the rules for creating
   immutable, commit-bound attestations. Phase 2A and Phase 2B create no
   synthetic PASS attestation.
@@ -82,8 +84,10 @@ and remains separately authorized from registry activation. Automated Docker
 execution requires the versioned execution-admission and lifecycle records in
 `EXECUTION_LIFECYCLE.md`. A missing local image, isolation prerequisite, or
 cleanup proof is reported honestly rather than replaced by a weaker
-environment. Manual recovery remains bound to its separately reviewed
-procedure.
+environment. The cleanup-only abrupt-death command does not perform or satisfy
+the cataloged manual recovery proof, and its report cannot become an
+attestation. Staged publication validates the complete three-profile batch and
+copies only its exact referenced evidence; it never commits or activates it.
 
 ## Review boundary
 

@@ -60,6 +60,9 @@ SCHEMA_PATHS = {
     "execution-draft": SCHEMA_DIR / "execution-draft.v1.schema.json",
     "execution-manifest": SCHEMA_DIR / "execution-manifest.v1.schema.json",
     "cleanup-manifest": SCHEMA_DIR / "cleanup-manifest.v1.schema.json",
+    "cleanup-recovery-intent": SCHEMA_DIR
+    / "cleanup-recovery-intent.v1.schema.json",
+    "cleanup-recovery-report": SCHEMA_DIR / "cleanup-recovery-report.v1.schema.json",
 }
 
 REGISTRY_SCHEMA_VERSION = "qt.guarantee_registry.v1"
@@ -74,6 +77,8 @@ EXECUTION_ADMISSION_ARCHIVE_SCHEMA_VERSION = (
 EXECUTION_DRAFT_SCHEMA_VERSION = "qt.assurance_execution_draft.v1"
 EXECUTION_MANIFEST_SCHEMA_VERSION = "qt.assurance_execution_manifest.v1"
 CLEANUP_MANIFEST_SCHEMA_VERSION = "qt.assurance_cleanup_manifest.v1"
+CLEANUP_RECOVERY_INTENT_SCHEMA_VERSION = "qt.assurance_cleanup_recovery_intent.v1"
+CLEANUP_RECOVERY_REPORT_SCHEMA_VERSION = "qt.assurance_cleanup_recovery_report.v1"
 
 GUARANTEE_ID_RE = re.compile(r"QT-GUAR-[A-Z0-9]+(?:-[A-Z0-9]+)*\Z")
 CANDIDATE_ID_RE = re.compile(r"QT-GC-(\d{3})\Z")
@@ -2244,6 +2249,14 @@ def validate_schema_contracts(*, root: Path = ROOT) -> None:
         "cleanup-manifest": (
             ("$defs", "facts", "properties", "record_schema_version", "const"),
             CLEANUP_MANIFEST_SCHEMA_VERSION,
+        ),
+        "cleanup-recovery-report": (
+            ("properties", "schema_version", "const"),
+            CLEANUP_RECOVERY_REPORT_SCHEMA_VERSION,
+        ),
+        "cleanup-recovery-intent": (
+            ("properties", "schema_version", "const"),
+            CLEANUP_RECOVERY_INTENT_SCHEMA_VERSION,
         ),
     }
     for schema_name, (path, expected) in lifecycle_schema_versions.items():
@@ -5013,11 +5026,59 @@ def _validate_profile_admission(
         _fail(f"{admission_where}:unsupported_execution_class:{execution_class}")
 
 
-def _verify_local_git_source(root: Path, git_commit: str, clean: bool) -> None:
+def _publication_untracked_path_in_closed_namespace(
+    relative: str, git_commit: str
+) -> bool:
+    """Limit the validator exception to publisher-owned path layouts."""
+
+    if "\\" in relative:
+        return False
+    pure = PurePosixPath(relative)
+    if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+        return False
+    parts = pure.parts
+    evidence_prefix = ("docs", "assurance", "guarantees", "evidence")
+    attestation_prefix = (
+        "docs",
+        "assurance",
+        "guarantees",
+        "attestations",
+        git_commit,
+    )
+    if len(parts) >= 6 and parts[:4] == evidence_prefix:
+        match = ATTESTATION_ID_RE.fullmatch(parts[4])
+        return bool(match and git_commit.startswith(match.group("commit")))
+    if len(parts) == 6 and parts[:5] == attestation_prefix:
+        filename = parts[5]
+        if not filename.endswith(".json"):
+            return False
+        attestation_id = filename[:-5]
+        match = ATTESTATION_ID_RE.fullmatch(attestation_id)
+        return bool(match and git_commit.startswith(match.group("commit")))
+    if len(parts) == 3 and parts[0] == ".qt-assurance-publication":
+        return bool(
+            HEX64_RE.fullmatch(parts[1])
+            and re.fullmatch(r"[0-9a-f]{64}\.pending", parts[2])
+        )
+    return False
+
+
+def _verify_local_git_source(
+    root: Path,
+    git_commit: str,
+    clean: bool,
+    *,
+    publication_allowed_untracked_paths: frozenset[str] | None = None,
+) -> None:
     """Verify source assertions when the attestation is checked in a Git worktree."""
 
     if not (root / ".git").exists():
         return
+    if publication_allowed_untracked_paths is not None and any(
+        not _publication_untracked_path_in_closed_namespace(relative, git_commit)
+        for relative in publication_allowed_untracked_paths
+    ):
+        _fail("attestation.source.clean:publication_allowlist_path_invalid")
     try:
         head = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -5035,25 +5096,59 @@ def _verify_local_git_source(root: Path, git_commit: str, clean: bool) -> None:
             check=True,
             capture_output=True,
         )
-        status = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "status",
-                "--porcelain",
-                "--untracked-files=normal",
-                "--",
-                ".",
-                ":(exclude)docs/assurance/guarantees/attestations/**",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
+        if publication_allowed_untracked_paths is None:
+            status = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=normal",
+                    "--",
+                    ".",
+                    ":(exclude)docs/assurance/guarantees/attestations/**",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            observed_clean = not status.strip()
+        else:
+            raw_status = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                ],
+                check=True,
+                capture_output=True,
+            ).stdout
+            unexpected: list[bytes] = []
+            for entry in raw_status.split(b"\0"):
+                if not entry:
+                    continue
+                if len(entry) < 4 or entry[2:3] != b" ":
+                    unexpected.append(entry)
+                    continue
+                status_code = entry[:2]
+                try:
+                    relative = entry[3:].decode("utf-8")
+                except UnicodeDecodeError:
+                    unexpected.append(entry)
+                    continue
+                if (
+                    status_code != b"??"
+                    or relative not in publication_allowed_untracked_paths
+                ):
+                    unexpected.append(entry)
+            observed_clean = not unexpected
     except (OSError, subprocess.CalledProcessError) as exc:
         _fail(f"attestation.source:git_verification_failed:{exc}")
-    observed_clean = not status.strip()
     if head == git_commit and clean != observed_clean:
         _fail(
             "attestation.source.clean:worktree_mismatch:"
@@ -5921,6 +6016,7 @@ def validate_attestation_historically(
     current_bundle: ValidationBundle,
     *,
     evidence_root: Path | None = None,
+    publication_allowed_untracked_paths: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Validate an immutable attestation against definitions at its source commit."""
 
@@ -5929,7 +6025,12 @@ def validate_attestation_historically(
     if not HEX40_RE.fullmatch(git_commit):
         _fail("attestation.source.git_commit:expected_lowercase_40_hex")
     clean = _expect_bool(source.get("clean"), "attestation.source.clean")
-    _verify_local_git_source(current_bundle.root, git_commit, clean)
+    _verify_local_git_source(
+        current_bundle.root,
+        git_commit,
+        clean,
+        publication_allowed_untracked_paths=publication_allowed_untracked_paths,
+    )
     with _historical_repository(current_bundle.root, git_commit) as historical_root:
         expected_source_snapshot = source_snapshot_sha256(
             current_bundle.root, git_commit
@@ -5969,11 +6070,13 @@ def validate_attestation_file_historically(
     current_bundle: ValidationBundle,
     *,
     evidence_root: Path | None = None,
+    publication_allowed_untracked_paths: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     return validate_attestation_historically(
         load_json_strict(attestation_path),
         current_bundle,
         evidence_root=evidence_root,
+        publication_allowed_untracked_paths=publication_allowed_untracked_paths,
     )
 
 
