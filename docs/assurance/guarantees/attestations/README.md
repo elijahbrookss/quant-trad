@@ -30,8 +30,9 @@ The document must conform to `../schemas/attestation.v1.schema.json` and bind:
   material, and per-required-proof `required_proof_material_sha256` bindings;
 - tool and required-service identities for every bound environment;
 - start/end timestamps and per-proof collection, exit, and output evidence,
-  including the exact shell-free `executed_argv` for attempted automated runs
-  and explicit pass/fail/skip/xfail/xpass counts for pytest;
+  including the exact shell-free `executed_argv` for attempted automated runs,
+  explicit pass/fail/skip/xfail/xpass counts for pytest, and the admitted
+  runner-specific typed result fields for native Node tests;
 - attestation- and proof-scoped typed result-summary/output artifacts under
   `docs/assurance/guarantees/evidence/<attestation-id>/<proof-id>/`, with every
   artifact's kind, path, and hash cross-checked against the result envelope;
@@ -50,12 +51,19 @@ HEAD.
 
 Version 1 validates repository paths, Git-blob and artifact hashes, typed result
 summaries, and agreement among runner arguments, counts, exit state, and the
-attestation envelope. It does not cryptographically prove that a runner or
-reviewer identity performed the stated action, or establish that the named
-reviewer has authority under the repository hierarchy. A distinct external
-activation review is therefore the trust boundary: it must verify execution
-provenance, reviewer authority, and the exact attestation ID and hash it
-reviewed. Structural validation alone cannot authorize activation.
+attestation envelope. Native `node --test` results use the catalog-bound
+`qt.node_test_events.v1` reporter transport and a separately hashed
+`qt.node_test_result.v1` summary. That summary must identify every collected
+target file, the exact selected test-name set, and every name excluded only
+because it did not match `--test-name-pattern`. Excluded nonmatches are not
+selected skips and do not weaken an otherwise complete result.
+
+The model does not cryptographically prove that a runner or reviewer identity
+performed the stated action, or establish that the named reviewer has
+authority under the repository hierarchy. A distinct external activation
+review is therefore the trust boundary: it must verify execution provenance,
+reviewer authority, and the exact attestation ID and hash it reviewed.
+Structural validation alone cannot authorize activation.
 
 Version 1 also binds the full registry semantic projection and proof catalog,
 not only one claim's slice. Any later semantic or catalog addition therefore
@@ -68,10 +76,26 @@ re-attestation before activation.
 Only attestations may use result states. For automated proofs, `PASS` and
 `FAIL` bind the exact catalog runner. For manual proofs, `PASS` and `FAIL`
 require timed, hashed evidence plus distinct operator and reviewer identities.
-Version 1 permits automated `PASS` only for pytest, whose collection and
-outcome counts have explicit executable semantics. Other runner kinds may be
-cataloged, but cannot satisfy a guarantee until runner-specific PASS rules are
-reviewed and modeled.
+Version 1 permits automated `PASS` for pytest and for the admitted native Node
+runner. Other runner kinds may be cataloged, but cannot satisfy a guarantee
+until runner-specific PASS rules are reviewed and modeled.
+
+For a native Node result, `PASS` additionally requires all of the following:
+
+- the bound reporter transport, exact target-file set, and exact expected
+  selected test-name set agree with the proof definition;
+- the selected outcomes account exactly for the collected selected tests;
+- every selected test passed, with zero failed, cancelled, todo, or explicitly
+  skipped selected results;
+- the process exited zero; and
+- stdout, stderr, and the typed result summary are each present as a uniquely
+  named, hashed artifact.
+
+A test that the native runner reports as skipped solely because its name did
+not match the cataloged pattern is recorded under
+`excluded_nonmatch_test_names`. It is outside the selected proof denominator;
+an explicit skip of an expected selected test remains inside that denominator
+and forbids `PASS`.
 
 - `PASS`: the complete required automated selector set ran at the bound clean
   commit without failures, skips, or expected/unexpected outcome escapes, or a
