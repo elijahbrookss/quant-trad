@@ -8,6 +8,7 @@ from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import Lock
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from ...market import instrument_service
@@ -1564,7 +1565,29 @@ class StrategyPreviewStore:
         raise KeyError("Strategy preview signal not found")
 
 
-_REGISTRY = StrategyRegistry()
+class _LazyStrategyRegistry:
+    """Defer persistence-backed registry bootstrap until the first runtime use."""
+
+    def __init__(self) -> None:
+        self._instance: StrategyRegistry | None = None
+        self._lock = Lock()
+
+    def _resolve(self) -> StrategyRegistry:
+        instance = self._instance
+        if instance is not None:
+            return instance
+        with self._lock:
+            instance = self._instance
+            if instance is None:
+                instance = StrategyRegistry()
+                self._instance = instance
+        return instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+
+_REGISTRY = _LazyStrategyRegistry()
 _PREVIEW_RESULTS = StrategyPreviewStore()
 
 
