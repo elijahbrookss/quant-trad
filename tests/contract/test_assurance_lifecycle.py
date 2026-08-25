@@ -1202,6 +1202,172 @@ def test_runner_observation_rejects_unadmitted_image_environment(
         )
 
 
+def _none_network_runner_observation(
+    controller: docker_lifecycle.DockerController,
+    networks: dict[str, object],
+) -> dict[str, object]:
+    expected_env = controller._runner_environment(database=False)
+    return {
+        "Id": "runner",
+        "Image": "sha256:" + "1" * 64,
+        "Config": {
+            "Labels": {
+                docker_lifecycle.SESSION_LABEL: controller.attestation_id,
+                docker_lifecycle.PROFILE_LABEL: controller.profile_id,
+                docker_lifecycle.SOURCE_LABEL: controller.source_commit,
+                docker_lifecycle.INSTANCE_LABEL: controller.environment_instance_id,
+            },
+            "WorkingDir": "/workspace",
+            "Env": [f"{key}={value}" for key, value in expected_env.items()],
+        },
+        "HostConfig": {
+            "ReadonlyRootfs": True,
+            "NetworkMode": "none",
+            "Tmpfs": {"/tmp": "rw"},
+        },
+        "Mounts": [
+            {
+                "Destination": "/workspace",
+                "Type": "bind",
+                "RW": False,
+                "Source": str(controller.root),
+            }
+        ],
+        "NetworkSettings": {"Networks": networks},
+    }
+
+
+def _builtin_none_network(
+    *,
+    network_id: str = "2" * 64,
+    driver: str = "null",
+) -> dict[str, object]:
+    return {
+        "Id": network_id,
+        "Name": "none",
+        "Driver": driver,
+        "Scope": "local",
+        "Internal": False,
+        "Attachable": False,
+        "Ingress": False,
+    }
+
+
+def test_none_network_runner_accepts_started_null_endpoint(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        lambda argv, env, timeout: docker_lifecycle.CommandResult(b"", b"", 0),
+    )
+    controller.root.mkdir()
+    networks = {
+        "none": {
+            "IPAMConfig": None,
+            "Links": None,
+            "Aliases": None,
+            "MacAddress": "",
+            "DriverOpts": None,
+            "GwPriority": 0,
+            "NetworkID": "2" * 64,
+            "EndpointID": "3" * 64,
+            "Gateway": "",
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DNSNames": None,
+        }
+    }
+    observed = _none_network_runner_observation(controller, networks)
+    none_network = _builtin_none_network()
+    controller._resource_inspect = (  # type: ignore[method-assign]
+        lambda kind, token: observed if kind == "container" else none_network
+    )
+
+    facts = controller._verify_runner_configuration(
+        "runner", "sha256:" + "1" * 64, "none"
+    )
+
+    assert facts["network_identity"] == "none"
+    assert facts["network_mode"] == "none"
+
+
+@pytest.mark.parametrize(
+    "networks",
+    [
+        {
+            "none": {
+                "NetworkID": "2" * 64,
+                "EndpointID": "3" * 64,
+                "IPAddress": "172.18.0.2",
+            }
+        },
+        {
+            "none": {"NetworkID": "2" * 64, "EndpointID": "3" * 64},
+            "bridge": {"NetworkID": "4" * 64},
+        },
+        {"none": {"NetworkID": "", "EndpointID": ""}},
+    ],
+)
+def test_none_network_runner_rejects_routable_or_ambiguous_state(
+    tmp_path: Path,
+    networks: dict[str, object],
+) -> None:
+    controller = _controller(
+        tmp_path,
+        lambda argv, env, timeout: docker_lifecycle.CommandResult(b"", b"", 0),
+    )
+    controller.root.mkdir()
+    observed = _none_network_runner_observation(controller, networks)
+    none_network = _builtin_none_network()
+    controller._resource_inspect = (  # type: ignore[method-assign]
+        lambda kind, token: observed if kind == "container" else none_network
+    )
+
+    with pytest.raises(
+        docker_lifecycle.DockerLifecycleError,
+        match="runner_network_not_none",
+    ):
+        controller._verify_runner_configuration(
+            "runner", "sha256:" + "1" * 64, "none"
+        )
+
+
+@pytest.mark.parametrize(
+    ("network_id", "driver"),
+    [
+        ("4" * 64, "null"),
+        ("2" * 64, "bridge"),
+    ],
+)
+def test_none_network_runner_rejects_unbound_or_nonnull_builtin_network(
+    tmp_path: Path,
+    network_id: str,
+    driver: str,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        lambda argv, env, timeout: docker_lifecycle.CommandResult(b"", b"", 0),
+    )
+    controller.root.mkdir()
+    observed = _none_network_runner_observation(
+        controller,
+        {"none": {"NetworkID": "2" * 64, "EndpointID": "3" * 64}},
+    )
+    none_network = _builtin_none_network(network_id=network_id, driver=driver)
+    controller._resource_inspect = (  # type: ignore[method-assign]
+        lambda kind, token: observed if kind == "container" else none_network
+    )
+
+    with pytest.raises(
+        docker_lifecycle.DockerLifecycleError,
+        match="runner_network_not_none",
+    ):
+        controller._verify_runner_configuration(
+            "runner", "sha256:" + "1" * 64, "none"
+        )
+
+
 def test_database_runner_observation_retains_only_dsn_hash(tmp_path: Path) -> None:
     controller = _controller(
         tmp_path,

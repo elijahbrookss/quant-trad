@@ -24,6 +24,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 HEX_IMAGE_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+HEX_DOCKER_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 SESSION_LABEL = "com.quant-trad.assurance.session"
 PROFILE_LABEL = "com.quant-trad.assurance.profile"
 SOURCE_LABEL = "com.quant-trad.assurance.source"
@@ -534,10 +535,47 @@ class DockerController:
         if not isinstance(networks, dict):
             raise DockerLifecycleError("runner_network_shape_invalid")
         if network_id == "none":
-            if host.get("NetworkMode") != "none" or any(
-                (item or {}).get("NetworkID")
-                for item in networks.values()
-                if isinstance(item, dict)
+            none_endpoint = networks.get("none")
+            none_network = self._resource_inspect("network", "none")
+            none_network_identity = str(none_network.get("Id", ""))
+            if (
+                host.get("NetworkMode") != "none"
+                or set(networks) != {"none"}
+                or not isinstance(none_endpoint, dict)
+                or none_network.get("Name") != "none"
+                or none_network.get("Driver") != "null"
+                or none_network.get("Scope") != "local"
+                or none_network.get("Internal") is not False
+                or none_network.get("Attachable") is not False
+                or none_network.get("Ingress") is not False
+                or HEX_DOCKER_ID_RE.fullmatch(none_network_identity) is None
+                or HEX_DOCKER_ID_RE.fullmatch(
+                    str(none_endpoint.get("NetworkID", ""))
+                )
+                is None
+                or none_endpoint.get("NetworkID") != none_network_identity
+                or HEX_DOCKER_ID_RE.fullmatch(
+                    str(none_endpoint.get("EndpointID", ""))
+                )
+                is None
+                or any(
+                    none_endpoint.get(key)
+                    for key in (
+                        "Aliases",
+                        "DNSNames",
+                        "DriverOpts",
+                        "Gateway",
+                        "GlobalIPv6Address",
+                        "GlobalIPv6PrefixLen",
+                        "GwPriority",
+                        "IPAMConfig",
+                        "IPAddress",
+                        "IPPrefixLen",
+                        "IPv6Gateway",
+                        "Links",
+                        "MacAddress",
+                    )
+                )
             ):
                 raise DockerLifecycleError("runner_network_not_none")
             network_mode = "none"
