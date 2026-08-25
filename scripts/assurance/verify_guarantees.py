@@ -1229,6 +1229,7 @@ def derive_guarantee_results(
 ) -> list[dict[str, Any]]:
     statuses = {item["proof_id"]: item["status"] for item in proof_results}
     required: dict[str, list[str]] = defaultdict(list)
+    required_strengths: dict[str, list[str]] = defaultdict(list)
     proposed: dict[str, list[str]] = defaultdict(list)
     for proof in catalog["proofs"]:
         for coverage in proof["coverage"]:
@@ -1237,15 +1238,20 @@ def derive_guarantee_results(
             target = required if proof["lifecycle"] == "active" else proposed
             if proof["lifecycle"] in {"active", "proposed"}:
                 target[coverage["guarantee_id"]].append(proof["id"])
+                if proof["lifecycle"] == "active":
+                    required_strengths[coverage["guarantee_id"]].append(
+                        coverage["strength"]
+                    )
     maturity = {row["id"]: row["proof_maturity"] for row in registry["guarantees"]}
     results: list[dict[str, Any]] = []
     for guarantee_id in sorted(required):
         proof_ids = sorted(required[guarantee_id])
-        status = guarantees._aggregate_status([statuses[item] for item in proof_ids])
-        if status == "PASS" and (
-            proposed.get(guarantee_id) or maturity.get(guarantee_id) != "adequate"
-        ):
-            status = "PARTIAL"
+        status = guarantees._aggregate_guarantee_status(
+            [statuses[item] for item in proof_ids],
+            proof_maturity=maturity[guarantee_id],
+            required_strengths=required_strengths[guarantee_id],
+            has_proposed_required_proof=bool(proposed.get(guarantee_id)),
+        )
         results.append(
             {
                 "guarantee_id": guarantee_id,

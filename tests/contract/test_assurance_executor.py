@@ -567,6 +567,7 @@ def test_guarantee_derivation_caps_pass_by_maturity_and_proposed_proof() -> None
             {"id": "QT-GUAR-A", "proof_maturity": "partial"},
             {"id": "QT-GUAR-B", "proof_maturity": "adequate"},
             {"id": "QT-GUAR-C", "proof_maturity": "adequate"},
+            {"id": "QT-GUAR-D", "proof_maturity": "adequate"},
         ]
     }
     coverage = lambda guarantee_id: [  # noqa: E731 - compact fixture builder
@@ -582,15 +583,28 @@ def test_guarantee_derivation_caps_pass_by_maturity_and_proposed_proof() -> None
             {"id": "QT-PROOF-002", "lifecycle": "active", "coverage": coverage("QT-GUAR-B")},
             {"id": "QT-PROOF-003", "lifecycle": "active", "coverage": coverage("QT-GUAR-C")},
             {"id": "QT-PROOF-004", "lifecycle": "proposed", "coverage": coverage("QT-GUAR-C")},
+            {
+                "id": "QT-PROOF-005",
+                "lifecycle": "active",
+                "coverage": [
+                    {
+                        "guarantee_id": "QT-GUAR-D",
+                        "strength": "partial",
+                        "required_for_full_attestation": True,
+                    }
+                ],
+            },
         ]
     }
     proof_results = [
         {"proof_id": "QT-PROOF-001", "status": "PASS"},
         {"proof_id": "QT-PROOF-002", "status": "PASS"},
         {"proof_id": "QT-PROOF-003", "status": "PASS"},
+        {"proof_id": "QT-PROOF-005", "status": "PASS"},
     ]
     assert verifier.derive_guarantee_results(registry, catalog, proof_results) == [
         {"guarantee_id": "QT-GUAR-A", "status": "PARTIAL", "proof_ids": ["QT-PROOF-001"]},
         {"guarantee_id": "QT-GUAR-B", "status": "PASS", "proof_ids": ["QT-PROOF-002"]},
         {"guarantee_id": "QT-GUAR-C", "status": "PARTIAL", "proof_ids": ["QT-PROOF-003"]},
+        {"guarantee_id": "QT-GUAR-D", "status": "PARTIAL", "proof_ids": ["QT-PROOF-005"]},
     ]
