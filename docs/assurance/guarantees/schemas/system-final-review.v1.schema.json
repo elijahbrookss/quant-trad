@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://quant-trad.local/schemas/phase-3-final-review.v1.schema.json",
-  "title": "QT Phase 3 Final Review v1",
+  "$id": "https://quant-trad.local/schemas/system-final-review.v1.schema.json",
+  "title": "QT System Final Review v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,7 +13,7 @@
     "attestation_results",
     "summary",
     "system_summary",
-    "phase3_slices",
+    "system_slices",
     "guarantees",
     "proof_accounting",
     "proofs",
@@ -23,7 +23,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "qt.phase3_final_review.v1"
+      "const": "qt.system_final_review.v1"
     },
     "authority": {
       "const": "non_normative_final_review"
@@ -49,10 +49,10 @@
     "system_summary": {
       "$ref": "#/$defs/nonemptyStrings"
     },
-    "phase3_slices": {
+    "system_slices": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/phase3Slice"
+        "$ref": "#/$defs/systemSlice"
       },
       "minItems": 1
     },
@@ -132,11 +132,11 @@
     },
     "sliceId": {
       "type": "string",
-      "pattern": "^QT-P3-SLICE-[A-Z0-9-]+$"
+      "pattern": "^QT-SYSTEM-SLICE-[A-Z0-9-]+$"
     },
     "riskId": {
       "type": "string",
-      "pattern": "^QT-RISK-P3-[0-9]{3}$"
+      "pattern": "^QT-RISK-SYSTEM-[0-9]{3}$"
     },
     "repoPath": {
       "type": "string",
@@ -266,7 +266,7 @@
           "enum": [
             "docs/assurance/guarantees/proof-catalog.json",
             "docs/assurance/guarantees/registry.json",
-            "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json"
+            "docs/plans/documentation-reconciliation/system-final-review-policy.json"
           ]
         },
         "sha256": {
@@ -580,7 +580,7 @@
         "proof_assessment",
         "remediation_ids",
         "deferred_term_ids",
-        "phase3_slice_ids",
+        "system_slice_ids",
         "residual_risk_ids"
       ],
       "properties": {
@@ -630,7 +630,7 @@
           },
           "uniqueItems": true
         },
-        "phase3_slice_ids": {
+        "system_slice_ids": {
           "$ref": "#/$defs/sliceIds"
         },
         "residual_risk_ids": {
@@ -638,7 +638,7 @@
         }
       }
     },
-    "phase3Slice": {
+    "systemSlice": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -672,6 +672,13 @@
             "$ref": "#/$defs/repoPath"
           },
           "minItems": 1,
+          "uniqueItems": true
+        },
+        "historical_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          },
           "uniqueItems": true
         },
         "guarantee_ids": {
@@ -836,12 +843,12 @@
         "source_path",
         "source_lifecycle",
         "source_review_status",
-        "approved_phase2_disposition",
-        "phase3_action_outcome",
+        "approved_disposition",
+        "system_action_outcome",
         "acceptance_state",
         "closure_state",
         "proof_ids",
-        "phase3_slice_ids",
+        "system_slice_ids",
         "residual_risk_ids"
       ],
       "properties": {
@@ -860,16 +867,16 @@
         "source_review_status": {
           "const": "pending"
         },
-        "approved_phase2_disposition": {
+        "approved_disposition": {
           "enum": [
-            "retain_phase3",
+            "retain_for_system_work",
             "split_resolution_execution",
             "defer_activation_priority",
             "defer_owner_approval",
             "defer_proof_environment"
           ]
         },
-        "phase3_action_outcome": {
+        "system_action_outcome": {
           "enum": [
             "implemented",
             "planned",
@@ -892,7 +899,7 @@
         "proof_ids": {
           "$ref": "#/$defs/proofIds"
         },
-        "phase3_slice_ids": {
+        "system_slice_ids": {
           "$ref": "#/$defs/sliceIds"
         },
         "residual_risk_ids": {

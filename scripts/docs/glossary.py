@@ -26,11 +26,11 @@ if str(ROOT) not in sys.path:
 from scripts.docs import build_architecture_index as architecture_index
 
 
-CAMPAIGN_DIR = ROOT / "docs" / "plans" / "documentation-reconciliation"
-LEDGER_PATH = CAMPAIGN_DIR / "phase-3-terminology-dispositions.json"
-PROPOSAL_PATH = CAMPAIGN_DIR / "proposed-glossary.md"
-INVENTORY_PATH = CAMPAIGN_DIR / "terminology-inventory.md"
-DISPOSITION_VIEW_PATH = CAMPAIGN_DIR / "phase-3-terminology-dispositions.md"
+RECONCILIATION_DIR = ROOT / "docs" / "plans" / "documentation-reconciliation"
+LEDGER_PATH = RECONCILIATION_DIR / "phase-3-terminology-dispositions.json"
+PROPOSAL_PATH = RECONCILIATION_DIR / "proposed-glossary.md"
+INVENTORY_PATH = RECONCILIATION_DIR / "terminology-inventory.md"
+DISPOSITION_VIEW_PATH = RECONCILIATION_DIR / "phase-3-terminology-dispositions.md"
 PLATFORM_GLOSSARY_PATH = ROOT / "docs" / "contracts" / "platform" / "04_glossary.md"
 
 SCHEMA_VERSION = "qt.terminology_dispositions.v1"

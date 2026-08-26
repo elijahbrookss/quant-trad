@@ -50,8 +50,10 @@ CANDIDATE_INVENTORY_PATH = (
     / "documentation-reconciliation"
     / "guarantee-candidates.md"
 )
-CAMPAIGN_DIR = ROOT / "docs" / "plans" / "documentation-reconciliation"
-PHASE_1_SURFACE_INVENTORY_PATH = CAMPAIGN_DIR / "implementation-surface-inventory.json"
+RECONCILIATION_DIR = ROOT / "docs" / "plans" / "documentation-reconciliation"
+PHASE_1_SURFACE_INVENTORY_PATH = (
+    RECONCILIATION_DIR / "implementation-surface-inventory.json"
+)
 SCHEMA_DIR = ASSURANCE_DIR / "schemas"
 SCHEMA_PATHS = {
     "registry": SCHEMA_DIR / "registry.v1.schema.json",
@@ -614,15 +616,17 @@ def _table_definition_ids(path: Path, pattern: str) -> set[str]:
 
 
 def _finding_ids(root: Path) -> set[str]:
-    phase_1 = root / CAMPAIGN_DIR.relative_to(ROOT) / "phase-1-findings.md"
-    terminology = root / CAMPAIGN_DIR.relative_to(ROOT) / "terminology-inventory.md"
+    phase_1 = root / RECONCILIATION_DIR.relative_to(ROOT) / "phase-1-findings.md"
+    terminology = (
+        root / RECONCILIATION_DIR.relative_to(ROOT) / "terminology-inventory.md"
+    )
     return _table_definition_ids(phase_1, r"[A-Z][A-Z0-9-]+-\d{3}") | _table_definition_ids(
         terminology, r"QT-CONFLICT-\d{3}"
     )
 
 
 def _term_inventory_ids(root: Path) -> set[str]:
-    path = root / CAMPAIGN_DIR.relative_to(ROOT) / "terminology-inventory.md"
+    path = root / RECONCILIATION_DIR.relative_to(ROOT) / "terminology-inventory.md"
     if not path.exists():
         _fail(f"term_inventory_missing:{path.relative_to(root).as_posix()}")
     term_ids = _table_definition_ids(path, r"QT-TERM-\d{3}")
@@ -3404,11 +3408,11 @@ def assurance_material_sha256(
         relative = schema_path.relative_to(ROOT)
         if (bundle.root / relative).exists():
             paths.add(relative.as_posix())
-    campaign_dir = bundle.root / CAMPAIGN_DIR.relative_to(ROOT)
-    if campaign_dir.exists():
+    evidence_dir = bundle.root / RECONCILIATION_DIR.relative_to(ROOT)
+    if evidence_dir.exists():
         paths.update(
             path.relative_to(bundle.root).as_posix()
-            for path in campaign_dir.iterdir()
+            for path in evidence_dir.iterdir()
             if path.is_file() and path.suffix in {".md", ".json"}
         )
     glossary = bundle.root / GLOSSARY_PATH.relative_to(ROOT)

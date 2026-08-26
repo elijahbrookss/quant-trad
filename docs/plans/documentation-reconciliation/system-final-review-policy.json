@@ -1,5 +1,5 @@
 {
-  "schema_version": "qt.phase3_final_review_policy.v1",
+  "schema_version": "qt.system_final_review_policy.v1",
   "frozen_evidence": {
     "audit_baseline_commit": "d46e40bf55caeea12f4ccbde640c71f271eaf9c4",
     "classification_commit": "f1381f4d2eaa10841e40db42fea32d4ac0844e8f",
@@ -49,7 +49,7 @@
       "QT-GUAR-RUNTIME-EXECUTION-OWNERSHIP-QUALITY-CEILING"
     ]
   },
-  "phase2_dispositions": {
+  "approved_dispositions": {
     "defer_activation_priority": [
       "QT-REM-003",
       "QT-REM-121",
@@ -85,7 +85,7 @@
       "QT-REM-311",
       "QT-REM-405"
     ],
-    "retain_phase3": [
+    "retain_for_system_work": [
       "QT-REM-001",
       "QT-REM-005",
       "QT-REM-007",
@@ -230,9 +230,9 @@
       ]
     }
   ],
-  "phase3_slices": [
+  "system_slices": [
     {
-      "id": "QT-P3-SLICE-AUTHORITY",
+      "id": "QT-SYSTEM-SLICE-AUTHORITY",
       "title": "Authority and schema hierarchy",
       "commits": [
         "d958fe41c23ac9e0d09e1d0f123f2d4ed74f27c1",
@@ -258,10 +258,10 @@
         "QT-REM-305",
         "QT-REM-315"
       ],
-      "effect": "Records the owner's Phase 3 authorization, the approved authority hierarchy, and layered relational-schema ownership without making agent guidance product authority."
+      "effect": "Records the owner's approved authorization, authority hierarchy, and layered relational-schema ownership without making agent guidance product authority."
     },
     {
-      "id": "QT-P3-SLICE-CHECK-ADMISSION",
+      "id": "QT-SYSTEM-SLICE-CHECK-ADMISSION",
       "title": "Explicit Check-to-Observation admission",
       "commits": [
         "1091ad0550ec82e5a76174cb57044cf75e713959"
@@ -283,7 +283,7 @@
       "effect": "Resolves the accepted-authority conflict in favor of explicit admission of completed frozen replayable evidence."
     },
     {
-      "id": "QT-P3-SLICE-EXECUTION-MEANING",
+      "id": "QT-SYSTEM-SLICE-EXECUTION-MEANING",
       "title": "Run-scoped execution meaning and X-class authority",
       "commits": [
         "b043036ba8827f380809aa6d3badf9bf257c8a81"
@@ -311,7 +311,7 @@
       "effect": "Adopts resolved execution contexts and the X0-X5 weakest-evidence quality ladder as normative meaning."
     },
     {
-      "id": "QT-P3-SLICE-OWNERSHIP",
+      "id": "QT-SYSTEM-SLICE-OWNERSHIP",
       "title": "Architecture ownership and module-contract discovery",
       "commits": [
         "e1905d655414716ab0681768b48faf9e332ce8a1",
@@ -359,7 +359,7 @@
       "effect": "Creates reviewed semantic-owner and reviewer discovery while keeping module contracts subordinate and nonactivating."
     },
     {
-      "id": "QT-P3-SLICE-TERMINOLOGY",
+      "id": "QT-SYSTEM-SLICE-TERMINOLOGY",
       "title": "Reviewed glossary and alias dispositions",
       "commits": [
         "fb5814de8998736fe57121db708e2b32903b16a3",
@@ -392,7 +392,7 @@
       "effect": "Adopts 53 terms and 20 aliases while retaining QT-TERM-035 and QT-TERM-055 as deferred."
     },
     {
-      "id": "QT-P3-SLICE-DATA-DOCS",
+      "id": "QT-SYSTEM-SLICE-DATA-DOCS",
       "title": "Market-structure lifecycle and locator lineage",
       "commits": [
         "15ce6155a596fc8f5703364749cac54ea67b4609"
@@ -419,7 +419,7 @@
       "effect": "Reconciles explanatory lifecycle documentation and preserves the frozen QT-GC-026 locator correction as forward lineage only."
     },
     {
-      "id": "QT-P3-SLICE-REPOSITORY-DOCS",
+      "id": "QT-SYSTEM-SLICE-REPOSITORY-DOCS",
       "title": "Repository navigation, history, and CI documentation",
       "commits": [
         "db48ca8beb322e9ae8ab6e438929bc8ef8a27225",
@@ -458,7 +458,7 @@
       "effect": "Makes navigation, historical labels, retained-unverified assets, and the four-job PR topology explicit and testable."
     },
     {
-      "id": "QT-P3-SLICE-OBSERVABILITY",
+      "id": "QT-SYSTEM-SLICE-OBSERVABILITY",
       "title": "Supported Loki ingress topology",
       "commits": [
         "ee1ac864468d730438608d571a22864ba26d9a8e",
@@ -481,7 +481,7 @@
       "effect": "Defines Promtail for local development and Alloy for native server operation under one out-of-process shipper and no in-process hot path."
     },
     {
-      "id": "QT-P3-SLICE-MARKET-IDENTITY",
+      "id": "QT-SYSTEM-SLICE-MARKET-IDENTITY",
       "title": "Canonical strategy market identity",
       "commits": [
         "405381e447d51c9574f5b204a4e72ccc53e798dd",
@@ -503,7 +503,7 @@
       "effect": "Keeps datasource and exchange as compatibility defaults while canonical instrument linkage owns strategy and runtime routing."
     },
     {
-      "id": "QT-P3-SLICE-X-QUALITY",
+      "id": "QT-SYSTEM-SLICE-X-QUALITY",
       "title": "X0-X5 report enforcement",
       "commits": [
         "c94981facb19a6277675039ad09e6adeddf86cc6",
@@ -532,7 +532,7 @@
       "effect": "Prevents reports from advertising an attained execution class above the weakest required evidence or pinned model ceiling."
     },
     {
-      "id": "QT-P3-SLICE-FRONTEND",
+      "id": "QT-SYSTEM-SLICE-FRONTEND",
       "title": "Supported nonauthoritative operator surface",
       "commits": [
         "204dcf8368d986670ccd64f4832203cab88c549c",
@@ -577,7 +577,7 @@
       "effect": "Defines the supported read-oriented surface, fails on absent declared scan roots, and wires the tracked frontend suites into the supported topology."
     },
     {
-      "id": "QT-P3-SLICE-COLLECTION",
+      "id": "QT-SYSTEM-SLICE-COLLECTION",
       "title": "Side-effect-free proof collection",
       "commits": [
         "521bb399cee6322aada57149541886c117a24446"
@@ -591,7 +591,7 @@
       "effect": "Defers persistence resolution during collection; collection remains selector validation rather than product proof."
     },
     {
-      "id": "QT-P3-SLICE-RECOVERY",
+      "id": "QT-SYSTEM-SLICE-RECOVERY",
       "title": "Isolated recovery procedure",
       "commits": [
         "9e1fcc0e0fd0cbedbb32c49106a0aba2a0e7854d"
@@ -608,7 +608,7 @@
       "effect": "Defines a non-production source/target rehearsal procedure but supplies no environment or result."
     },
     {
-      "id": "QT-P3-SLICE-PROFILES",
+      "id": "QT-SYSTEM-SLICE-PROFILES",
       "title": "Pinned frontend and disposable database proof runtimes",
       "commits": [
         "8029d9ab20ad559c4860a2ca1aed8d0328c99292",
@@ -642,7 +642,7 @@
       "effect": "Admits exact Node 20 and PostgreSQL 15/TimescaleDB 2.14.2 isolated profiles; it executes no proof and creates no result."
     },
     {
-      "id": "QT-P3-SLICE-ASSURANCE-FINALIZATION",
+      "id": "QT-SYSTEM-SLICE-ASSURANCE-FINALIZATION",
       "title": "Profile-bound assurance and non-normative final-review machinery",
       "commits": [
         "8380f1781741535b97f6db8e4facb0cbc98550b1",
@@ -687,16 +687,14 @@
         "docs/assurance/guarantees/schemas/execution-admission.v1.schema.json",
         "docs/assurance/guarantees/schemas/execution-draft.v1.schema.json",
         "docs/assurance/guarantees/schemas/execution-manifest.v1.schema.json",
-        "docs/assurance/guarantees/schemas/phase-3-final-review.v1.schema.json",
         "docs/assurance/guarantees/schemas/proof-catalog.v1.schema.json",
         "docs/assurance/guarantees/schemas/python-wheel-manifest.v1.schema.json",
         "docs/assurance/guarantees/schemas/runner-build-profile.v1.schema.json",
         "docs/assurance/guarantees/schemas/runner-build-record.v1.schema.json",
         "docs/assurance/guarantees/schemas/runner-materialization.v1.schema.json",
+        "docs/assurance/guarantees/schemas/system-final-review.v1.schema.json",
         "docs/plans/documentation-reconciliation/phase-3-authorization-and-plan.md",
-        "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json",
-        "docs/plans/documentation-reconciliation/phase-3-final-review.json",
-        "docs/plans/documentation-reconciliation/phase-3-final-review.md",
+        "docs/plans/documentation-reconciliation/system-final-review-policy.json",
         "scripts/assurance/__init__.py",
         "scripts/assurance/build_runner.py",
         "scripts/assurance/docker_lifecycle.py",
@@ -704,7 +702,7 @@
         "scripts/assurance/process_guard.py",
         "scripts/assurance/pytest_result_plugin.py",
         "scripts/assurance/verify_guarantees.py",
-        "scripts/docs/build_phase3_final_review.py",
+        "scripts/docs/build_system_final_review.py",
         "scripts/docs/guarantees.py",
         "tests/contract/test_assurance_environment_profiles.py",
         "tests/contract/test_assurance_executor.py",
@@ -712,21 +710,29 @@
         "tests/contract/test_assurance_publication.py",
         "tests/contract/test_assurance_runner_build.py",
         "tests/contract/test_guarantee_registry.py",
+        "tests/contract/test_system_final_review.py"
+      ],
+      "historical_files": [
+        "docs/assurance/guarantees/schemas/phase-3-final-review.v1.schema.json",
+        "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json",
+        "docs/plans/documentation-reconciliation/phase-3-final-review.json",
+        "docs/plans/documentation-reconciliation/phase-3-final-review.md",
+        "scripts/docs/build_phase3_final_review.py",
         "tests/contract/test_phase3_final_review.py"
       ],
       "guarantee_selector": "all",
       "guarantee_ids": [],
       "remediation_selector": "all",
       "remediation_ids": [],
-      "effect": "Binds admitted proof profiles, typed Node results, structured environment admission, a source/profile-bound hash-complete external wheelhouse, deterministic offline runner materialization and immutable build records, build-record-derived candidate admission, commit-bound and cleanup-gated isolated Docker execution, nonfinalizing abrupt-cleanup recovery, crash-consistent whole-campaign staged publication, conservative guarantee-result capping, and deterministic final-review accounting. It executes no campaign proof, supplies no proof result, closes no remediation, and activates no guarantee."
+      "effect": "Binds admitted proof profiles, typed Node results, structured environment admission, a source/profile-bound hash-complete external wheelhouse, deterministic offline runner materialization and immutable build records, build-record-derived candidate admission, commit-bound and cleanup-gated isolated Docker execution, nonfinalizing abrupt-cleanup recovery, crash-consistent whole-run staged publication, conservative guarantee-result capping, and deterministic final-review accounting. It executes no assurance proof, supplies no proof result, closes no remediation, and activates no guarantee."
     }
   ],
   "residual_risks": [
     {
-      "id": "QT-RISK-P3-001",
+      "id": "QT-RISK-SYSTEM-001",
       "category": "frozen_forward_lineage",
       "severity": "high",
-      "summary": "Frozen Phase 1/2 evidence and current Phase 3 evidence are different subjects and must never be silently retargeted.",
+      "summary": "Frozen audit evidence and current system evidence are different subjects and must never be silently retargeted.",
       "guarantee_selector": "all",
       "guarantee_ids": [],
       "remediation_selector": "all",
@@ -735,7 +741,7 @@
       "exit_criteria": "Every forward row retains the frozen registry hash and commit-bound current evidence."
     },
     {
-      "id": "QT-RISK-P3-002",
+      "id": "QT-RISK-SYSTEM-002",
       "category": "open_denominator",
       "severity": "high",
       "summary": "Universal and absence claims remain limited by PDR-05 closed-denominator requirements; representative tests are insufficient.",
@@ -829,7 +835,7 @@
       "exit_criteria": "Each claim has an owner-reviewed closed static/runtime denominator, narrowed wording, or remains partial."
     },
     {
-      "id": "QT-RISK-P3-003",
+      "id": "QT-RISK-SYSTEM-003",
       "category": "proof_maturity",
       "severity": "high",
       "summary": "Seventy-four guarantees retain partial proof maturity, so an all-green execution cannot become an uncapped guarantee PASS.",
@@ -841,7 +847,7 @@
       "exit_criteria": "A reviewed proof-denominator change explicitly raises the affected registry proof maturity."
     },
     {
-      "id": "QT-RISK-P3-004",
+      "id": "QT-RISK-SYSTEM-004",
       "category": "environment_unavailable",
       "severity": "high",
       "summary": "Recovery has no provisioned source/target rehearsal. QT-PROOF-311 may execute its admitted static validation, but no approved isolated deployment-execution profile exists for clean deployment, negative migration, rollback, and recovery.",
@@ -862,7 +868,7 @@
       "exit_criteria": "Approved isolated environments are admitted and exercised without production or live resources."
     },
     {
-      "id": "QT-RISK-P3-005",
+      "id": "QT-RISK-SYSTEM-005",
       "category": "proof_catalog_trace",
       "severity": "medium",
       "summary": "Several newly landed validators are not selected by their corresponding proof definitions and therefore remain validation-only evidence.",
@@ -891,7 +897,7 @@
       "exit_criteria": "Catalog selectors are reviewed and updated, or the validation-only limitation remains explicit."
     },
     {
-      "id": "QT-RISK-P3-006",
+      "id": "QT-RISK-SYSTEM-006",
       "category": "terminology_deferred",
       "severity": "medium",
       "summary": "QT-TERM-035 and QT-TERM-055 remain deliberately deferred and block activation claims that depend on them.",
@@ -909,7 +915,7 @@
       "exit_criteria": "The named semantic owners review and adopt or reject the two deferred distinctions."
     },
     {
-      "id": "QT-RISK-P3-007",
+      "id": "QT-RISK-SYSTEM-007",
       "category": "remediation_open",
       "severity": "high",
       "summary": "All 68 remediation records remain proposed, pending review, and open even where a bounded implementation slice landed.",
@@ -921,7 +927,7 @@
       "exit_criteria": "Each record is separately reviewed against every acceptance criterion before any lifecycle closure."
     },
     {
-      "id": "QT-RISK-P3-008",
+      "id": "QT-RISK-SYSTEM-008",
       "category": "attestation_and_activation_identity",
       "severity": "high",
       "summary": "Local or commit-bound proof results do not establish protected-CI provenance or grant activation authority.",
@@ -933,7 +939,7 @@
       "exit_criteria": "An immutable attestation is bound to protected source identity and a separate activation reviewer records an explicit decision."
     },
     {
-      "id": "QT-RISK-P3-009",
+      "id": "QT-RISK-SYSTEM-009",
       "category": "external_submission_absence",
       "severity": "critical",
       "summary": "External order submission remains normatively closed, while its repository-wide absence denominator remains open.",
@@ -951,7 +957,7 @@
       "exit_criteria": "A reviewed repository-wide static denominator confirms the closed boundary without sending an external order."
     },
     {
-      "id": "QT-RISK-P3-010",
+      "id": "QT-RISK-SYSTEM-010",
       "category": "historical_residue",
       "severity": "low",
       "summary": "Unavailable BTC V1/V2 lineage and the source-less platform-flow SVG are retained explicitly as historical or unverified evidence.",
@@ -963,7 +969,7 @@
       "exit_criteria": "Recovered provenance or a separately approved disposition replaces the explicit retained-unavailable labels."
     },
     {
-      "id": "QT-RISK-P3-011",
+      "id": "QT-RISK-SYSTEM-011",
       "category": "runner_build_provenance",
       "severity": "high",
       "summary": "The source-bound runner build design now binds a reviewed hash-complete external wheelhouse, deterministic offline materialization, exact Docker invocation/tool/daemon/base identities, output labels and image identity, and an immutable build record to source and profile. The risk remains high and open until the newly frozen exact source is successfully rebuilt with no network or pulls, the record and image are retained, and the exact candidate receives the required owner admission; implementation and validation alone are not proof.",
@@ -975,10 +981,10 @@
       "exit_criteria": "Build the newly frozen exact source through the reviewed profile with network disabled and pulls forbidden; retain the validated wheelhouse materialization, immutable build record, resulting image identity, build-definition binding, and explicit owner admission. Preserve UNAVAILABLE if any prerequisite or identity check fails."
     },
     {
-      "id": "QT-RISK-P3-012",
+      "id": "QT-RISK-SYSTEM-012",
       "category": "runner_prerequisite_unavailable",
       "severity": "high",
-      "summary": "The candidate Phase 3 runner inspected for admission does not provide the declared PostgreSQL psql client. Unless a separately reviewed source-bound runner supplies it, QT-PROOF-002 and QT-PROOF-314 must be recorded UNAVAILABLE rather than PASS or product FAIL.",
+      "summary": "The candidate runner inspected for admission does not provide the declared PostgreSQL psql client. Unless a separately reviewed source-bound runner supplies it, QT-PROOF-002 and QT-PROOF-314 must be recorded UNAVAILABLE rather than PASS or product FAIL.",
       "guarantee_selector": "listed",
       "guarantee_ids": [
         "QT-GUAR-CANONICAL-FACT-APPEND-ONLY",
@@ -996,7 +1002,7 @@
       "exit_criteria": "Admit a provenance-pinned PostgreSQL 15 psql client or a separately reviewed equivalent execution design, then execute both proofs in the approved isolated database profile; retain UNAVAILABLE until then."
     },
     {
-      "id": "QT-RISK-P3-013",
+      "id": "QT-RISK-SYSTEM-013",
       "category": "integration_identity",
       "severity": "high",
       "summary": "Attestations and the final packet bind exact feature-branch commit identities; rebasing, squashing, cherry-picking, or force-pushing would create a different subject, while integrating into a moved remote develop branch would add unassessed target state.",
@@ -1008,7 +1014,7 @@
       "exit_criteria": "Verify the authoritative remote origin ref refs/heads/develop still equals frozen d46e40bf55caeea12f4ccbde640c71f271eaf9c4; after final approval, update that remote branch by fast-forward only to the exact reviewed feature head so S, P, and C remain exact ancestors. If the remote ref differs or cannot be verified, invalidate and refresh the packet and return for review. A stale local develop ref is not integration-target evidence."
     },
     {
-      "id": "QT-RISK-P3-014",
+      "id": "QT-RISK-SYSTEM-014",
       "category": "assurance_lifecycle_concurrency",
       "severity": "high",
       "summary": "Recovery and staged publication are crash-safe within cooperative same-user use, not transactional against a hostile same-UID process: file locks are advisory, Docker inspect/recheck/remove spans separate CLI calls, a create-only external receipt race can safely deny progress, and repository publication is pending-backed multi-file crash-consistent rather than atomic.",
@@ -1017,7 +1023,7 @@
       "remediation_selector": "listed",
       "remediation_ids": [],
       "proof_ids": [],
-      "exit_criteria": "Run the approved campaign without overlapping same-user actors and retain these limits in the final packet. Eliminating the underlying risk requires OS-enforced exclusive runner isolation, a transactional daemon identity-and-removal primitive, and transactional artifact storage; safe receipt-race denial and resumable partial publication remain visible until then."
+      "exit_criteria": "Run the approved assurance work without overlapping same-user actors and retain these limits in the final packet. Eliminating the underlying risk requires OS-enforced exclusive runner isolation, a transactional daemon identity-and-removal primitive, and transactional artifact storage; safe receipt-race denial and resumable partial publication remain visible until then."
     }
   ],
   "system_summary": [
@@ -1027,7 +1033,7 @@
     "Reports, BotLens, observability, and the operator console explain or project owned truth and cannot rewrite it.",
     "External order submission remains closed in every runtime mode, and no proof may use production or live systems.",
     "Abrupt cleanup recovery cannot finalize or attest a session, and publication validates all three immutable staged attestations before copying evidence; both mechanisms remain cooperative, crash-consistent controls rather than hostile-process or multi-file transactional guarantees.",
-    "Phase 3 slice file lists retain each named commit's complete changed-file footprint plus explicitly consumed source inputs; they are evidence bindings, not authority declarations.",
+    "System slice file lists retain each named commit's complete changed-file footprint plus explicitly consumed source inputs; they are evidence bindings, not authority declarations.",
     "The commit that finalizes this policy cannot list its own future identity; exact policy bytes are instead bound through source commit S and the final review's source-material hash.",
     "Wheel bytes remain outside Git; source-owned manifest hashes and recorded deterministic materialization bind the exact external artifacts without treating a host cache as authority.",
     "Proof results bind exact source, profile, runner, environment, cleanup, and attestation identities; runner admission additionally requires the validated immutable offline build record. Missing prerequisites remain UNAVAILABLE, and results do not transfer to rewritten commits.",

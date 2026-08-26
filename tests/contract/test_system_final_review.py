@@ -6,10 +6,21 @@ import json
 
 import pytest
 
-from scripts.docs import build_phase3_final_review as final_review
+from scripts.docs import build_system_final_review as final_review
 
 
 HISTORICAL_SOURCE_COMMIT = "1672f22fc269cb3e4b11d68505057932b088e9ed"
+HISTORICAL_REVIEW_SHA256 = (
+    "f3a828ebf3b1ad1a7366f159fc463ffb68255bc4da5c66ddc3a6b986b80d913a"
+)
+HISTORICAL_VIEW_SHA256 = (
+    "c49e7048c0cda43fedfa0db1448fe38cb8ebdd4102eed7f8ea5a8e8a4e3fa6c7"
+)
+HISTORICAL_SOURCE_MATERIAL_PATHS = {
+    "docs/assurance/guarantees/proof-catalog.json",
+    "docs/assurance/guarantees/registry.json",
+    "docs/plans/documentation-reconciliation/phase-3-final-review-policy.json",
+}
 IMPLEMENTED = {
     "QT-REM-004",
     "QT-REM-207",
@@ -49,7 +60,9 @@ def review() -> dict:
 
 @pytest.fixture(scope="module")
 def historical_review() -> dict:
-    return final_review.guarantees.load_json_strict(final_review.REVIEW_PATH)
+    return final_review.guarantees.load_json_strict(
+        final_review.HISTORICAL_REVIEW_PATH
+    )
 
 
 def test_pre_attestation_review_accounts_for_every_record(review: dict) -> None:
@@ -111,17 +124,17 @@ def test_forward_state_and_remediation_outcomes_are_exact(review: dict) -> None:
     assert {
         item
         for item, row in rows.items()
-        if row["phase3_action_outcome"] == "implemented"
+        if row["system_action_outcome"] == "implemented"
     } == IMPLEMENTED
     assert {
         item
         for item, row in rows.items()
-        if row["phase3_action_outcome"] == "unavailable"
+        if row["system_action_outcome"] == "unavailable"
     } == UNAVAILABLE
     assert {
         item
         for item, row in rows.items()
-        if row["phase3_action_outcome"] == "deferred"
+        if row["system_action_outcome"] == "deferred"
     } == DEFERRED
     assert all(
         row["source_lifecycle"] == "proposed"
@@ -134,12 +147,14 @@ def test_forward_state_and_remediation_outcomes_are_exact(review: dict) -> None:
 def test_checked_intermediate_review_fixture_is_deterministic(
     historical_review: dict,
 ) -> None:
-    checked = json.loads(final_review.REVIEW_PATH.read_text(encoding="utf-8"))
+    checked = json.loads(
+        final_review.HISTORICAL_REVIEW_PATH.read_text(encoding="utf-8")
+    )
     assert checked == historical_review
     assert checked["assessment_subject"]["source_commit"] == HISTORICAL_SOURCE_COMMIT
     assert {
         row["path"] for row in checked["assessment_subject"]["source_material"]
-    } == final_review.SOURCE_MATERIAL_PATHS
+    } == HISTORICAL_SOURCE_MATERIAL_PATHS
     assert checked["final_gate"] == {
         "mode": "intermediate",
         "repository_state": None,
@@ -150,13 +165,17 @@ def test_checked_intermediate_review_fixture_is_deterministic(
     assert checked["attestation_binding"]["state"] == "not_attested"
     proof_014 = next(row for row in checked["proofs"] if row["id"] == "QT-PROOF-014")
     assert proof_014["lifecycle"] == "active"
-    assert final_review.REVIEW_PATH.read_bytes() == final_review._canonical_json_bytes(
-        checked
+    assert (
+        hashlib.sha256(final_review.HISTORICAL_REVIEW_PATH.read_bytes()).hexdigest()
+        == HISTORICAL_REVIEW_SHA256
     )
-    assert final_review.VIEW_PATH.read_text(encoding="utf-8") == (
-        final_review.render_markdown(checked)
+    assert final_review.HISTORICAL_REVIEW_PATH.read_bytes() == (
+        final_review._canonical_json_bytes(checked)
     )
-    final_review.validate_review_data(checked)
+    assert (
+        hashlib.sha256(final_review.HISTORICAL_VIEW_PATH.read_bytes()).hexdigest()
+        == HISTORICAL_VIEW_SHA256
+    )
 
 
 def test_published_schema_is_programmatically_bound_to_executable_model() -> None:
@@ -246,7 +265,7 @@ def test_attestation_loader_sorts_and_binds_every_immutable_input(
 
 def test_validation_results_are_immutable_sorted_and_source_bound(tmp_path) -> None:
     source_commit = "a" * 40
-    evidence_path = "logs/phase3-validation/catalog-check.txt"
+    evidence_path = "logs/system-validation/catalog-check.txt"
     evidence = tmp_path / evidence_path
     evidence.parent.mkdir(parents=True)
     evidence.write_text("catalog valid\n", encoding="utf-8")
@@ -284,7 +303,7 @@ def test_validation_results_are_immutable_sorted_and_source_bound(tmp_path) -> N
         / "assurance"
         / "guarantees"
         / "validation-results"
-        / "phase3.json"
+        / "system.json"
     )
     result_path.parent.mkdir(parents=True)
     result_path.write_text(json.dumps(document) + "\n", encoding="utf-8")
@@ -297,7 +316,7 @@ def test_validation_results_are_immutable_sorted_and_source_bound(tmp_path) -> N
 
     assert loaded == results
     assert binding == {
-        "path": "docs/assurance/guarantees/validation-results/phase3.json",
+        "path": "docs/assurance/guarantees/validation-results/system.json",
         "sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
     }
     with pytest.raises(final_review.FinalReviewError, match="ids_must_be_sorted_unique"):
@@ -381,7 +400,7 @@ def _strict_final_gate_review(intermediate: dict) -> dict:
             "clean": True,
         },
         "validation_results_source": {
-            "path": "docs/assurance/guarantees/validation-results/phase3.json",
+            "path": "docs/assurance/guarantees/validation-results/system.json",
             "sha256": "e" * 64,
         },
         "validation_results": [
@@ -563,12 +582,12 @@ def test_slice_evidence_requires_complete_named_commit_footprint(
         final_review.FinalReviewError,
         match="missing_commit_footprint:docs/two.md",
     ):
-        final_review._verify_slice_evidence(
+        final_review._verify_system_slice_evidence(
             final_review.ROOT,
             "a" * 40,
             [
                 {
-                    "id": "QT-P3-SLICE-TEST",
+                    "id": "QT-SYSTEM-SLICE-TEST",
                     "commits": ["b" * 40],
                     "files": ["docs/one.md"],
                 }

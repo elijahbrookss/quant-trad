@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build QT's non-normative Phase 3 final-review assessment.
+"""Build QT's non-normative system final-review assessment.
 
-The frozen Phase 2 registry and remediation records remain immutable inputs.
-This module layers a commit-specific forward assessment over those inputs and
+The frozen registry and remediation records remain immutable inputs. This
+module layers a commit-specific forward assessment over those inputs and
 optionally binds already-created immutable attestations. It never executes a
 proof, changes guarantee activation, or treats remediation progress as closure.
 
@@ -35,28 +35,30 @@ if str(ROOT) not in sys.path:
 from scripts.docs import guarantees  # noqa: E402
 
 
-CAMPAIGN_DIR = ROOT / "docs" / "plans" / "documentation-reconciliation"
-POLICY_PATH = CAMPAIGN_DIR / "phase-3-final-review-policy.json"
-REVIEW_PATH = CAMPAIGN_DIR / "phase-3-final-review.json"
-VIEW_PATH = CAMPAIGN_DIR / "phase-3-final-review.md"
+RECONCILIATION_DIR = ROOT / "docs" / "plans" / "documentation-reconciliation"
+POLICY_PATH = RECONCILIATION_DIR / "system-final-review-policy.json"
+REVIEW_PATH = RECONCILIATION_DIR / "system-final-review.json"
+VIEW_PATH = RECONCILIATION_DIR / "system-final-review.md"
+HISTORICAL_REVIEW_PATH = RECONCILIATION_DIR / "phase-3-final-review.json"
+HISTORICAL_VIEW_PATH = RECONCILIATION_DIR / "phase-3-final-review.md"
 SCHEMA_PATH = (
     ROOT
     / "docs"
     / "assurance"
     / "guarantees"
     / "schemas"
-    / "phase-3-final-review.v1.schema.json"
+    / "system-final-review.v1.schema.json"
 )
 
-POLICY_SCHEMA_VERSION = "qt.phase3_final_review_policy.v1"
-REVIEW_SCHEMA_VERSION = "qt.phase3_final_review.v1"
-VALIDATION_RESULTS_SCHEMA_VERSION = "qt.phase3_validation_results.v1"
+POLICY_SCHEMA_VERSION = "qt.system_final_review_policy.v1"
+REVIEW_SCHEMA_VERSION = "qt.system_final_review.v1"
+VALIDATION_RESULTS_SCHEMA_VERSION = "qt.system_validation_results.v1"
 HEX40_RE = re.compile(r"[0-9a-f]{40}\Z")
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
 VALIDATION_ID_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 REMEDIATION_ID_RE = re.compile(r"QT-REM-[0-9]{3}\Z")
-RISK_ID_RE = re.compile(r"QT-RISK-P3-[0-9]{3}\Z")
-SLICE_ID_RE = re.compile(r"QT-P3-SLICE-[A-Z0-9-]+\Z")
+RISK_ID_RE = re.compile(r"QT-RISK-SYSTEM-[0-9]{3}\Z")
+SLICE_ID_RE = re.compile(r"QT-SYSTEM-SLICE-[A-Z0-9-]+\Z")
 
 ATTESTATION_STATUSES = {
     "PASS",
@@ -68,8 +70,8 @@ ATTESTATION_STATUSES = {
 }
 ACTION_OUTCOMES = {"implemented", "planned", "deferred", "blocked", "unavailable"}
 ACCEPTANCE_STATES = {"not_assessed", "partial", "met", "contradicted"}
-PHASE2_DISPOSITIONS = {
-    "retain_phase3",
+APPROVED_DISPOSITIONS = {
+    "retain_for_system_work",
     "split_resolution_execution",
     "defer_activation_priority",
     "defer_owner_approval",
@@ -98,7 +100,7 @@ SOURCE_MATERIAL_PATHS = {
 
 
 class FinalReviewError(ValueError):
-    """Raised when the Phase 3 assessment is incomplete or inconsistent."""
+    """Raised when the system assessment is incomplete or inconsistent."""
 
 
 def _fail(message: str) -> NoReturn:
@@ -189,7 +191,7 @@ def _validate_review_schema_contract(root: Path) -> None:
     """Keep the published schema aligned with the executable review model."""
 
     schema = guarantees.load_json_strict(root / SCHEMA_PATH.relative_to(ROOT))
-    where = "schema.phase3_final_review"
+    where = "schema.system_final_review"
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         _fail(f"{where}:expected_draft_2020_12")
     if schema.get("additionalProperties") is not False:
@@ -208,7 +210,7 @@ def _validate_review_schema_contract(root: Path) -> None:
             "attestation_results",
             "summary",
             "system_summary",
-            "phase3_slices",
+            "system_slices",
             "guarantees",
             "proof_accounting",
             "proofs",
@@ -548,12 +550,17 @@ def _load_validation_results(
     return validated, {"path": relative, "sha256": _sha256(resolved)}
 
 
-def _verify_slice_evidence(root: Path, source_commit: str, slices: Sequence[Mapping[str, Any]]) -> None:
+def _verify_system_slice_evidence(
+    root: Path,
+    source_commit: str,
+    slices: Sequence[Mapping[str, Any]],
+) -> None:
     if not (root / ".git").exists():
         return
     for slice_row in slices:
         slice_id = slice_row["id"]
         listed_files = set(slice_row["files"])
+        historical_files = set(slice_row.get("historical_files", []))
         changed_files: set[str] = set()
         previous_commit: str | None = None
         for commit in slice_row["commits"]:
@@ -596,11 +603,19 @@ def _verify_slice_evidence(root: Path, source_commit: str, slices: Sequence[Mapp
                 if line
             )
             previous_commit = commit
-        missing_changed_files = sorted(changed_files - listed_files)
+        missing_changed_files = sorted(
+            changed_files - listed_files - historical_files
+        )
         if missing_changed_files:
             _fail(
                 f"{slice_id}:files:missing_commit_footprint:"
                 + ",".join(missing_changed_files)
+            )
+        unused_historical_files = sorted(historical_files - changed_files)
+        if unused_historical_files:
+            _fail(
+                f"{slice_id}:historical_files:not_in_commit_footprint:"
+                + ",".join(unused_historical_files)
             )
         for repo_path in slice_row["files"]:
             try:
@@ -685,11 +700,11 @@ def _validate_policy(
             "frozen_evidence",
             "expected_summary",
             "forward_overrides",
-            "phase2_dispositions",
+            "approved_dispositions",
             "remediation_outcomes",
             "acceptance_overrides",
             "deferred_terms",
-            "phase3_slices",
+            "system_slices",
             "residual_risks",
             "system_summary",
             "integration_plan",
@@ -756,10 +771,12 @@ def _validate_policy(
         _fail("policy.forward_overrides.current_claim_overlay_required:invalid_set")
 
     _validate_partition(
-        _expect_object(policy["phase2_dispositions"], "policy.phase2_dispositions"),
+        _expect_object(
+            policy["approved_dispositions"], "policy.approved_dispositions"
+        ),
         expected_ids=remediation_ids,
-        allowed_groups=PHASE2_DISPOSITIONS,
-        where="policy.phase2_dispositions",
+        allowed_groups=APPROVED_DISPOSITIONS,
+        where="policy.approved_dispositions",
     )
     _validate_partition(
         _expect_object(policy["remediation_outcomes"], "policy.remediation_outcomes"),
@@ -792,8 +809,10 @@ def _validate_policy(
             _fail(f"{where}.guarantee_ids:invalid_set")
 
     slice_ids: set[str] = set()
-    for index, raw in enumerate(_expect_list(policy["phase3_slices"], "policy.phase3_slices")):
-        where = f"policy.phase3_slices[{index}]"
+    for index, raw in enumerate(
+        _expect_list(policy["system_slices"], "policy.system_slices")
+    ):
+        where = f"policy.system_slices[{index}]"
         row = _expect_object(raw, where)
         _exact_keys(
             row,
@@ -806,7 +825,11 @@ def _validate_policy(
                 "remediation_ids",
                 "effect",
             },
-            optional={"guarantee_selector", "remediation_selector"},
+            optional={
+                "guarantee_selector",
+                "remediation_selector",
+                "historical_files",
+            },
             where=where,
         )
         slice_id = _expect_string(row["id"], f"{where}.id")
@@ -824,6 +847,15 @@ def _validate_policy(
         files = _expect_list(row["files"], f"{where}.files")
         if not files or files != sorted(files) or len(files) != len(set(files)):
             _fail(f"{where}.files:must_be_nonempty_sorted_unique")
+        historical_files = _expect_list(
+            row.get("historical_files", []), f"{where}.historical_files"
+        )
+        if historical_files != sorted(historical_files) or len(
+            historical_files
+        ) != len(set(historical_files)):
+            _fail(f"{where}.historical_files:must_be_sorted_unique")
+        if set(files) & set(historical_files):
+            _fail(f"{where}:current_and_historical_files_overlap")
         guarantee_selector = row.get("guarantee_selector", "listed")
         remediation_selector = row.get("remediation_selector", "listed")
         if guarantee_selector not in {"listed", "all"}:
@@ -1122,7 +1154,7 @@ def build_review(
     if bundle.registry["audit_baseline_commit"] != frozen["audit_baseline_commit"]:
         _fail("frozen_audit_baseline_commit_mismatch")
 
-    _verify_slice_evidence(root, source_commit, policy["phase3_slices"])
+    _verify_system_slice_evidence(root, source_commit, policy["system_slices"])
     attestations, attestation_binding = _load_attestations(
         root=root,
         bundle=bundle,
@@ -1176,11 +1208,11 @@ def build_review(
             "integration_approval_request": None,
         }
 
-    phase2_disposition_by_remediation = _validate_partition(
-        policy["phase2_dispositions"],
+    approved_disposition_by_remediation = _validate_partition(
+        policy["approved_dispositions"],
         expected_ids=remediation_ids,
-        allowed_groups=PHASE2_DISPOSITIONS,
-        where="policy.phase2_dispositions",
+        allowed_groups=APPROVED_DISPOSITIONS,
+        where="policy.approved_dispositions",
     )
     outcome_by_remediation = _validate_partition(
         policy["remediation_outcomes"],
@@ -1228,8 +1260,8 @@ def build_review(
 
     slices_by_guarantee: dict[str, list[str]] = defaultdict(list)
     slices_by_remediation: dict[str, list[str]] = defaultdict(list)
-    phase3_slices: list[dict[str, Any]] = []
-    for raw in policy["phase3_slices"]:
+    system_slices: list[dict[str, Any]] = []
+    for raw in policy["system_slices"]:
         row = dict(raw)
         guarantee_selector = row.pop("guarantee_selector", "listed")
         remediation_selector = row.pop("remediation_selector", "listed")
@@ -1243,7 +1275,7 @@ def build_review(
             else row["remediation_ids"],
             key=_id_sort_key,
         )
-        phase3_slices.append(row)
+        system_slices.append(row)
         for guarantee_id in row["guarantee_ids"]:
             slices_by_guarantee[guarantee_id].append(row["id"])
         for remediation_id in row["remediation_ids"]:
@@ -1311,7 +1343,7 @@ def build_review(
             field for field in frozen_state if frozen_state[field] != forward_state[field]
         ]
         forward_reasons = (
-            ["approved_phase3_forward_reassessment"]
+            ["approved_forward_reassessment"]
             if changed_fields
             else ["frozen_state_carried_forward"]
         )
@@ -1389,7 +1421,7 @@ def build_review(
                 "deferred_term_ids": sorted(
                     term_blockers.get(guarantee_id, []), key=_id_sort_key
                 ),
-                "phase3_slice_ids": sorted(
+                "system_slice_ids": sorted(
                     slices_by_guarantee.get(guarantee_id, [])
                 ),
                 "residual_risk_ids": sorted(
@@ -1464,14 +1496,14 @@ def build_review(
                 "source_path": remediation_paths[remediation_id],
                 "source_lifecycle": frontmatter["lifecycle"],
                 "source_review_status": frontmatter["review_status"],
-                "approved_phase2_disposition": phase2_disposition_by_remediation[
+                "approved_disposition": approved_disposition_by_remediation[
                     remediation_id
                 ],
-                "phase3_action_outcome": outcome,
+                "system_action_outcome": outcome,
                 "acceptance_state": acceptance_state,
                 "closure_state": "open",
                 "proof_ids": remediation_proofs,
-                "phase3_slice_ids": sorted(
+                "system_slice_ids": sorted(
                     slices_by_remediation.get(remediation_id, [])
                 ),
                 "residual_risk_ids": sorted(
@@ -1493,7 +1525,7 @@ def build_review(
         row["forward_state"]["proof_maturity"] for row in guarantee_rows
     )
     remediation_outcome_counts = Counter(
-        row["phase3_action_outcome"] for row in remediation_rows
+        row["system_action_outcome"] for row in remediation_rows
     )
     proof_lifecycle_counts = Counter(row["lifecycle"] for row in proof_rows)
     proof_environment_counts = Counter(
@@ -1547,7 +1579,7 @@ def build_review(
         "attestation_results": attestation_results,
         "summary": summary,
         "system_summary": list(policy["system_summary"]),
-        "phase3_slices": phase3_slices,
+        "system_slices": system_slices,
         "guarantees": guarantee_rows,
         "proof_accounting": {
             "catalog_path": guarantees.PROOF_CATALOG_PATH.relative_to(
@@ -1853,7 +1885,7 @@ def validate_review_data(
             "attestation_results",
             "summary",
             "system_summary",
-            "phase3_slices",
+            "system_slices",
             "guarantees",
             "proof_accounting",
             "proofs",
@@ -1978,7 +2010,7 @@ def validate_review_data(
                 "proof_assessment",
                 "remediation_ids",
                 "deferred_term_ids",
-                "phase3_slice_ids",
+                "system_slice_ids",
                 "residual_risk_ids",
             },
             where=where,
@@ -2099,8 +2131,8 @@ def validate_review_data(
             _fail(f"{where}.source_review_status:must_remain_pending")
         if row["closure_state"] != "open":
             _fail(f"{where}.closure_state:must_remain_open")
-        if row["phase3_action_outcome"] not in ACTION_OUTCOMES:
-            _fail(f"{where}.phase3_action_outcome:invalid")
+        if row["system_action_outcome"] not in ACTION_OUTCOMES:
+            _fail(f"{where}.system_action_outcome:invalid")
         if row["acceptance_state"] not in ACCEPTANCE_STATES:
             _fail(f"{where}.acceptance_state:invalid")
     if len(remediation_ids) != len(set(remediation_ids)):
@@ -2133,9 +2165,9 @@ def render_markdown(review: Mapping[str, Any]) -> str:
     summary = review["summary"]
     binding = review["attestation_binding"]
     lines = [
-        "# Phase 3 Final Review",
+        "# System Final Review",
         "",
-        "Generated by `python scripts/docs/build_phase3_final_review.py render`. Do not edit by hand.",
+        "Generated by `python scripts/docs/build_system_final_review.py render`. Do not edit by hand.",
         "",
         "> **Non-normative review boundary.** This document does not rewrite the frozen",
         "> audit, activate a guarantee, close a remediation, or turn a proof definition",
@@ -2151,10 +2183,10 @@ def render_markdown(review: Mapping[str, Any]) -> str:
         "| Evidence | Value |",
         "| --- | --- |",
         f"| Frozen audit subject | `{review['frozen_evidence']['audit_baseline_commit']}` |",
-        f"| Phase 2 classification | `{review['frozen_evidence']['classification_commit']}` |",
+        f"| Frozen classification | `{review['frozen_evidence']['classification_commit']}` |",
         f"| Frozen registry SHA-256 | `{review['frozen_evidence']['registry_sha256']}` |",
         f"| Approved decision packet | `{review['frozen_evidence']['decision_packet_commit']}` |",
-        f"| Phase 3 source commit | `{review['assessment_subject']['source_commit']}` |",
+        f"| Assessed source commit | `{review['assessment_subject']['source_commit']}` |",
         f"| Attestation state | `{binding['state']}` |",
         f"| Bound attestations | `{len(binding['attestations'])}` |",
     ]
@@ -2239,7 +2271,7 @@ def render_markdown(review: Mapping[str, Any]) -> str:
             ]
         )
 
-    lines.extend(["", "## How QT Works After Phase 3", ""])
+    lines.extend(["", "## How QT Works", ""])
     lines.extend(f"- {item}" for item in review["system_summary"])
     lines.extend(
         [
@@ -2310,7 +2342,7 @@ def render_markdown(review: Mapping[str, Any]) -> str:
         ids = [
             row["id"]
             for row in review["remediations"]
-            if row["phase3_action_outcome"] == outcome
+            if row["system_action_outcome"] == outcome
         ]
         lines.extend(["", f"### {outcome.replace('_', ' ').title()}", "", _join_ids(ids)])
 
@@ -2376,14 +2408,14 @@ def render_markdown(review: Mapping[str, Any]) -> str:
             "",
             "## Appendix C — All 68 Remediations",
             "",
-            "| Remediation | Approved Phase 2 disposition | Phase 3 outcome | Acceptance | Closure | Guarantees |",
+            "| Remediation | Approved disposition | System outcome | Acceptance | Closure | Guarantees |",
             "| --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in review["remediations"]:
         lines.append(
-            f"| `{row['id']}` | `{row['approved_phase2_disposition']}` | "
-            f"`{row['phase3_action_outcome']}` | `{row['acceptance_state']}` | "
+            f"| `{row['id']}` | `{row['approved_disposition']}` | "
+            f"`{row['system_action_outcome']}` | `{row['acceptance_state']}` | "
             f"`{row['closure_state']}` | {_join_ids(row['guarantee_ids'])} |"
         )
     return "\n".join(lines) + "\n"
@@ -2430,14 +2462,14 @@ def _check_outputs(root: Path, *, final_gate_required: bool = False) -> None:
         review_mode = gate["mode"]
     if review_path.read_bytes() != _canonical_json_bytes(rebuilt):
         _fail(
-            "generated_phase3_final_review_json_stale:run "
-            "python scripts/docs/build_phase3_final_review.py render --source-commit <commit>"
+            "generated_system_final_review_json_stale:run "
+            "python scripts/docs/build_system_final_review.py render --source-commit <commit>"
         )
     view_path = root / VIEW_PATH.relative_to(ROOT)
     if not view_path.exists() or view_path.read_bytes() != render_markdown(rebuilt).encode("utf-8"):
         _fail(
-            "generated_phase3_final_review_markdown_stale:run "
-            "python scripts/docs/build_phase3_final_review.py render --source-commit <commit>"
+            "generated_system_final_review_markdown_stale:run "
+            "python scripts/docs/build_system_final_review.py render --source-commit <commit>"
         )
     external_state: dict[str, str | bool] | None = None
     if final_gate_required:
@@ -2445,7 +2477,7 @@ def _check_outputs(root: Path, *, final_gate_required: bool = False) -> None:
             root, rebuilt["final_gate"]["repository_state"]
         )
     print(
-        "phase 3 final review valid: "
+        "system final review valid: "
         f"{len(rebuilt['guarantees'])} guarantees, "
         f"{len(rebuilt['proofs'])} proofs, "
         f"{len(rebuilt['remediations'])} remediations, "
@@ -2453,7 +2485,7 @@ def _check_outputs(root: Path, *, final_gate_required: bool = False) -> None:
     )
     if external_state is not None:
         print(
-            "phase 3 external approval-gate repository evidence: "
+            "system external approval-gate repository evidence: "
             + json.dumps(external_state, sort_keys=True, separators=(",", ":"))
         )
 
@@ -2504,7 +2536,7 @@ def _cli() -> int:
         else:
             _check_outputs(root, final_gate_required=args.final_gate)
     except (FinalReviewError, guarantees.GuaranteeValidationError) as exc:
-        print(f"phase3_final_review_failed:{exc}", file=sys.stderr)
+        print(f"system_final_review_failed:{exc}", file=sys.stderr)
         return 1
     return 0
 

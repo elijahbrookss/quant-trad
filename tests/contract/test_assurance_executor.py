@@ -39,7 +39,7 @@ def _evidence(
 def _profile_admission(*, services: list[object] | None = None) -> dict:
     return {
         "profile_id": "python-nondb",
-        "admission_id": "phase3-python-nondb",
+        "admission_id": "qt-test-python-nondb",
         "admitted": True,
         "environment_class": "local_test",
         "isolation": "process_local",

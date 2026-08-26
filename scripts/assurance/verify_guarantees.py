@@ -631,7 +631,7 @@ def _installed_interrupt_handlers() -> Any:
         state.signals.append(signum)
         if state.cleanup_in_progress:
             return
-        # Set the non-interruptible cleanup phase before propagating the first
+        # Set the non-interruptible cleanup state before propagating the first
         # signal. This closes the transition race into the outer cleanup
         # ``finally`` and makes repeated signals record-only.
         state.cleanup_in_progress = True

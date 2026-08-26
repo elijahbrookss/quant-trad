@@ -338,7 +338,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
-	test-reporting test-reporting-api test-botlens test-runtime backend-check glossary-render guarantees-render phase3-final-review-render validate-glossary validate-guarantees validate-assurance-runner validate-phase3-final-review validate-phase3-final-gate validate-docs frontend-test frontend-build frontend-check \
+	test-reporting test-reporting-api test-botlens test-runtime backend-check glossary-render guarantees-render system-final-review-render validate-glossary validate-guarantees validate-assurance-runner validate-system-final-review validate-system-final-gate validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check check-all
 
 status: ## Show service status without docker compose ps sandbox friction
@@ -471,10 +471,10 @@ glossary-render: venv ## Render reviewed terminology views
 guarantees-render: venv ## Render the guarantee registry human view
 	@$(PYTHON) scripts/docs/guarantees.py render
 
-phase3-final-review-render: venv ## Render Phase 3 final review (source=<40-hex>; attestations="path ..."; final_gate=1; validation_results=path)
+system-final-review-render: venv ## Render system final review (source=<40-hex>; attestations="path ..."; final_gate=1; validation_results=path)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(source))" ]; then echo "✗ source=<40-hex commit> is required"; exit 1; fi; \
-	$(PYTHON) scripts/docs/build_phase3_final_review.py render --source-commit "$(source)" $(foreach item,$(attestations),--attestation "$(item)") $(if $(filter 1 true yes,$(final_gate)),--final-gate,) $(if $(strip $(validation_results)),--validation-results "$(validation_results)",)
+	$(PYTHON) scripts/docs/build_system_final_review.py render --source-commit "$(source)" $(foreach item,$(attestations),--attestation "$(item)") $(if $(filter 1 true yes,$(final_gate)),--final-gate,) $(if $(strip $(validation_results)),--validation-results "$(validation_results)",)
 
 validate-glossary: venv ## Validate terminology metadata and generated views
 	@$(PYTHON) scripts/docs/glossary.py check
@@ -487,20 +487,20 @@ validate-guarantees: venv ## Validate guarantee metadata and its generated human
 validate-assurance-runner: venv ## Validate the source-bound offline runner model without Docker or network
 	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_assurance_environment_profiles.py tests/contract/test_assurance_runner_build.py
 
-validate-phase3-final-review: venv ## Validate the non-normative Phase 3 final-review model
-	@$(PYTHON) scripts/docs/build_phase3_final_review.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_phase3_final_review.py
+validate-system-final-review: venv ## Validate the non-normative system final-review model
+	@$(PYTHON) scripts/docs/build_system_final_review.py check
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_system_final_review.py
 
-validate-phase3-final-gate: venv ## Verify a committed strict final-gate packet and its external repository state
-	@$(PYTHON) scripts/docs/build_phase3_final_review.py check --final-gate
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_phase3_final_review.py
+validate-system-final-gate: venv ## Verify a committed strict final-gate packet and its external repository state
+	@$(PYTHON) scripts/docs/build_system_final_review.py check --final-gate
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_system_final_review.py
 
 validate-docs: venv ## Refresh indexes and run docs contract validation
 	@$(PYTHON) scripts/docs/build_architecture_index.py
 	@$(PYTHON) scripts/docs/glossary.py check
 	@$(PYTHON) scripts/docs/guarantees.py check
-	@$(PYTHON) scripts/docs/build_phase3_final_review.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_documentation_reconciliation.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py tests/contract/test_phase3_final_review.py
+	@$(PYTHON) scripts/docs/build_system_final_review.py check
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_documentation_reconciliation.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py tests/contract/test_system_final_review.py
 
 frontend-test: ## Run frontend Node and JSX tests
 	@$(NPM) --prefix $(FRONT_DIR) test
