@@ -149,7 +149,7 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "const": "phase3-python312-node20-offline"
+          "const": "qt-python312-node20-offline"
         },
         "sha256": {
           "$ref": "#/$defs/hash"

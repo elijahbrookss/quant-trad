@@ -24,7 +24,7 @@
       "const": false
     },
     "id": {
-      "const": "phase3-python312-node20-offline"
+      "const": "qt-python312-node20-offline"
     },
     "installation": {
       "$ref": "#/$defs/installation"

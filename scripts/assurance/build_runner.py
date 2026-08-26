@@ -585,7 +585,7 @@ def validate_build_profile(content: bytes) -> dict[str, Any]:
     )
     if raw["schema_version"] != BUILD_PROFILE_SCHEMA_VERSION:
         raise RunnerBuildError("build_profile:schema_version_unsupported")
-    if raw["id"] != "phase3-python312-node20-offline":
+    if raw["id"] != "qt-python312-node20-offline":
         raise RunnerBuildError("build_profile:id_mismatch")
     if raw["platform"] != {
         "os": "linux",

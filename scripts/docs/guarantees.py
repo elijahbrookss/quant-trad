@@ -4296,7 +4296,7 @@ def _validate_archived_runner_build_record(
     }
     expected_profile = {
         "schema_version": RUNNER_BUILD_PROFILE_SCHEMA_VERSION,
-        "id": "phase3-python312-node20-offline",
+        "id": "qt-python312-node20-offline",
         "platform": {
             "os": "linux",
             "architecture": "amd64",
