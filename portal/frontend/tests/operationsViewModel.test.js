@@ -9,7 +9,7 @@ import {
   filterResearchRows,
   formatBacktestWindow,
 } from '../src/features/operations/buildOperationsViewModel.js'
-import { buildRunInventoryScopeKey } from '../src/features/operations/useRunInventory.js'
+import { buildRunInventoryScopeKey } from '../src/features/operations/runInventoryScope.js'
 
 const NOW = Date.parse('2026-08-02T12:00:00Z')
 

@@ -4,8 +4,8 @@ import assert from 'node:assert/strict'
 import {
   buildTradeMarkerArtifacts,
   projectTradeEventToCandle,
-} from '../src/components/bots/hooks/useTradeMarkers.js'
-import { buildTradeFocusPulseMarkers } from '../src/components/bots/hooks/usePulseMarkers.js'
+} from '../src/components/bots/hooks/tradeMarkerArtifacts.js'
+import { buildTradeFocusPulseMarkers } from '../src/components/bots/hooks/pulseMarkerArtifacts.js'
 
 const candles = [
   { time: 1_700_000_000, open: 100, high: 101, low: 99, close: 100 },
