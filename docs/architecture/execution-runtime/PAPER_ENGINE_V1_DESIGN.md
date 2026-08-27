@@ -387,9 +387,9 @@ research need.
 
 Recommendation: defer.
 
-## Implementation Phases
+## Paper Runtime Steps
 
-### Phase 1: Coinbase Read-Only Stream Adapter
+### 1. Coinbase Read-Only Stream Adapter
 
 - Add a Coinbase market-data stream component.
 - Support `heartbeats`, `ticker`, and `candles`.
@@ -399,7 +399,7 @@ Recommendation: defer.
 
 Status: implemented for public Coinbase Advanced Trade streams.
 
-### Phase 1.5: Observe-Only Bot Intake
+### 2. Observe-Only Bot Intake
 
 - Start a bot in `paper` mode with `execution_behavior=observe-only`.
 - Reuse normal bot/strategy/instrument resolution.
@@ -409,14 +409,14 @@ Status: implemented for public Coinbase Advanced Trade streams.
 
 Status: implemented as the first no-fill paper validation path.
 
-### Phase 2: Market Event Recording And Current Candle Projection
+### 3. Market Event Recording And Current Candle Projection
 
 - Persist or retain bounded canonical stream facts.
 - Build current-candle state from candle updates.
 - Feed BotLens through backend projection contracts, not direct provider
   payloads.
 
-### Phase 3: Provider-Backed Paper Runtime Runner
+### 4. Provider-Backed Paper Runtime Runner
 
 - Wire provider streams into `paper` mode.
 - Keep paper fills behind the existing execution adapter boundary.
@@ -428,14 +428,14 @@ Status: implemented for Coinbase public candle streams feeding closed
 strategy-timeframe candles into the existing runtime loop. Current-candle
 BotLens projection and REST aggregation audits remain future work.
 
-### Phase 4: 24-Hour Operational Run
+### 5. 24-Hour Operational Run
 
 - Run Coinbase paper mode for selected CDE products.
 - Evaluate uptime, reconnects, heartbeat gaps, sequence gaps, memory, CPU,
   runtime lifecycle, report export, and BotLens health.
 - Treat trading results as secondary until operational stability is proven.
 
-### Phase 5: Private Streams And Live Preparation
+### 6. Private Streams And Live Preparation
 
 - Add authenticated `user` and `futures_balance_summary` streams only after
   public stream and paper runtime are stable.

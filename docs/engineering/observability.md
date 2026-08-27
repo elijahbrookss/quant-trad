@@ -90,7 +90,7 @@ seven-day retention. The two cadences intentionally answer different questions:
 short spikes stay visible in Loki, while table growth remains cheap enough to
 retain for planning.
 
-Before creating alerts, measure at least one representative campaign. Never use
+Before creating alerts, measure at least one representative workload. Never use
 Docker Desktop/WSL guest free space as physical-host headroom; check the
 dashboard authority panel and require `physical_host_visible=true`.
 Useful starting candidates are filesystem free below 20%, database connections
@@ -136,7 +136,7 @@ Quant-Trad should fail loudly for invalid states. A fallback is allowed only whe
 
 ## Next
 
-- Full doctrine: [observability doctrine](observability-doctrine.md).
+- Historical context: [retained observability doctrine](observability-doctrine.md).
 - Engineering contract: [engineering contract](../contracts/platform/03_engineering_contract.md).
 - Runtime event storage: [persistence boundary](../architecture/persistence/PERSISTENCE_BOUNDARY.md).
 - BotLens diagnostics: [BotLens projection boundary](../architecture/botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md).

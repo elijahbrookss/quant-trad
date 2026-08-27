@@ -3,7 +3,7 @@ component: architecture-docs-model
 subsystem: architecture-docs
 layer: reference
 doc_type: architecture
-status: active
+status: historical
 tags:
   - documentation
   - architecture
@@ -18,7 +18,11 @@ code_paths:
 
 ## Purpose
 
-This document records the architecture-doc modernization pass. It explains what was kept, consolidated, rewritten, or removed so future docs do not drift back into package-shaped notes.
+This historical record explains the architecture-document modernization that
+established QT's boundary-first documentation. It is preserved so later
+contributors can understand why material was kept, consolidated, rewritten, or
+removed. For the current architecture, start with the
+[architecture README](README.md) and [system model](system/SYSTEM_MODEL.md).
 
 The target model is boundary-first. A systems engineer should be able to open one folder and understand the ownership boundary, upstream inputs, downstream outputs, truth source, projection rules, failure behavior, and implementation paths.
 
@@ -150,7 +154,7 @@ Important current facts from those files were preserved in the relevant boundary
 - Provider session/calendar truth is still limited. Unknown gaps should remain unknown until explicit session evidence exists.
 - SVG diagram assets are generated only when Mermaid tooling is available.
 
-## Maintenance Rules
+## Principles Preserved In The Current Standard
 
 - Keep contracts authoritative.
 - Prefer boundary docs over package docs.
@@ -160,8 +164,8 @@ Important current facts from those files were preserved in the relevant boundary
 - Keep architecture prose explanatory. Ownership metadata routes review; it
   does not create product semantics, prove approval, or activate a guarantee.
 - Migrate legacy frontmatter to version 2 only as a complete owner-reviewed
-  change. Never infer owners from `subsystem`, source paths, audit records, or
-  `CODEOWNERS`.
+  change. Never infer owners from `subsystem`, source paths, historical review
+  records, or `CODEOWNERS`.
 - Keep docs short enough to read, but complete enough to debug ownership and flow.
 - Keep explanatory docs intent-first. Avoid template sections that make a page
   look organized without making the system easier to understand.

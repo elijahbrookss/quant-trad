@@ -2,8 +2,9 @@
 
 This directory records documentation assets whose lineage is distinct from the
 canonical architecture-diagram workflow described by the
-[architecture navigation hub](../architecture/README.md) and
-[architecture documentation model](../architecture/ARCHITECTURE_DOCS_MODEL.md).
+[architecture navigation hub](../architecture/README.md). The
+[historical architecture documentation model](../architecture/ARCHITECTURE_DOCS_MODEL.md)
+records how that workflow was established.
 
 ## Architecture Diagram Policy
 

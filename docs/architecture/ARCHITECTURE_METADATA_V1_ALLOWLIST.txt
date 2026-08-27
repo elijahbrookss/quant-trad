@@ -91,11 +91,6 @@ docs/architecture/decisions/0065-use-explicit-frozen-check-admission-for-new-res
 docs/architecture/engine/ENGINE_STATE_MODEL.md
 docs/architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md
 docs/architecture/execution-runtime/PAPER_ENGINE_V1_DESIGN.md
-docs/architecture/execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md
-docs/architecture/execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md
-docs/architecture/execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md
-docs/architecture/execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md
-docs/architecture/execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md
 docs/architecture/execution-runtime/RUNTIME_COMPOSITION_ROOT.md
 docs/architecture/execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md
 docs/architecture/frontend/OPERATOR_CONSOLE_V2.md

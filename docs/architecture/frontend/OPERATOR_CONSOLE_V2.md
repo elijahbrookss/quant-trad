@@ -428,7 +428,7 @@ failed; invalid means evidence explicitly failed a validity contract.
 
 ## Related Docs
 
-- [Operator validation](../../engineering/frontend-v2-operator-validation.md)
+- [Historical operator validation](../../engineering/frontend-v2-operator-validation.md)
 - [System architecture model](../system/SYSTEM_MODEL.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)

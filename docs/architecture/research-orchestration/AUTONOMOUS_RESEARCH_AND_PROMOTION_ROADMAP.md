@@ -3,7 +3,7 @@ component: autonomous-research-promotion-roadmap
 subsystem: research-orchestration
 layer: roadmap
 doc_type: architecture
-status: active
+status: historical
 tags:
   - autonomy
   - research
@@ -33,7 +33,15 @@ code_paths:
   - docs/architecture/decisions/0057-use-append-only-canonical-order-lifecycle.md
   - docs/architecture/decisions/0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md
 ---
-# Autonomous Research and Promotion Roadmap
+# Historical Autonomous Research and Promotion Roadmap
+
+> **Historical architecture record.** This document preserves the dated
+> capability sequence and decisions inspected on 2026-08-05. It is not the
+> current product reading path or product authority. For current behavior, use
+> the [research orchestration boundary](RESEARCH_ORCHESTRATION_BOUNDARY.md),
+> [scientific research authority](SCIENTIFIC_RESEARCH_AUTHORITY.md),
+> [offline research governance](OFFLINE_RESEARCH_GOVERNANCE.md), and the
+> platform contracts.
 
 ## Status and assessment boundary
 

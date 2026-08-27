@@ -11,9 +11,9 @@ a guarantee.
 
 | State | Count |
 |---|---:|
-| Metadata version 2 | 0 |
-| [Legacy allowlisted](ARCHITECTURE_METADATA_V1_ALLOWLIST.txt) | 115 |
-| **Total component docs** | **115** |
+| Metadata version 2 | 6 |
+| [Legacy allowlisted](ARCHITECTURE_METADATA_V1_ALLOWLIST.txt) | 110 |
+| **Total component docs** | **116** |
 
 Legacy `subsystem` values are not inferred as semantic owners. Each legacy row
 remains unresolved until its complete owner-reviewed metadata migration.
@@ -23,7 +23,7 @@ remains unresolved until its complete owner-reviewed metadata migration.
 | Component | Subsystem | Layer | Status | Metadata | Doc |
 |---|---|---|---|---|---|
 | adr-boundary-first-architecture-docs | architecture-docs | decision | accepted | legacy | [0001-use-boundary-first-architecture-docs.md](decisions/0001-use-boundary-first-architecture-docs.md) |
-| architecture-docs-model | architecture-docs | reference | active | legacy | [ARCHITECTURE_DOCS_MODEL.md](ARCHITECTURE_DOCS_MODEL.md) |
+| architecture-docs-model | architecture-docs | reference | historical | legacy | [ARCHITECTURE_DOCS_MODEL.md](ARCHITECTURE_DOCS_MODEL.md) |
 | adr-batch-and-degrade-botlens-projection-drain | botlens-projections | decision | accepted | legacy | [0029-batch-and-degrade-botlens-projection-drain.md](decisions/0029-batch-and-degrade-botlens-projection-drain.md) |
 | adr-botlens-bounded-hot-durable-inspection | botlens-projections | decision | accepted | legacy | [0055-separate-bounded-botlens-hot-state-from-durable-inspection.md](decisions/0055-separate-bounded-botlens-hot-state-from-durable-inspection.md) |
 | adr-botlens-projection-debugger | botlens-projections | decision | accepted | legacy | [0008-treat-botlens-as-projection-debugger.md](decisions/0008-treat-botlens-as-projection-debugger.md) |
@@ -58,6 +58,7 @@ remains unresolved until its complete owner-reviewed metadata migration.
 | adr-known-at-prefix-invariance | engine | decision | accepted | legacy | [0044-enforce-known-at-prefix-invariance.md](decisions/0044-enforce-known-at-prefix-invariance.md) |
 | adr-walk-forward-runtime-timeline | engine | decision | accepted | legacy | [0002-use-one-walk-forward-runtime-timeline.md](decisions/0002-use-one-walk-forward-runtime-timeline.md) |
 | engine-state-model | engine | architecture | active | legacy | [ENGINE_STATE_MODEL.md](engine/ENGINE_STATE_MODEL.md) |
+| adr-consequence-scaled-assurance | engineering-governance | decision | accepted | v2 | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
 | adr-append-only-canonical-order-lifecycle | execution-runtime | decision | accepted | legacy | [0057-use-append-only-canonical-order-lifecycle.md](decisions/0057-use-append-only-canonical-order-lifecycle.md) |
 | adr-budgeted-market-data-stream-reconnect-policy | execution-runtime | decision | accepted | legacy | [0020-use-budgeted-market-data-stream-reconnect-policy.md](decisions/0020-use-budgeted-market-data-stream-reconnect-policy.md) |
 | adr-canonical-accounting-reconciliation | execution-runtime | decision | accepted | legacy | [0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md](decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md) |
@@ -76,14 +77,14 @@ remains unresolved until its complete owner-reviewed metadata migration.
 | adr-shared-wallet-arbitration-policy-runtime-mode | execution-runtime | decision | accepted | legacy | [0014-use-shared-wallet-arbitration-policy-by-runtime-mode.md](decisions/0014-use-shared-wallet-arbitration-policy-by-runtime-mode.md) |
 | adr-shared-wallet-backtest-market-time-ordering | execution-runtime | decision | accepted | legacy | [0013-use-market-time-ordering-for-shared-wallet-backtests.md](decisions/0013-use-market-time-ordering-for-shared-wallet-backtests.md) |
 | adr-watchdog-degradation-diagnostics | execution-runtime | decision | accepted | legacy | [0023-persist-watchdog-degradation-diagnostics.md](decisions/0023-persist-watchdog-degradation-diagnostics.md) |
+| durable-canonical-order-lifecycle | execution-runtime | boundary | active | v2 | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| economic-execution-contract | execution-runtime | boundary | active | v2 | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
 | execution-runtime-boundary | execution-runtime | boundary | active | legacy | [EXECUTION_RUNTIME_BOUNDARY.md](execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md) |
 | paper-engine-v1 | execution-runtime | design | draft | legacy | [PAPER_ENGINE_V1_DESIGN.md](execution-runtime/PAPER_ENGINE_V1_DESIGN.md) |
-| phase-1-economic-execution-contract | execution-runtime | boundary | active | legacy | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| phase-2a-venue-neutral-execution-context | execution-runtime | boundary | active | legacy | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| phase-2b-durable-canonical-order-lifecycle | execution-runtime | boundary | active | legacy | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| phase-3a-replay-certified-book-execution | execution-runtime | boundary | active | legacy | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| phase-3b-passive-queue-bounds-and-latency | execution-runtime | boundary | active | legacy | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| passive-queue-bounds-and-latency | execution-runtime | boundary | active | v2 | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| replay-certified-book-execution | execution-runtime | boundary | active | v2 | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
 | runtime-composition-root | execution-runtime | service | active | legacy | [RUNTIME_COMPOSITION_ROOT.md](execution-runtime/RUNTIME_COMPOSITION_ROOT.md) |
+| venue-neutral-execution-context | execution-runtime | boundary | active | v2 | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
 | wallet-and-capital-boundary | execution-runtime | engine | active | legacy | [WALLET_AND_CAPITAL_BOUNDARY.md](execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md) |
 | operator-console-v2 | frontend | projection | active | legacy | [OPERATOR_CONSOLE_V2.md](frontend/OPERATOR_CONSOLE_V2.md) |
 | identity-correlation-boundary | identity | boundary | active | legacy | [IDENTITY_AND_CORRELATION_BOUNDARY.md](identity/IDENTITY_AND_CORRELATION_BOUNDARY.md) |
@@ -122,7 +123,7 @@ remains unresolved until its complete owner-reviewed metadata migration.
 | adr-frozen-bindings-durable-check-evidence | research-orchestration | decision | accepted | legacy | [0062-use-frozen-bindings-for-durable-check-evidence.md](decisions/0062-use-frozen-bindings-for-durable-check-evidence.md) |
 | adr-in-app-scientific-authority-offline-ceiling | research-orchestration | decision | accepted | legacy | [0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md](decisions/0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md) |
 | adr-shared-async-jobs-research-dispatch | research-orchestration | decision | accepted | legacy | [0039-use-shared-async-jobs-for-research-dispatch.md](decisions/0039-use-shared-async-jobs-for-research-dispatch.md) |
-| autonomous-research-promotion-roadmap | research-orchestration | roadmap | active | legacy | [AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md](research-orchestration/AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md) |
+| autonomous-research-promotion-roadmap | research-orchestration | roadmap | historical | legacy | [AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md](research-orchestration/AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md) |
 | capability-native-research-and-collection | research-orchestration | boundary | active | legacy | [CAPABILITY_NATIVE_RESEARCH_AND_COLLECTION.md](research-orchestration/CAPABILITY_NATIVE_RESEARCH_AND_COLLECTION.md) |
 | check-evidence-boundary | research-orchestration | boundary | active | legacy | [CHECK_EVIDENCE_BOUNDARY.md](research-orchestration/CHECK_EVIDENCE_BOUNDARY.md) |
 | mcp-research-server | research-orchestration | boundary | active | legacy | [MCP_RESEARCH_SERVER.md](research-orchestration/MCP_RESEARCH_SERVER.md) |
@@ -143,7 +144,14 @@ remains unresolved until its complete owner-reviewed metadata migration.
 These rows reproduce version 2 routing metadata. A listed role is not an
 authenticated identity or evidence that review occurred.
 
-No component has completed metadata version 2 migration.
+| Component | Semantic Owner | Required Reviewers | Doc |
+|---|---|---|---|
+| adr-consequence-scaled-assurance | `architecture-owner` | `architecture-owner`, `platform-contract-reviewer`, `testing-owner` | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
+| durable-canonical-order-lifecycle | `execution-runtime` | `architecture-documentation-owner`, `execution-runtime-owner` | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| economic-execution-contract | `execution-runtime` | `architecture-documentation-owner`, `execution-runtime-owner` | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| passive-queue-bounds-and-latency | `execution-runtime` | `architecture-documentation-owner`, `execution-runtime-owner` | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| replay-certified-book-execution | `execution-runtime` | `architecture-documentation-owner`, `execution-runtime-owner` | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| venue-neutral-execution-context | `execution-runtime` | `architecture-documentation-owner`, `execution-runtime-owner` | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
 
 ## Structurally Discovered Source-Module Contracts
 
@@ -307,6 +315,12 @@ exclusive file ownership.
 | `cli/mcp_server.py` | adr-complete-output-catalogs-split-strategy-reads | [0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md](decisions/0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md) |
 | `docs/architecture/indicator-runtime/INDICATOR_RUNTIME_BOUNDARY.md` | adr-complete-output-catalogs-split-strategy-reads | [0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md](decisions/0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md) |
 | `docs/architecture/decision-layer/DECISION_LAYER_BOUNDARY.md` | adr-complete-output-catalogs-split-strategy-reads | [0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md](decisions/0035-use-complete-output-catalogs-and-split-strategy-read-contracts.md) |
+| `docs/core-promises.md` | adr-consequence-scaled-assurance | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
+| `docs/engineering/assurance-maintenance.md` | adr-consequence-scaled-assurance | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
+| `docs/assurance/guarantees/registry.json` | adr-consequence-scaled-assurance | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
+| `docs/assurance/guarantees/proof-catalog.json` | adr-consequence-scaled-assurance | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
+| `scripts/docs/guarantees.py` | adr-consequence-scaled-assurance | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
+| `scripts/assurance/verify_guarantees.py` | adr-consequence-scaled-assurance | [0066-scale-assurance-to-consequence-and-trust-boundaries.md](decisions/0066-scale-assurance-to-consequence-and-trust-boundaries.md) |
 | `portal/backend/service/bots/container_runtime.py` | adr-control-plane-telemetry-flush | [0026-use-control-plane-telemetry-flush.md](decisions/0026-use-control-plane-telemetry-flush.md) |
 | `portal/backend/service/bots/container_runtime_telemetry.py` | adr-control-plane-telemetry-flush | [0026-use-control-plane-telemetry-flush.md](decisions/0026-use-control-plane-telemetry-flush.md) |
 | `tests/test_portal/test_container_runtime_transport.py` | adr-control-plane-telemetry-flush | [0026-use-control-plane-telemetry-flush.md](decisions/0026-use-control-plane-telemetry-flush.md) |
@@ -904,6 +918,33 @@ exclusive file ownership.
 | `portal/backend/service/bots/strategy_loader.py` | decision-layer-boundary | [DECISION_LAYER_BOUNDARY.md](decision-layer/DECISION_LAYER_BOUNDARY.md) |
 | `docs/architecture/decision-layer/diagrams/decision-flow.mmd` | decision-layer-boundary | [DECISION_LAYER_BOUNDARY.md](decision-layer/DECISION_LAYER_BOUNDARY.md) |
 | `docs/architecture/decision-layer/diagrams/signal-consumption-contract.mmd` | decision-layer-boundary | [DECISION_LAYER_BOUNDARY.md](decision-layer/DECISION_LAYER_BOUNDARY.md) |
+| `src/engines/bot_runtime/core/order_lifecycle.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `src/engines/bot_runtime/core/execution_order.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `src/engines/bot_runtime/core/entry_execution.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `src/engines/bot_runtime/core/domain/engine.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `src/engines/bot_runtime/core/domain/position.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `src/engines/bot_runtime/core/runtime_events.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `src/engines/bot_runtime/runtime/mixins/runtime_events.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `portal/backend/service/bots/botlens_domain_events.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `portal/backend/service/bots/botlens_event_retention.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `portal/backend/service/reports/run_research_dataset.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `tests/integration/runtime/test_canonical_order_lifecycle.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `tests/integration/runtime/test_persisted_runtime_correctness.py` | durable-canonical-order-lifecycle | [DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
+| `src/engines/bot_runtime/core/execution_assumptions.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `src/engines/bot_runtime/core/execution_runtime.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `src/engines/bot_runtime/core/execution.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `src/engines/bot_runtime/core/execution_profile.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `src/engines/bot_runtime/core/domain/engine.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `src/engines/bot_runtime/core/domain/position.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `portal/backend/service/bots/runtime_control_service.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `portal/backend/service/bots/startup_service.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `portal/backend/service/reports/run_research_dataset.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `portal/backend/service/reports/comparison.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `cli/experiments/contracts.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `cli/experiments/runner.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `cli/experiments/pass_gates.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
+| `tests/integration/runtime/test_execution_assumptions.py` | economic-execution-contract | [ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md) |
 | `src/engines` | engine-state-model | [ENGINE_STATE_MODEL.md](engine/ENGINE_STATE_MODEL.md) |
 | `src/engines/indicator_engine` | engine-state-model | [ENGINE_STATE_MODEL.md](engine/ENGINE_STATE_MODEL.md) |
 | `src/engines/bot_runtime/runtime` | engine-state-model | [ENGINE_STATE_MODEL.md](engine/ENGINE_STATE_MODEL.md) |
@@ -1160,6 +1201,17 @@ exclusive file ownership.
 | `portal/backend/service/providers` | paper-engine-v1 | [PAPER_ENGINE_V1_DESIGN.md](execution-runtime/PAPER_ENGINE_V1_DESIGN.md) |
 | `cli/main.py` | paper-engine-v1 | [PAPER_ENGINE_V1_DESIGN.md](execution-runtime/PAPER_ENGINE_V1_DESIGN.md) |
 | `docs/guides/coinbase-derivatives-paper-setup.md` | paper-engine-v1 | [PAPER_ENGINE_V1_DESIGN.md](execution-runtime/PAPER_ENGINE_V1_DESIGN.md) |
+| `src/engines/bot_runtime/core/passive_execution.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `src/engines/bot_runtime/core/book_execution.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `src/engines/bot_runtime/core/execution_context.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `src/engines/bot_runtime/core/execution_order.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `src/engines/bot_runtime/core/entry_execution.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `portal/backend/service/market/market_structure_service.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `portal/backend/service/bots/config_service.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `portal/backend/service/bots/startup_service.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `portal/backend/service/reports/run_research_dataset.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
+| `tests/integration/runtime/test_book_execution.py` | passive-queue-bounds-and-latency | [PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
 | `portal/backend/db/models.py` | persistence-boundary | [PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) |
 | `portal/backend/db/market_data_models.py` | persistence-boundary | [PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) |
 | `portal/backend/db/session.py` | persistence-boundary | [PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) |
@@ -1189,74 +1241,21 @@ exclusive file ownership.
 | `scripts/db/manual_migration_async_job_fencing_v1.sql` | persistence-boundary | [PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) |
 | `scripts/db/manual_migration_numeric_fact_store_v1.sql` | persistence-boundary | [PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) |
 | `scripts/db/manual_add_operator_read_path_indexes_v1.sql` | persistence-boundary | [PERSISTENCE_BOUNDARY.md](persistence/PERSISTENCE_BOUNDARY.md) |
-| `src/engines/bot_runtime/core/execution_assumptions.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `src/engines/bot_runtime/core/execution_runtime.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `src/engines/bot_runtime/core/execution.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `src/engines/bot_runtime/core/execution_profile.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `src/engines/bot_runtime/core/domain/engine.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `src/engines/bot_runtime/core/domain/position.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `portal/backend/service/bots/runtime_control_service.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `portal/backend/service/bots/startup_service.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `portal/backend/service/reports/run_research_dataset.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `portal/backend/service/reports/comparison.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `cli/experiments/contracts.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `cli/experiments/runner.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `cli/experiments/pass_gates.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `tests/integration/runtime/test_execution_assumptions.py` | phase-1-economic-execution-contract | [PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md](execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md) |
-| `src/engines/bot_runtime/core/execution_context.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/fees.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/execution_profile.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/execution_order.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/execution.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/execution_runtime.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/entry_execution.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/domain/engine.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/domain/position.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `portal/backend/service/bots/config_service.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `portal/backend/service/bots/startup_service.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `portal/backend/service/bots/container_runtime.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `portal/backend/service/reports/run_research_dataset.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `tests/integration/runtime/test_execution_contexts.py` | phase-2a-venue-neutral-execution-context | [PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
-| `src/engines/bot_runtime/core/order_lifecycle.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `src/engines/bot_runtime/core/execution_order.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `src/engines/bot_runtime/core/entry_execution.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `src/engines/bot_runtime/core/domain/engine.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `src/engines/bot_runtime/core/domain/position.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `src/engines/bot_runtime/core/runtime_events.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `src/engines/bot_runtime/runtime/mixins/runtime_events.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `portal/backend/service/bots/botlens_domain_events.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `portal/backend/service/bots/botlens_event_retention.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `portal/backend/service/reports/run_research_dataset.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `tests/integration/runtime/test_canonical_order_lifecycle.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `tests/integration/runtime/test_persisted_runtime_correctness.py` | phase-2b-durable-canonical-order-lifecycle | [PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md](execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) |
-| `src/engines/bot_runtime/core/book_execution.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `src/engines/bot_runtime/core/execution_context.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `src/engines/bot_runtime/core/execution_order.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `src/engines/bot_runtime/core/entry_execution.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `src/engines/bot_runtime/core/domain/engine.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `src/engines/bot_runtime/core/domain/position.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `portal/backend/service/market/market_structure_service.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `portal/backend/service/bots/config_service.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `portal/backend/service/bots/startup_service.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `portal/backend/service/reports/run_research_dataset.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `tests/integration/runtime/test_book_execution.py` | phase-3a-replay-certified-book-execution | [PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
-| `src/engines/bot_runtime/core/passive_execution.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `src/engines/bot_runtime/core/book_execution.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `src/engines/bot_runtime/core/execution_context.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `src/engines/bot_runtime/core/execution_order.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `src/engines/bot_runtime/core/entry_execution.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `portal/backend/service/market/market_structure_service.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `portal/backend/service/bots/config_service.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `portal/backend/service/bots/startup_service.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `portal/backend/service/reports/run_research_dataset.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
-| `tests/integration/runtime/test_book_execution.py` | phase-3b-passive-queue-bounds-and-latency | [PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md](execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md) |
 | `src/indicators/regime` | regime-context-boundary | [REGIME_CONTEXT_BOUNDARY.md](decision-layer/REGIME_CONTEXT_BOUNDARY.md) |
 | `src/strategies/evaluator.py` | regime-context-boundary | [REGIME_CONTEXT_BOUNDARY.md](decision-layer/REGIME_CONTEXT_BOUNDARY.md) |
 | `portal/backend/service/market/regime_blocks.py` | regime-context-boundary | [REGIME_CONTEXT_BOUNDARY.md](decision-layer/REGIME_CONTEXT_BOUNDARY.md) |
 | `portal/backend/service/reports/artifacts.py` | regime-context-boundary | [REGIME_CONTEXT_BOUNDARY.md](decision-layer/REGIME_CONTEXT_BOUNDARY.md) |
+| `src/engines/bot_runtime/core/book_execution.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `src/engines/bot_runtime/core/execution_context.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `src/engines/bot_runtime/core/execution_order.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `src/engines/bot_runtime/core/entry_execution.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `src/engines/bot_runtime/core/domain/engine.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `src/engines/bot_runtime/core/domain/position.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `portal/backend/service/market/market_structure_service.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `portal/backend/service/bots/config_service.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `portal/backend/service/bots/startup_service.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `portal/backend/service/reports/run_research_dataset.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
+| `tests/integration/runtime/test_book_execution.py` | replay-certified-book-execution | [REPLAY_CERTIFIED_BOOK_EXECUTION.md](execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md) |
 | `portal/backend/service/provenance.py` | reporting-boundary | [REPORTING_BOUNDARY.md](reporting/REPORTING_BOUNDARY.md) |
 | `portal/backend/service/reports` | reporting-boundary | [REPORTING_BOUNDARY.md](reporting/REPORTING_BOUNDARY.md) |
 | `portal/backend/service/reports/candle_continuity.py` | reporting-boundary | [REPORTING_BOUNDARY.md](reporting/REPORTING_BOUNDARY.md) |
@@ -1368,6 +1367,21 @@ exclusive file ownership.
 | `portal/backend/db/models.py` | typed-strategy-action-graph | [TYPED_STRATEGY_GRAPH.md](research-orchestration/TYPED_STRATEGY_GRAPH.md) |
 | `tests/test_strategies/test_typed_graph.py` | typed-strategy-action-graph | [TYPED_STRATEGY_GRAPH.md](research-orchestration/TYPED_STRATEGY_GRAPH.md) |
 | `tests/test_portal/test_research_authority.py` | typed-strategy-action-graph | [TYPED_STRATEGY_GRAPH.md](research-orchestration/TYPED_STRATEGY_GRAPH.md) |
+| `src/engines/bot_runtime/core/execution_context.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/fees.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/execution_profile.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/execution_order.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/execution.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/execution_runtime.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/entry_execution.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/domain/engine.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/core/domain/position.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `src/engines/bot_runtime/strategy/series_builder_parts/series_construction.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `portal/backend/service/bots/config_service.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `portal/backend/service/bots/startup_service.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `portal/backend/service/bots/container_runtime.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `portal/backend/service/reports/run_research_dataset.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
+| `tests/integration/runtime/test_execution_contexts.py` | venue-neutral-execution-context | [VENUE_NEUTRAL_EXECUTION_CONTEXT.md](execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md) |
 | `portal/backend/service/bots/container_runtime.py` | wallet-and-capital-boundary | [WALLET_AND_CAPITAL_BOUNDARY.md](execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md) |
 | `src/engines/bot_runtime/core/wallet.py` | wallet-and-capital-boundary | [WALLET_AND_CAPITAL_BOUNDARY.md](execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md) |
 | `src/engines/bot_runtime/core/wallet_gateway.py` | wallet-and-capital-boundary | [WALLET_AND_CAPITAL_BOUNDARY.md](execution-runtime/WALLET_AND_CAPITAL_BOUNDARY.md) |
@@ -1386,21 +1400,22 @@ exclusive file ownership.
 | Tag | Components |
 |---|---|
 | `accepted` | adr-botlens-bounded-hot-durable-inspection, adr-fastapi-execution-boundary, adr-tiered-market-structure-archive-replay |
-| `accounting` | adr-append-only-canonical-order-lifecycle, adr-canonical-accounting-reconciliation, phase-2b-durable-canonical-order-lifecycle, phase-3a-replay-certified-book-execution, phase-3b-passive-queue-bounds-and-latency |
+| `accounting` | adr-append-only-canonical-order-lifecycle, adr-canonical-accounting-reconciliation, durable-canonical-order-lifecycle, passive-queue-bounds-and-latency, replay-certified-book-execution |
 | `acquisition` | numeric-facts-on-demand-acquisition |
 | `actions` | typed-strategy-action-graph |
 | `active` | market-structure-data-plane |
-| `adr` | adr-agent-mutation-promotion-gates, adr-api-backed-research-cli, adr-append-only-canonical-order-lifecycle, adr-async-job-ownership-fencing, adr-batch-and-degrade-botlens-projection-drain, adr-botlens-bounded-hot-durable-inspection, adr-botlens-projection-debugger, adr-boundary-first-architecture-docs, adr-bounded-botlens-projection-dispatch, adr-budgeted-market-data-stream-reconnect-policy, adr-candle-dataset-identity-quality, adr-canonical-accounting-reconciliation, adr-canonical-collector-operations, adr-canonical-execution-plan-order-semantics, adr-canonical-market-data-store, adr-complete-output-catalogs-split-strategy-reads, adr-control-plane-telemetry-flush, adr-data-boundary-source-facts, adr-dataset-bound-backtests, adr-decouple-visual-overlay-projection-runtime-push, adr-docker-container-lifecycle-observability, adr-execution-profiles-runtime-instrument-authority, adr-execution-semantics-independent-from-playback, adr-explicit-execution-exit-policy, adr-explicit-frozen-check-observation-admission, adr-fastapi-execution-boundary, adr-field-owned-version-provenance-contracts, adr-file-backed-sequential-experiment-plans, adr-fingerprint-reports-and-slim-runtime-storage, adr-frozen-bindings-durable-check-evidence, adr-indicator-truth-projections, adr-known-at-prefix-invariance, adr-live-trading-closed-boundary, adr-market-profile-raw-breakout-retests, adr-observability-bounded-non-canonical, adr-per-run-leases, adr-pin-venue-neutral-execution-contexts-per-run, adr-portal-bots-definition-only, adr-postgres-persistence-event-ledger, adr-provider-credential-references, adr-provider-neutral-exact-numeric-facts, adr-research-checks-analytical-memory-evidence, adr-research-presentations-metric-contract-driven, adr-run-research-dataset-reporting-contract, adr-runner-clock-gap-sentinel, adr-runtime-composition-root-mode-aware-wiring, adr-runtime-event-ledger-lifecycle-truth, adr-runtime-event-ledger-order-operational-evidence, adr-runtime-exit-plans-liquidity-roles, adr-runtime-loki-ingress, adr-schema-registered-canonical-facts, adr-scoped-causal-clocks-runtime-replay, adr-semantic-operational-golden-fingerprints, adr-shared-async-jobs-research-dispatch, adr-shared-wallet-arbitration-policy-runtime-mode, adr-shared-wallet-backtest-market-time-ordering, adr-strategy-decisions-separate-from-execution, adr-strategy-variant-output-filters, adr-tiered-market-structure-archive-replay, adr-typed-market-fact-collectors, adr-walk-forward-runtime-timeline, adr-watchdog-degradation-diagnostics |
+| `adr` | adr-agent-mutation-promotion-gates, adr-api-backed-research-cli, adr-append-only-canonical-order-lifecycle, adr-async-job-ownership-fencing, adr-batch-and-degrade-botlens-projection-drain, adr-botlens-bounded-hot-durable-inspection, adr-botlens-projection-debugger, adr-boundary-first-architecture-docs, adr-bounded-botlens-projection-dispatch, adr-budgeted-market-data-stream-reconnect-policy, adr-candle-dataset-identity-quality, adr-canonical-accounting-reconciliation, adr-canonical-collector-operations, adr-canonical-execution-plan-order-semantics, adr-canonical-market-data-store, adr-complete-output-catalogs-split-strategy-reads, adr-consequence-scaled-assurance, adr-control-plane-telemetry-flush, adr-data-boundary-source-facts, adr-dataset-bound-backtests, adr-decouple-visual-overlay-projection-runtime-push, adr-docker-container-lifecycle-observability, adr-execution-profiles-runtime-instrument-authority, adr-execution-semantics-independent-from-playback, adr-explicit-execution-exit-policy, adr-explicit-frozen-check-observation-admission, adr-fastapi-execution-boundary, adr-field-owned-version-provenance-contracts, adr-file-backed-sequential-experiment-plans, adr-fingerprint-reports-and-slim-runtime-storage, adr-frozen-bindings-durable-check-evidence, adr-indicator-truth-projections, adr-known-at-prefix-invariance, adr-live-trading-closed-boundary, adr-market-profile-raw-breakout-retests, adr-observability-bounded-non-canonical, adr-per-run-leases, adr-pin-venue-neutral-execution-contexts-per-run, adr-portal-bots-definition-only, adr-postgres-persistence-event-ledger, adr-provider-credential-references, adr-provider-neutral-exact-numeric-facts, adr-research-checks-analytical-memory-evidence, adr-research-presentations-metric-contract-driven, adr-run-research-dataset-reporting-contract, adr-runner-clock-gap-sentinel, adr-runtime-composition-root-mode-aware-wiring, adr-runtime-event-ledger-lifecycle-truth, adr-runtime-event-ledger-order-operational-evidence, adr-runtime-exit-plans-liquidity-roles, adr-runtime-loki-ingress, adr-schema-registered-canonical-facts, adr-scoped-causal-clocks-runtime-replay, adr-semantic-operational-golden-fingerprints, adr-shared-async-jobs-research-dispatch, adr-shared-wallet-arbitration-policy-runtime-mode, adr-shared-wallet-backtest-market-time-ordering, adr-strategy-decisions-separate-from-execution, adr-strategy-variant-output-filters, adr-tiered-market-structure-archive-replay, adr-typed-market-fact-collectors, adr-walk-forward-runtime-timeline, adr-watchdog-degradation-diagnostics |
 | `agent` | adr-api-backed-research-cli, adr-file-backed-sequential-experiment-plans, mcp-research-server, research-orchestration-boundary |
 | `agents` | adr-agent-mutation-promotion-gates, adr-live-trading-closed-boundary |
 | `api` | adr-api-backed-research-cli, adr-fastapi-execution-boundary, mcp-research-server, research-orchestration-boundary |
 | `architecture` | adr-boundary-first-architecture-docs, architecture-docs-model |
+| `assurance` | adr-consequence-scaled-assurance |
 | `async-jobs` | adr-async-job-ownership-fencing, adr-shared-async-jobs-research-dispatch, research-async-job-boundary |
 | `asyncio` | adr-fastapi-execution-boundary |
 | `atm` | adr-canonical-execution-plan-order-semantics |
-| `audit` | adr-agent-mutation-promotion-gates, adr-canonical-collector-operations, architecture-docs-model, autonomous-research-promotion-roadmap, collector-operations-control-plane, offline-research-governance, phase-2b-durable-canonical-order-lifecycle |
+| `audit` | adr-agent-mutation-promotion-gates, adr-canonical-collector-operations, architecture-docs-model, autonomous-research-promotion-roadmap, collector-operations-control-plane, durable-canonical-order-lifecycle, offline-research-governance |
 | `automation-ready` | reporting-contract-redesign |
-| `autonomy` | adr-capability-native-research-collection-contracts, autonomous-research-promotion-roadmap, offline-research-governance, phase-1-economic-execution-contract, phase-2a-venue-neutral-execution-context, phase-2b-durable-canonical-order-lifecycle, phase-3a-replay-certified-book-execution, phase-3b-passive-queue-bounds-and-latency, scientific-research-authority, typed-strategy-action-graph |
+| `autonomy` | adr-capability-native-research-collection-contracts, autonomous-research-promotion-roadmap, durable-canonical-order-lifecycle, economic-execution-contract, offline-research-governance, passive-queue-bounds-and-latency, replay-certified-book-execution, scientific-research-authority, typed-strategy-action-graph, venue-neutral-execution-context |
 | `backtest` | adr-dataset-bound-backtests, adr-shared-wallet-arbitration-policy-runtime-mode, adr-shared-wallet-backtest-market-time-ordering |
 | `backtests` | market-structure-phase4-normalization-datasets |
 | `botlens` | adr-batch-and-degrade-botlens-projection-drain, adr-botlens-bounded-hot-durable-inspection, adr-botlens-projection-debugger, adr-bounded-botlens-projection-dispatch, adr-control-plane-telemetry-flush, adr-decouple-visual-overlay-projection-runtime-push, botlens-message-flow-troubleshooting, botlens-projection-boundary, observability-boundary, operator-console-v2, paper-engine-v1 |
@@ -1443,11 +1458,11 @@ exclusive file ownership.
 | `diagrams` | architecture-docs-model |
 | `docker` | adr-docker-container-lifecycle-observability |
 | `documentation` | adr-boundary-first-architecture-docs, architecture-docs-model |
-| `economics` | phase-1-economic-execution-contract |
+| `economics` | economic-execution-contract |
 | `engine` | adr-walk-forward-runtime-timeline, engine-state-model |
-| `evidence` | adr-explicit-frozen-check-observation-admission, adr-frozen-bindings-durable-check-evidence, check-evidence-boundary |
+| `evidence` | adr-consequence-scaled-assurance, adr-explicit-frozen-check-observation-admission, adr-frozen-bindings-durable-check-evidence, check-evidence-boundary |
 | `exact-numeric` | adr-provider-neutral-exact-numeric-facts, data-boundary, numeric-facts-on-demand-acquisition, persistence-boundary |
-| `execution` | adr-append-only-canonical-order-lifecycle, adr-canonical-execution-plan-order-semantics, adr-execution-profiles-runtime-instrument-authority, adr-execution-semantics-independent-from-playback, adr-explicit-execution-exit-policy, adr-pin-venue-neutral-execution-contexts-per-run, adr-replay-certified-execution-book-tapes, adr-runtime-exit-plans-liquidity-roles, adr-strategy-decisions-separate-from-execution, autonomous-research-promotion-roadmap, execution-runtime-boundary, paper-engine-v1, phase-1-economic-execution-contract, phase-2a-venue-neutral-execution-context, phase-2b-durable-canonical-order-lifecycle, phase-3a-replay-certified-book-execution, phase-3b-passive-queue-bounds-and-latency |
+| `execution` | adr-append-only-canonical-order-lifecycle, adr-canonical-execution-plan-order-semantics, adr-execution-profiles-runtime-instrument-authority, adr-execution-semantics-independent-from-playback, adr-explicit-execution-exit-policy, adr-pin-venue-neutral-execution-contexts-per-run, adr-replay-certified-execution-book-tapes, adr-runtime-exit-plans-liquidity-roles, adr-strategy-decisions-separate-from-execution, autonomous-research-promotion-roadmap, durable-canonical-order-lifecycle, economic-execution-contract, execution-runtime-boundary, paper-engine-v1, passive-queue-bounds-and-latency, replay-certified-book-execution, venue-neutral-execution-context |
 | `execution-policy` | typed-strategy-action-graph |
 | `exits` | adr-explicit-execution-exit-policy, adr-runtime-exit-plans-liquidity-roles |
 | `experiments` | adr-api-backed-research-cli, adr-file-backed-sequential-experiment-plans, adr-strategy-variant-output-filters, autonomous-research-promotion-roadmap, mcp-research-server, research-orchestration-boundary |
@@ -1458,7 +1473,7 @@ exclusive file ownership.
 | `fastapi` | adr-fastapi-execution-boundary |
 | `feature-materialization` | adr-tiered-market-structure-archive-replay |
 | `features` | market-structure-phase3-state-features |
-| `fees` | adr-pin-venue-neutral-execution-contexts-per-run, adr-runtime-exit-plans-liquidity-roles, phase-2a-venue-neutral-execution-context |
+| `fees` | adr-pin-venue-neutral-execution-contexts-per-run, adr-runtime-exit-plans-liquidity-roles, venue-neutral-execution-context |
 | `fencing` | adr-async-job-ownership-fencing, adr-typed-market-fact-collectors |
 | `fills` | adr-canonical-accounting-reconciliation, adr-canonical-execution-plan-order-semantics |
 | `frontend` | adr-botlens-bounded-hot-durable-inspection, adr-canonical-collector-operations, collector-operations-control-plane, operator-console-v2 |
@@ -1466,7 +1481,7 @@ exclusive file ownership.
 | `funding-rate` | adr-typed-market-fact-collectors, data-boundary |
 | `gaps` | adr-candle-dataset-identity-quality, adr-data-boundary-source-facts, data-boundary |
 | `golden-repeatability` | adr-semantic-operational-golden-fingerprints |
-| `governance` | adr-in-app-scientific-authority-offline-ceiling, autonomous-research-promotion-roadmap, offline-research-governance |
+| `governance` | adr-consequence-scaled-assurance, adr-in-app-scientific-authority-offline-ceiling, autonomous-research-promotion-roadmap, offline-research-governance |
 | `hard-cutover` | adr-canonical-market-data-store |
 | `history` | chainlink-structured-facts |
 | `holdout` | research-replay-availability, scientific-research-authority |
@@ -1476,11 +1491,11 @@ exclusive file ownership.
 | `indicators` | adr-complete-output-catalogs-split-strategy-reads, adr-indicator-truth-projections, adr-market-profile-raw-breakout-retests, adr-strategy-variant-output-filters, candle-stats-signal-contract, indicator-runtime-boundary, mcp-research-server, regime-context-boundary, research-orchestration-boundary |
 | `instruments` | adr-execution-profiles-runtime-instrument-authority |
 | `known-at` | adr-canonical-market-data-store, adr-dataset-bound-backtests, adr-indicator-truth-projections, adr-known-at-prefix-invariance, adr-provider-neutral-exact-numeric-facts, adr-replay-certified-execution-book-tapes, adr-schema-registered-canonical-facts, adr-typed-market-fact-collectors, adr-walk-forward-runtime-timeline, check-evidence-boundary, data-boundary, engine-state-model, generalized-fact-data-plane, identity-correlation-boundary, indicator-runtime-boundary, market-structure-data-plane, market-structure-phase4-normalization-datasets, numeric-facts-on-demand-acquisition |
-| `latency` | phase-3b-passive-queue-bounds-and-latency |
+| `latency` | passive-queue-bounds-and-latency |
 | `leasing` | adr-per-run-leases, adr-portal-bots-definition-only, execution-runtime-boundary, persistence-boundary, runtime-composition-root |
 | `ledger` | adr-postgres-persistence-event-ledger, persistence-boundary |
 | `level2` | market-structure-data-plane, market-structure-phase2-level2 |
-| `lifecycle` | adr-append-only-canonical-order-lifecycle, adr-control-plane-telemetry-flush, adr-market-profile-raw-breakout-retests, adr-per-run-leases, adr-portal-bots-definition-only, adr-runtime-event-ledger-lifecycle-truth, adr-watchdog-degradation-diagnostics, collector-operations-control-plane, execution-runtime-boundary, phase-2b-durable-canonical-order-lifecycle |
+| `lifecycle` | adr-append-only-canonical-order-lifecycle, adr-control-plane-telemetry-flush, adr-market-profile-raw-breakout-retests, adr-per-run-leases, adr-portal-bots-definition-only, adr-runtime-event-ledger-lifecycle-truth, adr-watchdog-degradation-diagnostics, collector-operations-control-plane, durable-canonical-order-lifecycle, execution-runtime-boundary |
 | `lineage` | identity-correlation-boundary |
 | `live` | adr-budgeted-market-data-stream-reconnect-policy |
 | `live-trading` | adr-live-trading-closed-boundary |
@@ -1510,8 +1525,8 @@ exclusive file ownership.
 | `operations` | adr-canonical-collector-operations, collector-operations-control-plane, market-structure-phase1-trades, market-structure-phase2-level2, market-structure-phase3-state-features, operator-console-v2 |
 | `operator-console` | operator-console-v2 |
 | `orchestration` | adr-shared-async-jobs-research-dispatch, research-async-job-boundary |
-| `order-book` | adr-replay-certified-execution-book-tapes, market-structure-phase2-level2, phase-3a-replay-certified-book-execution, phase-3b-passive-queue-bounds-and-latency |
-| `orders` | adr-append-only-canonical-order-lifecycle, adr-canonical-execution-plan-order-semantics, phase-2a-venue-neutral-execution-context, phase-2b-durable-canonical-order-lifecycle |
+| `order-book` | adr-replay-certified-execution-book-tapes, market-structure-phase2-level2, passive-queue-bounds-and-latency, replay-certified-book-execution |
+| `orders` | adr-append-only-canonical-order-lifecycle, adr-canonical-execution-plan-order-semantics, durable-canonical-order-lifecycle, venue-neutral-execution-context |
 | `overlays` | adr-decouple-visual-overlay-projection-runtime-push, adr-indicator-truth-projections, indicator-runtime-boundary |
 | `overview` | operator-console-v2 |
 | `ownership` | adr-async-job-ownership-fencing |
@@ -1535,18 +1550,18 @@ exclusive file ownership.
 | `provider-neutral` | adr-provider-neutral-exact-numeric-facts, adr-schema-registered-canonical-facts, generalized-fact-data-plane, numeric-facts-on-demand-acquisition |
 | `provider-proof` | market-structure-phase-0-provider-proof |
 | `providers` | adr-budgeted-market-data-stream-reconnect-policy, adr-data-boundary-source-facts, adr-provider-credential-references, data-boundary, paper-engine-v1, security-layer |
-| `quality` | adr-candle-dataset-identity-quality, phase-1-economic-execution-contract |
-| `queue` | phase-3b-passive-queue-bounds-and-latency |
+| `quality` | adr-candle-dataset-identity-quality, economic-execution-contract |
+| `queue` | passive-queue-bounds-and-latency |
 | `raw-archive` | data-boundary, market-structure-phase1-trades, market-structure-phase2-level2 |
 | `read-model` | adr-botlens-projection-debugger, botlens-projection-boundary, operator-console-v2 |
 | `reconciliation` | adr-canonical-accounting-reconciliation |
 | `recovery` | coinbase-perpetual-trade-fleet-validation-2026-08-06, continuous-collector-runtime |
 | `regime` | regime-context-boundary |
 | `reorgs` | numeric-facts-on-demand-acquisition |
-| `replay` | adr-append-only-canonical-order-lifecycle, adr-botlens-bounded-hot-durable-inspection, adr-explicit-frozen-check-observation-admission, adr-frozen-bindings-durable-check-evidence, adr-replay-certified-execution-book-tapes, adr-runtime-event-ledger-order-operational-evidence, adr-scoped-causal-clocks-runtime-replay, adr-tiered-market-structure-archive-replay, check-evidence-boundary, generalized-fact-data-plane, market-structure-data-plane, market-structure-phase-0-provider-proof, market-structure-phase1-trades, market-structure-phase2-level2, market-structure-phase3-state-features, market-structure-phase4-normalization-datasets, phase-2b-durable-canonical-order-lifecycle, phase-3a-replay-certified-book-execution, research-replay-availability |
-| `reporting` | adr-dataset-bound-backtests, adr-execution-profiles-runtime-instrument-authority, adr-field-owned-version-provenance-contracts, adr-file-backed-sequential-experiment-plans, adr-fingerprint-reports-and-slim-runtime-storage, adr-run-research-dataset-reporting-contract, adr-semantic-operational-golden-fingerprints, mcp-research-server, phase-3a-replay-certified-book-execution, phase-3b-passive-queue-bounds-and-latency, reporting-boundary, reporting-contract-redesign, research-orchestration-boundary, system-architecture-model |
-| `reproducibility` | adr-pin-venue-neutral-execution-contexts-per-run, phase-1-economic-execution-contract, phase-2a-venue-neutral-execution-context |
-| `research` | adr-api-backed-research-cli, adr-capability-native-research-collection-contracts, adr-complete-output-catalogs-split-strategy-reads, adr-explicit-frozen-check-observation-admission, adr-file-backed-sequential-experiment-plans, adr-frozen-bindings-durable-check-evidence, adr-in-app-scientific-authority-offline-ceiling, adr-research-checks-analytical-memory-evidence, adr-research-presentations-metric-contract-driven, adr-shared-async-jobs-research-dispatch, adr-strategy-variant-output-filters, autonomous-research-promotion-roadmap, candle-stats-signal-contract, capability-native-research-and-collection, check-evidence-boundary, operator-console-v2, phase-1-economic-execution-contract, research-async-job-boundary, research-memory-boundary, research-replay-availability, scientific-research-authority |
+| `replay` | adr-append-only-canonical-order-lifecycle, adr-botlens-bounded-hot-durable-inspection, adr-explicit-frozen-check-observation-admission, adr-frozen-bindings-durable-check-evidence, adr-replay-certified-execution-book-tapes, adr-runtime-event-ledger-order-operational-evidence, adr-scoped-causal-clocks-runtime-replay, adr-tiered-market-structure-archive-replay, check-evidence-boundary, durable-canonical-order-lifecycle, generalized-fact-data-plane, market-structure-data-plane, market-structure-phase-0-provider-proof, market-structure-phase1-trades, market-structure-phase2-level2, market-structure-phase3-state-features, market-structure-phase4-normalization-datasets, replay-certified-book-execution, research-replay-availability |
+| `reporting` | adr-dataset-bound-backtests, adr-execution-profiles-runtime-instrument-authority, adr-field-owned-version-provenance-contracts, adr-file-backed-sequential-experiment-plans, adr-fingerprint-reports-and-slim-runtime-storage, adr-run-research-dataset-reporting-contract, adr-semantic-operational-golden-fingerprints, mcp-research-server, passive-queue-bounds-and-latency, replay-certified-book-execution, reporting-boundary, reporting-contract-redesign, research-orchestration-boundary, system-architecture-model |
+| `reproducibility` | adr-pin-venue-neutral-execution-contexts-per-run, economic-execution-contract, venue-neutral-execution-context |
+| `research` | adr-api-backed-research-cli, adr-capability-native-research-collection-contracts, adr-complete-output-catalogs-split-strategy-reads, adr-explicit-frozen-check-observation-admission, adr-file-backed-sequential-experiment-plans, adr-frozen-bindings-durable-check-evidence, adr-in-app-scientific-authority-offline-ceiling, adr-research-checks-analytical-memory-evidence, adr-research-presentations-metric-contract-driven, adr-shared-async-jobs-research-dispatch, adr-strategy-variant-output-filters, autonomous-research-promotion-roadmap, candle-stats-signal-contract, capability-native-research-and-collection, check-evidence-boundary, economic-execution-contract, operator-console-v2, research-async-job-boundary, research-memory-boundary, research-replay-availability, scientific-research-authority |
 | `research-dataset` | adr-run-research-dataset-reporting-contract, adr-semantic-operational-golden-fingerprints, reporting-boundary, reporting-contract-redesign |
 | `research-validation` | adr-market-profile-raw-breakout-retests, indicator-runtime-boundary |
 | `responsiveness` | adr-fastapi-execution-boundary |
@@ -1583,6 +1598,7 @@ exclusive file ownership.
 | `supervision` | continuous-collector-runtime |
 | `system` | system-architecture-model |
 | `telemetry` | adr-control-plane-telemetry-flush |
+| `testing` | adr-consequence-scaled-assurance |
 | `threadpool` | adr-fastapi-execution-boundary |
 | `timescaledb` | continuous-collector-runtime |
 | `trades` | data-boundary, market-structure-data-plane, market-structure-phase1-trades |
@@ -1591,7 +1607,7 @@ exclusive file ownership.
 | `typed-payloads` | adr-schema-registered-canonical-facts, generalized-fact-data-plane |
 | `validation` | coinbase-perpetual-trade-fleet-validation-2026-08-06 |
 | `variants` | adr-strategy-variant-output-filters |
-| `venues` | adr-pin-venue-neutral-execution-contexts-per-run, autonomous-research-promotion-roadmap, phase-2a-venue-neutral-execution-context |
+| `venues` | adr-pin-venue-neutral-execution-contexts-per-run, autonomous-research-promotion-roadmap, venue-neutral-execution-context |
 | `versioning` | adr-field-owned-version-provenance-contracts |
 | `wallet` | adr-canonical-accounting-reconciliation, adr-scoped-causal-clocks-runtime-replay, adr-shared-wallet-arbitration-policy-runtime-mode, adr-shared-wallet-backtest-market-time-ordering, execution-runtime-boundary, wallet-and-capital-boundary |
 | `watchdog` | adr-docker-container-lifecycle-observability, adr-runner-clock-gap-sentinel, adr-watchdog-degradation-diagnostics |

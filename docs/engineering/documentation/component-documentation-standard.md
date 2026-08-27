@@ -157,10 +157,10 @@ Discovery and remediation success still do not activate a guarantee.
 Existing unversioned architecture docs keep their legacy seven-field metadata
 until their semantic owner and required reviewers approve a complete migration.
 A migration adds all version 2 fields atomically; it never guesses ownership
-from the current subsystem or from Phase 1/Phase 2 audit routing. New component
-docs use version 2. The transition mechanism may grandfather only the exact
-pre-version-2 document paths, and each reviewed rollout removes its migrated
-paths rather than allowing legacy metadata to expand.
+from the current subsystem or from historical discovery and review routing. New
+component docs use version 2. The transition mechanism may grandfather only the
+exact pre-version-2 document paths, and each reviewed rollout removes its
+migrated paths rather than allowing legacy metadata to expand.
 
 After that, let the doc choose its own shape. Common useful moves are:
 

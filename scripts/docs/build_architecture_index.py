@@ -23,6 +23,7 @@ EXCLUDED_ARCHITECTURE_DOCS = frozenset(
         "ARCHITECTURE_COMPONENT_INDEX.md",
     }
 )
+HISTORICAL_REDIRECT_HEADING = "# Historical Path Redirect"
 
 LEGACY_KEYS = frozenset(
     {
@@ -338,6 +339,9 @@ def _component_paths(root: Path) -> list[Path]:
     for path in architecture_dir.rglob("*.md"):
         relative = path.relative_to(architecture_dir).as_posix()
         if relative in EXCLUDED_ARCHITECTURE_DOCS:
+            continue
+        first_line = path.open(encoding="utf-8").readline().rstrip("\r\n")
+        if first_line == HISTORICAL_REDIRECT_HEADING:
             continue
         paths.append(path)
     return sorted(

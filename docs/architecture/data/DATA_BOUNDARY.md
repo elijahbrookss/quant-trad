@@ -157,9 +157,9 @@ fact. Successful and failed collection attempts retain one bounded typed timing
 payload separating schedule lag, pacing, provider request wall time, contract
 validation, canonical normalization, lease heartbeat, and persistence.
 
-Phase 3 market-state tables preserve typed BBO, depth, flow, futures/spot,
-derivative-state, and response facts. Phase 4 adds immutable normalization specs
-and append-only normalized revisions without replacing their source facts. A
+Market-state tables preserve typed BBO, depth, flow, futures/spot,
+derivative-state, and response facts. Immutable normalization specs add
+append-only normalized revisions without replacing their source facts. A
 registry declares each fact type's contract version, timeframe behavior,
 record-time field, archive policy, and dataset eligibility; reconstructed L2
 book state is intentionally replay input rather than a dataset fact surface.
@@ -431,5 +431,5 @@ replacing source provenance and quality.
 - [Numeric Facts And On-Demand Acquisition](NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md)
 - [Chainlink Numeric Facts Operator Guide](../../guides/chainlink-numeric-facts.md)
 - [Market Structure Data Plane](MARKET_STRUCTURE_DATA_PLANE.md)
-- [Market Structure Phase 1 Trades](MARKET_STRUCTURE_PHASE_1_TRADES.md)
+- [Historical market-structure trade-capture record](MARKET_STRUCTURE_PHASE_1_TRADES.md)
 - [Accepted ADR 0053: Tiered market-structure archive and replay](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
