@@ -36,6 +36,53 @@ product behavior, the platform contract wins.
 
 ---
 
+## Repository Reading Path
+
+Start with the product before opening deep architecture or retained audit
+records:
+
+1. `README.md` explains what QT does and how to start it.
+2. `docs/current-system.md` explains the current end-to-end system, its limits,
+   and the six promises that guide high-consequence changes.
+3. `docs/contracts/platform/04_glossary.md` standardizes QT vocabulary.
+4. `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` maps code paths to the
+   component documents that describe them. Metadata-version-2 entries also
+   name semantic owners and required reviewers; legacy entries do not.
+5. `docs/contracts/README.md` leads to the authoritative platform contracts.
+6. `docs/core-promises.md` shows which important system promises a change may
+   affect and links to their deeper engineering traceability.
+
+For an ordinary change, this path is enough to find meaning, ownership, and the
+normal checks. The exhaustive guarantee inventory, named proof catalog,
+remediation records, environment-admission material, and older review packets
+under `docs/assurance/` and `docs/plans/documentation-reconciliation/` are
+retained engineering history. Read them only when maintaining assurance
+traceability or investigating that history. Their ongoing treatment is
+summarized in `docs/engineering/assurance-maintenance.md`.
+
+Ownership metadata is still being adopted. Treat a legacy subsystem label as a
+discovery hint, not a semantic-owner or reviewer assignment. Use the relevant
+platform contract, accepted ADRs, and current subsystem maintainers to resolve
+the review route, and do not invent an owner from `CODEOWNERS` or the generated
+index.
+
+Before changing behavior:
+
+- use the component index to find the relevant component documents, and use
+  reviewed metadata only when it actually names the semantic owner and
+  required reviewers;
+- use the glossary and contracts to confirm the current meaning;
+- check the six core promises for consequences beyond the local component;
+- update a platform contract when platform-wide product meaning changes;
+- add or revise an ADR when a durable architectural or safety tradeoff changes;
+- run the focused tests first, then the normal validation scope described in
+  `docs/engineering/developer-audit-workflow.md`.
+
+Historical evidence and a passing test do not create product authority,
+activate a guarantee, or close a remediation.
+
+---
+
 ## Canonical Context (Required Reading)
 
 Agents MUST understand these documents before making architectural or behavioral changes:
@@ -44,7 +91,7 @@ Agents MUST understand these documents before making architectural or behavioral
 - `docs/contracts/platform/01_runtime_contract.md`
 - `docs/contracts/platform/02_execution_playback_contract.md`
 - `docs/contracts/platform/03_engineering_contract.md`
-- `docs/contracts/platform/04_glossary.md`
+- the platform glossary listed in the Repository Reading Path above
 
 These define the system contract.
 
@@ -110,7 +157,7 @@ Include these whenever they exist:
 
 ### Log Levels
 - **DEBUG** — internal mechanics, cache behavior, counters
-- **INFO** — lifecycle events and phase transitions
+- **INFO** — lifecycle events and stage transitions
 - **WARN** — unexpected but recoverable states (always explain why)
 - **ERROR** — failed actions or invalid results (never swallowed)
 
@@ -123,7 +170,7 @@ If a fallback is used, it must emit a WARN explaining why.
 - Do not swallow exceptions
 - Do not silently skip invalid states
 - Prefer failing early over producing incorrect output
-- Errors must include context (IDs, symbol, timeframe, phase)
+- Errors must include context (IDs, symbol, timeframe, lifecycle stage)
 
 A system that hides errors cannot be trusted or improved.
 
@@ -213,6 +260,27 @@ Performance, polish, and optimization come second.
   `Makefile`, `scripts/reporting/`, and `docs/engineering/`; do not add new
   root-level workflow files or folders. Normal bot/run/report workflows belong
   in `qt`, not Make.
+
+### Normal Validation Matrix
+
+Run focused checks while working. Before handoff, run every applicable row
+below; broad or cross-system changes should run the full matrix. All database
+and configuration checks use disposable local inputs. Never point validation at
+production or live systems, load real credentials, deploy a host, or enable
+external-order submission.
+
+| Area | Normal command or check | Required scope |
+|---|---|---|
+| Documentation and generated views | `make validate-docs` | Documentation, contracts, glossary, architecture metadata, or generated-view changes; also broad handoff validation. |
+| Non-database Python | `make backend-check` | Backend, CLI, domain, service, configuration, or cross-system changes. |
+| Disposable database | `./scripts/ci/run_test_suite.sh db` | Persistence, schema, repository, recovery-guard, or database-backed behavior; requires the isolated Docker test stack. |
+| Frontend | `make frontend-check` | UI, frontend adapters, API-view contracts, or broad handoff validation. |
+| Deployment/configuration without deployment | `bash -n scripts/automation/server_deploy.sh`, `bash -n scripts/automation/server_host_bootstrap.sh`, then `docker compose --env-file <disposable-env> -f docker/docker-compose.server.yml config --quiet` | Deployment scripts, Compose/configuration, or broad handoff validation. Render configuration only; do not run deploy, credential, or remote-host actions. |
+| Retained assurance contracts | `make validate-retained-assurance` | Run once after changes to the retained assurance machinery, or when a bounded review explicitly includes that machinery. This validates internal executor, lifecycle, publication, environment, runner, and final-review contracts; it does not execute formal checks or change product authority. |
+| Diff and clean tree | `git diff --check`; after committing the intended work, require empty `git status --porcelain=v1` | Every handoff. Inspect failures and preserve unrelated user changes rather than staging them for cleanliness. |
+
+Record unavailable prerequisites honestly. A skipped database, frontend, or
+configuration row is an unavailable validation result, not a passing result.
 
 ## Commit Hygiene
 

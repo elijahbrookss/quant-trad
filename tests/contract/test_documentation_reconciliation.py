@@ -75,26 +75,24 @@ def test_manual_adr_index_matches_accepted_primary_records() -> None:
         assert _frontmatter(repo_path)["status"] == "accepted"
 
 
-def test_btc_campaign_index_preserves_unavailable_history_and_v3_lineage() -> None:
-    index = _read("docs/index.md")
-    guide_section = index.split("## Guides", 1)[1].split("## Contracts", 1)[0]
-    normalized = _squash(guide_section)
+def test_historical_research_index_preserves_unavailable_history_and_v3_lineage() -> None:
+    docs_home = _read("docs/index.md")
+    history = _read("docs/research-campaigns/README.md")
+    normalized = _squash(history)
 
     dead_targets = {
-        "research-campaigns/BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V1.md",
-        "research-campaigns/BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V2.md",
+        "BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V1.md",
+        "BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V2.md",
     }
-    linked_targets = set(re.findall(r"\[[^]]+\]\(([^)]+)\)", index))
+    linked_targets = set(re.findall(r"\[[^]]+\]\(([^)]+)\)", history))
     assert linked_targets.isdisjoint(dead_targets)
+    assert "research-campaigns/" not in docs_home
 
-    v3_target = (
-        "research-campaigns/"
-        "BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V3_DOSSIER.md"
-    )
+    v3_target = "BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V3_DOSSIER.md"
     assert v3_target in linked_targets
-    assert (ROOT / "docs" / v3_target).is_file()
-    assert _frontmatter(f"docs/{v3_target}")["status"] == "historical"
-    assert "campaigns v1/v2" in normalized
+    assert (ROOT / "docs/research-campaigns" / v3_target).is_file()
+    assert _frontmatter(f"docs/research-campaigns/{v3_target}")["status"] == "historical"
+    assert "v1 and v2 source documents" in normalized
     assert "unavailable in this repository" in normalized
     assert "lineage gap" in normalized
     assert "does not reconstruct v1 or v2" in normalized

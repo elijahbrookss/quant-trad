@@ -1,13 +1,61 @@
 # Quant-Trad
 
-Quant-Trad (QT) is a local quantitative research platform for turning external
-market data into reproducible evidence, hypotheses, strategies, and validated
-trading research.
+Quant-Trad (QT) is a local workspace for testing trading ideas before trusting
+them. It helps you turn an idea into explicit rules, run those rules over known
+market data in time order, and keep the evidence needed to understand why a
+result happened.
 
-QT combines causal data collection, typed market-state modeling, frozen
-datasets, provider-free replay, walk-forward backtesting, and bounded paper
-execution. The UI, `qt` CLI, backend API, reports, and MCP adapter all sit over
-the same contracts and durable evidence.
+Quantitative trading means expressing a trading idea precisely enough that it
+can be measured and repeated. QT supports that process without pretending a
+historical result is a forecast. It combines market-data collection, frozen
+research evidence, reusable measurements, strategy rules, walk-forward
+simulation, and tools for inspecting and comparing runs.
+
+QT is useful to traders who want to replace chart-memory with evidence,
+researchers comparing ideas across the same data, and engineers who need the
+calculation, execution, and reporting paths to agree.
+
+## Start With One Idea
+
+A normal QT research path is:
+
+```text
+trading idea
+    -> precise definition
+    -> frozen evidence
+    -> measurements
+    -> research Check
+    -> Strategy
+    -> backtest
+    -> walk-forward review
+    -> paper simulation
+    -> inspect and compare
+```
+
+For example, “buy when momentum looks strong” is not ready to test. A usable
+definition names the instrument and timeframe, the exact measurement, the
+entry and exit conditions, the costs and execution assumptions, and what would
+count as evidence against the idea.
+
+The [core research workflow](docs/guides/research-workflow.md) walks through
+that path without assuming you already know QT terminology. The
+[platform overview](docs/overview.md) explains where each part fits, and the
+[six core promises](docs/core-promises.md) summarize the properties QT is
+designed to preserve.
+
+## Backtest And Paper, In Plain English
+
+A **backtest** replays a frozen historical dataset in time order. At each step,
+the strategy can use only information that would have been available then. QT
+simulates execution, fees, wallet effects, and lifecycle events according to
+the run's declared assumptions. A backtest is evidence about those data and
+assumptions; it is not proof of future profitability.
+
+A **paper run** exercises the workflow as market data arrives. Depending on the
+declared execution behavior, it uses simulation or observe-only operation. It
+helps expose timing, data, and operational problems that a historical replay
+can miss. QT does not submit external exchange orders, and the example paper
+command in this README is explicitly observe-only.
 
 <p align="center">
   <img
@@ -294,7 +342,8 @@ backend concerns.
 
 | Topic | Documentation |
 | --- | --- |
-| Start here | [Getting started](docs/getting-started.md), [operator handbook](docs/operators/README.md), [platform overview](docs/overview.md), [docs home](docs/index.md) |
+| Start here | [Platform overview](docs/overview.md), [core research workflow](docs/guides/research-workflow.md), [getting started](docs/getting-started.md), [docs home](docs/index.md) |
+| What QT promises | [Six core promises](docs/core-promises.md), [current system](docs/current-system.md), [platform glossary](docs/contracts/platform/04_glossary.md) |
 | Deploy and update | [Portable single-node deployment](docs/engineering/server-deployment.md), [operator handbook](docs/operators/README.md) |
 | Market-data boundary | [Data boundary](docs/architecture/data/DATA_BOUNDARY.md), [generalized Fact data plane](docs/architecture/data/GENERALIZED_FACT_DATA_PLANE.md) |
 | Canonical Facts and datasets | [Canonical Fact ADR](docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md), [numeric Facts and acquisition](docs/architecture/data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md) |
@@ -304,8 +353,8 @@ backend concerns.
 | Runtime | [Runtime timeline](docs/concepts/runtime-timeline.md), [execution model](docs/concepts/execution-model.md), [strategies and signals](docs/concepts/strategies-and-signals.md) |
 | Inspection and reporting | [BotLens](docs/concepts/botlens.md), [reporting datasets](docs/concepts/reporting-datasets.md) |
 | Agent workflows | [Developer/audit workflow](docs/engineering/developer-audit-workflow.md), [MCP research server](docs/architecture/research-orchestration/MCP_RESEARCH_SERVER.md) |
-| Operational proof | [Collector operations validation](docs/engineering/collector-operations-validation.md) |
-| System contracts | [Architecture component index](docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md), [platform contracts](docs/contracts/README.md) |
+| Historical collector validation | [Collector operations validation](docs/engineering/collector-operations-validation.md) |
+| Internals and exact rules | [System architecture](docs/architecture/system/SYSTEM_MODEL.md), [architecture guide](docs/architecture/README.md), [engineering docs](docs/engineering/README.md), [platform contracts](docs/contracts/README.md) |
 
 Contracts are the source of truth when code and explanatory documentation
 disagree.

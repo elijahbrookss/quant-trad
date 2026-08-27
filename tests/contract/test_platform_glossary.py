@@ -417,6 +417,31 @@ def test_deferred_terms_are_accounted_for_but_not_normatively_defined(
     glossary._validate_normative_output(bundle, text.encode("utf-8"))
 
 
+def test_platform_glossary_starts_with_a_plain_language_vocabulary_path(
+    bundle: glossary.GlossaryBundle,
+) -> None:
+    text = glossary.render_platform_glossary(bundle)
+
+    assert "## Core Vocabulary Path" in text
+    assert text.index("## Core Vocabulary Path") < text.index("## Standard Term Index")
+    for label in (
+        "Canonical Fact",
+        "Fact revision",
+        "Observation key",
+        "Frozen Dataset",
+        "Frozen Market Data Read Binding",
+        "Indicator",
+        "Check preview",
+        "Research Observation",
+        "Strategy",
+        "Execution event / record",
+        "RunResearchDataset",
+    ):
+        assert label in text
+    assert "[historical terminology proposal]" in text
+    assert "[review disposition record]" in text
+
+
 def test_required_navigation_build_targets_and_docs_profile_are_wired(
     bundle: glossary.GlossaryBundle,
 ) -> None:
