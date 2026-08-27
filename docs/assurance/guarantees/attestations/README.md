@@ -1,8 +1,9 @@
 # Guarantee Attestations
 
 This directory is reserved for immutable, commit-bound verification records.
-There is intentionally no attestation for the Phase 2A calibration: existing
-test files were inspected as named proof, but inspection is not a fresh PASS.
+There is intentionally no attestation for the retained calibration record:
+existing test files were inspected as named proof, but inspection is not a
+fresh PASS.
 
 When verification is authorized, write one JSON document per source commit and
 verification session under:

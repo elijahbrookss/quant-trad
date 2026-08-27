@@ -26,9 +26,12 @@ QT uses one authority hierarchy rather than parallel sources of product truth:
 `AGENTS.md` owns contributor and agent workflow. It may summarize product rules
 but cannot override these contracts or activate a guarantee. Architecture
 roadmaps remain explanatory unless an approved rule is reconciled into this
-hierarchy. Assurance registries, proof catalogs, attestations, and campaign
-records index authority and evidence; they are not an additional source of
-product requirements.
+hierarchy. The [six core promises](../core-promises.md) summarize important
+system outcomes without replacing these contracts. Internal assurance
+inventories, named checks, formal-result records, and historical review packets
+index authority and evidence; they are not an additional source of product
+requirements. Their normal maintenance boundary is documented in
+[assurance maintenance](../engineering/assurance-maintenance.md).
 
 The [adopted platform glossary](platform/04_glossary.md) is a vocabulary
 index into these owners. It may qualify terms and aliases but cannot create

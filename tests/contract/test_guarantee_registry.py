@@ -3468,3 +3468,44 @@ def test_checked_in_registry_catalog_schemas_and_view_are_consistent() -> None:
     )
 
     assert guarantees.VIEW_PATH.read_bytes() == expected
+
+
+def test_assurance_maintenance_covers_the_preserved_inventory_once() -> None:
+    bundle = guarantees.validate_repository()
+    maintenance = (
+        guarantees.ROOT / "docs/engineering/assurance-maintenance.md"
+    ).read_text(encoding="utf-8")
+    rows = re.findall(
+        r"^\| \[`(QT-GUAR-[^`]+)`\]\([^)]+\) \| ([^|]+) \|",
+        maintenance,
+        flags=re.MULTILINE,
+    )
+
+    registry_ids = [item["id"] for item in bundle.registry["guarantees"]]
+    assert [guarantee_id for guarantee_id, _ in rows] == registry_ids
+    assert len(rows) == len(set(registry_ids)) == 75
+    assert sum(treatment.startswith("Core constituent") for _, treatment in rows) == 22
+    assert sum(treatment.startswith("Owned engineering invariant") for _, treatment in rows) == 51
+    assert sum(treatment.startswith("Historical/deferred") for _, treatment in rows) == 2
+
+    proof_ids = set(re.findall(r"`(QT-PROOF-\d{3})`", maintenance))
+    assert proof_ids == {item["id"] for item in bundle.proof_catalog["proofs"]}
+    remediation_ids = set(re.findall(r"`(QT-REM-\d{3})`", maintenance))
+    assert remediation_ids == {
+        path.stem
+        for path in (guarantees.ROOT / "docs/assurance/guarantees/remediations").glob(
+            "QT-REM-*.md"
+        )
+    }
+
+    promises = (guarantees.ROOT / "docs/core-promises.md").read_text(
+        encoding="utf-8"
+    )
+    assert re.findall(r"^## \d\. (.+)$", promises, flags=re.MULTILINE) == [
+        "Causal and canonical truth",
+        "Frozen research authority",
+        "Decision and execution authority",
+        "Capital, order, and accounting integrity",
+        "Credential confinement",
+        "Durable persistence and recovery",
+    ]
