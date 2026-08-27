@@ -156,15 +156,25 @@ Use focused checks first, then broaden only when the change warrants it:
 - `make validate-docs`
 - `make git-check`
 - `make check`
-- `make frontend-check` only when intentionally validating the legacy frontend
+- `make frontend-check` when the change affects the supported frontend or its adapters
 
 `make test-reporting-api` is intentionally separate from `make test-reporting`
 because it starts FastAPI route tests and may expose backend lifespan, DB, or
 watchdog readiness issues. It is bounded by `REPORT_API_TEST_TIMEOUT`.
 
 `make check` is the backend baseline: repository hygiene, architecture-doc
-contracts, and every non-database backend test. `make check-all` adds the
-optional legacy frontend tests and build.
+contracts, and ordinary non-database backend tests. `make check-all` adds the
+supported frontend tests and production build.
+
+The exhaustive assurance inventory remains available for deliberate
+maintenance. `make validate-guarantees` checks its registry and generated view.
+`make validate-retained-assurance` checks the retained executor, lifecycle,
+publication, environment, runner-build, and final-review contracts when that
+machinery itself changes. Those tests are intentionally excluded from
+`make backend-check`; they are not prerequisites for an ordinary product change
+and do not run proof sessions or activate guarantees. The narrower
+`make validate-assurance-runner` and `make validate-system-final-review` targets
+remain available when only one retained boundary needs review.
 
 For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component

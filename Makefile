@@ -112,6 +112,14 @@ LOCAL_PG_ENV = if [ -f secrets.env ]; then \
 	fi
 PYTEST_ENV = QT_LOGGING_LOKI_URL= QT_LOGGING_DEBUG=false QT_LOGGING_LEVEL=WARNING MPLCONFIGDIR=/tmp/matplotlib
 REPORT_API_TEST_TIMEOUT ?= 90s
+RETAINED_ASSURANCE_TESTS = \
+	tests/contract/test_assurance_environment_profiles.py \
+	tests/contract/test_assurance_executor.py \
+	tests/contract/test_assurance_lifecycle.py \
+	tests/contract/test_assurance_publication.py \
+	tests/contract/test_assurance_runner_build.py \
+	tests/contract/test_system_final_review.py
+RETAINED_ASSURANCE_IGNORES = $(foreach test,$(RETAINED_ASSURANCE_TESTS),--ignore=$(test))
 
 # Docs sync (Obsidian/Windows rsync friendly)
 SYNC_DOCS_SRC         ?= docs/
@@ -338,7 +346,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
-	test-reporting test-reporting-api test-botlens test-runtime backend-check glossary-render guarantees-render system-final-review-render validate-glossary validate-guarantees validate-assurance-runner validate-system-final-review validate-system-final-gate validate-docs frontend-test frontend-build frontend-check \
+	test-reporting test-reporting-api test-botlens test-runtime backend-check glossary-render guarantees-render system-final-review-render validate-glossary validate-guarantees validate-assurance-runner validate-system-final-review validate-retained-assurance validate-system-final-gate validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check check-all
 
 status: ## Show service status without docker compose ps sandbox friction
@@ -462,8 +470,8 @@ test-botlens: venv ## Run focused BotLens and runtime projection tests
 
 test-runtime: test-botlens ## Alias for focused BotLens/runtime tests
 
-backend-check: venv ## Run every non-database backend test
-	@$(PYTEST_ENV) QT_OMIT_DB_TESTS=1 $(PYTHON) -m pytest -q
+backend-check: venv ## Run ordinary non-database backend tests
+	@$(PYTEST_ENV) QT_OMIT_DB_TESTS=1 $(PYTHON) -m pytest -q $(RETAINED_ASSURANCE_IGNORES)
 
 glossary-render: venv ## Render reviewed terminology views
 	@$(PYTHON) scripts/docs/glossary.py render
@@ -491,6 +499,10 @@ validate-system-final-review: venv ## Validate the non-normative system final-re
 	@$(PYTHON) scripts/docs/build_system_final_review.py check
 	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_system_final_review.py
 
+validate-retained-assurance: venv ## Check retained assurance machinery without proof execution
+	@$(PYTHON) scripts/docs/build_system_final_review.py check
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q $(RETAINED_ASSURANCE_TESTS)
+
 validate-system-final-gate: venv ## Verify a committed strict final-gate packet and its external repository state
 	@$(PYTHON) scripts/docs/build_system_final_review.py check --final-gate
 	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_system_final_review.py
@@ -499,8 +511,7 @@ validate-docs: venv ## Refresh indexes and run docs contract validation
 	@$(PYTHON) scripts/docs/build_architecture_index.py
 	@$(PYTHON) scripts/docs/glossary.py check
 	@$(PYTHON) scripts/docs/guarantees.py check
-	@$(PYTHON) scripts/docs/build_system_final_review.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_documentation_reconciliation.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py tests/contract/test_system_final_review.py
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_documentation_reconciliation.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py
 
 frontend-test: ## Run frontend Node and JSX tests
 	@$(NPM) --prefix $(FRONT_DIR) test
@@ -523,7 +534,7 @@ git-check: ## Show status and run git diff whitespace checks
 
 check: git-check validate-docs backend-check ## Run standard backend developer/audit checks
 
-check-all: check frontend-check ## Run backend checks plus optional legacy frontend checks
+check-all: check frontend-check ## Run backend checks plus the supported frontend checks
 
 ## =============================== QUALITY ================================ ##
 .PHONY: test clean
