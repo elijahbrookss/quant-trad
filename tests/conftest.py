@@ -63,8 +63,10 @@ def _declares_db_marker(path: Path) -> bool:
 
 def pytest_ignore_collect(collection_path, config):  # noqa: ANN001 - pytest hook type varies by version.
     if not _env_flag("QT_OMIT_DB_TESTS"):
-        return False
-    return _declares_db_marker(Path(str(collection_path)))
+        return None
+    if _declares_db_marker(Path(str(collection_path))):
+        return True
+    return None
 
 
 def pytest_pyfunc_call(pyfuncitem):
