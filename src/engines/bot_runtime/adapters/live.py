@@ -10,7 +10,7 @@ from ..core.execution_order import FillOrder
 
 
 class LiveAdapter(ExecutionAdapter):
-    """Keep the live composition seam closed until owner authority admits it."""
+    """Keep the live composition seam closed while external execution is unsupported."""
 
     def __init__(
         self,
