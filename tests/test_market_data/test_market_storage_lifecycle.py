@@ -75,6 +75,23 @@ class _LifecycleRepository:
         yield
 
 
+class _PinnedDuringExecutionRepository(_LifecycleRepository):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[dict] = []
+
+    def archive_target_status(self, **_kwargs):
+        return {
+            "expired": False,
+            "pinned": True,
+            "explicit_pin_count": 1,
+            "dataset_pin_count": 0,
+        }
+
+    def append_event(self, **kwargs):
+        self.events.append(dict(kwargs))
+
+
 def _service(repository: _LifecycleRepository) -> MarketStorageLifecycleService:
     return MarketStorageLifecycleService(
         lifecycle_repository=repository,
@@ -127,6 +144,35 @@ def test_lifecycle_execution_requires_explicit_policy_gate() -> None:
             execute=True,
         )
     assert repository.lock_entered is False
+
+
+def test_archive_expiration_rechecks_new_retention_pin_before_deletion() -> None:
+    repository = _PinnedDuringExecutionRepository()
+    item = {
+        "operation_id": "operation-a",
+        "target_kind": "raw_manifest",
+        "target_id": "manifest-a",
+        "cutoff_at": "2026-08-01T00:00:00+00:00",
+        "reason": "retention elapsed",
+        "object_key": "raw/a.parquet",
+        "object_sha256": "a" * 64,
+        "replacement_manifest_id": None,
+    }
+
+    outcome = _service(repository)._execute_archive_expiration(
+        item=item,
+        store=object(),
+    )
+
+    assert outcome == {
+        "action": "archive_expire",
+        "operation_id": "operation-a",
+        "status": "skipped",
+        "reason": "pinned",
+    }
+    assert len(repository.events) == 1
+    assert repository.events[0]["event_type"] == "skipped"
+    assert repository.events[0]["reason"] == "retention pin appeared after planning"
 
 
 def test_lifecycle_policy_rejects_unknown_or_unsafe_values() -> None:
