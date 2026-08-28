@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -552,7 +553,7 @@ async def test_fanout_drop_emits_metrics(monkeypatch: pytest.MonkeyPatch) -> Non
         ),
     )
     await projector._load_initial_state()
-    await projector._apply_bootstrap(
+    bootstrap = projector._apply_bootstrap(
         _bootstrap_batch(
             {
             "kind": "botlens_runtime_bootstrap_facts",
@@ -577,6 +578,7 @@ async def test_fanout_drop_emits_metrics(monkeypatch: pytest.MonkeyPatch) -> Non
             }
         )
     )
+    await asyncio.wait_for(bootstrap, timeout=1.0)
 
     snapshot = get_observability_sink().snapshot()
     assert any(metric["metric_name"] == "fanout_dropped_total" for metric in snapshot["metrics"])

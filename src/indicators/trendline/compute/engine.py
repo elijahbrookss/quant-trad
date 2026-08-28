@@ -27,6 +27,7 @@ RANSAC_TRIALS           = 250    # random 2-point samples
 RANSAC_TOL_FRAC         = 0.003  # ~0.3% relative error to count as inlier
 RANSAC_MIN_INLIERS      = 3      # need at least this many pivot inliers
 MAX_LINES_PER_SIDE      = 2      # sequentially extract up to N lines per side
+RANSAC_SEED             = 0      # identical inputs must produce identical lines
 
 
 @dataclass
@@ -74,7 +75,7 @@ def _ransac_line(x: np.ndarray, y: np.ndarray,
         return None
     best = (None, None, None)
     best_count = 0
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(RANSAC_SEED)
     for _ in range(trials):
         i, j = rng.choice(n, size=2, replace=False)
         if x[j] == x[i]:

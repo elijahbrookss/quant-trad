@@ -51,13 +51,25 @@ def test_definition_builds_compute_request_from_indicator_timeframe() -> None:
 def test_find_pivots(dummy_df) -> None:
     indicator = PivotLevelIndicator(dummy_df, timeframe="1h", lookbacks=(2,))
     highs, lows = indicator._find_pivots(2)
-    assert isinstance(highs, list) and isinstance(lows, list)
-    assert all(isinstance(point, tuple) for point in highs + lows)
+
+    assert highs == [
+        (dummy_df.index[4], 105),
+        (dummy_df.index[7], 104),
+    ]
+    assert lows == [(dummy_df.index[5], 94)]
 
 
 def test_compute_generates_levels(dummy_df) -> None:
     indicator = PivotLevelIndicator(dummy_df, timeframe="1h", lookbacks=(2,))
-    assert isinstance(indicator.levels, list)
+
+    assert [
+        (level.price, level.kind, level.lookback, level.first_touched)
+        for level in indicator.levels
+    ] == [
+        (94, "support", 2, dummy_df.index[5]),
+        (104, "resistance", 2, dummy_df.index[7]),
+        (105, "resistance", 2, dummy_df.index[4]),
+    ]
     assert all(isinstance(level, Level) for level in indicator.levels)
 
 
@@ -65,15 +77,18 @@ def test_nearest_support_and_resistance(dummy_df) -> None:
     indicator = PivotLevelIndicator(dummy_df, timeframe="1h", lookbacks=(2,))
     support = indicator.nearest_support(100)
     resistance = indicator.nearest_resistance(100)
-    if support:
-        assert isinstance(support, Level)
-    if resistance:
-        assert isinstance(resistance, Level)
+
+    assert support is not None
+    assert support.price == 94
+    assert support.kind == "support"
+    assert resistance is not None
+    assert resistance.price == 104
+    assert resistance.kind == "resistance"
 
 
 def test_distance_to_level(dummy_df) -> None:
     indicator = PivotLevelIndicator(dummy_df, timeframe="1h", lookbacks=(2,))
-    if indicator.levels:
-        distance = indicator.distance_to_level(indicator.levels[0], 100)
-        assert isinstance(distance, float)
-        assert distance >= 0
+    support = indicator.nearest_support(100)
+
+    assert support is not None
+    assert indicator.distance_to_level(support, 100) == pytest.approx(0.06)

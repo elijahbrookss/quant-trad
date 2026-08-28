@@ -23,9 +23,17 @@ const defaultProps = {
   onConfirm: vi.fn(),
 };
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe('DeleteIndicatorModal', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     fetchIndicatorStrategies.mockResolvedValue([]);
   });
 
@@ -48,11 +56,16 @@ describe('DeleteIndicatorModal', () => {
 
   describe('Dependency Fetch', () => {
     it('shows loading state while fetching dependencies', async () => {
-      fetchIndicatorStrategies.mockImplementation(
-        () => new Promise((resolve) => setTimeout(() => resolve([]), 1000))
-      );
+      const request = deferred();
+      fetchIndicatorStrategies.mockReturnValue(request.promise);
+
       render(<DeleteIndicatorModal {...defaultProps} />);
       expect(screen.getByText('Checking for dependencies...')).toBeInTheDocument();
+
+      request.resolve([]);
+      await waitFor(() => {
+        expect(screen.getByText('No strategies are using this indicator.')).toBeInTheDocument();
+      });
     });
 
     it('displays strategies list when available', async () => {
@@ -159,19 +172,22 @@ describe('DeleteIndicatorModal', () => {
     });
 
     it('shows loading state during deletion', async () => {
-      defaultProps.onConfirm.mockImplementation(
-        () => new Promise((resolve) => setTimeout(resolve, 1000))
-      );
+      const deletion = deferred();
+      defaultProps.onConfirm.mockReturnValue(deletion.promise);
+
       render(<DeleteIndicatorModal {...defaultProps} />);
 
-      await waitFor(async () => {
-        const input = screen.getByPlaceholderText('DELETE');
-        fireEvent.change(input, { target: { value: 'DELETE' } });
+      const input = screen.getByPlaceholderText('DELETE');
+      fireEvent.change(input, { target: { value: 'DELETE' } });
 
-        const confirmButton = screen.getByRole('button', { name: 'Delete Indicator' });
-        fireEvent.click(confirmButton);
+      const confirmButton = screen.getByRole('button', { name: 'Delete Indicator' });
+      fireEvent.click(confirmButton);
 
-        expect(screen.getByText('Deleting...')).toBeInTheDocument();
+      expect(screen.getByText('Deleting...')).toBeInTheDocument();
+
+      deletion.resolve();
+      await waitFor(() => {
+        expect(defaultProps.onClose).toHaveBeenCalledTimes(1);
       });
     });
 
