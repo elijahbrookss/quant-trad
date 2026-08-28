@@ -1,146 +1,22 @@
 # Quant-Trad
 
-Quant-Trad (QT) is a local workspace for testing trading ideas before trusting
-them. It helps you turn an idea into explicit rules, run those rules over known
-market data in time order, and keep the evidence needed to understand why a
-result happened.
+Quant-Trad (QT) is a local quantitative-research platform for turning trading
+ideas into repeatable evidence. It collects and normalizes market data, freezes
+exact research inputs, runs Checks and Strategies in time order, simulates
+execution and accounting, and preserves results for inspection and comparison.
 
-Quantitative trading means expressing a trading idea precisely enough that it
-can be measured and repeated. QT supports that process without pretending a
-historical result is a forecast. It combines market-data collection, frozen
-research evidence, reusable measurements, strategy rules, walk-forward
-simulation, and tools for inspecting and comparing runs.
-
-QT is useful to traders who want to replace chart-memory with evidence,
-researchers comparing ideas across the same data, and engineers who need the
-calculation, execution, and reporting paths to agree.
-
-## Start With One Idea
-
-A normal QT research path is:
-
-```text
-trading idea
-    -> precise definition
-    -> frozen evidence
-    -> measurements
-    -> research Check
-    -> Strategy
-    -> backtest
-    -> walk-forward review
-    -> paper simulation
-    -> inspect and compare
-```
-
-For example, “buy when momentum looks strong” is not ready to test. A usable
-definition names the instrument and timeframe, the exact measurement, the
-entry and exit conditions, the costs and execution assumptions, and what would
-count as evidence against the idea.
-
-The [core research workflow](docs/guides/research-workflow.md) walks through
-that path without assuming you already know QT terminology. The
-[platform overview](docs/overview.md) explains where each part fits, and the
-[six core promises](docs/core-promises.md) summarize the properties QT is
-designed to preserve.
-
-## Backtest And Paper, In Plain English
-
-A **backtest** replays a frozen historical dataset in time order. At each step,
-the strategy can use only information that would have been available then. QT
-simulates execution, fees, wallet effects, and lifecycle events according to
-the run's declared assumptions. A backtest is evidence about those data and
-assumptions; it is not proof of future profitability.
-
-A **paper run** exercises the workflow as market data arrives. Depending on the
-declared execution behavior, it uses simulation or observe-only operation. It
-helps expose timing, data, and operational problems that a historical replay
-can miss. QT does not submit external exchange orders, and the example paper
-command in this README is explicitly observe-only.
-
-<p align="center">
-  <img
-    src="docs/architecture/data/diagrams/data-boundary-flow.svg"
-    alt="Quant-Trad market-data boundary from explicit acquisition through canonical facts and frozen datasets to research consumers"
-    width="920"
-  />
-</p>
-
-## What You Can Do
-
-- Acquire and normalize provider data into one typed, versioned canonical
-  `Fact` model with provenance and causal `known_at` semantics.
-- Collect Coinbase market state and Chainlink scalar or structured observations
-  through provider-specific adapters that disappear after canonicalization.
-- Monitor and safely operate registered collectors through a provider-first,
-  lazy-loading console with explicit lifecycle, health, gaps, diagnostics, and
-  recent canonical Facts.
-- Freeze exact, provider-free `Dataset` evidence for replay, backtests, Checks,
-  and research.
-- Build Indicators over scalar and structured Facts without making research
-  logic provider-aware.
-- Run generic Checks that turn research questions into durable, replayable
-  evidence and evidence-backed Observations.
-- Compile strategies, preview decisions, compare variants, and run walk-forward
-  backtests against immutable datasets.
-- Run bounded observe-only paper sessions against provider streams.
-- Inspect candles, overlays, signals, decisions, trades, playback, accounting,
-  and runtime diagnostics in BotLens and reports.
-- Drive repeatable workflows through `qt`, or expose the same guarded contracts
-  to agent hosts with `qt mcp serve`.
-
-## Platform Flow
-
-Market truth, research evidence, and bot execution remain separate while sharing
-one causal timeline.
-
-```mermaid
-flowchart LR
-    external["External market state"] --> adapter["Provider adapter<br/>acquire + decode"]
-    adapter --> facts["Canonical Facts<br/>typed · versioned · causal"]
-    facts --> store[("Append-only Fact store<br/>provenance + gaps")]
-    store --> dataset["Frozen Dataset<br/>exact evidence boundary"]
-    dataset --> replay["Provider-free replay"]
-
-    replay --> indicators["Indicators"]
-    indicators --> checks["Checks"]
-    checks --> observations["Observations"]
-    observations --> research["Hypotheses + research memory"]
-
-    indicators --> decisions["Strategy decisions"]
-    decisions --> runtime["Walk-forward bot runtime<br/>backtest or bounded paper"]
-    runtime --> inspection["BotLens + reports<br/>playback · compare · diagnose"]
-
-    classDef provider fill:#1f2937,stroke:#94a3b8,color:#f8fafc
-    classDef truth fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
-    classDef evidence fill:#13251d,stroke:#34d399,color:#dcfce7
-    classDef runtime fill:#2e1065,stroke:#a78bfa,color:#f5f3ff
-    class external,adapter provider
-    class facts,store truth
-    class dataset,replay,indicators,checks,observations,research evidence
-    class decisions,runtime,inspection runtime
-```
-
-Provider identity matters at acquisition and in provenance. Everything below
-canonicalization operates on QT semantics:
-
-```text
-Coinbase ─┐
-Chainlink ├─> provider adapter ─> canonical Fact ─> Dataset ─> research
-Future ───┘
-```
-
-Frozen Datasets preserve exact Facts, payload schemas, provenance, gaps, and
-causal knowledge boundaries. Replay does not call the original provider.
+QT supports research, backtesting, walk-forward evaluation, reporting, and
+bounded paper simulation or observe-only operation. **It does not submit orders
+to external venues and is not live-capital trading infrastructure.**
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker
+- Bash on Linux or WSL
+- Docker Engine or Docker Desktop with Compose v2
 - GNU Make
 - Python 3.12+
-
-### Set Up QT
 
 From the repository root:
 
@@ -151,18 +27,15 @@ make up BUILD=1 STACK_PROFILES=core
 ./scripts/qt setup doctor
 ```
 
-`./scripts/qt` dispatches through the repo-managed virtual environment. You can
-also activate it and use `qt` directly:
+If Python 3.12 is not your default interpreter, use
+`make deps PY=python3.12`. The `./scripts/qt` wrapper uses the
+repository-managed virtual environment, so activating `.venv` is optional.
 
-```bash
-source .venv/bin/activate
-qt setup doctor
-```
+Provider credentials are not required to start QT or work with existing frozen
+Datasets. Configure them only for external acquisition or streaming; the
+[getting-started guide](docs/getting-started.md) covers that path.
 
-If Python 3.12 is not your default interpreter, run
-`make deps PY=python3.12`.
-
-### Open the Local Stack
+### Local Surfaces
 
 | Surface | Address |
 | --- | --- |
@@ -171,201 +44,104 @@ If Python 3.12 is not your default interpreter, run
 | TimescaleDB / PostgreSQL | `localhost:15432` |
 | pgAdmin | <http://localhost:8080> |
 
-Start Grafana, Loki, and the rest of the observability profile with:
+Useful first checks:
 
 ```bash
-make up BUILD=1 STACK_PROFILES=all
-```
-
-### Provider Credentials
-
-Provider credentials are stored through encrypted credential references. Do not
-put provider secrets in repository files, logs, experiment plans, or bot
-configuration.
-
-Use the guided setup after the core stack is healthy:
-
-```bash
-./scripts/qt setup provider coinbase
-./scripts/qt providers credentials list
-./scripts/qt providers stream-smoke \
-  --provider COINBASE \
-  --venue COINBASE_DIRECT \
-  --symbol <product> \
-  --auth-mode authenticated
-```
-
-Backtests and Checks over frozen Datasets do not require a live provider
-connection.
-
-## Core Workflows
-
-### Stack and Diagnostics
-
-```bash
-make help
-make up BUILD=1 STACK_PROFILES=core
+./scripts/qt setup doctor
 make ps
 make logs SERVICE=backend
-make test
-make check
-make down
 ```
 
-### Market Data and Datasets
+Start the optional Grafana and Loki services with
+`make up BUILD=1 STACK_PROFILES=all`. Stop the local stack with `make down`.
 
-```bash
-qt data coverage \
-  --instrument-id <instrument_id> \
-  --timeframe <timeframe> \
-  --start <iso> \
-  --end <iso>
-
-qt data collectors fleet
-qt data collectors plane
-qt data collectors detail scheduled_fact <collector_id>
-qt data collectors diagnose scheduled_fact <collector_id>
-qt data collectors probe scheduled_fact <collector_id>
-qt data series
-qt data prepare-backtest-dataset --help
-qt data freeze-dataset --help
-qt data dataset <dataset_id>
-```
-
-External acquisition remains explicit and bounded. Network-backed numeric-fact
-acquisition, for example, requires an affirmative `--allow-network` flag.
-
-### Strategies, Backtests, and Paper Runs
-
-```bash
-qt strategies list
-qt strategies compile <strategy_id>
-qt strategies preview <strategy_id> \
-  --start <iso> \
-  --end <iso> \
-  --interval <timeframe> \
-  --instrument-id <instrument_id>
-
-qt bots list
-qt bots start <bot_id> --run-type backtest --dataset-id <dataset_id>
-qt runs wait <bot_id> <run_id>
-
-qt bots start <bot_id> \
-  --run-type paper \
-  --execution observe-only \
-  --duration-seconds 30
-```
-
-### Reports and Comparisons
-
-```bash
-qt reports summary <run_id>
-qt reports diagnostics <run_id>
-qt reports export <run_id>
-qt reports compare <baseline_run_id> <candidate_run_id>
-```
-
-### Experiment Plans
-
-```bash
-qt experiments validate-plan <plan.json>
-qt experiments run-plan <plan.json> --experiment-id <experiment_id>
-qt experiments status <experiment_id>
-qt experiments events <experiment_id> --tail 50
-```
-
-Plans are validated, auditable, and resumable. Their steps run sequentially;
-configured backtest work may use bounded parallel workers where supported.
-
-### MCP
-
-```bash
-make mcp-ready
-qt mcp serve
-```
-
-`qt mcp serve` exposes read resources and guarded workflow tools to agent hosts.
-It adapts the `qt` and backend contracts; it is not a second runtime or source of
-truth.
-
-## Runtime and Research Model
-
-Every derived runtime output follows one state-engine timeline:
+## How QT Fits Together
 
 ```text
-initialize -> apply_bar -> snapshot
+external market state
+  -> provider adapters
+  -> canonical Facts
+  -> frozen Datasets
+  -> Indicators, Checks, and Strategies
+  -> simulated execution and accounting
+  -> BotLens and reports
 ```
 
-- Indicators publish typed outputs through engine snapshots.
-- Strategies consume those outputs and emit decisions.
-- Bot runtime owns fills, fees, margin, wallet state, settlement, and lifecycle
-  events.
-- BotLens and reports inspect durable runtime truth; they do not reconstruct an
-  alternate execution path.
-- Checks freeze their evidence and remain replayable after orchestration or
-  provider state disappears.
+- Provider adapters translate outside data into QT's canonical model, and
+  frozen Datasets identify the exact evidence used by durable research.
+- Indicators measure, Checks evaluate bounded questions, and Strategies decide.
+  The bot runtime owns simulated fills, fees, wallet state, and order lifecycle.
+- The CLI, API, frontend, reports, and MCP adapter share the same backend
+  contracts; presentation surfaces do not create alternate runtime truth.
 
-## Entry Points
+For implemented behavior and current limits, read
+[QT Today](docs/current-system.md).
 
-| Surface | Use it for |
+## Repository Map
+
+| Path | Responsibility |
 | --- | --- |
-| `qt` CLI | Providers, market data, datasets, collectors, bot runs, strategies, reports, comparisons, experiments, and research operations. |
-| `qt mcp serve` | Agent-facing workflow adapter over the same guarded backend contracts. |
-| Frontend V2 | Human operation and inspection: market data, charts, strategies, BotLens, playback, reports, and research evidence. |
-| Backend API | Canonical application contracts used by the CLI, UI, and MCP adapter. |
-| Makefile | Local stack, tests, database access, logs, documentation sync, and forensic helpers. |
+| `src/` | Core domain, data, research, indicator, and runtime code |
+| `portal/backend/` | HTTP application interface and service orchestration |
+| `portal/frontend/` | Frontend V2 operation, visualization, BotLens, and reports |
+| `tests/` | Contract, unit, integration, database, and boundary tests |
+| `docker/` | Local, test, observability, and server compositions |
+| `scripts/` | Repository CLI, CI, setup, and operational helpers |
+| `docs/` | Guides, contracts, architecture, engineering, and operator material |
 
-The UI does not define provider adapters, Fact schemas, collectors, strategy
-execution semantics, or alternate research truth. Those remain code-reviewed
-backend concerns.
+Use `./scripts/qt --help` to discover CLI commands and `make help` for stack,
+test, and repository operations.
 
-## Architecture Principles
+## Developer Checks
 
-- Providers acquire and canonicalize external information.
-- Everything downstream consumes canonical Facts, never provider-specific
-  payloads.
-- Facts are typed, schema-versioned, queryable, deterministic, causal, and
-  provenance-preserving.
-- Intrinsically structured market state remains one atomic observation when
-  scalar flattening would lose meaning.
-- Frozen Datasets are provider-free and reproducible.
-- Research claims require durable, inspectable evidence.
-- Bot execution has one canonical accounting and lifecycle path.
-- Known-at timing is part of correctness; nothing appears retroactively.
-- Agents operate through guarded CLI, API, and MCP contracts rather than hidden
-  runtimes.
-- Collector implementations and provider adapter packs remain code-owned;
-  operators may enroll products only through registered capabilities.
-- QT uses one persistence DSN: `PG_DSN`.
+Run checks for the area you changed:
 
-## Documentation
+```bash
+make backend-check
+make frontend-check
+make validate-docs
+```
 
-| Topic | Documentation |
+Run the normal combined validation before handing off a broad change:
+
+```bash
+make check-all
+```
+
+For database-related changes, use the disposable isolated route:
+
+```bash
+./scripts/ci/run_test_suite.sh db
+```
+
+Never point test configuration at a development, shared, server, or production
+database. See the [testing strategy](docs/engineering/testing/testing-strategy.md)
+for suite selection and isolation details.
+
+## Safety Notes
+
+- Keep provider secrets out of repository files, logs, research artifacts, and
+  bot configuration. QT stores credential references instead of plaintext
+  provider secrets.
+- Backtests and durable Checks use frozen evidence. A historical result is
+  evidence under declared inputs and assumptions, not a forecast.
+- Network-backed acquisition is explicit; replay, tests, and canonical reads
+  must not contact a provider implicitly.
+- External order submission is closed, and normal validation must not use
+  production or live systems.
+
+## Where To Go Next
+
+| Goal | Read |
 | --- | --- |
-| Start here | [Platform overview](docs/overview.md), [core research workflow](docs/guides/research-workflow.md), [getting started](docs/getting-started.md), [docs home](docs/index.md) |
-| What QT promises | [Six core promises](docs/core-promises.md), [current system](docs/current-system.md), [platform glossary](docs/contracts/platform/04_glossary.md) |
-| Deploy and update | [Portable single-node deployment](docs/engineering/server-deployment.md), [operator handbook](docs/operators/README.md) |
-| Market-data boundary | [Data boundary](docs/architecture/data/DATA_BOUNDARY.md), [generalized Fact data plane](docs/architecture/data/GENERALIZED_FACT_DATA_PLANE.md) |
-| Canonical Facts and datasets | [Canonical Fact ADR](docs/architecture/decisions/0063-use-schema-registered-canonical-facts.md), [numeric Facts and acquisition](docs/architecture/data/NUMERIC_FACTS_AND_ON_DEMAND_ACQUISITION.md) |
-| Collectors | [Collector operations guide](docs/guides/collector-operations.md), [control-plane architecture](docs/architecture/data/COLLECTOR_OPERATIONS_CONTROL_PLANE.md), [continuous collector runtime](docs/architecture/data/CONTINUOUS_COLLECTOR_RUNTIME.md) |
-| Provider examples | [Chainlink structured Facts](docs/guides/chainlink-structured-facts.md), [Coinbase derivatives paper setup](docs/guides/coinbase-derivatives-paper-setup.md), [adding a provider](docs/guides/adding-a-provider.md) |
-| Research evidence | [Check evidence boundary](docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md), [research memory](docs/architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md) |
-| Runtime | [Runtime timeline](docs/concepts/runtime-timeline.md), [execution model](docs/concepts/execution-model.md), [strategies and signals](docs/concepts/strategies-and-signals.md) |
-| Inspection and reporting | [BotLens](docs/concepts/botlens.md), [reporting datasets](docs/concepts/reporting-datasets.md) |
-| Agent workflows | [Developer workflow](docs/engineering/developer-workflow.md), [MCP research server](docs/architecture/research-orchestration/MCP_RESEARCH_SERVER.md) |
-| Historical collector validation | [Collector operations validation](docs/engineering/collector-operations-validation.md) |
-| Internals and exact rules | [System architecture](docs/architecture/system/SYSTEM_MODEL.md), [architecture guide](docs/architecture/README.md), [engineering docs](docs/engineering/README.md), [platform contracts](docs/contracts/README.md) |
+| Install QT or run a first backtest | [Getting started](docs/getting-started.md) |
+| Test a trading idea | [Core research workflow](docs/guides/research-workflow.md) |
+| Understand the implemented system | [Current system](docs/current-system.md) |
+| Understand the boundaries worth protecting | [Six core promises](docs/core-promises.md) and [platform contracts](docs/contracts/README.md) |
+| Change code or a subsystem boundary | [Developer workflow](docs/engineering/developer-workflow.md) and [architecture guide](docs/architecture/README.md) |
+| Look up an exact QT term | [Platform glossary](docs/contracts/platform/04_glossary.md) |
+| Operate or deploy a durable host | [Operator handbook](docs/operators/README.md) |
 
-Contracts are the source of truth when code and explanatory documentation
+The [documentation home](docs/index.md) provides the complete role-based reading
+map. Platform contracts are authoritative when explanatory prose and code
 disagree.
-
-## Project Status
-
-Quant-Trad is in active development. It is designed for quantitative research,
-causal data collection, reproducible backtesting, bounded paper trading, and
-controlled agent-assisted workflows.
-
-QT is not live-capital trading infrastructure by default. Do not treat it as
-production trading infrastructure without independently validating execution
-behavior, provider configuration, risk controls, operational recovery, and
-deployment boundaries for your use case.
