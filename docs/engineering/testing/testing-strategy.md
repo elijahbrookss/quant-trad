@@ -37,9 +37,42 @@ Bad reasons to add a test:
 - coverage would go up
 - an assistant generated a test by following control flow line by line
 
-## Current Phase
+## Supported Commands And Environment Boundaries
 
-This project is in an engine-first phase.
+Normal validation is split by the boundary a test actually needs:
+
+| Boundary | Command | What it covers |
+| --- | --- | --- |
+| Documentation | `make validate-docs` | Current documentation, architecture metadata, glossary and generated-view consistency |
+| Ordinary Python | `make backend-check` | Non-database contracts, domain behavior, services, CLI, runtime, reporting, and configuration |
+| PostgreSQL / TimescaleDB | `./scripts/ci/run_test_suite.sh db` | Tests marked `db`, using only the repository's disposable test stack |
+| Frontend | `make frontend-check` | Node-native and JSX tests plus the production Vite build |
+| Deployment configuration | the `deployment-contract` commands in [`ci-test-topology.md`](ci-test-topology.md) | Shell, Compose, source binding, and image construction without deployment |
+| Retained internal compatibility | `make validate-retained-assurance` | Run deliberately when retained assurance machinery changes; it is excluded from ordinary backend validation |
+
+`make check` combines repository hygiene, documentation validation, and the
+ordinary Python boundary. `make check-all` adds the supported frontend tests and
+production build. A broad `pytest` invocation is not a substitute for the
+database command: DB-marked tests skip unless the explicit isolation flags and
+disposable DSN are present. Clean bootstrap is a separate check against an
+empty disposable database.
+
+The Python test harness does not load repository `.env` or `secrets.env` files.
+Commands must provide their environment explicitly. Locked Python packages are
+required test dependencies; if one is missing, collection fails instead of
+silently converting its tests into skips. Real credentials, shared databases,
+live providers, collectors, production data, and external-order submission are
+outside normal testing.
+
+An unavailable environment is reported as unavailable. Do not turn it into a
+pass, and do not point a test at a less isolated resource. A skip is acceptable
+only when the supported workflow deliberately runs that check in another
+explicit environment, as with clean database bootstrap. Otherwise give the skip
+a current reason and an owning exit condition, or fix its routing.
+
+## Current Engineering Posture
+
+This project currently has an engine-first posture.
 
 Current priorities are:
 
@@ -142,7 +175,7 @@ Usually not worth testing:
 - snapshot-style tests that fail on every refactor without protecting a meaningful outcome
 - tests whose main effect is to freeze internal structure that is still changing
 
-Examples of low-value tests in this phase:
+Examples of low-value tests under this posture:
 
 - asserting that a wrapper calls one internal helper with the same arguments and returns the same object
 - mocking five collaborators just to prove a branch executed
@@ -186,7 +219,7 @@ Before adding a test, ask:
 
 If none of those apply, the test may not be worth adding.
 
-## Preferred Test Hierarchy For This Stage
+## Preferred Test Hierarchy
 
 ### Highest Priority
 
@@ -271,7 +304,57 @@ A reader should be able to answer:
 
 If that is not obvious, tighten the test.
 
-## Examples Of Good Tests For This Phase
+### Control Time And Concurrency Directly
+
+When the rule is about ordering or progress, coordinate the participants with
+events, barriers, deferred promises, injected clocks, or explicit queue drains.
+A timeout may remain as a generous deadlock guard. Do not use a narrow elapsed-
+time threshold as a proxy for "request B progressed while request A was held."
+
+Real sleeps are still reasonable when elapsed time is the behavior under test
+or when an external library exposes no controllable clock. State that reason
+and leave enough margin that host scheduling is not the assertion.
+
+### Build Historical Database States Explicitly
+
+Migration tests must create the smallest valid pre-migration schema in its real
+dependency order, assert that pre-state, run the actual migration, and inspect
+the resulting database. Do not call the current full ORM `create_all()` and then
+drop pieces to imitate history; current constraints can depend on migration-
+owned functions and make an impossible hybrid schema.
+
+Use a fresh disposable database identity when migration ordering, destructive
+cutover, extensions, or teardown are part of the claim. Prove cleanup on failure
+paths. Tests must never discover or reuse a developer, shared, live, or
+production DSN.
+
+### Keep External Boundaries Closed
+
+Provider, credential, network, container, filesystem, and order-execution
+boundaries should use synthetic data and controlled fakes unless the test is
+explicitly assigned an isolated integration environment. A mock is useful when
+it traps a forbidden call. It is misleading when it replaces the behavior the
+test claims to check.
+
+Credential tests use recognizable synthetic secrets and a synthetic key so
+plaintext leakage is detectable. External-order tests prove that the admission
+or composition seam fails closed; they never contact a venue.
+
+### Use Generated Cases And Controlled Defects Selectively
+
+Property-based or generated cases are valuable when varying inputs exposes a
+real rule—for example numeric bounds, state transitions, ordering, or parser
+normalization. A concrete regression example remains better when one known edge
+case tells the story clearly.
+
+For a small number of high-consequence rules, temporarily introducing one
+representative defect in a disposable working copy can confirm that the owning
+test fails. Remove the defect immediately and record only the detection result.
+Do not commit mutations or add broad mutation tooling merely to increase a
+score. Passing this kind of check improves confidence; it does not activate a
+guarantee or replace owner judgment.
+
+## Examples Of Good Tests
 
 - a deterministic backtest test proving the same bars and config produce the same fills, PnL, and event sequence twice
 - a known-at timing test proving an overlay or signal is not visible before its contract says it should exist
@@ -281,7 +364,7 @@ If that is not obvious, tighten the test.
 - an import/bootstrap regression test proving a backend or worker module still imports without pulling in the wrong runtime dependencies
 - a margin or liquidation math test proving futures exposure and contract-size math stays correct after a refactor
 
-## Examples Of Low-Value Tests For This Phase
+## Examples Of Low-Value Tests
 
 - a test that asserts a helper called another helper with the same arguments and returned the same result
 - a test that snapshots a large internal runtime payload even though only one field matters to correctness
@@ -353,7 +436,7 @@ The order matters. First stabilize the runtime contracts, then expand the covera
 
 ## PR Test Expectations
 
-For normal feature work in the current phase:
+For normal feature work under the current engineering posture:
 
 - add or update tests when the change affects determinism, financial math, state transitions, runtime contracts, or a known regression surface
 - do not add low-value tests just to pad coverage

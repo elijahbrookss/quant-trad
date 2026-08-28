@@ -21,7 +21,7 @@ them concurrently. The numbering below is for documentation only.
 
 | # | Job ID | Primary boundary |
 | ---: | --- | --- |
-| 1 | `pr-suite` | Complete non-database backend pytest screen on the runner host |
+| 1 | `pr-suite` | Complete ordinary non-database backend pytest screen on the runner host |
 | 2 | `frontend` | Current frontend test command plus production asset build |
 | 3 | `deployment-contract` | Server shell/Compose validation and attested production-image builds |
 | 4 | `clean-database-bootstrap` | Clean-schema bootstrap followed by PostgreSQL-marked contract tests |
@@ -39,8 +39,11 @@ The workflow steps are:
    followed by `python -m pip check`; and
 4. `Run PR suite` with `./scripts/ci/run_test_suite.sh pr`.
 
-The `pr` suite currently runs `QT_OMIT_DB_TESTS=1 pytest -q`. It is the complete
-non-database backend screen, not the whole workflow gate.
+The `pr` suite runs `QT_OMIT_DB_TESTS=1 pytest -q` with the six retained-
+assurance compatibility files explicitly ignored. It is the complete ordinary
+non-database backend screen, not the whole workflow gate. Missing locked Python
+dependencies fail collection; they do not silently turn supported coverage into
+skips.
 
 ### 2. `frontend`
 
@@ -56,9 +59,9 @@ The workflow steps are:
 4. `Test and build production frontend` with `make frontend-check`.
 
 `frontend-check` invokes the package's `npm test` command and the Vite
-production build. `npm test` runs the shell-free Node-native suite and the two
-explicitly tracked React component suites through the pinned Vitest/jsdom
-profile. It does not run lint, a real backend, a browser or cross-browser/E2E
+production build. `npm test` runs every `tests/**/*.test.js` file through the
+shell-free Node-native suite and every `src/**/*.test.jsx` file through the
+pinned Vitest/jsdom profile. It does not run lint, a real backend, a browser or cross-browser/E2E
 suite, production deployment, live collector or order activity, or
 accessibility conformance.
 
@@ -107,9 +110,10 @@ this fourth job. They are not separate workflow jobs. Both set
 explicit disposable DSN.
 
 The clean-bootstrap database begins from the service image's empty application
-schema. The DB-marked tests share `quanttrad_contracts` within the job; the
-current workflow does not claim a fresh database per individual test or test
-session.
+schema. Most DB-marked tests share `quanttrad_contracts` within the job.
+Migration tests that own historical schema ordering create and tear down a
+unique child database from that disposable PostgreSQL service. The workflow
+does not claim per-test database isolation for the rest of the DB corpus.
 
 ## What The Workflow Protects
 
@@ -249,7 +253,12 @@ layout, and separate clean-bootstrap invocation.
 - [`portal/frontend/package.json`](../../../portal/frontend/package.json) and
   [the Makefile](../../../Makefile) own `frontend-check` test/build composition.
 - [`tests/conftest.py`](../../../tests/conftest.py) owns DB opt-in and isolated
-  DSN guards; the workflow owns the two CI database invocations.
+  DSN guards, required-dependency checks, and suppression of implicit dotenv
+  discovery; the workflow owns the two CI database invocations.
+- `make validate-retained-assurance` owns deliberate compatibility validation
+  for the retained internal assurance files. Those files are not ordinary PR
+  prerequisites and this command does not execute formal checks or activate
+  guarantees.
 - Update this document whenever workflow jobs or their step boundaries change.
 
 Do not infer full runtime, deployment, proof-attestation, or guarantee coverage
