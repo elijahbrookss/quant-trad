@@ -25,12 +25,11 @@ code_paths:
 
 Accepted on 2026-07-25.
 
-**Retroactive cleanup ADR:** this makes the cleanup campaign's existing
-no-live-trading boundary explicit.
+This records QT's existing no-live-trading boundary explicitly.
 
 ## Context
 
-The repository uses `live` both for an active runtime lifecycle phase and for a
+The repository uses `live` both for an active runtime lifecycle state and for a
 reserved runtime-composition mode. Neither label proves that production exchange
 order submission is implemented or authorized. Paper market-data ingestion,
 provider credentials, and deterministic fill adapters must not accidentally
@@ -38,8 +37,8 @@ combine into a live trading path.
 
 ## Decision
 
-Quant-Trad has no authorized production order-submission capability during this
-cleanup campaign. Backtest and paper execution use deterministic simulated
+Quant-Trad has no authorized production order-submission capability. Backtest
+and paper execution use deterministic simulated
 fills; paper may also run `observe-only`, which forbids order, fill, trade, fee,
 slippage, and wallet mutation semantics.
 
@@ -68,7 +67,7 @@ and failure-recovery evidence.
 Current research and paper validation remain safe from external order placement.
 The reserved `live` seam may be misleading and should stay clearly documented
 until it is either removed or implemented behind a separately reviewed boundary.
-Live-trading features remain out of cleanup scope.
+Live-trading features remain outside the authorized product boundary.
 
 ## Rejected Alternatives
 

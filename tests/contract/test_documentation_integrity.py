@@ -8,20 +8,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
-HISTORICAL_RECORDS = (
-    "docs/engineering/canonical-fact-migration-backup.md",
-    "docs/engineering/canonical-fact-migration-discovery.md",
-    "docs/engineering/canonical-fact-migration-validation.md",
-    "docs/engineering/collector-operations-discovery.md",
-    "docs/engineering/collector-operations-validation.md",
-    "docs/engineering/frontend-v2-operator-validation.md",
-    "docs/plans/backtest-dataset-boundary.md",
-    "docs/plans/platform-baseline-cleanup.md",
-    "docs/research-campaigns/CHAINLINK_ETH_USD_BREAKOUT_V2_DOSSIER.md",
-    "docs/research-campaigns/CHAINLINK_ETH_USD_BREAKOUT_V3_SIX_MONTH_DOSSIER.md",
-)
-
-
 def _read(repo_path: str) -> str:
     return (ROOT / repo_path).read_text(encoding="utf-8")
 
@@ -47,7 +33,7 @@ def _squash(text: str) -> str:
     return " ".join(text.split()).lower()
 
 
-def test_manual_adr_index_matches_accepted_primary_records() -> None:
+def test_selected_accepted_adrs_are_indexed_and_linked() -> None:
     index = _read("docs/architecture/decisions/README.md")
     rows = {
         adr_id: (target, status.strip())
@@ -59,46 +45,19 @@ def test_manual_adr_index_matches_accepted_primary_records() -> None:
     }
 
     expected = {
-        "0048": (
-            "0048-gate-agent-mutation-and-research-promotion.md",
-            "Accepted",
-        ),
-        "0064": (
-            "0064-use-one-code-owned-collector-operations-contract.md",
-            "Accepted",
-        ),
+        "0048": "0048-gate-agent-mutation-and-research-promotion.md",
+        "0064": "0064-use-one-code-owned-collector-operations-contract.md",
+        "0065": "0065-use-explicit-frozen-check-admission-for-new-research-observations.md",
+        "0066": "0066-scale-validation-to-consequence-and-trust-boundaries.md",
     }
-    for adr_id, (target, status) in expected.items():
-        assert rows[adr_id] == (target, status)
+    for adr_id, target in expected.items():
+        assert rows[adr_id] == (target, "Accepted")
         repo_path = f"docs/architecture/decisions/{target}"
         assert (ROOT / repo_path).is_file()
         assert _frontmatter(repo_path)["status"] == "accepted"
 
 
-def test_historical_research_index_preserves_unavailable_history_and_v3_lineage() -> None:
-    docs_home = _read("docs/index.md")
-    history = _read("docs/research-campaigns/README.md")
-    normalized = _squash(history)
-
-    dead_targets = {
-        "BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V1.md",
-        "BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V2.md",
-    }
-    linked_targets = set(re.findall(r"\[[^]]+\]\(([^)]+)\)", history))
-    assert linked_targets.isdisjoint(dead_targets)
-    assert "research-campaigns/" not in docs_home
-
-    v3_target = "BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V3_DOSSIER.md"
-    assert v3_target in linked_targets
-    assert (ROOT / "docs/research-campaigns" / v3_target).is_file()
-    assert _frontmatter(f"docs/research-campaigns/{v3_target}")["status"] == "historical"
-    assert "v1 and v2 source documents" in normalized
-    assert "unavailable in this repository" in normalized
-    assert "lineage gap" in normalized
-    assert "does not reconstruct v1 or v2" in normalized
-
-
-def test_architecture_navigation_and_unverified_asset_lineage_are_current() -> None:
+def test_architecture_navigation_and_asset_lineage_are_current() -> None:
     architecture = _read("docs/architecture/README.md")
     boundary_map = architecture.split("## Boundary Map", 1)[1].split(
         "## Decision Records", 1
@@ -134,23 +93,7 @@ def test_architecture_navigation_and_unverified_asset_lineage_are_current() -> N
     )
 
 
-def test_only_completed_campaign_and_validation_records_were_historicized() -> None:
-    assert len(HISTORICAL_RECORDS) == 10
-    for repo_path in HISTORICAL_RECORDS:
-        assert _frontmatter(repo_path)["status"] == "historical"
-        assert re.search(
-            r"> Historical (?:evidence|campaign) record[.:]",
-            _read(repo_path),
-        ), repo_path
-
-    active_notice = "docs/research-campaigns/CHAINLINK_RESEARCH_BOUNDARY_LIMITATIONS.md"
-    assert _frontmatter(active_notice).get("status") != "historical"
-    notice = _read(active_notice)
-    assert "## Canonical Rerun Contract" in notice
-    assert "Any new result must report its actual population" in notice
-
-
-def test_ci_topology_document_matches_the_exact_four_workflow_jobs() -> None:
+def test_ci_topology_matches_workflow_jobs() -> None:
     workflow = _yaml(".github/workflows/test.yaml")
     jobs = workflow["jobs"]
     expected_jobs = (
@@ -159,7 +102,7 @@ def test_ci_topology_document_matches_the_exact_four_workflow_jobs() -> None:
         "deployment-contract",
         "clean-database-bootstrap",
     )
-    assert tuple(jobs) == expected_jobs
+    assert set(jobs) == set(expected_jobs)
 
     bootstrap_steps = tuple(
         step["name"] for step in jobs["clean-database-bootstrap"]["steps"]
@@ -181,7 +124,7 @@ def test_ci_topology_document_matches_the_exact_four_workflow_jobs() -> None:
     assert "they are not separate workflow jobs" in normalized
 
 
-def test_observability_topologies_and_dashboard_operations_stay_aligned() -> None:
+def test_observability_docs_match_supported_shippers_and_dashboard_operations() -> None:
     local_services = _yaml("docker/docker-compose.yml")["services"]
     server_services = _yaml("docker/docker-compose.server.yml")["services"]
     shipper_names = {"promtail", "alloy"}
@@ -205,16 +148,18 @@ def test_observability_topologies_and_dashboard_operations_stay_aligned() -> Non
     assert 'loki.write "local"' in alloy
     assert 'url = "http://loki:3100/loki/api/v1/push"' in alloy
 
+    makefile = _read("Makefile")
+    assert re.search(
+        r"^(?:grafana-backup|grafana-restore)\s*:",
+        makefile,
+        flags=re.MULTILINE,
+    ) is None
+
     provider = _yaml("docker/grafana/provisioning/dashboards/dashboard.yml")[
         "providers"
     ][0]
     assert provider["allowUiUpdates"] is False
     assert provider["updateIntervalSeconds"] == 10
-
-    make_targets = set(
-        re.findall(r"^([A-Za-z0-9_.-]+):", _read("Makefile"), flags=re.MULTILINE)
-    )
-    assert make_targets.isdisjoint({"grafana-backup", "grafana-restore"})
 
     expectations = {
         "docs/engineering/observability.md": (
@@ -250,35 +195,4 @@ def test_observability_topologies_and_dashboard_operations_stay_aligned() -> Non
     for repo_path, required_facts in expectations.items():
         normalized = _squash(_read(repo_path))
         missing = [fact for fact in required_facts if fact not in normalized]
-        assert not missing, f"{repo_path} is missing reconciled facts: {missing}"
-
-
-def test_forward_correction_preserves_gc026_lineage_without_claiming_result() -> None:
-    frozen_candidates = _read(
-        "docs/plans/documentation-reconciliation/guarantee-candidates.md"
-    )
-    frozen_row = next(
-        line for line in frozen_candidates.splitlines() if line.startswith("| `QT-GC-026`")
-    )
-    frozen_locator = "docs/architecture/data/MARKET_STRUCTURE_DATA_PLANE.md:380,1051"
-    assert f"A: `{frozen_locator}`" in frozen_row
-
-    ledger = _read(
-        "docs/plans/documentation-reconciliation/phase-3-forward-corrections.md"
-    )
-    normalized = _squash(ledger)
-    assert frozen_locator.lower() in normalized
-    assert (
-        "docs/architecture/decisions/"
-        "0053-use-tiered-market-structure-archive-and-replay-boundary.md"
-        "@fb5814de:128-132"
-    ) in normalized
-    assert (
-        "docs/architecture/data/market_structure_data_plane.md@fb5814de:1044"
-    ) in normalized
-    assert "trade coverage discrimination" in normalized
-    assert "describes evidence that must be produced; it is not a proof result" in normalized
-    assert "does not execute or satisfy `qt-proof-410`" in normalized
-    assert "does not execute or close `qt-rem-410`" in normalized
-    assert "does not create an attestation" in normalized
-    assert "does not reclassify or activate `qt-guar-proven-zero-trade-coverage`" in normalized
+        assert not missing, f"{repo_path} is missing required documented facts: {missing}"

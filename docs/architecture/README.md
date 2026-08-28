@@ -13,7 +13,7 @@ The architecture docs are organized by conceptual boundary, not by the current P
 4. [Identity and correlation boundary](identity/IDENTITY_AND_CORRELATION_BOUNDARY.md) - how `run_id`, `bot_id`, `strategy_hash`, `instrument_id`, `signal_id`, `decision_id`, and `trade_id` connect the system.
 5. [Architecture decision records](decisions/README.md) - durable decisions and tradeoffs.
 6. [Security layer](security/SECURITY_LAYER.md) - credential handling, trust boundaries, known gaps, and PQ risk points.
-7. [Architecture component index](ARCHITECTURE_COMPONENT_INDEX.md) - generated frontmatter/code-path index and review routing.
+7. [Architecture component index](ARCHITECTURE_COMPONENT_INDEX.md) - generated frontmatter/code-path index.
 
 ## Fastest Diagrams
 
@@ -92,8 +92,8 @@ source of truth when there is disagreement.
 Use an ADR when a durable choice changes lifecycle truth, accounting, known-at
 semantics, execution or exit behavior, dataset identity or quality, async
 ownership, agent authority, recovery, security, or external-order boundaries.
-An accepted ADR records the decision and rationale; it does not silently
-override an unreconciled platform contract or activate a guarantee.
+An accepted ADR records the decision and rationale; changing a platform
+contract still requires an explicit contract update.
 
 ## Reading Paths
 
@@ -114,17 +114,9 @@ For adding extension points:
 - Contracts under `docs/contracts/platform/` remain the source of truth.
 - Follow the
   [component documentation standard](../engineering/documentation/component-documentation-standard.md)
-  for versioned metadata, semantic-owner review routing, and source-module
-  contract discovery.
-- New component docs use metadata version 2. Migrate legacy metadata only as a
-  complete owner-reviewed change; do not infer ownership from existing paths or
-  audit routing.
-- The generated component index is a derived human view. Ownership metadata
-  routes review but does not create product semantics, prove approval, or
-  activate a guarantee.
-- Shared `code_paths` are navigation and coverage, not exclusive file
-  ownership. A discovered source-module contract remains subordinate to the
-  platform contracts.
+  for required frontmatter and readable boundary documentation.
+- The generated component index is a navigation aid. Shared `code_paths` are
+  coverage links, not exclusive file ownership.
 - Boundary docs should prefer supported current behavior over future language.
 - Diagrams should be budgeted. Add one only when it makes the intent easier to
   see than prose alone.

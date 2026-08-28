@@ -96,9 +96,9 @@ Frontend validation keeps two explicit test families. `npm run test:node` runs
 the Node-native model, adapter, and source-contract suites. `npm run test:jsx`
 runs the two tracked React component suites through the pinned Vitest/jsdom
 profile. `npm test` runs both families, and `make frontend-check` adds the Vite
-production build. These are bounded source, component, and compile checks. They
-do not provide a real backend, browser/E2E coverage, production or live-system
-proof, or guarantee activation.
+production build. These checks cover source contracts, tracked components, and compilation. They
+do not exercise a real backend, browser/E2E behavior, deployment, or a live
+system.
 
 ## Navigation And Visual Language
 

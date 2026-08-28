@@ -7,12 +7,12 @@ last_verified: 2026-08-10
 # Collector Operations Validation
 
 > Historical evidence record. "Live," "production," deployment, and rollback
-> statements below describe the recorded 2026-08-10 cutover campaign only; they
-> do not certify the current fleet or current recovery state.
+> statements below describe the recorded 2026-08-10 cutover only; they do not
+> certify the current fleet or current recovery state.
 
-## Campaign boundary
+## Record boundary
 
-This report records the cutover and operational proof for the canonical
+This report records the cutover and operational validation for the canonical
 collector control plane introduced after the
 [collector operations discovery](collector-operations-discovery.md). It covers
 the code-owned registry, scheduled and continuous runtimes, canonical API,
@@ -25,7 +25,7 @@ collectors.
 
 ## Final collector inventory
 
-| Family | Operational registration | Canonical output | History/recovery | Live campaign state |
+| Family | Operational registration | Canonical output | History/recovery | Recorded live state |
 | --- | --- | --- | --- | --- |
 | Coinbase scheduled open interest | Code-recognized `scheduled_fact` definitions | `derivatives.open_interest.v1` | Latest-state polling; durable attempts and missed-schedule gaps; no arbitrary provider history | Three production definitions healthy |
 | Coinbase scheduled funding | Code-recognized `scheduled_fact` definitions | `derivatives.funding_rate.v1` | Latest-state polling; durable attempts and missed-schedule gaps; no arbitrary provider history | Three production definitions healthy |

@@ -102,7 +102,7 @@ requires those identities to agree, not merely one matching ID.
 
 ## Six Promises Guide Important Changes
 
-QT presents its high-consequence assurance model as six promises:
+QT protects six high-consequence outcomes:
 
 1. **Causal and canonical truth.** Historical results use only information that
    was knowable at the time, and canonical observations are not silently
@@ -122,10 +122,8 @@ QT presents its high-consequence assurance model as six promises:
    platform truth, and destructive recovery is treated as a real operational
    obligation rather than assumed from configuration alone.
 
-The [core promises](core-promises.md) link these plain-language outcomes to the
-supporting contracts, properties, and engineering checks. They summarize the
-system; they do not replace the authoritative contracts or represent formally
-activated guarantees.
+The [core promises](core-promises.md) connect these outcomes to their platform
+contracts, accepted decisions, and normal engineering checks.
 
 ## What Normal Development Protects
 
@@ -137,21 +135,21 @@ QT uses ordinary engineering validation as its default protection:
   or TimescaleDB without touching a production database.
 - Frontend tests and the production build protect supported views and adapters;
   the frontend remains a projection rather than a source of truth.
-- Documentation, glossary, architecture metadata, generated views, and internal
-  references are checked for consistency.
+- Documentation, glossary, architecture metadata, and internal links are
+  checked for consistency.
 - Deployment and configuration checks inspect supported topology without
   deploying to a live system.
 - Network, real-credential, production-data, and external-order boundaries stay
   closed during normal validation.
 
-The complete suites are the regression unit. Individual named checks help
-reviewers find important coverage, but one passing test does not prove every
-broad statement under every environment.
+The complete suites are the regression unit. An individual test protects the
+behavior it actually exercises; it does not establish universal correctness for
+every environment.
 
 Stronger verification is reserved for a real trust boundary—for example, an
-external release consumer, security review, legal requirement, or capital
-authorization. Exact-build provenance and formal evidence publication are not
-part of ordinary QT development today.
+external release consumer, security review, legal requirement, recovery
+commitment, or capital authorization. Exact-build provenance and formal
+evidence publication are not part of ordinary QT development today.
 
 ## Honest Current Limits
 
@@ -159,29 +157,17 @@ part of ordinary QT development today.
   and does not authorize live venue trading.
 - Destructive recovery has static guards, but a complete disposable
   source-to-restore rehearsal may be unavailable until the required isolated
-  environment exists. QT reports that as unavailable rather than treating a
+  environment exists. QT reports that honestly rather than treating a
   configuration check as a restore result.
-- Some guarantees are only partially enforced, and open remediation records are
-  not automatically closed by passing tests.
+- Some broad properties have representative rather than universal test
+  coverage. The [testing strategy](engineering/testing/testing-strategy.md)
+  describes the supported validation boundary.
 - The current deployment model has a local/private trust boundary. Multi-user,
   remotely exposed, regulated, independently certified, or live-capital use
-  would require a new owner decision and stronger evidence.
+  would require explicit product and security decisions plus stronger evidence.
 - QT is evolving. Missing provider, indicator, or presentation support is a
   limitation; violating causal, authority, persistence, credential, or
   accounting boundaries is a defect.
-
-## Retained Assurance History
-
-QT preserves the exhaustive discovery inventory of 75 properties, 85 named
-check definitions, 68 remediation records, exact-source inspection material,
-formal result schemas, and earlier review packets. This material remains useful
-for traceability, maintenance, and any future high-trust use. It is not required
-vocabulary or workflow for a trader, researcher, or engineer making an ordinary
-change. None of the 75 properties is formally activated.
-
-Contributors who need that layer should start with
-[assurance maintenance](engineering/assurance-maintenance.md), then deliberately
-enter the retained [assurance internals](assurance/guarantees/README.md).
 
 ## Where To Read Next
 

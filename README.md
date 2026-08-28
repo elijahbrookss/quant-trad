@@ -352,7 +352,7 @@ backend concerns.
 | Research evidence | [Check evidence boundary](docs/architecture/research-orchestration/CHECK_EVIDENCE_BOUNDARY.md), [research memory](docs/architecture/research-memory/RESEARCH_MEMORY_BOUNDARY.md) |
 | Runtime | [Runtime timeline](docs/concepts/runtime-timeline.md), [execution model](docs/concepts/execution-model.md), [strategies and signals](docs/concepts/strategies-and-signals.md) |
 | Inspection and reporting | [BotLens](docs/concepts/botlens.md), [reporting datasets](docs/concepts/reporting-datasets.md) |
-| Agent workflows | [Developer/audit workflow](docs/engineering/developer-audit-workflow.md), [MCP research server](docs/architecture/research-orchestration/MCP_RESEARCH_SERVER.md) |
+| Agent workflows | [Developer workflow](docs/engineering/developer-workflow.md), [MCP research server](docs/architecture/research-orchestration/MCP_RESEARCH_SERVER.md) |
 | Historical collector validation | [Collector operations validation](docs/engineering/collector-operations-validation.md) |
 | Internals and exact rules | [System architecture](docs/architecture/system/SYSTEM_MODEL.md), [architecture guide](docs/architecture/README.md), [engineering docs](docs/engineering/README.md), [platform contracts](docs/contracts/README.md) |
 

@@ -1,14 +1,9 @@
 ---
-metadata_version: 2
 component: economic-execution-contract
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
 status: active
-semantic_owner: execution-runtime
-required_reviewers:
-  - architecture-documentation-owner
-  - execution-runtime-owner
 tags:
   - execution
   - economics
@@ -32,7 +27,6 @@ code_paths:
   - cli/experiments/runner.py
   - cli/experiments/pass_gates.py
   - tests/integration/runtime/test_execution_assumptions.py
-module_contracts: []
 ---
 # Bar-Execution Economic Contract
 

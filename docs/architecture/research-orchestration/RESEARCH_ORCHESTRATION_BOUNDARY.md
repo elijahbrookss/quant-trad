@@ -29,7 +29,7 @@ code_paths:
   - portal/backend/workers/research_worker.py
   - portal/backend/service/reports/contract.py
   - portal/backend/service/reports/comparison.py
-  - docs/engineering/developer-audit-workflow.md
+  - docs/engineering/developer-workflow.md
 ---
 # Research Orchestration Boundary
 

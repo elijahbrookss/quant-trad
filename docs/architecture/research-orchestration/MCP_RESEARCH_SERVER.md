@@ -26,7 +26,7 @@ code_paths:
   - portal/backend/service/indicators/indicator_service
   - pyproject.toml
   - docs/architecture/research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md
-  - docs/engineering/developer-audit-workflow.md
+  - docs/engineering/developer-workflow.md
 ---
 # MCP Research Server
 

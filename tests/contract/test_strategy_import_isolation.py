@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_strategy_facade_import_does_not_bootstrap_persistence() -> None:
-    """Proof collection may import strategy routes without resolving a DSN."""
+    """Importing strategy routes must not resolve a database connection."""
 
     environment = os.environ.copy()
     environment.update(

@@ -21,7 +21,7 @@ code_paths:
 
 ## Status
 
-Accepted on 2026-08-05 for Phase 3A deterministic backtests.
+Accepted on 2026-08-05 for deterministic execution-book backtests.
 
 ## Context
 
@@ -78,7 +78,7 @@ Costs and limitations:
 - L2 tapes may be large and require explicit run binding and retention policy;
 - aggregated L2 cannot prove passive queue position or hidden liquidity;
 - tape certification proves source reconstruction, not venue matching fidelity;
-- Phase 3A uses deterministic zero latency; and
+- current replay uses deterministic zero latency; and
 - a tape is not authorization to submit an order.
 
 ## Rejected alternatives
@@ -105,13 +105,13 @@ reproducible false claim.
 
 ## Follow-up
 
-Phase 3B may add resting progress, bounded latency, and capability-aware queue
-models behind the same tape/context/lifecycle boundary. Shadow and live
-calibration remain later phases and require their own authorization decisions.
+Resting progress, bounded latency, and capability-aware queue models may be
+added behind the same tape/context/lifecycle boundary. Shadow and live
+calibration remain separate work and require their own authorization decisions.
 
 ## References
 
-- [Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md)
+- [Replay-certified book execution](../execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md)
 - [ADR 0053](0053-use-tiered-market-structure-archive-and-replay-boundary.md)
 - [ADR 0056](0056-pin-venue-neutral-execution-contexts-per-run.md)
 - [ADR 0057](0057-use-append-only-canonical-order-lifecycle.md)

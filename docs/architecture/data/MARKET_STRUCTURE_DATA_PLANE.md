@@ -1057,10 +1057,10 @@ definitions; it does not report a formal verification result.
 | Consumer failure | crash parser/book/feature worker after source durable but before/after DB commit | restart catches up with idempotent effects and visible lag; acquisition remains bounded |
 | Fence safety | expire owner and let new generation start while old worker attempts append | old append/manifest/session completion rejected transactionally |
 
-The retained L2 acceptance definition additionally required the property suite
+The historical L2 acceptance definition additionally required the property suite
 to generate random valid absolute mutation sequences, injected duplicates and
-gaps, and checkpoint cuts and to prove the state-machine invariants above. This
-retained requirement is not a new proof result.
+gaps, and checkpoint cuts and to check the state-machine rules above. This text
+does not report a current validation result.
 
 ## Research Integration And Falsifiable Evidence
 
@@ -1083,20 +1083,19 @@ conditional results.
 
 ## Historical Implementation Record And Open Production Limit
 
-The detailed phase material below is retained as the implementation campaign's
-design and acceptance history. Its dated status statements are campaign
-evidence, not live-environment readings or Phase 3 proof results. Current and
+The detailed material below preserves the original design and acceptance history.
+Its dated status statements are not live-environment readings. Current and
 remaining lifecycle states are:
 
-| Stage | Lifecycle reading |
+| Recorded area | Historical state |
 |---|---|
-| Phase 0 | completed historical provider-proof and provisional-capacity campaign |
-| Phase 1 | implemented and live-verified for the recorded bounded BIP/BTC scope on 2026-08-02; this record does not establish current production enrollment |
-| Phase 2 | completed for the recorded bounded BIP/BTC scope on 2026-08-02 |
-| Phase 3 | implemented for the recorded bounded BIP/BTC scope on 2026-08-02 |
-| Phase 4 | implemented and accepted for the recorded bounded BIP evidence on 2026-08-02 |
+| Provider validation and provisional capacity | completed |
+| Trade ingestion | implemented and live-verified for the recorded bounded BIP/BTC scope on 2026-08-02; this record does not establish current production enrollment |
+| Level 2 archive and reconstruction | completed for the recorded bounded BIP/BTC scope on 2026-08-02 |
+| Market-state features | implemented for the recorded bounded BIP/BTC scope on 2026-08-02 |
+| Normalization and frozen datasets | implemented and accepted for the recorded bounded BIP evidence on 2026-08-02 |
 | Production enrollment | not approved; no historical milestone or document silently satisfies it |
-| Phase 5 observation studies | future work; not implemented or authorized by this document |
+| Observation studies | future work; not implemented or authorized by this document |
 
 Each completed historical slice remains independently understandable without
 treating its acceptance bullets as current verification results.
@@ -1304,26 +1303,25 @@ Acceptance:
 Value: evidence about market structure and bounded strategy context, not an
 alpha or deployment claim.
 
-## Explicit Unknowns, Limitations, And Proof Decisions
+## Explicit Unknowns, Limitations, And Validation Decisions
 
-### Historical Phase 0 Proof Decisions
+### Historical Validation Decisions
 
-These dated campaign decisions are retained to explain the inputs to Phases
-1–4. They do not establish a current proof, attestation, production admission,
-or guarantee state.
+These dated implementation decisions explain the evidence behind the current
+design. They do not establish current production support.
 
 | Question | Decision state |
 |---|---|
-| BIP/BTC public `market_trades`, L2, ticker, heartbeat and REST access | passed one-hour public and existing-CDP proofs; authenticated v2 evidence passes the v3 implementation-readiness gate |
-| ETP/ETH and SLP/SOL access/units | passed bounded public access/unit/reconnect/replay spot checks; eligible for implementation configuration but production-unenrolled |
+| BIP/BTC public `market_trades`, L2, ticker, heartbeat and REST access | passed one-hour public and existing-CDP validation; authenticated evidence passes the current implementation-readiness gate |
+| ETP/ETH and SLP/SOL access/units | passed bounded public access, unit, reconnect, and replay checks; eligible for implementation configuration but production-unenrolled |
 | `sequence_num` scope | resolved as one connection-epoch counter shared across all received channels; reset to zero on reconnect; not per product/channel |
-| first event after subscription/reconnect | BIP and BTC L2 began with a complete `snapshot` in both public proof epochs; v1 keeps one product per connection and does not depend on multi-product frames |
+| first event after subscription/reconnect | BIP and BTC L2 began with a complete `snapshot` in both public validation windows; the implementation keeps one product per connection and does not depend on multi-product frames |
 | BIP futures trade/L2 size and multiplier | confirmed as contracts, 0.01 BTC/contract, from published specification, live metadata, and observed integral trade/L2 quantities |
-| public REST product/book/recent trades | admitted for bounded BIP/BTC proof/reconciliation; recent trades are not complete history |
+| public REST product/book/recent trades | used for bounded BIP/BTC validation and reconciliation; recent trades are not complete history |
 | REST book as WebSocket recovery splice | rejected: observed REST book has provider time but no compatible WebSocket sequence position |
 | Advanced Trade product funding meaning | admitted only as provider-reported observation known on acceptance; API does not prove projected/finalized semantics, so those features remain disabled |
 | public CDE historical/funding machine source | rejected: human page has no stable documented data endpoint; direct historical funding REST returns 401 without CDE credentials |
-| actual p99/max, compression, replay, backlog, annual budget | one-hour diagnostics measured; 24-hour implemented-path capture and explicit operator budget approval deferred until after Phase 4 and mandatory before production enrollment |
+| actual p99/max, compression, replay, backlog, annual budget | one-hour diagnostics measured; a 24-hour implemented-path capture and explicit operator budget approval remain mandatory before production enrollment |
 
 ### Explicit Coverage Gaps
 
@@ -1345,9 +1343,8 @@ Quant-Trad feature.
 ## Current Repository Implementation Map
 
 This explanatory map names current repository paths instead of preserving
-never-created proposed directories alongside implemented code. Path presence is
-implementation evidence only; it does not by itself establish authority, proof,
-attestation, production admission, or guarantee activation.
+never-created proposed directories alongside implemented code. Path presence
+shows implementation, not supported production behavior.
 
 | Area | Current paths/artifacts | Current role |
 |---|---|---|
@@ -1363,8 +1360,8 @@ attestation, production admission, or guarantee activation.
 | Controllers/API | `portal/backend/controller/market_data.py` and its typed API schemas | definitions, sessions, coverage, quality, replay, lifecycle, and dataset inspection/operations |
 | CLI/MCP | `cli/main.py`, `cli/api.py`, `cli/mcp_server.py` | API-backed collector, market-structure, replay, retention, lifecycle, and dataset operations |
 | Configuration | `config/defaults.yaml`, `src/core/settings.py`, deployment environment documentation | allowlists, spool/archive bounds, retention, reconnect, checkpoint, and capacity settings without a second DSN |
-| Tests/fixtures | `tests/test_data_providers`, `tests/test_market_data`, `tests/test_portal`, `tests/integration/runtime` | current test and fixture locations; a named test remains a proof definition until separately executed and attested |
-| Architecture/operations docs | `DATA_BOUNDARY.md`, this document, ADR 0053, provider guidance, and runbooks | explanatory navigation, accepted decision lineage, operating procedures, measured campaign evidence, and supported-coverage guidance |
+| Tests/fixtures | `tests/test_data_providers`, `tests/test_market_data`, `tests/test_portal`, `tests/integration/runtime` | current test and fixture locations; validation results depend on the exact revision, environment, and command executed |
+| Architecture/operations docs | `DATA_BOUNDARY.md`, this document, ADR 0053, provider guidance, and runbooks | explanatory navigation, accepted decision lineage, operating procedures, measured historical evidence, and supported-coverage guidance |
 
 Current CLI operations remain operator-oriented:
 
@@ -1382,20 +1379,20 @@ rooms remain read-only; enumerated collector action requests route through the
 backend's code-owned collector-operations service. The frontend does not become
 market-data truth, mutation-policy authority, or workflow authority.
 
-## Historical Definition Of Ready For Phase 0 And Phase 1
+## Historical Implementation Readiness Criteria
 
-The following definition governed the completed campaign and is retained as
-decision lineage, not as a current instruction or proof result.
+The following criteria governed the recorded implementation and are retained as
+decision lineage, not as current instructions or validation results.
 
-An implementation agent could execute Phase 0 without choosing a new provider,
-credential model, raw format, storage role, identity, time model, product scope,
-or validity philosophy. Phase 0 existed to fill the explicitly named empirical
-fields, not to redesign the plane.
+Initial validation could proceed without choosing a new provider, credential
+model, raw format, storage role, identity, time model, product scope, or validity
+philosophy. Its purpose was to fill explicitly named empirical fields, not to
+redesign the plane.
 
-After Phase 0 acceptance, Phase 1 had fixed boundaries for durable-spool-first
+Implementation then had fixed boundaries for durable-spool-first
 delivery, pre-parse raw identity, append-only manifest mapping, session fencing,
 trade coverage, trade identity, maker/aggressor translation, unit conversion,
 typed storage, late revisions, aggregation, replay, retention, dataset freezing,
 CLI ownership, and the three-pair gated allowlist. Evidence contradicting those
-boundaries required an owner-reviewed amendment before implementation rather
-than a hidden divergence in provider code.
+boundaries required an explicit architecture amendment before implementation
+rather than a hidden divergence in provider code.

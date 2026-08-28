@@ -112,15 +112,6 @@ LOCAL_PG_ENV = if [ -f secrets.env ]; then \
 	fi
 PYTEST_ENV = QT_LOGGING_LOKI_URL= QT_LOGGING_DEBUG=false QT_LOGGING_LEVEL=WARNING MPLCONFIGDIR=/tmp/matplotlib
 REPORT_API_TEST_TIMEOUT ?= 90s
-RETAINED_ASSURANCE_TESTS = \
-	tests/contract/test_assurance_environment_profiles.py \
-	tests/contract/test_assurance_executor.py \
-	tests/contract/test_assurance_lifecycle.py \
-	tests/contract/test_assurance_publication.py \
-	tests/contract/test_assurance_runner_build.py \
-	tests/contract/test_system_final_review.py
-RETAINED_ASSURANCE_IGNORES = $(foreach test,$(RETAINED_ASSURANCE_TESTS),--ignore=$(test))
-
 # Docs sync (Obsidian/Windows rsync friendly)
 SYNC_DOCS_SRC         ?= docs/
 SYNC_DOCS_DEST        ?= $(or $(OBSIDIAN_SYNC_DOCS_DEST),$(OBSIDIAN_SYNC_DEST),)
@@ -346,7 +337,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
-	test-reporting test-reporting-api test-botlens test-runtime backend-check glossary-render guarantees-render system-final-review-render validate-glossary validate-guarantees validate-assurance-runner validate-system-final-review validate-retained-assurance validate-system-final-gate validate-docs frontend-test frontend-build frontend-check \
+	test-reporting test-reporting-api test-botlens test-runtime backend-check validate-glossary validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check check-all
 
 status: ## Show service status without docker compose ps sandbox friction
@@ -471,48 +462,14 @@ test-botlens: venv ## Run focused BotLens and runtime projection tests
 test-runtime: test-botlens ## Alias for focused BotLens/runtime tests
 
 backend-check: venv ## Run ordinary non-database backend tests
-	@$(PYTEST_ENV) QT_OMIT_DB_TESTS=1 $(PYTHON) -m pytest -q $(RETAINED_ASSURANCE_IGNORES)
+	@$(PYTEST_ENV) QT_OMIT_DB_TESTS=1 $(PYTHON) -m pytest -q
 
-glossary-render: venv ## Render reviewed terminology views
-	@$(PYTHON) scripts/docs/glossary.py render
-
-guarantees-render: venv ## Render the guarantee registry human view
-	@$(PYTHON) scripts/docs/guarantees.py render
-
-system-final-review-render: venv ## Render system final review (source=<40-hex>; attestations="path ..."; final_gate=1; validation_results=path)
-	@set -euo pipefail; \
-	if [ -z "$(strip $(source))" ]; then echo "✗ source=<40-hex commit> is required"; exit 1; fi; \
-	$(PYTHON) scripts/docs/build_system_final_review.py render --source-commit "$(source)" $(foreach item,$(attestations),--attestation "$(item)") $(if $(filter 1 true yes,$(final_gate)),--final-gate,) $(if $(strip $(validation_results)),--validation-results "$(validation_results)",)
-
-validate-glossary: venv ## Validate terminology metadata and generated views
-	@$(PYTHON) scripts/docs/glossary.py check
+validate-glossary: venv ## Validate the maintained platform glossary
 	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_platform_glossary.py
 
-validate-guarantees: venv ## Validate guarantee metadata and its generated human view
-	@$(PYTHON) scripts/docs/guarantees.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_guarantee_registry.py
-
-validate-assurance-runner: venv ## Validate the source-bound offline runner model without Docker or network
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_assurance_environment_profiles.py tests/contract/test_assurance_runner_build.py
-
-validate-system-final-review: venv ## Validate the non-normative system final-review model
-	@$(PYTHON) scripts/docs/build_system_final_review.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_system_final_review.py
-
-validate-retained-assurance: venv ## Check retained assurance machinery without proof execution
-	@$(PYTHON) scripts/docs/build_system_final_review.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q $(RETAINED_ASSURANCE_TESTS)
-
-validate-system-final-gate: venv ## Verify a committed strict final-gate packet and its external repository state
-	@$(PYTHON) scripts/docs/build_system_final_review.py check --final-gate
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_system_final_review.py
-
-validate-docs: venv ## Refresh indexes and run docs contract validation
+validate-docs: venv ## Refresh the architecture index and run documentation checks
 	@$(PYTHON) scripts/docs/build_architecture_index.py
-	@$(PYTHON) scripts/docs/glossary.py check
-	@$(PYTHON) scripts/docs/guarantees.py check
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_architecture_metadata_schema.py tests/contract/test_documentation_reconciliation.py tests/contract/test_platform_glossary.py tests/contract/test_guarantee_registry.py
-
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_documentation_integrity.py tests/contract/test_platform_glossary.py
 frontend-test: ## Run frontend Node and JSX tests
 	@$(NPM) --prefix $(FRONT_DIR) test
 

@@ -71,11 +71,11 @@ run so exploratory evidence cannot be relabeled after completion.
 
 Phase 1, Phase 2A, Phase 2B, Phase 3A, Phase 3B, Phase 4, Phase 5, and the
 offline Phase 6 ceiling are implemented by the
-[Phase 1 economic execution contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md),
-[Phase 2A venue-neutral execution context](../execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md),
-the [Phase 2B durable canonical order lifecycle](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md),
-the [Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md),
-and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md),
+[Economic execution contract](../execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md),
+[Venue-neutral execution context](../execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md),
+the [Durable canonical order lifecycle](../execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md),
+the [Replay-certified book execution](../execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md),
+and [Passive queue bounds and latency](../execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md),
 [scientific research authority](SCIENTIFIC_RESEARCH_AUTHORITY.md), the
 [typed strategy/action graph](TYPED_STRATEGY_GRAPH.md), and
 [offline research governance](OFFLINE_RESEARCH_GOVERNANCE.md).
@@ -438,7 +438,7 @@ must label their claims accordingly.
 
 **Implementation status:** Implemented on 2026-08-05. The normative current
 behavior, evidence rules, limitations, and rollback contract are documented in
-[Phase 1 Economic Execution Contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md).
+[Economic Execution Contract](../execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md).
 
 - **Objective:** Make bar-level economics honest before adding book complexity.
 - **Capabilities added:** A versioned resolved execution-assumption manifest;
@@ -536,7 +536,7 @@ behavior, evidence rules, limitations, and rollback contract are documented in
 ## Phase 2B — Durable canonical order lifecycle
 
 **Implementation status:** Delivered on 2026-08-05. See the
-[Phase 2B implementation contract](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+[Durable canonical order lifecycle](../execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
 and [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md).
 
 - **Objective:** Replace the immediate full-fill request as the long-term order
@@ -580,8 +580,8 @@ and [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md).
 ## Phase 3 — L2 replay, partial fills, resting orders, queue bounds, and latency
 
 **Implementation record:** Releases 3A and 3B are implemented by
-[Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md)
-and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md).
+[Replay-certified book execution](../execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md)
+and [Passive queue bounds and latency](../execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md).
 Together they cover X3 spread/top-of-book, aggressive X4 L2 walking, exact level
 fills, incremental accounting, TIF/residual custody, deterministic resting
 progress, bounded queue uncertainty, nonzero latency scenarios, and X5 report

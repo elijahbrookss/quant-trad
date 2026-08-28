@@ -24,10 +24,10 @@ code_paths:
 
 ## Status
 
-Accepted on 2026-08-24 as the Phase 3 resolution of DRR-07.
+Accepted on 2026-08-24.
 
 This is a prospective supersession decision. Historical records and the
-accepted decisions that produced them remain part of the audit trail.
+accepted decisions that produced them remain part of the system history.
 
 ## Context
 
@@ -59,7 +59,7 @@ Check-to-Observation admission.
   exact evidence target.
 - Persisting a Check does not automatically create or require a Research
   Observation.
-- Only a completed, replayable Check whose reviewed definition is
+- Only a completed, replayable Check whose registered definition is
   Observation-eligible may support a new Research Observation.
 - Check-backed Observation creation is a separate explicit operation. That
   operation revalidates the persisted Check and creates a `supports` link from
@@ -74,7 +74,7 @@ Check-to-Observation admission.
 
 This decision governs Check-derived Observation admission only. It does not
 require every Research Observation to originate from a Check and does not change
-separately owned manual Research Observation creation.
+the separate manual Research Observation path.
 
 ## Supersession Scope
 
@@ -94,7 +94,7 @@ Observation creation becomes an explicit research-memory choice made only after
 the Check has produced eligible evidence. Preview can remain fast and useful
 without acquiring durable evidence authority.
 
-Legacy V1 behavior remains visible for compatibility and audit. New code must
+Legacy V1 behavior remains visible for compatibility and historical inspection. New code must
 not invoke that compatibility path as a fallback when V2 admission fails.
 
 ## Rejected Alternatives
@@ -107,15 +107,9 @@ not invoke that compatibility path as a fallback when V2 admission fails.
 - Introduce separate preview and evidence Observation classes: expands the
   domain model without a demonstrated need.
 - Rewrite or upgrade historical V1 records: destroys their original evidence
-  meaning and audit lineage.
+  meaning and historical lineage.
 - Treat every completed Check as Observation-eligible: bypasses the reviewed
   definition and evidence-admission boundary.
-
-## Assurance Boundary
-
-This decision settles the prospective semantic conflict. It does not adopt
-glossary entries, activate a guarantee, mark `QT-REM-004` complete, or attest
-that any proof has passed.
 
 ## References
 

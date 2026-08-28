@@ -4,8 +4,8 @@ status: historical
 
 # Chainlink ETH/USD Breakout V2 Campaign Dossier
 
-> Historical evidence record: the results and production-shaped statements
-> below describe only this bounded campaign at its recorded study times and do
+> Historical research record: the results and production-shaped statements
+> below describe only this bounded study at its recorded times and do
 > not certify a current deployment. Its population, joins, outcomes, and hashes
 > predate the canonical frozen `event_fact_analysis` boundary and are not
 > classified as current replayable Check evidence. The original record is

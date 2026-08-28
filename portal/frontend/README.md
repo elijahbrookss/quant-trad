@@ -70,7 +70,6 @@ From the repository root, `make frontend-check` runs both test groups and then
 the production build. `npm run lint` remains a separate diagnostic command and
 is not part of `frontend-check`.
 
-These checks prove only their bounded assertions and compilation contract.
+These checks cover only their bounded assertions and the compilation contract.
 They do not run a real backend, a browser or cross-browser/E2E suite, production
 deployment, live collector or order activity, or accessibility conformance.
-Passing them is neither operational proof nor guarantee activation.

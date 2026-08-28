@@ -90,4 +90,4 @@ direct-local diagnostics.
 ## References
 
 - [Research orchestration boundary](../research-orchestration/RESEARCH_ORCHESTRATION_BOUNDARY.md)
-- [Developer audit workflow](../../engineering/developer-audit-workflow.md)
+- [Developer workflow](../../engineering/developer-workflow.md)

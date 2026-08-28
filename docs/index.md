@@ -14,7 +14,7 @@ For a first visit, use this order:
 [core research workflow](guides/research-workflow.md) →
 [concepts](concepts/) / [glossary](contracts/platform/04_glossary.md) →
 [architecture](architecture/README.md) → [six core promises](core-promises.md)
-→ contributor or assurance internals only when your work needs them.
+→ contributor guidance when you are ready to change the system.
 
 ## Choose Your Path
 
@@ -113,11 +113,11 @@ Read these after the main workflow when a result is surprising:
 - [Chainlink structured Facts](guides/chainlink-structured-facts.md)
 - [Coinbase derivatives paper setup](guides/coinbase-derivatives-paper-setup.md)
 - [Binance futures public data setup](guides/binance-futures-public-data.md)
-- [Developer and audit workflow](engineering/developer-audit-workflow.md)
+- [Developer workflow](engineering/developer-workflow.md)
 
 ## Documentation Rule
 
-Start with intent, then follow links to the exact owner. Contracts remain the
+Start with intent, then follow links to the exact source. Contracts remain the
 source of truth. Architecture explains boundaries. Tests and implementation
 show current conformance. Missing or unavailable support should stay visible
 rather than being presented as a successful result.

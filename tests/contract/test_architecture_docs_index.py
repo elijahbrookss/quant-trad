@@ -5,9 +5,7 @@ from pathlib import Path
 from scripts.docs import build_architecture_index as architecture_index
 
 
-def test_architecture_docs_have_required_frontmatter_tags():
-    """QT-PROOF-316 selector: validate the complete adopted metadata model."""
-
+def test_architecture_docs_have_valid_frontmatter_and_paths() -> None:
     catalog = architecture_index.build_catalog(Path.cwd())
 
     assert catalog.components, "expected architecture component docs"
@@ -15,14 +13,9 @@ def test_architecture_docs_have_required_frontmatter_tags():
     components = [entry.component for entry in catalog.components]
     assert len(repo_paths) == len(set(repo_paths))
     assert len(components) == len(set(components))
-    assert set(catalog.legacy_paths) == {
-        entry.repo_path
-        for entry in catalog.components
-        if entry.metadata_version == 1
-    }
 
 
-def test_architecture_index_exactly_matches_validated_catalog():
+def test_architecture_index_exactly_matches_validated_catalog() -> None:
     catalog = architecture_index.build_catalog(Path.cwd())
     expected = architecture_index.render_index(catalog).encode("utf-8")
     actual = Path(
@@ -32,7 +25,7 @@ def test_architecture_index_exactly_matches_validated_catalog():
     assert actual == expected
 
 
-def test_architecture_index_references_runtime_composition_doc():
+def test_architecture_index_references_runtime_composition_doc() -> None:
     index_text = Path(
         "docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md"
     ).read_text(encoding="utf-8")

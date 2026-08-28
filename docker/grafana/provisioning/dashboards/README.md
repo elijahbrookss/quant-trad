@@ -61,8 +61,8 @@ git diff -- docker/grafana/provisioning/dashboards
 ```
 
 Review additions, replacements, and stale files explicitly before committing.
-An export is a candidate source update, not an automatic backup acceptance or
-restore attestation.
+An export is a candidate source update, not evidence that the dashboard can be
+restored after loss.
 
 ## Reapply Checked-In Dashboards Locally
 
@@ -102,9 +102,9 @@ directly into a running server container, save a competing UI version, or start
 Promtail beside Alloy.
 
 Local polling, stack restart, and reviewed-commit deployment reapply the
-checked-in source. They are not evidence that a destructive dashboard-loss and
-restore rehearsal passed. No such restore proof or automatic recovery workflow
-is claimed here; verify the expected UIDs and content after each operator action.
+checked-in source. They do not exercise destructive dashboard loss and recovery,
+and no automatic recovery workflow is provided. Verify the expected UIDs and
+content after each operator action.
 
 For the complete native-server promotion boundary, see
 [Portable Single-Node Deployment](../../../../docs/engineering/server-deployment.md).

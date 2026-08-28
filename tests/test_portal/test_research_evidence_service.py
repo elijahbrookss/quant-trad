@@ -419,7 +419,7 @@ def test_eligible_check_requires_explicit_observation_admission_and_support_link
 
     admitted = service.create_observation_from_check_evidence(
         "check-1",
-        {"title": "Explicit observation", "tags": ["owner-reviewed"]},
+        {"title": "Explicit observation", "tags": ["research-note"]},
     )
 
     assert admitted["schema_version"] == "research_observation_from_check.v1"
@@ -427,7 +427,7 @@ def test_eligible_check_requires_explicit_observation_admission_and_support_link
     assert len(created_items) == 1
     assert created_items[0]["kind"] == "observation"
     assert created_items[0]["title"] == "Explicit observation"
-    assert created_items[0]["tags"] == ["evidence-backed", "owner-reviewed"]
+    assert created_items[0]["tags"] == ["evidence-backed", "research-note"]
     assert created_items[0]["payload"] == {
         "schema_version": "research_observation_payload.v2",
         "created_from": "research_check_evidence",

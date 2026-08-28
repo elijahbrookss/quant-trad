@@ -43,12 +43,11 @@ Normal validation is split by the boundary a test actually needs:
 
 | Boundary | Command | What it covers |
 | --- | --- | --- |
-| Documentation | `make validate-docs` | Current documentation, architecture metadata, glossary and generated-view consistency |
+| Documentation | `make validate-docs` | Architecture navigation, glossary links, and current documentation integrity |
 | Ordinary Python | `make backend-check` | Non-database contracts, domain behavior, services, CLI, runtime, reporting, and configuration |
 | PostgreSQL / TimescaleDB | `./scripts/ci/run_test_suite.sh db` | Tests marked `db`, using only the repository's disposable test stack |
 | Frontend | `make frontend-check` | Node-native and JSX tests plus the production Vite build |
 | Deployment configuration | the `deployment-contract` commands in [`ci-test-topology.md`](ci-test-topology.md) | Shell, Compose, source binding, and image construction without deployment |
-| Retained internal compatibility | `make validate-retained-assurance` | Run deliberately when retained assurance machinery changes; it is excluded from ordinary backend validation |
 
 `make check` combines repository hygiene, documentation validation, and the
 ordinary Python boundary. `make check-all` adds the supported frontend tests and
@@ -357,8 +356,8 @@ For a small number of high-consequence rules, temporarily introducing one
 representative defect in a disposable working copy can confirm that the owning
 test fails. Remove the defect immediately and record only the detection result.
 Do not commit mutations or add broad mutation tooling merely to increase a
-score. Passing this kind of check improves confidence; it does not activate a
-guarantee or replace owner judgment.
+score. Passing this kind of check improves confidence; it does not replace review or
+system-level validation.
 
 ## Examples Of Good Tests
 

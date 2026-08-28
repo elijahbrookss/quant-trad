@@ -28,7 +28,8 @@ Accepted on 2026-08-05 after roadmap ratification.
 
 ## Context
 
-Phase 1 made bar economics explicit and reproducible, but the runtime profile
+The bar-execution model made economics explicit and reproducible, but the
+runtime profile
 still combined instrument facts and legacy fee inputs while lacking a separate
 venue rule contract. Extending that profile with every venue capability, fee
 tier, fill model, and later calibration would create a monolith and invite
@@ -49,8 +50,8 @@ schedules own rate, currency, basis, tier, and rounding. Model artifacts own
 fill-model evidence and the execution-quality ceiling.
 
 `SeriesExecutionProfile` remains a compatibility compiler into the instrument
-slice. `FillOrder` remains the Phase 2A pre-fill compatibility adapter. ADR
-0057 and Phase 2B now bind each durable request to the resolved context hash for
+slice. `FillOrder` remains the pre-fill compatibility adapter. ADR 0057 binds
+each durable request to the resolved context hash for
 its full append-only lifecycle. External order submission remains disabled and
 governed by ADR 0049.
 
@@ -65,7 +66,7 @@ governed by ADR 0049.
   model used; reporting mismatches force X0.
 - The context does not replace canonical fill, position, wallet, or accounting
   ownership.
-- A Phase 2A profile cannot authorize external order submission.
+- A resolved profile cannot authorize external order submission.
 
 ## Consequences
 
@@ -75,8 +76,8 @@ governed by ADR 0049.
   profile rather than silent defaults.
 - Production venue profiles still require authoritative evidence; a valid
   manifest proves implemented rules, not realistic fills.
-- Phase 2B adds lifecycle behind these contracts; Phase 3 can add book mechanics
-  without coupling strategy semantics to a venue.
+- The canonical order lifecycle sits behind these contracts; replay-certified
+  book mechanics remain separate from strategy and venue semantics.
 
 ## Rejected alternatives
 
@@ -94,7 +95,7 @@ governed by ADR 0049.
 - `tests/test_portal/test_bot_config_runtime_readiness.py`
 - `tests/test_portal/test_bot_startup_orchestrator.py`
 - `tests/test_portal/test_run_research_dataset.py`
-- [Phase 2A venue-neutral execution context](../execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
+- [Venue-neutral execution context](../execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
 
 ## References
 
@@ -102,5 +103,5 @@ governed by ADR 0049.
 - [ADR 0041](0041-use-canonical-execution-plan-and-order-fill-semantics.md)
 - [ADR 0049](0049-keep-live-order-submission-closed.md)
 - [ADR 0057](0057-use-append-only-canonical-order-lifecycle.md)
-- [Phase 2B durable canonical order lifecycle](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+- [Durable canonical order lifecycle](../execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)

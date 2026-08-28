@@ -12,26 +12,20 @@ QT uses one authority hierarchy rather than parallel sources of product truth:
 
 1. The platform contracts in this directory own platform-wide product
    behavior.
-2. A reviewed component or source-module contract may own narrower behavior
-   only inside its declared component scope. It remains subordinate to the
-   platform contracts and must be discoverable from the owning architecture
-   component document.
-3. Accepted ADRs preserve decisions and rationale. A newer ADR may authorize a
+2. Accepted ADRs preserve decisions and rationale. A newer ADR may authorize a
    contract reconciliation, but it does not silently override unreconciled
    platform-contract wording.
-4. Architecture documents explain the current system and its boundaries.
-5. Implementation and tests provide conformance evidence; they do not become
+3. Architecture and component documents explain the current system, its
+   boundaries, and narrower implementation semantics. They remain subordinate
+   to platform contracts and accepted decisions.
+4. Implementation and tests provide conformance evidence; they do not become
    normative merely because behavior exists.
 
-`AGENTS.md` owns contributor and agent workflow. It may summarize product rules
-but cannot override these contracts or activate a guarantee. Architecture
-roadmaps remain explanatory unless an approved rule is reconciled into this
-hierarchy. The [six core promises](../core-promises.md) summarize important
-system outcomes without replacing these contracts. Internal assurance
-inventories, named checks, formal-result records, and historical review packets
-index authority and evidence; they are not an additional source of product
-requirements. Their normal maintenance boundary is documented in
-[assurance maintenance](../engineering/assurance-maintenance.md).
+`AGENTS.md` defines contributor and agent workflow. It may summarize product
+rules but cannot override these contracts. Architecture roadmaps remain
+explanatory unless their decisions are reconciled into this hierarchy. The
+[six core promises](../core-promises.md) summarize important system outcomes
+without replacing these contracts.
 
 The [adopted platform glossary](platform/04_glossary.md) is a vocabulary
 index into these owners. It may qualify terms and aliases but cannot create

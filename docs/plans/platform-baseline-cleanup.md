@@ -4,9 +4,9 @@ status: historical
 
 # Platform Baseline Cleanup
 
-> Historical campaign record. Branch, workstream, production-path, and
-> validation statements below describe the recorded July 2026 cleanup campaign
-> and do not assert current integration or deployment status.
+> Historical implementation record. Branch, workstream, production-path, and
+> validation statements below describe the recorded July 2026 state and do not
+> assert current integration or deployment status.
 
 ## Baseline
 

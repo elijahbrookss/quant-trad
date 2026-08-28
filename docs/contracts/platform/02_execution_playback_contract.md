@@ -95,7 +95,7 @@ downgrade reasons, and material limitations.
 
 No X class implies venue-realized fill probability, exact queue position,
 calibrated live behavior, external-order authority, scientific validity,
-reproducibility certification, promotion eligibility, or guarantee activation.
+reproducibility certification or promotion eligibility.
 
 ## Playback Contract
 

@@ -12,15 +12,6 @@ if [[ "$SUITE" == "db" ]]; then
   USE_DOCKER=1
 fi
 COMPOSE_FILE="docker/docker-compose.test.yml"
-RETAINED_ASSURANCE_IGNORES=(
-  --ignore=tests/contract/test_assurance_environment_profiles.py
-  --ignore=tests/contract/test_assurance_executor.py
-  --ignore=tests/contract/test_assurance_lifecycle.py
-  --ignore=tests/contract/test_assurance_publication.py
-  --ignore=tests/contract/test_assurance_runner_build.py
-  --ignore=tests/contract/test_system_final_review.py
-)
-
 run_pytest_host() {
   local cmd="$1"
   bash -lc "$cmd"
@@ -87,10 +78,8 @@ run_suite() {
 
 profile_command() {
   local profile_args
-  local retained_ignore_args
   printf -v profile_args '%q ' "$@"
-  printf -v retained_ignore_args '%q ' "${RETAINED_ASSURANCE_IGNORES[@]}"
-  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py && python scripts/docs/guarantees.py check; fi; QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=\"\${profile}\" pytest -q ${retained_ignore_args}; done"
+  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py --check; fi; QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
 }
 
 run_profiles() {
@@ -99,7 +88,7 @@ run_profiles() {
 
 case "$SUITE" in
   pr)
-    run_suite "QT_OMIT_DB_TESTS=1 pytest -q ${RETAINED_ASSURANCE_IGNORES[*]}"
+    run_suite "QT_OMIT_DB_TESTS=1 pytest -q"
     ;;
   contracts)
     run_profiles core provider cli docs
@@ -108,7 +97,7 @@ case "$SUITE" in
     run_profiles runtime botlens web reports
     ;;
   backend)
-    run_suite "QT_OMIT_DB_TESTS=1 pytest -q ${RETAINED_ASSURANCE_IGNORES[*]}"
+    run_suite "QT_OMIT_DB_TESTS=1 pytest -q"
     ;;
   full)
     run_suite "pytest -q"
@@ -141,7 +130,7 @@ case "$SUITE" in
     run_profiles docs
     ;;
   integration)
-    run_suite "pytest -m 'not db' --ignore=tests/test_reports/test_reports_endpoints.py ${RETAINED_ASSURANCE_IGNORES[*]} --cov=src --cov-report=term --cov-report=xml"
+    run_suite "pytest -m 'not db' --ignore=tests/test_reports/test_reports_endpoints.py --cov=src --cov-report=term --cov-report=xml"
     ;;
   *)
     echo "unknown suite: $SUITE" >&2

@@ -39,8 +39,7 @@ The workflow steps are:
    followed by `python -m pip check`; and
 4. `Run PR suite` with `./scripts/ci/run_test_suite.sh pr`.
 
-The `pr` suite runs `QT_OMIT_DB_TESTS=1 pytest -q` with the six retained-
-assurance compatibility files explicitly ignored. It is the complete ordinary
+The `pr` suite runs `QT_OMIT_DB_TESTS=1 pytest -q`. It is the complete ordinary
 non-database backend screen, not the whole workflow gate. Missing locked Python
 dependencies fail collection; they do not silently turn supported coverage into
 skips.
@@ -140,8 +139,8 @@ A passing workflow does not by itself prove:
   package test discovery;
 - per-test database isolation within `quanttrad_contracts`;
 - behavior against an existing migrated operator database; or
-- external-provider availability, live order submission, production safety, an
-  attestation result, or guarantee activation.
+- external-provider availability, live order submission, production safety, or
+  production readiness.
 
 The workflow uses only its disposable GitHub-hosted environment. Shared
 development, live, and production databases are outside this topology.
@@ -259,11 +258,6 @@ clean-bootstrap invocation.
 - [`tests/conftest.py`](../../../tests/conftest.py) owns DB opt-in and isolated
   DSN guards, required-dependency checks, and suppression of implicit dotenv
   discovery; the workflow owns the two CI database invocations.
-- `make validate-retained-assurance` owns deliberate compatibility validation
-  for the retained internal assurance files. Those files are not ordinary PR
-  prerequisites and this command does not execute formal checks or activate
-  guarantees.
 - Update this document whenever workflow jobs or their step boundaries change.
 
-Do not infer full runtime, deployment, proof-attestation, or guarantee coverage
-from a job name. Read the commands and environment of the exact workflow step.
+Do not infer full runtime, deployment, or production coverage from a job name. Read the commands and environment of the exact workflow step.

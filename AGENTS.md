@@ -5,12 +5,10 @@ This file is the **entry point for all agents and contributors**.
 It defines the expectations, principles, and engineering discipline required
 to work safely inside the Quant-Trad codebase.
 
-This file owns contributor and agent workflow. Product behavior is owned by the
-platform contracts under `docs/contracts/`. This file may summarize those
-rules, but it cannot override a platform contract or independently activate a
-guarantee. If code conflicts with either source inside that source's scope, the
-code is wrong; if workflow guidance and a platform contract disagree about
-product behavior, the platform contract wins.
+This file governs contributor and agent workflow. Product behavior is defined
+by the platform contracts under `docs/contracts/`. This file may summarize
+those rules, but it cannot override them. If workflow guidance and a platform
+contract disagree about product behavior, the platform contract wins.
 
 ---
 
@@ -38,48 +36,34 @@ product behavior, the platform contract wins.
 
 ## Repository Reading Path
 
-Start with the product before opening deep architecture or retained audit
-records:
+Start with the product before opening deep architecture:
 
 1. `README.md` explains what QT does and how to start it.
 2. `docs/current-system.md` explains the current end-to-end system, its limits,
    and the six promises that guide high-consequence changes.
 3. `docs/contracts/platform/04_glossary.md` standardizes QT vocabulary.
 4. `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` maps code paths to the
-   component documents that describe them. Metadata-version-2 entries also
-   name semantic owners and required reviewers; legacy entries do not.
+   component documents that describe them.
 5. `docs/contracts/README.md` leads to the authoritative platform contracts.
 6. `docs/core-promises.md` shows which important system promises a change may
-   affect and links to their deeper engineering traceability.
+   affect and links to the contracts and decisions that define them.
 
-For an ordinary change, this path is enough to find meaning, ownership, and the
-normal checks. The exhaustive guarantee inventory, named proof catalog,
-remediation records, environment-admission material, and older review packets
-under `docs/assurance/` and `docs/plans/documentation-reconciliation/` are
-retained engineering history. Read them only when maintaining assurance
-traceability or investigating that history. Their ongoing treatment is
-summarized in `docs/engineering/assurance-maintenance.md`.
-
-Ownership metadata is still being adopted. Treat a legacy subsystem label as a
-discovery hint, not a semantic-owner or reviewer assignment. Use the relevant
-platform contract, accepted ADRs, and current subsystem maintainers to resolve
-the review route, and do not invent an owner from `CODEOWNERS` or the generated
-index.
+For an ordinary change, this path is enough to find current meaning and normal
+checks. Use historical plans, incident records, and research evidence only when
+the change needs their context; they do not override current contracts.
 
 Before changing behavior:
 
-- use the component index to find the relevant component documents, and use
-  reviewed metadata only when it actually names the semantic owner and
-  required reviewers;
-- use the glossary and contracts to confirm the current meaning;
+- use the component index to find the relevant component documents;
+- use the glossary and contracts to confirm current meaning;
 - check the six core promises for consequences beyond the local component;
 - update a platform contract when platform-wide product meaning changes;
 - add or revise an ADR when a durable architectural or safety tradeoff changes;
-- run the focused tests first, then the normal validation scope described in
-  `docs/engineering/developer-audit-workflow.md`.
+- run focused tests first, then the normal validation scope described in
+  `docs/engineering/developer-workflow.md`.
 
-Historical evidence and a passing test do not create product authority,
-activate a guarantee, or close a remediation.
+A passing test supports the behavior it exercises; it does not override the
+documented product contract.
 
 ---
 
@@ -245,7 +229,7 @@ Performance, polish, and optimization come second.
   - or `OBSIDIAN_SYNC_DOCS_DEST`
   - optional local override file: `.sync-docs.mk`
 
-## Developer/Audit Workflow
+## Developer Workflow
 
 - Use `qt` as the primary command surface for agent/tool workflows and
   operations: bot runs, experiments, provider checks, report summaries, report
@@ -254,8 +238,8 @@ Performance, polish, and optimization come second.
   as workflow truth.
 - Use `make help` as the repo-native support index for Docker, DB, validation,
   git, local stack control, and direct forensic helpers.
-- Use `docs/engineering/developer-audit-workflow.md` for the standard Codex
-  and local audit workflow before inventing new one-off commands.
+- Use `docs/engineering/developer-workflow.md` for the standard Codex
+  and local development workflow before inventing new one-off commands.
 - Keep local support and forensic helpers in existing locations such as the root
   `Makefile`, `scripts/reporting/`, and `docs/engineering/`; do not add new
   root-level workflow files or folders. Normal bot/run/report workflows belong
@@ -271,12 +255,11 @@ external-order submission.
 
 | Area | Normal command or check | Required scope |
 |---|---|---|
-| Documentation and generated views | `make validate-docs` | Documentation, contracts, glossary, architecture metadata, or generated-view changes; also broad handoff validation. |
+| Documentation and indexes | `make validate-docs` | Documentation, contracts, glossary, architecture metadata, or generated-index changes; also broad handoff validation. |
 | Non-database Python | `make backend-check` | Backend, CLI, domain, service, configuration, or cross-system changes. |
 | Disposable database | `./scripts/ci/run_test_suite.sh db` | Persistence, schema, repository, recovery-guard, or database-backed behavior; requires the isolated Docker test stack. |
 | Frontend | `make frontend-check` | UI, frontend adapters, API-view contracts, or broad handoff validation. |
 | Deployment/configuration without deployment | `bash -n scripts/automation/server_deploy.sh`, `bash -n scripts/automation/server_host_bootstrap.sh`, then `docker compose --env-file <disposable-env> -f docker/docker-compose.server.yml config --quiet` | Deployment scripts, Compose/configuration, or broad handoff validation. Render configuration only; do not run deploy, credential, or remote-host actions. |
-| Retained assurance contracts | `make validate-retained-assurance` | Run once after changes to the retained assurance machinery, or when a bounded review explicitly includes that machinery. This validates internal executor, lifecycle, publication, environment, runner, and final-review contracts; it does not execute formal checks or change product authority. |
 | Diff and clean tree | `git diff --check`; after committing the intended work, require empty `git status --porcelain=v1` | Every handoff. Inspect failures and preserve unrelated user changes rather than staging them for cleanliness. |
 
 Record unavailable prerequisites honestly. A skipped database, frontend, or
@@ -299,20 +282,15 @@ Required workflow:
 1. Locate existing component docs via `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` before changing architecture.
 2. Update/create relevant component docs under `docs/architecture/<subsystem>/`.
 3. Follow `docs/engineering/documentation/component-documentation-standard.md`.
-   New component docs use metadata version 2. Migrate a legacy document only
-   as a complete owner-reviewed change; never infer its owner or reviewers.
 4. Refresh the architecture index with:
    - `python scripts/docs/build_architecture_index.py`
 5. Run `make sync-docs` after doc updates.
 
 Agent expectation:
 - Prefer component-targeted doc updates over broad vague edits.
-- Treat frontmatter ownership as review routing, not product authority or
-  guarantee activation. `CODEOWNERS` cannot supply semantic authority.
-- A source-module contract is discoverable only through its owning component's
-  reviewed metadata and remains subordinate to platform contracts.
-- Treat shared `code_paths` as navigation and coverage, not exclusive file
+- Treat frontmatter `code_paths` as navigation and coverage, not exclusive file
   ownership.
+- Platform contracts remain authoritative over narrower architecture notes.
 - Runtime composition/wiring changes must keep docs and index in sync.
 - Runtime composition changes should preserve mode-aware seams (`backtest`/`paper`/`live`) even when only backtest is implemented today.
 - If you touch code paths listed in `code_paths`, verify corresponding docs remain accurate.

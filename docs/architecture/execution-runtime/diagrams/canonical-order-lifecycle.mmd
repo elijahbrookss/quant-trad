@@ -1,6 +1,6 @@
 flowchart LR
     D[Causal strategy decision] --> R[Immutable CanonicalOrderRequest]
-    C[Phase 2A ResolvedExecutionContext] --> R
+    C[ResolvedExecutionContext] --> R
     R --> A1[Attempt 1 requested]
     A1 --> V[validated]
     V --> AC[accepted]
@@ -24,5 +24,5 @@ flowchart LR
     EV --> RR[RunResearchDataset projection]
 
     VP[Venue lifecycle mapping] -. terminology only .-> A1
-    L2[L2 walking queue and latency] -. deferred to Phase 3 .-> A1
+    L2[L2 walking queue and latency] -. separate capability .-> A1
     LIVE[External submission] -. prohibited by ADR 0049 .-> A1

@@ -1,14 +1,9 @@
 ---
-metadata_version: 2
 component: durable-canonical-order-lifecycle
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
 status: active
-semantic_owner: execution-runtime
-required_reviewers:
-  - architecture-documentation-owner
-  - execution-runtime-owner
 tags:
   - execution
   - orders
@@ -30,7 +25,6 @@ code_paths:
   - portal/backend/service/reports/run_research_dataset.py
   - tests/integration/runtime/test_canonical_order_lifecycle.py
   - tests/integration/runtime/test_persisted_runtime_correctness.py
-module_contracts: []
 ---
 # Durable Canonical Order Lifecycle
 

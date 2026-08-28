@@ -148,11 +148,9 @@ def _ci_profile_markers_for_path(path: str) -> set[str]:
     elif normalized.startswith("tests/contract/"):
         docs_contract = (
             "architecture_docs" in name
-            or "guarantee_registry" in name
             or name
             in {
-                "test_architecture_metadata_schema.py",
-                "test_documentation_reconciliation.py",
+                "test_documentation_integrity.py",
                 "test_platform_glossary.py",
             }
         )

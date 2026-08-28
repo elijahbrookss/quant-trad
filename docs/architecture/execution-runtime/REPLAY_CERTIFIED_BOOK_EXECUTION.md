@@ -1,14 +1,9 @@
 ---
-metadata_version: 2
 component: replay-certified-book-execution
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
 status: active
-semantic_owner: execution-runtime
-required_reviewers:
-  - architecture-documentation-owner
-  - execution-runtime-owner
 tags:
   - execution
   - order-book
@@ -28,7 +23,6 @@ code_paths:
   - portal/backend/service/bots/startup_service.py
   - portal/backend/service/reports/run_research_dataset.py
   - tests/integration/runtime/test_book_execution.py
-module_contracts: []
 ---
 # Replay-Certified Book Execution
 

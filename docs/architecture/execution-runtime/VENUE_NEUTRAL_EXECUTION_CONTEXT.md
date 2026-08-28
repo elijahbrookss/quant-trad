@@ -1,14 +1,9 @@
 ---
-metadata_version: 2
 component: venue-neutral-execution-context
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
 status: active
-semantic_owner: execution-runtime
-required_reviewers:
-  - architecture-documentation-owner
-  - execution-runtime-owner
 tags:
   - execution
   - venues
@@ -32,7 +27,6 @@ code_paths:
   - portal/backend/service/bots/container_runtime.py
   - portal/backend/service/reports/run_research_dataset.py
   - tests/integration/runtime/test_execution_contexts.py
-module_contracts: []
 ---
 # Venue-Neutral Execution Context
 

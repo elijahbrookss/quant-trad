@@ -23,5 +23,5 @@ it is generated, current, canonical, or authoritative.
 Status: **retained, unreferenced as architecture evidence, and unverified**.
 
 This record does not delete, recreate, promote, or infer lineage for the asset.
-Recovering a source or authorizing another disposition requires separate owner
-review.
+Recovering a source or changing this disposition requires a separate explicit
+maintenance decision.

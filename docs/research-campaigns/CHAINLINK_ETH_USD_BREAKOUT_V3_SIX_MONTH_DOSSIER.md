@@ -4,8 +4,8 @@ status: historical
 
 # Chainlink ETH/USD Breakout V3 Six-Month Campaign Dossier
 
-> Historical evidence record: the results below describe only this bounded
-> campaign at its recorded study times. The 119-candidate population was
+> Historical research record: the results below describe only this bounded
+> study at its recorded times. The 119-candidate population was
 > calculated before an admitted six-month Dataset existed and is not current
 > replayable Check evidence. The original blocked result is preserved. See
 > [Chainlink Historical Research Boundary Notice](CHAINLINK_RESEARCH_BOUNDARY_LIMITATIONS.md).
