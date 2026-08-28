@@ -145,14 +145,14 @@ ps: stack-ps ## Show running containers (alias for stack-ps)
 
 sync-docs: ## Sync ./docs to external path via rsync (set SYNC_DOCS_DEST or OBSIDIAN_SYNC_DOCS_DEST)
 	@set -euo pipefail; \
-	if ! command -v "$(SYNC_DOCS_RSYNC)" >/dev/null 2>&1; then \
-		echo "✗ rsync not found on PATH"; exit 1; \
-	fi; \
 	src_raw="$(SYNC_DOCS_SRC)"; \
 	dest_raw="$(SYNC_DOCS_DEST)"; \
 	if [ -z "$$dest_raw" ]; then \
 		echo "ℹ sync-docs skipped: set SYNC_DOCS_DEST (or OBSIDIAN_SYNC_DOCS_DEST)"; \
 		exit 0; \
+	fi; \
+	if ! command -v "$(SYNC_DOCS_RSYNC)" >/dev/null 2>&1; then \
+		echo "✗ rsync not found on PATH"; exit 1; \
 	fi; \
 	src="$$(cd "$$src_raw" >/dev/null 2>&1 && pwd)/"; \
 	dest="$$dest_raw"; \
