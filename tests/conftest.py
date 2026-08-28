@@ -1,11 +1,16 @@
 import asyncio
+import importlib.util
 import inspect
 import os
 from pathlib import Path
 import warnings
 
 import pytest
-from dotenv import load_dotenv
+
+
+# Supported test commands provide their environment explicitly.  Product
+# imports must not discover developer-local .env or secrets.env files.
+os.environ.setdefault("QT_DISABLE_DOTENV", "1")
 
 warnings.filterwarnings(
     "ignore",
@@ -45,6 +50,27 @@ _CI_PROFILES = {
     "reports",
     "docs",
 }
+
+_REQUIRED_TEST_MODULES = {
+    "ccxt": "ccxt",
+    "coinbase": "coinbase-advanced-py",
+    "fastapi": "fastapi",
+    "jwt": "PyJWT",
+    "pandas": "pandas",
+    "sqlalchemy": "SQLAlchemy",
+}
+
+
+def pytest_configure(config):  # noqa: ANN001 - pytest hook type varies by version.
+    missing = [
+        package
+        for module, package in _REQUIRED_TEST_MODULES.items()
+        if importlib.util.find_spec(module) is None
+    ]
+    if missing:
+        raise pytest.UsageError(
+            "required locked test dependencies are missing: " + ", ".join(missing)
+        )
 
 
 def _env_flag(name: str) -> bool:
@@ -100,13 +126,6 @@ def _ensure_event_loop():
         if _SESSION_EVENT_LOOP is not None and not _SESSION_EVENT_LOOP.is_closed():
             _SESSION_EVENT_LOOP.close()
             _SESSION_EVENT_LOOP = None
-
-@pytest.fixture(scope="session", autouse=True)
-def load_env_once():
-    load_dotenv(".env")
-    load_dotenv("secrets.env")
-    print("Environment variables loaded from .env and secrets.env")
-
 
 def _normalise_test_path(path: str) -> tuple[str, str]:
     raw_path = Path(path)

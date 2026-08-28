@@ -6,10 +6,7 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./tests/setupVitest.js'],
-    include: [
-      'src/components/__tests__/DeleteIndicatorModal.test.jsx',
-      'src/components/__tests__/IndicatorCard.test.jsx',
-    ],
+    include: ['src/**/*.test.jsx'],
     clearMocks: true,
     restoreMocks: true,
   },
