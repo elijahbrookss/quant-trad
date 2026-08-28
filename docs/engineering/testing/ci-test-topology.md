@@ -239,9 +239,13 @@ python -m pytest -q -m db \
 ```
 
 `./scripts/ci/run_test_suite.sh db` remains the convenient repository-owned
-local DB profile. It uses the disposable test Compose stack, but it is not an
-exact reproduction of the fourth workflow job's pinned image, two-database
-layout, and separate clean-bootstrap invocation.
+local DB profile. It builds a source image that excludes local environment and
+secret files, generates a unique synthetic database identity and Compose
+project for every invocation, runs on an internal network without a host port,
+and tears down only that project's containers, network, volumes, and locally
+built test image. It is still not an exact
+reproduction of the fourth workflow job's two-database layout and separate
+clean-bootstrap invocation.
 
 ## Ownership And Maintenance
 

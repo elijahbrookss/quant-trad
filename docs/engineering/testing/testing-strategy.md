@@ -57,6 +57,12 @@ database command: DB-marked tests skip unless the explicit isolation flags and
 disposable DSN are present. Clean bootstrap is a separate check against an
 empty disposable database.
 
+The repository-owned DB command builds the source captured by `.dockerignore`
+instead of mounting the developer checkout. Each invocation generates a new
+synthetic database identity and Compose project, uses an internal network with
+no host database port, and tears down that exact project's containers, network,
+volumes, and locally built test image on both success and failure.
+
 The Python test harness does not load repository `.env` or `secrets.env` files.
 Commands must provide their environment explicitly. Locked Python packages are
 required test dependencies; if one is missing, collection fails instead of

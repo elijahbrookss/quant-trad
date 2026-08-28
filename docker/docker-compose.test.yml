@@ -4,26 +4,31 @@ services:
     build:
       context: ..
       dockerfile: docker/test/Dockerfile
-    volumes:
-      - ../:/app
     working_dir: /app
-    env_file:
-      - ../secrets.env
+    environment:
+      POSTGRES_USER: ${QT_TEST_POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${QT_TEST_POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${QT_TEST_POSTGRES_DB:?required}
+      QT_DISABLE_DOTENV: "1"
+      QT_LOGGING_LOKI_URL: ""
+      QT_LOGGING_DEBUG: "false"
     depends_on:
       timescaledb:
         condition: service_healthy
     command: ["bash","-lc","export PG_DSN=postgresql+psycopg2://$$POSTGRES_USER:$$POSTGRES_PASSWORD@timescaledb:5432/$$POSTGRES_DB && bash /app/scripts/wait-for-db.sh pytest --cov=src --cov-report=term --cov-report=xml"]
 
-
-
   timescaledb:
-    image: timescale/timescaledb:latest-pg14
-    env_file:
-      - ../secrets.env
-    ports:
-      - "5432:5432"
+    image: timescale/timescaledb:2.14.2-pg15
+    environment:
+      POSTGRES_USER: ${QT_TEST_POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${QT_TEST_POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${QT_TEST_POSTGRES_DB:?required}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\""]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 3s
       retries: 10
+
+networks:
+  default:
+    internal: true

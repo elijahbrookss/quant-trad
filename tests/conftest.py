@@ -10,7 +10,7 @@ import pytest
 
 # Supported test commands provide their environment explicitly.  Product
 # imports must not discover developer-local .env or secrets.env files.
-os.environ.setdefault("QT_DISABLE_DOTENV", "1")
+os.environ["QT_DISABLE_DOTENV"] = "1"
 
 warnings.filterwarnings(
     "ignore",
