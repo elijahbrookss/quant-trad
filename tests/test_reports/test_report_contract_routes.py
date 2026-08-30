@@ -291,6 +291,31 @@ def test_materialized_report_compare_route_exposes_run_comparison_dto(monkeypatc
     assert summary["performance_delta"]["net_pnl"]["delta"] == 0
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/reports/compare?left_run_id=run-1&right_run_id=run-2&minimum_execution_quality_class=X6",
+        "/api/reports/compare/summary?left_run_id=run-1&right_run_id=run-2&minimum_execution_quality_class=X7",
+    ],
+)
+def test_materialized_report_compare_routes_reject_unimplemented_quality_classes(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    def unexpected_comparison(*_args: object, **_kwargs: object) -> RunComparisonDTO:
+        raise AssertionError("invalid execution quality must be rejected before comparison")
+
+    monkeypatch.setattr(
+        reports_controller,
+        "_compare_materialized_run_reports",
+        unexpected_comparison,
+    )
+
+    response = TestClient(app).get(path)
+
+    assert response.status_code == 422
+
+
 def test_run_report_route_blocks_active_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reports_controller, "_materialized_run_report", lambda _run_id: None)
 

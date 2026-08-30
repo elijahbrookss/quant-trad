@@ -32,10 +32,12 @@ Grafana and Loki provide stack-level dashboards and log inspection. They complem
 
 Application logs enter Loki through Docker stdout/stderr and one
 out-of-process shipper. The native-Linux server uses Grafana Alloy; the local
-development composition retains its historical Promtail path. Backend and
-bot-runtime processes should write structured logs to their normal process
-stream; ordinary runtime logging must not post directly to Loki from the hot
-path.
+development composition uses its supported Promtail service. Each topology
+runs exactly one of those shippers. Never run Promtail and Alloy against the
+same application-container streams or otherwise double scrape them. Backend
+and bot-runtime processes write structured logs to their normal process stream;
+ordinary runtime logging must not post directly to Loki from the hot path, and
+shipper absence must not activate an in-process fallback.
 
 Bot-runtime log lines include process context from environment variables:
 `request_id`, `bot_id`, `run_id`, `service=bot-runtime`, `runtime=bot`, and
@@ -88,7 +90,7 @@ seven-day retention. The two cadences intentionally answer different questions:
 short spikes stay visible in Loki, while table growth remains cheap enough to
 retain for planning.
 
-Before creating alerts, measure at least one representative campaign. Never use
+Before creating alerts, measure at least one representative workload. Never use
 Docker Desktop/WSL guest free space as physical-host headroom; check the
 dashboard authority panel and require `physical_host_visible=true`.
 Useful starting candidates are filesystem free below 20%, database connections
@@ -107,13 +109,34 @@ The user-level task starts immediately, starts again at logon, restarts after
 failure, writes one bounded daily NDJSON file under `logs/host-capacity`, and is
 removed with the same command plus `-RemoveScheduledTask`.
 
+## Grafana Dashboard Source And Recovery
+
+Checked-in JSON under `docker/grafana/provisioning/dashboards/` is the supported
+dashboard source. Grafana polls that directory every 10 seconds with
+`allowUiUpdates: false`, so UI edits to provisioned dashboards are not the
+durable workflow. In local development, allow one polling interval for a
+checked-in JSON change; if the observability stack is stopped or needs to be
+reconciled, run `make STACK_PROFILES=observability stack-restart`. On a native
+server, deliver dashboard changes through
+`bash scripts/automation/server_deploy.sh deploy <reviewed-commit-sha>` so the
+mounted provisioning source comes from the reviewed release.
+
+The tracked `scripts/backup-grafana-dashboards.sh` script can export dashboard
+models from a reachable Grafana API when Bash, `curl`, `jq`, valid Grafana
+credentials, and a writable output directory are available. Its output is a
+candidate source change that requires diff review; it does not delete stale
+JSON, automate scheduling, or prove that a restore succeeded. There are no
+supported `make grafana-backup` or `make grafana-restore` targets. See the
+[dashboard provisioning workflow](../../docker/grafana/provisioning/dashboards/README.md)
+for the exact backup and reload boundaries.
+
 ## Error Posture
 
 Quant-Trad should fail loudly for invalid states. A fallback is allowed only when it is modeled, visible, and logged with enough context to investigate.
 
 ## Next
 
-- Full doctrine: [observability doctrine](observability-doctrine.md).
+- Historical context: [retained observability doctrine](observability-doctrine.md).
 - Engineering contract: [engineering contract](../contracts/platform/03_engineering_contract.md).
 - Runtime event storage: [persistence boundary](../architecture/persistence/PERSISTENCE_BOUNDARY.md).
 - BotLens diagnostics: [BotLens projection boundary](../architecture/botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md).

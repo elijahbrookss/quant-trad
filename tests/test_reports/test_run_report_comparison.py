@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from portal.backend.service.reports import comparison
-from portal.backend.service.reports.schemas import FirstDivergenceDTO, GoldenEvidenceDTO
+from portal.backend.service.reports import comparison, contract
+from portal.backend.service.reports.schemas import FirstDivergenceDTO, GoldenEvidenceDTO, RunReportDTO
 
 
 def _ready_status(run_id: str, status: str = "ready", *, can_view: bool = True) -> dict:
@@ -203,6 +203,102 @@ def test_minimum_x4_execution_quality_is_enforced_by_comparison(
         minimum_execution_quality_class="X4",
     )
     assert ready.can_compare is True
+
+
+def test_invalid_minimum_execution_quality_is_rejected_before_report_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"status": 0, "artifact": 0}
+
+    def status(*_args: object, **_kwargs: object) -> dict:
+        calls["status"] += 1
+        raise AssertionError("status must not be read for an invalid floor")
+
+    def artifact(*_args: object, **_kwargs: object) -> dict:
+        calls["artifact"] += 1
+        raise AssertionError("artifact must not be read for an invalid floor")
+
+    monkeypatch.setattr(comparison, "report_materialization_status", status)
+    monkeypatch.setattr(comparison, "materialized_run_report", artifact)
+
+    with pytest.raises(ValueError, match="minimum_execution_quality_class must be one of"):
+        comparison.compare_materialized_run_reports(
+            "left",
+            "right",
+            minimum_execution_quality_class="X6",
+        )
+
+    assert calls == {"status": 0, "artifact": 0}
+
+
+def test_direct_comparison_normalizes_lowercase_quality_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports = {"left": _report("left"), "right": _report("right")}
+    reports["left"]["trust"]["execution_quality_class"] = "X1"
+    reports["right"]["trust"]["execution_quality_class"] = "X5"
+    monkeypatch.setattr(comparison, "report_materialization_status", lambda run_id, **_kwargs: _ready_status(run_id))
+    monkeypatch.setattr(comparison, "materialized_run_report", lambda run_id: reports[run_id])
+
+    result = comparison.compare_materialized_run_reports(
+        "left",
+        "right",
+        minimum_execution_quality_class="x2",
+    )
+
+    assert result.can_compare is False
+    assert result.blocked_reason == "left_execution_quality_below_X2"
+
+
+@pytest.mark.parametrize("quality_class", ["X0", "X1", "X2", "X3", "X4", "X5"])
+def test_direct_comparison_accepts_each_implemented_quality_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    quality_class: str,
+) -> None:
+    reports = {"left": _report("left"), "right": _report("right")}
+    reports["left"]["trust"]["execution_quality_class"] = quality_class
+    reports["right"]["trust"]["execution_quality_class"] = quality_class
+    monkeypatch.setattr(comparison, "report_materialization_status", lambda run_id, **_kwargs: _ready_status(run_id))
+    monkeypatch.setattr(comparison, "materialized_run_report", lambda run_id: reports[run_id])
+
+    result = comparison.compare_materialized_run_reports(
+        "left",
+        "right",
+        include_golden=False,
+        minimum_execution_quality_class=quality_class,
+    )
+
+    assert result.can_compare is True
+
+
+@pytest.mark.parametrize("quality_class", ["X6", "X7", "venue_live"])
+def test_run_report_dto_rejects_unimplemented_attained_quality_class(
+    quality_class: str,
+) -> None:
+    payload = _report("run-1")
+    payload["trust"]["execution_quality_class"] = quality_class
+
+    with pytest.raises(ValueError, match="execution_quality_class"):
+        RunReportDTO.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("quality_class", "expected"),
+    [
+        ("X5", "reproducible_economic_evidence"),
+        ("X6", "reproducible"),
+    ],
+)
+def test_research_status_uses_only_implemented_economic_quality_classes(
+    quality_class: str,
+    expected: str,
+) -> None:
+    assert contract._research_status(
+        {
+            "golden_candidate_status": "certified",
+            "execution_quality_class": quality_class,
+        }
+    ) == expected
 
 
 def test_metric_validity_is_preserved_in_deltas(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,5 +14,5 @@ flowchart LR
     PA[Provider and venue data registry] -. identity only .-> IC
     PA -. not execution authority .-> VP
     OL[Durable canonical order lifecycle] --> EX
-    L2[L2 replay queue and latency] -. deferred to Phase 3 .-> EX
+    L2[L2 replay queue and latency] -. separate capability .-> EX
     LIVE[External order submission] -. prohibited by ADR 0049 .-> EX

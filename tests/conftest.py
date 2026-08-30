@@ -1,11 +1,16 @@
 import asyncio
+import importlib.util
 import inspect
 import os
 from pathlib import Path
 import warnings
 
 import pytest
-from dotenv import load_dotenv
+
+
+# Supported test commands provide their environment explicitly.  Product
+# imports must not discover developer-local .env or secrets.env files.
+os.environ["QT_DISABLE_DOTENV"] = "1"
 
 warnings.filterwarnings(
     "ignore",
@@ -46,6 +51,27 @@ _CI_PROFILES = {
     "docs",
 }
 
+_REQUIRED_TEST_MODULES = {
+    "ccxt": "ccxt",
+    "coinbase": "coinbase-advanced-py",
+    "fastapi": "fastapi",
+    "jwt": "PyJWT",
+    "pandas": "pandas",
+    "sqlalchemy": "SQLAlchemy",
+}
+
+
+def pytest_configure(config):  # noqa: ANN001 - pytest hook type varies by version.
+    missing = [
+        package
+        for module, package in _REQUIRED_TEST_MODULES.items()
+        if importlib.util.find_spec(module) is None
+    ]
+    if missing:
+        raise pytest.UsageError(
+            "required locked test dependencies are missing: " + ", ".join(missing)
+        )
+
 
 def _env_flag(name: str) -> bool:
     return str(os.getenv(name, "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -63,8 +89,10 @@ def _declares_db_marker(path: Path) -> bool:
 
 def pytest_ignore_collect(collection_path, config):  # noqa: ANN001 - pytest hook type varies by version.
     if not _env_flag("QT_OMIT_DB_TESTS"):
-        return False
-    return _declares_db_marker(Path(str(collection_path)))
+        return None
+    if _declares_db_marker(Path(str(collection_path))):
+        return True
+    return None
 
 
 def pytest_pyfunc_call(pyfuncitem):
@@ -99,13 +127,6 @@ def _ensure_event_loop():
             _SESSION_EVENT_LOOP.close()
             _SESSION_EVENT_LOOP = None
 
-@pytest.fixture(scope="session", autouse=True)
-def load_env_once():
-    load_dotenv(".env")
-    load_dotenv("secrets.env")
-    print("Environment variables loaded from .env and secrets.env")
-
-
 def _normalise_test_path(path: str) -> tuple[str, str]:
     raw_path = Path(path)
     try:
@@ -125,7 +146,15 @@ def _ci_profile_markers_for_path(path: str) -> set[str]:
     if normalized.startswith("tests/contract/providers/"):
         profiles.add("provider")
     elif normalized.startswith("tests/contract/"):
-        profiles.add("docs" if "architecture_docs" in name else "core")
+        docs_contract = (
+            "architecture_docs" in name
+            or name
+            in {
+                "test_documentation_integrity.py",
+                "test_platform_glossary.py",
+            }
+        )
+        profiles.add("docs" if docs_contract else "core")
 
     if normalized.startswith("tests/test_cli/"):
         profiles.add("cli")

@@ -101,6 +101,20 @@ Runtime separates source identity from execution modeling:
   It may carry sparse-source classifications into diagnostics, but it must not
   accept a truncated replay as a completed backtest window.
 
+## Execution-Quality Vocabulary
+
+X0 through X5 are QT's complete execution-model quality vocabulary. A pinned
+execution-model artifact declares only the highest class its mechanics can
+support; it never grants that class by itself. Runtime emits the immutable
+context and fill evidence from which reporting assigns the attained class at
+the weakest required evidence boundary. Missing or contradictory context
+forces X0.
+
+X3 and X4 require causal, replay-certified book evidence for spread and visible
+depth respectively. X5 additionally requires that the pinned bounded passive
+queue and latency model was actually exercised. No X class claims
+venue-realized fill probability, calibrated live behavior, or live realism.
+
 ## Position Lifecycle And Order Semantics
 
 ATM templates declare position lifecycle intent; runtime executes that intent.
@@ -177,20 +191,22 @@ Executable fills retain `execute_order(FillOrder)` as the immediate adapter
 contract, so side, quantity, price, order type, liquidity role, price source,
 fee rate, TIF, post-only intent, and the exact resolved context are known before
 the adapter applies a fill. The authoritative long-term order contract is now
-the Phase 2B `CanonicalOrderRequest` plus immutable attempts and append-only
-lifecycle events. Entry and exit callers reach the adapter through that
-lifecycle; fills then continue through existing accounting owners. `FillOrder`
-must remain a compatibility seam and must not own durable state.
+the durable lifecycle's `CanonicalOrderRequest` plus immutable attempts and
+append-only lifecycle events. Entry and exit callers reach the adapter through
+that lifecycle; fills then continue through existing accounting owners.
+`FillOrder` must remain a compatibility seam and must not own durable state.
 
-Phase 3A optionally binds a replay-certified execution-book tape for backtests.
-X3 consumes only the causal top of book; X4 walks visible aggregated L2 and
-records exact level fills through this same lifecycle. Book-driven partial
-entries settle incrementally into the existing wallet and position owners, so
-filled exposure survives residual open/cancel/expiry outcomes. Omitting the tape
-preserves immutable full-fill X0-X2 bar behavior. Passive queue progress,
-nonzero latency, paper/shadow use, and calibration remain out of scope. See the
-[Phase 2B contract](PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md) and
-[Phase 3A contract](PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md).
+Replay-certified book execution optionally binds an execution-book tape for
+backtests. X3 consumes only the causal top of book; X4 walks visible aggregated
+L2 and records exact level fills through this same lifecycle. Book-driven
+partial entries settle incrementally into the existing wallet and position
+owners, so filled exposure survives residual open/cancel/expiry outcomes.
+Omitting the tape preserves immutable full-fill X0-X2 bar behavior. Passive
+queue bounds and deterministic latency scenarios are supplied by the separate
+X5 capability; paper/shadow book use and empirical calibration remain out of
+scope. See the
+[durable canonical order lifecycle](DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+and [replay-certified book execution](REPLAY_CERTIFIED_BOOK_EXECUTION.md).
 
 The runtime reads entry order semantics only from the immutable compiled plan.
 Unknown liquidity roles, exit-event types, and same-bar conflict policies are
@@ -210,8 +226,8 @@ summaries. Future slippage models should attach to the execution-policy
 boundary after order type, liquidity role, and fallback behavior are known.
 
 Current X0-X2 bar assumptions and their execution-model artifact are pinned
-inside the resolved context. A valid Phase 2A context does not raise a run above
-the class justified by the Phase 1 model and fill evidence.
+inside the resolved context. A valid venue-neutral context does not raise a run
+above the class justified by the bar-execution model and fill evidence.
 
 ## Diagram Walkthrough: Runtime Hot Path
 
@@ -235,7 +251,7 @@ cold paths or bounded projection steps.
 
 [runtime-lifecycle-state.mmd](diagrams/runtime-lifecycle-state.mmd) shows startup and terminal states:
 
-- startup phases prove the container, config, series, and first snapshot are available,
+- startup stages prove the container, config, series, and first snapshot are available,
 - live means runtime has first usable runtime truth,
 - degraded means partial recoverable failure,
 - terminal states stop execution and preserve failure/completion context.
@@ -358,7 +374,7 @@ snapshot is incomplete; it does not infer reasons or prices from legs.
 The current execution runtime supports deterministic simulated fills and
 observe-only paper ingestion. It does not have an authorized production
 exchange-order adapter. `RuntimeMode.LIVE` is a reserved composition seam, and
-the `live` lifecycle phase means the runtime is actively producing facts;
+the `live` lifecycle state means the runtime is actively producing facts;
 neither label grants order-submission capability.
 
 Paper mode must not place external orders. Provider credential references are
@@ -401,5 +417,5 @@ controls.
 - [ADR 0044: Known-at prefix invariance](../decisions/0044-enforce-known-at-prefix-invariance.md)
 - [ADR 0045: Explicit execution and exit policy](../decisions/0045-require-explicit-execution-and-exit-policy.md)
 - [ADR 0049: Keep live order submission closed](../decisions/0049-keep-live-order-submission-closed.md)
-- [Phase 2A venue-neutral execution context](PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
+- [Venue-neutral execution context](VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
 - [ADR 0056: Pin venue-neutral execution contexts per run](../decisions/0056-pin-venue-neutral-execution-contexts-per-run.md)

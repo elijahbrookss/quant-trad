@@ -12,17 +12,20 @@ if [[ "$SUITE" == "db" ]]; then
   USE_DOCKER=1
 fi
 COMPOSE_FILE="docker/docker-compose.test.yml"
-
 run_pytest_host() {
   local cmd="$1"
-  python -m pip install --upgrade pip
   bash -lc "$cmd"
 }
 
-run_pytest_docker() {
+run_pytest_docker() (
   local cmd="$1"
   local source_revision
   local source_tree_hash
+  local test_token
+  local test_project
+  local cleanup_status
+  local original_status
+  local -a compose
   if ! command -v docker >/dev/null 2>&1; then
     echo "ci_runner_prereq_missing: docker CLI is required when CI_USE_DOCKER=1" >&2
     exit 127
@@ -31,12 +34,30 @@ run_pytest_docker() {
   source_tree_hash="${SOURCE_TREE_HASH:-$(python scripts/provenance/source_tree_hash.py --git-revision "$source_revision")}"
   export SOURCE_REVISION="$source_revision"
   export SOURCE_TREE_HASH="$source_tree_hash"
-  docker compose -f "$COMPOSE_FILE" build test
-  docker compose -f "$COMPOSE_FILE" run --rm \
+  test_token="$(python -c 'import secrets; print(secrets.token_hex(8))')"
+  test_project="qt-test-${test_token}"
+  export QT_TEST_POSTGRES_USER="qt_test_${test_token}"
+  export QT_TEST_POSTGRES_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
+  export QT_TEST_POSTGRES_DB="qt_test_${test_token}"
+  compose=(docker compose --project-name "$test_project" -f "$COMPOSE_FILE")
+
+  cleanup_test_stack() {
+    original_status=$?
+    trap - EXIT
+    cleanup_status=0
+    "${compose[@]}" down --volumes --remove-orphans --rmi local || cleanup_status=$?
+    if [[ "$original_status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+      original_status=$cleanup_status
+    fi
+    exit "$original_status"
+  }
+  trap cleanup_test_stack EXIT
+
+  "${compose[@]}" build test
+  "${compose[@]}" run --rm \
     -e SOURCE_REVISION="$source_revision" \
     -e SOURCE_TREE_HASH="$source_tree_hash" \
     test bash -lc '
-    python -m pip install --upgrade pip &&
     export PG_DSN="postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescaledb:5432/${POSTGRES_DB}" &&
     if [ ! -r "/app/scripts/wait-for-db.sh" ]; then
       echo "ci_runner_wait_script_missing_or_unreadable: path=/app/scripts/wait-for-db.sh" >&2
@@ -44,7 +65,7 @@ run_pytest_docker() {
     fi
     bash /app/scripts/wait-for-db.sh bash -lc "$1"
   ' _ "$cmd"
-}
+)
 
 run_suite() {
   local cmd="$1"
@@ -58,7 +79,7 @@ run_suite() {
 profile_command() {
   local profile_args
   printf -v profile_args '%q ' "$@"
-  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py; fi; QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
+  echo "for profile in ${profile_args}; do echo \"ci_profile_start profile=\${profile}\"; if [[ \"\${profile}\" == \"docs\" ]]; then python scripts/docs/build_architecture_index.py --check; fi; QT_OMIT_DB_TESTS=1 QT_CI_PROFILE=\"\${profile}\" pytest -q; done"
 }
 
 run_profiles() {

@@ -1,92 +1,123 @@
 # Quant-Trad Documentation
 
-These docs are meant to help a competent engineer rebuild the system model in
-their head without pretending they remember every detail. Start with the intent,
-then drop into contracts or component notes only when the exact behavior
-matters.
+Quant-Trad (QT) helps you turn a trading idea into repeatable evidence before
+you trust it with real decisions. You define the idea, bind it to known data,
+measure it, test it in time order, and inspect what happened.
 
-## Start Here
+You do not need to learn QT's internal vocabulary before getting value from
+the system. Start with the reading path that matches what you want to do.
 
-- [Overview](overview.md): the shortest explanation of what the system is trying
-  to preserve.
-- [Getting started](getting-started.md): local setup, stack commands, endpoints,
-  and first checks.
-- [Operator handbook](operators/README.md): deploy, update, provider onboarding,
-  product enrollment, collector operation, recovery, and node boundaries.
-- [README](../README.md): project portal and capability summary.
+For a first visit, use this order:
 
-## Core Concepts
+[README](../README.md) → [What is QT?](overview.md) →
+[Quick Start](getting-started.md) →
+[core research workflow](guides/research-workflow.md) →
+[concepts](concepts/) / [glossary](contracts/platform/04_glossary.md) →
+[architecture](architecture/README.md) → [six core promises](core-promises.md)
+→ contributor guidance when you are ready to change the system.
 
-The concept pages explain the normal shape before the edge cases. Read these
-when behavior feels surprising and you want to know what the system intended.
+## Choose Your Path
 
-- [Runtime timeline](concepts/runtime-timeline.md): `initialize -> apply_bar -> snapshot`, known-at timing, and runtime truth.
-- [Execution model](concepts/execution-model.md): FAST/FULL execution, pessimistic same-bar handling, intrabar fallback, and playback separation.
-- [Strategies and signals](concepts/strategies-and-signals.md): how typed indicator outputs become strategy decisions.
-- [BotLens](concepts/botlens.md): runtime inspection and playback as projection surfaces, not execution engines.
-- [Reporting datasets](concepts/reporting-datasets.md): RunResearchDataset v1 and report/compare views.
+### I want to understand QT
 
-## Engineering Architecture
+1. [Overview](overview.md) — what quantitative trading means here, who QT
+   helps, and what a result can and cannot tell you.
+2. [Six core promises](core-promises.md) — the short list of system properties
+   that make QT research worth trusting.
+3. [Current system](current-system.md) — what is implemented now, what remains
+   bounded, and what QT deliberately does not claim.
 
-Architecture docs explain ownership: what owns truth, what is only a view, and
-which identifiers carry meaning across boundaries.
+### I have a trading idea to test
 
-- [Architecture overview](engineering/architecture.md): backend, runtime, frontend, storage, and observability relationships.
-- [Runtime engine](engineering/runtime-engine.md): concise runtime internals summary with links to deep design docs.
-- [Data layer](engineering/data-layer.md): provider adapters, canonical candle intake, causal reads, provenance, and gap classification.
-- [Observability](engineering/observability.md): logs, metrics, runtime events, BotLens diagnostics, Grafana, and Loki.
-- [Security layer](architecture/security/SECURITY_LAYER.md): credential handling, trust boundaries, known gaps, and post-quantum risk points.
-- [Engineering standards](engineering/README.md): testing, CI, observability doctrine, and documentation writing guidance.
+1. [Core research workflow](guides/research-workflow.md) — idea, definition,
+   evidence, measurements, Check, Strategy, backtest, walk-forward review,
+   paper simulation, and comparison.
+2. [Getting started](getting-started.md) — install QT, start the local stack,
+   and verify that it is ready.
+3. [Creating an indicator](guides/creating-an-indicator.md) and
+   [creating a strategy](guides/creating-a-strategy.md) — extend the system
+   after the normal research path makes sense.
 
-## Guides
+### I operate QT
 
-- [Portable single-node deployment](engineering/server-deployment.md): install,
-  promote, verify, roll back, access, and move storage on a VPS or on-prem host.
-- [Collector operations](guides/collector-operations.md): enroll supported
-  products and inspect or operate the resulting collector fleet.
-- [Creating an indicator](guides/creating-an-indicator.md): minimal authoring checklist and example links.
-- [Creating a strategy](guides/creating-a-strategy.md): typed-output decision flow and test expectations.
-- [Adding a provider](guides/adding-a-provider.md): adapter, explicit intake, known-at, provider-gap, and test expectations.
-- [Binance futures public data setup](guides/binance-futures-public-data.md): target setup and ingestion contract for archive-backed USD-M perpetual research data.
-- [BTC PERP market-structure campaign V1](research-campaigns/BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V1.md): invalidated and archived pre-trial activation record.
-- [BTC PERP market-structure campaign V2](research-campaigns/BTC_PERP_MARKET_STRUCTURE_CAMPAIGN_V2.md): replacement sealed, provider-free charter for QT's first bounded autonomous research operation.
-- [Coinbase derivatives paper setup](guides/coinbase-derivatives-paper-setup.md): target setup for Coinbase product metadata, WebSockets, and provider-backed paper runs.
+- [Operator handbook](operators/README.md) — deployment, updates, provider
+  onboarding, collector operation, backup, recovery, and node boundaries.
+- [Collector operations](guides/collector-operations.md) — enroll supported
+  products and inspect or operate the collector fleet.
+- [Portable single-node deployment](engineering/server-deployment.md) —
+  install, verify, promote, roll back, and move storage.
 
-## Contracts
+### I need the internals or exact rule
 
-Contracts are normative. If code or explanatory docs disagree with these files,
-the contract wins until corrected. Use them when you need the exact rule, not as
-the first page for learning the system.
+- [Architecture guide](architecture/README.md) — the boundary-oriented map of
+  data, research, execution, persistence, reporting, and inspection.
+- [System architecture model](architecture/system/SYSTEM_MODEL.md) — the
+  end-to-end truth flow.
+- [Engineering standards](engineering/README.md) — implementation, testing,
+  CI, observability, and documentation guidance.
+- [Platform contracts](contracts/README.md) — the normative rules that win
+  when explanatory prose or code disagrees.
+- [Platform glossary](contracts/platform/04_glossary.md) — precise definitions
+  when a QT term matters.
 
-- [Contracts README](contracts/README.md)
-- [System contract](contracts/platform/00_system_contract.md)
-- [Runtime contract](contracts/platform/01_runtime_contract.md)
-- [Execution and playback contract](contracts/platform/02_execution_playback_contract.md)
-- [Engineering contract](contracts/platform/03_engineering_contract.md)
+## The Research Path In One Minute
 
-## Deep Architecture
+```text
+idea
+  -> define the rule and failure criteria
+  -> choose and freeze the evidence
+  -> calculate measurements
+  -> ask a bounded research question
+  -> express a Strategy
+  -> backtest in time order
+  -> repeat across chronological windows
+  -> observe with paper data
+  -> inspect, compare, refine, or reject
+```
 
-Deep architecture docs are for the moments when the concept is clear but the
-boundary matters. They should explain the current intent and source paths
-without becoming a pile of disconnected requirements.
+A frozen **Dataset** identifies the exact market evidence used by a piece of
+research. An **Indicator** produces a measurement. A **Check** asks a bounded
+question of evidence. A **Strategy** turns declared measurements into decisions.
+The bot runtime—not the Strategy—simulates fills, fees, wallet effects, and
+lifecycle. BotLens and reports explain the result; they do not rewrite it.
 
-- [Architecture folder guide](architecture/README.md)
-- [System architecture model](architecture/system/SYSTEM_MODEL.md)
-- [Engine state model](architecture/engine/ENGINE_STATE_MODEL.md)
-- [Architecture decision records](architecture/decisions/README.md)
-- [Execution runtime boundary](architecture/execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
-- [Paper engine v1 design](architecture/execution-runtime/PAPER_ENGINE_V1_DESIGN.md)
-- [BotLens projection boundary](architecture/botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
-- [Reporting boundary](architecture/reporting/REPORTING_BOUNDARY.md)
-- [Architecture component index](architecture/ARCHITECTURE_COMPONENT_INDEX.md)
-- [Incident records](incidents/README.md)
+## Backtest And Paper Simulation
 
-## Status
+A backtest replays frozen historical evidence in time order. It prevents a
+decision from seeing future data and applies declared execution assumptions.
+It answers “what would this rule have done under this evidence and model?” It
+does not answer “what will happen next?”
 
-Quant-Trad is in active development. Keep docs precise and honest:
+A paper run exercises the system as data arrives, using simulated or
+observe-only behavior. It is useful for timing, data-readiness, and operational
+learning. QT does not submit external exchange orders.
 
-- Document behavior that exists or is explicitly contracted.
-- Explain the system intent before listing exceptions.
-- Link to deep notes instead of copying large sections across files.
-- Keep unfinished areas as short caveats, not broad future tutorials.
-- Update contracts and architecture docs in the same pass when runtime, provider, storage, reporting, or observability behavior materially changes.
+## Concept Pages
+
+Read these after the main workflow when a result is surprising:
+
+- [Runtime timeline](concepts/runtime-timeline.md) —
+  `initialize -> apply_bar -> snapshot`, known-at timing, and runtime truth.
+- [Execution model](concepts/execution-model.md) — fill assumptions, same-bar
+  handling, and playback separation.
+- [Strategies and signals](concepts/strategies-and-signals.md) — how typed
+  measurements become decisions.
+- [BotLens](concepts/botlens.md) — inspection and playback as views, not an
+  execution engine.
+- [Reporting datasets](concepts/reporting-datasets.md) — report, export, and
+  comparison views.
+
+## Additional Guides
+
+- [Adding a provider](guides/adding-a-provider.md)
+- [Chainlink structured Facts](guides/chainlink-structured-facts.md)
+- [Coinbase derivatives paper setup](guides/coinbase-derivatives-paper-setup.md)
+- [Binance futures public data setup](guides/binance-futures-public-data.md)
+- [Developer workflow](engineering/developer-workflow.md)
+
+## Documentation Rule
+
+Start with intent, then follow links to the exact source. Contracts remain the
+source of truth. Architecture explains boundaries. Tests and implementation
+show current conformance. Missing or unavailable support should stay visible
+rather than being presented as a successful result.

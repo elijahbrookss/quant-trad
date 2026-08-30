@@ -8,7 +8,7 @@ Start with:
 - [Runtime engine](runtime-engine.md)
 - [Data layer](data-layer.md)
 - [Observability](observability.md)
-- [Developer audit workflow](developer-audit-workflow.md)
+- [Developer workflow](developer-workflow.md)
 
 Use it for:
 

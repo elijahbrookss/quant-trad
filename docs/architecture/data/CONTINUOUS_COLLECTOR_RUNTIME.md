@@ -104,6 +104,12 @@ deployment helper promotes an exact reviewed Git commit and retains prior
 commit-tagged images for compatible rollback; it does not make the agent or Git
 checkout a workload supervisor.
 
+Alloy is the native-server topology's only normal Docker-to-Loki shipper. Local
+development instead uses its supported Promtail service. The two must never
+scrape the same collector or application-container streams. Collector processes
+write structured logs to stdout/stderr and do not activate a direct or
+in-process Loki hot-path fallback when a shipper is absent.
+
 ## Runtime Contract
 
 One enabled definition maps to one supervisor task and one fenced stream claim.
@@ -296,7 +302,9 @@ On Windows Docker Desktop, the optional
 and emits physical free/used/reserve bytes, allocated VHDX growth, and projected
 days to reserve. It falls back only to bounded Docker/WSL metadata locations and
 fails visibly when discovery is unavailable. Promtail ingests its bounded daily
-NDJSON files through the existing Loki path. Its opt-in
+NDJSON files through the supported local-development Loki path; the
+native-server topology continues to use Alloy rather than double scraping with
+Promtail. Its opt-in
 `-InstallScheduledTask` mode installs a user-level, at-logon, restart-on-failure
 task; application startup never mutates host scheduling implicitly.
 

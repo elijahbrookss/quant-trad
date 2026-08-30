@@ -1,7 +1,16 @@
+---
+status: historical
+---
+
 # Canonical Fact Migration Pre-Cutover Backup
 
-Status: verified and safe to use as the rollback artifact for the generalized
-Fact cutover.
+> Historical evidence record. The "verified and safe to use" finding below
+> applies only to the recorded 2026-08-09 generalized Fact cutover and its
+> captured environment; it does not certify this artifact for a current or
+> different deployment.
+
+Recorded cutover finding: verified and safe to use as the rollback artifact for
+the generalized Fact cutover described here.
 
 ## Backup identity
 

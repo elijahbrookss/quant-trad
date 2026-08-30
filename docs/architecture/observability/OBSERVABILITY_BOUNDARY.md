@@ -99,9 +99,11 @@ keeps run incident investigation away from ad hoc curl command knowledge.
 
 Backend and runtime application logs enter Loki through one normal path:
 container stdout/stderr, Docker log storage, one out-of-process shipper, then
-Loki. Alloy owns this role on the native-Linux server; the local development
-composition retains its historical Promtail path. Runtime code must not
-synchronously post ordinary log lines to Loki. Bot-runtime processes append
+Loki. Alloy owns this role on the native-Linux server; Promtail is the supported
+local-development shipper. A topology runs exactly one of them. Promtail and
+Alloy must never scrape the same application-container streams, and shipper
+absence must not activate a second or in-process ingress path. Runtime code must
+not synchronously post ordinary log lines to Loki. Bot-runtime processes append
 `run_id`, `bot_id`, `service=bot-runtime`, and `runtime=bot` to log lines so
 run-centered searches remain cheap enough without indexing every run as a Loki
 stream label.
@@ -180,7 +182,9 @@ On Windows Docker Desktop, `host_capacity_sampler.ps1` optionally supplies the
 missing physical authority. It discovers Docker's configured WSL VHDX and its
 backing volume from Docker metadata rather than a drive literal, writes bounded
 daily NDJSON, and projects days to a configurable reserve from observed VHDX
-allocation growth. Promtail reads those files through the same Loki pipeline.
+allocation growth. Promtail reads those files through the supported
+local-development Loki pipeline; this does not add Alloy to the local topology
+or Promtail to the native-server topology.
 On native Linux or cloud volumes, the engine/data-volume exporter can be
 authoritative directly. If the actual backing resource is not observable,
 capacity remains explicitly unavailable.
@@ -193,6 +197,29 @@ panels show engine/guest storage, physical Docker backing-volume headroom, VHDX
 allocation growth, projected days to reserve, and discovery/authority state.
 Alert rules may consume these panels later, but alert thresholds are operator
 policy rather than trading truth.
+
+## Grafana Dashboard Lifecycle
+
+The checked-in JSON files under
+`docker/grafana/provisioning/dashboards/` are the supported dashboard source.
+The file provider polls every 10 seconds and sets `allowUiUpdates: false`;
+provisioned-dashboard UI edits therefore do not replace the reviewed file
+source.
+
+Local development first relies on that poll. If the stack is stopped or needs
+reconciliation, `make STACK_PROFILES=observability stack-restart` recreates the
+local observability profile from checked-in configuration. Native-server
+dashboard changes move through
+`bash scripts/automation/server_deploy.sh deploy <reviewed-commit-sha>`, not a
+manual file copy or Grafana UI mutation.
+
+`scripts/backup-grafana-dashboards.sh` is a tracked export helper, not an
+automatic backup or restore contract. It requires a reachable Grafana API,
+valid credentials, Bash, `curl`, `jq`, and a writable output directory. Its
+JSON output must be reviewed before commit, and neither export nor provisioning
+constitutes restore proof. No `grafana-backup` or `grafana-restore` Make target,
+hook, timer, or other automatic restore workflow is supported by the current
+repository.
 
 ## What Belongs Here
 
@@ -293,6 +320,9 @@ policy rather than trading truth.
 ## Invariants
 
 - Logs and metrics include IDs when available: `run_id`, `bot_id`, `strategy_id`, `instrument_id`, `symbol`, `timeframe`, `trade_id`, `bar_time`.
+- Local development runs Promtail and native server runs Alloy; each topology
+  has exactly one normal out-of-process shipper, never both, and application
+  hot paths never post ordinary logs directly to Loki.
 - One event should mean one lifecycle or diagnostic fact.
 - Observability is designed for traceability from QuantLab to strategy to bot to trade to playback.
 - Durable observability rows must be bounded enough that observing pressure does
@@ -312,3 +342,4 @@ policy rather than trading truth.
 - [Execution runtime boundary](../execution-runtime/EXECUTION_RUNTIME_BOUNDARY.md)
 - [Engineering observability overview](../../engineering/observability.md)
 - [ADR 0033: Use Promtail as Runtime Loki Ingress](../decisions/0033-use-promtail-as-runtime-loki-ingress.md)
+- [Grafana dashboard provisioning](../../../docker/grafana/provisioning/dashboards/README.md)

@@ -73,7 +73,7 @@ respect.
 | [0045](0045-require-explicit-execution-and-exit-policy.md) | Require explicit execution and exit policy | Accepted, retroactive cleanup |
 | [0046](0046-fingerprint-exact-candle-inputs-and-keep-quality-separate.md) | Fingerprint exact candle inputs and keep quality separate | Accepted, retroactive cleanup |
 | [0047](0047-fence-async-job-ownership.md) | Fence async job ownership | Accepted |
-| [0048](0048-gate-agent-mutation-and-research-promotion.md) | Gate agent mutation and research promotion | Proposed |
+| [0048](0048-gate-agent-mutation-and-research-promotion.md) | Gate agent mutation and research promotion | Accepted |
 | [0049](0049-keep-live-order-submission-closed.md) | Keep live order submission closed | Accepted, retroactive cleanup |
 | [0050](0050-use-one-canonical-append-only-market-data-store.md) | Use one canonical append-only market-data store | Accepted, retroactive cleanup |
 | [0051](0051-require-frozen-datasets-for-canonical-backtests.md) | Require frozen datasets for canonical backtests | Accepted |
@@ -89,3 +89,6 @@ respect.
 | [0061](0061-use-provider-neutral-exact-numeric-facts-and-bounded-acquisition.md) | Use provider-neutral exact numeric facts and bounded acquisition | Accepted |
 | [0062](0062-use-frozen-bindings-for-durable-check-evidence.md) | Use frozen bindings for durable Check evidence | Accepted |
 | [0063](0063-use-schema-registered-canonical-facts.md) | Use schema-registered canonical Facts | Accepted |
+| [0064](0064-use-one-code-owned-collector-operations-contract.md) | Use one code-owned Collector Operations contract | Accepted |
+| [0065](0065-use-explicit-frozen-check-admission-for-new-research-observations.md) | Use explicit frozen-Check admission for new Research Observations | Accepted |
+| [0066](0066-scale-validation-to-consequence-and-trust-boundaries.md) | Scale validation to consequence and trust boundaries | Accepted |

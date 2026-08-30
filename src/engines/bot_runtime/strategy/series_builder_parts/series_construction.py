@@ -1164,13 +1164,7 @@ class SeriesBuilderConstructionMixin:
                 execution_context=execution_context,
             )
         if self.run_type == "live":
-            spot_adapter = self.config.get("spot_execution_adapter")
-            derivatives_adapter = self.config.get("derivatives_execution_adapter")
-            if not spot_adapter and not derivatives_adapter:
-                raise ValueError("Live execution requires spot_execution_adapter or derivatives_execution_adapter.")
             return LiveAdapter(
                 short_requires_borrow=short_requires_borrow,
-                spot_adapter=spot_adapter,
-                derivatives_adapter=derivatives_adapter,
             )
         raise ValueError(f"Unsupported run_type '{self.run_type}' for execution adapter selection.")

@@ -5,8 +5,10 @@ This file is the **entry point for all agents and contributors**.
 It defines the expectations, principles, and engineering discipline required
 to work safely inside the Quant-Trad codebase.
 
-If behavior conflicts with this document or the docs under `docs/contracts/`,
-the code is wrong.
+This file governs contributor and agent workflow. Product behavior is defined
+by the platform contracts under `docs/contracts/`. This file may summarize
+those rules, but it cannot override them. If workflow guidance and a platform
+contract disagree about product behavior, the platform contract wins.
 
 ---
 
@@ -32,6 +34,39 @@ the code is wrong.
 
 ---
 
+## Repository Reading Path
+
+Start with the product before opening deep architecture:
+
+1. `README.md` explains what QT does and how to start it.
+2. `docs/current-system.md` explains the current end-to-end system, its limits,
+   and the six promises that guide high-consequence changes.
+3. `docs/contracts/platform/04_glossary.md` standardizes QT vocabulary.
+4. `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` maps code paths to the
+   component documents that describe them.
+5. `docs/contracts/README.md` leads to the authoritative platform contracts.
+6. `docs/core-promises.md` shows which important system promises a change may
+   affect and links to the contracts and decisions that define them.
+
+For an ordinary change, this path is enough to find current meaning and normal
+checks. Use historical plans, incident records, and research evidence only when
+the change needs their context; they do not override current contracts.
+
+Before changing behavior:
+
+- use the component index to find the relevant component documents;
+- use the glossary and contracts to confirm current meaning;
+- check the six core promises for consequences beyond the local component;
+- update a platform contract when platform-wide product meaning changes;
+- add or revise an ADR when a durable architectural or safety tradeoff changes;
+- run focused tests first, then the normal validation scope described in
+  `docs/engineering/developer-workflow.md`.
+
+A passing test supports the behavior it exercises; it does not override the
+documented product contract.
+
+---
+
 ## Canonical Context (Required Reading)
 
 Agents MUST understand these documents before making architectural or behavioral changes:
@@ -40,6 +75,7 @@ Agents MUST understand these documents before making architectural or behavioral
 - `docs/contracts/platform/01_runtime_contract.md`
 - `docs/contracts/platform/02_execution_playback_contract.md`
 - `docs/contracts/platform/03_engineering_contract.md`
+- the platform glossary listed in the Repository Reading Path above
 
 These define the system contract.
 
@@ -105,7 +141,7 @@ Include these whenever they exist:
 
 ### Log Levels
 - **DEBUG** — internal mechanics, cache behavior, counters
-- **INFO** — lifecycle events and phase transitions
+- **INFO** — lifecycle events and stage transitions
 - **WARN** — unexpected but recoverable states (always explain why)
 - **ERROR** — failed actions or invalid results (never swallowed)
 
@@ -118,7 +154,7 @@ If a fallback is used, it must emit a WARN explaining why.
 - Do not swallow exceptions
 - Do not silently skip invalid states
 - Prefer failing early over producing incorrect output
-- Errors must include context (IDs, symbol, timeframe, phase)
+- Errors must include context (IDs, symbol, timeframe, lifecycle stage)
 
 A system that hides errors cannot be trusted or improved.
 
@@ -150,10 +186,15 @@ Avoid switch statements in core services.
 Use registries and explicit registration instead.
 
 ### Schema Expectations
-- No runtime migrations or backfills live in the codebase.
-- If a table is missing, create it once and log a WARN so operators know it was provisioned.
-- If columns are missing, fail loud with an actionable error; do not attempt to patch or alter in-place.
-- All schema changes must come from clean table definitions (drop/recreate out-of-band if needed).
+- Runtime must not perform implicit migrations or data backfills.
+- Current ORM/model definitions are the canonical clean-schema description.
+  Startup bootstrap may create missing clean-model tables and enforce only the
+  explicitly reviewed bootstrap clauses owned by the persistence boundary.
+- If existing columns disagree with the current contract, fail loud with an
+  actionable error; do not silently patch or alter them in place.
+- Existing deployments change through explicit, reviewed operator cutovers
+  outside runtime. Preserve their manual SQL and runbooks as historical and
+  operational evidence; they do not outrank the current model contract.
 
 ---
 
@@ -188,7 +229,7 @@ Performance, polish, and optimization come second.
   - or `OBSIDIAN_SYNC_DOCS_DEST`
   - optional local override file: `.sync-docs.mk`
 
-## Developer/Audit Workflow
+## Developer Workflow
 
 - Use `qt` as the primary command surface for agent/tool workflows and
   operations: bot runs, experiments, provider checks, report summaries, report
@@ -197,12 +238,32 @@ Performance, polish, and optimization come second.
   as workflow truth.
 - Use `make help` as the repo-native support index for Docker, DB, validation,
   git, local stack control, and direct forensic helpers.
-- Use `docs/engineering/developer-audit-workflow.md` for the standard Codex
-  and local audit workflow before inventing new one-off commands.
+- Use `docs/engineering/developer-workflow.md` for the standard Codex
+  and local development workflow before inventing new one-off commands.
 - Keep local support and forensic helpers in existing locations such as the root
   `Makefile`, `scripts/reporting/`, and `docs/engineering/`; do not add new
   root-level workflow files or folders. Normal bot/run/report workflows belong
   in `qt`, not Make.
+
+### Normal Validation Matrix
+
+Run focused checks while working. Before handoff, run every applicable row
+below; broad or cross-system changes should run the full matrix. All database
+and configuration checks use disposable local inputs. Never point validation at
+production or live systems, load real credentials, deploy a host, or enable
+external-order submission.
+
+| Area | Normal command or check | Required scope |
+|---|---|---|
+| Documentation and indexes | `make validate-docs` | Documentation, contracts, glossary, architecture metadata, or generated-index changes; also broad handoff validation. |
+| Non-database Python | `make backend-check` | Backend, CLI, domain, service, configuration, or cross-system changes. |
+| Disposable database | `./scripts/ci/run_test_suite.sh db` | Persistence, schema, repository, recovery-guard, or database-backed behavior; requires the isolated Docker test stack. |
+| Frontend | `make frontend-check` | UI, frontend adapters, API-view contracts, or broad handoff validation. |
+| Deployment/configuration without deployment | `bash -n scripts/automation/server_deploy.sh`, `bash -n scripts/automation/server_host_bootstrap.sh`, then `docker compose --env-file <disposable-env> -f docker/docker-compose.server.yml config --quiet` | Deployment scripts, Compose/configuration, or broad handoff validation. Render configuration only; do not run deploy, credential, or remote-host actions. |
+| Diff and clean tree | `git diff --check`; after committing the intended work, require empty `git status --porcelain=v1` | Every handoff. Inspect failures and preserve unrelated user changes rather than staging them for cleanliness. |
+
+Record unavailable prerequisites honestly. A skipped database, frontend, or
+configuration row is an unavailable validation result, not a passing result.
 
 ## Commit Hygiene
 
@@ -220,20 +281,16 @@ When a change materially affects runtime/service/provider/storage/reporting arch
 Required workflow:
 1. Locate existing component docs via `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md` before changing architecture.
 2. Update/create relevant component docs under `docs/architecture/<subsystem>/`.
-3. Ensure each affected architecture doc has frontmatter metadata with at least:
-   - `component`
-   - `subsystem`
-   - `layer`
-   - `tags`
-   - `code_paths`
-   - `doc_type`
-   - `status`
+3. Follow `docs/engineering/documentation/component-documentation-standard.md`.
 4. Refresh the architecture index with:
    - `python scripts/docs/build_architecture_index.py`
 5. Run `make sync-docs` after doc updates.
 
 Agent expectation:
 - Prefer component-targeted doc updates over broad vague edits.
+- Treat frontmatter `code_paths` as navigation and coverage, not exclusive file
+  ownership.
+- Platform contracts remain authoritative over narrower architecture notes.
 - Runtime composition/wiring changes must keep docs and index in sync.
 - Runtime composition changes should preserve mode-aware seams (`backtest`/`paper`/`live`) even when only backtest is implemented today.
 - If you touch code paths listed in `code_paths`, verify corresponding docs remain accurate.

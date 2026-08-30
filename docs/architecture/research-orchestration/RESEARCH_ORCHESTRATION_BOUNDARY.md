@@ -29,11 +29,11 @@ code_paths:
   - portal/backend/workers/research_worker.py
   - portal/backend/service/reports/contract.py
   - portal/backend/service/reports/comparison.py
-  - docs/engineering/developer-audit-workflow.md
+  - docs/engineering/developer-workflow.md
 ---
 # Research Orchestration Boundary
 
-## Offline autonomy through Phase 6
+## Offline Research Authority Ceiling
 
 The production research surface now includes three additional, provider-free
 boundaries:
@@ -55,9 +55,8 @@ not a prerequisite for honest controlled-workflow claims.
 
 [Check Evidence Boundary](CHECK_EVIDENCE_BOUNDARY.md) defines the canonical
 preview, frozen evidence, replay, Observation, and trail workflow. It replaces
-objective-specific calculations with versioned QT-owned evaluators;
-"campaign" remains an external objective description, not QT domain
-nomenclature.
+objective-specific calculations with versioned QT-owned evaluators. An external
+research objective does not become QT domain vocabulary or product authority.
 
 The autonomous research workflow cannot choose provider data, resolve a sealed
 holdout through public operations, disable durable audit, mutate a frozen

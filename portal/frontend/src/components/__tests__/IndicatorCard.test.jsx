@@ -1,10 +1,7 @@
 /**
  * IndicatorCard Component Tests
  *
- * These tests require a testing library setup. To run:
- * 1. Install: npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom
- * 2. Configure vitest.config.js with jsdom environment
- * 3. Run: npm test
+ * Runs in the pinned Vitest/jsdom profile via `npm run test:jsx`.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -22,8 +19,8 @@ const mockIndicator = {
     threshold: 0.5,
   },
   typed_outputs: [
-    { name: 'breakout', type: 'signal', enabled: true },
-    { name: 'retest', type: 'signal', enabled: false },
+    { name: 'breakout', type: 'signal' },
+    { name: 'retest', type: 'signal' },
   ],
   enabled: true,
   created_at: new Date().toISOString(),
@@ -76,10 +73,10 @@ describe('IndicatorCard', () => {
       expect(screen.queryByText('Ready')).not.toBeInTheDocument();
     });
 
-    it('shows enabled signal summary in collapsed view', () => {
+    it('shows declared signal outputs in collapsed view', () => {
       render(<IndicatorCard {...defaultProps} />);
       expect(screen.getByText('breakout')).toBeInTheDocument();
-      expect(screen.queryByText('retest')).not.toBeInTheDocument();
+      expect(screen.getByText('retest')).toBeInTheDocument();
     });
 
     it('does NOT display "Awaiting first compute" text', () => {

@@ -1,9 +1,15 @@
+---
+status: historical
+---
+
 # Chainlink ETH/USD Breakout V2 Campaign Dossier
 
-> Historical limitation notice: the population, joins, outcomes, and hashes in
-> this dossier predate the canonical frozen `event_fact_analysis` boundary and
-> are not classified as current replayable Check evidence. The original record
-> is preserved. See [Chainlink Historical Research Boundary Notice](CHAINLINK_RESEARCH_BOUNDARY_LIMITATIONS.md).
+> Historical research record: the results and production-shaped statements
+> below describe only this bounded study at its recorded times and do
+> not certify a current deployment. Its population, joins, outcomes, and hashes
+> predate the canonical frozen `event_fact_analysis` boundary and are not
+> classified as current replayable Check evidence. The original record is
+> preserved. See [Chainlink Historical Research Boundary Notice](CHAINLINK_RESEARCH_BOUNDARY_LIMITATIONS.md).
 
 ## Outcome
 

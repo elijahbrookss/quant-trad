@@ -112,7 +112,6 @@ LOCAL_PG_ENV = if [ -f secrets.env ]; then \
 	fi
 PYTEST_ENV = QT_LOGGING_LOKI_URL= QT_LOGGING_DEBUG=false QT_LOGGING_LEVEL=WARNING MPLCONFIGDIR=/tmp/matplotlib
 REPORT_API_TEST_TIMEOUT ?= 90s
-
 # Docs sync (Obsidian/Windows rsync friendly)
 SYNC_DOCS_SRC         ?= docs/
 SYNC_DOCS_DEST        ?= $(or $(OBSIDIAN_SYNC_DOCS_DEST),$(OBSIDIAN_SYNC_DEST),)
@@ -146,14 +145,14 @@ ps: stack-ps ## Show running containers (alias for stack-ps)
 
 sync-docs: ## Sync ./docs to external path via rsync (set SYNC_DOCS_DEST or OBSIDIAN_SYNC_DOCS_DEST)
 	@set -euo pipefail; \
-	if ! command -v "$(SYNC_DOCS_RSYNC)" >/dev/null 2>&1; then \
-		echo "✗ rsync not found on PATH"; exit 1; \
-	fi; \
 	src_raw="$(SYNC_DOCS_SRC)"; \
 	dest_raw="$(SYNC_DOCS_DEST)"; \
 	if [ -z "$$dest_raw" ]; then \
 		echo "ℹ sync-docs skipped: set SYNC_DOCS_DEST (or OBSIDIAN_SYNC_DOCS_DEST)"; \
 		exit 0; \
+	fi; \
+	if ! command -v "$(SYNC_DOCS_RSYNC)" >/dev/null 2>&1; then \
+		echo "✗ rsync not found on PATH"; exit 1; \
 	fi; \
 	src="$$(cd "$$src_raw" >/dev/null 2>&1 && pwd)/"; \
 	dest="$$dest_raw"; \
@@ -338,7 +337,7 @@ mcp-register-codex: venv ## Register the Quant-Trad MCP stdio server with Codex 
 	forensic-run-seq-gaps forensic-run-write-latency forensic-observability-storage-budget \
 	forensic-run-logs forensic-logs-doctor \
 	forensic-botlens-check forensic-wallet-diagnostics forensic-golden-compare \
-	test-reporting test-reporting-api test-botlens test-runtime backend-check validate-docs frontend-test frontend-build frontend-check \
+	test-reporting test-reporting-api test-botlens test-runtime backend-check validate-glossary validate-docs frontend-test frontend-build frontend-check \
 	git-status git-diff git-check check check-all
 
 status: ## Show service status without docker compose ps sandbox friction
@@ -462,20 +461,22 @@ test-botlens: venv ## Run focused BotLens and runtime projection tests
 
 test-runtime: test-botlens ## Alias for focused BotLens/runtime tests
 
-backend-check: venv ## Run every non-database backend test
+backend-check: venv ## Run ordinary non-database backend tests
 	@$(PYTEST_ENV) QT_OMIT_DB_TESTS=1 $(PYTHON) -m pytest -q
 
-validate-docs: venv ## Refresh architecture index and run docs contract validation
-	@$(PYTHON) scripts/docs/build_architecture_index.py
-	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py
+validate-glossary: venv ## Validate the maintained platform glossary
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_platform_glossary.py
 
-frontend-test: ## Run frontend unit tests
+validate-docs: venv ## Refresh the architecture index and run documentation checks
+	@$(PYTHON) scripts/docs/build_architecture_index.py
+	@$(PYTEST_ENV) $(PYTHON) -m pytest -q tests/contract/test_architecture_docs_index.py tests/contract/test_documentation_integrity.py tests/contract/test_platform_glossary.py
+frontend-test: ## Run frontend Node and JSX tests
 	@$(NPM) --prefix $(FRONT_DIR) test
 
 frontend-build: ## Build frontend assets
 	@$(NPM) --prefix $(FRONT_DIR) run build
 
-frontend-check: frontend-test frontend-build ## Run frontend tests and build
+frontend-check: frontend-test frontend-build ## Run frontend Node/JSX tests and build
 
 git-status: ## Show short git status
 	@git status --short
@@ -490,7 +491,7 @@ git-check: ## Show status and run git diff whitespace checks
 
 check: git-check validate-docs backend-check ## Run standard backend developer/audit checks
 
-check-all: check frontend-check ## Run backend checks plus optional legacy frontend checks
+check-all: check frontend-check ## Run backend checks plus the supported frontend checks
 
 ## =============================== QUALITY ================================ ##
 .PHONY: test clean

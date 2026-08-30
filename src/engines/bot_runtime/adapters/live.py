@@ -1,4 +1,4 @@
-"""Run-type adapter for live execution."""
+"""Reserved fail-closed seam for a possible future live execution mode."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from ..core.execution_order import FillOrder
 
 
 class LiveAdapter(ExecutionAdapter):
-    """Execution adapter that forwards to provided live executors."""
+    """Keep the live composition seam closed while external execution is unsupported."""
 
     def __init__(
         self,
@@ -19,18 +19,20 @@ class LiveAdapter(ExecutionAdapter):
         spot_adapter: Optional[ExecutionAdapter] = None,
         derivatives_adapter: Optional[ExecutionAdapter] = None,
     ) -> None:
+        if spot_adapter is not None or derivatives_adapter is not None:
+            raise ValueError(
+                "external order submission is closed; live execution adapters are not admitted"
+            )
         self._short_requires_borrow = bool(short_requires_borrow)
-        self._spot_adapter = spot_adapter
-        self._derivatives_adapter = derivatives_adapter
 
     def execute_order(
         self,
         order: FillOrder,
     ) -> Tuple[Optional[FillResult], Optional[FillRejection]]:
-        adapter = self._spot_adapter if self._short_requires_borrow else self._derivatives_adapter
-        if not adapter:
-            raise ValueError("LiveAdapter requires a configured execution adapter for this instrument.")
-        return adapter.execute_order(order)
+        del order
+        raise RuntimeError(
+            "external order submission is closed; live execution is a reserved seam"
+        )
 
 
 __all__ = ["LiveAdapter"]

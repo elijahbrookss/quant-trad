@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import threading
 
 import httpx
 import pytest
@@ -14,8 +14,13 @@ from portal.backend.controller import research as research_controller
 async def test_slow_sync_route_does_not_block_unrelated_async_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
     def slow_create(_payload):
-        time.sleep(0.2)
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test did not release the held synchronous handler")
         return {"id": "item-1", "kind": "observation", "title": "Slow item"}
 
     monkeypatch.setattr(
@@ -34,21 +39,27 @@ async def test_slow_sync_route_does_not_block_unrelated_async_request(
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        started = time.perf_counter()
         slow_request = asyncio.create_task(
             client.post(
                 "/api/research/items",
                 json={"kind": "observation", "title": "Slow item"},
             )
         )
-        await asyncio.sleep(0.02)
-        scheduling_delay = time.perf_counter() - started
-        probe_started = time.perf_counter()
-        probe_response = await client.get("/async-probe")
-        probe_delay = time.perf_counter() - probe_started
-        slow_response = await slow_request
+        try:
+            handler_entered = await asyncio.wait_for(
+                asyncio.to_thread(entered.wait, 5),
+                timeout=6,
+            )
+            assert handler_entered is True
+            assert slow_request.done() is False
 
-    assert scheduling_delay < 0.1
-    assert probe_delay < 0.1
+            probe_response = await asyncio.wait_for(client.get("/async-probe"), timeout=5)
+            assert slow_request.done() is False
+        finally:
+            release.set()
+
+        slow_response = await asyncio.wait_for(slow_request, timeout=5)
+
     assert probe_response.status_code == 200
+    assert probe_response.json() == {"ready": True}
     assert slow_response.status_code == 201

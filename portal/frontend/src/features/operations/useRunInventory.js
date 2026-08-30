@@ -1,16 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchRunInventory } from '../../adapters/bot.adapter.js'
+import { buildRunInventoryScopeKey } from './runInventoryScope.js'
 
-export function buildRunInventoryScopeKey(definitions = []) {
-  return definitions
-    .map((definition) => [
-      definition?.id,
-      definition?.active_run_id,
-      definition?.latest_run_id,
-    ].join(':'))
-    .sort()
-    .join('|')
-}
+export { buildRunInventoryScopeKey } from './runInventoryScope.js'
 
 export function useRunInventory(definitions = [], { enabled = true } = {}) {
   const [runs, setRuns] = useState([])

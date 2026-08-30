@@ -1,5 +1,5 @@
 ---
-component: phase-2b-durable-canonical-order-lifecycle
+component: durable-canonical-order-lifecycle
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
@@ -26,28 +26,27 @@ code_paths:
   - tests/integration/runtime/test_canonical_order_lifecycle.py
   - tests/integration/runtime/test_persisted_runtime_correctness.py
 ---
-# Phase 2B Durable Canonical Order Lifecycle
+# Durable Canonical Order Lifecycle
 
 ## Scope and status
 
-Phase 2B is implemented for the current deterministic X0-X2 runtime. It replaces
-the immediate-fill request as the authoritative long-term order abstraction with
-an immutable request, immutable attempts, and an append-only lifecycle trace.
-Entry and exit paths now produce this lifecycle through the existing execution
-seam, while fills continue into the existing position, wallet, fee, PnL,
-runtime-event, reconciliation, BotLens, and reporting owners.
+The durable canonical order lifecycle is implemented for the current
+deterministic X0-X2 runtime. It replaces the immediate-fill request as the
+authoritative long-term order abstraction with an immutable request, immutable
+attempts, and an append-only lifecycle trace. Entry and exit paths produce this
+lifecycle through the existing execution seam, while fills continue into the
+existing position, wallet, fee, PnL, runtime-event, reconciliation, BotLens,
+and reporting owners.
 
 This is an order-state and auditability boundary. It does not add spread or book
 observation, L2 walking, queue estimates, latency, external submission, or a
 higher execution-quality class. Current production bar models remain full-fill.
-Phase 3 is the first campaign allowed to admit book-driven partial entry fills
-and resting residual behavior after adding per-fill incremental entry settlement.
-
-Phase 3A has since implemented that incremental entry boundary and aggressive
-X3/X4 book execution for backtests. The Phase 2B restrictions below remain
-controlling for X0-X2 and for custom/legacy adapters that do not carry exact
+Book-driven partial entry fills and resting residual behavior require per-fill
+incremental entry settlement. Replay-certified book execution supplies that
+boundary for X3/X4 backtests. The base lifecycle restrictions below remain
+controlling for X0-X2 and for custom or legacy adapters that do not carry exact
 book-fill identity. See
-[Phase 3A replay-certified book execution](PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md).
+[replay-certified book execution](REPLAY_CERTIFIED_BOOK_EXECUTION.md).
 
 The composition is illustrated in
 [canonical-order-lifecycle.mmd](diagrams/canonical-order-lifecycle.mmd).
@@ -73,11 +72,11 @@ not settlement; the corresponding fill must still pass through the existing
 canonical accounting path exactly once. No second execution ledger or
 "realistic" position ledger is introduced.
 
-The `ResolvedExecutionContext` from Phase 2A is pinned by hash on the request and
-cannot change during the order lifetime. A separately hashed execution policy
-binds order type, time in force, post-only intent, liquidity role, and price
-source. Venue profiles may translate a canonical state into venue terminology,
-but generic transition code contains no venue-name branches.
+The `ResolvedExecutionContext` is pinned by hash on the request and cannot
+change during the order lifetime. A separately hashed execution policy binds
+order type, time in force, post-only intent, liquidity role, and price source.
+Venue profiles may translate a canonical state into venue terminology, but
+generic transition code contains no venue-name branches.
 
 ## Canonical identities and manifests
 
@@ -162,18 +161,18 @@ while the original signal remains the causal root.
 ## Partial-entry safety boundary
 
 Current production X0-X2 bar execution models emit either a full fill or no
-fill. The lifecycle can represent partial quantities now so Phase 3 does not
-need a new order contract, and canonical exits already settle partial fills per
-fill.
+fill. The lifecycle can represent partial quantities without requiring a new
+order contract, and canonical exits already settle partial fills per fill.
 
-Incremental entry settlement while an order still has residual quantity is not
-enabled in Phase 2B. A custom or future adapter may retain a partial entry and
-complete its residual, including through the explicit convert-to-market
-replacement. It may not reject, cancel, or expire that residual: runtime fails
-closed before such a disposition so the already-filled quantity cannot
-disappear. Phase 3 must add an atomic lifecycle-to-position/wallet transaction
-for each entry fill before admitting book-driven partial entries or residual
-resting/cancel behavior.
+The base X0-X2 lifecycle path does not enable incremental entry settlement
+while an order still has residual quantity. An adapter without per-fill entry
+evidence may retain a partial entry and complete its residual, including
+through the explicit convert-to-market replacement. It may not reject, cancel,
+or expire that residual: runtime fails closed before such a disposition so the
+already-filled quantity cannot disappear. Replay-certified book execution
+supplies the atomic lifecycle-to-position/wallet transaction for each admitted
+book-driven entry fill; adapters without that evidence retain this fail-closed
+restriction.
 
 ## Compatibility, migration, and deprecation
 
@@ -181,10 +180,11 @@ resting/cancel behavior.
   facade for immediate adapters. `execute_fill_order_with_lifecycle` is the
   migration seam and returns both the existing fill/rejection result and the
   canonical lifecycle.
-- Existing callers keep their X0-X2 bar economics. Phase 2B does not change
-  economic claim intent, fee/slippage assumptions, or execution-quality class.
+- Existing callers keep their X0-X2 bar economics. The lifecycle does not
+  change economic claim intent, fee/slippage assumptions, or execution-quality
+  class.
 - Historical run snapshots and reports without lifecycle evidence remain
-  readable. They are not retroactively assigned Phase 2B evidence.
+  readable. They are not retroactively assigned canonical lifecycle evidence.
 - BotLens uses the existing typed event envelope, so no database schema
   migration is required. Consumers must tolerate the additive
   `ORDER_LIFECYCLE_CHANGED` event and additive report/artifact fields.
@@ -223,28 +223,28 @@ regressions.
 
 ## Agent permission boundary
 
-Phase 2B grants no external or capital authority. Agents may observe lifecycle
-evidence, propose bounded lifecycle trials, create simulated orders only inside
-approved protocols, compare compatible simulations, and automatically reject
-invalid transitions. Agents may not mutate authoritative order state directly,
-change pinned contexts or policies, publish profiles, certify their own work,
-promote, deploy, transmit venue orders, or alter capital limits.
+The lifecycle grants no external or capital authority. Agents may observe
+lifecycle evidence, propose bounded lifecycle trials, create simulated orders
+only inside approved protocols, compare compatible simulations, and
+automatically reject invalid transitions. Agents may not mutate authoritative
+order state directly, change pinned contexts or policies, publish profiles,
+certify their own work, promote, deploy, transmit venue orders, or alter capital
+limits.
 
-## Residual risks and next campaign
+## Residual risks and follow-on capabilities
 
-Phase 2B proves lifecycle determinism and quantity custody, not executable
-liquidity. It does not prove spread, book depth, maker queue position, latency,
-venue acknowledgements, or capacity. Phase 3 is the next coherent campaign:
-consume replay-certified L2 facts behind this boundary, add spread-aware and
-aggressive book walking, settle each admitted partial entry fill atomically,
-make TIF/residual behavior explicit, and then add resting/queue/latency models
-without raising claims beyond their supported X class.
+The lifecycle proves lifecycle determinism and quantity custody, not executable
+liquidity. Replay-certified book execution adds spread-aware and aggressive
+visible-book execution plus atomic settlement of admitted partial entry fills.
+Passive queue bounds and latency add bounded resting-order research. None of
+these capabilities proves exact venue acknowledgements, exact queue position,
+hidden liquidity, empirically calibrated latency, or capacity beyond the
+evidence supported by its X class.
 
 ## References
 
-- [Autonomous research and promotion roadmap](../research-orchestration/AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md)
-- [Phase 1 economic execution contract](PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md)
-- [Phase 2A venue-neutral execution context](PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
+- [Bar-execution economic contract](ECONOMIC_EXECUTION_CONTRACT.md)
+- [Venue-neutral execution context](VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
 - [Execution runtime boundary](EXECUTION_RUNTIME_BOUNDARY.md)
 - [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md)
 - [ADR 0043](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)

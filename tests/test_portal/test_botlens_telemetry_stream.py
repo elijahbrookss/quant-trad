@@ -70,6 +70,7 @@ from portal.backend.service.bots.botlens_projector_registry import ProjectorRegi
 from portal.backend.service.bots.botlens_intake_router import IntakeRouter
 import portal.backend.service.bots.botlens_intake_router as intake_mod
 import portal.backend.service.bots.botlens_run_projector as run_mod
+import portal.backend.service.bots.botlens_symbol_projector as symbol_mod
 from portal.backend.controller import bots as bots_controller
 
 
@@ -1169,6 +1170,7 @@ class TestFanoutDecoupling:
     ) -> None:
         """Projection must put_nowait to fanout, never awaiting delivery."""
         async def scenario() -> None:
+            monkeypatch.setattr(symbol_mod, "load_domain_projection_batches", lambda **_kwargs: ())
             fanout: asyncio.Queue = asyncio.Queue(maxsize=100)
             mailbox = SymbolMailbox(run_id="run-1", bot_id="bot-1", symbol_key="instrument-btc|1m")
             projector = SymbolProjector(
@@ -1211,9 +1213,11 @@ class TestFanoutDecoupling:
     ) -> None:
         """When fanout channel is full, projection must continue (delta dropped, not blocked)."""
         async def scenario() -> None:
+            monkeypatch.setattr(symbol_mod, "load_domain_projection_batches", lambda **_kwargs: ())
             # Fill fanout channel to capacity.
             fanout: asyncio.Queue = asyncio.Queue(maxsize=1)
-            fanout.put_nowait({"sentinel": True})  # fills it
+            sentinel = {"sentinel": True}
+            fanout.put_nowait(sentinel)
 
             mailbox = SymbolMailbox(run_id="run-1", bot_id="bot-1", symbol_key="instrument-btc|1m")
             projector = SymbolProjector(
@@ -1242,9 +1246,20 @@ class TestFanoutDecoupling:
             )
             await projector._load_initial_state()
 
-            # Should not raise, even though fanout is full.
-            await projector._apply_bootstrap(_projection_batch(_bootstrap_payload(candle_time=1)))
-            # Projection completed. The full fanout just logged a warning and moved on.
+            # This timeout is a deadlock guard, not a performance threshold. If
+            # put_nowait regresses to a blocking put, the test fails instead of
+            # hanging the whole suite.
+            await asyncio.wait_for(
+                projector._apply_bootstrap(
+                    _projection_batch(_bootstrap_payload(candle_time=1))
+                ),
+                timeout=1.0,
+            )
+
+            snapshot = projector.get_snapshot()
+            assert snapshot.candles.candles[-1]["time"] == _epoch_candle_time(1)
+            assert fanout.qsize() == 1
+            assert fanout.get_nowait() is sentinel
 
         asyncio.run(scenario())
 

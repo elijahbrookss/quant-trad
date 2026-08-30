@@ -1,5 +1,5 @@
 ---
-component: phase-3a-replay-certified-book-execution
+component: replay-certified-book-execution
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
@@ -24,15 +24,15 @@ code_paths:
   - portal/backend/service/reports/run_research_dataset.py
   - tests/integration/runtime/test_book_execution.py
 ---
-# Phase 3A Replay-Certified Book Execution
+# Replay-Certified Book Execution
 
 ## Scope and status
 
-Phase 3A is implemented for deterministic backtests. It adds X3 spread-aware
-top-of-book execution and X4 aggressive aggregated-L2 execution behind the
-Phase 2A `ResolvedExecutionContext` and Phase 2B canonical lifecycle. It does
-not open external order submission, paper/live book execution, passive queue
-claims, calibrated latency, or autonomous promotion.
+Replay-certified book execution is implemented for deterministic backtests. It
+adds X3 spread-aware top-of-book execution and X4 aggressive aggregated-L2
+execution behind the `ResolvedExecutionContext` and canonical order lifecycle.
+It does not open external order submission, paper/live book execution, passive
+queue claims, calibrated latency, or autonomous promotion.
 
 The implementation preserves the existing strategy, lifecycle, accounting,
 runtime-event, BotLens, report, and comparison owners. It does not create a
@@ -81,8 +81,8 @@ transport invalidation or clean close. Selection uses only the last state whose
 
 `execution_book_tape_bundle.v1` binds one unique tape per runtime instrument.
 Startup validates every nested hash, rejects missing or extra instrument
-bindings, and pins the bundle in the immutable run config snapshot. Phase 3A
-admits this artifact only for backtests.
+bindings, and pins the bundle in the immutable run config snapshot. This
+capability admits the artifact only for backtests.
 
 The replay-book API accepts an optional `execution_instrument_id`. When present,
 it returns both a tape and a directly consumable single-tape bundle, but only
@@ -113,10 +113,12 @@ receives price improvement when available. Each consumed level produces a
 separate deterministic fill ID, fee calculation, lifecycle event, and evidence
 record. Aggregate consumed quantity is checked against eligible visible depth.
 
-`limit_maker` and `limit_resting` do not cross the book in Phase 3A. They remain
-open with an explicit `resting_order_execution_not_admitted` limitation. This
-prevents a marketable resting order from being incorrectly classified or
-charged as maker execution. Resting progress belongs to Phase 3B/X5.
+`limit_maker` and `limit_resting` do not cross the book in replay-certified
+aggressive execution. They remain open with an explicit
+`resting_order_execution_not_admitted` limitation. This prevents a marketable
+resting order from being incorrectly classified or charged as maker execution.
+Resting progress is handled by the passive queue bounds and latency model at
+X5.
 
 ### Time in force and residuals
 
@@ -126,12 +128,12 @@ charged as maker execution. Resting progress belongs to Phase 3B/X5.
 | IOC | Consume eligible depth | Cancel residual |
 | GTC aggressive limit | Consume eligible depth | Retain residual as open for later causal evaluation |
 | Market or stop-market | Consume eligible depth | Cancel residual; it cannot rest |
-| Resting/maker limit | No Phase 3A fill | Remain open until existing expiry/cancel policy acts |
+| Resting/maker limit | No aggressive book fill | Remain open until existing expiry/cancel policy acts |
 
 A later GTC evaluation reuses the same immutable request/lifecycle, submits only
 the derived residual, selects the new causal arrival snapshot, and may complete
-the order. Existing Phase 2B replacement, cancellation, expiry, and deterministic
-race rules remain authoritative.
+the order. Existing canonical replacement, cancellation, expiry, and
+deterministic race rules remain authoritative.
 
 ## Per-fill accounting
 
@@ -148,7 +150,7 @@ applies levels one at a time and immediately:
 Duplicate fill IDs are no-ops before wallet mutation. A partially filled entry
 may remain active when its residual later fills, rests, cancels, or expires;
 the filled exposure is never discarded. Legacy/custom partial-entry adapters
-without this per-fill evidence retain the Phase 2B fail-closed guard.
+without this per-fill evidence retain the base lifecycle fail-closed guard.
 
 Each level is also an immutable `ORDER_LIFECYCLE_CHANGED` runtime event. Wallet
 and position effects remain owned by the existing ledgers. BotLens and reports
@@ -207,7 +209,7 @@ Rollback removes the tape binding and pins the previous immutable bar model for
 new runs. Existing tapes, lifecycle events, wallet facts, and reports remain
 readable and are never rewritten. Simulated open residuals are drained or
 canceled under their original policy; no external venue state exists to clean
-up in Phase 3A.
+up in this backtest-only capability.
 
 ## Agent permission boundary
 
@@ -220,19 +222,18 @@ certify themselves, promote, deploy, or change capital limits.
 
 ## Explicit non-goals and residual risks
 
-Phase 3A does not implement passive fill probability, resting queue progress,
-L2 cancellation-ahead inference, order-level L3 queue position, nonzero or
-stochastic latency, shadow execution, paper/live reconciliation, calibration,
-hidden liquidity, external submission, derivatives expansion, or promotion
-authority. Aggregated L2 proves visible aggressive liquidity only. It does not
-prove exact venue fills, matching-engine priority, or capacity beyond the
-visible arrival book.
+Replay-certified book execution does not implement passive fill probability,
+resting queue progress, L2 cancellation-ahead inference, order-level L3 queue
+position, nonzero or stochastic latency, shadow execution, paper/live
+reconciliation, calibration, hidden liquidity, external submission,
+derivatives expansion, or promotion authority. Aggregated L2 proves visible
+aggressive liquidity only. It does not prove exact venue fills, matching-engine
+priority, or capacity beyond the visible arrival book.
 
 ## References
 
-- [Autonomous research and promotion roadmap](../research-orchestration/AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md)
-- [Phase 1 economic execution contract](PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md)
-- [Phase 2A venue-neutral execution context](PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
-- [Phase 2B durable canonical order lifecycle](PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+- [Bar-execution economic contract](ECONOMIC_EXECUTION_CONTRACT.md)
+- [Venue-neutral execution context](VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
+- [Durable canonical order lifecycle](DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
 - [ADR 0058](../decisions/0058-use-replay-certified-execution-book-tapes.md)
 - [ADR 0049](../decisions/0049-keep-live-order-submission-closed.md)

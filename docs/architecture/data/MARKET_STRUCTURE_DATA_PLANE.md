@@ -34,18 +34,18 @@ code_paths:
 ---
 # Market Structure Data Plane
 
-## Status And Campaign Boundary
+## Current Scope
 
-This phased design is implemented through Phase 4: provider proof,
-futures/spot trades, Level 2 archive/reconstruction, typed market-state
-features, causal normalization, and frozen typed datasets. A generic supervised
+The current data plane supports bounded provider validation, futures/spot
+trades, Level 2 archive and reconstruction, typed market-state features, causal
+normalization, and frozen typed datasets. A generic supervised
 continuous runtime composes explicit provider transports with trade or Level 2
 projection adapters for bounded validation and indefinite collection. Level 2
 uses the same lifecycle as other continuous collectors; its stateful projection
-adds checkpoint/reconciliation requirements after discontinuity. No phase or
+adds checkpoint and reconciliation requirements after discontinuity. No
 document by itself authorizes cloud resources, strategy changes, live trading,
 or frontend work. Production enrollment remains an explicit reviewed manifest
-and must produce canonical soak and authoritative resource evidence.
+and requires canonical soak and authoritative resource evidence.
 
 The allowed live provider boundary is Coinbase Advanced Trade REST and
 WebSocket using the existing provider credential boundary. Public channels may
@@ -66,7 +66,7 @@ The design extends, and does not replace, the contracts in:
 - [ADR 0020: Budgeted Market-Stream Reconnect](../decisions/0020-use-budgeted-market-data-stream-reconnect-policy.md)
 - [ADR 0024: Provider Credential References](../decisions/0024-use-provider-credential-references.md)
 - [ADR 0053: Tiered Market-Structure Archive And Replay Boundary](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
-- [Market Structure Phase 4: Normalization And Frozen Datasets](MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md)
+- [Historical normalization and frozen-dataset implementation record](MARKET_STRUCTURE_PHASE_4_NORMALIZATION_DATASETS.md)
 
 ## Decision Summary
 
@@ -115,8 +115,8 @@ The design extends, and does not replace, the contracts in:
 
 ### Concrete Current Limitations
 
-- Phase 1 supports `market_trades` plus heartbeats and Phase 2 supports `level2`
-  plus heartbeats on one product per connection. Both remain bounded and
+- The current stream adapters support `market_trades` or `level2` plus
+  heartbeats on one product per connection. Both remain bounded and
   production-unenrolled.
 - Market-structure archive identity is deterministic through `raw_record_id`
   and `spool_segment_id`; the generic `CanonicalMarketEvent.event_id` remains
@@ -126,13 +126,13 @@ The design extends, and does not replace, the contracts in:
   cross-product ordering contract.
 - the paper runner is candle-specific, owned by a bot run, and publishes only
   after candle persistence. It is not an independently recoverable data plane.
-- OI and funding have typed append-only storage. Phase 3 causally aligns both
-  into derivative-state facts; Phase 4 registers and freezes them through the
-  same typed dataset boundary.
-- shared commit-clock, hypertable, and immutability setup enumerates Phase 1–4
-  source, feature, normalization, and frozen-reference tables without creating
-  another clock.
-- the live catalog contains BIP, ETP, and SLP Coinbase futures. Phase 1 pair
+- OI and funding have typed append-only storage. The derivative-state path
+  causally aligns both, and the typed dataset boundary registers and freezes
+  them.
+- shared commit-clock, hypertable, and immutability setup enumerates source,
+  feature, normalization, and frozen-reference tables without creating another
+  clock.
+- the live catalog contains BIP, ETP, and SLP Coinbase futures. The initial pair
   configuration registered canonical direct Coinbase BTC-USD. ETH-USD and
   SOL-USD remain explicit on-demand registrations and are not enrolled.
 
@@ -142,7 +142,7 @@ Status means:
 
 - **confirmed**: official Advanced Trade contract is sufficient for the stated
   use, or the current repository has observed the field through that surface;
-- **conditional**: a bounded Phase 0 capture must prove product access or
+- **conditional**: a bounded provider capture must prove product access or
   semantics before implementation;
 - **unsupported**: outside the allowed provider boundary or lacking a stable,
   unauthenticated publication contract.
@@ -150,7 +150,7 @@ Status means:
 | Source/channel | Auth | Role/products | Snapshot/incremental and batching | Time and ordering | Duplicate/gap/recovery | Historical value | Retention value | Status |
 |---|---|---|---|---|---|---|---|---|
 | Advanced Trade WS `market_trades`, spot | public; authenticated CDP recommended | BTC-USD, ETH-USD, SOL-USD | initial `snapshot`, then 250 ms `update` batches containing one or more trades | trade `time`; envelope `timestamp`; Phase 0 observed one connection-wide `sequence_num` across subscribed channels, reset on reconnect; local receipt/acceptance becomes known-at | dedupe by provider trade ID; a connection-sequence gap affects every subscription on that connection; typed coverage intervals detect gaps and reconnect; explicit zero requires the complete rule below; recent REST trades validate only | no complete event-level backfill documented | irreplaceable event evidence | confirmed for BIP/BTC proof scope |
-| Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | captured schema is the same; Phase 0 proved product access and contract units | same fields; maker-side semantics documented and captured | same typed coverage policy; BIP Phase 1 live capture passed | no complete event-level backfill documented | irreplaceable event evidence | confirmed semantics; only BIP Phase 1 live-verified |
+| Advanced Trade WS `market_trades`, CDE futures | same surface/auth contract | BIP, ETP, SLP product IDs | captured schema is the same; bounded provider evidence established product access and contract units | same fields; maker-side semantics documented and captured | same typed coverage policy; bounded BIP live capture passed | no complete event-level backfill documented | irreplaceable event evidence | confirmed semantics; only BIP was live-verified in the recorded bounded validation |
 | Advanced Trade WS `level2`, spot | public; authenticated CDP recommended | matching spot allowlist | `snapshot` then `update`; each event contains ordered absolute level quantities | update `event_time`; envelope `timestamp`; Phase 0 observed the same connection-wide `sequence_num`; receipt/known-at locally assigned | channel is documented as guaranteed; validate the connection sequence; reconnect resets it and requires a new snapshot | none documented | irreplaceable book evidence | confirmed for BIP/BTC proof scope |
 | Advanced Trade WS `level2`, CDE futures | same surface/auth contract | BIP, ETP, SLP | Phase 0 captured the absolute-quantity contract and product units | same fields and local times | same validity contract; no assumed native retransmit | none documented | irreplaceable book evidence | implemented and enrolled for BIP/ETP/SLP; bounded live evidence previously covered BIP and the single-node soak records continuing product evidence |
 | Advanced Trade WS `heartbeats` | public | every stream session | one-second heartbeat and counter | server current time, envelope time, receipt | counter discontinuity is transport evidence, not a product-book sequence substitute | none | session/gap evidence, low volume | confirmed |
@@ -161,14 +161,14 @@ Status means:
 | Advanced Trade REST public market trades | same public/auth ambiguity | one product, recent ticks | recent snapshot, bounded result | provider trade time and ID, receipt | reconcile recent IDs after reconnect; must not claim completeness | recent only, no range pagination contract | bounded validation/reconciliation | conditional |
 | Existing Advanced Trade product OI | current repository public path | BIP, ETP, SLP | scheduled point-in-time poll | no provider event/publication time; sample schedule and receipt/acceptance known-at | existing typed revisions, retries, gaps, fence | no supported backfill in repository | durable contracts, minute-level | confirmed |
 | Existing Advanced Trade product funding | current repository public path | BIP, ETP, SLP | scheduled point-in-time poll | provider `funding_time` preserved; meaning not assumed; receipt/acceptance known-at | existing typed revisions, retries, gaps, fence | no supported backfill in repository | durable rate observation | confirmed; final/predicted meaning conditional |
-| CDE REST historical funding `/rest/funding-rate` | live unauthenticated proof returns `401`; requires CDE request credentials | native CDE symbol such as BIPZ30 | trading-session query is documented, but unavailable through Advanced Trade/CDP credentials | provider `event_time`; publication/known-at unavailable historically | direct CDE auth and mapping would be required | unavailable inside this campaign's provider boundary | semantic reference only | unsupported under provider boundary |
+| CDE REST historical funding `/rest/funding-rate` | live unauthenticated proof returns `401`; requires CDE request credentials | native CDE symbol such as BIPZ30 | trading-session query is documented, but unavailable through Advanced Trade/CDP credentials | provider `event_time`; publication/known-at unavailable historically | direct CDE auth and mapping would be required | unavailable inside the supported provider boundary | semantic reference only | unsupported under provider boundary |
 | CDE public finalized-funding webpage/files | no stable documented public machine endpoint found; the public historical table does not expose funding | CDE perpetual-style contracts | no admissible source contract | unavailable | no stable identity, schema, revision, pagination, or symbol-mapping contract | not verified | none | unsupported; explicit coverage gap |
 | CDE public daily price/volume/OI/settlement page | public human webpage; rows are loaded through an undocumented website-internal CMS token | CDE contracts including BIP, ETP, and SLP | observed rolling daily rows include price, settlement, volume, block volume, and OI; no stable documented download/API contract | trading date is present; publication time is visible only as mutable CMS metadata and is not a contractual known-at rule | page may be challenged; underlying token, schema, rolling window, and correction behavior are not provider contracts | useful only for bounded manual sanity checks | no canonical retention | unsupported as an automated or dataset source; explicit coverage gap |
 | CDE public derivatives dashboard | public webpage | venue-level and filtered aggregates | current/daily chart values | displayed dates; exact release time and revision policy unverified | no collector contract inferred from page internals | 7/30/90-day UI windows visible | venue-level sanity checks only | unsupported as canonical source |
 | CDE public block-trade webpage | public webpage | reported CDE blocks | table with date/time/product/type/symbol/qty/price | Central Time display; publication latency/ID/revisions absent | no stable machine identity or pagination contract proven | recent page history visible | optional off-book context; not central-book flow | conditional and excluded from Phases 0-4 |
 | CDE REST block-trade API | CDE auth/firm permissions despite OpenAPI ambiguity | firm-owned/permissioned block trades | query/booking surface | native fields | permissioned | bounded by permission | not public market-wide evidence | unsupported |
 | Direct CDE FIX/SBE/UDP/multicast | Participant Firm/institutional connectivity | native CDE | native incrementals, snapshots, retransmits, richer definitions | native venue ordering | native recovery channels | not through Advanced Trade | venue semantics reference only | unsupported |
-| Coinbase Data Marketplace | purchased product/SFTP | purchased datasets | files/manifests | marketplace-defined | purchased manifest checks | yes | potential future external source | unsupported for this campaign |
+| Coinbase Data Marketplace | purchased product/SFTP | purchased datasets | files/manifests | marketplace-defined | purchased manifest checks | yes | potential future external source | unsupported by the current source boundary |
 
 Official evidence used for this inventory:
 
@@ -194,11 +194,11 @@ root units. The mapping is explicit data; no runtime symbol parsing is allowed.
 | 2 | `44226144-fb38-4566-92c4-580734d76d3c` | `ETP-20DEC30-CDE` | 0.1 ETH/contract | `ETH-USD` | direct Coinbase spot instrument missing |
 | 3 | `bead556e-22e2-4ac0-8ee0-0d8c5310e9a0` | `SLP-20DEC30-CDE` | 5 SOL/contract | `SOL-USD` | direct Coinbase spot instrument missing |
 
-Phase 0 captured BIP/BTC first, then proved ETP/ETH and SLP/SOL access and units
-through bounded spot checks. All three pairs may be represented by Phase 1–4
+Bounded provider checks captured BIP/BTC first, then established ETP/ETH and
+SLP/SOL access and units. All three pairs may be represented by the current
 implementation and tests. Production collector enrollment remains sequential
-and blocked until the post-Phase 4 capacity gate proves total storage, CPU,
-replay, and backlog budgets with a 3x observed-p99 safety factor.
+and blocked until a capacity review establishes total storage, CPU, replay, and
+backlog budgets with a 3x observed-p99 safety factor.
 
 ## End-To-End Data Path And Authorities
 
@@ -851,7 +851,7 @@ manifests.
 
 ### Backpressure And Degradation
 
-Phase 0 starts with a per-host spool cap of `min(50 GiB, six hours of measured
+The current design starts with a per-host spool cap of `min(50 GiB, six hours of measured
 p99 compressed input)` and reserves 20% disk for non-spool operation. Final
 values are configuration, not hard-coded behavior.
 
@@ -876,7 +876,7 @@ is preferable to incomplete data labeled complete.
 | BBO/depth/trade aggregates/basis | compressed hot rows; 400d default expiry | no typed cold archive yet; source raw evidence remains independent | overlapping typed chunks pinned for dataset lifetime |
 | normalized operational features | compressed hot rows; 400d default expiry | no typed cold archive yet | exact specs plus overlapping typed chunks pinned |
 | frozen dataset manifests | logical manifest and commit watermark indefinite | referenced raw/checkpoint objects retained until dataset retirement | never removed by ordinary compaction/retention |
-| temporary replay output/cache | none/campaign schema only | local block cache <= 7d | never referenced by a dataset |
+| temporary replay output/cache | no durable schema | local block cache <= 7d | never referenced by a dataset |
 
 The implemented lifecycle plans before it mutates, is execution-disabled by
 default, and processes only bounded sets of acknowledged objects or complete
@@ -905,9 +905,9 @@ Do not approve three-pair L2 rollout from estimates alone. Measure a continuous
   rate.
 
 On 2026-08-02 the operator accepted the completed public and existing-CDP
-one-hour proofs as sufficient to begin Phase 1–4 implementation and explicitly
-deferred this 24-hour measurement until after Phase 4. This is an implementation
-sequencing decision, not a production-capacity waiver. No production collector
+one-hour checks as sufficient to begin implementation and explicitly deferred
+this 24-hour measurement. This is a historical sequencing decision, not a
+production-capacity waiver. No production collector
 may be enrolled before the measurement and budget approval below pass against
 the implemented archive, hot-store, replay, and feature paths.
 
@@ -972,7 +972,7 @@ effects. It does not claim distributed exactly-once delivery.
   depend on in-process-only state.
 - Book reconstruction is one writer per L2 series under a generation fence.
   Replay jobs write only to isolated temporary namespaces unless an explicit
-  canonical backfill campaign is later approved.
+  canonical backfill operation is later approved.
 - A historical source is admitted through a typed provider handler and normal
   provenance/quality contract. A downloaded CSV is not canonical merely
   because it exists.
@@ -1025,10 +1025,12 @@ effects. It does not claim distributed exactly-once delivery.
 8. Execution resolves only the dataset. Missing frozen material fails before
    engine initialization.
 
-## Determinism And Correctness Proof Plan
+## Determinism And Correctness Test Plan
 
-Every later phase must add fixtures made from captured, sanitized exact frames.
-No test substitutes imagined Coinbase fields for a proof-spike fixture.
+Each implementation slice was required to add fixtures made from captured,
+sanitized exact frames. No test substitutes imagined Coinbase fields for a
+provider fixture. The matrix below preserves the required test and acceptance
+definitions; it does not report a formal verification result.
 
 | Proof | Test procedure | Required result |
 |---|---|---|
@@ -1055,9 +1057,10 @@ No test substitutes imagined Coinbase fields for a proof-spike fixture.
 | Consumer failure | crash parser/book/feature worker after source durable but before/after DB commit | restart catches up with idempotent effects and visible lag; acquisition remains bounded |
 | Fence safety | expire owner and let new generation start while old worker attempts append | old append/manifest/session completion rejected transactionally |
 
-Phase 2 is not accepted unless the L2 property suite also generates random
-valid absolute mutation sequences, injected duplicates/gaps, and checkpoint
-cuts and proves the state-machine invariants above.
+The historical L2 acceptance definition additionally required the property suite
+to generate random valid absolute mutation sequences, injected duplicates and
+gaps, and checkpoint cuts and to check the state-machine rules above. This text
+does not report a current validation result.
 
 ## Research Integration And Falsifiable Evidence
 
@@ -1078,9 +1081,24 @@ No study may infer individual long/short positions from aggregate OI, call a
 block trade central-book aggression, or promote a strategy from descriptive
 conditional results.
 
-## Phased Implementation Backlog
+## Historical Implementation Record And Open Production Limit
 
-Each phase is independently reviewable and useful without later phases.
+The detailed material below preserves the original design and acceptance history.
+Its dated status statements are not live-environment readings. Current and
+remaining lifecycle states are:
+
+| Recorded area | Historical state |
+|---|---|
+| Provider validation and provisional capacity | completed |
+| Trade ingestion | implemented and live-verified for the recorded bounded BIP/BTC scope on 2026-08-02; this record does not establish current production enrollment |
+| Level 2 archive and reconstruction | completed for the recorded bounded BIP/BTC scope on 2026-08-02 |
+| Market-state features | implemented for the recorded bounded BIP/BTC scope on 2026-08-02 |
+| Normalization and frozen datasets | implemented and accepted for the recorded bounded BIP evidence on 2026-08-02 |
+| Production enrollment | not approved; no historical milestone or document silently satisfies it |
+| Observation studies | future work; not implemented or authorized by this document |
+
+Each completed historical slice remains independently understandable without
+treating its acceptance bullets as current verification results.
 
 ### Phase 0: Provider Proof Spikes And Measured Capacity
 
@@ -1240,7 +1258,7 @@ Acceptance:
 Value without later phases: reusable causal feature datasets for any bounded
 research question.
 
-### Post-Phase 4 Production Admission Gate
+### Remaining Post-Phase 4 Production Admission Gate
 
 This gate is required before any market-structure collector is production
 enrolled. It is not a 24-hour runtime cap: validation and admitted production
@@ -1262,7 +1280,7 @@ See [Continuous Collector Runtime](CONTINUOUS_COLLECTOR_RUNTIME.md).
   Desktop/WSL guest free space is never sufficient;
 - only then enroll BIP/BTC, followed by separately budgeted ETP/ETH and SLP/SOL.
 
-### Phase 5: Observation Studies And Existing-Strategy Filters
+### Future Phase 5: Observation Studies And Existing-Strategy Filters
 
 Dependencies: approved Phase 4 datasets; no live-trading authorization.
 
@@ -1285,22 +1303,25 @@ Acceptance:
 Value: evidence about market structure and bounded strategy context, not an
 alpha or deployment claim.
 
-## Explicit Unknowns, Limitations, And Proof Decisions
+## Explicit Unknowns, Limitations, And Validation Decisions
 
-### Phase 0 Proof Decisions
+### Historical Validation Decisions
+
+These dated implementation decisions explain the evidence behind the current
+design. They do not establish current production support.
 
 | Question | Decision state |
 |---|---|
-| BIP/BTC public `market_trades`, L2, ticker, heartbeat and REST access | passed one-hour public and existing-CDP proofs; authenticated v2 evidence passes the v3 implementation-readiness gate |
-| ETP/ETH and SLP/SOL access/units | passed bounded public access/unit/reconnect/replay spot checks; eligible for implementation configuration but production-unenrolled |
+| BIP/BTC public `market_trades`, L2, ticker, heartbeat and REST access | passed one-hour public and existing-CDP validation; authenticated evidence passes the current implementation-readiness gate |
+| ETP/ETH and SLP/SOL access/units | passed bounded public access, unit, reconnect, and replay checks; eligible for implementation configuration but production-unenrolled |
 | `sequence_num` scope | resolved as one connection-epoch counter shared across all received channels; reset to zero on reconnect; not per product/channel |
-| first event after subscription/reconnect | BIP and BTC L2 began with a complete `snapshot` in both public proof epochs; v1 keeps one product per connection and does not depend on multi-product frames |
+| first event after subscription/reconnect | BIP and BTC L2 began with a complete `snapshot` in both public validation windows; the implementation keeps one product per connection and does not depend on multi-product frames |
 | BIP futures trade/L2 size and multiplier | confirmed as contracts, 0.01 BTC/contract, from published specification, live metadata, and observed integral trade/L2 quantities |
-| public REST product/book/recent trades | admitted for bounded BIP/BTC proof/reconciliation; recent trades are not complete history |
+| public REST product/book/recent trades | used for bounded BIP/BTC validation and reconciliation; recent trades are not complete history |
 | REST book as WebSocket recovery splice | rejected: observed REST book has provider time but no compatible WebSocket sequence position |
 | Advanced Trade product funding meaning | admitted only as provider-reported observation known on acceptance; API does not prove projected/finalized semantics, so those features remain disabled |
 | public CDE historical/funding machine source | rejected: human page has no stable documented data endpoint; direct historical funding REST returns 401 without CDE credentials |
-| actual p99/max, compression, replay, backlog, annual budget | one-hour diagnostics measured; 24-hour implemented-path capture and explicit operator budget approval deferred until after Phase 4 and mandatory before production enrollment |
+| actual p99/max, compression, replay, backlog, annual budget | one-hour diagnostics measured; a 24-hour implemented-path capture and explicit operator budget approval remain mandatory before production enrollment |
 
 ### Explicit Coverage Gaps
 
@@ -1319,54 +1340,59 @@ An unsupported fact is represented in coverage and requirements as unsupported;
 it is never fabricated, inferred from a nearby field, or advertised as a
 Quant-Trad feature.
 
-## Repository Impact Map For A Later Campaign
+## Current Repository Implementation Map
 
-No path below is changed by this design campaign except documentation. These are
-the likely implementation sites.
+This explanatory map names current repository paths instead of preserving
+never-created proposed directories alongside implemented code. Path presence
+shows implementation, not supported production behavior.
 
-| Area | Likely paths/artifacts | Later change |
+| Area | Current paths/artifacts | Current role |
 |---|---|---|
-| Stream contracts/adapters | `src/data_providers/streams/contracts.py`, `src/data_providers/streams/coinbase.py`, `src/data_providers/streams/__init__.py` | raw receive callback/identity, market-trade/L2 parsing, connection-epoch sequence evidence, authenticated/public subscribe support |
-| Provider semantics | `src/data_providers/facts.py`, `src/data_providers/providers/coinbase.py`, `src/data_providers/registry.py` | typed product/trade unit validation and implemented feature declarations only |
-| Core market contracts | `src/market_data/contracts.py`, `src/market_data/requirements.py`, `src/market_data/store.py`, proposed `src/market_data/archive/`, `src/market_data/book/`, `src/market_data/features/` | typed models, source positions, archive manifests, reconstruction/spec/fingerprint contracts |
-| Database models/bootstrap | `portal/backend/db/market_data_models.py`, `portal/backend/db/session.py` | proposed tables, shared fact clock, hypertables, immutability, strict drift checks |
-| Manual migrations | proposed `scripts/db/manual_migration_market_structure_v1.sql` and later phase-specific migrations | out-of-band clean definitions only; no runtime alter/backfill |
-| Repositories | `portal/backend/service/storage/repos/market_data.py`, `market_collection.py`, proposed market archive/book repositories | fenced append, range reads, manifest/pin, validity/checkpoint/spec/dataset refs |
-| Services | `portal/backend/service/market/collector_service.py`, `runtime_market_data.py`, `backtest_dataset_service.py`, proposed archive/replay/book/feature services | continuous session lifecycle, replay, registry-driven dataset planning and causal delivery |
-| Workers | `portal/backend/workers/market_data_collector.py`, proposed stream/archive/replay/feature/retention workers | independent fenced components described above |
-| Paper/runtime | `portal/backend/service/bots/paper_market_stream.py`, `src/engines/bot_runtime/live_market.py`, runtime snapshot contracts | consume canonical facts; do not own archival collection or mutable book state |
-| Controllers/API | `portal/backend/controller/market_data.py`, API schemas | definitions/sessions/archive lag/quality/replay/dataset inspection; no raw secret/object mutation |
-| CLI/MCP | `cli/main.py`, `cli/mcp_server.py`, `cli/api_client.py` | `qt data streams`, `archives`, `quality`, `replay verify`, `features`, and extended dataset coverage/freeze operations |
-| Configuration | `config/defaults.yaml`, `src/core/settings.py`, deployment env docs | allowlist, spool path/cap, rotation, object prefix, retention, reconnect, checkpoint and capacity gates; no second DSN |
-| Tests/fixtures | `tests/test_data_providers`, `tests/test_market_data`, `tests/test_portal`, `tests/integration/runtime`, proposed sanitized raw fixtures | proof fixtures and correctness matrix |
-| Architecture/operations docs | `DATA_BOUNDARY.md`, this design, ADR 0053, developer audit workflow, provider guide, runbooks | accepted boundaries, operating procedures, measured budgets, supported coverage |
+| Stream contracts/adapters | `src/data_providers/streams/contracts.py`, `src/data_providers/streams/coinbase.py`, `src/data_providers/streams/__init__.py` | raw receive identity, market-trade/L2 translation, connection-epoch sequence evidence, and explicit public/authenticated subscription branches |
+| Provider semantics | `src/data_providers/facts.py`, `src/data_providers/providers/coinbase.py`, `src/data_providers/registry.py` | typed product/trade validation and implemented provider capability declarations |
+| Core market contracts and state | `src/market_data/contracts.py`, `src/market_data/requirements.py`, `src/market_data/store.py`, `src/market_data/archive.py`, `src/market_data/order_book.py`, `src/market_data/market_state.py`, `src/market_data/normalization.py`, `src/market_data/frozen.py`, `src/market_data/acquisition_coverage.py` | typed source positions, archive manifests, exact-scope coverage, reconstruction, normalization, fingerprints, and frozen material |
+| Database models/bootstrap | `portal/backend/db/market_data_models.py`, `portal/backend/db/session.py` | current market tables, shared fact clock, hypertables, immutability, and strict drift checks |
+| Manual migrations | `scripts/db/manual_migration_market_data_v2_hard_cutover.sql`, `scripts/db/manual_migration_market_fact_commit_clock_v1.sql`, `scripts/db/manual_enable_market_storage_lifecycle_v1.sql` | reviewed out-of-band schema and storage-lifecycle changes; runtime code does not patch schema |
+| Repositories | `portal/backend/service/storage/repos/market_data.py`, `portal/backend/service/storage/repos/market_collection.py`, `portal/backend/service/storage/repos/market_structure.py`, `portal/backend/service/storage/repos/market_lifecycle.py` | fenced append/range reads plus archive, pin, validity, checkpoint, coverage, and lifecycle persistence |
+| Services | `portal/backend/service/market/continuous_stream_collector.py`, `portal/backend/service/market/continuous_stream_runtime.py`, `portal/backend/service/market/market_structure_service.py`, `portal/backend/service/market/market_storage_lifecycle.py`, `portal/backend/service/market/normalization_service.py`, `portal/backend/service/market/backtest_dataset_service.py`, `portal/backend/service/market/runtime_market_data.py` | bounded and continuous collection, replay/reconstruction, lifecycle planning, normalization, dataset planning, and causal delivery |
+| Workers | `portal/backend/workers/market_data_collector.py`, `portal/backend/workers/market_data_collector_health.py` | supervised collection and health projection over the service-owned plane |
+| Paper/runtime consumers | `portal/backend/service/bots/paper_market_stream.py`, `src/engines/bot_runtime/live_market.py` | consume canonical facts without owning archival collection or mutable book truth |
+| Controllers/API | `portal/backend/controller/market_data.py` and its typed API schemas | definitions, sessions, coverage, quality, replay, lifecycle, and dataset inspection/operations |
+| CLI/MCP | `cli/main.py`, `cli/api.py`, `cli/mcp_server.py` | API-backed collector, market-structure, replay, retention, lifecycle, and dataset operations |
+| Configuration | `config/defaults.yaml`, `src/core/settings.py`, deployment environment documentation | allowlists, spool/archive bounds, retention, reconnect, checkpoint, and capacity settings without a second DSN |
+| Tests/fixtures | `tests/test_data_providers`, `tests/test_market_data`, `tests/test_portal`, `tests/integration/runtime` | current test and fixture locations; validation results depend on the exact revision, environment, and command executed |
+| Architecture/operations docs | `DATA_BOUNDARY.md`, this document, ADR 0053, provider guidance, and runbooks | explanatory navigation, accepted decision lineage, operating procedures, measured historical evidence, and supported-coverage guidance |
 
-The likely CLI operations are intentionally operator-oriented:
+Current CLI operations remain operator-oriented:
 
 ```text
-qt data streams list|show|enable|disable|sessions
-qt data archives coverage|lag|verify
-qt data quality gaps|book-validity
-qt data replay verify --definition ... --start ... --end ...
-qt data features coverage|specs
+qt data collectors fleet|plane|detail|diagnose|probe|events|gaps
+qt data market-structure definitions|sessions|status|continuous-evidence
+qt data market-structure capture|replay|replay-book|compact
+qt data market-structure retention-status|lifecycle-plan|lifecycle-events
 qt data prepare-backtest-dataset ...
 qt data freeze-dataset ...
 ```
 
-The frontend may later visualize these read models, but it is not part of this
-campaign and never becomes the mutation or workflow authority.
+Frontend V2 now visualizes bounded market and collector read models. Its primary
+rooms remain read-only; enumerated collector action requests route through the
+backend's code-owned collector-operations service. The frontend does not become
+market-data truth, mutation-policy authority, or workflow authority.
 
-## Definition Of Ready For Phase 0 And Phase 1
+## Historical Implementation Readiness Criteria
 
-An implementation agent may execute Phase 0 without choosing a new provider,
-credential model, raw format, storage role, identity, time model, product scope,
-or validity philosophy. Phase 0 exists to fill the explicitly named empirical
-fields, not to redesign the plane.
+The following criteria governed the recorded implementation and are retained as
+decision lineage, not as current instructions or validation results.
 
-After Phase 0 acceptance, Phase 1 has fixed boundaries for durable-spool-first
+Initial validation could proceed without choosing a new provider, credential
+model, raw format, storage role, identity, time model, product scope, or validity
+philosophy. Its purpose was to fill explicitly named empirical fields, not to
+redesign the plane.
+
+Implementation then had fixed boundaries for durable-spool-first
 delivery, pre-parse raw identity, append-only manifest mapping, session fencing,
 trade coverage, trade identity, maker/aggressor translation, unit conversion,
 typed storage, late revisions, aggregation, replay, retention, dataset freezing,
-CLI ownership, and the three-pair gated allowlist. Any proof that contradicts
-those boundaries must amend this proposed design/ADR before implementation
-rather than hiding the contradiction in provider code.
+CLI ownership, and the three-pair gated allowlist. Evidence contradicting those
+boundaries required an explicit architecture amendment before implementation
+rather than a hidden divergence in provider code.

@@ -23,6 +23,7 @@ from ..provenance import (
 )
 from . import report_data
 from .contract import build_run_report
+from .schemas import RunReportDTO
 
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ def _build_and_store(
         )
     )
     try:
-        payload = build_run_report(run_id)
+        payload = RunReportDTO.model_validate(build_run_report(run_id)).model_dump(mode="json")
         duration_ms = (time.perf_counter() - started) * 1000.0
         status = report_data.store_materialized_run_report(
             run_id,

@@ -3,7 +3,7 @@ component: operator-console-v2-validation
 subsystem: frontend
 layer: validation
 doc_type: validation
-status: active
+status: historical
 tags:
   - frontend
   - operator-console
@@ -21,6 +21,10 @@ code_paths:
   - portal/backend/service/reports
 ---
 # Frontend v2 Operator Validation
+
+> Historical evidence record. "Now," "deployed," "production," and
+> live-readiness statements below describe the 2026-08-03 validation environment
+> and its recorded runs, not current frontend or deployment state.
 
 ## Scope
 

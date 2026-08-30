@@ -1,31 +1,38 @@
 # Documentation
 
-The primary documentation homepage is [index.md](index.md).
+The documentation homepage is [index.md](index.md). It starts with the reason
+to use QT and introduces internal detail only when a workflow needs it.
 
-This folder is organized by reader intent:
+## Recommended Reading
 
-- [Start here](index.md): documentation homepage and reading paths.
-- [Overview](overview.md): what Quant-Trad is and how the major layers fit together.
-- [Getting started](getting-started.md): local setup and first stack run.
-- [Operator handbook](operators/README.md): deployment, onboarding, collector,
-  update, backup, and recovery entry point.
-- [Concepts](concepts/): mental models for runtime, execution, strategies, BotLens, and reporting datasets.
-- [Engineering](engineering/): implementation-oriented architecture and contributor standards.
-- [Guides](guides/): minimal extension guides for indicators, strategies, and providers.
-- [Contracts](contracts/): normative platform rules.
-- [Architecture](architecture/): deep component and subsystem design docs.
-- [Architecture decisions](architecture/decisions/): compact backfilled ADRs for durable tradeoffs.
-- [Incidents](incidents/): dated investigation records.
+1. [Overview](overview.md) — what QT does, who it helps, and how to interpret a
+   result.
+2. [Getting started](getting-started.md) — install and verify the local stack.
+3. [Core research workflow](guides/research-workflow.md) — move from a trading
+   idea to evidence, a Strategy, backtest, paper simulation, and comparison.
+4. [Concepts](concepts/) and the
+   [platform glossary](contracts/platform/04_glossary.md) — learn the mental
+   model and look up exact QT wording when needed.
+5. [Architecture](architecture/README.md) — follow truth, ownership, and
+   interface boundaries.
+6. [Six core promises](core-promises.md) — the high-consequence outcomes QT
+   protects.
+7. [Current system](current-system.md) — implemented scope, normal validation,
+   historical internals, and honest limits.
 
-## Read Order
+After that, choose the depth you need:
 
-1. [index.md](index.md)
-2. [overview.md](overview.md)
-3. [getting-started.md](getting-started.md)
-4. [operators/README.md](operators/README.md) when operating a durable host
-5. [concepts/runtime-timeline.md](concepts/runtime-timeline.md)
-6. [contracts/README.md](contracts/README.md)
-7. [architecture/decisions/README.md](architecture/decisions/README.md)
-8. [architecture/ARCHITECTURE_COMPONENT_INDEX.md](architecture/ARCHITECTURE_COMPONENT_INDEX.md)
+- [Concepts](concepts/) explain runtime, execution, Strategies, BotLens, and
+  reporting in approachable terms.
+- [Guides](guides/) cover research work and supported extensions.
+- [Operator handbook](operators/README.md) covers deployment, providers,
+  collectors, updates, backup, and recovery.
+- [Architecture](architecture/README.md) maps truth and ownership boundaries.
+- [Engineering](engineering/README.md) covers implementation and validation.
+- [Contracts](contracts/README.md) contain the exact normative rules.
+- [Architecture decisions](architecture/decisions/README.md) preserve durable
+  choices and their tradeoffs.
+- [Incidents](incidents/README.md) preserve dated investigations.
 
-Contracts remain the source of truth. Concept and engineering pages should explain the system without redefining contract behavior.
+Contracts remain the source of truth. Explanatory pages should make QT easier
+to understand without redefining its behavior.

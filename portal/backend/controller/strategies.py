@@ -9,8 +9,10 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..service.market import instrument_service
-from ..service.providers import provider_service
 from ..service.strategies.strategy_service import facade as strategy_service
+from ..service.strategies.strategy_service.market_identity import (
+    reject_forbidden_strategy_market_identity,
+)
 
 
 router = APIRouter()
@@ -34,22 +36,14 @@ def _resolve_slot_instrument(payload: Dict[str, Any], slot_payload: Dict[str, An
     symbol = str(slot_payload.get("symbol") or "").strip()
     if not symbol:
         return None
-    provider_id = slot_payload.get("provider_id") or metadata.get("provider_id")
-    venue_id = slot_payload.get("venue_id") or metadata.get("venue_id")
-    translated_provider = None
-    translated_exchange = None
-    if provider_id or venue_id:
-        translated_provider, translated_exchange = provider_service.translate_market(provider_id, venue_id)
     datasource = (
         slot_payload.get("datasource")
         or metadata.get("datasource")
-        or translated_provider
         or payload.get("datasource")
     )
     exchange = (
         slot_payload.get("exchange")
         or metadata.get("exchange")
-        or translated_exchange
         or payload.get("exchange")
     )
     inst_rec = instrument_service.resolve_instrument(datasource, exchange, symbol)
@@ -59,10 +53,23 @@ def _resolve_slot_instrument(payload: Dict[str, Any], slot_payload: Dict[str, An
         datasource,
         exchange,
         symbol,
-        provider_id=provider_id,
-        venue_id=venue_id,
     )
     return enriched
+
+
+def _bind_canonical_instrument(
+    slot_payload: Dict[str, Any],
+    instrument: Dict[str, Any],
+) -> None:
+    """Pin canonical identity over any lookup hints supplied on the slot."""
+
+    metadata = dict(slot_payload.get("metadata") or {})
+    metadata["instrument_id"] = instrument.get("id")
+    if instrument.get("datasource") is not None:
+        metadata["datasource"] = instrument.get("datasource")
+    if instrument.get("exchange") is not None:
+        metadata["exchange"] = instrument.get("exchange")
+    slot_payload["metadata"] = metadata
 
 
 def _strategy_core(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -208,13 +215,13 @@ class StrategyRuleOut(BaseModel):
 class InstrumentSlotIn(BaseModel):
     """Lightweight instrument slot definition for strategies."""
 
+    model_config = ConfigDict(extra="forbid")
+
     symbol: str
     risk_multiplier: Optional[float] = Field(default=None)
     instrument_id: Optional[str] = None
     datasource: Optional[str] = None
     exchange: Optional[str] = None
-    provider_id: Optional[str] = None
-    venue_id: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -423,6 +430,7 @@ def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
 
     try:
         payload = body.model_dump()
+        reject_forbidden_strategy_market_identity(payload)
         slots = payload.get("instrument_slots") or body.instrument_slots or []
 
         # Resolve or create instruments for each provided slot and embed instrument_id in metadata
@@ -459,9 +467,7 @@ def create_strategy(body: StrategyCreateRequest) -> Dict[str, Any]:
                     pass
 
             if inst_rec and isinstance(slot_payload, dict):
-                slot_payload.setdefault("metadata", {})["instrument_id"] = inst_rec.get("id")
-                slot_payload["metadata"].setdefault("datasource", inst_rec.get("datasource"))
-                slot_payload["metadata"].setdefault("exchange", inst_rec.get("exchange"))
+                _bind_canonical_instrument(slot_payload, inst_rec)
             resolved_slots.append(slot_payload)
 
         record = strategy_service.create_strategy(
@@ -490,16 +496,13 @@ def clone_strategy(
 
     try:
         payload = body.model_dump()
+        reject_forbidden_strategy_market_identity(payload)
         resolved_slots: list[dict[str, Any]] = []
         for raw in payload.get("instrument_slots") or []:
             slot_payload = _slot_payload(raw)
             instrument = _resolve_slot_instrument(payload, slot_payload)
             if instrument is not None:
-                metadata = dict(slot_payload.get("metadata") or {})
-                metadata["instrument_id"] = instrument.get("id")
-                metadata.setdefault("datasource", instrument.get("datasource"))
-                metadata.setdefault("exchange", instrument.get("exchange"))
-                slot_payload["metadata"] = metadata
+                _bind_canonical_instrument(slot_payload, instrument)
             resolved_slots.append(slot_payload)
         if not resolved_slots:
             raise ValueError("strategy clone requires at least one instrument slot")
@@ -701,6 +704,7 @@ def update_strategy(strategy_id: str, body: StrategyUpdateRequest) -> Dict[str, 
 
     try:
         payload = body.model_dump(exclude_unset=True)
+        reject_forbidden_strategy_market_identity(payload)
         record = strategy_service.update_strategy(strategy_id, **payload)
         return _build_strategy_definition(record)
     except KeyError as exc:

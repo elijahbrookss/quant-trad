@@ -36,6 +36,14 @@ ingress role in `docker-compose.server.yml`. The architectural decision remains
 one out-of-process stdout/stderr shipper and no in-process Loki hot path; the
 local development composition retains Promtail only as historical tooling.
 
+Clarified on 2026-08-24: the 2026-08-20 description of local Promtail as
+historical tooling is superseded. Promtail remains supported for the local
+development composition, while Grafana Alloy is the supported native-Linux
+server shipper. Promtail-specific statements in the original decision therefore
+apply to local development; Alloy occupies the same role on the native server.
+The invariant is unchanged: one normal out-of-process shipper per topology and
+no in-process Loki hot path.
+
 ## Context
 
 Runtime incident investigation depends on Loki, but the runtime had two

@@ -3,7 +3,7 @@ component: autonomous-research-promotion-roadmap
 subsystem: research-orchestration
 layer: roadmap
 doc_type: architecture
-status: active
+status: historical
 tags:
   - autonomy
   - research
@@ -33,15 +33,25 @@ code_paths:
   - docs/architecture/decisions/0057-use-append-only-canonical-order-lifecycle.md
   - docs/architecture/decisions/0059-use-in-app-scientific-authority-and-offline-certification-ceiling.md
 ---
-# Autonomous Research and Promotion Roadmap
+# Historical Autonomous Research and Promotion Roadmap
+
+> **Historical architecture record.** This document preserves the dated
+> capability sequence and decisions inspected on 2026-08-05. It is not the
+> current product reading path or product authority. For current behavior, use
+> the [research orchestration boundary](RESEARCH_ORCHESTRATION_BOUNDARY.md),
+> [scientific research authority](SCIENTIFIC_RESEARCH_AUTHORITY.md),
+> [offline research governance](OFFLINE_RESEARCH_GOVERNANCE.md), and the
+> platform contracts.
 
 ## Status and assessment boundary
 
-This is the ratified governing cross-boundary roadmap. Unimplemented phases
-remain direction rather than implementation truth, and this document is never an
-authorization to submit external orders. It records the repository state
-inspected on 2026-08-05 and defines the evidence and enforcement that must exist
-before permissions expand.
+This is a ratified explanatory cross-boundary roadmap. Unimplemented phases
+remain direction rather than implementation truth, and this document is never
+product authority or an authorization to submit external orders. Platform
+contracts own product behavior; accepted ADRs record reviewed decisions within
+that hierarchy. This roadmap records the repository state inspected on
+2026-08-05 and proposes the evidence and enforcement that would have to be
+approved before permissions expand.
 
 The assessment treated documentation as intent and traced executable paths,
 composition roots, persisted contracts, reports, experiment orchestration, and
@@ -61,11 +71,11 @@ run so exploratory evidence cannot be relabeled after completion.
 
 Phase 1, Phase 2A, Phase 2B, Phase 3A, Phase 3B, Phase 4, Phase 5, and the
 offline Phase 6 ceiling are implemented by the
-[Phase 1 economic execution contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md),
-[Phase 2A venue-neutral execution context](../execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md),
-the [Phase 2B durable canonical order lifecycle](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md),
-the [Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md),
-and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md),
+[Economic execution contract](../execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md),
+[Venue-neutral execution context](../execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md),
+the [Durable canonical order lifecycle](../execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md),
+the [Replay-certified book execution](../execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md),
+and [Passive queue bounds and latency](../execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md),
 [scientific research authority](SCIENTIFIC_RESEARCH_AUTHORITY.md), the
 [typed strategy/action graph](TYPED_STRATEGY_GRAPH.md), and
 [offline research governance](OFFLINE_RESEARCH_GOVERNANCE.md).
@@ -154,7 +164,7 @@ Wiring classifications used below are `production`, `bounded production`,
 | Fees | The resolved `FeeSchedule` owns maker/taker rates, source, version, profile binding, currency, basis, deterministic rounding, precision, tier, configured/verified-zero status, and hash. Phase 2A admits only non-negative quote-notional fees in the instrument quote currency because canonical wallet/event accounting can settle exactly that subset. | Production for admitted pinned bar schedules | Effective-time/account-tier resolution against authoritative production venues is not yet implemented; non-quote fees, base-quantity fees, and rebates require a new canonical accounting/event contract and fail context resolution today. Missing economic assumptions still fail or downgrade under Phase 1 rules. |
 | Partial fills and resting orders | The lifecycle owns cumulative/residual quantity and replacement lineage; partial fills settle through the canonical wallet and position. `PassiveBookExecutionModel` uses initial displayed quantity ahead, causal trade prints, and an optional bounded cancellation-credit policy to produce deterministic maker-fill bounds while residual custody remains in the existing lifecycle. | Production for bounded passive X5 backtests | Aggregated L2 cannot prove exact queue position, hidden liquidity, or whether a particular cancellation was ahead. Those limitations remain mandatory evidence until later shadow/live calibration. |
 | Book and latency simulation | Certified market-structure replay exports immutable, validity-aware book-and-trade tapes. `BookExecutionModel` selects causal X3/X4 state; `PassiveBookExecutionModel` applies a pinned decision/network/ack/cancel/replace latency scenario, trade-driven queue progress, expiration, and deterministic cancel/replace race boundaries. Reports validate X5 queue evidence and deterministically downgrade X5→X4→X3→X2. | Production for backtest X3-X5; paper/live closed | Declared latency is stress input rather than venue calibration. Hidden liquidity, exact queue truth, paper/shadow reconciliation, and venue-realized models remain later phases. |
-| Paper, shadow, and live | `PaperMarketStreamRunner` is started by `container_runtime.py`; `PaperAdapter` delegates to `BacktestAdapter`; observe-only intake is also implemented. `LiveAdapter` is an injected forwarding seam. | Paper: production. Shadow: absent. Live: closed seam. | Paper does not replay the live book. No local shadow order lifecycle or simulated-versus-realized reconciliation exists. No production venue trading adapter is authorized; ADR 0049 remains controlling. |
+| Paper, shadow, and live | `PaperMarketStreamRunner` is started by `container_runtime.py`; `PaperAdapter` delegates to `BacktestAdapter`; observe-only intake is also implemented. `LiveAdapter` is a reserved fail-closed seam and rejects injected executors. | Paper: production. Shadow: absent. Live: closed seam. | Paper does not replay the live book. No local shadow order lifecycle or simulated-versus-realized reconciliation exists. No production venue trading adapter is authorized; ADR 0049 remains controlling. |
 | Canonical accounting | Fill-driven wallet settlement, position state, margin reservation, fee/PnL accounting, and report reconciliation live under `src/engines/bot_runtime/core` and `portal/backend/service/reports`. | Production | New partial fills, funding, liquidation, and venue fees must enter through these owners rather than parallel ledgers. |
 | Research evidence and comparison | `RunResearchDataset`, comparisons, semantic fingerprints, continuity, wallet reconciliation, golden reproducibility, X0-X5 assessment, context/tape/policy validation, cost stress, and separate quality dimensions are production-wired. | Production | Scientific authority remains S0; golden and X class do not confer selection, promotion, or deployment eligibility. Historical runs without context bundles remain explicit legacy evidence. |
 | Experiment orchestration | Immutable local plans/events, explicit immutable claim intent, run/report/comparison composition, resume state, baseline/golden/X2-or-higher requirements, and non-empty selection-oriented gates are wired in `cli/experiments`. | Bounded production | Plans remain local orchestration pointers rather than a canonical protocol/trial/search-budget ledger. Holdout and multiple-testing authority remain absent. |
@@ -428,7 +438,7 @@ must label their claims accordingly.
 
 **Implementation status:** Implemented on 2026-08-05. The normative current
 behavior, evidence rules, limitations, and rollback contract are documented in
-[Phase 1 Economic Execution Contract](../execution-runtime/PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md).
+[Economic Execution Contract](../execution-runtime/ECONOMIC_EXECUTION_CONTRACT.md).
 
 - **Objective:** Make bar-level economics honest before adding book complexity.
 - **Capabilities added:** A versioned resolved execution-assumption manifest;
@@ -526,7 +536,7 @@ behavior, evidence rules, limitations, and rollback contract are documented in
 ## Phase 2B — Durable canonical order lifecycle
 
 **Implementation status:** Delivered on 2026-08-05. See the
-[Phase 2B implementation contract](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+[Durable canonical order lifecycle](../execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
 and [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md).
 
 - **Objective:** Replace the immediate full-fill request as the long-term order
@@ -570,8 +580,8 @@ and [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md).
 ## Phase 3 — L2 replay, partial fills, resting orders, queue bounds, and latency
 
 **Implementation record:** Releases 3A and 3B are implemented by
-[Phase 3A replay-certified book execution](../execution-runtime/PHASE_3A_REPLAY_CERTIFIED_BOOK_EXECUTION.md)
-and [Phase 3B passive queue bounds and latency](../execution-runtime/PHASE_3B_PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md).
+[Replay-certified book execution](../execution-runtime/REPLAY_CERTIFIED_BOOK_EXECUTION.md)
+and [Passive queue bounds and latency](../execution-runtime/PASSIVE_QUEUE_BOUNDS_AND_LATENCY.md).
 Together they cover X3 spread/top-of-book, aggressive X4 L2 walking, exact level
 fills, incremental accounting, TIF/residual custody, deterministic resting
 progress, bounded queue uncertainty, nonzero latency scenarios, and X5 report
@@ -950,10 +960,11 @@ promotion states are structurally absent.
 
 ## Autonomy ladder
 
-This matrix is normative. Existing endpoints that technically allow more do not
-grant authority; they are enforcement gaps to close in Phase 6. “Certify” below
-always means request an independent deterministic certifier, never write or sign
-one's own certificate.
+This matrix is an explanatory planning model, not a normative permission
+source. Existing endpoints that technically allow more do not grant authority;
+future expansion requires a separately approved contract/decision and its
+enforcement. “Certify” below always means request an independent deterministic
+certifier, never write or sign one's own certificate.
 
 | Boundary | Observe | Propose | Create | Mutate | Execute | Compare | Certify | Promote | Deploy |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -1077,7 +1088,7 @@ contracts. Remaining review decisions are:
 ## Repository uncertainty and refresh points
 
 - No production venue private-event/order adapter was found; the `LiveAdapter`
-  requires injection and ADR 0049 prohibits treating the seam as authorization.
+  is fail-closed, rejects injected executors, and remains subject to ADR 0049.
 - The market-structure replay boundary now exports a certified provider-neutral
   execution tape and Phase 3A consumes it in backtests. Operational retention,
   artifact sizing, and sustained production-session export remain deployment

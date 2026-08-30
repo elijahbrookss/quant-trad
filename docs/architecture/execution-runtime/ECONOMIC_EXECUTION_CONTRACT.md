@@ -1,5 +1,5 @@
 ---
-component: phase-1-economic-execution-contract
+component: economic-execution-contract
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
@@ -28,14 +28,14 @@ code_paths:
   - cli/experiments/pass_gates.py
   - tests/integration/runtime/test_execution_assumptions.py
 ---
-# Phase 1 Economic Execution Contract
+# Bar-Execution Economic Contract
 
 ## Scope
 
 This is the implemented economic-truth floor for bar execution. It does not
 claim venue-book realism, partial-fill realism, queue position, latency,
-capacity, shadow calibration, or live calibration. Those remain later phases of
-the [autonomous research and promotion roadmap](../research-orchestration/AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md).
+capacity, shadow calibration, or live calibration. Those remain separate
+follow-on capabilities and do not expand the claims of this contract.
 
 The contract preserves the existing canonical order-plan, fill, position,
 wallet, event-ledger, replay, and reporting owners. It adds a run-scoped
@@ -44,7 +44,7 @@ second execution or accounting ledger.
 
 ## Ratified semantics
 
-The human decisions governing this phase are:
+The human decisions governing this capability are:
 
 1. `golden` remains a deterministic reproducibility and reconciliation
    certificate. It does not certify economic realism, scientific validity,
@@ -59,19 +59,20 @@ The human decisions governing this phase are:
 4. `economic_claim_intent` is required and immutable for each newly started
    run. A completed exploratory run cannot later become selection evidence; it
    must be rerun under the stricter intent and manifest.
-5. L2 collection and replay remain independent. Phase 1 consumes bars only and
-   does not wire provider-specific book events into generic execution code.
+5. L2 collection and replay remain independent. The bar-execution model
+   consumes bars only and does not wire provider-specific book events into
+   generic execution code.
 
 ## Run-start contract
 
 `economic_claim_intent` accepts exactly:
 
-| Intent | Meaning in Phase 1 |
+| Intent | Meaning for bar-execution economics |
 | --- | --- |
 | `exploration` | Signal or compatibility research. It may resolve to X0 and cannot nominate or promote a candidate. |
-| `economic` | Requires complete Phase 1 economic assumptions and evidence. |
+| `economic` | Requires complete bar-execution economic assumptions and evidence. |
 | `selection` | Adds non-empty experiment gates, a baseline comparison, golden reproducibility evidence, and a minimum X2 comparison class. |
-| `promotion` | Uses the same Phase 1 fail-closed research gates but remains ineligible for actual promotion until later governance phases exist. |
+| `promotion` | Uses the same fail-closed research gates but remains ineligible for actual promotion until the required governance capabilities exist. |
 
 The HTTP run-start contracts require the intent in the request. Internal
 service construction may read an explicitly configured bot intent, but no
@@ -145,9 +146,9 @@ without being misrepresented as economic evidence.
 
 Comparisons accept `minimum_execution_quality_class`. Experiment selection and
 promotion plans fix that minimum at X2, require golden evidence, a baseline
-comparison, and non-empty pass gates. Phase 1 reports `scientific_quality_class`
-as S0 and `promotion_eligibility=ineligible`, so X2 never implies autonomous
-promotion.
+comparison, and non-empty pass gates. The bar-execution report sets
+`scientific_quality_class` to S0 and `promotion_eligibility` to `ineligible`, so
+X2 never implies autonomous promotion.
 
 ## Cost-stress evidence
 
@@ -173,21 +174,22 @@ silently expanding this method's claims.
 - Existing golden evidence remains usable for its narrow reproducibility
   purpose; `research_valid` is no longer derived from golden certification.
 - A rollback pins the prior model version for deterministic replay but forces
-  X0 when Phase 1 evidence is absent. Rollback may reduce permissions; it must
-  never preserve an unsupported higher class.
+  X0 when bar-execution economic evidence is absent. Rollback may reduce
+  permissions; it must never preserve an unsupported higher class.
 - No database migration is required because intent and assumptions live in the
   immutable JSON run snapshot and existing event/report contracts.
 
-## Phase boundary
+## Capability boundary
 
-After Phase 1, agents may execute approved costed/stressed bar experiments,
+Under this contract, agents may execute approved costed/stressed bar experiments,
 compare only compatible declared X classes, and automatically reject failed
 economic gates. They still may not create unrestricted strategy code, certify
 their own evidence, mutate promotion state, submit venue orders, or deploy
 capital.
 
-Phase 2A adds the venue-neutral capability/rule/fee/model contracts and pins
-their resolved bundle per run. Phase 2B now adds the durable order lifecycle.
-Phase 3 may consume L2 only through those implemented boundaries and must add
-atomic per-fill entry settlement before admitting book-driven partial entries.
-None of these contracts may reinterpret X2 as book-level execution evidence.
+The venue-neutral execution-context capability adds rule, fee, instrument, and
+model contracts and pins their resolved bundle per run. The canonical order
+lifecycle supplies durable order state. Replay-certified book execution may
+consume L2 only through those implemented boundaries and must use atomic
+per-fill entry settlement for book-driven partial entries. None of these
+contracts may reinterpret X2 as book-level execution evidence.

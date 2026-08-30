@@ -41,6 +41,15 @@ Related diagram: [run-research-dataset-flow.mmd](diagrams/run-research-dataset-f
 
 Reports are views. `RunResearchDataset v1` is the canonical run-level data product. Export bundles are generated from the dataset and are not comparison truth.
 
+Reporting accepts only the X0-through-X5 execution-quality vocabulary. The
+pinned execution-model artifact supplies a ceiling, while
+`RunResearchDataset` assigns the attained class from the weakest evidence
+required by that class. Missing or contradictory execution context forces X0;
+X3 and X4 require causal, replay-certified spread and visible-depth evidence;
+and X5 requires actually exercised bounded passive-queue and latency evidence.
+Comparison floors use the same closed vocabulary. No attained class represents
+venue-realized fill probability or live realism.
+
 `RunReportDTO` with `contract_version=run_report.v2` is the typed single-run report contract for frontend and
 future MCP consumers. It wraps canonical dataset facts into research-trust and
 research-performance sections while keeping raw rows available only as

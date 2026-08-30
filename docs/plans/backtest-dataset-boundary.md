@@ -3,7 +3,7 @@ component: plan-backtest-dataset-boundary
 subsystem: execution-runtime
 layer: plan
 doc_type: plan
-status: active
+status: historical
 tags:
   - backtest
   - dataset
@@ -19,6 +19,10 @@ code_paths:
   - src/market_data
 ---
 # Dataset-Bound Backtesting And Performance Campaign
+
+> Historical implementation record. Branch, PR, production-path, and validation
+> statements below describe the recorded July 2026 state and do not assert
+> current integration or deployment status.
 
 ## Baseline
 
@@ -150,7 +154,7 @@ Recorded before public provider acquisition on revision `da8a44f`:
 ## Performance Evidence
 
 The three-sample pre-optimization baseline is established below. No optimization
-claim exists yet. Measurements from the previous cleanup campaign remain separate
+claim exists yet. Earlier measurements remain separate
 and are not used as this backtest execution baseline.
 
 Dataset preparation emits low-overhead wall/CPU timings for requirement

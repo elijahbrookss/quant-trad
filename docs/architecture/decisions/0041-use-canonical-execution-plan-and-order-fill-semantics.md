@@ -56,10 +56,10 @@ Runtime now has two canonical execution layers:
 - `FillOrder` carries executable fill semantics: side, quantity, price,
   `order_type`, `liquidity_role`, `price_source`, and fee rate.
 
-Phase 2A extends `FillOrder` with time in force, post-only intent, pinned fee
-schedule identity, and `ResolvedExecutionContext`. It remains an immediate
-full-fill request adapter, not a durable venue order. ADR 0057 and Phase 2B now
-provide the accepted successor: immutable requests and attempts plus requested,
+The resolved execution context extends `FillOrder` with time in force, post-only
+intent, pinned fee schedule identity, and `ResolvedExecutionContext`. It remains
+an immediate full-fill request adapter, not a durable venue order. ADR 0057
+provides the accepted successor: immutable requests and attempts plus requested,
 validated, accepted, open, partial, fill, cancel, replace, reject, and expiry
 events. The adapter remains only for incremental caller compatibility.
 
@@ -109,7 +109,7 @@ interpretations.
 - Startup and per-order conformance reject semantics unsupported by the pinned
   venue profile before an adapter can fabricate a fill.
 - Durable state, residual quantity, replacement lineage, and replay now belong
-  to the Phase 2B lifecycle rather than `FillOrder`.
+  to the canonical order lifecycle rather than `FillOrder`.
 - Disabled trailing cannot activate from stale distance fields.
 - Malformed targets and exit rules fail during normalization or plan
   compilation instead of silently becoming market entry, disabled policy, or
@@ -120,4 +120,4 @@ interpretations.
 ## References
 
 - [ADR 0056: Pin venue-neutral execution contexts per run](0056-pin-venue-neutral-execution-contexts-per-run.md)
-- [Phase 2A venue-neutral execution context](../execution-runtime/PHASE_2A_VENUE_NEUTRAL_EXECUTION_CONTEXT.md)
+- [Venue-neutral execution context](../execution-runtime/VENUE_NEUTRAL_EXECUTION_CONTEXT.md)

@@ -1,10 +1,14 @@
 ---
 title: Collector Operations Discovery
-status: active
+status: historical
 last_verified: 2026-08-10
 ---
 
 # Collector Operations Discovery
+
+> Historical evidence record. "Current," "live," and "production" descriptions
+> below are observations from the 2026-08-10 pre-implementation inventory, not
+> current fleet state.
 
 ## Scope and evidence boundary
 

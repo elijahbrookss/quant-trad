@@ -374,7 +374,13 @@ def ensure_env_loaded() -> None:
     global _ENV_LOADED
     if _ENV_LOADED:
         return
-    if not os.getenv("GITHUB_ACTIONS"):
+    disable_dotenv = str(os.getenv("QT_DISABLE_DOTENV") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not os.getenv("GITHUB_ACTIONS") and not disable_dotenv:
         load_dotenv(_REPO_ROOT / "secrets.env")
         load_dotenv(_REPO_ROOT / ".env")
     _ENV_LOADED = True
@@ -412,6 +418,14 @@ def _load_raw_config() -> Dict[str, Any]:
         if not custom_path.exists():
             raise RuntimeError(f"QT_CONFIG_FILE does not exist: {custom_path}")
         payload = _deep_merge(payload, _yaml_file(custom_path))
+
+    configured_database_dsn = _coerce_optional_str(
+        _path_get(payload, ("database", "dsn"), None)
+    )
+    if configured_database_dsn is not None:
+        raise RuntimeError(
+            "database.dsn must be supplied through PG_DSN; config-file DSNs are not supported"
+        )
 
     env_overrides: Dict[str, Any] = {}
     for env_name, path in _ENV_BINDINGS:

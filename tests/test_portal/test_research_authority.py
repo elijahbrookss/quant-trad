@@ -24,7 +24,7 @@ from research_science import (
 )
 from strategies.typed_graph import TYPED_STRATEGY_GRAPH_VERSION
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.db]
 
 
 def _protocol_payload(protocol_id: str) -> dict:

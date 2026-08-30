@@ -373,6 +373,76 @@ def test_legacy_check_is_readable_but_not_replayable_or_observation_eligible(
         service.create_observation_from_check_evidence("legacy-check", {})
 
 
+def test_eligible_check_requires_explicit_observation_admission_and_support_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition, request, plan, evidence, result = _contracts()
+    check = {
+        "id": "check-1",
+        "kind": "research_check",
+        "title": "Frozen evidence",
+        "payload": {
+            "schema_version": "research_check_payload.v2",
+            "evidence_classification": "frozen_replayable",
+            "definition": definition.to_dict(),
+            "request": request.to_dict(),
+            "plan": plan.to_dict(),
+            "evidence": evidence.to_dict(),
+            "result": result.to_dict(),
+            "replayable": True,
+            "observation_eligible": True,
+        },
+    }
+    created_items: list[dict[str, Any]] = []
+    created_links: list[dict[str, Any]] = []
+
+    # Exercise the admission operation with an otherwise valid frozen contract
+    # designated eligible for this focused service-boundary test.
+    monkeypatch.setattr(
+        service,
+        "DURABLE_EVIDENCE_CHECK_FAMILIES",
+        frozenset({definition.definition_id}),
+    )
+    monkeypatch.setattr(service, "PREVIEW_ONLY_CHECK_FAMILIES", frozenset())
+    monkeypatch.setattr(service.repository, "get_item", lambda *_args, **_kwargs: check)
+
+    def create_item(**kwargs):
+        created_items.append(dict(kwargs))
+        return {"id": "observation-1", **kwargs}
+
+    def create_link(**kwargs):
+        created_links.append(dict(kwargs))
+        return {"id": "link-1", **kwargs}
+
+    monkeypatch.setattr(service.repository, "create_item", create_item)
+    monkeypatch.setattr(service.repository, "create_link", create_link)
+
+    admitted = service.create_observation_from_check_evidence(
+        "check-1",
+        {"title": "Explicit observation", "tags": ["research-note"]},
+    )
+
+    assert admitted["schema_version"] == "research_observation_from_check.v1"
+    assert admitted["check_id"] == "check-1"
+    assert len(created_items) == 1
+    assert created_items[0]["kind"] == "observation"
+    assert created_items[0]["title"] == "Explicit observation"
+    assert created_items[0]["tags"] == ["evidence-backed", "research-note"]
+    assert created_items[0]["payload"] == {
+        "schema_version": "research_observation_payload.v2",
+        "created_from": "research_check_evidence",
+        "check_id": "check-1",
+        "result_hash": result.result_hash,
+        "evidence_hash": result.evidence_hash,
+        "input_hash": evidence.input_hash,
+        "scope": dict(request.scope),
+    }
+    assert len(created_links) == 1
+    assert created_links[0]["source_item_id"] == "check-1"
+    assert created_links[0]["target_id"] == "observation-1"
+    assert created_links[0]["relation"] == "supports"
+
+
 def test_older_frozen_contract_is_preserved_but_not_claimed_replayable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

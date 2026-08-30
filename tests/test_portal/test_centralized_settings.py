@@ -48,6 +48,41 @@ def test_settings_applies_single_underscore_env_overrides(monkeypatch, request):
     assert settings.database.dsn == "postgresql://example/test"
 
 
+def test_config_file_cannot_define_a_second_database_dsn_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    custom_config = tmp_path / "custom.yaml"
+    custom_config.write_text(
+        "database:\n  dsn: postgresql://configuration-file/not-authoritative\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("QT_CONFIG_FILE", str(custom_config))
+    monkeypatch.delenv("PG_DSN", raising=False)
+    settings_module.clear_settings_cache()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"database\.dsn must be supplied through PG_DSN",
+    ):
+        get_settings(force_reload=True)
+
+
+def test_explicit_dotenv_disable_prevents_repository_file_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_dotenv_load(*_args, **_kwargs):
+        raise AssertionError("dotenv discovery must remain disabled")
+
+    monkeypatch.setattr(settings_module, "_ENV_LOADED", False)
+    monkeypatch.setattr(settings_module, "load_dotenv", unexpected_dotenv_load)
+    monkeypatch.setenv("QT_DISABLE_DOTENV", "1")
+
+    settings_module.ensure_env_loaded()
+
+    assert settings_module._ENV_LOADED is True
+
+
 def test_materialize_bot_config_flattens_bot_env_and_snapshot_interval():
     pytest.importorskip("sqlalchemy")
 

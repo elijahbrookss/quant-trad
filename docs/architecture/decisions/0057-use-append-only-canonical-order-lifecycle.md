@@ -23,12 +23,13 @@ code_paths:
 
 ## Status
 
-Accepted on 2026-08-05 after Phase 2B implementation and acceptance testing.
+Accepted on 2026-08-05 after canonical-lifecycle implementation and
+acceptance testing.
 
 ## Context
 
-`FillOrder` made immediate fill semantics explicit, and Phase 2A pinned the
-instrument, venue, fee, and model context. It still could not serve as a durable
+`FillOrder` made immediate fill semantics explicit, and
+`ResolvedExecutionContext` pinned the instrument, venue, fee, and model context. It still could not serve as a durable
 order: it had no generic acceptance/open/partial/cancel/replace/expiry state,
 residual ownership, restart replay, or idempotent event history. Adding book
 execution or live reconciliation directly to that shape would either scatter
@@ -40,7 +41,7 @@ Use one venue-neutral, immutable-request, append-only canonical order lifecycle.
 Each order has a stable request identity, one or more immutable attempt
 identities, a strict generic transition graph, cumulative and residual quantity,
 replacement lineage, idempotent event and fill identities, and deterministic
-replay hashes. The Phase 2A execution-context hash and order-policy hash remain
+replay hashes. The execution-context hash and order-policy hash remain
 fixed for the request lifetime.
 
 The lifecycle owns order state and lineage only. Fills remain inputs to the
@@ -67,7 +68,7 @@ own the generic transition graph. Generic code must not branch on venue names.
   settles once through existing owners, and no alternate ledger is allowed.
 - The runtime event ledger is canonical; BotLens and reports are projections.
 - Current X0-X2 bar models remain full-fill. A partial entry cannot be abandoned
-  before Phase 3 provides per-fill incremental entry accounting.
+  until per-fill incremental entry accounting is implemented.
 - Lifecycle evidence does not raise execution quality or authorize external
   order submission.
 
@@ -80,7 +81,7 @@ own the generic transition graph. Generic code must not branch on venue names.
 - Restart and report reconstruction no longer infer order state from trade rows.
 - L2, queue, shadow, and live-calibration work can reuse the contract without
   coupling matching mechanics or venue adapters to strategy semantics.
-- Book-driven partial entry settlement remains explicit Phase 3 work; Phase 2B
+- Book-driven partial entry settlement remains unsupported; the current runtime
   fails closed rather than allowing filled quantity to disappear.
 
 ## Rejected alternatives
@@ -102,7 +103,7 @@ own the generic transition graph. Generic code must not branch on venue names.
 - `tests/test_portal/test_botlens_domain_events.py`
 - `tests/test_portal/test_botlens_event_retention.py`
 - `tests/test_portal/test_run_research_dataset.py`
-- [Phase 2B durable canonical order lifecycle](../execution-runtime/PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+- [Durable canonical order lifecycle](../execution-runtime/DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
 
 ## References
 

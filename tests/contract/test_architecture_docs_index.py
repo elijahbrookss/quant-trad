@@ -2,38 +2,32 @@ from __future__ import annotations
 
 from pathlib import Path
 
-REQUIRED_KEYS = {
-    "component:",
-    "subsystem:",
-    "layer:",
-    "doc_type:",
-    "status:",
-    "tags:",
-    "code_paths:",
-}
+from scripts.docs import build_architecture_index as architecture_index
 
 
-def test_architecture_docs_have_required_frontmatter_tags():
-    architecture_docs = list(Path("docs/architecture").rglob("*.md"))
-    assert architecture_docs, "expected architecture docs"
+def test_architecture_docs_have_valid_frontmatter_and_paths() -> None:
+    catalog = architecture_index.build_catalog(Path.cwd())
 
-    missing: list[str] = []
-    for path in architecture_docs:
-        if path.name in {"ARCHITECTURE_COMPONENT_INDEX.md", "README.md"}:
-            continue
-        text = path.read_text(encoding="utf-8")
-        if not text.startswith("---\n"):
-            missing.append(f"{path}:missing-frontmatter")
-            continue
-        frontmatter = text.split("\n---\n", 1)[0]
-        for key in REQUIRED_KEYS:
-            if key not in frontmatter:
-                missing.append(f"{path}:missing-{key}")
-
-    assert missing == [], "architecture metadata coverage gaps: " + ", ".join(missing)
+    assert catalog.components, "expected architecture component docs"
+    repo_paths = [entry.repo_path for entry in catalog.components]
+    components = [entry.component for entry in catalog.components]
+    assert len(repo_paths) == len(set(repo_paths))
+    assert len(components) == len(set(components))
 
 
-def test_architecture_index_references_runtime_composition_doc():
-    index_text = Path("docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md").read_text(encoding="utf-8")
+def test_architecture_index_exactly_matches_validated_catalog() -> None:
+    catalog = architecture_index.build_catalog(Path.cwd())
+    expected = architecture_index.render_index(catalog).encode("utf-8")
+    actual = Path(
+        "docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md"
+    ).read_bytes()
+
+    assert actual == expected
+
+
+def test_architecture_index_references_runtime_composition_doc() -> None:
+    index_text = Path(
+        "docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md"
+    ).read_text(encoding="utf-8")
     assert "RUNTIME_COMPOSITION_ROOT.md" in index_text
     assert "portal/backend/service/bots/runtime_composition.py" in index_text

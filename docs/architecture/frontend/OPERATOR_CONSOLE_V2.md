@@ -19,7 +19,6 @@ code_paths:
   - portal/frontend/src/features/overview
   - portal/frontend/src/features/operations
   - portal/frontend/src/features/collectors
-  - portal/frontend/src/features/market-structure
   - portal/frontend/src/features/bots/botlens
   - portal/frontend/src/components/bots
   - portal/frontend/src/adapters/marketData.adapter.js
@@ -76,6 +75,30 @@ The console does not own:
 The v2 adapters used by the primary rooms issue GET requests only. A rerun
 option copies the canonical `qt bots start ... --dataset-id ...` command; it
 does not start a run from the browser.
+
+## Supported Source And Validation Topology
+
+The V2 read-only-surface scan covers the exact routed source roots:
+
+- `portal/frontend/src/v2`;
+- `portal/frontend/src/features/overview`;
+- `portal/frontend/src/features/operations`;
+- `portal/frontend/src/features/collectors`;
+- `portal/frontend/src/features/bots/botlens`.
+
+A declared root that does not exist is a contract failure, not an empty surface.
+The primary Overview and Operations rooms remain GET/read-only. A routed
+collector lens requests lifecycle actions only through the canonical backend
+collector-operation endpoint owned by `CollectorOperationsService`; the
+frontend does not acquire lifecycle authority by presenting that action.
+
+Frontend validation keeps two explicit test families. `npm run test:node` runs
+the Node-native model, adapter, and source-contract suites. `npm run test:jsx`
+runs the two tracked React component suites through the pinned Vitest/jsdom
+profile. `npm test` runs both families, and `make frontend-check` adds the Vite
+production build. These checks cover source contracts, tracked components, and compilation. They
+do not exercise a real backend, browser/E2E behavior, deployment, or a live
+system.
 
 ## Navigation And Visual Language
 
@@ -405,7 +428,7 @@ failed; invalid means evidence explicitly failed a validity contract.
 
 ## Related Docs
 
-- [Operator validation](../../engineering/frontend-v2-operator-validation.md)
+- [Historical operator validation](../../engineering/frontend-v2-operator-validation.md)
 - [System architecture model](../system/SYSTEM_MODEL.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
 - [Reporting boundary](../reporting/REPORTING_BOUNDARY.md)

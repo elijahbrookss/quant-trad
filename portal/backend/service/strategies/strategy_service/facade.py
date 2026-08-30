@@ -8,6 +8,7 @@ from copy import deepcopy
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from threading import Lock
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
 
 from ...market import instrument_service
@@ -19,6 +20,7 @@ from risk import normalise_risk_config
 from strategies.contracts import CompiledStrategySpec, DecisionRuleSpec
 from strategies.compiler import compile_strategy, normalize_rule_intent
 from . import persistence
+from .market_identity import reject_forbidden_strategy_market_identity
 from .typed_preview import build_strategy_preview_compare, build_strategy_preview_summary, evaluate_strategy_preview
 
 
@@ -1563,7 +1565,29 @@ class StrategyPreviewStore:
         raise KeyError("Strategy preview signal not found")
 
 
-_REGISTRY = StrategyRegistry()
+class _LazyStrategyRegistry:
+    """Defer persistence-backed registry bootstrap until the first runtime use."""
+
+    def __init__(self) -> None:
+        self._instance: StrategyRegistry | None = None
+        self._lock = Lock()
+
+    def _resolve(self) -> StrategyRegistry:
+        instance = self._instance
+        if instance is not None:
+            return instance
+        with self._lock:
+            instance = self._instance
+            if instance is None:
+                instance = StrategyRegistry()
+                self._instance = instance
+        return instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+
+_REGISTRY = _LazyStrategyRegistry()
 _PREVIEW_RESULTS = StrategyPreviewStore()
 
 
@@ -1673,11 +1697,21 @@ def clone_strategy(
     need to infer or recreate Strategy defaults.
     """
 
+    symbol_values = list(symbols)
+    reject_forbidden_strategy_market_identity(
+        {
+            "name": name,
+            "symbols": symbol_values,
+            "description": description,
+            "datasource": datasource,
+            "exchange": exchange,
+        }
+    )
     source = _REGISTRY.get(source_strategy_id)
     source_variants = list_strategy_variants(source_strategy_id)
     created = create_strategy(
         name,
-        symbols=symbols,
+        symbols=symbol_values,
         timeframe=source.timeframe,
         description=description,
         datasource=datasource if datasource is not None else source.datasource,
@@ -1758,14 +1792,30 @@ def create_strategy(
 ) -> Dict[str, Any]:
     """Create a new strategy using the global registry."""
 
+    symbol_values = list(symbols)
+    indicator_values = list(indicator_ids) if indicator_ids is not None else None
+    reject_forbidden_strategy_market_identity(
+        {
+            "name": name,
+            "symbols": symbol_values,
+            "timeframe": timeframe,
+            "description": description,
+            "datasource": datasource,
+            "exchange": exchange,
+            "indicator_ids": indicator_values,
+            "atm_template": atm_template,
+            "atm_template_id": atm_template_id,
+            "risk_config": risk_config,
+        }
+    )
     return _REGISTRY.create(
         name,
-        symbols=symbols,
+        symbols=symbol_values,
         timeframe=timeframe,
         description=description,
         datasource=datasource,
         exchange=exchange,
-        indicator_ids=indicator_ids,
+        indicator_ids=indicator_values,
         atm_template=atm_template,
         atm_template_id=atm_template_id,
         risk_config=risk_config,
@@ -1775,6 +1825,7 @@ def create_strategy(
 def update_strategy(strategy_id: str, **fields: Any) -> Dict[str, Any]:
     """Update the specified strategy."""
 
+    reject_forbidden_strategy_market_identity(fields)
     return _REGISTRY.update(strategy_id, **fields)
 
 

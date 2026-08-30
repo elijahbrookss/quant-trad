@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -67,12 +66,21 @@ def test_claim_rejects_invalid_owner_or_partition_before_database_access(
         )
 
 
-def test_stale_running_reclaim_is_throttled_by_job_type() -> None:
-    repository._RECLAIM_LAST_MONOTONIC_BY_JOB_TYPES.clear()
+def test_stale_running_reclaim_is_throttled_by_job_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reclaim_history: dict[tuple[str, ...], float] = {}
+    monkeypatch.setattr(
+        repository,
+        "_RECLAIM_LAST_MONOTONIC_BY_JOB_TYPES",
+        reclaim_history,
+    )
+    monkeypatch.setattr(repository, "_reclaim_interval_seconds", lambda: 30.0)
 
     assert repository._should_reclaim_stale_running_jobs(["signals", "overlays"], now_monotonic=100.0) is True
     assert repository._should_reclaim_stale_running_jobs(["overlays", "signals"], now_monotonic=101.0) is False
     assert repository._should_reclaim_stale_running_jobs(["signals", "overlays"], now_monotonic=131.0) is True
+    assert reclaim_history == {("overlays", "signals"): 131.0}
 
 
 def _claimed_job() -> ClaimedJob:
@@ -129,7 +137,6 @@ def test_claim_heartbeat_surfaces_ownership_loss(
             interval_seconds=0.01,
         ):
             assert attempted.wait(timeout=0.5)
-            time.sleep(0.01)
 
 
 def test_claim_heartbeat_preserves_handler_error(

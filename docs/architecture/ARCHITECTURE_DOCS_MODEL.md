@@ -3,7 +3,7 @@ component: architecture-docs-model
 subsystem: architecture-docs
 layer: reference
 doc_type: architecture
-status: active
+status: historical
 tags:
   - documentation
   - architecture
@@ -18,7 +18,11 @@ code_paths:
 
 ## Purpose
 
-This document records the architecture-doc modernization pass. It explains what was kept, consolidated, rewritten, or removed so future docs do not drift back into package-shaped notes.
+This historical record explains the architecture-document modernization that
+established QT's boundary-first documentation. It is preserved so later
+contributors can understand why material was kept, consolidated, rewritten, or
+removed. For the current architecture, start with the
+[architecture README](README.md) and [system model](system/SYSTEM_MODEL.md).
 
 The target model is boundary-first. A systems engineer should be able to open one folder and understand the ownership boundary, upstream inputs, downstream outputs, truth source, projection rules, failure behavior, and implementation paths.
 
@@ -71,6 +75,8 @@ docs/architecture/
   data/
     DATA_BOUNDARY.md
     diagrams/
+  cli/
+    CLI_SETUP_BOUNDARY.md
   indicator-runtime/
     INDICATOR_RUNTIME_BOUNDARY.md
     diagrams/
@@ -86,12 +92,16 @@ docs/architecture/
   botlens-projections/
     BOTLENS_PROJECTION_BOUNDARY.md
     diagrams/
+  frontend/
+    OPERATOR_CONSOLE_V2.md
   persistence/
     PERSISTENCE_BOUNDARY.md
     diagrams/
   reporting/
     REPORTING_BOUNDARY.md
     diagrams/
+  research-memory/
+    RESEARCH_MEMORY_BOUNDARY.md
   observability/
     OBSERVABILITY_BOUNDARY.md
     diagrams/
@@ -109,11 +119,18 @@ through `make architecture-svgs`, which writes each SVG beside its `.mmd` source
 in the local `diagrams/` folder. The source `.mmd` files remain canonical; the
 nearby SVGs are for quick reference while reading.
 
+Repository-level assets whose source or generator is not established are
+tracked separately in [documentation asset lineage](../assets/README.md). Their
+presence does not make them generated architecture derivatives.
+
 ## Entry Points
 
 - [Architecture README](README.md) is the navigation hub.
 - [System model](system/SYSTEM_MODEL.md) is the end-to-end architecture overview.
 - [Engine state model](engine/ENGINE_STATE_MODEL.md) explains the deterministic walk-forward contract.
+- [CLI setup boundary](cli/CLI_SETUP_BOUNDARY.md) explains local readiness and provider onboarding.
+- [Operator Console v2](frontend/OPERATOR_CONSOLE_V2.md) explains the bounded human inspection surface.
+- [Research memory boundary](research-memory/RESEARCH_MEMORY_BOUNDARY.md) explains the reasoning trail around research and runtime artifacts.
 - [Architecture decision records](decisions/README.md) explain durable decisions and tradeoffs.
 - [Architecture component index](ARCHITECTURE_COMPONENT_INDEX.md) is generated from frontmatter and should not be edited by hand.
 
@@ -132,20 +149,25 @@ Important current facts from those files were preserved in the relevant boundary
 
 ## Remaining Gaps
 
-- Frontend operator surfaces beyond BotLens are not modeled as a dedicated architecture boundary yet.
 - Paper/live runtime mode behavior is documented only as a composition seam because backtest is the implemented runtime shape today.
 - Identity keys are spread across strategy, runtime events, database rows, and projection code. The new identity doc explains current relationships, but the code does not yet have a single identity registry.
 - Provider session/calendar truth is still limited. Unknown gaps should remain unknown until explicit session evidence exists.
 - SVG diagram assets are generated only when Mermaid tooling is available.
 
-## Maintenance Rules
+## Principles Preserved In The Current Standard
 
 - Keep contracts authoritative.
 - Prefer boundary docs over package docs.
-- Keep docs short enough to read, but complete enough to debug ownership and flow.
+- Follow the
+  [component documentation standard](../engineering/documentation/component-documentation-standard.md)
+  for the small frontmatter schema used by the generated index.
+- Keep architecture metadata focused on navigation; product meaning remains in
+  contracts, accepted decisions, and the architecture prose itself.
+- Keep docs short enough to read, but complete enough to debug responsibility and flow.
 - Keep explanatory docs intent-first. Avoid template sections that make a page
   look organized without making the system easier to understand.
 - Add diagrams lightly. They should reduce cognitive load, not decorate a page.
 - Use ADRs for durable cross-boundary decisions; keep operational or incident-specific narratives in incident docs.
-- Link to source paths through frontmatter `code_paths`.
+- Link to source paths through frontmatter `code_paths`; shared mappings remain
+  navigation and coverage rather than exclusive file ownership.
 - Rebuild [ARCHITECTURE_COMPONENT_INDEX.md](ARCHITECTURE_COMPONENT_INDEX.md) after frontmatter changes.

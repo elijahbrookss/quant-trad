@@ -1,4 +1,4 @@
-# Developer Audit Workflow
+# Developer Workflow
 
 This workflow is for Codex, other agents, and local developer operations. It
 standardizes the command surfaces for workflows, visualization, Docker,
@@ -108,7 +108,7 @@ navigate. If it does, split by current sections into included files such as
 `make/docker.mk`, `make/db.mk`, `make/reporting.mk`, `make/test.mk`, and
 `make/docs.mk`.
 
-## Reporting Audit
+## Reporting Diagnostics
 
 For normal report workflows, prefer `qt reports ...` because it goes through
 the backend API contract and returns machine-readable workflow output.
@@ -156,15 +156,16 @@ Use focused checks first, then broaden only when the change warrants it:
 - `make validate-docs`
 - `make git-check`
 - `make check`
-- `make frontend-check` only when intentionally validating the legacy frontend
+- `make frontend-check` when the change affects the supported frontend or its adapters
 
 `make test-reporting-api` is intentionally separate from `make test-reporting`
 because it starts FastAPI route tests and may expose backend lifespan, DB, or
 watchdog readiness issues. It is bounded by `REPORT_API_TEST_TIMEOUT`.
 
 `make check` is the backend baseline: repository hygiene, architecture-doc
-contracts, and every non-database backend test. `make check-all` adds the
-optional legacy frontend tests and build.
+contracts, and ordinary non-database backend tests. `make check-all` adds the
+supported frontend tests and production build.
+
 
 For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component
@@ -188,7 +189,7 @@ not claim pixel or click-path verification. Reopen the repository through a
 supported Remote WSL/native path or repair the bridge before making an
 interactive-browser claim.
 
-## Codex Audit Shape
+## Codex Workflow Shape
 
 Do not hide full audits behind one opaque target. Keep the pieces composable:
 

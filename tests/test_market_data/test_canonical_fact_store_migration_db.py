@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -11,8 +10,11 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from market_data.fact_registry import supported_fact_payload_schemas
-from portal.backend.db import db
-from portal.backend.db.models import Base
+from tests.test_market_data.migration_test_support import (
+    PRE_CUTOVER_TABLES,
+    fresh_migration_database,
+    prepare_canonical_pre_migration_schema,
+)
 
 
 pytestmark = pytest.mark.db
@@ -23,12 +25,6 @@ _HARD_CUTOVER = (
     _REPO_ROOT / "scripts/db/manual_migration_canonical_fact_hard_cutover_v1.sql"
 )
 _NUMERIC_MIGRATION = _REPO_ROOT / "scripts/db/manual_migration_numeric_fact_store_v1.sql"
-_NUMERIC_MIGRATION_TABLES = frozenset(
-    {
-        ("market", "numeric_fact_versions"),
-        ("market", "fact_acquisition_coverage"),
-    }
-)
 _REQUIRED_INDEXES = frozenset(
     {
         "ix_market_fact_series_time_revision",
@@ -44,84 +40,6 @@ _REQUIRED_INDEXES = frozenset(
         "ix_market_fact_funding_time",
     }
 )
-_PRE_CUTOVER_TABLES = (
-    "candle_versions",
-    "open_interest_versions",
-    "funding_rate_versions",
-    "market_trade_versions",
-    "trade_flow_aggregate_versions",
-    "l2_snapshot_versions",
-    "l2_snapshot_levels",
-    "l2_mutation_batches",
-    "l2_mutations",
-    "bbo_feature_versions",
-    "depth_feature_versions",
-    "trade_flow_feature_versions",
-    "futures_spot_relationship_versions",
-    "derivative_state_versions",
-    "market_response_feature_versions",
-    "normalized_feature_versions",
-)
-
-
-def _isolated_dsn() -> str:
-    if os.getenv("QT_DB_TEST_ISOLATED", "").strip() != "1":
-        pytest.fail("canonical Fact migration test requires QT_DB_TEST_ISOLATED=1")
-    dsn = os.getenv("PG_DSN", "").strip()
-    if not dsn:
-        pytest.fail("canonical Fact migration test requires the disposable PG_DSN")
-    return dsn
-
-
-def _prepare_pre_migration_schema(dsn: str) -> None:
-    """Build the deployed pre-canonical baseline from its owned migrations."""
-
-    db.reset_connection_state()
-    engine = create_engine(dsn, future=True)
-    try:
-        with engine.begin() as conn:
-            schemas = sorted(
-                {
-                    str(table.schema)
-                    for table in Base.metadata.sorted_tables
-                    if str(table.schema or "").strip()
-                }
-            )
-            for schema in schemas:
-                conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-            conn.execute(text("CREATE SEQUENCE IF NOT EXISTS market.fact_commit_seq"))
-            for table in Base.metadata.sorted_tables:
-                key = (str(table.schema or "").strip() or None, str(table.name))
-                if key in _NUMERIC_MIGRATION_TABLES:
-                    continue
-                table.create(bind=conn, checkfirst=True)
-            conn.execute(
-                text("DROP TABLE IF EXISTS market.fact_acquisition_coverage")
-            )
-            conn.execute(text("DROP TABLE IF EXISTS market.numeric_fact_versions"))
-            conn.execute(
-                text(
-                    "ALTER TABLE market.series "
-                    "DROP CONSTRAINT IF EXISTS ck_market_series_dimensions_object"
-                )
-            )
-            conn.execute(
-                text("ALTER TABLE market.series DROP COLUMN IF EXISTS dimensions")
-            )
-            conn.execute(text("DROP TABLE IF EXISTS market.fact_versions"))
-            conn.execute(text("DROP TABLE IF EXISTS market.fact_schemas"))
-            # Runtime metadata deliberately no longer owns the retired tables.
-            # Reconstruct the explicit empty pre-cutover boundary needed to
-            # prove the historical schema migration and destructive cutover.
-            for table_name in _PRE_CUTOVER_TABLES:
-                conn.execute(
-                    text(
-                        f'CREATE TABLE IF NOT EXISTS market."{table_name}" '
-                        '(id varchar PRIMARY KEY)'
-                    )
-                )
-    finally:
-        engine.dispose()
 
 
 def _run_sql_migration(dsn: str, migration: Path, label: str) -> None:
@@ -153,6 +71,87 @@ def _run_migration(dsn: str) -> None:
 
 def _run_hard_cutover(dsn: str) -> None:
     _run_sql_migration(dsn, _HARD_CUTOVER, "canonical Fact hard cutover")
+
+
+def _pre_migration_state(dsn: str) -> dict[str, Any]:
+    engine = create_engine(dsn, future=True)
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(conn)
+            return {
+                "market_tables": frozenset(
+                    inspector.get_table_names(schema="market")
+                ),
+                "public_tables": frozenset(
+                    inspector.get_table_names(schema="public")
+                ),
+                "series_columns": frozenset(
+                    str(column["name"])
+                    for column in inspector.get_columns("series", schema="market")
+                ),
+                "dataset_series_columns": frozenset(
+                    str(column["name"])
+                    for column in inspector.get_columns(
+                        "dataset_series", schema="market"
+                    )
+                ),
+                "commit_sequence": conn.execute(
+                    text("SELECT to_regclass('market.fact_commit_seq')")
+                ).scalar_one(),
+                "timescaledb": conn.execute(
+                    text(
+                        "SELECT EXISTS ("
+                        "SELECT 1 FROM pg_extension WHERE extname='timescaledb'"
+                        ")"
+                    )
+                ).scalar_one(),
+            }
+    finally:
+        engine.dispose()
+
+
+def _assert_pre_numeric_schema(dsn: str) -> None:
+    state = _pre_migration_state(dsn)
+    assert "portal_instruments" in state["public_tables"]
+    assert {
+        "sources",
+        "series",
+        "ingestion_runs",
+        "datasets",
+        "dataset_series",
+        *PRE_CUTOVER_TABLES,
+    } <= state["market_tables"]
+    assert {
+        "numeric_fact_versions",
+        "fact_acquisition_coverage",
+        "fact_schemas",
+        "fact_versions",
+    }.isdisjoint(state["market_tables"])
+    assert "dimensions" not in state["series_columns"]
+    assert "payload_schemas" not in state["dataset_series_columns"]
+    assert state["commit_sequence"] is not None
+    assert state["timescaledb"] is True
+
+
+def _assert_pre_canonical_schema(dsn: str) -> None:
+    state = _pre_migration_state(dsn)
+    assert {
+        "sources",
+        "series",
+        "ingestion_runs",
+        "dataset_series",
+        "candle_versions",
+        "open_interest_versions",
+        "funding_rate_versions",
+        "numeric_fact_versions",
+        "fact_acquisition_coverage",
+        *PRE_CUTOVER_TABLES,
+    } <= state["market_tables"]
+    assert {"fact_schemas", "fact_versions"}.isdisjoint(state["market_tables"])
+    assert "dimensions" in state["series_columns"]
+    assert "payload_schemas" not in state["dataset_series_columns"]
+    assert state["commit_sequence"] is not None
+    assert state["timescaledb"] is True
 
 
 def _schema_snapshot(dsn: str) -> dict[str, Any]:
@@ -305,128 +304,156 @@ def _fact_insert_sql(payload_expression: str) -> str:
 
 
 def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> None:
-    dsn = _isolated_dsn()
-    _prepare_pre_migration_schema(dsn)
-    _run_sql_migration(dsn, _NUMERIC_MIGRATION, "numeric Fact baseline")
+    with fresh_migration_database("canonical") as dsn:
+        prepare_canonical_pre_migration_schema(dsn)
+        _assert_pre_numeric_schema(dsn)
+        _run_sql_migration(dsn, _NUMERIC_MIGRATION, "numeric Fact baseline")
+        _assert_pre_canonical_schema(dsn)
 
-    _run_migration(dsn)
-    first = _schema_snapshot(dsn)
-    _run_migration(dsn)
-    second = _schema_snapshot(dsn)
+        _run_migration(dsn)
+        first = _schema_snapshot(dsn)
+        _run_migration(dsn)
+        second = _schema_snapshot(dsn)
 
-    assert second == first
-    assert {"fact_schemas", "fact_versions"} <= set(second["tables"])
-    assert second["primary_key"] == ("id",)
-    assert "payload_schemas" in second["dataset_series_columns"]
-    assert _REQUIRED_INDEXES <= set(second["indexes"])
-    assert "market.fact_commit_seq" in second["commit_default"]
-    assert second["triggers"] == (
-        "trg_assert_fact_version_valid",
-        "trg_reject_mutation_fact_schemas",
-        "trg_reject_mutation_fact_versions",
-    )
-    expected_registry = tuple(
-        (schema.schema_id, schema.fact_type, schema.contract_hash)
-        for schema in supported_fact_payload_schemas()
-    )
-    assert second["registry"] == expected_registry
+        assert second == first
+        assert {"fact_schemas", "fact_versions"} <= set(second["tables"])
+        assert second["primary_key"] == ("id",)
+        assert "payload_schemas" in second["dataset_series_columns"]
+        assert _REQUIRED_INDEXES <= set(second["indexes"])
+        assert "market.fact_commit_seq" in second["commit_default"]
+        assert second["triggers"] == (
+            "trg_assert_fact_version_valid",
+            "trg_reject_mutation_fact_schemas",
+            "trg_reject_mutation_fact_versions",
+        )
+        expected_registry = tuple(
+            (schema.schema_id, schema.fact_type, schema.contract_hash)
+            for schema in supported_fact_payload_schemas()
+        )
+        assert second["registry"] == expected_registry
 
-    engine = create_engine(dsn, future=True)
-    try:
-        with engine.begin() as conn:
-            _insert_fixture_identity(conn)
-            l2_payload = """{
-                "event_type":"snapshot",
-                "product_definition_version_id":"coinbase.BTC-USD.v1",
-                "validity_interval_id":"validity-1",
-                "reconstruction_version":"l2-absolute.v1",
-                "before_state_hash":null,
-                "after_state_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "event_material_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "entry_count":1,
-                "unknown_zero_delete_count":0,
-                "entries":[{
-                    "ordinal":0,
-                    "side":"bid",
-                    "price":"118000",
-                    "quantity":"1.25",
-                    "provider_size_unit":"base",
-                    "provider_event_time":"2026-08-09T12:00:00.000000Z"
-                }]
-            }"""
-            assert conn.execute(
-                text(
-                    "SELECT market.validate_fact_payload("
-                    "'market.l2_book.v1', CAST(:payload AS jsonb))"
-                ),
-                {"payload": l2_payload},
-            ).scalar_one() is True
-            assert conn.execute(
-                text(
-                    "SELECT market.validate_fact_payload("
-                    "'market.l2_book.v1', "
-                    "jsonb_set(CAST(:payload AS jsonb), "
-                    "'{entries,0,provider}', '\"COINBASE\"'::jsonb))"
-                ),
-                {"payload": l2_payload},
-            ).scalar_one() is False
-            with pytest.raises(DBAPIError, match="payload does not satisfy"):
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            _fact_insert_sql(
-                                """'{
-                                    "rate":"0.0001",
-                                    "raw_rate":"0.0001",
-                                    "funding_time":"2026-08-09T11:00:00Z",
-                                    "interval_seconds": 3600,
-                                    "unit":"fraction",
-                                    "provider":"TEST"
-                                }'::jsonb"""
-                            )
-                        ),
-                        {"hash": "c" * 64},
-                    )
-            conn.execute(
-                text(
-                    _fact_insert_sql(
-                        """'{
-                            "rate":"0.0001",
-                            "raw_rate":"0.0001",
-                            "funding_time":"2026-08-09T11:00:00.000000Z",
-                            "interval_seconds": 3600,
-                            "unit":"fraction"
-                        }'::jsonb"""
-                    )
-                ),
-                {"hash": "c" * 64},
-            )
-            with pytest.raises(DBAPIError, match="immutable market-data relation"):
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            "UPDATE market.fact_versions SET state='invalidated' "
-                            "WHERE id='mfv_fixture'"
+        engine = create_engine(dsn, future=True)
+        try:
+            with engine.begin() as conn:
+                for mutation in (
+                    "UPDATE market.fact_schemas SET created_at=created_at "
+                    "WHERE schema_id='asset.reserve_state.v1'",
+                    "DELETE FROM market.fact_schemas "
+                    "WHERE schema_id='asset.reserve_state.v1'",
+                ):
+                    with pytest.raises(
+                        DBAPIError, match="immutable market-data relation"
+                    ):
+                        with conn.begin_nested():
+                            conn.execute(text(mutation))
+
+                _insert_fixture_identity(conn)
+                l2_payload = """{
+                    "event_type":"snapshot",
+                    "product_definition_version_id":"coinbase.BTC-USD.v1",
+                    "validity_interval_id":"validity-1",
+                    "reconstruction_version":"l2-absolute.v1",
+                    "before_state_hash":null,
+                    "after_state_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "event_material_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "entry_count":1,
+                    "unknown_zero_delete_count":0,
+                    "entries":[{
+                        "ordinal":0,
+                        "side":"bid",
+                        "price":"118000",
+                        "quantity":"1.25",
+                        "provider_size_unit":"base",
+                        "provider_event_time":"2026-08-09T12:00:00.000000Z"
+                    }]
+                }"""
+                assert conn.execute(
+                    text(
+                        "SELECT market.validate_fact_payload("
+                        "'market.l2_book.v1', CAST(:payload AS jsonb))"
+                    ),
+                    {"payload": l2_payload},
+                ).scalar_one() is True
+                assert conn.execute(
+                    text(
+                        "SELECT market.validate_fact_payload("
+                        "'market.l2_book.v1', "
+                        "jsonb_set(CAST(:payload AS jsonb), "
+                        "'{entries,0,provider}', '\"COINBASE\"'::jsonb))"
+                    ),
+                    {"payload": l2_payload},
+                ).scalar_one() is False
+                with pytest.raises(DBAPIError, match="payload does not satisfy"):
+                    with conn.begin_nested():
+                        conn.execute(
+                            text(
+                                _fact_insert_sql(
+                                    """'{
+                                        "rate":"0.0001",
+                                        "raw_rate":"0.0001",
+                                        "funding_time":"2026-08-09T11:00:00Z",
+                                        "interval_seconds": 3600,
+                                        "unit":"fraction",
+                                        "provider":"TEST"
+                                    }'::jsonb"""
+                                )
+                            ),
+                            {"hash": "c" * 64},
                         )
+                conn.execute(
+                    text(
+                        _fact_insert_sql(
+                            """'{
+                                "rate":"0.0001",
+                                "raw_rate":"0.0001",
+                                "funding_time":"2026-08-09T11:00:00.000000Z",
+                                "interval_seconds": 3600,
+                                "unit":"fraction"
+                            }'::jsonb"""
+                        )
+                    ),
+                    {"hash": "c" * 64},
+                )
+                for mutation in (
+                    "UPDATE market.fact_versions SET state='invalidated' "
+                    "WHERE id='mfv_fixture'",
+                    "DELETE FROM market.fact_versions WHERE id='mfv_fixture'",
+                ):
+                    with pytest.raises(
+                        DBAPIError, match="immutable market-data relation"
+                    ):
+                        with conn.begin_nested():
+                            conn.execute(text(mutation))
+                assert conn.execute(
+                    text(
+                        "SELECT count(*) FROM market.fact_versions "
+                        "WHERE id='mfv_fixture'"
                     )
-    finally:
-        engine.dispose()
+                ).scalar_one() == 1
+        finally:
+            engine.dispose()
 
-    _run_hard_cutover(dsn)
-    engine = create_engine(dsn, future=True)
-    try:
-        with engine.connect() as conn:
-            remaining = conn.execute(
-                text(
-                    "SELECT count(*) FROM pg_tables "
-                    "WHERE schemaname='market' "
-                    "AND tablename = ANY(CAST(:tables AS text[]))"
-                ),
-                {"tables": list(_PRE_CUTOVER_TABLES) + ["numeric_fact_versions"]},
-            ).scalar_one()
-            assert int(remaining) == 0
-            assert conn.execute(
-                text("SELECT count(*) FROM market.fact_versions")
-            ).scalar_one() == 1
-    finally:
-        engine.dispose()
+        _run_hard_cutover(dsn)
+        engine = create_engine(dsn, future=True)
+        try:
+            with engine.connect() as conn:
+                remaining = conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_tables "
+                        "WHERE schemaname='market' "
+                        "AND tablename = ANY(CAST(:tables AS text[]))"
+                    ),
+                    {
+                        "tables": list(PRE_CUTOVER_TABLES)
+                        + ["numeric_fact_versions"]
+                    },
+                ).scalar_one()
+                assert int(remaining) == 0
+                assert conn.execute(
+                    text("SELECT count(*) FROM market.fact_versions")
+                ).scalar_one() == 1
+                assert conn.execute(
+                    text("SELECT count(*) FROM market.fact_schemas")
+                ).scalar_one() == len(expected_registry)
+        finally:
+            engine.dispose()

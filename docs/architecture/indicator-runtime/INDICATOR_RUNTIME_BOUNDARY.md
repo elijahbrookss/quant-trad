@@ -204,6 +204,7 @@ or unordered mapping iteration.
 - [Engine state model](../engine/ENGINE_STATE_MODEL.md)
 - [Decision layer boundary](../decision-layer/DECISION_LAYER_BOUNDARY.md)
 - [BotLens projection boundary](../botlens-projections/BOTLENS_PROJECTION_BOUNDARY.md)
+- [Market Profile timing contract](../../../src/indicators/market_profile/docs/timing_contract.md)
 
 ## Known Gaps
 

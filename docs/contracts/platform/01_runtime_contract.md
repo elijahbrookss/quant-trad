@@ -40,12 +40,25 @@ instrument service. Runtime must fail loud when those fields are missing. It
 must not silently treat a spot source as full-notional cash spot, invent default
 margin rates, or apply spot quantity constraints to a derivative proxy run.
 
-The compiled `SeriesExecutionProfile` is the runtime authority for execution
-fields. `LadderRiskEngine`, wallet reservation diagnostics, execution adapters,
-and series metadata must consume tick size, contract size, tick value, fees,
-amount constraints, quote currency, collateral mode, and margin calculator from
-that profile. ATM templates are strategy/risk templates only and must not patch
-or override missing execution metadata.
+`SeriesExecutionProfile` is the compatibility compiler for current instrument,
+risk, margin, and legacy fee inputs. It is not the final run-scoped execution
+authority.
+
+Before execution, runtime resolves one immutable `ResolvedExecutionContext` per
+runtime series. That context binds the exact `InstrumentExecutionContract`,
+`VenueExecutionProfile`, `FeeSchedule`, and `ExecutionModelArtifact`; the
+complete context bundle and its hashes are pinned in the run snapshot.
+
+Execution, accounting, lifecycle, and reporting consumers must read the
+resolved context directly or through an explicit compatibility projection
+derived from it. A `SeriesExecutionProfile` or other compatibility adapter must
+not independently select or override instrument economics, venue rules, fees,
+increments, rounding, collateral behavior, or execution-model identity.
+Runtime disagreement fails before execution; reporting disagreement cannot
+receive a class above X0.
+
+ATM templates remain strategy and risk templates only. They must not patch,
+supply, or override missing execution-context material.
 
 When a strategy contains instruments from more than one provider or venue,
 runtime data routing must follow each strategy-instrument link's canonical

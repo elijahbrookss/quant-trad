@@ -123,3 +123,34 @@ def test_report_build_failure_is_recorded_not_raised(monkeypatch: pytest.MonkeyP
 
     assert result["report_status"]["status"] == "failed"
     assert "boom" in result["report_status"]["error"]
+
+
+def test_invalid_attained_quality_is_not_materialized(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"store": 0}
+    monkeypatch.setattr(
+        materialization,
+        "build_run_report",
+        lambda run_id: {
+            "contract_version": "run_report.v2",
+            "schema_version": "run_report.v2",
+            "run_id": run_id,
+            "trust": {"execution_quality_class": "X6"},
+        },
+    )
+
+    def store(*_args: object, **_kwargs: object) -> dict:
+        calls["store"] += 1
+        raise AssertionError("invalid attained quality must not be stored")
+
+    monkeypatch.setattr(materialization.report_data, "store_materialized_run_report", store)
+    monkeypatch.setattr(
+        materialization.report_data,
+        "mark_report_materialization_failed",
+        lambda run_id, **kwargs: _status("failed") | {"run_id": run_id, "error": kwargs.get("error")},
+    )
+
+    result = materialization._build_and_store("run-1", "key", "fingerprint", {})
+
+    assert result["status"] == "failed"
+    assert "execution_quality_class" in result["error"]
+    assert calls["store"] == 0

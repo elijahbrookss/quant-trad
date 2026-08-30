@@ -1,6 +1,11 @@
-# Observability Doctrine: Quant-Trad
+# Historical Observability Doctrine: Quant-Trad
 
-**Status**: Active Engineering Doctrine  
+> **Historical engineering record.** This document preserves the April 2026
+> doctrine and audit context. Current operational guidance lives in
+> [observability.md](observability.md) and the
+> [observability boundary](../architecture/observability/OBSERVABILITY_BOUNDARY.md).
+
+**Status**: Historical
 **Audience**: All engineers, infrastructure, and operations maintaining observability systems  
 **Change Policy**: Cross-team consensus required for principle changes
 
@@ -1045,6 +1050,6 @@ This doctrine is the policy layer that:
 ---
 
 **Document Revision**: 1.0 (April 2026)  
-**Next Review**: Q3 2026 (after Phase 1 implementation)  
+**Review State**: Superseded by the current observability guide and boundary
 **Owner**: Engineering / Infrastructure  
 **All questions**: Check the architecture docs in `/docs/architecture/` and this codebase's AGENTS.md for system context.

@@ -1,5 +1,5 @@
 ---
-component: phase-3b-passive-queue-bounds-and-latency
+component: passive-queue-bounds-and-latency
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
@@ -25,15 +25,15 @@ code_paths:
   - portal/backend/service/reports/run_research_dataset.py
   - tests/integration/runtime/test_book_execution.py
 ---
-# Phase 3B Passive Queue Bounds and Latency
+# Passive Queue Bounds and Latency
 
 ## Scope and status
 
-Phase 3B is implemented for deterministic backtests. It adds X5 passive-order
-research behind the existing venue-neutral execution context, replay-certified
-book tape, canonical order lifecycle, and canonical accounting owners. It does
-not open shadow, paper-book, live-order, calibration, promotion, or capital
-authority.
+Passive queue bounds and latency are implemented for deterministic backtests.
+They add X5 passive-order research behind the existing venue-neutral execution
+context, replay-certified book tape, canonical order lifecycle, and canonical
+accounting owners. This capability does not open shadow, paper-book,
+live-order, calibration, promotion, or capital authority.
 
 X5 means that a result used a named deterministic latency scenario and a named
 bounded interpretation of aggregated queue evidence. It does not mean that the
@@ -177,7 +177,7 @@ Golden remains solely a reproducibility/reconciliation certificate.
 
 ## Tests and acceptance
 
-The Phase 3B suite verifies:
+The passive-execution suite verifies:
 
 - v1 tape/model backward compatibility and hash stability;
 - v2 trade/tape/policy tamper detection;

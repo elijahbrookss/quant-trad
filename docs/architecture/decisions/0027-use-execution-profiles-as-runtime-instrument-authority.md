@@ -64,7 +64,8 @@ constraints, quote currency, and margin model from the compiled execution
 profile. ATM templates remain strategy/risk templates and must not carry
 instrument execution metadata.
 
-Phase 2A addendum, accepted 2026-08-05: the immutable run-scoped authority is
+Execution-context addendum, accepted 2026-08-05: the immutable run-scoped
+authority is
 now `ResolvedExecutionContext`. `SeriesExecutionProfile` compiles the
 instrument, risk, margin, and legacy fee inputs used to resolve that context;
 it must not expand into a venue, fee-tier, fill-model, and calibration monolith.

@@ -1,5 +1,5 @@
 ---
-component: phase-2a-venue-neutral-execution-context
+component: venue-neutral-execution-context
 subsystem: execution-runtime
 layer: boundary
 doc_type: architecture
@@ -28,21 +28,23 @@ code_paths:
   - portal/backend/service/reports/run_research_dataset.py
   - tests/integration/runtime/test_execution_contexts.py
 ---
-# Phase 2A Venue-Neutral Execution Context
+# Venue-Neutral Execution Context
 
 ## Scope and status
 
-Phase 2A is implemented for deterministic X0-X2 bar execution. It separates
-instrument facts, venue rules, fee facts, and fill-model evidence into immutable
-versioned contracts, resolves them before run creation, and pins the complete
-bundle in the immutable run snapshot. Generic execution code consumes the
-resolved context without branching on venue names.
+The venue-neutral execution context is implemented for deterministic X0-X2 bar
+execution. It separates instrument facts, venue rules, fee facts, and
+fill-model evidence into immutable versioned contracts, resolves them before
+run creation, and pins the complete bundle in the immutable run snapshot.
+Generic execution code consumes the resolved context without branching on
+venue names.
 
 This is an architectural credibility boundary, not a claim of book or venue
-fill realism. Phase 2B now supplies the durable canonical order lifecycle while
-preserving this context authority. L2 walking, book-generated partial entries,
-queue and latency models, shadow execution, external order submission,
-calibration, and expanded derivative economics remain outside Phase 2A.
+fill realism. The durable canonical order lifecycle preserves this context
+authority. Replay-certified book execution and passive queue bounds add their
+own higher-class evidence without changing that authority. Shadow execution,
+external order submission, empirical calibration, and expanded derivative
+economics remain outside this capability.
 
 The composition is illustrated in
 [resolved-execution-context.mmd](diagrams/resolved-execution-context.mmd).
@@ -69,7 +71,7 @@ not only their hashes, are retained in the run snapshot.
 | `InstrumentExecutionContract` | Product identity, source/execution semantics, currencies, tick/contract values, quantity and notional constraints, product capabilities, accounting and margin facts. | Venue order rules, fee-tier policy, fill behavior, provider transport. |
 | `VenueExecutionProfile` | Supported order types and TIF, post-only behavior, maker/taker classification, increment policies, market protections, lifecycle mappings, book-data capability, and the closed external-order flag. | Instrument economics, fill generation, accounting, credentials. |
 | `FeeSchedule` | Maker/taker rates, schedule/profile identity, version, source, currency, basis, deterministic rounding, precision, tier, configuration status, and hash. | Liquidity classification or fill generation. |
-| `ExecutionModelArtifact` | Phase 1 assumption-manifest reference, input capability, execution-quality ceiling, supported mechanics, calibration reference, version, and hash. | Venue rules or mutable calibration fitting. |
+| `ExecutionModelArtifact` | Bar-execution assumption-manifest reference, input capability, execution-quality ceiling, supported mechanics, calibration reference, version, and hash. | Venue rules or mutable calibration fitting. |
 | `ResolvedExecutionContext` | Exact references binding the four contracts for one runtime series. | Strategy meaning, accounting ownership, or authorization. |
 
 `SeriesExecutionProfile` remains the compatibility compiler for current
@@ -81,7 +83,7 @@ monolith.
 ## Resolution and pinning flow
 
 1. Backend startup loads the typed strategy and linked canonical instruments.
-2. It resolves the immutable Phase 1 execution-assumption manifest.
+2. It resolves the immutable bar-execution assumption manifest.
 3. It compiles the existing `SeriesExecutionProfile` into the instrument slice.
 4. It resolves an explicit venue profile and fee schedule from instrument
    metadata, or the versioned bar-simulation compatibility profile.
@@ -96,7 +98,8 @@ monolith.
 
 Newly resolved runs therefore cannot change profile, fee, or model versions in
 place. Historical snapshots without this bundle remain readable as
-`legacy_unavailable`; they are not retroactively assigned Phase 2A evidence.
+`legacy_unavailable`; they are not retroactively assigned venue-neutral context
+evidence.
 
 ## Order conformance and current lifecycle boundary
 
@@ -113,10 +116,10 @@ enforces:
 
 `FillOrder` carries TIF, post-only, fee-schedule identity, and the resolved
 context as a compatibility request adapter. Current bar execution remains an
-immediate deterministic full-fill path. Phase 2B now wraps that seam with
-durable requested, validated, accepted, open, partial, fill, cancel, replace,
-reject, and expiry semantics. `FillOrder` is not a durable order and must not
-accumulate lifecycle, venue, or calibration ownership.
+immediate deterministic full-fill path. The canonical order lifecycle wraps
+that seam with durable requested, validated, accepted, open, partial, fill,
+cancel, replace, reject, and expiry semantics. `FillOrder` is not a durable
+order and must not accumulate lifecycle, venue, or calibration ownership.
 
 ## Execution and evidence wiring
 
@@ -128,14 +131,15 @@ applicable profile and fee attributes.
 
 `RunResearchDataset` validates the snapshot bundle and checks each fill against
 it. Missing, invalid, or contradictory evidence forces X0 for new-context runs.
-Phase 1 still determines the X0-X2 ceiling and attained class; Phase 2A does not
-grant X3 because it has no spread observation or model.
+The bar-execution economic contract still determines the X0-X2 ceiling and
+attained class; the venue-neutral context does not grant X3 because it has no
+spread observation or model.
 
 `FeeSchedule` can describe quote-notional or base-quantity calculation,
-arbitrary fee currency, and positive or negative rates. The Phase 2A resolved
-context deliberately admits only non-negative, quote-notional fees denominated
-in the instrument quote currency. Canonical wallet settlement currently debits
-that quote balance and the canonical event contract rejects negative
+arbitrary fee currency, and positive or negative rates. The resolved context
+deliberately admits only non-negative, quote-notional fees denominated in the
+instrument quote currency. Canonical wallet settlement currently debits that
+quote balance and the canonical event contract rejects negative
 `fee_paid`; admitting another currency, basis, or a rebate would therefore
 overstate accounting support. Those schedules fail at context resolution until
 a new canonical accounting/event contract can settle them. Admitted schedules
@@ -169,36 +173,35 @@ separately reviewed adapter when external interaction is eventually allowed.
 - Rollback selects a previously pinned immutable bundle and may reduce the X
   class. A profile, schedule, or model is never edited in place, and rollback
   cannot preserve a class unsupported by its bundle.
-- External order submission remains hard-false in every Phase 2A venue profile
-  and remains prohibited by ADR 0049.
+- External order submission remains hard-false in every venue profile admitted
+  by this context and remains prohibited by ADR 0049.
 
 ## Agent permission boundary
 
-After Phase 2A, agents may observe resolved context evidence, execute approved
-simulations with allow-listed immutable profiles and models, compare compatible
-execution classes, reject conformance failures, and propose a new profile or
-model version for review. They may not publish or approve those versions,
-change a pinned run, submit venue orders, mutate runtime/live state, certify
-their own evidence, promote a strategy, or deploy capital.
+Under this context, agents may observe resolved context evidence, execute
+approved simulations with allow-listed immutable profiles and models, compare
+compatible execution classes, reject conformance failures, and propose a new
+profile or model version for review. They may not publish or approve those
+versions, change a pinned run, submit venue orders, mutate runtime/live state,
+certify their own evidence, promote a strategy, or deploy capital.
 
-## Residual risks and next campaign
+## Residual risks and follow-on capabilities
 
-Phase 2A proves rule conformance and reproducibility, not empirical fill truth.
-It also does not settle non-quote fees or rebates; those require an explicit
-canonical accounting and event-contract version rather than a profile-only
-change.
-Phase 2B is now implemented and retains the same context and accounting owners.
-The next coherent campaign is Phase 3A: consume replay-certified spread/L2 facts
-through that lifecycle, add aggressive book walking and atomic per-fill entry
-settlement, and preserve explicit residual/TIF behavior without claiming queue
-or latency realism.
+The venue-neutral context proves rule conformance and reproducibility, not
+empirical fill truth. It also does not settle non-quote fees or rebates; those
+require an explicit canonical accounting and event-contract version rather
+than a profile-only change. The canonical lifecycle retains the same context
+and accounting owners. Replay-certified book execution adds aggressive book
+walking and atomic per-fill entry settlement; passive queue bounds and latency
+add bounded X5 research. Remaining follow-on capabilities include empirical
+fill calibration, shadow and paper-book reconciliation, and any externally
+authorized venue execution.
 
 ## References
 
-- [Autonomous research and promotion roadmap](../research-orchestration/AUTONOMOUS_RESEARCH_AND_PROMOTION_ROADMAP.md)
-- [Phase 1 economic execution contract](PHASE_1_ECONOMIC_EXECUTION_CONTRACT.md)
+- [Bar-execution economic contract](ECONOMIC_EXECUTION_CONTRACT.md)
 - [Execution runtime boundary](EXECUTION_RUNTIME_BOUNDARY.md)
 - [ADR 0056](../decisions/0056-pin-venue-neutral-execution-contexts-per-run.md)
-- [Phase 2B durable canonical order lifecycle](PHASE_2B_DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
+- [Durable canonical order lifecycle](DURABLE_CANONICAL_ORDER_LIFECYCLE.md)
 - [ADR 0057](../decisions/0057-use-append-only-canonical-order-lifecycle.md)
 - [ADR 0049](../decisions/0049-keep-live-order-submission-closed.md)
