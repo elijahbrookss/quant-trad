@@ -5,6 +5,16 @@ installation. It points to the exact runbooks and commands that own each
 operation so the deployment does not depend on chat history or one person's
 memory.
 
+## Choose the onboarding path
+
+- For a disposable workstation installation, start with
+  [Getting started](../getting-started.md).
+- For a durable Ubuntu host, start with **First install** below and use this
+  handbook as the central operator checklist.
+
+The detailed runbooks remain the source for exact commands. This page owns the
+order in which a new installation encounters them.
+
 ## Source of truth
 
 | Operator task | Canonical source |
@@ -39,12 +49,54 @@ in order:
 2. create the private operator environment with `init-env`;
 3. run `doctor`;
 4. deploy one reviewed commit SHA;
-5. verify `status`, `release`, and `fleet`; and
-6. use SSH forwarding for private operator surfaces.
+5. verify `status`, `release`, and `fleet`;
+6. decide whether email alerting is enabled and, if so, complete the one-time
+   managed-provider setup and delivery proof; and
+7. use SSH forwarding for private operator surfaces.
 
 A new database initializes directly at the current schema. Historical upgrade
 scripts are optional tools for preserving an older database; they are not part
 of a clean install.
+
+## Email alert onboarding
+
+Email requires an installation-owned sender identity. Quant-Trad and Grafana
+own alert rules and routing, but a managed delivery provider must authorize the
+sender and accept the messages. Resend is the documented reference path; any
+managed relay that supports authenticated STARTTLS may satisfy the same
+environment contract.
+
+The installation owner performs these steps once:
+
+1. create the managed-provider account;
+2. authorize a sender address/domain and create a send-only credential;
+3. add the credential, sender, and initial recipients to
+   `/srv/quanttrad/secrets.env`;
+4. run `validate-alerts`, apply or preview the Grafana configuration, and prove
+   delivery to every inbox.
+
+After that, a routine ownership change edits only `QT_ALERT_EMAILS`, validates,
+applies the Grafana-only change, and sends another test. Application users do
+not need provider accounts or credentials.
+
+From a Windows laptop, enter the server through the configured WSL SSH alias;
+edit the private file on the server so the credential never enters PowerShell
+history or chat:
+
+```powershell
+wsl -d Ubuntu -- ssh qt-server
+```
+
+Then, on the server:
+
+```bash
+cd /srv/quanttrad
+nano secrets.env
+chmod 600 secrets.env
+```
+
+Follow [Operator email alerting](alerting.md) for the provider values, exact-SHA
+pre-merge preview, real-inbox proof, restoration, and routine recipient changes.
 
 ## Routine update
 

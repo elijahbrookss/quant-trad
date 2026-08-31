@@ -93,6 +93,64 @@ QT_ALERT_EMAIL_FROM=alerts@example.com
 QT_ALERT_EMAIL_FROM_NAME=Quant-Trad Alerts
 ```
 
+### Resend reference path
+
+Resend is the reference managed provider for the first Quant-Trad installation.
+It is not a hard dependency: another authenticated STARTTLS relay can supply the
+same `QT_ALERT_SMTP_*` contract.
+
+1. Create the installation's Resend account.
+2. Create a send-only API key; Grafana uses that value as the relay password.
+3. For an initial proof to the same address that owns the Resend account, use
+   Resend's `onboarding@resend.dev` test sender. It cannot send to arbitrary
+   recipients.
+4. Before adding other owners, verify a project domain in Resend and replace the
+   sender with an address on that domain.
+
+The corresponding first-proof values are:
+
+```dotenv
+QT_ALERTS_ENABLED=true
+QT_ALERT_EMAILS=account-owner@example.com
+QT_ALERT_SMTP_HOST=smtp.resend.com:587
+QT_ALERT_SMTP_USER=resend
+QT_ALERT_SMTP_PASSWORD=<private-resend-api-key>
+QT_ALERT_EMAIL_FROM=onboarding@resend.dev
+QT_ALERT_EMAIL_FROM_NAME=Quant-Trad Alerts
+```
+
+Provider instructions:
+
+- [Send with Resend SMTP](https://resend.com/docs/send-with-smtp)
+- [Resend test-sender restriction](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain)
+
+### Configure it from a Windows laptop
+
+The configured SSH alias lives in Ubuntu WSL. Start an interactive server shell
+from PowerShell:
+
+```powershell
+wsl -d Ubuntu -- ssh qt-server
+```
+
+Edit the private file on the server rather than putting the credential in a
+PowerShell command, shell history, Git, or chat:
+
+```bash
+cd /srv/quanttrad
+nano secrets.env
+chmod 600 secrets.env
+```
+
+In `nano`, save with `Ctrl+O`, press `Enter`, then exit with `Ctrl+X`. Validate
+from the deployed checkout, or from the detached candidate worktree during a
+pre-merge proof:
+
+```bash
+cd /srv/quanttrad/app
+bash scripts/automation/server_deploy.sh validate-alerts
+```
+
 The production transport is locked to mandatory STARTTLS with certificate
 verification. Unencrypted SMTP exists only inside the isolated capture test. Keep
 `secrets.env` mode `0600` and include it in the installation's secure backup and
