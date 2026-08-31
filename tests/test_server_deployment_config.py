@@ -225,6 +225,12 @@ def test_deploy_helper_never_runs_migrations_and_verifies_every_app_image():
     assert "--no-deps --force-recreate --wait" in deploy
     assert 'deployed_revision="$(state_value current_revision)"' in deploy
     assert "does not match deployed revision" in deploy
+    assert "preview-alerts)" in deploy
+    assert "restore-alerts)" in deploy
+    assert 'alert_preview_state_file="$state_root/alert-preview.env"' in deploy
+    assert "preview must run from a separate worktree" in deploy
+    assert "Production release remains recorded at" in deploy
+    assert "require_no_alert_preview" in deploy
     assert "Operator email alerting: enabled" in deploy
     for service in (
         "backend",
@@ -398,6 +404,9 @@ def test_stream_definition_storage_does_not_whitelist_domain_channels():
 
 def test_email_alerting_integration_stack_is_isolated_and_pinned() -> None:
     compose_text = (ROOT / "docker" / "test" / "grafana-email-alerting.compose.yml").read_text()
+    cleanup_compose_text = (
+        ROOT / "docker" / "test" / "grafana-email-alerting-cleanup.compose.yml"
+    ).read_text()
     rule_text = (ROOT / "docker" / "test" / "grafana-email-test-rule.yml").read_text()
 
     assert "ghcr.io/axllent/mailpit:v1.30.6@sha256:" in compose_text
@@ -405,6 +414,9 @@ def test_email_alerting_integration_stack_is_isolated_and_pinned() -> None:
     assert "127.0.0.1:${QT_ALERT_TEST_MAILPIT_PORT" in compose_text
     assert "QT_ALERT_EMAILS: owner@quanttrad.test,backup@quanttrad.test" in compose_text
     assert "grafana-email-test-rule.yml" in compose_text
+    assert "operator-email-cleanup.yml" in cleanup_compose_text
+    assert "grafana-data:/var/lib/grafana" in compose_text
+    assert "grafana-data:/var/lib/grafana" in cleanup_compose_text
     assert "expression: 1 == 1" in rule_text
     assert "severity: test" in rule_text
 
@@ -416,6 +428,9 @@ def test_email_alerting_integration_script_proves_both_recipients() -> None:
     assert "/api/v1/messages" in script_text
     assert "owner@quanttrad.test" in script_text
     assert "backup@quanttrad.test" in script_text
+    assert "/api/v1/provisioning/contact-points" in script_text
+    assert "/api/v1/provisioning/policies" in script_text
+    assert "alerting cleanup proof" in script_text
     assert "down --volumes --remove-orphans" in script_text
     assert "bash scripts/ci/test_grafana_email_alerting.sh" in workflow_text
 
@@ -426,3 +441,43 @@ def test_disposable_email_rule_is_not_in_production_provisioning() -> None:
 
     assert "grafana-email-test-rule" not in base_compose
     assert "grafana-email-test-rule" not in alert_overlay
+
+
+def test_alert_preview_is_grafana_only_reversible_and_fail_closed() -> None:
+    deploy = (ROOT / "scripts" / "automation" / "server_deploy.sh").read_text()
+    preview_body = deploy.split("preview_alerting_configuration() {", 1)[1].split(
+        "restore_alerting_preview() {", 1
+    )[0]
+    restore_body = deploy.split("restore_alerting_preview() {", 1)[1].split(
+        "deploy_release() {", 1
+    )[0]
+
+    assert 'test "$alerts_enabled" = "true"' in preview_body
+    assert 'test "$deployed_revision" != "$QT_RELEASE_REVISION"' in preview_body
+    assert "record_alert_preview" in preview_body
+    assert 'recreate_grafana_from_repo "$repo_root"' in preview_body
+    assert 'restore_grafana_to_base "$base_root"' in preview_body
+    assert "backend" not in preview_body
+    assert "market-data-collector" not in preview_body
+    assert 'test "$current_revision" = "$base_revision"' in restore_body
+    assert 'restore_grafana_to_base "$base_root"' in restore_body
+    assert 'rm -f -- "$alert_preview_state_file"' in restore_body
+
+
+def test_alert_preview_cleanup_deletes_preview_only_grafana_resources() -> None:
+    cleanup = yaml.safe_load(
+        (
+            ROOT
+            / "docker"
+            / "grafana"
+            / "server-alerting"
+            / "operator-email-cleanup.yml"
+        ).read_text()
+    )
+    assert cleanup["resetPolicies"] == [1]
+    assert cleanup["deleteContactPoints"] == [
+        {"orgId": 1, "uid": "qt-operator-email"}
+    ]
+    assert cleanup["deleteRules"] == [
+        {"orgId": 1, "uid": "qt-database-unavailable"}
+    ]

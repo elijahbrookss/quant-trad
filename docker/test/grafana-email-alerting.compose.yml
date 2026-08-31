@@ -34,7 +34,10 @@ services:
       timeout: 2s
       retries: 45
       start_period: 10s
+    ports:
+      - "127.0.0.1:${QT_ALERT_TEST_GRAFANA_PORT:-13030}:3000"
     volumes:
+      - grafana-data:/var/lib/grafana
       - type: bind
         source: ../grafana/server-alerting/operator-email.yml
         target: /etc/grafana/provisioning/alerting/operator-email.yml
@@ -43,3 +46,6 @@ services:
         source: ./grafana-email-test-rule.yml
         target: /etc/grafana/provisioning/alerting/grafana-email-test-rule.yml
         read_only: true
+
+volumes:
+  grafana-data:

@@ -1,0 +1,7 @@
+services:
+  grafana:
+    volumes:
+      - type: bind
+        source: ./grafana/server-alerting/operator-email-cleanup.yml
+        target: /etc/grafana/provisioning/alerting/operator-email-cleanup.yml
+        read_only: true

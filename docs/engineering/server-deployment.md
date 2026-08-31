@@ -125,7 +125,10 @@ once with mode `0600`, strong URL-safe database and UI passwords, and a valid
 provider-credential encryption key. Keeping it outside Git makes exact-SHA
 updates and rollback independent of ignored working-tree files. The command
 refuses to overwrite an existing file. Review or change non-secret settings as
-needed. Raw provider API credentials do not belong in that file.
+needed. Trading and market-data provider credentials remain in the encrypted
+application credential store. The managed email relay's send-only credential is
+an installation secret and does belong in this private file when alerting is
+enabled.
 
 ## Validate And Deploy
 
@@ -167,6 +170,29 @@ secrets are never printed. Follow the
 [operator email alerting runbook](../operators/alerting.md) for setup, testing,
 rule standards, recipient changes, blind spots, and rollback.
 
+Before merge, an operator can test the exact candidate SHA from a detached
+worktree without changing the recorded production release:
+
+```bash
+bash scripts/automation/server_deploy.sh validate-alerts
+QT_ALERT_PREVIEW_BASE_ROOT=/srv/quanttrad/app \
+  bash scripts/automation/server_deploy.sh preview-alerts
+```
+
+The preview recreates only Grafana and records enough state to restore it from
+the production checkout. Full deploys and routine alert applies are refused
+while that preview marker exists. After the real-provider contact-point test,
+restore before removing the candidate worktree:
+
+```bash
+bash scripts/automation/server_deploy.sh restore-alerts
+```
+
+If the production revision predates native email alerting, restoration runs an
+explicit Grafana provisioning cleanup before recreating the production
+configuration. See the alerting runbook for the complete worktree, verification,
+and cleanup sequence.
+
 Useful operations are:
 
 ```bash
@@ -177,6 +203,8 @@ bash scripts/automation/server_deploy.sh qt <qt-arguments...>
 bash scripts/automation/server_deploy.sh logs market-data-collector
 bash scripts/automation/server_deploy.sh validate-alerts
 bash scripts/automation/server_deploy.sh apply-alerts
+bash scripts/automation/server_deploy.sh preview-alerts
+bash scripts/automation/server_deploy.sh restore-alerts
 bash scripts/automation/server_deploy.sh stop
 ```
 

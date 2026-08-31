@@ -45,6 +45,7 @@ single_node_profiles="$(first_value "${QT_SINGLE_NODE_PROFILES:-}" "$(env_value 
 state_root="$(first_value "${QT_SINGLE_NODE_STATE_ROOT:-}" "$(env_value QT_SINGLE_NODE_STATE_ROOT)" "$deployment_root/deploy-state")"
 state_file="$state_root/release.env"
 history_file="$state_root/release-history.ndjson"
+alert_preview_state_file="$state_root/alert-preview.env"
 alerts_enabled="$(first_value "$(env_value QT_ALERTS_ENABLED)" "false")"
 export QT_MARKET_DATA_ROOT="$data_root"
 
@@ -55,6 +56,8 @@ Usage:
   scripts/automation/server_deploy.sh doctor
   scripts/automation/server_deploy.sh validate-alerts
   scripts/automation/server_deploy.sh apply-alerts
+  scripts/automation/server_deploy.sh preview-alerts
+  scripts/automation/server_deploy.sh restore-alerts
   scripts/automation/server_deploy.sh deploy [git-ref]
   scripts/automation/server_deploy.sh rollback [git-ref]
   scripts/automation/server_deploy.sh config
@@ -70,6 +73,10 @@ Deploy promotes one exact commit. Rollback without an argument promotes the
 previously recorded commit. The default stack is the complete single-node
 application and observability surface. Set QT_SINGLE_NODE_PROFILES=broker to
 include the optional IBKR Gateway.
+
+Preview-alerts temporarily recreates only Grafana from the current clean
+checkout. Restore-alerts returns Grafana to the recorded production revision;
+a full deploy is refused while a preview is active.
 EOF
 }
 
@@ -357,6 +364,48 @@ compose() {
     "$@"
 }
 
+compose_from_repo_root() {
+  local source_root="$1"
+  local extra_compose_file="$2"
+  shift 2
+  local source_compose_file="$source_root/docker/docker-compose.server.yml"
+  local source_alerting_file="$source_root/docker/docker-compose.alert-email.yml"
+  local source_revision source_tree_hash
+  local compose_file_args=(--file "$source_compose_file")
+  local profile_args=()
+  local profile
+  local profiles="${single_node_profiles//,/ }"
+
+  test -f "$source_compose_file" \
+    || die "server Compose file not found in checkout: $source_compose_file"
+  source_revision="$(git -C "$source_root" rev-parse --verify HEAD)"
+  source_tree_hash="$(
+    python3 "$source_root/scripts/provenance/source_tree_hash.py" \
+      --root "$source_root" \
+      --git-revision "$source_revision"
+  )"
+  for profile in $profiles; do
+    profile_args+=(--profile "$profile")
+  done
+  if test "$alerts_enabled" = "true" && test -f "$source_alerting_file"; then
+    compose_file_args+=(--file "$source_alerting_file")
+  fi
+  if test -n "$extra_compose_file"; then
+    test -f "$extra_compose_file" \
+      || die "additional Compose file not found: $extra_compose_file"
+    compose_file_args+=(--file "$extra_compose_file")
+  fi
+
+  env \
+    QT_RELEASE_REVISION="$source_revision" \
+    QT_SOURCE_TREE_HASH="$source_tree_hash" \
+    docker compose \
+      --env-file "$env_file" \
+      "${compose_file_args[@]}" \
+      "${profile_args[@]}" \
+      "$@"
+}
+
 build_release_images() {
   local rebuild_database_image
   rebuild_database_image="$(
@@ -438,6 +487,42 @@ record_release() {
     >>"$history_file"
 }
 
+preview_state_value() {
+  local key="$1"
+  local line=""
+  if test -f "$alert_preview_state_file"; then
+    line="$(grep -E "^${key}=" "$alert_preview_state_file" | tail -n 1 || true)"
+  fi
+  printf '%s' "${line#*=}"
+}
+
+record_alert_preview() {
+  local base_root="$1"
+  local base_revision="$2"
+  local preview_revision="$3"
+  local preview_source_tree_hash="$4"
+  local status="$5"
+  local started_at temporary
+  mkdir -p "$state_root"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  temporary="$(mktemp "$state_root/alert-preview.XXXXXX")"
+  chmod 0600 "$temporary"
+  {
+    printf 'status=%s\n' "$status"
+    printf 'base_repo_root=%s\n' "$base_root"
+    printf 'base_revision=%s\n' "$base_revision"
+    printf 'preview_revision=%s\n' "$preview_revision"
+    printf 'preview_source_tree_hash=%s\n' "$preview_source_tree_hash"
+    printf 'started_at=%s\n' "$started_at"
+  } >"$temporary"
+  mv "$temporary" "$alert_preview_state_file"
+}
+
+require_no_alert_preview() {
+  test ! -f "$alert_preview_state_file" \
+    || die "an alert preview is active; run restore-alerts before applying or deploying another revision"
+}
+
 show_release() {
   if ! test -f "$state_file"; then
     echo "No successful release has been recorded at $state_file"
@@ -449,6 +534,12 @@ show_release() {
     -e 's/^previous_revision=/previous revision: /p' \
     -e 's/^deployed_at=/deployed at: /p' \
     "$state_file"
+  if test -f "$alert_preview_state_file"; then
+    echo "alert preview: $(preview_state_value status)"
+    echo "alert preview revision: $(preview_state_value preview_revision)"
+    echo "alert preview base revision: $(preview_state_value base_revision)"
+    echo "alert preview started at: $(preview_state_value started_at)"
+  fi
 }
 
 run_doctor() {
@@ -476,6 +567,7 @@ run_doctor() {
 
 apply_alerting_configuration() {
   local deployed_revision
+  require_no_alert_preview
   require_runtime
   compute_release_material
   deployed_revision="$(state_value current_revision)"
@@ -495,8 +587,132 @@ apply_alerting_configuration() {
   fi
 }
 
+find_deployed_checkout() {
+  local deployed_revision="$1"
+  local explicit_root="${QT_ALERT_PREVIEW_BASE_ROOT:-}"
+  if test -n "$explicit_root"; then
+    printf '%s' "$explicit_root"
+    return 0
+  fi
+  python3 - "$repo_root" "$deployed_revision" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+repo_root, revision = sys.argv[1:]
+result = subprocess.run(
+    ["git", "-C", repo_root, "worktree", "list", "--porcelain"],
+    check=True,
+    capture_output=True,
+    text=True,
+)
+matches = []
+for block in result.stdout.strip().split("\n\n"):
+    fields = {}
+    for line in block.splitlines():
+        key, _, value = line.partition(" ")
+        fields[key] = value
+    if fields.get("HEAD") == revision and fields.get("worktree"):
+        matches.append(str(Path(fields["worktree"]).resolve()))
+if len(matches) != 1:
+    raise SystemExit(
+        "expected exactly one worktree at the deployed revision "
+        f"{revision}, found {len(matches)}; set QT_ALERT_PREVIEW_BASE_ROOT"
+    )
+print(matches[0], end="")
+PY
+}
+
+validate_deployed_checkout() {
+  local base_root="$1"
+  local deployed_revision="$2"
+  test "$base_root" != "$repo_root" \
+    || die "preview must run from a separate worktree, not the deployed checkout"
+  test -d "$base_root" \
+    || die "recorded production checkout is missing: $base_root"
+  test "$(git -C "$base_root" rev-parse --verify HEAD)" = "$deployed_revision" \
+    || die "production checkout no longer matches deployed revision $deployed_revision: $base_root"
+  test -z "$(git -C "$base_root" status --porcelain)" \
+    || die "production checkout must be clean before an alert preview: $base_root"
+}
+
+recreate_grafana_from_repo() {
+  local source_root="$1"
+  local extra_compose_file="${2:-}"
+  compose_from_repo_root "$source_root" "$extra_compose_file" config --quiet
+  compose_from_repo_root "$source_root" "$extra_compose_file" up \
+    --detach --no-deps --force-recreate --wait \
+    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" grafana
+  compose_from_repo_root "$source_root" "$extra_compose_file" ps grafana
+}
+
+restore_grafana_to_base() {
+  local base_root="$1"
+  local cleanup_compose_file="$repo_root/docker/docker-compose.alert-preview-cleanup.yml"
+  if test ! -f "$base_root/docker/docker-compose.alert-email.yml"; then
+    recreate_grafana_from_repo "$base_root" "$cleanup_compose_file"
+  fi
+  recreate_grafana_from_repo "$base_root"
+}
+
+preview_alerting_configuration() {
+  local deployed_revision base_root
+  require_no_alert_preview
+  require_runtime
+  compute_release_material
+  test "$alerts_enabled" = "true" \
+    || die "preview-alerts requires QT_ALERTS_ENABLED=true"
+  deployed_revision="$(state_value current_revision)"
+  test -n "$deployed_revision" \
+    || die "no successful release is recorded; deploy a production revision first"
+  test "$deployed_revision" != "$QT_RELEASE_REVISION" \
+    || die "checkout already matches the deployed revision; use apply-alerts"
+  base_root="$(find_deployed_checkout "$deployed_revision")" \
+    || die "could not locate the clean production checkout for $deployed_revision"
+  validate_deployed_checkout "$base_root" "$deployed_revision"
+  compose config --quiet
+
+  record_alert_preview \
+    "$base_root" "$deployed_revision" "$QT_RELEASE_REVISION" \
+    "$QT_SOURCE_TREE_HASH" "applying"
+  if ! recreate_grafana_from_repo "$repo_root"; then
+    echo "Alert preview failed; attempting to restore Grafana from $deployed_revision." >&2
+    if restore_grafana_to_base "$base_root"; then
+      rm -f -- "$alert_preview_state_file"
+      die "alert preview failed; Grafana was restored to production revision $deployed_revision"
+    fi
+    die "alert preview failed and automatic restoration failed; run restore-alerts from the preview worktree"
+  fi
+  record_alert_preview \
+    "$base_root" "$deployed_revision" "$QT_RELEASE_REVISION" \
+    "$QT_SOURCE_TREE_HASH" "active"
+  echo "Alert preview is active on Grafana."
+  echo "Production release remains recorded at: $deployed_revision"
+  echo "Preview revision: $QT_RELEASE_REVISION"
+  echo "Run restore-alerts from this preview worktree before any full deployment."
+}
+
+restore_alerting_preview() {
+  local base_root base_revision current_revision
+  require_runtime
+  test -f "$alert_preview_state_file" \
+    || die "no alert preview is recorded at $alert_preview_state_file"
+  base_root="$(preview_state_value base_repo_root)"
+  base_revision="$(preview_state_value base_revision)"
+  current_revision="$(state_value current_revision)"
+  test -n "$base_root" && test -n "$base_revision" \
+    || die "alert preview state is incomplete: $alert_preview_state_file"
+  test "$current_revision" = "$base_revision" \
+    || die "recorded production revision changed during preview; refusing automatic restoration"
+  validate_deployed_checkout "$base_root" "$base_revision"
+  restore_grafana_to_base "$base_root"
+  rm -f -- "$alert_preview_state_file"
+  echo "Grafana alerting restored to production revision $base_revision."
+}
+
 deploy_release() {
   local requested_ref="${1:-}"
+  require_no_alert_preview
   require_runtime
   select_release "$requested_ref"
   echo "Deploying Quant-Trad revision $QT_RELEASE_REVISION"
@@ -536,6 +752,12 @@ case "$action" in
     ;;
   apply-alerts)
     apply_alerting_configuration
+    ;;
+  preview-alerts)
+    preview_alerting_configuration
+    ;;
+  restore-alerts)
+    restore_alerting_preview
     ;;
   deploy)
     deploy_release "${1:-}"

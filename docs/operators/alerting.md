@@ -43,6 +43,26 @@ network path, or the managed relay is unavailable, this installation cannot
 email about its own failure. Add one external heartbeat only when that blind
 spot is important enough to operate.
 
+## What an installation owner supplies
+
+The repository owns the rules, routing shape, validation, and deployment
+workflow. Each installation owner supplies only the identity and authorization
+needed to send mail:
+
+| Input | Why it exists | Where it lives |
+| --- | --- | --- |
+| Managed email-provider account | Operates delivery, TLS, reputation, and retries | Provider account |
+| Authorized sender address or domain | Prevents arbitrary sender impersonation | Provider account plus `QT_ALERT_EMAIL_FROM` |
+| One send-only credential | Authorizes this installation to send | Private `QT_ALERT_SMTP_PASSWORD` |
+| One or more recipients | Defines who owns this installation's alerts | Private `QT_ALERT_EMAILS` |
+| Grafana administrator access | Runs the contact-point test and inspects rule state | Existing installation access |
+
+There are two different setup costs. The installation owner performs the
+provider and sender setup once. After that, adding or removing Quant-Trad users
+is only a comma-separated `QT_ALERT_EMAILS` edit, followed by validation and a
+Grafana-only apply. Application users do not need provider accounts or email
+credentials.
+
 ## One-time installation setup
 
 Grafana OSS needs an outbound email transport. The supported choice is a
@@ -57,8 +77,11 @@ concern. After it is configured, adding or removing people changes only
 `QT_ALERT_EMAILS`.
 
 Create a sender/domain and a send-only relay credential with the selected
-managed provider. Store the following in the private `secrets.env` beside the
-server checkout, never in Git or chat:
+managed provider. A provider-supplied test sender is sufficient for a first
+delivery proof when the provider restricts it to the account owner's inbox; a
+verified project domain is needed before routing to arbitrary users. Store the
+following in the private `secrets.env` beside the server checkout, never in Git
+or chat:
 
 ```dotenv
 QT_ALERTS_ENABLED=true
@@ -85,10 +108,64 @@ Validation requires every delivery field only when `QT_ALERTS_ENABLED=true`,
 rejects malformed or duplicate recipients, validates the relay host/port, and
 never prints the password.
 
-## Deploy and prove delivery
+## Prove the exact change before merge
+
+An alerting change does not need to become the recorded production release
+before it can be tested. Use a detached worktree at the exact candidate commit:
+
+```bash
+git -C /srv/quanttrad/app fetch origin feat/grafana-email-alerting
+git -C /srv/quanttrad/app worktree add \
+  --detach /srv/quanttrad/alert-preview \
+  origin/feat/grafana-email-alerting
+cd /srv/quanttrad/alert-preview
+bash scripts/automation/server_deploy.sh validate-alerts
+QT_ALERT_PREVIEW_BASE_ROOT=/srv/quanttrad/app \
+  bash scripts/automation/server_deploy.sh preview-alerts
+```
+
+`preview-alerts` records the candidate SHA and the existing production SHA,
+then force-recreates only Grafana. It does not rebuild or restart the database,
+backend, frontends, Alloy, Loki, or collectors. The production release record
+does not change, and normal apply/deploy commands fail closed until the preview
+is restored.
+
+While the preview is active:
+
+1. Confirm the candidate SHA printed by the command matches the PR head.
+2. Confirm `qt-operator-email`, the root notification policy, and the reviewed
+   rules are provisioned in Grafana.
+3. Use the contact-point **Test** action and confirm delivery to every address.
+4. Confirm the database rule evaluates `Normal`; do not stop the production
+   database merely to manufacture a firing alert.
+5. Check Grafana logs and the provider delivery record for errors.
+
+The disposable integration proof separately exercises a real firing rule and
+two-recipient routing without touching production:
+
+```bash
+bash scripts/ci/test_grafana_email_alerting.sh
+```
+
+Restore before merging or deploying anything else:
+
+```bash
+cd /srv/quanttrad/alert-preview
+bash scripts/automation/server_deploy.sh restore-alerts
+cd /srv/quanttrad/app
+git worktree remove /srv/quanttrad/alert-preview
+```
+
+Restoration first provisions explicit deletions for preview-only rules and the
+email contact point, resets the policy tree when the production revision did
+not yet contain this feature, and then recreates Grafana from the recorded
+production checkout. This matters because removing a provisioning file alone
+does not remove resources already stored in Grafana's database.
+
+## Deploy after acceptance
 
 Alert rules and routing structure are reviewed release material. Promote their
-commit through the normal release path:
+accepted commit through the normal release path:
 
 ```bash
 bash scripts/automation/server_deploy.sh doctor
@@ -118,14 +195,10 @@ Then open Grafana through the private SSH tunnel and check **Alerting**:
 5. Confirm the received sender, subject, TLS/provider delivery record, and
    resolved-message behavior.
 
-The repository's automated transport proof is:
-
-```bash
-bash scripts/ci/test_grafana_email_alerting.sh
-```
-
-It uses a disposable Grafana and capture-only Mailpit container. It never sends
-mail to the internet and is not a production relay.
+The automated transport proof uses a disposable Grafana and capture-only
+Mailpit container. It never sends mail to the internet and is not a production
+relay. The pre-merge contact-point test is what proves the managed provider and
+real inbox boundary.
 
 ## Change recipients
 
