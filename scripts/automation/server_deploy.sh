@@ -5,6 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 repo_root="$(cd "$script_dir/../.." >/dev/null 2>&1 && pwd)"
 deployment_root="$(dirname "$repo_root")"
 compose_file="${QT_SINGLE_NODE_COMPOSE_FILE:-$repo_root/docker/docker-compose.server.yml}"
+alerting_compose_file="${QT_ALERTING_COMPOSE_FILE:-$repo_root/docker/docker-compose.alert-email.yml}"
 env_file="${QT_SINGLE_NODE_ENV_FILE:-${QT_SERVER_ENV_FILE:-$deployment_root/secrets.env}}"
 
 if [[ "$compose_file" != /* ]]; then
@@ -12,6 +13,9 @@ if [[ "$compose_file" != /* ]]; then
 fi
 if [[ "$env_file" != /* ]]; then
   env_file="$repo_root/$env_file"
+fi
+if [[ "$alerting_compose_file" != /* ]]; then
+  alerting_compose_file="$repo_root/$alerting_compose_file"
 fi
 export QT_SINGLE_NODE_ENV_FILE="$env_file"
 export QT_SERVER_ENV_FILE="$env_file"
@@ -41,6 +45,7 @@ single_node_profiles="$(first_value "${QT_SINGLE_NODE_PROFILES:-}" "$(env_value 
 state_root="$(first_value "${QT_SINGLE_NODE_STATE_ROOT:-}" "$(env_value QT_SINGLE_NODE_STATE_ROOT)" "$deployment_root/deploy-state")"
 state_file="$state_root/release.env"
 history_file="$state_root/release-history.ndjson"
+alerts_enabled="$(first_value "$(env_value QT_ALERTS_ENABLED)" "false")"
 export QT_MARKET_DATA_ROOT="$data_root"
 
 usage() {
@@ -48,6 +53,8 @@ usage() {
 Usage:
   scripts/automation/server_deploy.sh init-env
   scripts/automation/server_deploy.sh doctor
+  scripts/automation/server_deploy.sh validate-alerts
+  scripts/automation/server_deploy.sh apply-alerts
   scripts/automation/server_deploy.sh deploy [git-ref]
   scripts/automation/server_deploy.sh rollback [git-ref]
   scripts/automation/server_deploy.sh config
@@ -121,6 +128,8 @@ values = {
     "QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS": "true",
     "QT_SINGLE_NODE_ENABLE_TRADE_STREAMS": "true",
     "QT_SINGLE_NODE_ENABLE_L2_STREAMS": "true",
+    "QT_ALERTS_ENABLED": "false",
+    "QT_ALERT_EMAILS": "",
 }
 payload = "\n".join(f"{key}={value}" for key, value in values.items()) + "\n"
 descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -147,6 +156,70 @@ require_operator_value() {
       die "$key still contains an example value in $env_file"
       ;;
   esac
+}
+
+validate_boolean_value() {
+  local key="$1"
+  local value="$2"
+  case "$value" in
+    true | false)
+      ;;
+    *)
+      die "$key must be true or false"
+      ;;
+  esac
+}
+
+validate_email_list() {
+  local key="$1"
+  local value="$2"
+  if ! python3 - "$key" "$value" <<'PY'
+from email.headerregistry import Address
+import sys
+
+key, raw_value = sys.argv[1:]
+items = [item.strip() for item in raw_value.split(",")]
+if not items or any(not item for item in items):
+    raise SystemExit(f"{key} must be a comma-separated list of email addresses")
+if len(set(items)) != len(items):
+    raise SystemExit(f"{key} contains a duplicate email address")
+for item in items:
+    try:
+        parsed = Address(addr_spec=item)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{key} contains an invalid email address: {item}") from exc
+    if not parsed.username or not parsed.domain or parsed.addr_spec != item:
+        raise SystemExit(f"{key} contains an invalid email address: {item}")
+PY
+  then
+    die "$key validation failed"
+  fi
+}
+
+validate_alerting_environment() {
+  local smtp_host smtp_port
+  validate_boolean_value QT_ALERTS_ENABLED "$alerts_enabled"
+  if test "$alerts_enabled" = "false"; then
+    return 0
+  fi
+
+  test -f "$alerting_compose_file" \
+    || die "alerting Compose overlay not found: $alerting_compose_file"
+  require_operator_value QT_ALERT_EMAILS
+  require_operator_value QT_ALERT_SMTP_HOST
+  require_operator_value QT_ALERT_SMTP_USER
+  require_operator_value QT_ALERT_SMTP_PASSWORD
+  require_operator_value QT_ALERT_EMAIL_FROM
+  validate_email_list QT_ALERT_EMAILS "$(env_value QT_ALERT_EMAILS)"
+  validate_email_list QT_ALERT_EMAIL_FROM "$(env_value QT_ALERT_EMAIL_FROM)"
+
+  smtp_host="$(env_value QT_ALERT_SMTP_HOST)"
+  smtp_port="${smtp_host##*:}"
+  test "${smtp_host%:*}" != "$smtp_host" \
+    && test -n "${smtp_host%:*}" \
+    && [[ "$smtp_port" =~ ^[0-9]+$ ]] \
+    && (( smtp_port >= 1 && smtp_port <= 65535 )) \
+    || die "QT_ALERT_SMTP_HOST must use host:port with a valid port"
 }
 
 profile_enabled() {
@@ -196,6 +269,7 @@ validate_operator_environment() {
     require_operator_value IBKR_TWS_USERNAME
     require_operator_value IBKR_TWS_PASSWORD
   fi
+  validate_alerting_environment
 }
 
 validate_private_env_file() {
@@ -266,15 +340,19 @@ select_release() {
 
 compose() {
   local profile_args=()
+  local compose_file_args=(--file "$compose_file")
   local profile
   local profiles="${single_node_profiles//,/ }"
   for profile in $profiles; do
     profile_args+=(--profile "$profile")
   done
+  if test "$alerts_enabled" = "true"; then
+    compose_file_args+=(--file "$alerting_compose_file")
+  fi
 
   docker compose \
     --env-file "$env_file" \
-    --file "$compose_file" \
+    "${compose_file_args[@]}" \
     "${profile_args[@]}" \
     "$@"
 }
@@ -389,6 +467,32 @@ run_doctor() {
     echo "Public Coinbase OI, funding, trade, and L2 definitions will be enrolled without credentials."
     echo "Provider credentials are optional unless an authenticated enrollment or operation is selected."
   fi
+  if test "$alerts_enabled" = "true"; then
+    echo "Operator email alerting: enabled"
+  else
+    echo "Operator email alerting: disabled"
+  fi
+}
+
+apply_alerting_configuration() {
+  local deployed_revision
+  require_runtime
+  compute_release_material
+  deployed_revision="$(state_value current_revision)"
+  test -n "$deployed_revision" \
+    || die "no successful release is recorded; deploy a reviewed revision first"
+  test "$deployed_revision" = "$QT_RELEASE_REVISION" \
+    || die "checkout revision $QT_RELEASE_REVISION does not match deployed revision $deployed_revision"
+
+  compose config --quiet
+  compose up --detach --no-deps --force-recreate --wait \
+    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" grafana
+  compose ps grafana
+  if test "$alerts_enabled" = "true"; then
+    echo "Operator email alerting applied to Grafana (enabled)."
+  else
+    echo "Operator email alerting removed from Grafana (disabled)."
+  fi
 }
 
 deploy_release() {
@@ -421,6 +525,17 @@ case "$action" in
     ;;
   doctor)
     run_doctor
+    ;;
+  validate-alerts)
+    require_command python3
+    require_command stat
+    test -f "$env_file" || die "operator environment file not found: $env_file"
+    validate_private_env_file
+    validate_alerting_environment
+    echo "Operator alert configuration is valid (enabled=$alerts_enabled)."
+    ;;
+  apply-alerts)
+    apply_alerting_configuration
     ;;
   deploy)
     deploy_release "${1:-}"

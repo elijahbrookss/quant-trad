@@ -51,7 +51,7 @@ gap evidence.
 | pgAdmin | database operations | `127.0.0.1:8080` |
 | Loki and Alloy | durable logs and Docker log ingress | Loki private; Alloy UI `127.0.0.1:12345` |
 | Docker event and capacity samplers | lifecycle and storage evidence | no published port |
-| Grafana | provisioned logs, capacity, and database dashboards | `127.0.0.1:3000` |
+| Grafana | provisioned dashboards, alert rules, and optional email routing | `127.0.0.1:3000` |
 | IBKR Gateway | optional paper/live broker transport and VNC | `broker` profile; loopback only |
 
 All published ports are loopback-only by default. Use SSH forwarding. Do not
@@ -147,6 +147,26 @@ renders Compose, pulls pinned third-party images, builds release images, waits
 for health, verifies embedded source attestations, checks definition enrollment,
 and writes release state outside the repository.
 
+Operator email is optional and disabled by default. A managed transactional
+relay owns outbound delivery; Grafana owns alert state, grouping, routing, and
+resolved notifications. Configure the private environment once, then routine
+recipient changes only edit the comma-separated `QT_ALERT_EMAILS` value:
+
+```bash
+bash scripts/automation/server_deploy.sh validate-alerts
+bash scripts/automation/server_deploy.sh apply-alerts
+```
+
+`apply-alerts` requires the clean checkout to match the recorded deployed
+revision and force-recreates only Grafana without starting its dependencies.
+When `QT_ALERTS_ENABLED=true`, validation requires the managed relay host,
+credential, verified sender, and at least one valid recipient. The deployment
+helper adds `docker/docker-compose.alert-email.yml`; when false, the overlay,
+SMTP settings, contact point, and root email policy are absent. Provider
+secrets are never printed. Follow the
+[operator email alerting runbook](../operators/alerting.md) for setup, testing,
+rule standards, recipient changes, blind spots, and rollback.
+
 Useful operations are:
 
 ```bash
@@ -155,6 +175,8 @@ bash scripts/automation/server_deploy.sh status
 bash scripts/automation/server_deploy.sh fleet
 bash scripts/automation/server_deploy.sh qt <qt-arguments...>
 bash scripts/automation/server_deploy.sh logs market-data-collector
+bash scripts/automation/server_deploy.sh validate-alerts
+bash scripts/automation/server_deploy.sh apply-alerts
 bash scripts/automation/server_deploy.sh stop
 ```
 

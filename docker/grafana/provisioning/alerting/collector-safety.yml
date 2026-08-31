@@ -54,9 +54,12 @@ groups:
         execErrState: Alerting
         for: 0s
         annotations:
+          first_action: Inspect the active safety latch and collector fleet before changing state.
+          recovery: Clear the latch only after its cause is fixed and fleet health is verified.
           summary: A global, fleet, or stream safety latch is active.
         labels:
           component: market-data-collector
+          owner: qt-infra
           severity: critical
         isPaused: false
 
@@ -109,8 +112,11 @@ groups:
         execErrState: Alerting
         for: 0s
         annotations:
+          first_action: Inspect spool, archive, database, and filesystem headroom.
+          recovery: Verify the warning stops recurring and storage headroom is stable.
           summary: Collector filesystem or spool utilization crossed a warning threshold.
         labels:
           component: market-data-collector
+          owner: qt-infra
           severity: warning
         isPaused: false

@@ -1,0 +1,48 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Email delivery proof
+    folder: Quant Trad Tests
+    interval: 10s
+    rules:
+      - uid: qt-email-delivery-proof
+        title: QT email delivery proof
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [0, 0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: []
+                  reducer:
+                    params: []
+                    type: avg
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: 1 == 1
+              hide: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+              type: math
+        noDataState: Alerting
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: Disposable proof of the Grafana email notification path.
+        labels:
+          owner: qt-infra
+          severity: test
+        isPaused: false

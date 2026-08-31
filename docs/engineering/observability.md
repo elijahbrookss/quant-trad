@@ -68,6 +68,28 @@ starts to pressure Loki, prefer these levers in order:
 5. Add labels only for stable routing dimensions; avoid `run_id` and `bot_id`
    labels unless measured query needs justify the cardinality cost.
 
+## Alerts And Notifications
+
+Grafana is the alert engine and notification router. Quant-Trad does not turn
+every log row into a page or maintain a parallel delivery service. A rule
+evaluates logs, database state, or metrics into Normal, Pending, Firing, and
+Resolved state; the provisioned policy groups that state and sends it through
+the optional `qt-operator-email` contact point.
+
+This distinction matters operationally: a disconnect is an event, sustained
+coverage loss is an alert, an email is a notification, and an incident is the
+response to material impact. Rule thresholds should describe actionable bad
+state and recovery, not raw event volume.
+
+Email delivery uses an operator-selected managed transactional relay. Grafana
+OSS still needs one installation-owned sender credential, but operators do not
+run an SMTP server or use personal mailbox credentials. After one-time setup,
+recipient ownership is the single `QT_ALERT_EMAILS` environment value.
+
+Provisioned rules, contact points, and policies are reviewed source. The
+bounded V1 standard and full setup/test/rollback procedure are in the
+[operator email alerting runbook](../operators/alerting.md).
+
 ## Capacity And Growth Dashboard
 
 The observability profile provisions **QuantTrad Capacity & Database Growth**

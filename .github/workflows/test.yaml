@@ -80,6 +80,9 @@ jobs:
             --file docker/docker-compose.server.yml \
             config --quiet
 
+      - name: Prove Grafana email notification path
+        run: bash scripts/ci/test_grafana_email_alerting.sh
+
       - name: Build production images with source attestation
         run: |
           revision="$(git rev-parse HEAD)"

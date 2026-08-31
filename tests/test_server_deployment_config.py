@@ -11,6 +11,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_COMPOSE_PATH = ROOT / "docker/docker-compose.server.yml"
+ALERT_COMPOSE_PATH = ROOT / "docker/docker-compose.alert-email.yml"
+ALERT_PROVISIONING_PATH = ROOT / "docker/grafana/server-alerting/operator-email.yml"
 
 
 def _server_compose() -> dict:
@@ -158,6 +160,40 @@ def test_server_frontends_proxy_api_and_fall_back_to_spa_entrypoint():
     assert "try_files $uri $uri/ /index.html;" in nginx
 
 
+def test_server_email_alerting_is_an_optional_native_grafana_overlay():
+    base = _server_compose()["services"]["grafana"]
+    overlay = yaml.safe_load(ALERT_COMPOSE_PATH.read_text(encoding="utf-8"))[
+        "services"
+    ]["grafana"]
+    environment = overlay["environment"]
+
+    assert not any("operator-email.yml" in str(volume) for volume in base["volumes"])
+    assert environment["GF_SMTP_ENABLED"] == "true"
+    assert "QT_ALERT_SMTP_HOST" in environment["GF_SMTP_HOST"]
+    assert "QT_ALERT_SMTP_PASSWORD" in environment["GF_SMTP_PASSWORD"]
+    assert environment["GF_SMTP_SKIP_VERIFY"] == "false"
+    assert environment["GF_SMTP_STARTTLS_POLICY"] == "MandatoryStartTLS"
+    assert overlay["volumes"][0]["target"].endswith("/operator-email.yml")
+
+
+def test_server_email_contact_point_and_policy_use_operator_contract():
+    alerting = yaml.safe_load(ALERT_PROVISIONING_PATH.read_text(encoding="utf-8"))
+    contact_point = alerting["contactPoints"][0]
+    receiver = contact_point["receivers"][0]
+    policy = alerting["policies"][0]
+
+    assert contact_point["name"] == "qt-operator-email"
+    assert receiver["uid"] == "qt-operator-email"
+    assert receiver["type"] == "email"
+    assert receiver["settings"]["addresses"] == "$QT_ALERT_EMAILS"
+    assert receiver["settings"]["singleEmail"] is False
+    assert receiver["disableResolveMessage"] is False
+    assert policy["receiver"] == "qt-operator-email"
+    assert policy["group_by"] == ["grafana_folder", "alertname", "severity"]
+    assert policy["group_wait"] == "30s"
+    assert policy["repeat_interval"] == "4h"
+
+
 def test_deploy_helper_never_runs_migrations_and_verifies_every_app_image():
     deploy = (ROOT / "scripts/automation/server_deploy.sh").read_text(
         encoding="utf-8"
@@ -181,6 +217,15 @@ def test_deploy_helper_never_runs_migrations_and_verifies_every_app_image():
     assert '$deployment_root/secrets.env' in deploy
     assert '$repo_root/secrets.env' not in deploy
     assert "env_value QT_REBUILD_DATABASE_IMAGE" in deploy
+    assert "validate-alerts)" in deploy
+    assert "validate_alerting_environment" in deploy
+    assert 'compose_file_args+=(--file "$alerting_compose_file")' in deploy
+    assert "QT_ALERT_SMTP_PASSWORD" in deploy
+    assert "apply-alerts)" in deploy
+    assert "--no-deps --force-recreate --wait" in deploy
+    assert 'deployed_revision="$(state_value current_revision)"' in deploy
+    assert "does not match deployed revision" in deploy
+    assert "Operator email alerting: enabled" in deploy
     for service in (
         "backend",
         "market-data-collector",
@@ -235,6 +280,8 @@ def test_deploy_helper_generates_private_operator_environment_once(tmp_path):
     assert values["QT_SINGLE_NODE_ENABLE_L2_STREAMS"] == "true"
     assert values["QT_SINGLE_NODE_ENABLE_STRUCTURED_FACTS"] == "true"
     assert values["CHAINLINK_ARBITRUM_RPC_URL"].startswith("https://")
+    assert values["QT_ALERTS_ENABLED"] == "false"
+    assert values["QT_ALERT_EMAILS"] == ""
     assert not any(key.startswith("COINBASE_API_") for key in values)
 
     before = target.read_bytes()
@@ -248,6 +295,86 @@ def test_deploy_helper_generates_private_operator_environment_once(tmp_path):
     )
     assert second.returncode != 0
     assert target.read_bytes() == before
+
+
+def _validate_alert_environment(tmp_path: Path, values: dict[str, str]):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "secrets.env"
+    target.write_text(
+        "\n".join(f"{key}={value}" for key, value in values.items()) + "\n",
+        encoding="utf-8",
+    )
+    target.chmod(0o600)
+    return subprocess.run(
+        [
+            "bash",
+            str(ROOT / "scripts/automation/server_deploy.sh"),
+            "validate-alerts",
+        ],
+        cwd=ROOT,
+        env={**os.environ, "QT_SINGLE_NODE_ENV_FILE": str(target)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_alert_validation_accepts_disabled_single_and_multiple_recipient_modes(
+    tmp_path,
+):
+    disabled = _validate_alert_environment(
+        tmp_path / "disabled",
+        {"QT_ALERTS_ENABLED": "false"},
+    )
+    assert disabled.returncode == 0, disabled.stderr
+
+    base = {
+        "QT_ALERTS_ENABLED": "true",
+        "QT_ALERT_SMTP_HOST": "smtp.provider.test:587",
+        "QT_ALERT_SMTP_USER": "token-user",
+        "QT_ALERT_SMTP_PASSWORD": "provider-secret",
+        "QT_ALERT_EMAIL_FROM": "alerts@quanttrad.test",
+    }
+    for name, recipients in (
+        ("single", "owner@quanttrad.test"),
+        ("multiple", "owner@quanttrad.test,backup@quanttrad.test"),
+    ):
+        result = _validate_alert_environment(
+            tmp_path / name,
+            {**base, "QT_ALERT_EMAILS": recipients},
+        )
+        assert result.returncode == 0, result.stderr
+        assert "provider-secret" not in result.stdout
+        assert "provider-secret" not in result.stderr
+
+
+def test_alert_validation_rejects_incomplete_or_invalid_enabled_configuration(
+    tmp_path,
+):
+    valid = {
+        "QT_ALERTS_ENABLED": "true",
+        "QT_ALERT_EMAILS": "owner@quanttrad.test",
+        "QT_ALERT_SMTP_HOST": "smtp.provider.test:587",
+        "QT_ALERT_SMTP_USER": "token-user",
+        "QT_ALERT_SMTP_PASSWORD": "provider-secret",
+        "QT_ALERT_EMAIL_FROM": "alerts@quanttrad.test",
+    }
+    cases = {
+        "missing-recipient": {**valid, "QT_ALERT_EMAILS": ""},
+        "invalid-recipient": {**valid, "QT_ALERT_EMAILS": "not-an-email"},
+        "missing-secret": {**valid, "QT_ALERT_SMTP_PASSWORD": ""},
+        "invalid-host": {**valid, "QT_ALERT_SMTP_HOST": "smtp.provider.test"},
+        "invalid-port": {**valid, "QT_ALERT_SMTP_HOST": "smtp.provider.test:70000"},
+        "duplicate": {
+            **valid,
+            "QT_ALERT_EMAILS": "owner@quanttrad.test,owner@quanttrad.test",
+        },
+    }
+    for name, values in cases.items():
+        result = _validate_alert_environment(tmp_path / name, values)
+        assert result.returncode != 0, name
+        assert "provider-secret" not in result.stdout
+        assert "provider-secret" not in result.stderr
 
 
 def test_host_bootstrap_supports_a_configurable_single_node_root():
@@ -267,3 +394,35 @@ def test_stream_definition_storage_does_not_whitelist_domain_channels():
 
     assert "supported ordered channels" not in repository
     assert "one to sixteen channels are required" in repository
+
+
+def test_email_alerting_integration_stack_is_isolated_and_pinned() -> None:
+    compose_text = (ROOT / "docker" / "test" / "grafana-email-alerting.compose.yml").read_text()
+    rule_text = (ROOT / "docker" / "test" / "grafana-email-test-rule.yml").read_text()
+
+    assert "ghcr.io/axllent/mailpit:v1.30.6@sha256:" in compose_text
+    assert "grafana/grafana:13.2.0" in compose_text
+    assert "127.0.0.1:${QT_ALERT_TEST_MAILPIT_PORT" in compose_text
+    assert "QT_ALERT_EMAILS: owner@quanttrad.test,backup@quanttrad.test" in compose_text
+    assert "grafana-email-test-rule.yml" in compose_text
+    assert "expression: 1 == 1" in rule_text
+    assert "severity: test" in rule_text
+
+
+def test_email_alerting_integration_script_proves_both_recipients() -> None:
+    script_text = (ROOT / "scripts" / "ci" / "test_grafana_email_alerting.sh").read_text()
+    workflow_text = (ROOT / ".github" / "workflows" / "test.yaml").read_text()
+
+    assert "/api/v1/messages" in script_text
+    assert "owner@quanttrad.test" in script_text
+    assert "backup@quanttrad.test" in script_text
+    assert "down --volumes --remove-orphans" in script_text
+    assert "bash scripts/ci/test_grafana_email_alerting.sh" in workflow_text
+
+
+def test_disposable_email_rule_is_not_in_production_provisioning() -> None:
+    base_compose = (ROOT / "docker" / "docker-compose.server.yml").read_text()
+    alert_overlay = (ROOT / "docker" / "docker-compose.alert-email.yml").read_text()
+
+    assert "grafana-email-test-rule" not in base_compose
+    assert "grafana-email-test-rule" not in alert_overlay

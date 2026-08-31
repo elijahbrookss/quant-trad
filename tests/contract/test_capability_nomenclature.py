@@ -68,5 +68,26 @@ def test_collector_safety_alerts_are_provisioned_against_canonical_tables() -> N
         "warning",
         "critical",
     }
+    assert {rule["labels"]["owner"] for rule in rules} == {"qt-infra"}
     assert "market.collector_safety_state" in sql
     assert "market.collector_safety_events" in sql
+
+
+def test_database_unavailable_alert_fails_closed_after_a_bounded_delay() -> None:
+    path = Path("docker/grafana/provisioning/alerting/platform-safety.yml")
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    rule = parsed["groups"][0]["rules"][0]
+    sql = str(rule["data"][0]["model"]["rawSql"])
+
+    assert rule["uid"] == "qt-database-unavailable"
+    assert rule["for"] == "2m"
+    assert rule["noDataState"] == "Alerting"
+    assert rule["execErrState"] == "Alerting"
+    assert rule["labels"] == {
+        "component": "timescaledb",
+        "owner": "qt-infra",
+        "severity": "critical",
+    }
+    assert rule["annotations"]["first_action"]
+    assert rule["annotations"]["recovery"]
+    assert "SELECT 1::double precision AS value" in sql

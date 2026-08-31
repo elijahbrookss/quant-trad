@@ -13,6 +13,7 @@ memory.
 | Local workstation setup | [Getting started](../getting-started.md) |
 | Provider credentials and provider implementation | [Adding a provider](../guides/adding-a-provider.md) |
 | Inspect, diagnose, start, stop, pause, resume, or restart collectors | [Collector operations](../guides/collector-operations.md) |
+| Configure recipients, validate, test, and operate alerts | [Operator email alerting](alerting.md) |
 | Coinbase product metadata and stream proof | [Coinbase derivatives setup](../guides/coinbase-derivatives-paper-setup.md) |
 | Chainlink scheduled collection | [Chainlink structured Facts](../guides/chainlink-structured-facts.md) |
 | Runtime ownership and recovery semantics | [Continuous collector runtime](../architecture/data/CONTINUOUS_COLLECTOR_RUNTIME.md) |
@@ -147,6 +148,7 @@ coverage.
 | Store or rotate a provider credential | No | Credentials use the encrypted provider boundary. |
 | Add another product supported by a deployed collector pack | No | Product metadata and definitions are validated at enrollment. |
 | Change the poll interval while re-enrolling a supported product | No | The scheduled definition is durable configuration. |
+| Change alert recipients or delivery credentials | Grafana only | Run `validate-alerts` then `apply-alerts`; collectors and other services are not restarted. |
 | Add a provider transport, WebSocket channel, projection, Fact schema, or recovery behavior | Yes | Executable behavior and contracts must pass review and CI. |
 | Change database or archive contracts | Yes | Persistence compatibility and clean-schema validation are release concerns. |
 | Change the default clean-install fleet | Yes | Defaults are reviewed source-controlled release material. |
