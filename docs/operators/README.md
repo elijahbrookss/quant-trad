@@ -70,8 +70,8 @@ The installation owner performs these steps once:
 
 1. create the managed-provider account;
 2. authorize a sender address/domain and create a send-only credential;
-3. add the credential, sender, and initial recipients to
-   `/srv/quanttrad/secrets.env`;
+3. add the credential, sender, and initial recipients to the installation's
+   private `secrets.env`;
 4. run `validate-alerts`, apply or preview the Grafana configuration, and prove
    delivery to every inbox.
 
@@ -79,21 +79,9 @@ After that, a routine ownership change edits only `QT_ALERT_EMAILS`, validates,
 applies the Grafana-only change, and sends another test. Application users do
 not need provider accounts or credentials.
 
-From a Windows laptop, enter the server through the configured WSL SSH alias;
-edit the private file on the server so the credential never enters PowerShell
-history or chat:
-
-```powershell
-wsl -d Ubuntu -- ssh qt-server
-```
-
-Then, on the server:
-
-```bash
-cd /srv/quanttrad
-nano secrets.env
-chmod 600 secrets.env
-```
+Workstation-to-host connection details, SSH aliases, and locally selected paths
+belong in each installation's private infrastructure documentation. They are
+intentionally outside this portable product handbook.
 
 Follow [Operator email alerting](alerting.md) for the provider values, exact-SHA
 pre-merge preview, real-inbox proof, restoration, and routine recipient changes.

@@ -251,13 +251,15 @@ bash scripts/automation/server_deploy.sh credentials-coinbase
 
 The command is interactive and does not echo credentials into release state or
 the operator environment file. To import the downloaded CDP JSON directly from
-a WSL client without copying it onto the server or transforming it with `jq`,
-pipe it over SSH:
+a trusted client without copying it onto the server or transforming it with
+`jq`, pipe it over SSH. Set the two client-local values for the installation:
 
 ```bash
-ssh qt-server \
+QT_SERVER_HOST=your-server-host
+CDP_KEY_FILE=/path/to/cdp_api_key.json
+ssh "$QT_SERVER_HOST" \
   'cd /srv/quanttrad/app && bash scripts/automation/server_deploy.sh credentials-coinbase --cdp-key-file - --no-input' \
-  < /mnt/c/Users/<you>/Downloads/coinbase/cdp_api_key.json
+  < "$CDP_KEY_FILE"
 ```
 
 The importer accepts Coinbase's `name` or `id` key identifier and its
@@ -366,13 +368,14 @@ actual growth remain the meaningful soak signals.
 Forward the main operator surfaces from a trusted client:
 
 ```bash
+QT_SERVER_HOST=your-server-host
 ssh \
   -L 5174:127.0.0.1:5174 \
   -L 5173:127.0.0.1:5173 \
   -L 8000:127.0.0.1:8000 \
   -L 3000:127.0.0.1:3000 \
   -L 8080:127.0.0.1:8080 \
-  qt-server
+  "$QT_SERVER_HOST"
 ```
 
 Frontend V2 is then at `http://127.0.0.1:5174`, Grafana at

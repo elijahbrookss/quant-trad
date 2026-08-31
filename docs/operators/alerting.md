@@ -124,32 +124,10 @@ Provider instructions:
 - [Send with Resend SMTP](https://resend.com/docs/send-with-smtp)
 - [Resend test-sender restriction](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain)
 
-### Configure it from a Windows laptop
-
-The configured SSH alias lives in Ubuntu WSL. Start an interactive server shell
-from PowerShell:
-
-```powershell
-wsl -d Ubuntu -- ssh qt-server
-```
-
-Edit the private file on the server rather than putting the credential in a
-PowerShell command, shell history, Git, or chat:
-
-```bash
-cd /srv/quanttrad
-nano secrets.env
-chmod 600 secrets.env
-```
-
-In `nano`, save with `Ctrl+O`, press `Enter`, then exit with `Ctrl+X`. Validate
-from the deployed checkout, or from the detached candidate worktree during a
-pre-merge proof:
-
-```bash
-cd /srv/quanttrad/app
-bash scripts/automation/server_deploy.sh validate-alerts
-```
+Use the installation's private infrastructure runbook to reach the host and edit
+its protected `secrets.env`. Do not put the credential in a command, shell
+history, Git, or chat. Quant-Trad deliberately does not prescribe a workstation,
+SSH alias, host name, or secret-editing tool.
 
 The production transport is locked to mandatory STARTTLS with certificate
 verification. Unencrypted SMTP exists only inside the isolated capture test. Keep
@@ -169,13 +147,16 @@ never prints the password.
 ## Prove the exact change before merge
 
 An alerting change does not need to become the recorded production release
-before it can be tested. Use a detached worktree at the exact candidate commit:
+before it can be tested. Use a detached worktree at the exact candidate commit.
+Set `CANDIDATE_REF` to the branch or commit being reviewed:
 
 ```bash
-git -C /srv/quanttrad/app fetch origin feat/grafana-email-alerting
+CANDIDATE_REF=feat/example-alert-change
+git -C /srv/quanttrad/app fetch origin "$CANDIDATE_REF"
+CANDIDATE_SHA="$(git -C /srv/quanttrad/app rev-parse FETCH_HEAD)"
 git -C /srv/quanttrad/app worktree add \
   --detach /srv/quanttrad/alert-preview \
-  origin/feat/grafana-email-alerting
+  "$CANDIDATE_SHA"
 cd /srv/quanttrad/alert-preview
 bash scripts/automation/server_deploy.sh validate-alerts
 QT_ALERT_PREVIEW_BASE_ROOT=/srv/quanttrad/app \
