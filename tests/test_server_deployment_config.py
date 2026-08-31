@@ -11,10 +11,21 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_COMPOSE_PATH = ROOT / "docker/docker-compose.server.yml"
+IBKR_ENTRYPOINT_PATH = ROOT / "docker/ibkr-gateway/entrypoint.sh"
 
 
 def _server_compose() -> dict:
     return yaml.safe_load(SERVER_COMPOSE_PATH.read_text(encoding="utf-8"))
+
+
+def test_ibkr_gateway_has_no_committed_credential_defaults():
+    entrypoint = IBKR_ENTRYPOINT_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"^IbLoginId=$", entrypoint, re.MULTILINE)
+    assert re.search(r"^IbPassword=$", entrypoint, re.MULTILINE)
+    assert "IBC_TWS_USERNAME and IBC_TWS_PASSWORD are required" in entrypoint
+    assert 'set_ini_value "IbLoginId" "${IBC_TWS_USERNAME}"' in entrypoint
+    assert 'set_ini_value "IbPassword" "${IBC_TWS_PASSWORD}"' in entrypoint
 
 
 def test_server_compose_runs_full_stack_and_profiles_only_broker():

@@ -48,9 +48,9 @@ if [[ ! -f "${INI_PATH}" ]]; then
   log "Writing default IBC config to ${INI_PATH}"
   cat > "${INI_PATH}" <<'CONFIG'
 [Config]
-# These may be overridden by environment at runtime; keep secrets out of logs
-IbLoginId=elijahcbrooks
-IbPassword=lizardBreath34$7
+# Credentials are injected from environment at runtime; never add defaults here
+IbLoginId=
+IbPassword=
 TradingMode=paper
 ReadOnlyApi=yes
 AcceptIncomingConnectionAction=accept
@@ -65,15 +65,32 @@ LoginTimeoutSeconds=180
 [LogSettings]
 LogLevel=debug
 CONFIG
-
-  # Fill from env if provided (do not log)
-  [[ -n "${IBC_TWS_USERNAME:-}" ]] && sed -i "s/^IbLoginId=.*/IbLoginId=${IBC_TWS_USERNAME//\//\\/}/" "${INI_PATH}"
-  [[ -n "${IBC_TWS_PASSWORD:-}" ]] && sed -i "s/^IbPassword=.*/IbPassword=${IBC_TWS_PASSWORD//\//\\/}/" "${INI_PATH}"
-  [[ -n "${IBC_TRADING_MODE:-}" ]] && sed -i "s/^TradingMode=.*/TradingMode=${IBC_TRADING_MODE}/" "${INI_PATH}"
-  [[ -n "${IBC_READONLY_API:-}" ]] && sed -i "s/^ReadOnlyApi=.*/ReadOnlyApi=${IBC_READONLY_API}/" "${INI_PATH}"
-  [[ -n "${IBC_ACCEPT_INCOMING_ACTION:-}" ]] && sed -i "s/^AcceptIncomingConnectionAction=.*/AcceptIncomingConnectionAction=${IBC_ACCEPT_INCOMING_ACTION}/" "${INI_PATH}"
-  [[ -n "${IBC_EXISTING_SESSION_ACTION:-}" ]] && sed -i "s/^ExistingSessionDetectedAction=.*/ExistingSessionDetectedAction=${IBC_EXISTING_SESSION_ACTION}/" "${INI_PATH}"
 fi
+
+if [[ -z "${IBC_TWS_USERNAME:-}" || -z "${IBC_TWS_PASSWORD:-}" ]]; then
+  log "ERROR: IBC_TWS_USERNAME and IBC_TWS_PASSWORD are required"
+  exit 1
+fi
+
+escape_sed_replacement() {
+  printf '%s' "$1" | sed 's/[\\&|]/\\&/g'
+}
+
+set_ini_value() {
+  local key="$1"
+  local value
+  value="$(escape_sed_replacement "$2")"
+  sed -i "s|^${key}=.*|${key}=${value}|" "${INI_PATH}"
+}
+
+# Apply runtime configuration on every start so credential rotation updates an
+# existing persistent config. Values are never logged.
+set_ini_value "IbLoginId" "${IBC_TWS_USERNAME}"
+set_ini_value "IbPassword" "${IBC_TWS_PASSWORD}"
+[[ -n "${IBC_TRADING_MODE:-}" ]] && set_ini_value "TradingMode" "${IBC_TRADING_MODE}"
+[[ -n "${IBC_READONLY_API:-}" ]] && set_ini_value "ReadOnlyApi" "${IBC_READONLY_API}"
+[[ -n "${IBC_ACCEPT_INCOMING_ACTION:-}" ]] && set_ini_value "AcceptIncomingConnectionAction" "${IBC_ACCEPT_INCOMING_ACTION}"
+[[ -n "${IBC_EXISTING_SESSION_ACTION:-}" ]] && set_ini_value "ExistingSessionDetectedAction" "${IBC_EXISTING_SESSION_ACTION}"
 
 # -------- Preflight checks (helpful errors) ----------------------------------
 [[ -x "${IBC_PATH}/scripts/ibcstart.sh" ]] || { log "ERROR: ${IBC_PATH}/scripts/ibcstart.sh not found or not executable"; exit 1; }
