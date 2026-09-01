@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -7,6 +8,7 @@ import pytest
 
 from portal.backend.service.storage.repos.market_data import (
     _LINEAGE_QUERY_BATCH_SIZE,
+    _collect_canonical_book_archive_refs,
     _collect_typed_archive_refs,
     _load_lineage_material_rows,
     _lineage_values_context,
@@ -22,6 +24,10 @@ class _RowsResult:
 
     def all(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self._rows]
+
+    def one(self) -> dict[str, Any]:
+        assert len(self._rows) == 1
+        return dict(self._rows[0])
 
 
 class _StaticSession:
@@ -93,6 +99,113 @@ def test_lineage_error_context_is_deterministic_and_bounded() -> None:
     assert _lineage_values_context(values, field="raw_record_ids") == (
         "count=5 raw_record_ids=[value-1,value-2,value-3,...]"
     )
+
+
+def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -> None:
+    reference = {
+        "manifest_id": "manifest-1",
+        "object_sha256": "1" * 64,
+        "content_fingerprint": "2" * 64,
+        "object_key": "archive/manifest-1.parquet.zst",
+        "object_uri": "market-archive://manifest-1",
+    }
+    session = _StaticSession(
+        [
+            {
+                "fact_count": 4_000_000,
+                "malformed_count": 0,
+                "position_count": 1_000_000,
+                "missing_count": 0,
+                "archive_refs": [reference],
+            }
+        ]
+    )
+    start = datetime(2026, 8, 21, tzinfo=UTC)
+    end = datetime(2026, 9, 1, tzinfo=UTC)
+
+    references = _collect_canonical_book_archive_refs(
+        session,
+        series_id=52,
+        fact_type="market.depth_observation",
+        start=start,
+        end=end,
+        as_of_commit_seq=99,
+        expected_record_count=4_000_000,
+    )
+
+    assert references == {
+        "manifest-1": {
+            key: value for key, value in reference.items() if key != "manifest_id"
+        }
+    }
+    assert len(session.calls) == 1
+    sql, params = session.calls[0]
+    assert "with raw_positions as materialized" in sql
+    assert "select distinct definition_id, session_id," in sql
+    assert "left join market.raw_archive_manifests" in sql
+    assert "manifests.connection_epoch = positions.connection_epoch" in sql
+    assert "jsonb_agg" in sql
+    assert params == {
+        "evidence_key": "_qt_depth_evidence",
+        "series_id": 52,
+        "fact_type": "market.depth_observation",
+        "start": start,
+        "end": end,
+        "as_of_commit_seq": 99,
+    }
+
+
+@pytest.mark.parametrize(
+    ("row", "match"),
+    (
+        (
+            {
+                "fact_count": 2,
+                "malformed_count": 0,
+                "position_count": 2,
+                "missing_count": 0,
+                "archive_refs": [],
+            },
+            "provenance_mismatch",
+        ),
+        (
+            {
+                "fact_count": 3,
+                "malformed_count": 1,
+                "position_count": 2,
+                "missing_count": 0,
+                "archive_refs": [],
+            },
+            "source position is malformed count=1",
+        ),
+        (
+            {
+                "fact_count": 3,
+                "malformed_count": 0,
+                "position_count": 3,
+                "missing_count": 1,
+                "archive_refs": [],
+            },
+            "has no acknowledged archive count=1",
+        ),
+    ),
+)
+def test_canonical_book_archive_lineage_fails_loud(
+    row: dict[str, Any],
+    match: str,
+) -> None:
+    session = _StaticSession([row])
+
+    with pytest.raises(RuntimeError, match=match):
+        _collect_canonical_book_archive_refs(
+            session,
+            series_id=51,
+            fact_type="market.bbo",
+            start=datetime(2026, 8, 21, tzinfo=UTC),
+            end=datetime(2026, 9, 1, tzinfo=UTC),
+            as_of_commit_seq=99,
+            expected_record_count=3,
+        )
 
 
 @pytest.mark.parametrize(

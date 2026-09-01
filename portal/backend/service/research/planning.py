@@ -160,6 +160,7 @@ def _record_time(record: Any) -> datetime:
     value = (
         getattr(fact, "open_time", None)
         or getattr(fact, "sample_time", None)
+        or getattr(fact, "observation_time", None)
         or getattr(fact, "effective_at", None)
     )
     return _utc(value, field="record.time")
@@ -632,7 +633,10 @@ def plan_research_check(
                 "required_start": _iso(
                     evaluation_start - timedelta(seconds=lookback_seconds)
                 ),
-                "required_end": _iso(materialization_end),
+                # Check facts are sampled only at decision times. Outcome and
+                # invalidation tails require primary candles, not more high-rate
+                # fact history after the final decision boundary.
+                "required_end": _iso(evaluation_end),
             }
         )
 

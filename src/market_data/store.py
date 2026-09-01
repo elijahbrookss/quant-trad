@@ -101,6 +101,20 @@ class MarketDataStore(Protocol):
     ) -> list[CanonicalFactRecord]:
         ...
 
+    def read_fact_revisions(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        """Read every canonical revision, including causal invalidations."""
+
+        ...
+
     def ingest_facts(
         self,
         *,
@@ -281,6 +295,20 @@ class MarketDataStore(Protocol):
         source_identity_keys: Sequence[str] = (),
         causal_at_interval_close: bool = False,
     ) -> list[MarketDataRecord]:
+        ...
+
+    def read_dataset_fact_revisions(
+        self,
+        *,
+        dataset_id: str,
+        series_id: int,
+        known_at_lte: Optional[datetime] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        """Read the all-revision canonical history bound by one Dataset series."""
+
         ...
 
 

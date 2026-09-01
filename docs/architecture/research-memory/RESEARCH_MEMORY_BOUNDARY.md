@@ -102,6 +102,15 @@ family. It preserves resolved and unresolved counts/reasons for each horizon.
 No assertions means no verdict; unresolved assertions are indeterminate. A
 verdict grants no Strategy, promotion, certification, or execution authority.
 
+The v4 definition may instead create a neutral, Check-owned `fact_snapshot`
+sample at each primary-bar close for frozen Level 2 research. The first bounded
+surface admits BBO mid/spread and fixed-band depth imbalance through registered
+numeric query fields. It does not expose raw order-book payloads, infer a trade
+direction, or turn a correlation into a signal. Exact one-second alignment,
+known-at visibility, corrections, invalidations, gaps, and selected Fact hashes
+remain part of the evidence. This makes L2 correlations available to studies
+and later Observation review without creating a second runtime truth path.
+
 The older raw, Indicator-forward, signal/lifecycle, and report-backed families
 remain compatibility or diagnostic surfaces according to their registered
 definition. Historical mutable-store records are `legacy_unpinned`; their

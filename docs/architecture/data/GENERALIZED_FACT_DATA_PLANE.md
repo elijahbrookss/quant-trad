@@ -191,6 +191,19 @@ range, watermark, material, provenance, quality, source, archive, and gap
 evidence. Provider-disabled replay validates the registry contract before
 decoding payloads.
 
+When a Check needs causal structured history, the frozen series identity covers
+every canonical revision below the watermark, not only the latest active row
+per observation. Corrections and invalidations participate in the frozen row
+count, canonical material/provenance hashes, source counts, and transitive raw
+archive references. The hashed source summary records
+`record_selection=all_canonical_revisions.v1`. A dedicated Dataset-bound reader
+loads that exact revision history; ordinary latest-state readers retain their
+existing projection. Datasets created before this marker are re-frozen before
+they can supply causal structured history. Book-derived archive lookup binds
+the complete `(definition_id, session_id, connection_epoch, receive_ordinal)`
+position; a reused ordinal after reconnect cannot be satisfied by an object
+from an earlier connection epoch.
+
 ## Causal Selection
 
 For an evaluation time and frozen commit watermark, the canonical selector:
@@ -258,6 +271,10 @@ operator explicitly passes `--enabled`.
 - Indicators declare typed payload inputs or schema-owned scalar projections.
 - Checks consume frozen typed projections/Indicator outputs and preserve
   selected Fact evidence hashes.
+- Level 2 Checks initially consume only `market.bbo.v1` and
+  `market.depth_band.v1` numeric `query_fields`, at exact bucket boundaries.
+  `market.l2_book.v1` remains operational, archive-backed reconstruction input
+  and is never admitted directly to a research Dataset.
 - Observations derived from Checks retain dataset, schema, Fact, and result
   hashes without provider dependencies.
 - UI, CLI, API, MCP, and reports render canonical projections; none calculate

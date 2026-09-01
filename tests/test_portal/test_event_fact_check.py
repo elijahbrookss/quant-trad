@@ -6,9 +6,12 @@ from decimal import Decimal
 import pytest
 
 from market_data.contracts import NumericFact, NumericFactRecord, SourceIdentity
+from market_data.frozen import semantic_hash
 from research_science.check import CHECK_PLAN_SCHEMA_VERSION, ResolvedCheckPlan
 
 from portal.backend.service.research.event_fact_evaluator import (
+    LEGACY_EVENT_FACT_EVALUATOR_VERSION,
+    LEGACY_EVENT_FACT_RESULT_VERSION,
     EventFactEvaluator,
     normalize_event_fact_configuration,
 )
@@ -199,6 +202,23 @@ def test_event_fact_check_uses_indicator_events_causal_facts_and_exact_outcomes(
     assert result["outcome_resolution"]["2"]["resolved_count"] == 2
     assert len(result["hashes"]["selected_facts_hash"]) == 64
     assert result["event_ownership"] == "indicator"
+
+
+def test_legacy_event_fact_result_remains_byte_semantically_stable() -> None:
+    result = EventFactEvaluator(
+        version=LEGACY_EVENT_FACT_EVALUATOR_VERSION,
+        result_schema_version=LEGACY_EVENT_FACT_RESULT_VERSION,
+        fact_snapshot_enabled=False,
+    ).evaluate(
+        plan=_plan(gap_policy="continue_degraded"),
+        inputs=_inputs(),
+    )
+
+    assert result["schema_version"] == "event_fact_analysis_result.v2"
+    assert semantic_hash(result) == (
+        "b50a0b1586d182a5d6711252a26d4c58"
+        "af59ddcef3f22a7dabb9a959f8be2d38"
+    )
 
 
 def test_event_fact_check_excludes_event_not_known_by_evaluation_end() -> None:

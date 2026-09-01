@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from collections import Counter
-import os
-from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from market_data.canonical import (
@@ -518,6 +518,20 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
         "market.market_response.v1",
     }
 )
+_ALL_CANONICAL_REVISIONS_SELECTION = "all_canonical_revisions.v1"
+
+
+def _preserves_canonical_revision_history(contract_version: str) -> bool:
+    normalized = str(contract_version or "").strip().lower()
+    try:
+        get_fact_payload_schema(normalized)
+    except ValueError:
+        return False
+    return (
+        normalized not in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS
+        and not normalized.startswith(f"{NORMALIZED_FACT_VERSION}/")
+    )
+
 
 # Lineage rows include payload, provenance, and quality JSONB. Bound each query
 # even when a frozen series contains hundreds of thousands of witnesses.
@@ -729,10 +743,187 @@ def _load_lineage_material_rows(
     return {material_hash: by_hash[material_hash] for material_hash in requested}
 
 
+def _collect_canonical_book_archive_refs(
+    session,
+    *,
+    series_id: int,
+    fact_type: str,
+    start: datetime,
+    end: datetime,
+    as_of_commit_seq: int,
+    expected_record_count: int,
+) -> dict[str, dict[str, str]]:
+    """Resolve every frozen BBO/depth revision to raw objects in one DB pass."""
+
+    evidence_keys = {
+        "market.bbo": "_qt_bbo_evidence",
+        "market.depth_observation": "_qt_depth_evidence",
+    }
+    evidence_key = evidence_keys.get(str(fact_type))
+    if evidence_key is None:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: unsupported canonical book "
+            f"fact_type={fact_type}"
+        )
+    row = session.execute(
+        text(
+            """
+            WITH raw_positions AS MATERIALIZED (
+                SELECT versions.provenance -> :evidence_key
+                           -> 'source_position' AS position
+                FROM market.fact_versions AS versions
+                WHERE versions.series_id = :series_id
+                  AND versions.fact_type = :fact_type
+                  AND versions.observation_time >= :start
+                  AND versions.observation_time < :end
+                  AND versions.market_commit_seq <= :as_of_commit_seq
+            ),
+            classified AS MATERIALIZED (
+                SELECT position,
+                       COALESCE(position ->> 'definition_id', '') AS definition_id,
+                       COALESCE(position ->> 'session_id', '') AS session_id,
+                       COALESCE(position ->> 'connection_epoch', '')
+                           AS connection_epoch_text,
+                       COALESCE(position ->> 'receive_ordinal', '') AS receive_ordinal_text,
+                       COALESCE((
+                           jsonb_typeof(position) = 'object'
+                           AND COALESCE(position ->> 'definition_id', '') <> ''
+                           AND COALESCE(position ->> 'session_id', '') <> ''
+                           AND CASE
+                               WHEN COALESCE(position ->> 'connection_epoch', '')
+                                    ~ '^(0|[1-9][0-9]{0,18})$'
+                               THEN (position ->> 'connection_epoch')::numeric
+                                    <= 9223372036854775807
+                               ELSE FALSE
+                           END
+                           AND CASE
+                               WHEN COALESCE(position ->> 'receive_ordinal', '')
+                                    ~ '^[1-9][0-9]{0,18}$'
+                               THEN (position ->> 'receive_ordinal')::numeric
+                                    <= 9223372036854775807
+                               ELSE FALSE
+                           END
+                       ), FALSE) AS position_valid
+                FROM raw_positions
+            ),
+            positions AS MATERIALIZED (
+                SELECT DISTINCT definition_id, session_id,
+                       connection_epoch_text::bigint AS connection_epoch,
+                       receive_ordinal_text::bigint AS receive_ordinal
+                FROM classified
+                WHERE position_valid
+            ),
+            matched AS MATERIALIZED (
+                SELECT positions.definition_id, positions.session_id,
+                       positions.connection_epoch,
+                       positions.receive_ordinal,
+                       manifests.id AS manifest_id,
+                       manifests.object_sha256,
+                       manifests.content_fingerprint,
+                       manifests.object_key,
+                       manifests.object_uri
+                FROM positions
+                LEFT JOIN market.raw_archive_manifests AS manifests
+                  ON manifests.definition_id = positions.definition_id
+                 AND manifests.session_id = positions.session_id
+                 AND manifests.connection_epoch = positions.connection_epoch
+                 AND manifests.first_receive_ordinal <= positions.receive_ordinal
+                 AND manifests.last_receive_ordinal >= positions.receive_ordinal
+            )
+            SELECT (SELECT count(*) FROM raw_positions) AS fact_count,
+                   (SELECT count(*) FROM classified WHERE NOT position_valid)
+                       AS malformed_count,
+                   (SELECT count(*) FROM positions) AS position_count,
+                   count(*) FILTER (WHERE manifest_id IS NULL) AS missing_count,
+                   COALESCE(
+                       jsonb_agg(
+                           DISTINCT jsonb_build_object(
+                               'manifest_id', manifest_id,
+                               'object_sha256', object_sha256,
+                               'content_fingerprint', content_fingerprint,
+                               'object_key', object_key,
+                               'object_uri', object_uri
+                           )
+                       ) FILTER (WHERE manifest_id IS NOT NULL),
+                       '[]'::jsonb
+                   ) AS archive_refs
+            FROM matched
+            """
+        ),
+        {
+            "evidence_key": evidence_key,
+            "series_id": int(series_id),
+            "fact_type": str(fact_type),
+            "start": start,
+            "end": end,
+            "as_of_commit_seq": int(as_of_commit_seq),
+        },
+    ).mappings().one()
+    fact_count = int(row["fact_count"] or 0)
+    malformed_count = int(row["malformed_count"] or 0)
+    position_count = int(row["position_count"] or 0)
+    missing_count = int(row["missing_count"] or 0)
+    context = (
+        f"series_id={int(series_id)} fact_type={fact_type} "
+        f"start={_iso(start)} end={_iso(end)} "
+        f"as_of_commit_seq={int(as_of_commit_seq)}"
+    )
+    if fact_count != int(expected_record_count):
+        raise RuntimeError(
+            "market_dataset_provenance_mismatch: canonical book lineage count "
+            f"expected={int(expected_record_count)} actual={fact_count} {context}"
+        )
+    if malformed_count:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: canonical book source position "
+            f"is malformed count={malformed_count} {context}"
+        )
+    if position_count <= 0:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: canonical book lineage has no "
+            f"source positions {context}"
+        )
+    if missing_count:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: canonical book source position "
+            "has no acknowledged archive "
+            f"count={missing_count} {context}"
+        )
+    references: dict[str, dict[str, str]] = {}
+    for raw_reference in row["archive_refs"] or ():
+        if not isinstance(raw_reference, Mapping):
+            raise RuntimeError(
+                "market_dataset_archive_mismatch: canonical book archive "
+                f"reference is malformed {context}"
+            )
+        manifest_id = str(raw_reference.get("manifest_id") or "")
+        reference = {
+            "object_sha256": str(raw_reference.get("object_sha256") or ""),
+            "content_fingerprint": str(
+                raw_reference.get("content_fingerprint") or ""
+            ),
+            "object_key": str(raw_reference.get("object_key") or ""),
+            "object_uri": str(raw_reference.get("object_uri") or ""),
+        }
+        if not manifest_id or any(not value for value in reference.values()):
+            raise RuntimeError(
+                "market_dataset_archive_mismatch: canonical book archive "
+                f"reference is incomplete {context}"
+            )
+        existing = references.get(manifest_id)
+        if existing is not None and existing != reference:
+            raise RuntimeError(
+                "market_dataset_archive_mismatch: canonical book manifest "
+                f"evidence disagrees manifest_id={manifest_id} {context}"
+            )
+        references[manifest_id] = reference
+    return references
+
+
 def _collect_typed_archive_refs(
     session,
     *,
-    records: Sequence[TypedFeatureRecord],
+    records: Iterable[TypedFeatureRecord],
 ) -> dict[str, dict[str, str]]:
     """Resolve typed derived lineage back to acknowledged raw objects."""
 
@@ -2551,6 +2742,32 @@ class PostgresMarketDataRepository:
             )
         return [_canonical_row_to_record(row) for row in rows]
 
+    def read_fact_revisions(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        """Return all canonical revisions for causal historical selection."""
+
+        with db.session() as session:
+            rows = self._read_canonical_rows_with_session(
+                session,
+                series_id=series_id,
+                start=start,
+                end=end,
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+                latest_only=False,
+                include_invalidated=True,
+                source_identity_keys=source_identity_keys,
+            )
+        return [_canonical_row_to_record(row) for row in rows]
+
     def read_candles(
         self,
         *,
@@ -3359,6 +3576,22 @@ class PostgresMarketDataRepository:
                         records = [
                             _canonical_row_to_record(row) for row in canonical_rows
                         ]
+                elif _preserves_canonical_revision_history(
+                    str(identity["contract_version"])
+                ):
+                    canonical_rows = self._read_canonical_rows_with_session(
+                        session,
+                        series_id=item.series_id,
+                        start=item.start,
+                        end=item.end,
+                        as_of_commit_seq=watermark,
+                        known_at_lte=None,
+                        latest_only=False,
+                        include_invalidated=True,
+                    )
+                    records = [
+                        _canonical_row_to_record(row) for row in canonical_rows
+                    ]
                 else:
                     records = self.read_series_records(
                         series_id=item.series_id,
@@ -3482,6 +3715,20 @@ class PostgresMarketDataRepository:
                     isinstance(record, TypedFeatureRecord) for record in records
                 ):
                     archive_refs.update(_collect_typed_archive_refs(session, records=records))
+                elif records and all(
+                    isinstance(record, CanonicalFactRecord) for record in records
+                ) and fact_type in {"market.bbo", "market.depth_observation"}:
+                    archive_refs.update(
+                        _collect_canonical_book_archive_refs(
+                            session,
+                            series_id=item.series_id,
+                            fact_type=fact_type,
+                            start=item.start,
+                            end=item.end,
+                            as_of_commit_seq=watermark,
+                            expected_record_count=len(records),
+                        )
+                    )
                 if fact_type == MARKET_TRADE_FACT_TYPE:
                     source_ids = sorted({record.source_id for record in records})
                     source_rows = session.execute(
@@ -3613,6 +3860,15 @@ class PostgresMarketDataRepository:
                         "source_summary": {
                             "counts": dict(sorted(source_counts.items())),
                             "sources": {key: source_details[key] for key in sorted(source_details)},
+                            **(
+                                {
+                                    "record_selection": _ALL_CANONICAL_REVISIONS_SELECTION
+                                }
+                                if _preserves_canonical_revision_history(
+                                    str(identity["contract_version"])
+                                )
+                                else {}
+                            ),
                         },
                         "quality_hash": build_quality_hash(quality),
                         "quality_summary": {
@@ -3947,6 +4203,79 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
                 source_identity_keys=source_identity_keys,
             )
+
+    def read_dataset_fact_revisions(
+        self,
+        *,
+        dataset_id: str,
+        series_id: int,
+        known_at_lte: Optional[datetime] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        """Read only revision history explicitly bound into Dataset identity."""
+
+        with db.session() as session:
+            entry = session.execute(
+                text(
+                    """
+                    SELECT dataset_series.range_start, dataset_series.range_end,
+                           dataset_series.max_commit_seq,
+                           dataset_series.source_summary,
+                           series.fact_type, series.contract_version
+                    FROM market.dataset_series AS dataset_series
+                    JOIN market.series AS series ON series.id = dataset_series.series_id
+                    WHERE dataset_series.dataset_id = :dataset_id
+                      AND dataset_series.series_id = :series_id
+                    """
+                ),
+                {"dataset_id": str(dataset_id), "series_id": int(series_id)},
+            ).mappings().first()
+            if entry is None:
+                raise ValueError(
+                    "market_dataset_series_unknown: "
+                    f"dataset_id={dataset_id} series_id={series_id}"
+                )
+            requested = DatasetSeriesRequest(
+                series_id=int(series_id),
+                start=start or entry["range_start"],
+                end=end or entry["range_end"],
+            )
+            if (
+                requested.start < entry["range_start"]
+                or requested.end > entry["range_end"]
+            ):
+                raise ValueError(
+                    "market_dataset_range_expansion_forbidden: requested range is outside "
+                    f"dataset_id={dataset_id} series_id={series_id} frozen bounds"
+                )
+            selection = str(
+                dict(entry.get("source_summary") or {}).get("record_selection")
+                or ""
+            )
+            if (
+                selection != _ALL_CANONICAL_REVISIONS_SELECTION
+                or not _preserves_canonical_revision_history(
+                    str(entry["contract_version"])
+                )
+            ):
+                raise RuntimeError(
+                    "market_dataset_revision_history_unpinned: re-freeze Dataset "
+                    f"dataset_id={dataset_id} series_id={series_id}"
+                )
+            rows = self._read_canonical_rows_with_session(
+                session,
+                series_id=int(series_id),
+                start=requested.start,
+                end=requested.end,
+                as_of_commit_seq=int(entry["max_commit_seq"]),
+                known_at_lte=known_at_lte,
+                latest_only=False,
+                include_invalidated=True,
+                source_identity_keys=source_identity_keys,
+            )
+        return [_canonical_row_to_record(row) for row in rows]
 
 
 market_data_repo = PostgresMarketDataRepository()
