@@ -14,3 +14,5 @@ services:
         source: ./grafana/server-alerting/operator-email.yml
         target: /etc/grafana/provisioning/alerting/operator-email.yml
         read_only: true
+        bind:
+          create_host_path: false

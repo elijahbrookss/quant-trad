@@ -418,7 +418,30 @@ services:
       - "${QT_GRAFANA_BIND_ADDRESS:-127.0.0.1}:${QT_GRAFANA_PORT:-3000}:3000"
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - type: bind
+        source: ./grafana/provisioning/datasources
+        target: /etc/grafana/provisioning/datasources
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./grafana/provisioning/dashboards
+        target: /etc/grafana/provisioning/dashboards
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./grafana/provisioning/alerting/collector-safety.yml
+        target: /etc/grafana/provisioning/alerting/collector-safety.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./grafana/provisioning/alerting/platform-safety.yml
+        target: /etc/grafana/provisioning/alerting/platform-safety.yml
+        read_only: true
+        bind:
+          create_host_path: false
     networks:
       - quanttrad
     logging: *service-logging

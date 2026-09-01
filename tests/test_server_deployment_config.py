@@ -13,6 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVER_COMPOSE_PATH = ROOT / "docker/docker-compose.server.yml"
 ALERT_COMPOSE_PATH = ROOT / "docker/docker-compose.alert-email.yml"
 ALERT_PROVISIONING_PATH = ROOT / "docker/grafana/server-alerting/operator-email.yml"
+ALERT_CLEANUP_PROVISIONING_PATH = (
+    ROOT
+    / "docker/grafana/server-alerting/cleanup-provisioning/alerting/operator-email-cleanup.yml"
+)
 
 
 def _server_compose() -> dict:
@@ -167,6 +171,21 @@ def test_server_email_alerting_is_an_optional_native_grafana_overlay():
     ]["grafana"]
     environment = overlay["environment"]
 
+    base_volume_targets = {
+        volume["target"]
+        for volume in base["volumes"]
+        if isinstance(volume, dict)
+    }
+    assert "/etc/grafana/provisioning" not in base_volume_targets
+    assert {
+        "/etc/grafana/provisioning/datasources",
+        "/etc/grafana/provisioning/dashboards",
+        "/etc/grafana/provisioning/alerting/collector-safety.yml",
+        "/etc/grafana/provisioning/alerting/platform-safety.yml",
+    }.issubset(base_volume_targets)
+    for volume in base["volumes"]:
+        if isinstance(volume, dict):
+            assert volume["bind"]["create_host_path"] is False
     assert not any("operator-email.yml" in str(volume) for volume in base["volumes"])
     assert environment["GF_SMTP_ENABLED"] == "true"
     assert "QT_ALERT_SMTP_HOST" in environment["GF_SMTP_HOST"]
@@ -451,12 +470,20 @@ def test_alert_preview_is_grafana_only_reversible_and_fail_closed() -> None:
     restore_body = deploy.split("restore_alerting_preview() {", 1)[1].split(
         "deploy_release() {", 1
     )[0]
+    recreate_body = deploy.split("recreate_grafana_from_repo() {", 1)[1].split(
+        "restore_grafana_to_base() {", 1
+    )[0]
 
     assert 'test "$alerts_enabled" = "true"' in preview_body
     assert 'test "$deployed_revision" != "$QT_RELEASE_REVISION"' in preview_body
     assert "record_alert_preview" in preview_body
     assert 'recreate_grafana_from_repo "$repo_root"' in preview_body
     assert 'restore_grafana_to_base "$base_root"' in preview_body
+    assert (
+        'if ! compose_from_repo_root "$source_root" "$extra_compose_file" up'
+        in recreate_body
+    )
+    assert "return 1" in recreate_body
     assert "backend" not in preview_body
     assert "market-data-collector" not in preview_body
     assert 'test "$current_revision" = "$base_revision"' in restore_body
@@ -465,15 +492,7 @@ def test_alert_preview_is_grafana_only_reversible_and_fail_closed() -> None:
 
 
 def test_alert_preview_cleanup_deletes_preview_only_grafana_resources() -> None:
-    cleanup = yaml.safe_load(
-        (
-            ROOT
-            / "docker"
-            / "grafana"
-            / "server-alerting"
-            / "operator-email-cleanup.yml"
-        ).read_text()
-    )
+    cleanup = yaml.safe_load(ALERT_CLEANUP_PROVISIONING_PATH.read_text())
     assert cleanup["resetPolicies"] == [1]
     assert cleanup["deleteContactPoints"] == [
         {"orgId": 1, "uid": "qt-operator-email"}
@@ -481,3 +500,18 @@ def test_alert_preview_cleanup_deletes_preview_only_grafana_resources() -> None:
     assert cleanup["deleteRules"] == [
         {"orgId": 1, "uid": "qt-database-unavailable"}
     ]
+
+
+def test_alert_preview_cleanup_replaces_legacy_provisioning_root_mount() -> None:
+    cleanup_overlay = yaml.safe_load(
+        (ROOT / "docker/docker-compose.alert-preview-cleanup.yml").read_text()
+    )["services"]["grafana"]
+    cleanup_volume = cleanup_overlay["volumes"][0]
+
+    assert "QT_ALERT_CLEANUP_PROVISIONING_ROOT" in cleanup_volume["source"]
+    assert cleanup_volume["target"] == "/etc/grafana/provisioning"
+    assert cleanup_volume["read_only"] is True
+    assert cleanup_volume["bind"]["create_host_path"] is False
+
+    deploy = (ROOT / "scripts/automation/server_deploy.sh").read_text()
+    assert 'QT_ALERT_CLEANUP_PROVISIONING_ROOT="$cleanup_provisioning_root"' in deploy

@@ -22,7 +22,7 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - type: bind
-        source: ../grafana/server-alerting/operator-email-cleanup.yml
+        source: ../grafana/server-alerting/cleanup-provisioning/alerting/operator-email-cleanup.yml
         target: /etc/grafana/provisioning/alerting/operator-email-cleanup.yml
         read_only: true
 

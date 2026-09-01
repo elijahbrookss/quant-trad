@@ -370,6 +370,7 @@ compose_from_repo_root() {
   shift 2
   local source_compose_file="$source_root/docker/docker-compose.server.yml"
   local source_alerting_file="$source_root/docker/docker-compose.alert-email.yml"
+  local cleanup_provisioning_root="$repo_root/docker/grafana/server-alerting/cleanup-provisioning"
   local source_revision source_tree_hash
   local compose_file_args=(--file "$source_compose_file")
   local profile_args=()
@@ -399,6 +400,7 @@ compose_from_repo_root() {
   env \
     QT_RELEASE_REVISION="$source_revision" \
     QT_SOURCE_TREE_HASH="$source_tree_hash" \
+    QT_ALERT_CLEANUP_PROVISIONING_ROOT="$cleanup_provisioning_root" \
     docker compose \
       --env-file "$env_file" \
       "${compose_file_args[@]}" \
@@ -639,11 +641,19 @@ validate_deployed_checkout() {
 recreate_grafana_from_repo() {
   local source_root="$1"
   local extra_compose_file="${2:-}"
-  compose_from_repo_root "$source_root" "$extra_compose_file" config --quiet
-  compose_from_repo_root "$source_root" "$extra_compose_file" up \
+  if ! compose_from_repo_root \
+    "$source_root" "$extra_compose_file" config --quiet; then
+    return 1
+  fi
+  if ! compose_from_repo_root "$source_root" "$extra_compose_file" up \
     --detach --no-deps --force-recreate --wait \
-    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" grafana
-  compose_from_repo_root "$source_root" "$extra_compose_file" ps grafana
+    --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}" grafana; then
+    return 1
+  fi
+  if ! compose_from_repo_root \
+    "$source_root" "$extra_compose_file" ps grafana; then
+    return 1
+  fi
 }
 
 restore_grafana_to_base() {
