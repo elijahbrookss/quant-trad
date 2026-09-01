@@ -128,10 +128,23 @@ mapping, canonical trade publication, coverage revision, and completed-bucket
 materialization occur off the acquisition loop. A full queue or spool limit is
 a visible hard failure; memory or disk backlog cannot grow without bound.
 
+Before acquisition starts, the runtime performs one exact definition-scoped
+spool scan off the event-loop thread. It then enforces the byte bound from a
+thread-safe, constant-time ledger. A segment updates that ledger only after a
+durable append succeeds or after an acknowledged spool is durably deleted, so
+the receive path never traverses historical spool directories. A low-frequency
+off-thread scan detects drift; its result replaces the ledger only when no
+tracked filesystem mutation overlapped the scan. Corrected drift is logged, and
+uncertain accounting fails closed until a clean reconciliation succeeds.
+
 Reconnect creates a new connection epoch on the same logical session. The
 disconnect budget resets only after a provider message arrives, not after a
 successful socket handshake. Sequence, subscription, heartbeat, snapshot, and
 coverage evidence remain epoch-scoped.
+The transport returns the epoch of a successfully established connection, and
+the runtime advances its accepted epoch only after validating that return value.
+A failed connection attempt therefore cannot move either side of the accepted
+epoch boundary.
 
 Projection-quality rejection is distinct from transport failure. For example,
 Coinbase can emit a mixed trade update whose maker sides include

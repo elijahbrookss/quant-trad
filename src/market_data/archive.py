@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -129,11 +130,171 @@ def spool_backlog_bytes(root: Path, *, definition_id: str | None = None) -> int:
         root_path = root_path / _safe_component(definition_id)
     if not root_path.exists():
         return 0
-    return sum(
-        path.stat().st_size
-        for path in root_path.rglob("*")
-        if path.is_file() and path.suffix in {".open", ".sealed"}
-    )
+    total = 0
+    for path in root_path.rglob("*"):
+        if path.suffix not in {".open", ".sealed"}:
+            continue
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except FileNotFoundError:
+            # A segment may be atomically renamed or deleted while an off-thread
+            # reconciliation walks the tree. The tracker applies the scan only
+            # when no tracked mutation overlapped it.
+            continue
+    return total
+
+
+@dataclass(frozen=True)
+class SpoolBacklogReconciliation:
+    tracked_bytes_before: int
+    observed_bytes: int
+    tracked_bytes_after: int
+    drift_bytes: int
+    applied: bool
+
+
+class SpoolBacklogTracker:
+    """Definition-scoped, constant-time accounting for live spool bytes.
+
+    One exact filesystem scan seeds the tracker before acquisition starts.
+    Segment writes and acknowledged deletions then adjust the value by their
+    successful byte deltas. Reconciliation scans may run off-thread; a scan is
+    applied only when no tracked filesystem mutation overlapped it.
+    """
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        definition_id: str,
+        initial_bytes: int,
+    ) -> None:
+        self.root = Path(root).expanduser().resolve()
+        self.definition_id = str(definition_id or "").strip()
+        if not self.definition_id:
+            raise ValueError("market_spool_invalid: definition_id is required")
+        initial = int(initial_bytes)
+        if initial < 0:
+            raise ValueError("market_spool_invalid: backlog bytes cannot be negative")
+        self._bytes = initial
+        self._mutation_version = 0
+        self._active_mutations = 0
+        self._uncertain = False
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_disk(
+        cls,
+        *,
+        root: Path,
+        definition_id: str,
+    ) -> "SpoolBacklogTracker":
+        return cls(
+            root=root,
+            definition_id=definition_id,
+            initial_bytes=spool_backlog_bytes(
+                root,
+                definition_id=definition_id,
+            ),
+        )
+
+    def owns(self, *, root: Path, definition_id: str) -> bool:
+        return (
+            Path(root).expanduser().resolve() == self.root
+            and str(definition_id or "").strip() == self.definition_id
+        )
+
+    @property
+    def current_bytes(self) -> int:
+        with self._lock:
+            return self._bytes
+
+    def require_capacity(
+        self,
+        *,
+        max_backlog_bytes: int,
+        next_frame_bytes: int,
+    ) -> None:
+        limit = int(max_backlog_bytes)
+        incoming = int(next_frame_bytes)
+        if limit <= 0 or incoming < 0:
+            raise ValueError(
+                "market_spool_invalid: backlog bound and frame size are invalid"
+            )
+        with self._lock:
+            if self._uncertain:
+                raise RuntimeError(
+                    "market_spool_accounting_uncertain: reconciliation is required"
+                )
+            current = self._bytes
+        if current + incoming > limit:
+            raise SpoolBackpressureError(
+                "market_spool_backpressure: frame would exceed bounded local backlog "
+                f"current_bytes={current} next_frame_bytes={incoming} "
+                f"max_backlog_bytes={limit}"
+            )
+
+    def _begin_mutation(self) -> None:
+        with self._lock:
+            if self._uncertain:
+                raise RuntimeError(
+                    "market_spool_accounting_uncertain: reconciliation is required"
+                )
+            self._mutation_version += 1
+            self._active_mutations += 1
+
+    def _finish_mutation(self, byte_delta: int) -> None:
+        delta = int(byte_delta)
+        with self._lock:
+            if self._active_mutations <= 0:
+                self._uncertain = True
+                raise RuntimeError(
+                    "market_spool_accounting_invalid: no active mutation"
+                )
+            self._active_mutations -= 1
+            self._mutation_version += 1
+            updated = self._bytes + delta
+            if updated < 0:
+                self._uncertain = True
+                raise RuntimeError(
+                    "market_spool_accounting_invalid: backlog became negative"
+                )
+            self._bytes = updated
+
+    def _abandon_mutation(self) -> None:
+        with self._lock:
+            if self._active_mutations > 0:
+                self._active_mutations -= 1
+            self._mutation_version += 1
+            self._uncertain = True
+
+    def reconcile(self) -> SpoolBacklogReconciliation:
+        with self._lock:
+            start_version = self._mutation_version
+            start_active = self._active_mutations
+        observed = spool_backlog_bytes(
+            self.root,
+            definition_id=self.definition_id,
+        )
+        with self._lock:
+            tracked_before = self._bytes
+            applied = (
+                start_active == 0
+                and self._active_mutations == 0
+                and self._mutation_version == start_version
+            )
+            if applied:
+                self._bytes = observed
+                self._uncertain = False
+            tracked_after = self._bytes
+        return SpoolBacklogReconciliation(
+            tracked_bytes_before=tracked_before,
+            observed_bytes=observed,
+            tracked_bytes_after=tracked_after,
+            drift_bytes=observed - tracked_before,
+            applied=applied,
+        )
 
 
 def require_spool_capacity(
@@ -167,12 +328,21 @@ class DurableRawSpoolSegment:
         connection_epoch: int,
         segment_ordinal: int = 0,
         create: bool = True,
+        backlog_tracker: SpoolBacklogTracker | None = None,
     ) -> None:
         self.root = Path(root)
         self.definition_id = str(definition_id or "").strip()
         self.session_id = str(session_id or "").strip()
         self.connection_epoch = int(connection_epoch)
         self.segment_ordinal = int(segment_ordinal)
+        self.backlog_tracker = backlog_tracker
+        if self.backlog_tracker is not None and not self.backlog_tracker.owns(
+            root=self.root,
+            definition_id=self.definition_id,
+        ):
+            raise ValueError(
+                "market_spool_invalid: backlog tracker scope does not match segment"
+            )
         self.spool_segment_id = build_spool_segment_id(
             definition_id=self.definition_id,
             session_id=self.session_id,
@@ -190,6 +360,7 @@ class DurableRawSpoolSegment:
         self.sealed_path = directory / f"{self.spool_segment_id}.sealed"
         self.ack_path = directory / f"{self.spool_segment_id}.ack.json"
         self._descriptor: int | None = None
+        self._current_bytes = 0
         self._record_count = 0
         self._last_receive_ordinal = 0
         self.recovery_evidence: SpoolRecoveryEvidence | None = None
@@ -215,6 +386,7 @@ class DurableRawSpoolSegment:
             segment_ordinal=int(header["segment_ordinal"]),
             create=False,
         )
+        segment._current_bytes = source.stat().st_size
         segment._record_count = len(rows)
         segment._last_receive_ordinal = (
             int(rows[-1]["receive_ordinal"]) if rows else 0
@@ -232,10 +404,23 @@ class DurableRawSpoolSegment:
     def _open_or_create(self) -> None:
         existed = self.open_path.exists()
         if existed:
-            evidence = self.recover_open_tail()
+            before = self.open_path.stat().st_size
+            if self.backlog_tracker is not None:
+                self.backlog_tracker._begin_mutation()
+            try:
+                evidence = self.recover_open_tail()
+                after = self.open_path.stat().st_size
+            except BaseException:
+                if self.backlog_tracker is not None:
+                    self.backlog_tracker._abandon_mutation()
+                raise
+            else:
+                if self.backlog_tracker is not None:
+                    self.backlog_tracker._finish_mutation(after - before)
             self.recovery_evidence = evidence
             self._record_count = evidence.recovered_record_count
             self._last_receive_ordinal = evidence.last_receive_ordinal
+            self._current_bytes = after
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
         self._descriptor = os.open(self.open_path, flags, 0o600)
         if not existed:
@@ -258,19 +443,28 @@ class DurableRawSpoolSegment:
 
     @property
     def current_bytes(self) -> int:
-        path = self.open_path if self.open_path.exists() else self.sealed_path
-        return path.stat().st_size if path.exists() else 0
+        return self._current_bytes
 
     def _write_line(self, payload: bytes) -> None:
         if self._descriptor is None:
             raise RuntimeError("market_spool_closed: append rejected")
+        if self.backlog_tracker is not None:
+            self.backlog_tracker._begin_mutation()
         offset = 0
-        while offset < len(payload):
-            written = os.write(self._descriptor, payload[offset:])
-            if written <= 0:
-                raise OSError("market_spool_write_failed: zero-byte write")
-            offset += written
-        os.fsync(self._descriptor)
+        try:
+            while offset < len(payload):
+                written = os.write(self._descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("market_spool_write_failed: zero-byte write")
+                offset += written
+            os.fsync(self._descriptor)
+        except BaseException:
+            if self.backlog_tracker is not None:
+                self.backlog_tracker._abandon_mutation()
+            raise
+        self._current_bytes += offset
+        if self.backlog_tracker is not None:
+            self.backlog_tracker._finish_mutation(offset)
 
     def append(self, record: RawStreamRecord) -> None:
         if record.spool_segment_id != self.spool_segment_id:
@@ -383,8 +577,44 @@ class DurableRawSpoolSegment:
                 "market_spool_cleanup_forbidden: open segment cannot be discarded"
             )
         if self.sealed_path.exists():
-            self.sealed_path.unlink()
-            _fsync_directory(self.sealed_path.parent)
+            discarded_bytes = self.sealed_path.stat().st_size
+            if self.backlog_tracker is not None:
+                self.backlog_tracker._begin_mutation()
+            try:
+                self.sealed_path.unlink()
+                _fsync_directory(self.sealed_path.parent)
+            except BaseException:
+                if self.backlog_tracker is not None:
+                    self.backlog_tracker._abandon_mutation()
+                raise
+            self._current_bytes = 0
+            if self.backlog_tracker is not None:
+                self.backlog_tracker._finish_mutation(-discarded_bytes)
+
+    def discard_empty_open(self) -> None:
+        """Remove a header-only segment without weakening acknowledged cleanup."""
+
+        if self._record_count > 0:
+            raise RuntimeError(
+                "market_spool_cleanup_forbidden: non-empty open segment cannot be discarded"
+            )
+        self.close()
+        if not self.open_path.exists():
+            self._current_bytes = 0
+            return
+        discarded_bytes = self.open_path.stat().st_size
+        if self.backlog_tracker is not None:
+            self.backlog_tracker._begin_mutation()
+        try:
+            self.open_path.unlink()
+            _fsync_directory(self.open_path.parent)
+        except BaseException:
+            if self.backlog_tracker is not None:
+                self.backlog_tracker._abandon_mutation()
+            raise
+        self._current_bytes = 0
+        if self.backlog_tracker is not None:
+            self.backlog_tracker._finish_mutation(-discarded_bytes)
 
 
 def _infer_spool_root(path: Path, header: Mapping[str, Any]) -> Path:
@@ -885,6 +1115,8 @@ __all__ = [
     "RawArchiveObjectStore",
     "SPOOL_SCHEMA_VERSION",
     "SpoolBackpressureError",
+    "SpoolBacklogReconciliation",
+    "SpoolBacklogTracker",
     "SpoolRecoveryEvidence",
     "archive_object_key",
     "discover_spool_segments",

@@ -14,8 +14,9 @@ class _FakeStream:
         self.closed = False
         self.subscriptions = []
 
-    async def connect(self) -> None:
+    async def connect(self) -> int:
         self.connected = True
+        return 0
 
     async def subscribe(self, subscriptions) -> None:
         self.subscriptions.extend(subscriptions)

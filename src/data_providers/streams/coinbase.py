@@ -443,7 +443,7 @@ class CoinbaseAdvancedTradeStream:
         self._connection_epoch = -1
         self._receive_ordinal = 0
 
-    async def connect(self) -> None:
+    async def connect(self) -> int:
         if websockets is None:
             raise RuntimeError(
                 "Coinbase WebSocket streaming requires the 'websockets' package. "
@@ -464,6 +464,7 @@ class CoinbaseAdvancedTradeStream:
             self.stream_session_id,
             self.url,
         )
+        return self._connection_epoch
 
     async def subscribe(self, subscriptions: Sequence[MarketSubscription]) -> None:
         if self._ws is None:

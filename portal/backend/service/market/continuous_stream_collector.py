@@ -31,11 +31,10 @@ from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
     SpoolBackpressureError,
+    SpoolBacklogTracker,
     discover_spool_segments,
     publish_spool_archive,
     read_raw_archive_parquet,
-    require_spool_capacity,
-    spool_backlog_bytes,
 )
 from market_data.book_archive import (
     BOOK_CHECKPOINT_COMPRESSION,
@@ -628,6 +627,11 @@ class ContinuousStreamRuntime:
             temporary_root=temporary_root,
             projection=active_projection,
         )
+        backlog_tracker = await asyncio.to_thread(
+            SpoolBacklogTracker.from_disk,
+            root=spool_root,
+            definition_id=definition_id,
+        )
         claim = self.repository.claim_stream(
             definition_id=definition_id,
             owner_id=owner_id,
@@ -660,6 +664,13 @@ class ContinuousStreamRuntime:
                 projection=active_projection,
             )
         )
+        reconciler = asyncio.create_task(
+            self._spool_reconciliation_loop(
+                definition_id=definition_id,
+                backlog_tracker=backlog_tracker,
+                interval_seconds=policy.spool_reconcile_seconds,
+            )
+        )
         started_at = datetime.now(UTC)
         stream = active_transport.create_stream(claim)
         current_segment: DurableRawSpoolSegment | None = None
@@ -671,7 +682,7 @@ class ContinuousStreamRuntime:
         try:
             while not stop_requested():
                 self._raise_if_finalizer_failed(finalizer, definition_id)
-                connection_epoch += 1
+                attempted_epoch = connection_epoch + 1
                 analyzer = active_projection.create_analyzer(claim)
                 parser = active_transport.create_parser(claim)
                 segment_ordinal = 0
@@ -679,7 +690,15 @@ class ContinuousStreamRuntime:
                 disconnect_reason: Optional[str] = None
                 invalid_stream_state = False
                 try:
-                    await stream.connect()
+                    established_epoch = int(await stream.connect())
+                    if established_epoch != attempted_epoch:
+                        raise RuntimeError(
+                            "continuous_collector_epoch_contract_mismatch: "
+                            f"definition_id={definition_id} "
+                            f"expected={attempted_epoch} "
+                            f"actual={established_epoch}"
+                        )
+                    connection_epoch = established_epoch
                     await asyncio.to_thread(
                         event_writer.append,
                         connection_epoch=connection_epoch,
@@ -714,7 +733,7 @@ class ContinuousStreamRuntime:
                         if (
                             now_monotonic - last_lease_heartbeat
                             >= policy.heartbeat_seconds
-                    ):
+                        ):
                             await asyncio.to_thread(
                                 self.repository.heartbeat,
                                 claim,
@@ -754,11 +773,9 @@ class ContinuousStreamRuntime:
                         disconnect_started = None
                         backoff = policy.reconnect.initial_backoff_seconds
                         estimated_spool_bytes = len(message.raw_frame) * 2 + 4096
-                        require_spool_capacity(
-                            root=spool_root,
+                        backlog_tracker.require_capacity(
                             max_backlog_bytes=claim.max_spool_bytes,
                             next_frame_bytes=estimated_spool_bytes,
-                            definition_id=claim.definition_id,
                         )
                         if current_segment is None:
                             current_segment = DurableRawSpoolSegment(
@@ -767,6 +784,7 @@ class ContinuousStreamRuntime:
                                 session_id=claim.session_id,
                                 connection_epoch=connection_epoch,
                                 segment_ordinal=segment_ordinal,
+                                backlog_tracker=backlog_tracker,
                             )
                             segment_started = now_monotonic
                         elif (
@@ -794,6 +812,7 @@ class ContinuousStreamRuntime:
                                 session_id=claim.session_id,
                                 connection_epoch=connection_epoch,
                                 segment_ordinal=segment_ordinal + 1,
+                                backlog_tracker=backlog_tracker,
                             )
                             segment_ordinal += 1
                             segment_started = now_monotonic
@@ -837,7 +856,7 @@ class ContinuousStreamRuntime:
                         "error=%s",
                         definition_id,
                         claim.session_id,
-                        connection_epoch,
+                        attempted_epoch,
                         exc,
                     )
                 finally:
@@ -854,7 +873,7 @@ class ContinuousStreamRuntime:
                 stopping = stop_requested()
                 closing_event_id = await asyncio.to_thread(
                     event_writer.append,
-                    connection_epoch=connection_epoch,
+                    connection_epoch=attempted_epoch,
                     event_type=(
                         "continuous_capture_stopped"
                         if stopping
@@ -918,9 +937,7 @@ class ContinuousStreamRuntime:
                     counters["segments"] += 1
                     current_segment = None
                 elif current_segment is not None:
-                    current_segment.close()
-                    with contextlib.suppress(FileNotFoundError):
-                        current_segment.open_path.unlink()
+                    current_segment.discard_empty_open()
                     current_segment = None
                 if stopping:
                     break
@@ -967,9 +984,7 @@ class ContinuousStreamRuntime:
                 "finished_at": datetime.now(UTC).isoformat(),
                 "bounded_validation": bounded_validation,
                 "policy": policy.to_dict(),
-                "spool_backlog_bytes": spool_backlog_bytes(
-                    spool_root, definition_id=claim.definition_id
-                ),
+                "spool_backlog_bytes": backlog_tracker.current_bytes,
                 **counters,
             }
             logger.info(
@@ -1017,9 +1032,7 @@ class ContinuousStreamRuntime:
                         else "continuous collector failed; inspect correlated exception log"
                     ),
                     evidence={
-                        "spool_backlog_bytes": spool_backlog_bytes(
-                            spool_root, definition_id=definition_id
-                        )
+                        "spool_backlog_bytes": backlog_tracker.current_bytes
                     },
                 )
             if not isinstance(exc, asyncio.CancelledError):
@@ -1030,6 +1043,9 @@ class ContinuousStreamRuntime:
                 )
             raise
         finally:
+            reconciler.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reconciler
             if current_segment is not None:
                 with contextlib.suppress(Exception):
                     current_segment.close()
@@ -1708,6 +1724,47 @@ class ContinuousStreamRuntime:
                 joined.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await joined
+
+    @staticmethod
+    async def _spool_reconciliation_loop(
+        *,
+        definition_id: str,
+        backlog_tracker: SpoolBacklogTracker,
+        interval_seconds: float,
+    ) -> None:
+        """Reconcile drift without placing filesystem traversal on acquisition."""
+
+        while True:
+            await asyncio.sleep(interval_seconds)
+            try:
+                reconciliation = await asyncio.to_thread(backlog_tracker.reconcile)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "continuous_collector_spool_reconciliation_failed | "
+                    "definition_id=%s",
+                    definition_id,
+                )
+                continue
+            if reconciliation.applied and reconciliation.drift_bytes:
+                logger.warning(
+                    "continuous_collector_spool_backlog_reconciled | "
+                    "definition_id=%s tracked_bytes=%s observed_bytes=%s "
+                    "drift_bytes=%s",
+                    definition_id,
+                    reconciliation.tracked_bytes_before,
+                    reconciliation.observed_bytes,
+                    reconciliation.drift_bytes,
+                )
+            elif not reconciliation.applied:
+                logger.debug(
+                    "continuous_collector_spool_reconciliation_deferred | "
+                    "definition_id=%s tracked_bytes=%s observed_bytes=%s",
+                    definition_id,
+                    reconciliation.tracked_bytes_before,
+                    reconciliation.observed_bytes,
+                )
 
     @staticmethod
     async def _sleep_until_reconnect(

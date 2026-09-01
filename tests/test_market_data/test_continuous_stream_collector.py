@@ -1097,7 +1097,14 @@ def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projec
         contract_version="market.quote.v1",
         max_spool_bytes=1024**2,
         max_segment_bytes=1024,
-        config={"runtime_policy": {}},
+        config={
+            "runtime_policy": {
+                "reconnect_policy": {
+                    "initial_backoff_seconds": 0,
+                    "max_backoff_seconds": 0.001,
+                }
+            }
+        },
         owner_id="worker",
         lease_token="token",
         lease_generation=1,
@@ -1137,8 +1144,14 @@ def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projec
     stop = {"requested": False}
 
     class _Stream:
+        def __init__(self):
+            self.connect_attempts = 0
+
         async def connect(self):
-            return None
+            self.connect_attempts += 1
+            if self.connect_attempts == 1:
+                raise ConnectionError("injected connect failure")
+            return 0
 
         async def subscribe(self, _subscriptions):
             return None
@@ -1162,6 +1175,8 @@ def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projec
         def parse_raw(self, _raw_frame, **_kwargs):
             return ()
 
+    stream = _Stream()
+
     class _Transport:
         transport_id = "future.websocket.v1"
 
@@ -1169,7 +1184,7 @@ def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projec
             return definition["provider"] == "FUTURE_PROVIDER"
 
         def create_stream(self, _claim):
-            return _Stream()
+            return stream
 
         def create_parser(self, _claim):
             return _Parser()
@@ -1253,9 +1268,12 @@ def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projec
     assert result["status"] == "stopped"
     assert result["raw_records"] == 1
     assert result["quotes"] == 1
+    assert stream.connect_attempts == 2
     assert repository.released is True
     assert [row["event_type"] for row in repository.events] == [
+        "provider_disconnected",
         "connected",
         "subscription_sent",
         "continuous_capture_stopped",
     ]
+    assert {row["connection_epoch"] for row in repository.events} == {0}

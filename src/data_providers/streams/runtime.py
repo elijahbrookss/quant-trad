@@ -96,6 +96,7 @@ class ContinuousStreamPolicy:
     max_inflight_segments: int = 4
     lease_seconds: float = 90.0
     heartbeat_seconds: float = 10.0
+    spool_reconcile_seconds: float = 300.0
     reconnect: StreamReconnectPolicy = field(default_factory=StreamReconnectPolicy)
 
     @classmethod
@@ -108,6 +109,7 @@ class ContinuousStreamPolicy:
                 "max_inflight_segments",
                 "lease_seconds",
                 "heartbeat_seconds",
+                "spool_reconcile_seconds",
                 "reconnect_policy",
             }
         )
@@ -144,6 +146,14 @@ class ContinuousStreamPolicy:
                 "heartbeat_seconds",
                 minimum=1.0,
             ),
+            spool_reconcile_seconds=_coerce_float(
+                payload.get(
+                    "spool_reconcile_seconds",
+                    cls.spool_reconcile_seconds,
+                ),
+                "spool_reconcile_seconds",
+                minimum=30.0,
+            ),
             reconnect=StreamReconnectPolicy.from_mapping(
                 reconnect_payload
             ),
@@ -160,6 +170,7 @@ class ContinuousStreamPolicy:
             "max_inflight_segments": self.max_inflight_segments,
             "lease_seconds": self.lease_seconds,
             "heartbeat_seconds": self.heartbeat_seconds,
+            "spool_reconcile_seconds": self.spool_reconcile_seconds,
             "reconnect_policy": self.reconnect.to_dict(),
         }
 

@@ -189,7 +189,9 @@ class CanonicalMarketEvent:
 class ProviderMarketDataStream(Protocol):
     """Async provider stream boundary for read-only market data."""
 
-    async def connect(self) -> None:
+    async def connect(self) -> int:
+        """Connect and return the epoch assigned to that successful connection."""
+
         ...
 
     async def subscribe(self, subscriptions: Sequence[MarketSubscription]) -> None:

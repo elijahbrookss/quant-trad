@@ -95,24 +95,31 @@ No collector restart or corrective code was applied during alert validation.
 This preserved the evidence and avoided manufacturing a synthetic failure by
 stopping a healthy dependency.
 
-## Corrective Action Plan
+## Corrective Action
 
-The code correction is intentionally deferred until the alert path is proven.
-The bounded follow-up is:
+The alert and email path was proven against the live defect before corrective
+code was introduced. This change then implements the bounded correction:
 
-1. Maintain unacknowledged spool bytes incrementally on append, acknowledge,
-   recovery, and discard instead of recursively walking the tree per frame.
-2. Reconcile the counter asynchronously at startup and at a low operational
-   frequency so drift is observable without entering the receive hot path.
-3. Advance the collector's expected epoch only when connection establishment
-   succeeds, keeping it aligned with the transport epoch.
-4. Preserve append-before-parse, `fsync`, database acknowledgement, and
-   acknowledged-only deletion semantics.
+1. One exact, definition-scoped spool scan seeds a byte ledger before
+   acquisition starts. Durable appends and acknowledged deletions update it by
+   their successful byte deltas, so the per-frame capacity check is constant
+   time and independent of historical directory count.
+2. A low-frequency reconciliation scans off the event-loop thread and applies
+   only a quiescent snapshot. Drift is logged, while overlapping mutations cause
+   the snapshot to be deferred rather than overwriting newer accounting.
+3. The provider returns its successful connection epoch. The collector advances
+   its accepted epoch only after that handshake succeeds and the two values
+   match, so failed attempts cannot create an epoch offset.
+4. Append-before-parse, file and directory `fsync`, database acknowledgement,
+   and acknowledged-only deletion remain unchanged.
 
-The correction is done only when a sustained production observation shows fresh
+Implementation and automated verification are merge gates. Operational closure
+still requires a deployment and sustained production observation showing fresh
 valid data, no epoch mismatches, collector CPU returning to its normal range,
-and every stream remaining below the reconnect-storm threshold. A short green
-snapshot is insufficient evidence.
+and every stream remaining below the reconnect-storm threshold. The first gate
+is one L2 stream for at least 90 minutes; the fleet gate is all four streams for
+6–24 hours. The reconnect-storm alert must resolve naturally after the signal
+falls below threshold. A short green snapshot is insufficient evidence.
 
 ## Permanent Lessons
 

@@ -5,11 +5,13 @@ from pathlib import Path
 
 import pytest
 
+import market_data.archive as archive_module
 from data_providers.streams.contracts import ProviderRawMessage
 from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
     SpoolBackpressureError,
+    SpoolBacklogTracker,
     encode_spool_segment_to_parquet,
     publish_compacted_raw_archives,
     publish_spool_archive,
@@ -286,6 +288,120 @@ def test_spool_backlog_and_capacity_are_definition_scoped(tmp_path: Path) -> Non
         max_backlog_bytes=first_bytes + 1,
         next_frame_bytes=1,
     )
+
+
+def test_incremental_spool_backlog_tracks_append_seal_and_acknowledged_discard(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "spool"
+    tracker = SpoolBacklogTracker.from_disk(
+        root=root,
+        definition_id="coinbase-btc-trades",
+    )
+    segment = DurableRawSpoolSegment(
+        root=root,
+        definition_id="coinbase-btc-trades",
+        session_id="session-a",
+        connection_epoch=0,
+        backlog_tracker=tracker,
+    )
+
+    assert tracker.current_bytes == segment.current_bytes
+    segment.append(_record(segment, 1))
+    assert tracker.current_bytes == segment.current_bytes
+    assert tracker.current_bytes == segment.open_path.stat().st_size
+
+    segment.seal()
+    assert tracker.current_bytes == segment.sealed_path.stat().st_size
+    segment.mark_database_acknowledged(
+        manifest_id="manifest-a",
+        object_key="raw/example.parquet",
+        object_sha256="a" * 64,
+    )
+    segment.discard_acknowledged_spool()
+
+    assert tracker.current_bytes == 0
+    assert not segment.sealed_path.exists()
+
+
+def test_incremental_capacity_check_never_walks_the_spool_tree_per_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "spool"
+    tracker = SpoolBacklogTracker.from_disk(
+        root=root,
+        definition_id="coinbase-btc-trades",
+    )
+    segment = DurableRawSpoolSegment(
+        root=root,
+        definition_id="coinbase-btc-trades",
+        session_id="session-a",
+        connection_epoch=0,
+        backlog_tracker=tracker,
+    )
+
+    def _unexpected_tree_walk(_self, _pattern):
+        raise AssertionError("capacity check traversed historical spool paths")
+
+    monkeypatch.setattr(Path, "rglob", _unexpected_tree_walk)
+    tracker.require_capacity(
+        max_backlog_bytes=1024**2,
+        next_frame_bytes=4096,
+    )
+    segment.append(_record(segment, 1))
+    tracker.require_capacity(
+        max_backlog_bytes=1024**2,
+        next_frame_bytes=4096,
+    )
+
+
+def test_spool_reconciliation_repairs_quiescent_external_drift(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "spool"
+    tracker = SpoolBacklogTracker.from_disk(
+        root=root,
+        definition_id="coinbase-btc-trades",
+    )
+    external = root / "coinbase-btc-trades" / "external" / "epoch=0" / "tail.sealed"
+    external.parent.mkdir(parents=True)
+    external.write_bytes(b"external retained spool")
+
+    result = tracker.reconcile()
+
+    assert result.applied is True
+    assert result.drift_bytes == len(b"external retained spool")
+    assert tracker.current_bytes == len(b"external retained spool")
+
+
+def test_spool_reconciliation_does_not_overwrite_concurrent_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "spool"
+    tracker = SpoolBacklogTracker.from_disk(
+        root=root,
+        definition_id="coinbase-btc-trades",
+    )
+    segment = DurableRawSpoolSegment(
+        root=root,
+        definition_id="coinbase-btc-trades",
+        session_id="session-a",
+        connection_epoch=0,
+        backlog_tracker=tracker,
+    )
+
+    def _scan_with_concurrent_append(_root, *, definition_id=None):
+        assert definition_id == "coinbase-btc-trades"
+        segment.append(_record(segment, 1))
+        return segment.current_bytes
+
+    monkeypatch.setattr(archive_module, "spool_backlog_bytes", _scan_with_concurrent_append)
+    result = tracker.reconcile()
+
+    assert result.applied is False
+    assert tracker.current_bytes == segment.current_bytes
 
 
 def test_verified_object_deletion_requires_matching_evidence(tmp_path: Path) -> None:
