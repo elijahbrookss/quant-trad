@@ -11,6 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_COMPOSE_PATH = ROOT / "docker/docker-compose.server.yml"
+IBKR_ENTRYPOINT_PATH = ROOT / "docker/ibkr-gateway/entrypoint.sh"
 ALERT_COMPOSE_PATH = ROOT / "docker/docker-compose.alert-email.yml"
 ALERT_PROVISIONING_PATH = ROOT / "docker/grafana/server-alerting/operator-email.yml"
 ALERT_CLEANUP_PROVISIONING_PATH = (
