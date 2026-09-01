@@ -12,6 +12,7 @@ from market_data.archive import (
     FilesystemRawArchiveObjectStore,
     SpoolBackpressureError,
     SpoolBacklogTracker,
+    discover_spool_segments,
     encode_spool_segment_to_parquet,
     publish_compacted_raw_archives,
     publish_spool_archive,
@@ -95,6 +96,38 @@ def test_spool_discovery_repairs_open_tail_and_preserves_recovery_evidence(
     assert list(discovered.records()) == records
     discovered.seal()
     assert discovered.sealed_path.exists()
+
+
+def test_spool_discovery_scopes_paths_by_definition_before_open(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "spool"
+    first = DurableRawSpoolSegment(
+        root=root,
+        definition_id="definition-a",
+        session_id="session-a",
+        connection_epoch=0,
+    )
+    second = DurableRawSpoolSegment(
+        root=root,
+        definition_id="definition-b",
+        session_id="session-b",
+        connection_epoch=0,
+    )
+    first.close()
+    second.close()
+
+    assert discover_spool_segments(
+        root,
+        definition_id="definition-a",
+    ) == (first.open_path,)
+    assert discover_spool_segments(
+        root,
+        definition_id="definition-b",
+    ) == (second.open_path,)
+    assert discover_spool_segments(root) == tuple(
+        sorted((first.open_path, second.open_path), key=str)
+    )
 
 
 def test_spool_rejects_duplicate_or_reordered_receive_positions(tmp_path: Path) -> None:

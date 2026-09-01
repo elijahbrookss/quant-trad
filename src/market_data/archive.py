@@ -1087,8 +1087,14 @@ def publish_spool_archive(
     return encoded, acknowledgement, records
 
 
-def discover_spool_segments(root: Path) -> tuple[Path, ...]:
+def discover_spool_segments(
+    root: Path,
+    *,
+    definition_id: str | None = None,
+) -> tuple[Path, ...]:
     root_path = Path(root)
+    if definition_id is not None:
+        root_path = root_path / _safe_component(definition_id)
     if not root_path.exists():
         return ()
     return tuple(
