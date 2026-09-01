@@ -229,6 +229,50 @@ def test_frozen_dataset_cannot_observe_post_freeze_correction(
         )
 
 
+def test_series_catalog_preserves_exact_counts_and_bounds_across_corrections(
+    canonical_series: dict[str, int | str],
+) -> None:
+    instrument_id = str(canonical_series["instrument_id"])
+    series_id = int(canonical_series["series_id"])
+
+    empty = market_data_repo.list_series(instrument_id=instrument_id)
+    assert len(empty) == 1
+    assert empty[0]["version_count"] == 0
+    assert empty[0]["fact_count"] == 0
+    assert empty[0]["candle_count"] == 0
+    assert empty[0]["first_fact_time"] is None
+    assert empty[0]["last_fact_time"] is None
+    assert empty[0]["max_commit_seq"] == 0
+
+    _ingest(
+        canonical_series,
+        [_fact(0), _fact(1), _fact(2)],
+        source_revision="catalog-v1",
+    )
+    _ingest(
+        canonical_series,
+        [_fact(0, close=101.75)],
+        source_revision="catalog-v2",
+    )
+
+    listed = market_data_repo.list_series(instrument_id=instrument_id)
+    latest = market_data_repo.read_candles(
+        series_id=series_id,
+        start=_BASE,
+        end=_BASE + timedelta(hours=3),
+    )
+
+    assert len(listed) == 1
+    assert listed[0]["version_count"] == 4
+    assert listed[0]["fact_count"] == 3
+    assert listed[0]["candle_count"] == 3
+    assert listed[0]["first_fact_time"] == _BASE
+    assert listed[0]["last_fact_time"] == _BASE + timedelta(hours=2)
+    assert listed[0]["max_commit_seq"] == max(
+        record.market_commit_seq for record in latest
+    )
+
+
 def test_frozen_source_binding_filters_before_latest_revision_selection(
     canonical_series: dict[str, int | str],
 ) -> None:
