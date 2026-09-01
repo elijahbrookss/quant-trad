@@ -51,7 +51,7 @@ gap evidence.
 | pgAdmin | database operations | `127.0.0.1:8080` |
 | Loki and Alloy | durable logs and Docker log ingress | Loki private; Alloy UI `127.0.0.1:12345` |
 | Docker event and capacity samplers | lifecycle and storage evidence | no published port |
-| Grafana | provisioned logs, capacity, and database dashboards | `127.0.0.1:3000` |
+| Grafana | provisioned dashboards, alert rules, and optional email routing | `127.0.0.1:3000` |
 | IBKR Gateway | optional paper/live broker transport and VNC | `broker` profile; loopback only |
 
 All published ports are loopback-only by default. Use SSH forwarding. Do not
@@ -125,7 +125,10 @@ once with mode `0600`, strong URL-safe database and UI passwords, and a valid
 provider-credential encryption key. Keeping it outside Git makes exact-SHA
 updates and rollback independent of ignored working-tree files. The command
 refuses to overwrite an existing file. Review or change non-secret settings as
-needed. Raw provider API credentials do not belong in that file.
+needed. Trading and market-data provider credentials remain in the encrypted
+application credential store. The managed email relay's send-only credential is
+an installation secret and does belong in this private file when alerting is
+enabled.
 
 ## Validate And Deploy
 
@@ -147,6 +150,49 @@ renders Compose, pulls pinned third-party images, builds release images, waits
 for health, verifies embedded source attestations, checks definition enrollment,
 and writes release state outside the repository.
 
+Operator email is optional and disabled by default. A managed transactional
+relay owns outbound delivery; Grafana owns alert state, grouping, routing, and
+resolved notifications. Configure the private environment once, then routine
+recipient changes only edit the comma-separated `QT_ALERT_EMAILS` value:
+
+```bash
+bash scripts/automation/server_deploy.sh validate-alerts
+bash scripts/automation/server_deploy.sh apply-alerts
+```
+
+`apply-alerts` requires the clean checkout to match the recorded deployed
+revision and force-recreates only Grafana without starting its dependencies.
+When `QT_ALERTS_ENABLED=true`, validation requires the managed relay host,
+credential, verified sender, and at least one valid recipient. The deployment
+helper adds `docker/docker-compose.alert-email.yml`; when false, the overlay,
+SMTP settings, contact point, and root email policy are absent. Provider
+secrets are never printed. Follow the
+[operator email alerting runbook](../operators/alerting.md) for setup, testing,
+rule standards, recipient changes, blind spots, and rollback.
+
+Before merge, an operator can test the exact candidate SHA from a detached
+worktree without changing the recorded production release:
+
+```bash
+bash scripts/automation/server_deploy.sh validate-alerts
+QT_ALERT_PREVIEW_BASE_ROOT=/srv/quanttrad/app \
+  bash scripts/automation/server_deploy.sh preview-alerts
+```
+
+The preview recreates only Grafana and records enough state to restore it from
+the production checkout. Full deploys and routine alert applies are refused
+while that preview marker exists. After the real-provider contact-point test,
+restore before removing the candidate worktree:
+
+```bash
+bash scripts/automation/server_deploy.sh restore-alerts
+```
+
+If the production revision predates native email alerting, restoration runs an
+explicit Grafana provisioning cleanup before recreating the production
+configuration. See the alerting runbook for the complete worktree, verification,
+and cleanup sequence.
+
 Useful operations are:
 
 ```bash
@@ -155,6 +201,10 @@ bash scripts/automation/server_deploy.sh status
 bash scripts/automation/server_deploy.sh fleet
 bash scripts/automation/server_deploy.sh qt <qt-arguments...>
 bash scripts/automation/server_deploy.sh logs market-data-collector
+bash scripts/automation/server_deploy.sh validate-alerts
+bash scripts/automation/server_deploy.sh apply-alerts
+bash scripts/automation/server_deploy.sh preview-alerts
+bash scripts/automation/server_deploy.sh restore-alerts
 bash scripts/automation/server_deploy.sh stop
 ```
 
@@ -201,13 +251,15 @@ bash scripts/automation/server_deploy.sh credentials-coinbase
 
 The command is interactive and does not echo credentials into release state or
 the operator environment file. To import the downloaded CDP JSON directly from
-a WSL client without copying it onto the server or transforming it with `jq`,
-pipe it over SSH:
+a trusted client without copying it onto the server or transforming it with
+`jq`, pipe it over SSH. Set the two client-local values for the installation:
 
 ```bash
-ssh qt-server \
+QT_SERVER_HOST=your-server-host
+CDP_KEY_FILE=/path/to/cdp_api_key.json
+ssh "$QT_SERVER_HOST" \
   'cd /srv/quanttrad/app && bash scripts/automation/server_deploy.sh credentials-coinbase --cdp-key-file - --no-input' \
-  < /mnt/c/Users/<you>/Downloads/coinbase/cdp_api_key.json
+  < "$CDP_KEY_FILE"
 ```
 
 The importer accepts Coinbase's `name` or `id` key identifier and its
@@ -316,13 +368,14 @@ actual growth remain the meaningful soak signals.
 Forward the main operator surfaces from a trusted client:
 
 ```bash
+QT_SERVER_HOST=your-server-host
 ssh \
   -L 5174:127.0.0.1:5174 \
   -L 5173:127.0.0.1:5173 \
   -L 8000:127.0.0.1:8000 \
   -L 3000:127.0.0.1:3000 \
   -L 8080:127.0.0.1:8080 \
-  qt-server
+  "$QT_SERVER_HOST"
 ```
 
 Frontend V2 is then at `http://127.0.0.1:5174`, Grafana at

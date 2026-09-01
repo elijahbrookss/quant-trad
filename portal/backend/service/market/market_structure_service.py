@@ -32,11 +32,10 @@ from market_data.archive import (
     DurableRawSpoolSegment,
     FilesystemRawArchiveObjectStore,
     SpoolBackpressureError,
+    SpoolBacklogTracker,
     publish_compacted_raw_archives,
     publish_spool_archive,
     read_raw_archive_parquet,
-    require_spool_capacity,
-    spool_backlog_bytes,
 )
 from market_data.book_archive import (
     publish_book_checkpoint,
@@ -1205,6 +1204,11 @@ class MarketStructureService:
         object_store = FilesystemRawArchiveObjectStore(storage / "objects")
         temporary_root = storage / "tmp"
         temporary_root.mkdir(parents=True, exist_ok=True)
+        backlog_tracker = await asyncio.to_thread(
+            SpoolBacklogTracker.from_disk,
+            root=spool_root,
+            definition_id=claim.definition_id,
+        )
         started_monotonic = time.monotonic()
         started_at = datetime.now(UTC)
         session_event_ordinal = 0
@@ -1228,7 +1232,12 @@ class MarketStructureService:
                 jwt_factory=jwt_factory,
                 stream_session_id=claim.session_id,
             )
-            await stream.connect()
+            connection_epoch = int(await stream.connect())
+            if connection_epoch != 0:
+                raise RuntimeError(
+                    "market_structure_capture_epoch_invalid: "
+                    f"expected=0 actual={connection_epoch}"
+                )
             self.repository.append_session_event(
                 claim,
                 event_ordinal=session_event_ordinal,
@@ -1288,11 +1297,9 @@ class MarketStructureService:
                     pending = None
                 observed_channel = _observed_channel(message.raw_frame)
                 estimated_spool_bytes = len(message.raw_frame) * 2 + 4096
-                require_spool_capacity(
-                    root=spool_root,
+                backlog_tracker.require_capacity(
                     max_backlog_bytes=claim.max_spool_bytes,
                     next_frame_bytes=estimated_spool_bytes,
-                    definition_id=claim.definition_id,
                 )
                 if (
                     current_segment is None
@@ -1310,6 +1317,7 @@ class MarketStructureService:
                         session_id=claim.session_id,
                         connection_epoch=message.connection_epoch,
                         segment_ordinal=len(segments),
+                        backlog_tracker=backlog_tracker,
                     )
                     segments.append(current_segment)
                 record = RawStreamRecord.from_provider_message(
@@ -1397,6 +1405,7 @@ class MarketStructureService:
                     bounded_stop_event_id=bounded_stop_event_id,
                     session_event_ordinal=session_event_ordinal,
                     segment_count=len(segments),
+                    spool_backlog_bytes=backlog_tracker.current_bytes,
                 )
             coverage_interval_id = _stable_hash(
                 {
@@ -1746,9 +1755,7 @@ class MarketStructureService:
                 "raw_record_count": analysis.raw_record_count,
                 "raw_bytes": analysis.raw_bytes,
                 "spool_segment_count": len(segments),
-                "spool_backlog_bytes": spool_backlog_bytes(
-                    spool_root, definition_id=claim.definition_id
-                ),
+                "spool_backlog_bytes": backlog_tracker.current_bytes,
                 "manifest_ids": manifest_ids,
                 "trade_events": analysis.trade_event_count,
                 "snapshot_trades": analysis.snapshot_trade_count,
@@ -1846,6 +1853,7 @@ class MarketStructureService:
         bounded_stop_event_id: str,
         session_event_ordinal: int,
         segment_count: int,
+        spool_backlog_bytes: int,
     ) -> dict[str, Any]:
         """Reduce acknowledged raw L2 evidence and persist one bounded session."""
 
@@ -2203,9 +2211,7 @@ class MarketStructureService:
             "raw_record_count": analysis.raw_record_count,
             "raw_bytes": analysis.raw_bytes,
             "spool_segment_count": segment_count,
-            "spool_backlog_bytes": spool_backlog_bytes(
-                storage_root / "spool", definition_id=claim.definition_id
-            ),
+            "spool_backlog_bytes": int(spool_backlog_bytes),
             "manifest_ids": list(manifest_ids),
             "snapshot_count": len(snapshots),
             "mutation_batch_count": len(batches),

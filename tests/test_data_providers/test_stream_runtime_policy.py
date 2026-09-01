@@ -15,6 +15,7 @@ def test_continuous_policy_round_trips_provider_neutral_bounds() -> None:
             "max_inflight_segments": 3,
             "lease_seconds": 120,
             "heartbeat_seconds": 10,
+            "spool_reconcile_seconds": 120,
             "reconnect_policy": {
                 "reconnect_enabled": True,
                 "initial_backoff_seconds": 0.5,
@@ -26,6 +27,7 @@ def test_continuous_policy_round_trips_provider_neutral_bounds() -> None:
     )
 
     assert policy.max_inflight_segments == 3
+    assert policy.spool_reconcile_seconds == 120.0
     assert policy.reconnect == StreamReconnectPolicy(
         enabled=True,
         initial_backoff_seconds=0.5,
@@ -41,6 +43,7 @@ def test_continuous_policy_round_trips_provider_neutral_bounds() -> None:
     [
         ({"lease_seconds": 30, "heartbeat_seconds": 30}, "less than"),
         ({"max_inflight_segments": 0}, "must be >= 1"),
+        ({"spool_reconcile_seconds": 29}, "must be >= 30"),
         ({"reconnect_policy": []}, "must be an object"),
         ({"segment_max_second": 5}, "unsupported fields"),
         (

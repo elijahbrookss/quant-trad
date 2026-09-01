@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 
+import pytest
+
 from data_providers.streams import coinbase as coinbase_stream_module
 from data_providers.streams.coinbase import CoinbaseAdvancedTradeStream, CoinbaseMessageParser
 from data_providers.streams.contracts import MarketSubscription
@@ -379,12 +381,37 @@ def test_coinbase_connect_uses_bounded_message_size_and_resets_sequence(
     )
     monkeypatch.setattr(coinbase_stream_module, "websockets", _FakeWebSockets)
 
-    asyncio.run(stream.connect())
+    connection_epoch = asyncio.run(stream.connect())
 
+    assert connection_epoch == 0
     assert observed["max_size"] == 16 * 1024 * 1024
     assert observed["logger"] is coinbase_stream_module.COINBASE_WS_WIRE_LOGGER
     assert not observed["logger"].isEnabledFor(10)
     assert stream._parser._last_sequence_by_key == {}
+
+
+def test_coinbase_failed_connect_does_not_advance_successful_connection_epoch(
+    monkeypatch,
+) -> None:
+    class _FakeWebSockets:
+        attempts = 0
+
+        @classmethod
+        async def connect(cls, _url: str, **_kwargs):
+            cls.attempts += 1
+            if cls.attempts == 1:
+                raise ConnectionError("injected connect failure")
+            return object()
+
+    stream = CoinbaseAdvancedTradeStream()
+    monkeypatch.setattr(coinbase_stream_module, "websockets", _FakeWebSockets)
+
+    with pytest.raises(ConnectionError, match="injected connect failure"):
+        asyncio.run(stream.connect())
+    assert stream._connection_epoch == -1
+
+    assert asyncio.run(stream.connect()) == 0
+    assert stream._connection_epoch == 0
 
 
 def test_coinbase_stream_groups_and_dedupes_subscribe_frames() -> None:

@@ -1,0 +1,51 @@
+name: ${QT_ALERT_TEST_PROJECT_NAME:-quant-trad-alerting-test}
+
+services:
+  mailpit:
+    image: ghcr.io/axllent/mailpit:v1.30.6@sha256:7f33095f80e901f6ad08028f06ca284aa58fe84942be5496008d041d3b9f4d4d
+    environment:
+      MP_MAX_MESSAGES: "10"
+    ports:
+      - "127.0.0.1:${QT_ALERT_TEST_MAILPIT_PORT:-18025}:8025"
+
+  grafana:
+    image: grafana/grafana:13.2.0
+    depends_on:
+      mailpit:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: alert-test-password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: mailpit:1025
+      GF_SMTP_FROM_ADDRESS: alerts@quanttrad.test
+      GF_SMTP_FROM_NAME: Quant-Trad Alerts
+      GF_SMTP_STARTTLS_POLICY: NoStartTLS
+      GF_SMTP_SKIP_VERIFY: "false"
+      QT_ALERT_EMAILS: owner@quanttrad.test,backup@quanttrad.test
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:3000/api/health >/dev/null
+      interval: 2s
+      timeout: 2s
+      retries: 45
+      start_period: 10s
+    ports:
+      - "127.0.0.1:${QT_ALERT_TEST_GRAFANA_PORT:-13030}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - type: bind
+        source: ../grafana/server-alerting/operator-email.yml
+        target: /etc/grafana/provisioning/alerting/operator-email.yml
+        read_only: true
+      - type: bind
+        source: ./grafana-email-test-rule.yml
+        target: /etc/grafana/provisioning/alerting/grafana-email-test-rule.yml
+        read_only: true
+
+volumes:
+  grafana-data:

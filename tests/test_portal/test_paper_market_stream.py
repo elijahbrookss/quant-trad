@@ -15,8 +15,8 @@ class _ScriptedStream:
         self.events_script = list(events)
         self.closed = False
 
-    async def connect(self) -> None:
-        return None
+    async def connect(self) -> int:
+        return 0
 
     async def subscribe(self, subscriptions) -> None:
         self.subscriptions = list(subscriptions)

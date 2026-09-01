@@ -1,0 +1,61 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Platform safety
+    folder: Quant Trad
+    interval: 1m
+    rules:
+      - uid: qt-database-unavailable
+        title: Quant-Trad database unavailable
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: quanttrad-postgres
+            model:
+              datasource:
+                type: grafana-postgresql-datasource
+                uid: quanttrad-postgres
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: SELECT 1::double precision AS value
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          first_action: Check the TimescaleDB container, disk headroom, and recent database logs.
+          recovery: Confirm database health and a successful Grafana query before resolving.
+          summary: Grafana cannot complete the Quant-Trad database availability query.
+        labels:
+          component: timescaledb
+          owner: qt-infra
+          severity: critical
+        isPaused: false

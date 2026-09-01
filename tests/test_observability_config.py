@@ -70,3 +70,37 @@ def test_capacity_dashboard_has_schema_and_relation_drilldown():
     assert dashboard["refresh"] == "15s"
     assert any(panel["title"] == "Relation size history" for panel in dashboard["panels"])
     assert any(panel["title"] == "Relation growth over selected range" for panel in dashboard["panels"])
+
+
+def test_collector_reconnect_storm_rule_is_bounded_sustained_and_actionable():
+    provisioning = yaml.safe_load(
+        (
+            ROOT
+            / "docker/grafana/provisioning/alerting/collector-safety.yml"
+        ).read_text(encoding="utf-8")
+    )
+    rules = provisioning["groups"][0]["rules"]
+    rule = next(item for item in rules if item["uid"] == "qt-collector-reconnect-storm")
+
+    query = next(item for item in rule["data"] if item["refId"] == "A")
+    threshold = next(item for item in rule["data"] if item["refId"] == "C")
+    sql = query["model"]["rawSql"]
+
+    assert query["model"]["format"] == "table"
+    assert "count(DISTINCT (session_id, connection_epoch))" in sql
+    assert "event_type = 'provider_disconnected'" in sql
+    assert "now() - interval '15 minutes'" in sql
+    assert "GROUP BY definition_id" in sql
+    assert threshold["model"]["conditions"][0]["evaluator"] == {
+        "params": [5],
+        "type": "gt",
+    }
+    assert rule["for"] == "5m"
+    assert rule["noDataState"] == "OK"
+    assert rule["execErrState"] == "Alerting"
+    assert rule["labels"] == {
+        "component": "market-data-collector",
+        "owner": "qt-infra",
+        "severity": "warning",
+    }
+    assert {"summary", "first_action", "recovery"} <= set(rule["annotations"])

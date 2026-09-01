@@ -17,8 +17,8 @@ class _FakeStream:
         self.provider = provider
         self.venue = venue
 
-    async def connect(self) -> None:
-        return None
+    async def connect(self) -> int:
+        return 0
 
     async def subscribe(self, subscriptions) -> None:
         type(self).subscriptions = list(subscriptions)

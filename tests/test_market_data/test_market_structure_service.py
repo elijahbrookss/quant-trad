@@ -227,8 +227,8 @@ class _FakeStream:
         self.session_id = stream_session_id
         self.closed = False
 
-    async def connect(self) -> None:
-        return None
+    async def connect(self) -> int:
+        return 0
 
     async def subscribe(self, _subscriptions) -> None:
         return None
@@ -486,8 +486,8 @@ class _FakeL2Stream:
         self.session_id = stream_session_id
         self.closed = False
 
-    async def connect(self) -> None:
-        return None
+    async def connect(self) -> int:
+        return 0
 
     async def subscribe(self, _subscriptions) -> None:
         return None

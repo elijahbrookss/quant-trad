@@ -12,6 +12,7 @@ These docs are historical records, not normative contracts.
 
 ## Runtime Incidents
 
+- [Continuous collector reconnect storm](runtime/2026-09-01-continuous-collector-reconnect-storm.md)
 - [Paper bot stale heartbeat after WSL runtime pause](runtime/2026-05-19-paper-bot-stale-heartbeat-after-wsl-runtime-pause.md)
 - [Paper market stream transient disconnect](runtime/2026-05-18-paper-market-stream-transient-disconnect.md)
 - [Scoped causal clocks and replay ordering](runtime/2026-05-02-scoped-causal-clocks-and-replay-ordering.md)

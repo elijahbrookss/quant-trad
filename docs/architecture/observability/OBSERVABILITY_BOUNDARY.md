@@ -43,6 +43,9 @@ code_paths:
   - docker/loki/config.yml
   - docker/loki/server-config.yml
   - docker/grafana
+  - docker/docker-compose.alert-email.yml
+  - docker/grafana/provisioning/alerting
+  - docker/grafana/server-alerting/operator-email.yml
   - scripts/reporting/docker_capacity_sampler.sh
   - scripts/reporting/host_capacity_sampler.ps1
   - docs/architecture/observability/diagrams/observability-flow.mmd
@@ -221,6 +224,31 @@ constitutes restore proof. No `grafana-backup` or `grafana-restore` Make target,
 hook, timer, or other automatic restore workflow is supported by the current
 repository.
 
+## Alerting Boundary
+
+Alerting converts existing operational evidence into state that warrants human
+attention. Grafana owns rule evaluation, Pending/Firing/Resolved transitions,
+grouping, repeat timing, notification policies, and contact points. Application
+services own the signals and durable domain/runtime events they emit. The
+managed email provider owns outbound transport and delivery reputation.
+
+An event is not automatically an alert, an alert is not a notification, and a
+notification is not an incident. This boundary does not introduce a custom
+event bus, application-side mailer, notification database, or incident model.
+It reuses PostgreSQL, Loki, the Grafana data volume, and native Grafana
+Alertmanager-style routing.
+
+The server's email route is a conditional Compose overlay. Disabled means no
+SMTP environment, contact point, or root email policy is present. Enabled
+requires a validated recipient list, authenticated managed-relay credential,
+verified sender, and explicit TLS policy. Provider secrets remain private
+installation state; rule and routing structure remain reviewed source.
+
+A self-hosted single-node monitor cannot report failure of its own host,
+Grafana process, network path, or relay. That blind spot is preserved rather
+than hidden. A later external heartbeat is justified only if its failure
+consequence warrants the additional service and ownership.
+
 ## What Belongs Here
 
 - queue depth and drops,
@@ -343,3 +371,4 @@ repository.
 - [Engineering observability overview](../../engineering/observability.md)
 - [ADR 0033: Use Promtail as Runtime Loki Ingress](../decisions/0033-use-promtail-as-runtime-loki-ingress.md)
 - [Grafana dashboard provisioning](../../../docker/grafana/provisioning/dashboards/README.md)
+- [Operator email alerting](../../operators/alerting.md)

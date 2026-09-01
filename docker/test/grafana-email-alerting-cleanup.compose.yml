@@ -1,0 +1,30 @@
+name: ${QT_ALERT_TEST_PROJECT_NAME:-quant-trad-alerting-test}
+
+services:
+  grafana:
+    image: grafana/grafana:13.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: alert-test-password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O - http://127.0.0.1:3000/api/health >/dev/null
+      interval: 2s
+      timeout: 2s
+      retries: 45
+      start_period: 10s
+    ports:
+      - "127.0.0.1:${QT_ALERT_TEST_GRAFANA_PORT:-13030}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - type: bind
+        source: ../grafana/server-alerting/cleanup-provisioning/alerting/operator-email-cleanup.yml
+        target: /etc/grafana/provisioning/alerting/operator-email-cleanup.yml
+        read_only: true
+
+volumes:
+  grafana-data:

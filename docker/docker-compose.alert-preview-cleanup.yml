@@ -1,0 +1,9 @@
+services:
+  grafana:
+    volumes:
+      - type: bind
+        source: ${QT_ALERT_CLEANUP_PROVISIONING_ROOT:?QT_ALERT_CLEANUP_PROVISIONING_ROOT must identify the candidate cleanup directory}
+        target: /etc/grafana/provisioning
+        read_only: true
+        bind:
+          create_host_path: false
