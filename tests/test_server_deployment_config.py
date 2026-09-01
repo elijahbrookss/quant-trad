@@ -498,7 +498,8 @@ def test_alert_preview_cleanup_deletes_preview_only_grafana_resources() -> None:
         {"orgId": 1, "uid": "qt-operator-email"}
     ]
     assert cleanup["deleteRules"] == [
-        {"orgId": 1, "uid": "qt-database-unavailable"}
+        {"orgId": 1, "uid": "qt-database-unavailable"},
+        {"orgId": 1, "uid": "qt-collector-reconnect-storm"},
     ]
 
 

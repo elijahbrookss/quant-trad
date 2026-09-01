@@ -120,3 +120,69 @@ groups:
           owner: qt-infra
           severity: warning
         isPaused: false
+
+      - uid: qt-collector-reconnect-storm
+        title: Collector reconnect storm
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: quanttrad-postgres
+            model:
+              datasource:
+                type: grafana-postgresql-datasource
+                uid: quanttrad-postgres
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT definition_id,
+                       count(DISTINCT (session_id, connection_epoch))::double precision AS value
+                FROM market.stream_session_events
+                WHERE event_type = 'provider_disconnected'
+                  AND occurred_at >= now() - interval '15 minutes'
+                GROUP BY definition_id
+          - refId: C
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              type: threshold
+              conditions:
+                - evaluator:
+                    params: [5]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          first_action: >-
+            Inspect recent stream-session disconnect reasons, valid-data freshness,
+            collector CPU, and spool traversal cost before restarting anything.
+          recovery: >-
+            Confirm the stream stays below six unique disconnect epochs per 15
+            minutes for at least five minutes while valid data remains fresh.
+          summary: >-
+            Collector {{ $labels.definition_id }} recorded {{ printf "%.0f"
+            $values.A.Value }} unique disconnect epochs in the last 15 minutes.
+        labels:
+          component: market-data-collector
+          owner: qt-infra
+          severity: warning
+        isPaused: false

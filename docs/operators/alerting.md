@@ -34,8 +34,8 @@ This slice provides:
 - 30-second grouping, five-minute regrouping, and four-hour repeats;
 - strict configuration validation without printing provider secrets;
 - a CI proof that a real Grafana rule reaches two captured recipients;
-- the existing collector safety rules plus a two-minute database-unavailable
-  rule.
+- the existing collector safety rules, a sustained per-stream reconnect-storm
+  rule, and a two-minute database-unavailable rule.
 
 It does not provide SMS, escalation schedules, acknowledgements, an incident
 record, or an external monitor for the host itself. If the host, Grafana, its
@@ -279,18 +279,48 @@ Every provisioned rule must therefore include:
 
 Use `warning` when timely investigation prevents impact and `critical` when the
 service is unavailable, correctness is threatened, or a safety latch requires
-action. Do not alert on raw disconnect counts, individual retry log lines, or
-event-table row volume. Alert on sustained coverage loss, stale valid data,
-exhaustion risk, an active safety halt, or another state with a concrete action.
+action. Do not alert on lifetime disconnect totals, individual retry log lines,
+or undifferentiated event-table row volume. A bounded count of distinct
+connection failures can represent a bad state when it is evaluated per stream,
+has a sustained threshold, and has a concrete operator action. Prefer direct
+signals such as sustained coverage loss, stale valid data, exhaustion risk, or
+an active safety halt whenever those signals capture the failure sooner.
 
 The initial rules are intentionally small:
 
 - database query unavailable for two minutes: critical;
 - collector safety latch active: critical;
-- collector storage safety warning observed: warning.
+- collector storage safety warning observed: warning;
+- at least six unique disconnect epochs for one stream within 15 minutes,
+  sustained for five minutes: warning.
 
 A future rule belongs in the reviewed provisioning directory, not only in the
 Grafana UI. UI edits to provisioned resources are not the durable source.
+
+### Collector reconnect-storm response
+
+`qt-collector-reconnect-storm` evaluates the canonical
+`market.stream_session_events` history. It counts distinct
+`(session_id, connection_epoch)` pairs with a `provider_disconnected` event,
+grouped by `definition_id`. Grafana creates one alert instance per affected
+stream, while the notification policy groups instances from the same rule and
+severity into one email.
+
+On a firing alert:
+
+1. Inspect the recent disconnect reasons for the affected stream.
+2. Check valid-data freshness and accepted-record throughput; a healthy current
+   snapshot does not erase reconnect churn.
+3. Check collector CPU and the cost of any synchronous work in the receive
+   path, including spool traversal.
+4. Restart only if continuity is currently lost and a restart is the safest
+   containment. A restart erases useful live evidence and is not the default
+   first action.
+
+Treat the alert as recovered only after the stream remains below six unique
+disconnect epochs per rolling 15-minute window for at least five minutes and
+continues producing fresh, valid data. A resolved email means the rule recovered;
+it does not by itself prove the underlying defect was corrected.
 
 ## History and retention
 
