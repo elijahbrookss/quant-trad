@@ -157,6 +157,14 @@ Every Fact is addressable by series, observation time/key, revision, known-at,
 commit sequence, source, schema, and state through relational columns and
 B-tree indexes. Payload/provenance GIN indexes support bounded inspection.
 
+Two lineage lookups are explicit hot paths rather than generic JSON
+inspection. Exact material witnesses use the `(series_id, material_hash)`
+index. Derived trade-flow source validation uses `(series_id, source_id)` and
+compares the indexed minimum and maximum source per upstream trade series; an
+empty source set or unequal endpoints still fails loud. This preserves the
+single-source contract without rescanning every historical trade for every
+new aggregate bucket.
+
 Schema declarations identify hot payload fields. Exact decimals use canonical
 strings and receive numeric expression indexes where range/filter operations
 are supported. Timestamp fields receive timestamp expression indexes when they

@@ -97,6 +97,8 @@ _CANONICAL_FACT_REQUIRED_INDEXES = frozenset(
     {
         "ix_market_fact_series_time_revision",
         "ix_market_fact_series_commit",
+        "ix_market_fact_series_material",
+        "ix_market_fact_series_source",
         "ix_market_fact_series_known",
         "ix_market_fact_schema_time",
         "ix_market_fact_source_time",
@@ -108,6 +110,10 @@ _CANONICAL_FACT_REQUIRED_INDEXES = frozenset(
         "ix_market_fact_funding_time",
     }
 )
+_CANONICAL_FACT_LOOKUP_INDEX_COLUMNS = {
+    "ix_market_fact_series_material": ("series_id", "material_hash"),
+    "ix_market_fact_series_source": ("series_id", "source_id"),
+}
 _COLUMN_MIGRATION_GUIDANCE = {
     ("market", "collection_definitions", "desired_state"):
         "scripts/db/manual_migration_collector_operations_v1.sql",
@@ -1144,10 +1150,99 @@ class Database:
         }
         missing_indexes = sorted(_CANONICAL_FACT_REQUIRED_INDEXES - indexes)
         if missing_indexes:
+            migration = (
+                "scripts/db/manual_migration_canonical_fact_lookup_indexes_v1.sql"
+                if set(missing_indexes)
+                <= set(_CANONICAL_FACT_LOOKUP_INDEX_COLUMNS)
+                else "scripts/db/manual_migration_canonical_fact_store_v1.sql"
+            )
             raise RuntimeError(
                 "Table 'market.fact_versions' is missing required indexes: "
                 f"{', '.join(missing_indexes)}. Run "
-                "scripts/db/manual_migration_canonical_fact_store_v1.sql."
+                f"{migration}."
+            )
+        lookup_index_rows = {
+            str(row["index_name"]): row
+            for row in conn.execute(
+                text(
+                    """
+                    SELECT
+                        index_class.relname AS index_name,
+                        index_state.indisvalid,
+                        index_state.indisready,
+                        index_state.indisunique,
+                        index_state.indnkeyatts,
+                        index_state.indnatts,
+                        index_state.indexprs IS NULL AS has_plain_columns,
+                        index_state.indpred IS NULL AS is_unfiltered,
+                        access_method.amname AS access_method,
+                        ARRAY(
+                            SELECT COALESCE(
+                                attribute.attname::text,
+                                '<expression>'
+                            )
+                            FROM unnest(
+                                index_state.indkey::smallint[]
+                            ) WITH ORDINALITY
+                                AS index_key(attnum, position)
+                            LEFT JOIN pg_attribute AS attribute
+                              ON attribute.attrelid = index_state.indrelid
+                             AND attribute.attnum = index_key.attnum
+                            WHERE index_key.position
+                                  <= index_state.indnkeyatts
+                            ORDER BY index_key.position
+                        ) AS key_columns,
+                        pg_get_indexdef(index_state.indexrelid) AS definition
+                    FROM pg_index AS index_state
+                    JOIN pg_class AS index_class
+                      ON index_class.oid = index_state.indexrelid
+                    JOIN pg_class AS table_class
+                      ON table_class.oid = index_state.indrelid
+                    JOIN pg_namespace AS table_namespace
+                      ON table_namespace.oid = table_class.relnamespace
+                    JOIN pg_namespace AS index_namespace
+                      ON index_namespace.oid = index_class.relnamespace
+                    JOIN pg_am AS access_method
+                      ON access_method.oid = index_class.relam
+                    WHERE table_namespace.nspname = 'market'
+                      AND table_class.relname = 'fact_versions'
+                      AND index_namespace.nspname = 'market'
+                      AND index_class.relname::text
+                          = ANY(CAST(:index_names AS text[]))
+                    """
+                ),
+                {"index_names": list(_CANONICAL_FACT_LOOKUP_INDEX_COLUMNS)},
+            ).mappings()
+        }
+        mismatched_lookup_indexes: list[str] = []
+        for index_name, expected_columns in sorted(
+            _CANONICAL_FACT_LOOKUP_INDEX_COLUMNS.items()
+        ):
+            row = lookup_index_rows.get(index_name)
+            actual_columns = tuple(row["key_columns"] or ()) if row else ()
+            if (
+                row is None
+                or not bool(row["indisvalid"])
+                or not bool(row["indisready"])
+                or bool(row["indisunique"])
+                or str(row["access_method"]) != "btree"
+                or not bool(row["has_plain_columns"])
+                or not bool(row["is_unfiltered"])
+                or int(row["indnkeyatts"]) != len(expected_columns)
+                or int(row["indnatts"]) != len(expected_columns)
+                or actual_columns != expected_columns
+            ):
+                definition = str(row["definition"]) if row else "<missing>"
+                mismatched_lookup_indexes.append(
+                    f"{index_name} expected={expected_columns!r} "
+                    f"actual={definition}"
+                )
+        if mismatched_lookup_indexes:
+            raise RuntimeError(
+                "Table 'market.fact_versions' has invalid canonical Fact lookup "
+                "index definitions: "
+                f"{'; '.join(mismatched_lookup_indexes)}. Run "
+                "scripts/db/manual_migration_canonical_fact_lookup_indexes_v1.sql."
             )
         dataset_columns = {
             str(column["name"])

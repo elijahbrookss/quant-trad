@@ -346,6 +346,10 @@ CREATE INDEX IF NOT EXISTS ix_market_fact_series_time_revision
     (series_id, observation_time DESC, observation_key, revision DESC);
 CREATE INDEX IF NOT EXISTS ix_market_fact_series_commit
     ON market.fact_versions (series_id, market_commit_seq);
+CREATE INDEX IF NOT EXISTS ix_market_fact_series_material
+    ON market.fact_versions (series_id, material_hash);
+CREATE INDEX IF NOT EXISTS ix_market_fact_series_source
+    ON market.fact_versions (series_id, source_id);
 CREATE INDEX IF NOT EXISTS ix_market_fact_series_known
     ON market.fact_versions (series_id, known_at, observation_time);
 CREATE INDEX IF NOT EXISTS ix_market_fact_schema_time

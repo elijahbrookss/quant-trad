@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
+import os
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from market_data.fact_registry import supported_fact_payload_schemas
+from portal.backend.db.session import Database
 from tests.test_market_data.migration_test_support import (
     PRE_CUTOVER_TABLES,
     fresh_migration_database,
@@ -21,6 +23,9 @@ pytestmark = pytest.mark.db
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _MIGRATION = _REPO_ROOT / "scripts/db/manual_migration_canonical_fact_store_v1.sql"
+_LOOKUP_INDEX_MIGRATION = (
+    _REPO_ROOT / "scripts/db/manual_migration_canonical_fact_lookup_indexes_v1.sql"
+)
 _HARD_CUTOVER = (
     _REPO_ROOT / "scripts/db/manual_migration_canonical_fact_hard_cutover_v1.sql"
 )
@@ -29,6 +34,8 @@ _REQUIRED_INDEXES = frozenset(
     {
         "ix_market_fact_series_time_revision",
         "ix_market_fact_series_commit",
+        "ix_market_fact_series_material",
+        "ix_market_fact_series_source",
         "ix_market_fact_series_known",
         "ix_market_fact_schema_time",
         "ix_market_fact_source_time",
@@ -65,12 +72,121 @@ def _run_sql_migration(dsn: str, migration: Path, label: str) -> None:
     )
 
 
+def _run_sql_command(
+    dsn: str,
+    sql: str,
+    *,
+    expected_success: bool,
+    statement_timeout_ms: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    psql_url = make_url(dsn).set(drivername="postgresql")
+    environment = dict(os.environ)
+    if statement_timeout_ms is not None:
+        environment["PGOPTIONS"] = f"-c statement_timeout={statement_timeout_ms}ms"
+    completed = subprocess.run(
+        [
+            "psql",
+            psql_url.render_as_string(hide_password=False),
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            sql,
+        ],
+        cwd=_REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert (completed.returncode == 0) is expected_success, (
+        f"unexpected psql result for {sql!r}\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+    return completed
+
+
 def _run_migration(dsn: str) -> None:
     _run_sql_migration(dsn, _MIGRATION, "canonical Fact store")
 
 
 def _run_hard_cutover(dsn: str) -> None:
     _run_sql_migration(dsn, _HARD_CUTOVER, "canonical Fact hard cutover")
+
+
+def _run_lookup_index_migration(dsn: str) -> None:
+    _run_sql_migration(
+        dsn,
+        _LOOKUP_INDEX_MIGRATION,
+        "canonical Fact lookup indexes",
+    )
+
+
+def _lookup_index_snapshot(dsn: str) -> dict[str, tuple[bool, bool, str]]:
+    engine = create_engine(dsn, future=True)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT index_class.relname, index_state.indisvalid,
+                           index_state.indisready,
+                           pg_get_indexdef(index_state.indexrelid)
+                    FROM pg_index AS index_state
+                    JOIN pg_class AS index_class
+                      ON index_class.oid = index_state.indexrelid
+                    JOIN pg_class AS table_class
+                      ON table_class.oid = index_state.indrelid
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = table_class.relnamespace
+                    WHERE namespace.nspname = 'market'
+                      AND table_class.relname = 'fact_versions'
+                      AND index_class.relname IN (
+                          'ix_market_fact_series_material',
+                          'ix_market_fact_series_source'
+                      )
+                    ORDER BY index_class.relname
+                    """
+                )
+            ).all()
+        return {
+            str(name): (bool(valid), bool(ready), str(definition))
+            for name, valid, ready, definition in rows
+        }
+    finally:
+        engine.dispose()
+
+
+def _lookup_index_oids(dsn: str) -> dict[str, int]:
+    engine = create_engine(dsn, future=True)
+    try:
+        with engine.connect() as conn:
+            return {
+                str(name): int(oid)
+                for name, oid in conn.execute(
+                    text(
+                        """
+                        SELECT index_class.relname, index_class.oid
+                        FROM pg_index AS index_state
+                        JOIN pg_class AS index_class
+                          ON index_class.oid = index_state.indexrelid
+                        JOIN pg_class AS table_class
+                          ON table_class.oid = index_state.indrelid
+                        JOIN pg_namespace AS namespace
+                          ON namespace.oid = table_class.relnamespace
+                        WHERE namespace.nspname = 'market'
+                          AND table_class.relname = 'fact_versions'
+                          AND index_class.relname IN (
+                              'ix_market_fact_series_material',
+                              'ix_market_fact_series_source'
+                          )
+                        ORDER BY index_class.relname
+                        """
+                    )
+                ).all()
+            }
+    finally:
+        engine.dispose()
 
 
 def _pre_migration_state(dsn: str) -> dict[str, Any]:
@@ -332,6 +448,31 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
         )
         assert second["registry"] == expected_registry
 
+        correct_lookup_indexes = _lookup_index_snapshot(dsn)
+        engine = create_engine(dsn, future=True)
+        database = Database(dsn)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("DROP INDEX market.ix_market_fact_series_material")
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX ix_market_fact_series_material "
+                        "ON market.fact_versions (material_hash, series_id)"
+                    )
+                )
+            with engine.connect() as conn:
+                with pytest.raises(
+                    RuntimeError,
+                    match="invalid canonical Fact lookup index definitions",
+                ):
+                    database._assert_canonical_fact_migration(conn)
+        finally:
+            engine.dispose()
+        _run_lookup_index_migration(dsn)
+        assert _lookup_index_snapshot(dsn) == correct_lookup_indexes
+
         engine = create_engine(dsn, future=True)
         try:
             with engine.begin() as conn:
@@ -436,6 +577,26 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
         _run_hard_cutover(dsn)
         engine = create_engine(dsn, future=True)
         try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "DROP INDEX market.ix_market_fact_series_material, "
+                        "market.ix_market_fact_series_source"
+                    )
+                )
+        finally:
+            engine.dispose()
+        _run_lookup_index_migration(dsn)
+        first_lookup_snapshot = _schema_snapshot(dsn)
+        _run_lookup_index_migration(dsn)
+        assert _schema_snapshot(dsn) == first_lookup_snapshot
+        assert {
+            "ix_market_fact_series_material",
+            "ix_market_fact_series_source",
+        } <= set(first_lookup_snapshot["indexes"])
+
+        engine = create_engine(dsn, future=True)
+        try:
             with engine.connect() as conn:
                 remaining = conn.execute(
                     text(
@@ -457,3 +618,142 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
                 ).scalar_one() == len(expected_registry)
         finally:
             engine.dispose()
+
+
+def test_lookup_index_migration_recovers_interrupted_and_wrong_indexes() -> None:
+    with fresh_migration_database("canonical_lookup_indexes") as dsn:
+        engine = create_engine(dsn, future=True)
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("CREATE SCHEMA market"))
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE market.fact_versions (
+                            series_id bigint NOT NULL,
+                            material_hash varchar(64) NOT NULL,
+                            source_id bigint NOT NULL
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO market.fact_versions (
+                            series_id, material_hash, source_id
+                        ) VALUES
+                            (1, :first_hash, 17),
+                            (1, :second_hash, 17)
+                        """
+                    ),
+                    {"first_hash": "a" * 64, "second_hash": "b" * 64},
+                )
+        finally:
+            engine.dispose()
+
+        for index_name, columns in (
+            ("ix_market_fact_series_material", "series_id"),
+            ("ix_market_fact_series_source", "source_id"),
+        ):
+            failed = _run_sql_command(
+                dsn,
+                f"CREATE UNIQUE INDEX CONCURRENTLY {index_name} "
+                f"ON market.fact_versions ({columns})",
+                expected_success=False,
+            )
+            assert "could not create unique index" in failed.stderr
+
+        engine = create_engine(dsn, future=True)
+        try:
+            with engine.connect() as conn:
+                invalid_before = dict(
+                    conn.execute(
+                        text(
+                            """
+                            SELECT index_class.relname, index_state.indisvalid
+                            FROM pg_index AS index_state
+                            JOIN pg_class AS index_class
+                              ON index_class.oid = index_state.indexrelid
+                            WHERE index_class.relname IN (
+                                'ix_market_fact_series_material',
+                                'ix_market_fact_series_source'
+                            )
+                            ORDER BY index_class.relname
+                            """
+                        )
+                    ).all()
+                )
+            assert invalid_before == {
+                "ix_market_fact_series_material": False,
+                "ix_market_fact_series_source": False,
+            }
+        finally:
+            engine.dispose()
+
+        psql_url = make_url(dsn).set(drivername="postgresql")
+        environment = dict(os.environ)
+        environment["PGOPTIONS"] = "-c statement_timeout=1ms"
+        completed = subprocess.run(
+            [
+                "psql",
+                psql_url.render_as_string(hide_password=False),
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-f",
+                str(_LOOKUP_INDEX_MIGRATION),
+            ],
+            cwd=_REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        assert completed.returncode == 0, (
+            f"lookup migration failed\nstdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+
+        first = _lookup_index_snapshot(dsn)
+        first_oids = _lookup_index_oids(dsn)
+        _run_lookup_index_migration(dsn)
+        assert _lookup_index_snapshot(dsn) == first
+        assert _lookup_index_oids(dsn) == first_oids
+        assert first == {
+            "ix_market_fact_series_material": (
+                True,
+                True,
+                "CREATE INDEX ix_market_fact_series_material ON "
+                "market.fact_versions USING btree (series_id, material_hash)",
+            ),
+            "ix_market_fact_series_source": (
+                True,
+                True,
+                "CREATE INDEX ix_market_fact_series_source ON "
+                "market.fact_versions USING btree (series_id, source_id)",
+            ),
+        }
+
+        engine = create_engine(dsn, future=True)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("DROP INDEX market.ix_market_fact_series_material")
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX ix_market_fact_series_material "
+                        "ON market.fact_versions (material_hash, series_id)"
+                    )
+                )
+        finally:
+            engine.dispose()
+        wrong = _lookup_index_snapshot(dsn)
+        assert wrong["ix_market_fact_series_material"] == (
+            True,
+            True,
+            "CREATE INDEX ix_market_fact_series_material ON "
+            "market.fact_versions USING btree (material_hash, series_id)",
+        )
+        _run_lookup_index_migration(dsn)
+        assert _lookup_index_snapshot(dsn) == first

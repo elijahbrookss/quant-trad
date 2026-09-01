@@ -333,6 +333,16 @@ Index(
     MarketFactVersionRecord.market_commit_seq,
 )
 Index(
+    "ix_market_fact_series_material",
+    MarketFactVersionRecord.series_id,
+    MarketFactVersionRecord.material_hash,
+)
+Index(
+    "ix_market_fact_series_source",
+    MarketFactVersionRecord.series_id,
+    MarketFactVersionRecord.source_id,
+)
+Index(
     "ix_market_fact_series_known",
     MarketFactVersionRecord.series_id,
     MarketFactVersionRecord.known_at,
