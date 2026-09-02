@@ -1,5 +1,9 @@
 \set ON_ERROR_STOP on
 
+-- Reconnect before the first server-side statement so even an inherited
+-- sub-millisecond statement_timeout cannot cancel the SET that disables it.
+\connect -reuse-previous=on "options='-c statement_timeout=0'"
+
 -- Add the two canonical Fact lookup indexes used by derived-lineage validation.
 --
 -- This is an out-of-band schema operation for an existing canonical Fact store.
