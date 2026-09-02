@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
+import pandas as pd
 import pytest
 
 from market_data.canonical import CanonicalFactRecord, FactState
@@ -219,7 +220,7 @@ def _evaluate(
     enriched_features: Sequence[Mapping[str, Any]] = (),
     gap_policy: str = "continue_degraded",
     recorded_gaps: Sequence[Mapping[str, Any]] = (),
-    candles: Sequence[Mapping[str, Any]] | None = None,
+    candles: Any | None = None,
 ) -> dict[str, Any]:
     detector, outcomes, statistics = normalize_event_fact_configuration(
         detector={
@@ -243,7 +244,9 @@ def _evaluate(
             "detector": detector,
             "outcomes": outcomes,
             "statistics": statistics,
-            "candles": [dict(row) for row in candles or _candles(event_count)],
+            "candles": (
+                candles if candles is not None else _candles(event_count)
+            ),
             "fact_records_by_alias": {alias: list(records)},
             "fact_requirements_by_alias": {
                 alias: {
@@ -270,6 +273,89 @@ def _detector_version_ids(result: Mapping[str, Any]) -> list[str | None]:
         )
         for row in result["events"]
     ]
+
+
+def test_fact_snapshot_accepts_canonical_dataframe_candles() -> None:
+    rows = _candles(1)
+    frame = pd.DataFrame(
+        [
+            {
+                **{
+                    key: value
+                    for key, value in row.items()
+                    if key not in {"time", "open_time"}
+                },
+                "timestamp": pd.Timestamp(row["open_time"]),
+            }
+            for row in rows
+        ]
+    )
+    frame.set_index("timestamp", inplace=True, drop=False)
+    record = _bbo_record(
+        bucket_end=_BASE + timedelta(minutes=1),
+        known_at=_BASE + timedelta(minutes=1),
+        commit_seq=1,
+    )
+
+    result = _evaluate(
+        alias="bbo",
+        fact_type="market.bbo",
+        records=[record],
+        event_count=1,
+        alignment="exact_interval",
+        candles=frame,
+    )
+
+    assert result["status"] == "completed"
+    assert result["candidate_count"] == 1
+    assert result["sample_count"] == 1
+    assert _detector_version_ids(result) == [record.fact_version_id]
+
+
+def test_fact_snapshot_accepts_empty_dataframe_candles() -> None:
+    frame = pd.DataFrame(
+        columns=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "known_at",
+        ]
+    )
+
+    result = _evaluate(
+        alias="bbo",
+        fact_type="market.bbo",
+        records=[],
+        event_count=1,
+        alignment="exact_interval",
+        candles=frame,
+    )
+
+    assert result["candidate_count"] == 0
+    assert result["sample_count"] == 0
+    assert result["events"] == []
+
+
+def test_fact_snapshot_rejects_unsupported_candle_container() -> None:
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"event_fact_check_invalid: candles must be a pandas DataFrame "
+            r"or a sequence of objects; received_type=dict"
+        ),
+    ):
+        _evaluate(
+            alias="bbo",
+            fact_type="market.bbo",
+            records=[],
+            event_count=1,
+            alignment="exact_interval",
+            candles={"timestamp": _BASE},
+        )
 
 
 def test_exact_interval_requires_the_exact_bucket_and_preserves_prior_decisions() -> None:
