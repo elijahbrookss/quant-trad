@@ -116,9 +116,8 @@ def _prepare_pre_migration_schema(dsn: str) -> None:
                     """
                 )
             )
-            conn.execute(
-                text(
-                    """
+            conn.exec_driver_sql(
+                """
                     INSERT INTO market.fact_versions (
                         series_id, payload_schema_id, payload, market_commit_seq
                     ) VALUES
@@ -130,8 +129,7 @@ def _prepare_pre_migration_schema(dsn: str) -> None:
                          '{"event_type":"update","entry_count":4}'::jsonb, 3),
                         (2, 'market.trade.v1',
                          '{"event_type":"update","entry_count":999}'::jsonb, 4)
-                    """
-                )
+                """
             )
             conn.execute(
                 text(

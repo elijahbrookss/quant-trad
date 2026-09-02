@@ -1784,7 +1784,7 @@ class PostgresMarketDataRepository:
         if str(series["contract_version"]) == _MANAGED_L2_BOOK_CONTRACT_VERSION:
             raise ValueError(
                 "market_data_ingest_invalid: market.l2_book.v1 is owned by the "
-                "fenced market-structure book writer"
+                f"fenced market-structure book writer series_id={series_id}"
             )
         source = self._get_source_identity(source_id)
         for fact in rows:
@@ -1943,15 +1943,15 @@ class PostgresMarketDataRepository:
             str(series["contract_version"])
             == _MANAGED_L2_BOOK_CONTRACT_VERSION
         )
-        if is_l2_book != bool(require_l2_book):
-            lane = (
-                "fenced market-structure book writer"
-                if is_l2_book
-                else "generic writer"
+        if is_l2_book and not require_l2_book:
+            raise ValueError(
+                "market_data_ingest_invalid: market.l2_book.v1 is owned by the "
+                f"fenced market-structure book writer series_id={series_id}"
             )
+        if require_l2_book and not is_l2_book:
             raise ValueError(
                 "market_data_ingest_invalid: canonical Fact series is assigned "
-                f"to the {lane} series_id={series_id}"
+                f"to the generic writer series_id={series_id}"
             )
         source_row = session.execute(
             text(
