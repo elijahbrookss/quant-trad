@@ -355,7 +355,6 @@ def test_structured_dataset_pins_all_causal_revisions_and_excludes_post_freeze_c
         "alias": "reserve_state",
         "consumer_id": "check",
         "instrument_id": instrument_id,
-        "instrument_ref": instrument_id,
         "fact_type": "asset.reserve_state",
         "contract_version": "asset.reserve_state.v1",
         "timeframe_seconds": None,
