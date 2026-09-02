@@ -18,6 +18,9 @@ ALERT_CLEANUP_PROVISIONING_PATH = (
     ROOT
     / "docker/grafana/server-alerting/cleanup-provisioning/alerting/operator-email-cleanup.yml"
 )
+BOOK_ROLLUP_MIGRATION_PATH = (
+    ROOT / "scripts/db/manual_migration_book_operational_rollups_v1.sql"
+)
 
 
 def _server_compose() -> dict:
@@ -110,6 +113,36 @@ def test_server_ports_are_private_and_database_is_not_published():
     }
     for ports in published.values():
         assert all("127.0.0.1" in value for value in ports)
+
+
+def test_server_postgres_has_explicit_isolated_shared_memory_headroom():
+    tsdb = _server_compose()["services"]["tsdb"]
+
+    assert tsdb["shm_size"] == "1g"
+    assert "ipc" not in tsdb
+
+
+def test_book_rollup_migration_disables_query_and_maintenance_parallelism():
+    migration = BOOK_ROLLUP_MIGRATION_PATH.read_text(encoding="utf-8")
+
+    assert "SET LOCAL max_parallel_workers_per_gather = 0;" in migration
+    assert "SET LOCAL max_parallel_maintenance_workers = 0;" in migration
+    for exact_trigger_guard in (
+        "trigger.tgconstraint = 0",
+        "trigger.tgnargs = 0",
+        "trigger.tgqual IS NULL",
+        "trigger.tgoldtable IS NULL",
+        "trigger.tgnewtable IS NULL",
+        "pg_get_triggerdef(trigger.oid, false)",
+        "procedure.prorettype = 'trigger'::regtype",
+        "procedure.proparallel = 'u'",
+        "NOT procedure.prosecdef",
+        "procedure.proconfig IS NULL",
+        "btrim(procedure.prosrc)",
+        "'[[:space:]]+'",
+        "has_function_privilege",
+    ):
+        assert exact_trigger_guard in migration
 
 
 def test_server_images_are_pinned_and_application_images_are_attested():

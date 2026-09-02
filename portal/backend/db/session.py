@@ -88,6 +88,7 @@ _CLEAN_BOOTSTRAP_ONLY_TABLES = frozenset(
         ("market", "fact_schemas"),
         ("market", "fact_versions"),
         ("market", "fact_acquisition_coverage"),
+        ("market", "book_operational_rollups"),
     }
 )
 _NUMERIC_COVERAGE_REQUIRED_INDEXES = frozenset(
@@ -114,6 +115,61 @@ _CANONICAL_FACT_LOOKUP_INDEX_COLUMNS = {
     "ix_market_fact_series_material": ("series_id", "material_hash"),
     "ix_market_fact_series_source": ("series_id", "source_id"),
 }
+_BOOK_OPERATIONAL_STATUS_INDEXES = (
+    (
+        "fact_versions",
+        "ix_market_fact_series_commit",
+        ("series_id", "market_commit_seq"),
+        "CREATE INDEX ix_market_fact_series_commit ON market.fact_versions "
+        "USING btree (series_id, market_commit_seq)",
+    ),
+    (
+        "book_checkpoint_manifests",
+        "ix_market_book_checkpoint_series_acknowledged",
+        ("series_id", "acknowledged_at", "id"),
+        "CREATE INDEX ix_market_book_checkpoint_series_acknowledged ON "
+        "market.book_checkpoint_manifests USING btree "
+        "(series_id, acknowledged_at, id)",
+    ),
+)
+_BOOK_CHECKPOINT_ROLLUP_TRIGGER_DEFINITION = (
+    "CREATE TRIGGER trg_record_book_checkpoint_operational_rollup_v1 "
+    "AFTER INSERT ON market.book_checkpoint_manifests FOR EACH ROW "
+    "EXECUTE FUNCTION market.record_book_checkpoint_operational_rollup_v1()"
+)
+_BOOK_CHECKPOINT_ROLLUP_FUNCTION_BODY = """
+BEGIN
+    UPDATE market.book_operational_rollups
+    SET checkpoint_count = checkpoint_count + 1,
+        checkpoint_high_water_acknowledged_at = CASE
+            WHEN checkpoint_count = 0
+              OR (NEW.acknowledged_at, NEW.id) >
+                 (checkpoint_high_water_acknowledged_at,
+                  checkpoint_high_water_id)
+            THEN NEW.acknowledged_at
+            ELSE checkpoint_high_water_acknowledged_at
+        END,
+        checkpoint_high_water_id = CASE
+            WHEN checkpoint_count = 0
+              OR (NEW.acknowledged_at, NEW.id) >
+                 (checkpoint_high_water_acknowledged_at,
+                  checkpoint_high_water_id)
+            THEN NEW.id
+            ELSE checkpoint_high_water_id
+        END,
+        updated_at = now()
+    WHERE series_id = NEW.series_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'market_book_operational_rollup_missing: checkpoint insert has no seeded counters series_id=%',
+            NEW.series_id;
+    END IF;
+    RETURN NEW;
+END;
+""".strip()
+_BOOK_CHECKPOINT_ROLLUP_FUNCTION_BODY_NORMALIZED = " ".join(
+    _BOOK_CHECKPOINT_ROLLUP_FUNCTION_BODY.split()
+)
 _COLUMN_MIGRATION_GUIDANCE = {
     ("market", "collection_definitions", "desired_state"):
         "scripts/db/manual_migration_collector_operations_v1.sql",
@@ -360,9 +416,11 @@ class Database:
                     include_clean_bootstrap=True,
                 )
                 self._ensure_canonical_fact_insert_trigger(conn)
+                self._ensure_book_checkpoint_rollup_trigger(conn)
                 self._ensure_market_data_immutability(conn)
             self._assert_fact_acquisition_migration(conn)
             self._assert_canonical_fact_migration(conn)
+            self._assert_book_operational_rollup_migration(conn)
             self._ensure_market_data_hypertables(conn)
             self._assert_market_commit_clock(conn, existing_only=False)
             self._assert_columns(conn)
@@ -721,6 +779,44 @@ class Database:
             )
         )
 
+    def _ensure_book_checkpoint_rollup_trigger(self, conn) -> None:
+        """Install the durable checkpoint counter for a clean market store."""
+
+        conn.execute(
+            text(
+                f"""
+                CREATE OR REPLACE FUNCTION
+                    market.record_book_checkpoint_operational_rollup_v1()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                {_BOOK_CHECKPOINT_ROLLUP_FUNCTION_BODY}
+                $$
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TRIGGER
+                    trg_record_book_checkpoint_operational_rollup_v1
+                AFTER INSERT ON market.book_checkpoint_manifests
+                FOR EACH ROW
+                EXECUTE FUNCTION
+                    market.record_book_checkpoint_operational_rollup_v1()
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                ALTER TABLE market.book_checkpoint_manifests
+                ENABLE ALWAYS TRIGGER
+                    trg_record_book_checkpoint_operational_rollup_v1
+                """
+            )
+        )
+
     def _create_missing_schemas(self, conn) -> None:
         """Create non-public schemas declared by metadata when absent."""
 
@@ -990,6 +1086,313 @@ class Database:
         self._reset_engine()
         self._available = False
         self._error = None
+
+    def _assert_book_operational_rollup_migration(self, conn) -> None:
+        """Require the explicitly seeded Level 2 status rollup on existing stores."""
+
+        relation = conn.execute(
+            text("SELECT to_regclass(:table_ref)"),
+            {"table_ref": "market.book_operational_rollups"},
+        ).scalar_one_or_none()
+        if relation is None:
+            raise RuntimeError(
+                "Table 'market.book_operational_rollups' is missing. Run "
+                "scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                "with writers stopped before starting this code."
+            )
+        expected = {
+            "series_id",
+            "snapshot_count",
+            "batch_count",
+            "mutation_count",
+            "checkpoint_count",
+            "checkpoint_high_water_acknowledged_at",
+            "checkpoint_high_water_id",
+            "fact_high_water_commit_seq",
+            "updated_at",
+        }
+        inspector = inspect(conn)
+        existing = {
+            str(column["name"])
+            for column in inspector.get_columns(
+                "book_operational_rollups",
+                schema="market",
+            )
+        }
+        missing = sorted(expected - existing)
+        if missing:
+            raise RuntimeError(
+                "Table 'market.book_operational_rollups' is missing columns: "
+                f"{', '.join(missing)}. Run "
+                "scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                "with writers stopped before starting this code."
+            )
+        checkpoint_trigger_ready = bool(
+            conn.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_trigger AS trigger
+                        JOIN pg_proc AS procedure
+                          ON procedure.oid = trigger.tgfoid
+                        JOIN pg_namespace AS procedure_namespace
+                          ON procedure_namespace.oid = procedure.pronamespace
+                        JOIN pg_language AS language
+                          ON language.oid = procedure.prolang
+                        WHERE trigger.tgname =
+                            'trg_record_book_checkpoint_operational_rollup_v1'
+                          AND trigger.tgrelid =
+                            'market.book_checkpoint_manifests'::regclass
+                          AND NOT trigger.tgisinternal
+                          AND trigger.tgenabled = 'A'
+                          AND trigger.tgtype = 5
+                          AND trigger.tgconstraint = 0
+                          AND trigger.tgnargs = 0
+                          AND trigger.tgqual IS NULL
+                          AND trigger.tgoldtable IS NULL
+                          AND trigger.tgnewtable IS NULL
+                          AND pg_get_triggerdef(trigger.oid, false) =
+                              :expected_trigger_definition
+                          AND procedure_namespace.nspname = 'market'
+                          AND procedure.proname =
+                            'record_book_checkpoint_operational_rollup_v1'
+                          AND procedure.prokind = 'f'
+                          AND procedure.prorettype = 'trigger'::regtype
+                          AND procedure.pronargs = 0
+                          AND NOT procedure.proretset
+                          AND language.lanname = 'plpgsql'
+                          AND procedure.provolatile = 'v'
+                          AND procedure.proparallel = 'u'
+                          AND NOT procedure.proisstrict
+                          AND NOT procedure.prosecdef
+                          AND NOT procedure.proleakproof
+                          AND procedure.proconfig IS NULL
+                          AND regexp_replace(
+                              btrim(procedure.prosrc),
+                              '[[:space:]]+',
+                              ' ',
+                              'g'
+                          ) = :expected_function_body
+                          AND has_function_privilege(
+                              current_user,
+                              procedure.oid,
+                              'EXECUTE'
+                          )
+                    ) AS book_checkpoint_rollup_trigger_ready
+                    """
+                ),
+                {
+                    "expected_trigger_definition": (
+                        _BOOK_CHECKPOINT_ROLLUP_TRIGGER_DEFINITION
+                    ),
+                    "expected_function_body": (
+                        _BOOK_CHECKPOINT_ROLLUP_FUNCTION_BODY_NORMALIZED
+                    ),
+                },
+            ).scalar_one()
+        )
+        if not checkpoint_trigger_ready:
+            raise RuntimeError(
+                "Table 'market.book_checkpoint_manifests' is missing the "
+                "always-on durable checkpoint rollup trigger. Run "
+                "scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                "with writers stopped before starting this code."
+            )
+        self._assert_book_operational_status_indexes(conn)
+        missing_series_id = conn.execute(
+            text(
+                """
+                WITH required_series AS (
+                    SELECT series.id AS series_id
+                    FROM market.series AS series
+                    WHERE series.contract_version = 'market.l2_book.v1'
+                    UNION
+                    SELECT definitions.series_id
+                    FROM market.stream_definitions AS definitions
+                    WHERE definitions.contract_version = 'market.l2_book.v1'
+                )
+                SELECT required_series.series_id
+                    AS missing_required_book_rollup_series_id
+                FROM required_series
+                LEFT JOIN market.book_operational_rollups AS rollups
+                  ON rollups.series_id = required_series.series_id
+                WHERE rollups.series_id IS NULL
+                ORDER BY required_series.series_id
+                LIMIT 1
+                """
+            )
+        ).scalar_one_or_none()
+        if missing_series_id is not None:
+            raise RuntimeError(
+                "Table 'market.book_operational_rollups' has no seeded row for "
+                f"Level 2 series_id={int(missing_series_id)}. Run "
+                "scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                "with writers stopped before starting this code."
+            )
+        stale_fact = conn.execute(
+            text(
+                """
+                SELECT rollups.series_id,
+                       rollups.fact_high_water_commit_seq,
+                       COALESCE(latest.market_commit_seq, 0)
+                           AS latest_fact_commit_seq
+                FROM market.book_operational_rollups AS rollups
+                JOIN market.series AS series
+                  ON series.id = rollups.series_id
+                LEFT JOIN LATERAL (
+                    SELECT facts.market_commit_seq
+                    FROM market.fact_versions AS facts
+                    WHERE facts.series_id = rollups.series_id
+                      AND facts.payload_schema_id = 'market.l2_book.v1'
+                    ORDER BY facts.market_commit_seq DESC
+                    LIMIT 1
+                ) AS latest ON TRUE
+                WHERE series.contract_version = 'market.l2_book.v1'
+                  AND COALESCE(latest.market_commit_seq, 0)
+                      <> rollups.fact_high_water_commit_seq
+                ORDER BY rollups.series_id
+                LIMIT 1
+                """
+            )
+        ).mappings().first()
+        if stale_fact is not None:
+            raise RuntimeError(
+                "Table 'market.book_operational_rollups' has stale canonical "
+                f"Fact counters for Level 2 series_id={int(stale_fact['series_id'])} "
+                "stored_fact_commit_seq="
+                f"{int(stale_fact['fact_high_water_commit_seq'])} "
+                "latest_fact_commit_seq="
+                f"{int(stale_fact['latest_fact_commit_seq'])}. Run "
+                "scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                "with writers stopped before starting this code."
+            )
+        stale_checkpoint = conn.execute(
+            text(
+                """
+                SELECT rollups.series_id,
+                       rollups.checkpoint_high_water_id,
+                       latest.id AS latest_checkpoint_id
+                FROM market.book_operational_rollups AS rollups
+                JOIN market.series AS series
+                  ON series.id = rollups.series_id
+                LEFT JOIN LATERAL (
+                    SELECT checkpoints.id, checkpoints.acknowledged_at
+                    FROM market.book_checkpoint_manifests AS checkpoints
+                    WHERE checkpoints.series_id = rollups.series_id
+                    ORDER BY checkpoints.acknowledged_at DESC,
+                             checkpoints.id DESC
+                    LIMIT 1
+                ) AS latest ON TRUE
+                WHERE series.contract_version = 'market.l2_book.v1'
+                  AND (
+                      latest.id IS DISTINCT FROM
+                          rollups.checkpoint_high_water_id
+                      OR latest.acknowledged_at IS DISTINCT FROM
+                          rollups.checkpoint_high_water_acknowledged_at
+                  )
+                ORDER BY rollups.series_id
+                LIMIT 1
+                """
+            )
+        ).mappings().first()
+        if stale_checkpoint is not None:
+            raise RuntimeError(
+                "Table 'market.book_operational_rollups' has stale checkpoint "
+                f"counters for Level 2 series_id={int(stale_checkpoint['series_id'])} "
+                f"stored_checkpoint_id={stale_checkpoint['checkpoint_high_water_id']} "
+                f"latest_checkpoint_id={stale_checkpoint['latest_checkpoint_id']}. "
+                "Run scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                "with writers stopped before starting this code."
+            )
+
+    def _assert_book_operational_status_indexes(self, conn) -> None:
+        """Require exact bounded-read indexes before probing Level 2 high waters."""
+
+        mismatches: list[str] = []
+        for (
+            table_name,
+            index_name,
+            expected_columns,
+            expected_definition,
+        ) in (
+            _BOOK_OPERATIONAL_STATUS_INDEXES
+        ):
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        index_class.relname AS operational_index_name,
+                        index_state.indisvalid,
+                        index_state.indisready,
+                        index_state.indisunique,
+                        index_state.indnkeyatts,
+                        index_state.indnatts,
+                        index_state.indexprs IS NULL AS has_plain_columns,
+                        index_state.indpred IS NULL AS is_unfiltered,
+                        access_method.amname AS access_method,
+                        ARRAY(
+                            SELECT COALESCE(
+                                attribute.attname::text,
+                                '<expression>'
+                            )
+                            FROM unnest(
+                                index_state.indkey::smallint[]
+                            ) WITH ORDINALITY
+                                AS index_key(attnum, position)
+                            LEFT JOIN pg_attribute AS attribute
+                              ON attribute.attrelid = index_state.indrelid
+                             AND attribute.attnum = index_key.attnum
+                            WHERE index_key.position
+                                  <= index_state.indnkeyatts
+                            ORDER BY index_key.position
+                        ) AS key_columns,
+                        pg_get_indexdef(index_state.indexrelid) AS definition
+                    FROM pg_index AS index_state
+                    JOIN pg_class AS index_class
+                      ON index_class.oid = index_state.indexrelid
+                    JOIN pg_class AS table_class
+                      ON table_class.oid = index_state.indrelid
+                    JOIN pg_namespace AS table_namespace
+                      ON table_namespace.oid = table_class.relnamespace
+                    JOIN pg_namespace AS index_namespace
+                      ON index_namespace.oid = index_class.relnamespace
+                    JOIN pg_am AS access_method
+                      ON access_method.oid = index_class.relam
+                    WHERE table_namespace.nspname = 'market'
+                      AND table_class.relname = :table_name
+                      AND index_namespace.nspname = 'market'
+                      AND index_class.relname = :index_name
+                    """
+                ),
+                {"table_name": table_name, "index_name": index_name},
+            ).mappings().first()
+            actual_columns = tuple(row["key_columns"] or ()) if row else ()
+            if (
+                row is None
+                or not bool(row["indisvalid"])
+                or not bool(row["indisready"])
+                or bool(row["indisunique"])
+                or str(row["access_method"]) != "btree"
+                or not bool(row["has_plain_columns"])
+                or not bool(row["is_unfiltered"])
+                or int(row["indnkeyatts"]) != len(expected_columns)
+                or int(row["indnatts"]) != len(expected_columns)
+                or actual_columns != expected_columns
+                or str(row["definition"]) != expected_definition
+            ):
+                definition = str(row["definition"]) if row else "<missing>"
+                mismatches.append(
+                    f"{index_name} expected={expected_columns!r} "
+                    f"actual={definition}"
+                )
+        if mismatches:
+            raise RuntimeError(
+                "Level 2 bounded status indexes are missing or invalid: "
+                f"{'; '.join(mismatches)}. Run "
+                "scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                "with writers stopped before starting this code."
+            )
 
     def _assert_columns(self, conn) -> None:
         """Fail loud when an existing table does not match the current column contract."""

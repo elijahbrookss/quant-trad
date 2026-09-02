@@ -61,6 +61,7 @@ from market_data.market_state import (
 from market_data.order_book import (
     BOOK_CHECKPOINT_SCHEMA_VERSION,
     BOOK_RECONSTRUCTION_VERSION,
+    L2_BOOK_FACT_VERSION,
     BookCheckpointFact,
     BookLifecycle,
     BookSourcePosition,
@@ -206,6 +207,154 @@ class FeatureIngestionOutcome:
     noop_count: int
     max_commit_seq: int
     material_hashes: tuple[str, ...]
+
+
+def _require_book_operational_rollup(
+    session,
+    *,
+    series_id: int,
+    phase: str,
+) -> None:
+    present = session.execute(
+        text(
+            "SELECT 1 FROM market.book_operational_rollups "
+            "WHERE series_id = :series_id"
+        ),
+        {"series_id": int(series_id)},
+    ).scalar_one_or_none()
+    if present is None:
+        raise RuntimeError(
+            "market_book_operational_rollup_missing: existing canonical book "
+            f"material has no seeded counters series_id={int(series_id)} "
+            f"phase={phase}; run "
+            "scripts/db/manual_migration_book_operational_rollups_v1.sql "
+            "with writers stopped"
+        )
+
+
+def _increment_book_operational_rollup(
+    session,
+    *,
+    series_id: int,
+    snapshot_delta: int = 0,
+    batch_delta: int = 0,
+    mutation_delta: int = 0,
+    fact_high_water_commit_seq: int = 0,
+) -> None:
+    counters = {
+        "snapshot_delta": int(snapshot_delta),
+        "batch_delta": int(batch_delta),
+        "mutation_delta": int(mutation_delta),
+        "fact_high_water": int(fact_high_water_commit_seq),
+    }
+    if any(value < 0 for value in counters.values()):
+        raise ValueError(
+            "market_book_operational_rollup_invalid: counter deltas and high-water "
+            f"must be non-negative series_id={int(series_id)} counters={counters}"
+        )
+    updated = session.execute(
+        text(
+            """
+            UPDATE market.book_operational_rollups
+            SET snapshot_count = snapshot_count + :snapshot_delta,
+                batch_count = batch_count + :batch_delta,
+                mutation_count = mutation_count + :mutation_delta,
+                fact_high_water_commit_seq = GREATEST(
+                    fact_high_water_commit_seq,
+                    :fact_high_water
+                ),
+                updated_at = now()
+            WHERE series_id = :series_id
+            RETURNING series_id
+            """
+        ),
+        {"series_id": int(series_id), **counters},
+    ).scalar_one_or_none()
+    if updated is None:
+        _require_book_operational_rollup(
+            session,
+            series_id=series_id,
+            phase="counter_increment",
+        )
+
+
+def _advance_book_fact_rollup(
+    session,
+    *,
+    series_id: int,
+    expected_new_fact_count: int,
+) -> None:
+    high_water = session.execute(
+        text(
+            """
+            SELECT fact_high_water_commit_seq
+            FROM market.book_operational_rollups
+            WHERE series_id = :series_id
+            FOR UPDATE
+            """
+        ),
+        {"series_id": int(series_id)},
+    ).scalar_one_or_none()
+    if high_water is None:
+        _require_book_operational_rollup(
+            session,
+            series_id=series_id,
+            phase="canonical_fact_fold",
+        )
+    folded = session.execute(
+        text(
+            """
+            SELECT count(*) AS fact_count,
+                   count(*) FILTER (
+                       WHERE payload ->> 'event_type' = 'snapshot'
+                   ) AS snapshot_count,
+                   count(*) FILTER (
+                       WHERE payload ->> 'event_type' = 'update'
+                   ) AS batch_count,
+                   COALESCE(sum(
+                       CASE WHEN payload ->> 'event_type' = 'update'
+                            THEN CAST(payload ->> 'entry_count' AS bigint)
+                            ELSE 0
+                       END
+                   ), 0) AS mutation_count,
+                   COALESCE(max(market_commit_seq), :high_water) AS high_water
+            FROM market.fact_versions
+            WHERE series_id = :series_id
+              AND market_commit_seq > :high_water
+              AND payload_schema_id = 'market.l2_book.v1'
+            """
+        ),
+        {
+            "series_id": int(series_id),
+            "high_water": int(high_water),
+        },
+    ).mappings().one()
+    fact_count = int(folded["fact_count"])
+    if fact_count != int(expected_new_fact_count):
+        raise RuntimeError(
+            "market_book_operational_rollup_stale: canonical L2 Fact suffix "
+            "does not match the current fenced ingest "
+            f"series_id={int(series_id)} expected_new_fact_count="
+            f"{int(expected_new_fact_count)} actual_new_fact_count={fact_count}; "
+            "stop writers and rerun "
+            "scripts/db/manual_migration_book_operational_rollups_v1.sql"
+        )
+    snapshot_count = int(folded["snapshot_count"])
+    batch_count = int(folded["batch_count"])
+    if fact_count != snapshot_count + batch_count:
+        raise RuntimeError(
+            "market_book_operational_rollup_corrupt: unsupported canonical L2 "
+            f"event type series_id={int(series_id)} fact_count={fact_count} "
+            f"snapshot_count={snapshot_count} batch_count={batch_count}"
+        )
+    _increment_book_operational_rollup(
+        session,
+        series_id=series_id,
+        snapshot_delta=snapshot_count,
+        batch_delta=batch_count,
+        mutation_delta=int(folded["mutation_count"]),
+        fact_high_water_commit_seq=int(folded["high_water"]),
+    )
 
 
 
@@ -394,6 +543,30 @@ class PostgresMarketStructureRepository:
             "config": dict(config or {}),
         }
         with db.session() as session:
+            series_contract_version = session.execute(
+                text(
+                    """
+                    SELECT contract_version
+                    FROM market.series
+                    WHERE id = :series_id
+                    FOR SHARE
+                    """
+                ),
+                {"series_id": int(series_id)},
+            ).scalar_one_or_none()
+            if series_contract_version is None:
+                raise ValueError(
+                    "market_stream_definition_invalid: unknown "
+                    f"series_id={int(series_id)}"
+                )
+            if str(series_contract_version) != str(contract_version):
+                raise ValueError(
+                    "market_stream_definition_invalid: contract_version "
+                    "disagrees with series "
+                    f"series_id={int(series_id)} "
+                    f"series_contract_version={series_contract_version} "
+                    f"definition_contract_version={contract_version}"
+                )
             existing = session.execute(
                 text(
                     """
@@ -487,6 +660,16 @@ class PostgresMarketStructureRepository:
                         "generation": generation,
                         "config": _json(next_config),
                     },
+                )
+            if str(contract_version) == L2_BOOK_FACT_VERSION:
+                _require_book_operational_rollup(
+                    session,
+                    series_id=series_id,
+                    phase=(
+                        "stream_definition_create"
+                        if existing is None
+                        else "stream_definition_update"
+                    ),
                 )
             row = session.execute(
                 text("SELECT * FROM market.stream_definitions WHERE identity_key = :identity_key"),
@@ -933,6 +1116,21 @@ class PostgresMarketStructureRepository:
             text(
                 """
                 SELECT definitions.generation AS definition_generation,
+                       definitions.source_id AS definition_source_id,
+                       definitions.series_id AS definition_series_id,
+                       definitions.provider AS definition_provider,
+                       definitions.venue AS definition_venue,
+                       definitions.provider_product_id
+                           AS definition_provider_product_id,
+                       definitions.channels AS definition_channels,
+                       definitions.auth_mode AS definition_auth_mode,
+                       definitions.contract_version
+                           AS definition_contract_version,
+                       definitions.max_spool_bytes
+                           AS definition_max_spool_bytes,
+                       definitions.max_segment_bytes
+                           AS definition_max_segment_bytes,
+                       definitions.config AS definition_config,
                        leases.*, leases.expires_at > now() AS lease_current
                 FROM market.stream_definitions AS definitions
                 JOIN market.stream_lease_state AS leases
@@ -946,6 +1144,21 @@ class PostgresMarketStructureRepository:
         if (
             row is None
             or int(row["definition_generation"]) != claim.definition_generation
+            or int(row["definition_source_id"]) != claim.source_id
+            or int(row["definition_series_id"]) != claim.series_id
+            or str(row["definition_provider"]) != claim.provider
+            or str(row["definition_venue"]) != claim.venue
+            or str(row["definition_provider_product_id"])
+            != claim.provider_product_id
+            or tuple(str(value) for value in row["definition_channels"])
+            != claim.channels
+            or str(row["definition_auth_mode"]) != claim.auth_mode
+            or str(row["definition_contract_version"])
+            != claim.contract_version
+            or int(row["definition_max_spool_bytes"]) != claim.max_spool_bytes
+            or int(row["definition_max_segment_bytes"])
+            != claim.max_segment_bytes
+            or dict(row["definition_config"] or {}) != claim.config
             or str(row["owner_id"]) != claim.owner_id
             or str(row["token_hash"]) != _token_hash(claim.lease_token)
             or int(row["lease_generation"]) != claim.lease_generation
@@ -2411,7 +2624,7 @@ class PostgresMarketStructureRepository:
                     )
 
             if canonical_snapshots:
-                outcome = market_data_repo.ingest_facts_in_session(
+                outcome = market_data_repo.ingest_l2_book_facts_in_session(
                     session,
                     series_id=claim.series_id,
                     source_id=claim.source_id,
@@ -2438,7 +2651,7 @@ class PostgresMarketStructureRepository:
                 max_commit_seq = max(max_commit_seq, outcome.max_commit_seq)
 
             if canonical_batches:
-                outcome = market_data_repo.ingest_facts_in_session(
+                batch_outcome = market_data_repo.ingest_l2_book_facts_in_session(
                     session,
                     series_id=claim.series_id,
                     source_id=claim.source_id,
@@ -2453,16 +2666,19 @@ class PostgresMarketStructureRepository:
                     collection_fence=self._collection_fence(claim),
                 )
                 if (
-                    outcome.corrected_count != 0
-                    or outcome.inserted_count + outcome.noop_count
+                    batch_outcome.corrected_count != 0
+                    or batch_outcome.inserted_count + batch_outcome.noop_count
                     != len(canonical_batches)
                 ):
                     raise RuntimeError(
                         "market_l2_ingest_corrupt: canonical mutation outcome mismatch"
                     )
-                inserted_batches = outcome.inserted_count
-                noop_batches = outcome.noop_count
-                max_commit_seq = max(max_commit_seq, outcome.max_commit_seq)
+                inserted_batches = batch_outcome.inserted_count
+                noop_batches = batch_outcome.noop_count
+                max_commit_seq = max(
+                    max_commit_seq,
+                    batch_outcome.max_commit_seq,
+                )
 
             for validity in validity_rows:
                 inserted_validity += int(
@@ -2554,6 +2770,14 @@ class PostgresMarketStructureRepository:
                     )
                 )
 
+            _advance_book_fact_rollup(
+                session,
+                series_id=claim.series_id,
+                expected_new_fact_count=(
+                    inserted_snapshots + inserted_batches
+                ),
+            )
+
             session.execute(
                 text(
                     """
@@ -2616,6 +2840,18 @@ class PostgresMarketStructureRepository:
         source_manifest_ids: Sequence[str],
     ) -> bool:
         if (
+            claim.contract_version != L2_BOOK_FACT_VERSION
+            or int(checkpoint.series_id) != int(claim.series_id)
+            or checkpoint.source_position.definition_id != claim.definition_id
+            or checkpoint.source_position.session_id != claim.session_id
+            or checkpoint.source_position.provider_product_id
+            != claim.provider_product_id
+        ):
+            raise ValueError(
+                "market_book_checkpoint_commit_invalid: checkpoint scope "
+                "disagrees with stream claim"
+            )
+        if (
             checkpoint.checkpoint_id != encoded.checkpoint_id
             or encoded.sha256 != acknowledgement.sha256
             or encoded.byte_count != acknowledgement.byte_count
@@ -2627,14 +2863,42 @@ class PostgresMarketStructureRepository:
             raise ValueError("market_book_checkpoint_commit_invalid: source manifests required")
         with db.session() as session:
             self._require_fence(session, claim)
+            _require_book_operational_rollup(
+                session,
+                series_id=checkpoint.series_id,
+                phase="checkpoint_commit",
+            )
             source_count = int(
                 session.execute(
                     text(
-                        "SELECT count(*) FROM market.raw_archive_manifests "
-                        "WHERE definition_id = :definition_id AND id = ANY(:manifest_ids)"
+                        """
+                        SELECT count(*)
+                        FROM market.raw_archive_manifests AS manifests
+                        WHERE manifests.definition_id = :definition_id
+                          AND manifests.session_id = :session_id
+                          AND manifests.connection_epoch = :connection_epoch
+                          AND manifests.first_receive_ordinal <= :receive_ordinal
+                          AND manifests.last_receive_ordinal >= :receive_ordinal
+                          AND manifests.id = ANY(:manifest_ids)
+                          AND EXISTS (
+                              SELECT 1
+                              FROM market.raw_archive_ranges AS ranges
+                              WHERE ranges.manifest_id = manifests.id
+                                AND ranges.provider_product_id =
+                                    :provider_product_id
+                          )
+                        """
                     ),
                     {
                         "definition_id": claim.definition_id,
+                        "session_id": claim.session_id,
+                        "connection_epoch": (
+                            checkpoint.source_position.connection_epoch
+                        ),
+                        "receive_ordinal": (
+                            checkpoint.source_position.receive_ordinal
+                        ),
+                        "provider_product_id": claim.provider_product_id,
                         "manifest_ids": list(manifests),
                     },
                 ).scalar_one()
@@ -3092,7 +3356,8 @@ class PostgresMarketStructureRepository:
             definition = session.execute(
                 text(
                     """
-                    SELECT id, series_id, provider_product_id, enabled,
+                    SELECT id, series_id, provider_product_id, contract_version,
+                           enabled,
                            max_spool_bytes,
                            max_segment_bytes, config
                     FROM market.stream_definitions
@@ -3220,40 +3485,108 @@ class PostgresMarketStructureRepository:
                 text(
                     """
                     SELECT state.*,
-                           COALESCE(snapshots.snapshot_count, 0) AS snapshot_count,
-                           COALESCE(batches.batch_count, 0) AS batch_count,
-                           COALESCE(batches.mutation_count, 0) AS mutation_count,
-                           COALESCE(checkpoints.checkpoint_count, 0) AS checkpoint_count
+                           rollup.series_id AS rollup_series_id,
+                           COALESCE(rollup.snapshot_count, 0) AS snapshot_count,
+                           COALESCE(rollup.batch_count, 0) AS batch_count,
+                           COALESCE(rollup.mutation_count, 0) AS mutation_count,
+                           COALESCE(rollup.checkpoint_count, 0) AS checkpoint_count,
+                           rollup.checkpoint_high_water_acknowledged_at,
+                           rollup.checkpoint_high_water_id,
+                           COALESCE(
+                               rollup.fact_high_water_commit_seq,
+                               0
+                           ) AS counter_fact_high_water_commit_seq,
+                           rollup.updated_at AS counter_updated_at,
+                           latest_fact.market_commit_seq AS latest_fact_commit_seq,
+                           latest_checkpoint.id AS latest_checkpoint_id,
+                           latest_checkpoint.acknowledged_at
+                               AS latest_checkpoint_acknowledged_at
                     FROM (SELECT CAST(:series_id AS bigint) AS requested_series_id) AS scope
                     LEFT JOIN market.book_reconstruction_state AS state
                       ON state.series_id = scope.requested_series_id
+                    LEFT JOIN market.book_operational_rollups AS rollup
+                      ON rollup.series_id = scope.requested_series_id
                     LEFT JOIN LATERAL (
-                        SELECT count(*) AS snapshot_count
-                        FROM market.fact_versions
-                        WHERE series_id = scope.requested_series_id
-                          AND payload_schema_id = 'market.l2_book.v1'
-                          AND payload ->> 'event_type' = 'snapshot'
-                    ) AS snapshots ON TRUE
+                        SELECT facts.market_commit_seq
+                        FROM market.fact_versions AS facts
+                        WHERE CAST(:is_l2 AS boolean)
+                          AND facts.series_id = scope.requested_series_id
+                          AND facts.payload_schema_id = 'market.l2_book.v1'
+                        ORDER BY facts.market_commit_seq DESC
+                        LIMIT 1
+                    ) AS latest_fact ON TRUE
                     LEFT JOIN LATERAL (
-                        SELECT count(*) AS batch_count,
-                               COALESCE(
-                                   sum(CAST(payload ->> 'entry_count' AS bigint)),
-                                   0
-                               ) AS mutation_count
-                        FROM market.fact_versions
-                        WHERE series_id = scope.requested_series_id
-                          AND payload_schema_id = 'market.l2_book.v1'
-                          AND payload ->> 'event_type' = 'update'
-                    ) AS batches ON TRUE
-                    LEFT JOIN LATERAL (
-                        SELECT count(*) AS checkpoint_count
-                        FROM market.book_checkpoint_manifests
-                        WHERE series_id = scope.requested_series_id
-                    ) AS checkpoints ON TRUE
+                        SELECT checkpoints.id, checkpoints.acknowledged_at
+                        FROM market.book_checkpoint_manifests AS checkpoints
+                        WHERE CAST(:is_l2 AS boolean)
+                          AND checkpoints.series_id = scope.requested_series_id
+                        ORDER BY checkpoints.acknowledged_at DESC,
+                                 checkpoints.id DESC
+                        LIMIT 1
+                    ) AS latest_checkpoint ON TRUE
                     """
                 ),
-                {"series_id": int(definition["series_id"])},
+                {
+                    "series_id": int(definition["series_id"]),
+                    "is_l2": (
+                        str(definition["contract_version"])
+                        == L2_BOOK_FACT_VERSION
+                    ),
+                },
             ).mappings().one()
+            book_reconstruction = dict(book_state)
+            rollup_series_id = book_reconstruction.pop("rollup_series_id")
+            latest_fact_commit_seq = int(
+                book_reconstruction.pop("latest_fact_commit_seq") or 0
+            )
+            latest_checkpoint_id = book_reconstruction.pop("latest_checkpoint_id")
+            latest_checkpoint_acknowledged_at = book_reconstruction.pop(
+                "latest_checkpoint_acknowledged_at"
+            )
+            if (
+                str(definition["contract_version"]) == L2_BOOK_FACT_VERSION
+                and rollup_series_id is None
+            ):
+                raise RuntimeError(
+                    "market_book_operational_rollup_missing: Level 2 definition "
+                    f"has no seeded counters series_id={int(definition['series_id'])}; "
+                    "run scripts/db/manual_migration_book_operational_rollups_v1.sql "
+                    "with writers stopped"
+                )
+            counter_high_water = int(
+                book_reconstruction["counter_fact_high_water_commit_seq"]
+            )
+            if (
+                str(definition["contract_version"]) == L2_BOOK_FACT_VERSION
+                and latest_fact_commit_seq != counter_high_water
+            ):
+                raise RuntimeError(
+                    "market_book_operational_rollup_stale: latest canonical "
+                    "Level 2 Fact is not represented by the bounded status "
+                    f"projection series_id={int(definition['series_id'])} "
+                    f"latest_fact_commit_seq={latest_fact_commit_seq} "
+                    f"counter_fact_high_water_commit_seq={counter_high_water}; "
+                    "stop writers and rerun "
+                    "scripts/db/manual_migration_book_operational_rollups_v1.sql"
+                )
+            if str(definition["contract_version"]) == L2_BOOK_FACT_VERSION and (
+                latest_checkpoint_id
+                != book_reconstruction["checkpoint_high_water_id"]
+                or latest_checkpoint_acknowledged_at
+                != book_reconstruction[
+                    "checkpoint_high_water_acknowledged_at"
+                ]
+            ):
+                raise RuntimeError(
+                    "market_book_operational_rollup_stale: latest book "
+                    "checkpoint is not represented by the bounded status "
+                    f"projection series_id={int(definition['series_id'])} "
+                    f"latest_checkpoint_id={latest_checkpoint_id} "
+                    "counter_checkpoint_high_water_id="
+                    f"{book_reconstruction['checkpoint_high_water_id']}; "
+                    "stop writers and rerun "
+                    "scripts/db/manual_migration_book_operational_rollups_v1.sql"
+                )
             book_validity = session.execute(
                 text(
                     """
@@ -3297,7 +3630,7 @@ class PostgresMarketStructureRepository:
             "last_acknowledged_at": manifest["last_acknowledged_at"],
             "canonical_trade_count": trade_count,
             "trade_flow_aggregates": [dict(row) for row in aggregates],
-            "book_reconstruction": dict(book_state),
+            "book_reconstruction": book_reconstruction,
             "book_validity_intervals": [dict(row) for row in book_validity],
             "quality_counts": {str(row["classification"]): int(row["count"]) for row in quality},
             "coverage_intervals": [dict(row) for row in coverage],

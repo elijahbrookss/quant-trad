@@ -31,6 +31,7 @@ from .models import (
 )
 from .market_data_models import (
     MarketBookCheckpointManifestRecord,
+    MarketBookOperationalRollupRecord,
     MarketBookQualityEventLinkRecord,
     MarketBookReconstructionStateRecord,
     MarketBookValidityIntervalVersionRecord,
@@ -118,6 +119,7 @@ __all__ = [
     "MarketFactAcquisitionCoverageRecord",
     "MarketFactSchemaRecord",
     "MarketFactVersionRecord",
+    "MarketBookOperationalRollupRecord",
     "MarketCollectorSafetyEventRecord",
     "MarketCollectorSafetyStateRecord",
     "MarketProviderRateBudgetRecord",

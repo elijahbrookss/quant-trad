@@ -7,7 +7,11 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from market_data.fact_registry import supported_static_fact_payload_schemas
-from portal.backend.db.session import Database
+from portal.backend.db.session import (
+    Database,
+    _BOOK_CHECKPOINT_ROLLUP_FUNCTION_BODY,
+    _BOOK_CHECKPOINT_ROLLUP_TRIGGER_DEFINITION,
+)
 
 
 pytestmark = pytest.mark.db
@@ -74,6 +78,7 @@ def test_empty_timescale_database_bootstraps_current_schema_atomically(
                 "collection_definitions",
                 "collector_operation_events",
                 "stream_definitions",
+                "book_operational_rollups",
             } <= tables
 
             registry_count = conn.execute(
@@ -180,5 +185,123 @@ def test_empty_timescale_database_bootstraps_current_schema_atomically(
 
         second = Database(dsn)
         assert second.ensure_schema() is True, str(second.last_error)
+
+        def assert_rollup_trigger_drift_rejected() -> None:
+            drifted = Database(dsn)
+            assert drifted.ensure_schema() is False
+            assert "always-on durable checkpoint rollup trigger" in str(
+                drifted.last_error
+            )
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE market.book_checkpoint_manifests
+                    ENABLE TRIGGER
+                        trg_record_book_checkpoint_operational_rollup_v1
+                    """
+                )
+            )
+        assert_rollup_trigger_drift_rejected()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE market.book_checkpoint_manifests
+                    ENABLE ALWAYS TRIGGER
+                        trg_record_book_checkpoint_operational_rollup_v1
+                    """
+                )
+            )
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE OR REPLACE FUNCTION
+                        market.record_book_checkpoint_operational_rollup_v1()
+                    RETURNS trigger
+                    LANGUAGE plpgsql
+                    AS $$
+                    BEGIN
+                        RETURN NEW;
+                    END;
+                    $$
+                    """
+                )
+            )
+        assert_rollup_trigger_drift_rejected()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"""
+                    CREATE OR REPLACE FUNCTION
+                        market.record_book_checkpoint_operational_rollup_v1()
+                    RETURNS trigger
+                    LANGUAGE plpgsql
+                    AS $$
+                    {_BOOK_CHECKPOINT_ROLLUP_FUNCTION_BODY}
+                    $$
+                    """
+                )
+            )
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    DROP TRIGGER
+                        trg_record_book_checkpoint_operational_rollup_v1
+                    ON market.book_checkpoint_manifests
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TRIGGER
+                        trg_record_book_checkpoint_operational_rollup_v1
+                    AFTER INSERT ON market.book_checkpoint_manifests
+                    FOR EACH ROW
+                    WHEN (false)
+                    EXECUTE FUNCTION
+                        market.record_book_checkpoint_operational_rollup_v1()
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE market.book_checkpoint_manifests
+                    ENABLE ALWAYS TRIGGER
+                        trg_record_book_checkpoint_operational_rollup_v1
+                    """
+                )
+            )
+        assert_rollup_trigger_drift_rejected()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    DROP TRIGGER
+                        trg_record_book_checkpoint_operational_rollup_v1
+                    ON market.book_checkpoint_manifests
+                    """
+                )
+            )
+            conn.execute(text(_BOOK_CHECKPOINT_ROLLUP_TRIGGER_DEFINITION))
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE market.book_checkpoint_manifests
+                    ENABLE ALWAYS TRIGGER
+                        trg_record_book_checkpoint_operational_rollup_v1
+                    """
+                )
+            )
+
+        restored = Database(dsn)
+        assert restored.ensure_schema() is True, str(restored.last_error)
     finally:
         engine.dispose()

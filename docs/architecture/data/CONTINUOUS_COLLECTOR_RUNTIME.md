@@ -38,6 +38,7 @@ code_paths:
   - scripts/reporting/docker_capacity_sampler.sh
   - scripts/reporting/host_capacity_sampler.ps1
   - scripts/db/manual_enable_market_storage_lifecycle_v1.sql
+  - scripts/db/manual_migration_book_operational_rollups_v1.sql
   - config/defaults.yaml
   - docker/grafana/provisioning/dashboards/capacity-database-growth.json
   - docker/grafana/provisioning/alerting/collector-safety.yml
@@ -98,11 +99,20 @@ operator frontends, this collector worker, database administration, and the
 Grafana/Loki/Alloy observability surface. It uses commit-tagged application
 images, private database networking, loopback-only host publication, durable
 NVMe PostgreSQL, an explicit host archive mount, health-gated startup, and a
-five-minute collector drain window. IBKR Gateway remains profile-gated because
-broker credentials and trading surfaces require separate admission. The
-deployment helper promotes an exact reviewed Git commit and retains prior
-commit-tagged images for compatible rollback; it does not make the agent or Git
-checkout a workload supervisor.
+five-minute collector drain window. The `tsdb` container has an isolated 1 GiB
+`/dev/shm` allocation so bounded PostgreSQL parallel work has explicit dynamic
+shared-memory headroom instead of Docker's small default. This is runtime
+capacity, not durable storage, a PostgreSQL schema change, or permission for
+unbounded query fan-out.
+
+IBKR Gateway remains profile-gated because broker credentials and trading
+surfaces require separate admission. The deployment helper promotes an exact
+reviewed Git commit and retains prior commit-tagged images for compatible
+rollback; it does not make the agent or Git checkout a workload supervisor. A
+merge does not deploy this capacity setting. It takes effect only when an
+operator promotes the reviewed release and Compose recreates `tsdb`; that
+container replacement preserves the PostgreSQL named volume and runs no schema
+migration.
 
 Alloy is the native-server topology's only normal Docker-to-Loki shipper. Local
 development instead uses its supported Promtail service. The two must never
@@ -160,6 +170,29 @@ After a terminal segment is archived, mapped, canonicalized, and its terminal
 coverage revision is committed, the finalizer retires that connection epoch's
 projection state. Memory is therefore bounded by active/finalizing epochs, not
 the lifetime reconnect count.
+
+Level 2 operator totals are also bounded by one rebuildable
+`market.book_operational_rollups` row per series. Snapshot, update-batch, and
+mutation counts advance from the canonical Fact commit suffix inside the same
+fenced transaction as ingestion. An always-on database insert trigger advances
+checkpoint count in the checkpoint transaction only when its immutable insert
+succeeds, including through an older application writer. A new L2 definition
+cannot exist without its series-owned counter row: L2 series registration
+creates or reuses that row in the same transaction, and definition enrollment
+only asserts it. An existing store must run the explicit
+single-worker seed migration with writers stopped. Missing rows or trigger
+or exact trigger/function-contract drift fail loudly. The generic Fact writer
+rejects L2 book Facts, the privileged
+lane requires a stream fence and forbids corrections, and each suffix fold must
+equal the current transaction's inserted count. A bounded latest-Fact
+high-water check catches bypasses and old-code rollback writes, while the
+durable checkpoint trigger prevents backdated inserts from evading the exact
+count; the latest checkpoint guard verifies its marker. Every fenced mutation
+also binds the claim's source, series, provider, venue, product, channels, and
+configuration back to the stored definition. Checkpoint lineage accepts only
+acknowledged source manifests from that definition, session, connection epoch,
+and product whose receive range contains the checkpoint cut. These counters
+accelerate status only and never become archive, replay, or dataset truth.
 
 ## Stop, Restart, And Recovery
 
