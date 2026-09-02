@@ -1168,11 +1168,13 @@ class Database:
                           AND NOT procedure.prosecdef
                           AND NOT procedure.proleakproof
                           AND procedure.proconfig IS NULL
-                          AND regexp_replace(
-                              btrim(procedure.prosrc),
-                              '[[:space:]]+',
-                              ' ',
-                              'g'
+                          AND btrim(
+                              regexp_replace(
+                                  procedure.prosrc,
+                                  '[[:space:]]+',
+                                  ' ',
+                                  'g'
+                              )
                           ) = :expected_function_body
                           AND has_function_privilege(
                               current_user,
@@ -1221,11 +1223,13 @@ class Database:
                         procedure.proleakproof AS function_leakproof,
                         procedure.proconfig AS function_config,
                         md5(
-                            regexp_replace(
-                                btrim(procedure.prosrc),
-                                '[[:space:]]+',
-                                ' ',
-                                'g'
+                            btrim(
+                                regexp_replace(
+                                    procedure.prosrc,
+                                    '[[:space:]]+',
+                                    ' ',
+                                    'g'
+                                )
                             )
                         ) AS function_body_hash,
                         has_function_privilege(

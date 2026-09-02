@@ -566,7 +566,8 @@ def test_book_operational_rollup_requires_durable_checkpoint_trigger(
         "procedure.proparallel = 'u'",
         "NOT procedure.prosecdef",
         "procedure.proconfig IS NULL",
-        "btrim(procedure.prosrc)",
+        "btrim(",
+        "procedure.prosrc",
         "'[[:space:]]+'",
         "has_function_privilege",
     ):

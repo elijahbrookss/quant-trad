@@ -635,11 +635,13 @@ BEGIN
                   AND NOT procedure.proleakproof
                   AND procedure.proconfig IS NULL
                   AND md5(
-                      regexp_replace(
-                          btrim(procedure.prosrc),
-                          '[[:space:]]+',
-                          ' ',
-                          'g'
+                      btrim(
+                          regexp_replace(
+                              procedure.prosrc,
+                              '[[:space:]]+',
+                              ' ',
+                              'g'
+                          )
                       )
                   ) = '958715b15accfdedbc715d7827ba5ee4'
                   AND has_function_privilege(
