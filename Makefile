@@ -380,8 +380,15 @@ db-query: ## Run one SQL statement against TimescaleDB (sql="select 1")
 db-file: ## Run a SQL file against TimescaleDB (file=scripts/db/example.sql)
 	@set -euo pipefail; \
 	if [ -z "$(strip $(file))" ]; then echo "✗ file= is required"; exit 1; fi; \
+	if [ -n "$(strip $(statement_timeout))" ] && [ "$(strip $(statement_timeout))" != "0" ]; then \
+		echo '✗ statement_timeout= must be omitted or set to 0'; exit 1; \
+	fi; \
 	test -f "$(file)" || { echo "✗ SQL file not found: $(file)"; exit 1; }; \
-	$(COMPOSE_CMD) --profile database exec -T $(DB_SERVICE) bash -lc 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < "$(file)"
+	if [ "$(strip $(statement_timeout))" = "0" ]; then \
+		$(COMPOSE_CMD) --profile database exec -T $(DB_SERVICE) bash -c 'export PGOPTIONS="$${PGOPTIONS:+$$PGOPTIONS }-c statement_timeout=0"; exec psql -X -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < "$(file)"; \
+	else \
+		$(COMPOSE_CMD) --profile database exec -T $(DB_SERVICE) bash -c 'exec psql -X -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < "$(file)"; \
+	fi
 
 forensic-run-ordering: venv ## Forensic: check runtime event ordering health (run=<run_id>)
 	@set -euo pipefail; \

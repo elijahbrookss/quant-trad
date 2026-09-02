@@ -1,9 +1,5 @@
 \set ON_ERROR_STOP on
 
--- Reconnect before the first server-side statement so even an inherited
--- sub-millisecond statement_timeout cannot cancel the SET that disables it.
-\connect -reuse-previous=on "options='-c statement_timeout=0'"
-
 -- Add the two canonical Fact lookup indexes used by derived-lineage validation.
 --
 -- This is an out-of-band schema operation for an existing canonical Fact store.
@@ -12,12 +8,14 @@
 -- I/O and free space, and do not deploy code that requires these indexes until
 -- this script completes successfully:
 --
---   make db-file file=scripts/db/manual_migration_canonical_fact_lookup_indexes_v1.sql
+--   make db-file statement_timeout=0 file=scripts/db/manual_migration_canonical_fact_lookup_indexes_v1.sql
 --
--- The migration is restart-safe after cancellation. It disables an inherited
--- statement_timeout for this dedicated psql session, serializes concurrent
--- invocations, drops only invalid/not-ready or definition-mismatched target
--- indexes, and preserves every valid target index with the required key order.
+-- The documented runner disables an inherited statement_timeout before the
+-- initial connection while preserving other libpq startup options. The SET
+-- below is defense in depth. The migration is restart-safe after cancellation,
+-- serializes concurrent invocations, drops only invalid/not-ready or
+-- definition-mismatched target indexes, and preserves every valid target index
+-- with the required key order.
 
 SET statement_timeout = 0;
 

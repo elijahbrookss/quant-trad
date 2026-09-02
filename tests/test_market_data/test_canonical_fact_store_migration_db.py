@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -49,12 +50,38 @@ _REQUIRED_INDEXES = frozenset(
 )
 
 
-def _run_sql_migration(dsn: str, migration: Path, label: str) -> None:
+def _psql_environment(
+    environment: Mapping[str, str] | None = None,
+    *,
+    statement_timeout: str | None = None,
+) -> dict[str, str]:
+    command_environment = dict(os.environ if environment is None else environment)
+    if statement_timeout is not None:
+        existing_options = command_environment.get("PGOPTIONS", "").strip()
+        command_environment["PGOPTIONS"] = (
+            f"{existing_options} -c statement_timeout={statement_timeout}".strip()
+        )
+    return command_environment
+
+
+def _run_sql_migration(
+    dsn: str,
+    migration: Path,
+    label: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+    disable_statement_timeout: bool = False,
+) -> None:
     psql_url = make_url(dsn).set(drivername="postgresql")
+    command_environment = _psql_environment(
+        environment,
+        statement_timeout="0" if disable_statement_timeout else None,
+    )
     completed = subprocess.run(
         [
             "psql",
             psql_url.render_as_string(hide_password=False),
+            "-X",
             "-v",
             "ON_ERROR_STOP=1",
             "-f",
@@ -64,6 +91,7 @@ def _run_sql_migration(dsn: str, migration: Path, label: str) -> None:
         check=False,
         capture_output=True,
         text=True,
+        env=command_environment,
     )
     assert completed.returncode == 0, (
         f"{label} migration failed\n"
@@ -78,15 +106,22 @@ def _run_sql_command(
     *,
     expected_success: bool,
     statement_timeout_ms: int | None = None,
+    environment: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     psql_url = make_url(dsn).set(drivername="postgresql")
-    environment = dict(os.environ)
-    if statement_timeout_ms is not None:
-        environment["PGOPTIONS"] = f"-c statement_timeout={statement_timeout_ms}ms"
+    command_environment = _psql_environment(
+        environment,
+        statement_timeout=(
+            f"{statement_timeout_ms}ms"
+            if statement_timeout_ms is not None
+            else None
+        ),
+    )
     completed = subprocess.run(
         [
             "psql",
             psql_url.render_as_string(hide_password=False),
+            "-X",
             "-v",
             "ON_ERROR_STOP=1",
             "-c",
@@ -96,7 +131,7 @@ def _run_sql_command(
         check=False,
         capture_output=True,
         text=True,
-        env=environment,
+        env=command_environment,
     )
     assert (completed.returncode == 0) is expected_success, (
         f"unexpected psql result for {sql!r}\n"
@@ -114,11 +149,17 @@ def _run_hard_cutover(dsn: str) -> None:
     _run_sql_migration(dsn, _HARD_CUTOVER, "canonical Fact hard cutover")
 
 
-def _run_lookup_index_migration(dsn: str) -> None:
+def _run_lookup_index_migration(
+    dsn: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> None:
     _run_sql_migration(
         dsn,
         _LOOKUP_INDEX_MIGRATION,
         "canonical Fact lookup indexes",
+        environment=environment,
+        disable_statement_timeout=True,
     )
 
 
@@ -691,28 +732,30 @@ def test_lookup_index_migration_recovers_interrupted_and_wrong_indexes() -> None
         finally:
             engine.dispose()
 
-        psql_url = make_url(dsn).set(drivername="postgresql")
+        timed_out = _run_sql_command(
+            dsn,
+            "SELECT pg_sleep(0.05)",
+            expected_success=False,
+            statement_timeout_ms=1,
+        )
+        assert "canceling statement due to statement timeout" in timed_out.stderr
+
         environment = dict(os.environ)
-        environment["PGOPTIONS"] = "-c statement_timeout=1ms"
-        completed = subprocess.run(
-            [
-                "psql",
-                psql_url.render_as_string(hide_password=False),
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-f",
-                str(_LOOKUP_INDEX_MIGRATION),
-            ],
-            cwd=_REPO_ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            env=environment,
+        inherited_options = environment.get("PGOPTIONS", "").strip()
+        environment["PGOPTIONS"] = (
+            f"{inherited_options} -c statement_timeout=1ms".strip()
         )
-        assert completed.returncode == 0, (
-            f"lookup migration failed\nstdout:\n{completed.stdout}\n"
-            f"stderr:\n{completed.stderr}"
+        configured_timeout = _run_sql_command(
+            dsn,
+            "SHOW statement_timeout",
+            expected_success=True,
+            statement_timeout_ms=0,
+            environment=environment,
         )
+        assert "0" in {
+            line.strip() for line in configured_timeout.stdout.splitlines()
+        }
+        _run_lookup_index_migration(dsn, environment=environment)
 
         first = _lookup_index_snapshot(dsn)
         first_oids = _lookup_index_oids(dsn)

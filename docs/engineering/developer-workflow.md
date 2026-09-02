@@ -97,7 +97,10 @@ Use the root `Makefile` as the support command index:
   `bot=<container>` for a spawned runtime container.
 - `make dbshell` opens `psql` in the TimescaleDB container.
 - `make db-query sql="select 1"` runs a one-line SQL statement.
-- `make db-file file=scripts/db/example.sql` runs a SQL file.
+- `make db-file file=scripts/db/example.sql` runs a SQL file. Add
+  `statement_timeout=0` only for a reviewed long-running migration that
+  explicitly requires it; the runner preserves other PostgreSQL startup
+  options and applies that override before connecting.
 
 Normal bot/run/report operations do not belong in Make. Use `qt bots`,
 `qt runs`, `qt reports`, and `qt experiments` for those workflows.
