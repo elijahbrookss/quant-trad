@@ -82,6 +82,13 @@ The reusable frozen read binding is independent of Strategy. It binds:
 
 The binding reader rejects range expansion, series substitution, source
 substitution, subject substitution, hash disagreement, and provider transport.
+A structured Fact history used for causal Check sampling is frozen as every
+canonical revision, including later corrections and invalidations below the
+watermark. Its row count, material hash, provenance hash, source summary, and
+raw-archive lineage therefore bind the same revision set that replay consumes.
+Older structured Datasets without the `all_canonical_revisions.v1` selection
+marker are not silently reinterpreted; causal history asks the operator to
+re-freeze them.
 A Check adds a definition and optional Indicator graph. A Backtest adds an
 exact Strategy snapshot and execution configuration. A Check never needs a
 fake Strategy.
@@ -132,6 +139,26 @@ typed fact aliases, registered Indicator signal outputs, causal alignment,
 bounded feature operators, outcomes, folds, statistics, and optional scalar
 assertions. It contains no provider-specific or Chainlink-specific evaluator.
 
+Definition v4 also supports a Check-owned `fact_snapshot` occurrence for Level
+2 research. The initial admitted structured schemas are frozen
+`market.bbo.v1` and `market.depth_band.v1`; raw `market.l2_book.v1` is
+operational reconstruction evidence and remains Dataset-ineligible. A snapshot
+is sampled once per primary-bar close, is neutral rather than long/short, and
+uses only schema-declared numeric query fields. Depth-band selection is an
+explicit normalized predicate such as `payload.band_bps=5`; an under-specified
+same-time selection fails loud instead of choosing by ingestion order.
+
+Bucketed L2 inputs retain `exact_interval` alignment. Market sampling uses the
+primary candle close while causal visibility uses the candle's `known_at`.
+The matching BBO/depth `bucket_end` must equal that market boundary and its
+greatest visible revision must be active. An older one-second bucket is never
+carried forward merely because it is within a staleness threshold. Missing,
+late, stale, ambiguous, invalidated, or gap-covered frames are counted and
+excluded. Outcomes are unsigned forward returns because a Check-owned L2
+sample has no trading direction. Selection is keyed by both `known_at` and
+`bucket_end`, because several historical candles may legitimately share one
+batched availability timestamp without sharing a market interval.
+
 Only an Indicator signal output can supply an Indicator-defined event. The
 evaluator verifies output ownership and direction rather than relabeling a
 metric row as a signal. A raw Check may define an analytical occurrence, but it
@@ -161,6 +188,12 @@ New durable evidence must declare `reject`, `reset_rewarm`, or
 `continue_degraded`. Historical undeclared behavior remains readable but is not
 silently upgraded.
 
+For a Check-owned `fact_snapshot`, `reset_rewarm` is invalid because no
+Indicator state exists to reset. `reject` blocks before samples are emitted;
+`continue_degraded` retains the frozen gap evidence and excludes affected
+samples under a Check action. High-rate fact requirements end at the final
+decision boundary, not at the candle-only forward-outcome tail.
+
 ## Result, Verdict, And Replay
 
 Evidence persistence pins the normalized request, definition version/hash,
@@ -185,6 +218,11 @@ Older incomplete frozen contracts remain `legacy_frozen_unverifiable` or the
 applicable replay-only/diagnostic classification. Original payloads, hashes,
 and revisions are never rewritten, and legacy records cannot be represented as
 new replayable evidence.
+
+Registered `event_fact_analysis` definition v3 remains bound byte-for-byte to
+evaluator v2 and result payload v2 for replay. New requests materialize from
+definition v4/evaluator v3; adding L2 sampling does not route old evidence
+through the new semantics.
 
 ## Shared Operator Surface
 

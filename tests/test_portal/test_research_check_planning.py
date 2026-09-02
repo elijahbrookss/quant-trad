@@ -354,3 +354,69 @@ def test_requirement_planning_enforces_exact_series_identity() -> None:
             "candidate_series_ids": [2],
         }
     ]
+
+
+def test_l2_fact_snapshot_plans_no_indicator_and_stops_facts_at_last_decision() -> None:
+    definition, request = normalize_check_request(
+        {
+            "mode": "preview",
+            "check_family": "event_fact_analysis",
+            "scope": {
+                "instrument_id": "instrument-1",
+                "timeframe": "30m",
+                "start": "2026-01-01T00:00:00Z",
+                "end": "2026-01-02T00:00:00Z",
+            },
+            "detector": {"type": "fact_snapshot", "input_alias": "bbo"},
+            "outcomes": {"horizons": [6]},
+            "inputs": [
+                {
+                    "alias": "bbo",
+                    "fact_type": "market.bbo",
+                    "contract_version": "market.bbo.v1",
+                    "timeframe_seconds": 1,
+                    "max_staleness_seconds": 120,
+                    "source_policy": {"mode": "current"},
+                }
+            ],
+            "gap_policy": "continue_degraded",
+        },
+        mode="preview",
+    )
+    seen_indicator_ids: list[list[str]] = []
+
+    def empty_indicator_plan(indicator_ids, **_kwargs):
+        seen_indicator_ids.append(list(indicator_ids))
+        return {
+            "schema_version": "indicator_requirement_plan.v1",
+            "root_indicator_ids": [],
+            "warmup_bars": 0,
+            "graph_hash": semantic_hash({"indicators": []}),
+            "indicators": [],
+            "requirements": [],
+        }
+
+    plan = plan_research_check(
+        definition,
+        request,
+        store=_Store(),
+        indicator_planner=empty_indicator_plan,
+        instrument_loader=lambda instrument_id: {"id": instrument_id},
+        inspect_coverage=False,
+    )
+
+    bbo = next(
+        row for row in plan.market_data_requirements if row["alias"] == "bbo"
+    )
+    primary = next(
+        row
+        for row in plan.market_data_requirements
+        if row["alias"] == "primary_bars"
+    )
+    assert seen_indicator_ids == [[]]
+    assert plan.indicator_graph == ()
+    assert plan.execution["event_source"] == "check_fact_snapshot"
+    assert plan.execution["fact_history_required"] is True
+    assert bbo["alignment"] == "exact_interval"
+    assert bbo["required_end"] == "2026-01-02T00:00:00.000000Z"
+    assert primary["required_end"] == "2026-01-02T03:00:00.000000Z"

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from collections import Counter
-import os
-from pathlib import Path
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from market_data.canonical import (
@@ -518,27 +518,436 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
         "market.market_response.v1",
     }
 )
+_ALL_CANONICAL_REVISIONS_SELECTION = "all_canonical_revisions.v1"
+
+
+def _preserves_canonical_revision_history(contract_version: str) -> bool:
+    normalized = str(contract_version or "").strip().lower()
+    try:
+        get_fact_payload_schema(normalized)
+    except ValueError:
+        return False
+    return (
+        normalized not in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS
+        and not normalized.startswith(f"{NORMALIZED_FACT_VERSION}/")
+    )
+
+
+# Lineage rows include payload, provenance, and quality JSONB. Bound each query
+# even when a frozen series contains hundreds of thousands of witnesses.
+_LINEAGE_QUERY_BATCH_SIZE = 256
+
+
+def _lineage_query_chunks(values: Sequence[Any]) -> Iterable[tuple[Any, ...]]:
+    for start in range(0, len(values), _LINEAGE_QUERY_BATCH_SIZE):
+        yield tuple(values[start : start + _LINEAGE_QUERY_BATCH_SIZE])
+
+
+def _lineage_values_context(
+    values: Sequence[Any],
+    *,
+    field: str,
+) -> str:
+    normalized = tuple(sorted({str(value) for value in values}))
+    preview = ",".join(normalized[:3])
+    suffix = ",..." if len(normalized) > 3 else ""
+    return f"count={len(normalized)} {field}=[{preview}{suffix}]"
+
+
+def _lineage_hashes_context(material_hashes: Sequence[str]) -> str:
+    return _lineage_values_context(
+        material_hashes,
+        field="material_hashes",
+    )
+
+
+def _load_lineage_series_fact_types(
+    session,
+    *,
+    series_ids: Sequence[int],
+) -> dict[int, str]:
+    """Load one exact fact type for every requested lineage series."""
+
+    requested = tuple(sorted({int(series_id) for series_id in series_ids}))
+    if not requested:
+        return {}
+    rows = session.execute(
+        text(
+            """
+            SELECT id AS series_id, fact_type
+            FROM market.series
+            WHERE id = ANY(:series_ids)
+            ORDER BY id
+            """
+        ),
+        {"series_ids": list(requested)},
+    ).mappings().all()
+    requested_set = set(requested)
+    fact_types: dict[int, str] = {}
+    for row in rows:
+        actual_series_id = int(row["series_id"])
+        if actual_series_id not in requested_set:
+            raise RuntimeError(
+                "market_dataset_provenance_mismatch: lineage series lookup "
+                f"returned unrequested series_id={actual_series_id}"
+            )
+        if actual_series_id in fact_types:
+            raise RuntimeError(
+                "market_dataset_provenance_ambiguous: duplicate lineage series "
+                f"series_id={actual_series_id}"
+            )
+        fact_types[actual_series_id] = str(row["fact_type"])
+    missing = tuple(
+        series_id for series_id in requested if series_id not in fact_types
+    )
+    if missing:
+        raise RuntimeError(
+            "market_dataset_provenance_incomplete: source series is missing "
+            f"{_lineage_values_context(missing, field='series_ids')}"
+        )
+    return fact_types
+
+
+def _load_lineage_material_rows(
+    session,
+    *,
+    series_id: int,
+    fact_type: str,
+    material_hashes: Sequence[str],
+    evidence_key: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve one wave of exact lineage witnesses with bounded series queries."""
+
+    requested = tuple(sorted({str(value) for value in material_hashes}))
+    if not requested:
+        return {}
+    base_params: dict[str, Any] = {"series_id": int(series_id)}
+    if evidence_key is None:
+        statement = text(
+            """
+            SELECT series_id, fact_type,
+                   material_hash AS lineage_material_hash,
+                   observation_key, revision,
+                   provenance, quality, payload,
+                   market_commit_seq, id AS fact_version_id
+            FROM market.fact_versions
+            WHERE series_id = :series_id
+              AND material_hash = ANY(:material_hashes)
+            ORDER BY material_hash, market_commit_seq DESC, id
+            """
+        )
+    else:
+        base_params["evidence_key"] = str(evidence_key)
+        statement = text(
+            """
+            SELECT series_id, fact_type,
+                   provenance -> :evidence_key
+                       ->> 'legacy_material_hash' AS lineage_material_hash,
+                   provenance -> :evidence_key AS evidence,
+                   observation_key, revision,
+                   provenance, quality, payload,
+                   market_commit_seq, id AS fact_version_id
+            FROM market.fact_versions
+            WHERE series_id = :series_id
+              AND provenance -> :evidence_key
+                  ->> 'legacy_material_hash' = ANY(:material_hashes)
+            ORDER BY lineage_material_hash, market_commit_seq DESC, id
+            """
+        )
+    candidates_by_hash: dict[str, list[dict[str, Any]]] = {}
+    for material_hash_chunk in _lineage_query_chunks(requested):
+        params = {
+            **base_params,
+            "material_hashes": list(material_hash_chunk),
+        }
+        rows = session.execute(statement, params).mappings().all()
+        chunk_set = set(material_hash_chunk)
+        for row in rows:
+            actual_series_id = int(row["series_id"])
+            actual_fact_type = str(row["fact_type"])
+            actual_material_hash = str(row["lineage_material_hash"] or "")
+            if (
+                actual_series_id != int(series_id)
+                or actual_fact_type != str(fact_type)
+                or actual_material_hash not in chunk_set
+            ):
+                raise RuntimeError(
+                    "market_dataset_provenance_mismatch: canonical lineage row "
+                    f"requested_series_id={int(series_id)} "
+                    f"actual_series_id={actual_series_id} "
+                    f"requested_fact_type={fact_type} "
+                    f"actual_fact_type={actual_fact_type} "
+                    f"material_hash={actual_material_hash}"
+                )
+            candidates_by_hash.setdefault(actual_material_hash, []).append(
+                dict(row)
+            )
+    by_hash: dict[str, dict[str, Any]] = {}
+    for material_hash, candidates in candidates_by_hash.items():
+        observation_keys = {
+            str(candidate["observation_key"]) for candidate in candidates
+        }
+        if len(observation_keys) != 1:
+            observation_preview = sorted(observation_keys)[:3]
+            raise RuntimeError(
+                "market_dataset_provenance_ambiguous: canonical lineage "
+                "material spans multiple observations "
+                f"series_id={int(series_id)} "
+                f"fact_type={fact_type} material_hash={material_hash} "
+                f"observation_key_count={len(observation_keys)} "
+                f"observation_keys={observation_preview}"
+            )
+        ordered = sorted(
+            candidates,
+            key=lambda candidate: (
+                -int(candidate["market_commit_seq"]),
+                -int(candidate["revision"]),
+                str(candidate["fact_version_id"]),
+            ),
+        )
+        selected = ordered[0]
+        selected_rank = (
+            int(selected["market_commit_seq"]),
+            int(selected["revision"]),
+        )
+        equal_rank = [
+            candidate
+            for candidate in ordered
+            if (
+                int(candidate["market_commit_seq"]),
+                int(candidate["revision"]),
+            )
+            == selected_rank
+        ]
+        if any(candidate != selected for candidate in equal_rank[1:]):
+            raise RuntimeError(
+                "market_dataset_provenance_ambiguous: canonical lineage "
+                "material has conflicting latest revisions "
+                f"series_id={int(series_id)} fact_type={fact_type} "
+                f"material_hash={material_hash} "
+                f"market_commit_seq={selected_rank[0]} "
+                f"revision={selected_rank[1]}"
+            )
+        by_hash[material_hash] = selected
+    missing = tuple(
+        material_hash
+        for material_hash in requested
+        if material_hash not in by_hash
+    )
+    if missing:
+        raise RuntimeError(
+            "market_dataset_provenance_incomplete: canonical lineage material "
+            f"is missing series_id={int(series_id)} fact_type={fact_type} "
+            f"{_lineage_hashes_context(missing)}"
+        )
+    return {material_hash: by_hash[material_hash] for material_hash in requested}
+
+
+def _collect_canonical_book_archive_refs(
+    session,
+    *,
+    series_id: int,
+    fact_type: str,
+    start: datetime,
+    end: datetime,
+    as_of_commit_seq: int,
+    expected_record_count: int,
+) -> dict[str, dict[str, str]]:
+    """Resolve every frozen BBO/depth revision to raw objects in one DB pass."""
+
+    evidence_keys = {
+        "market.bbo": "_qt_bbo_evidence",
+        "market.depth_observation": "_qt_depth_evidence",
+    }
+    evidence_key = evidence_keys.get(str(fact_type))
+    if evidence_key is None:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: unsupported canonical book "
+            f"fact_type={fact_type}"
+        )
+    row = session.execute(
+        text(
+            """
+            WITH raw_positions AS MATERIALIZED (
+                SELECT versions.provenance -> :evidence_key
+                           -> 'source_position' AS position
+                FROM market.fact_versions AS versions
+                WHERE versions.series_id = :series_id
+                  AND versions.fact_type = :fact_type
+                  AND versions.observation_time >= :start
+                  AND versions.observation_time < :end
+                  AND versions.market_commit_seq <= :as_of_commit_seq
+            ),
+            classified AS MATERIALIZED (
+                SELECT position,
+                       COALESCE(position ->> 'definition_id', '') AS definition_id,
+                       COALESCE(position ->> 'session_id', '') AS session_id,
+                       COALESCE(position ->> 'connection_epoch', '')
+                           AS connection_epoch_text,
+                       COALESCE(position ->> 'receive_ordinal', '') AS receive_ordinal_text,
+                       COALESCE((
+                           jsonb_typeof(position) = 'object'
+                           AND COALESCE(position ->> 'definition_id', '') <> ''
+                           AND COALESCE(position ->> 'session_id', '') <> ''
+                           AND CASE
+                               WHEN COALESCE(position ->> 'connection_epoch', '')
+                                    ~ '^(0|[1-9][0-9]{0,18})$'
+                               THEN (position ->> 'connection_epoch')::numeric
+                                    <= 9223372036854775807
+                               ELSE FALSE
+                           END
+                           AND CASE
+                               WHEN COALESCE(position ->> 'receive_ordinal', '')
+                                    ~ '^[1-9][0-9]{0,18}$'
+                               THEN (position ->> 'receive_ordinal')::numeric
+                                    <= 9223372036854775807
+                               ELSE FALSE
+                           END
+                       ), FALSE) AS position_valid
+                FROM raw_positions
+            ),
+            positions AS MATERIALIZED (
+                SELECT DISTINCT definition_id, session_id,
+                       connection_epoch_text::bigint AS connection_epoch,
+                       receive_ordinal_text::bigint AS receive_ordinal
+                FROM classified
+                WHERE position_valid
+            ),
+            matched AS MATERIALIZED (
+                SELECT positions.definition_id, positions.session_id,
+                       positions.connection_epoch,
+                       positions.receive_ordinal,
+                       manifests.id AS manifest_id,
+                       manifests.object_sha256,
+                       manifests.content_fingerprint,
+                       manifests.object_key,
+                       manifests.object_uri
+                FROM positions
+                LEFT JOIN market.raw_archive_manifests AS manifests
+                  ON manifests.definition_id = positions.definition_id
+                 AND manifests.session_id = positions.session_id
+                 AND manifests.connection_epoch = positions.connection_epoch
+                 AND manifests.first_receive_ordinal <= positions.receive_ordinal
+                 AND manifests.last_receive_ordinal >= positions.receive_ordinal
+            )
+            SELECT (SELECT count(*) FROM raw_positions) AS fact_count,
+                   (SELECT count(*) FROM classified WHERE NOT position_valid)
+                       AS malformed_count,
+                   (SELECT count(*) FROM positions) AS position_count,
+                   count(*) FILTER (WHERE manifest_id IS NULL) AS missing_count,
+                   COALESCE(
+                       jsonb_agg(
+                           DISTINCT jsonb_build_object(
+                               'manifest_id', manifest_id,
+                               'object_sha256', object_sha256,
+                               'content_fingerprint', content_fingerprint,
+                               'object_key', object_key,
+                               'object_uri', object_uri
+                           )
+                       ) FILTER (WHERE manifest_id IS NOT NULL),
+                       '[]'::jsonb
+                   ) AS archive_refs
+            FROM matched
+            """
+        ),
+        {
+            "evidence_key": evidence_key,
+            "series_id": int(series_id),
+            "fact_type": str(fact_type),
+            "start": start,
+            "end": end,
+            "as_of_commit_seq": int(as_of_commit_seq),
+        },
+    ).mappings().one()
+    fact_count = int(row["fact_count"] or 0)
+    malformed_count = int(row["malformed_count"] or 0)
+    position_count = int(row["position_count"] or 0)
+    missing_count = int(row["missing_count"] or 0)
+    context = (
+        f"series_id={int(series_id)} fact_type={fact_type} "
+        f"start={_iso(start)} end={_iso(end)} "
+        f"as_of_commit_seq={int(as_of_commit_seq)}"
+    )
+    if fact_count != int(expected_record_count):
+        raise RuntimeError(
+            "market_dataset_provenance_mismatch: canonical book lineage count "
+            f"expected={int(expected_record_count)} actual={fact_count} {context}"
+        )
+    if malformed_count:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: canonical book source position "
+            f"is malformed count={malformed_count} {context}"
+        )
+    if position_count <= 0:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: canonical book lineage has no "
+            f"source positions {context}"
+        )
+    if missing_count:
+        raise RuntimeError(
+            "market_dataset_archive_incomplete: canonical book source position "
+            "has no acknowledged archive "
+            f"count={missing_count} {context}"
+        )
+    references: dict[str, dict[str, str]] = {}
+    for raw_reference in row["archive_refs"] or ():
+        if not isinstance(raw_reference, Mapping):
+            raise RuntimeError(
+                "market_dataset_archive_mismatch: canonical book archive "
+                f"reference is malformed {context}"
+            )
+        manifest_id = str(raw_reference.get("manifest_id") or "")
+        reference = {
+            "object_sha256": str(raw_reference.get("object_sha256") or ""),
+            "content_fingerprint": str(
+                raw_reference.get("content_fingerprint") or ""
+            ),
+            "object_key": str(raw_reference.get("object_key") or ""),
+            "object_uri": str(raw_reference.get("object_uri") or ""),
+        }
+        if not manifest_id or any(not value for value in reference.values()):
+            raise RuntimeError(
+                "market_dataset_archive_mismatch: canonical book archive "
+                f"reference is incomplete {context}"
+            )
+        existing = references.get(manifest_id)
+        if existing is not None and existing != reference:
+            raise RuntimeError(
+                "market_dataset_archive_mismatch: canonical book manifest "
+                f"evidence disagrees manifest_id={manifest_id} {context}"
+            )
+        references[manifest_id] = reference
+    return references
 
 
 def _collect_typed_archive_refs(
     session,
     *,
-    records: Sequence[TypedFeatureRecord],
+    records: Iterable[TypedFeatureRecord],
 ) -> dict[str, dict[str, str]]:
     """Resolve typed derived lineage back to acknowledged raw objects."""
 
     references: dict[str, dict[str, str]] = {}
     queue = [(record.series_id, record.fact.material_hash) for record in records]
     visited: set[tuple[int, str]] = set()
+    fact_types_by_series: dict[int, str] = {}
 
     def add_manifest_rows(rows: Sequence[Mapping[str, Any]]) -> None:
         for row in rows:
-            references[str(row["manifest_id"])] = {
+            manifest_id = str(row["manifest_id"])
+            reference = {
                 "object_sha256": str(row["object_sha256"]),
                 "content_fingerprint": str(row["content_fingerprint"]),
                 "object_key": str(row["object_key"]),
                 "object_uri": str(row["object_uri"]),
             }
+            existing = references.get(manifest_id)
+            if existing is not None and existing != reference:
+                raise RuntimeError(
+                    "market_dataset_archive_mismatch: manifest evidence "
+                    f"disagrees manifest_id={manifest_id}"
+                )
+            references[manifest_id] = reference
 
     def add_book_position(position: Mapping[str, Any]) -> None:
         definition_id = str(position.get("definition_id") or "")
@@ -573,239 +982,304 @@ def _collect_typed_archive_refs(
             )
         add_manifest_rows(rows)
 
-    def add_coverage(coverage_interval_id: str) -> None:
-        rows = session.execute(
-            text(
-                """
-                SELECT DISTINCT manifests.id AS manifest_id,
-                       manifests.object_sha256,
-                       manifests.content_fingerprint,
-                       manifests.object_key, manifests.object_uri
-                FROM market.stream_coverage_interval_versions AS coverage
-                JOIN market.raw_archive_manifests AS manifests
-                  ON manifests.definition_id = coverage.definition_id
-                 AND manifests.session_id = coverage.session_id
-                WHERE coverage.interval_id = :coverage_interval_id
-                ORDER BY manifests.id
-                """
-            ),
-            {"coverage_interval_id": str(coverage_interval_id)},
-        ).mappings().all()
-        if not rows:
-            raise RuntimeError(
-                "market_dataset_archive_incomplete: coverage interval has no acknowledged archive"
+    def add_trade_raw_records(raw_record_ids: Sequence[str]) -> None:
+        requested = tuple(sorted({str(value) for value in raw_record_ids}))
+        if not requested:
+            return
+        statement = text(
+            """
+            SELECT mappings.raw_record_id,
+                   manifests.id AS manifest_id,
+                   manifests.object_sha256,
+                   manifests.content_fingerprint,
+                   manifests.object_key, manifests.object_uri
+            FROM market.raw_archive_record_mappings AS mappings
+            JOIN market.raw_archive_manifests AS manifests
+              ON manifests.id = mappings.manifest_id
+            WHERE mappings.raw_record_id = ANY(:raw_record_ids)
+            ORDER BY mappings.raw_record_id, manifests.id
+            """
+        )
+        for raw_record_chunk in _lineage_query_chunks(requested):
+            rows = session.execute(
+                statement,
+                {"raw_record_ids": list(raw_record_chunk)},
+            ).mappings().all()
+            mapped = {str(row["raw_record_id"]) for row in rows}
+            unexpected = mapped - set(raw_record_chunk)
+            if unexpected:
+                raise RuntimeError(
+                    "market_dataset_archive_mismatch: trade raw mapping returned "
+                    "unrequested "
+                    f"{_lineage_values_context(tuple(unexpected), field='raw_record_ids')}"
+                )
+            missing = tuple(
+                value for value in raw_record_chunk if value not in mapped
             )
-        add_manifest_rows(rows)
+            if missing:
+                raise RuntimeError(
+                    "market_dataset_archive_incomplete: trade raw mapping is "
+                    "missing "
+                    f"{_lineage_values_context(missing, field='raw_record_ids')}"
+                )
+            add_manifest_rows(rows)
 
-    def canonical_evidence(
-        *,
-        series_id: int,
-        material_hash: str,
-        evidence_key: str,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        row = session.execute(
-            text(
-                "SELECT provenance -> :evidence_key AS evidence, payload "
-                "FROM market.fact_versions "
-                "WHERE series_id = :series_id "
-                "  AND provenance -> :evidence_key "
-                "      ->> 'legacy_material_hash' = :material_hash "
-                "ORDER BY market_commit_seq DESC "
-                "LIMIT 1"
-            ),
-            {
-                "series_id": int(series_id),
-                "evidence_key": str(evidence_key),
-                "material_hash": str(material_hash),
-            },
-        ).mappings().first()
-        if row is None:
-            raise RuntimeError(
-                "market_dataset_provenance_incomplete: canonical derived "
-                f"evidence is missing series_id={series_id}"
+    def add_coverages(coverage_interval_ids: Sequence[str]) -> None:
+        requested = tuple(
+            sorted({str(value) for value in coverage_interval_ids})
+        )
+        if not requested:
+            return
+        statement = text(
+            """
+            SELECT DISTINCT coverage.interval_id AS coverage_interval_id,
+                   manifests.id AS manifest_id,
+                   manifests.object_sha256,
+                   manifests.content_fingerprint,
+                   manifests.object_key, manifests.object_uri
+            FROM market.stream_coverage_interval_versions AS coverage
+            JOIN market.raw_archive_manifests AS manifests
+              ON manifests.definition_id = coverage.definition_id
+             AND manifests.session_id = coverage.session_id
+            WHERE coverage.interval_id = ANY(:coverage_interval_ids)
+            ORDER BY coverage.interval_id, manifests.id
+            """
+        )
+        for coverage_chunk in _lineage_query_chunks(requested):
+            rows = session.execute(
+                statement,
+                {"coverage_interval_ids": list(coverage_chunk)},
+            ).mappings().all()
+            covered = {str(row["coverage_interval_id"]) for row in rows}
+            unexpected = covered - set(coverage_chunk)
+            if unexpected:
+                raise RuntimeError(
+                    "market_dataset_archive_mismatch: coverage lookup returned "
+                    "unrequested "
+                    f"{_lineage_values_context(tuple(unexpected), field='coverage_interval_ids')}"
+                )
+            missing = tuple(
+                value for value in coverage_chunk if value not in covered
             )
-        evidence = dict(row["evidence"] or {})
-        if not evidence:
-            raise RuntimeError(
-                "market_dataset_provenance_incomplete: canonical derived "
-                f"evidence is malformed series_id={series_id}"
-            )
-        return evidence, dict(row["payload"] or {})
+            if missing:
+                raise RuntimeError(
+                    "market_dataset_archive_incomplete: coverage interval has no "
+                    "acknowledged archive "
+                    f"{_lineage_values_context(missing, field='coverage_interval_ids')}"
+                )
+            add_manifest_rows(rows)
 
     while queue:
-        series_id, material_hash = queue.pop()
-        key = (int(series_id), str(material_hash))
-        if key in visited:
+        wave: list[tuple[int, str]] = []
+        wave_seen: set[tuple[int, str]] = set()
+        for series_id, material_hash in queue:
+            key = (int(series_id), str(material_hash))
+            if key in visited or key in wave_seen:
+                continue
+            wave_seen.add(key)
+            wave.append(key)
+        queue = []
+        if not wave:
             continue
-        visited.add(key)
-        fact_type = session.execute(
-            text("SELECT fact_type FROM market.series WHERE id = :series_id"),
-            {"series_id": int(series_id)},
-        ).scalar_one_or_none()
-        if fact_type is None:
-            raise RuntimeError(
-                "market_dataset_provenance_incomplete: source series is missing"
+        missing_series_ids = sorted(
+            {
+                series_id
+                for series_id, _material_hash in wave
+                if series_id not in fact_types_by_series
+            }
+        )
+        fact_types_by_series.update(
+            _load_lineage_series_fact_types(
+                session,
+                series_ids=missing_series_ids,
             )
-        fact_type = str(fact_type)
-        if get_fact_contract(fact_type).uses_exact_numeric_storage:
-            continue
-        if fact_type in {
-            CANDLE_FACT_TYPE,
-            OPEN_INTEREST_FACT_TYPE,
-            FUNDING_RATE_FACT_TYPE,
-            "market.derivative_state",
-        }:
-            continue
-        if fact_type == MARKET_TRADE_FACT_TYPE:
-            row = session.execute(
-                text(
-                    """
-                    SELECT provenance
-                    FROM market.fact_versions
-                    WHERE series_id = :series_id AND material_hash = :material_hash
-                    LIMIT 1
-                    """
-                ),
-                {"series_id": series_id, "material_hash": material_hash},
-            ).mappings().first()
-            if row is None:
-                raise RuntimeError("market_dataset_provenance_incomplete: trade source missing")
-            trade_evidence = dict(row["provenance"] or {}).get("_qt_trade_evidence")
-            if not isinstance(trade_evidence, Mapping) or not trade_evidence.get(
-                "raw_record_id"
-            ):
-                raise RuntimeError(
-                    "market_dataset_provenance_incomplete: canonical trade raw reference missing"
+        )
+
+        exact_groups: dict[tuple[int, str], list[str]] = {}
+        evidence_groups: dict[tuple[int, str, str], list[str]] = {}
+        evidence_keys = {
+            "market.bbo": "_qt_bbo_evidence",
+            "market.depth_observation": "_qt_depth_evidence",
+            "market.trade_flow_feature": "_qt_trade_flow_feature_evidence",
+            "market.futures_spot_relationship": "_qt_basis_evidence",
+            "market.market_response": "_qt_response_evidence",
+        }
+        trade_raw_record_ids: list[str] = []
+        coverage_interval_ids: list[str] = []
+        for series_id, material_hash in wave:
+            fact_type = fact_types_by_series[series_id]
+            if get_fact_contract(fact_type).uses_exact_numeric_storage:
+                continue
+            if fact_type in {
+                CANDLE_FACT_TYPE,
+                OPEN_INTEREST_FACT_TYPE,
+                FUNDING_RATE_FACT_TYPE,
+                "market.derivative_state",
+            } or fact_type.startswith("market.normalized."):
+                continue
+            if fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE}:
+                exact_groups.setdefault((series_id, fact_type), []).append(
+                    material_hash
                 )
-            manifests = session.execute(
-                text(
-                    """
-                    SELECT manifests.id AS manifest_id, manifests.object_sha256,
-                           manifests.content_fingerprint, manifests.object_key,
-                           manifests.object_uri
-                    FROM market.raw_archive_record_mappings AS mappings
-                    JOIN market.raw_archive_manifests AS manifests
-                      ON manifests.id = mappings.manifest_id
-                    WHERE mappings.raw_record_id = :raw_record_id
-                    """
-                ),
-                {"raw_record_id": str(trade_evidence["raw_record_id"])},
-            ).mappings().all()
-            if not manifests:
-                raise RuntimeError("market_dataset_archive_incomplete: trade raw mapping missing")
-            add_manifest_rows(manifests)
-            continue
-        if fact_type == TRADE_FLOW_FACT_TYPE:
-            row = session.execute(
-                text(
-                    """
-                    SELECT provenance, quality
-                    FROM market.fact_versions
-                    WHERE series_id = :series_id AND material_hash = :material_hash
-                    LIMIT 1
-                    """
-                ),
-                {"series_id": series_id, "material_hash": material_hash},
-            ).mappings().first()
-            flow_evidence = (
-                dict(row["provenance"] or {}).get("_qt_trade_flow_evidence")
-                if row is not None
-                else None
-            )
-            flow_quality = (
-                dict(row["quality"] or {}).get("_qt_trade_flow_quality")
-                if row is not None
-                else None
-            )
-            if (
-                row is None
-                or not isinstance(flow_evidence, Mapping)
-                or not isinstance(flow_quality, Mapping)
-                or not bool(flow_quality.get("archive_complete"))
-                or not bool(flow_quality.get("canonicalization_complete"))
-                or not flow_evidence.get("coverage_interval_id")
-            ):
+                continue
+            evidence_key = evidence_keys.get(fact_type)
+            if evidence_key is None:
                 raise RuntimeError(
-                    "market_dataset_archive_incomplete: trade-flow source is incomplete"
+                    "market_dataset_provenance_incomplete: unsupported lineage "
+                    f"fact_type={fact_type}"
                 )
-            add_coverage(str(flow_evidence["coverage_interval_id"]))
-            continue
-        if fact_type in {"market.bbo", "market.depth_observation"}:
-            evidence_key = (
-                "_qt_bbo_evidence"
-                if fact_type == "market.bbo"
-                else "_qt_depth_evidence"
-            )
-            evidence, _payload = canonical_evidence(
+            evidence_groups.setdefault(
+                (series_id, fact_type, evidence_key), []
+            ).append(material_hash)
+
+        lineage_rows: dict[tuple[int, str], dict[str, Any]] = {}
+        for (series_id, fact_type), material_hashes in sorted(
+            exact_groups.items()
+        ):
+            rows_by_hash = _load_lineage_material_rows(
+                session,
                 series_id=series_id,
-                material_hash=material_hash,
+                fact_type=fact_type,
+                material_hashes=material_hashes,
+            )
+            lineage_rows.update(
+                ((series_id, material_hash), row)
+                for material_hash, row in rows_by_hash.items()
+            )
+        for (series_id, fact_type, evidence_key), material_hashes in sorted(
+            evidence_groups.items()
+        ):
+            rows_by_hash = _load_lineage_material_rows(
+                session,
+                series_id=series_id,
+                fact_type=fact_type,
+                material_hashes=material_hashes,
                 evidence_key=evidence_key,
             )
-            if not isinstance(evidence.get("source_position"), Mapping):
+            lineage_rows.update(
+                ((series_id, material_hash), row)
+                for material_hash, row in rows_by_hash.items()
+            )
+
+        for series_id, material_hash in wave:
+            key = (series_id, material_hash)
+            visited.add(key)
+            fact_type = fact_types_by_series[series_id]
+            if get_fact_contract(fact_type).uses_exact_numeric_storage:
+                continue
+            if fact_type in {
+                CANDLE_FACT_TYPE,
+                OPEN_INTEREST_FACT_TYPE,
+                FUNDING_RATE_FACT_TYPE,
+                "market.derivative_state",
+            }:
+                continue
+            if fact_type == MARKET_TRADE_FACT_TYPE:
+                row = lineage_rows[key]
+                trade_evidence = dict(row["provenance"] or {}).get(
+                    "_qt_trade_evidence"
+                )
+                if not isinstance(
+                    trade_evidence, Mapping
+                ) or not trade_evidence.get("raw_record_id"):
+                    raise RuntimeError(
+                        "market_dataset_provenance_incomplete: canonical "
+                        "trade raw reference missing"
+                    )
+                trade_raw_record_ids.append(
+                    str(trade_evidence["raw_record_id"])
+                )
+                continue
+            if fact_type == TRADE_FLOW_FACT_TYPE:
+                row = lineage_rows[key]
+                flow_evidence = dict(row["provenance"] or {}).get(
+                    "_qt_trade_flow_evidence"
+                )
+                flow_quality = dict(row["quality"] or {}).get(
+                    "_qt_trade_flow_quality"
+                )
+                if (
+                    not isinstance(flow_evidence, Mapping)
+                    or not isinstance(flow_quality, Mapping)
+                    or not bool(flow_quality.get("archive_complete"))
+                    or not bool(flow_quality.get("canonicalization_complete"))
+                    or not flow_evidence.get("coverage_interval_id")
+                ):
+                    raise RuntimeError(
+                        "market_dataset_archive_incomplete: trade-flow source "
+                        "is incomplete"
+                    )
+                coverage_interval_ids.append(
+                    str(flow_evidence["coverage_interval_id"])
+                )
+                continue
+            if fact_type.startswith("market.normalized."):
+                # The required frozen source series owns transitive archive lineage;
+                # normalized rows retain only bounded witness hashes.
+                continue
+            row = lineage_rows[key]
+            evidence = dict(row.get("evidence") or {})
+            payload = dict(row.get("payload") or {})
+            if not evidence:
                 raise RuntimeError(
-                    "market_dataset_provenance_incomplete: book position missing"
+                    "market_dataset_provenance_incomplete: canonical derived "
+                    f"evidence is malformed series_id={series_id} "
+                    f"material_hash={material_hash}"
                 )
-            add_book_position(dict(evidence["source_position"]))
-            continue
-        if fact_type == "market.trade_flow_feature":
-            evidence, payload = canonical_evidence(
-                series_id=series_id,
-                material_hash=material_hash,
-                evidence_key="_qt_trade_flow_feature_evidence",
-            )
-            queue.append(
-                (
-                    int(evidence["source_trade_flow_series_id"]),
-                    str(payload["aggregate_material_hash"]),
-                )
-            )
-            continue
-        if fact_type == "market.futures_spot_relationship":
-            evidence, _payload = canonical_evidence(
-                series_id=series_id,
-                material_hash=material_hash,
-                evidence_key="_qt_basis_evidence",
-            )
-            queue.extend(
-                (
+            if fact_type in {"market.bbo", "market.depth_observation"}:
+                if not isinstance(evidence.get("source_position"), Mapping):
+                    raise RuntimeError(
+                        "market_dataset_provenance_incomplete: book position "
+                        "missing"
+                    )
+                add_book_position(dict(evidence["source_position"]))
+                continue
+            if fact_type == "market.trade_flow_feature":
+                queue.append(
                     (
-                        int(evidence["futures_series_id"]),
-                        str(evidence["futures_bbo_material_hash"]),
-                    ),
+                        int(evidence["source_trade_flow_series_id"]),
+                        str(payload["aggregate_material_hash"]),
+                    )
+                )
+                continue
+            if fact_type == "market.futures_spot_relationship":
+                queue.extend(
                     (
-                        int(evidence["spot_series_id"]),
-                        str(evidence["spot_bbo_material_hash"]),
-                    ),
+                        (
+                            int(evidence["futures_series_id"]),
+                            str(evidence["futures_bbo_material_hash"]),
+                        ),
+                        (
+                            int(evidence["spot_series_id"]),
+                            str(evidence["spot_bbo_material_hash"]),
+                        ),
+                    )
                 )
-            )
-            continue
-        if fact_type == "market.market_response":
-            evidence, _payload = canonical_evidence(
-                series_id=series_id,
-                material_hash=material_hash,
-                evidence_key="_qt_response_evidence",
-            )
-            queue.append(
-                (
-                    int(evidence["source_flow_feature_series_id"]),
-                    str(evidence["source_flow_material_hash"]),
+                continue
+            if fact_type == "market.market_response":
+                queue.append(
+                    (
+                        int(evidence["source_flow_feature_series_id"]),
+                        str(evidence["source_flow_material_hash"]),
+                    )
                 )
+                for name in (
+                    "pre_book_source_position",
+                    "trough_book_source_position",
+                    "post_book_source_position",
+                ):
+                    add_book_position(dict(evidence[name]))
+                continue
+            raise RuntimeError(
+                "market_dataset_provenance_incomplete: unsupported lineage "
+                f"fact_type={fact_type}"
             )
-            for name in (
-                "pre_book_source_position",
-                "trough_book_source_position",
-                "post_book_source_position",
-            ):
-                add_book_position(dict(evidence[name]))
-            continue
-        if fact_type.startswith("market.normalized."):
-            # The required frozen source series owns transitive archive lineage;
-            # normalized rows retain only bounded witness hashes.
-            continue
-        raise RuntimeError(
-            f"market_dataset_provenance_incomplete: unsupported lineage fact_type={fact_type}"
-        )
-    return references
+        add_trade_raw_records(trade_raw_record_ids)
+        add_coverages(coverage_interval_ids)
+    return {
+        manifest_id: references[manifest_id]
+        for manifest_id in sorted(references)
+    }
 
 
 def _verify_local_archive_objects(references: Mapping[str, Mapping[str, str]]) -> None:
@@ -915,19 +1389,49 @@ class PostgresMarketDataRepository:
                                   )
                              THEN COALESCE(canonical.fact_count, 0) ELSE 0
                            END AS feature_count,
-                           canonical.first_fact_time,
-                           canonical.last_fact_time,
-                           COALESCE(canonical.max_commit_seq, 0) AS max_commit_seq
+                           bounds.first_fact_time,
+                           bounds.last_fact_time,
+                           COALESCE(bounds.max_commit_seq, 0) AS max_commit_seq
                     FROM market.series AS series
                     LEFT JOIN LATERAL (
-                        SELECT count(*) AS version_count,
-                               count(DISTINCT observation_key) AS fact_count,
-                               min(observation_time) AS first_fact_time,
-                               max(observation_time) AS last_fact_time,
-                               max(market_commit_seq) AS max_commit_seq
-                        FROM market.fact_versions
-                        WHERE series_id = series.id
+                        -- Count through the narrow observation/revision key so
+                        -- catalog reads do not hydrate every wide Fact row.
+                        SELECT COALESCE(
+                                   sum(observation_versions.version_count), 0
+                               )::bigint AS version_count,
+                               count(*) AS fact_count
+                        FROM (
+                            SELECT count(*) AS version_count
+                            FROM market.fact_versions AS versions
+                            WHERE versions.series_id = series.id
+                            GROUP BY versions.observation_key
+                        ) AS observation_versions
                     ) AS canonical ON TRUE
+                    LEFT JOIN LATERAL (
+                        -- Resolve bounds with the existing series/time and
+                        -- series/commit indexes instead of full-row aggregates.
+                        SELECT (
+                                   SELECT versions.observation_time
+                                   FROM market.fact_versions AS versions
+                                   WHERE versions.series_id = series.id
+                                   ORDER BY versions.observation_time ASC
+                                   LIMIT 1
+                               ) AS first_fact_time,
+                               (
+                                   SELECT versions.observation_time
+                                   FROM market.fact_versions AS versions
+                                   WHERE versions.series_id = series.id
+                                   ORDER BY versions.observation_time DESC
+                                   LIMIT 1
+                               ) AS last_fact_time,
+                               (
+                                   SELECT versions.market_commit_seq
+                                   FROM market.fact_versions AS versions
+                                   WHERE versions.series_id = series.id
+                                   ORDER BY versions.market_commit_seq DESC
+                                   LIMIT 1
+                               ) AS max_commit_seq
+                    ) AS bounds ON TRUE
                     {where_sql}
                     ORDER BY series.instrument_id, series.fact_type,
                              series.timeframe_seconds NULLS FIRST, series.id
@@ -2238,6 +2742,32 @@ class PostgresMarketDataRepository:
             )
         return [_canonical_row_to_record(row) for row in rows]
 
+    def read_fact_revisions(
+        self,
+        *,
+        series_id: int,
+        start: datetime,
+        end: datetime,
+        as_of_commit_seq: Optional[int] = None,
+        known_at_lte: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        """Return all canonical revisions for causal historical selection."""
+
+        with db.session() as session:
+            rows = self._read_canonical_rows_with_session(
+                session,
+                series_id=series_id,
+                start=start,
+                end=end,
+                as_of_commit_seq=as_of_commit_seq,
+                known_at_lte=known_at_lte,
+                latest_only=False,
+                include_invalidated=True,
+                source_identity_keys=source_identity_keys,
+            )
+        return [_canonical_row_to_record(row) for row in rows]
+
     def read_candles(
         self,
         *,
@@ -3046,6 +3576,22 @@ class PostgresMarketDataRepository:
                         records = [
                             _canonical_row_to_record(row) for row in canonical_rows
                         ]
+                elif _preserves_canonical_revision_history(
+                    str(identity["contract_version"])
+                ):
+                    canonical_rows = self._read_canonical_rows_with_session(
+                        session,
+                        series_id=item.series_id,
+                        start=item.start,
+                        end=item.end,
+                        as_of_commit_seq=watermark,
+                        known_at_lte=None,
+                        latest_only=False,
+                        include_invalidated=True,
+                    )
+                    records = [
+                        _canonical_row_to_record(row) for row in canonical_rows
+                    ]
                 else:
                     records = self.read_series_records(
                         series_id=item.series_id,
@@ -3169,6 +3715,20 @@ class PostgresMarketDataRepository:
                     isinstance(record, TypedFeatureRecord) for record in records
                 ):
                     archive_refs.update(_collect_typed_archive_refs(session, records=records))
+                elif records and all(
+                    isinstance(record, CanonicalFactRecord) for record in records
+                ) and fact_type in {"market.bbo", "market.depth_observation"}:
+                    archive_refs.update(
+                        _collect_canonical_book_archive_refs(
+                            session,
+                            series_id=item.series_id,
+                            fact_type=fact_type,
+                            start=item.start,
+                            end=item.end,
+                            as_of_commit_seq=watermark,
+                            expected_record_count=len(records),
+                        )
+                    )
                 if fact_type == MARKET_TRADE_FACT_TYPE:
                     source_ids = sorted({record.source_id for record in records})
                     source_rows = session.execute(
@@ -3300,6 +3860,15 @@ class PostgresMarketDataRepository:
                         "source_summary": {
                             "counts": dict(sorted(source_counts.items())),
                             "sources": {key: source_details[key] for key in sorted(source_details)},
+                            **(
+                                {
+                                    "record_selection": _ALL_CANONICAL_REVISIONS_SELECTION
+                                }
+                                if _preserves_canonical_revision_history(
+                                    str(identity["contract_version"])
+                                )
+                                else {}
+                            ),
                         },
                         "quality_hash": build_quality_hash(quality),
                         "quality_summary": {
@@ -3634,6 +4203,79 @@ class PostgresMarketDataRepository:
                 known_at_lte=known_at_lte,
                 source_identity_keys=source_identity_keys,
             )
+
+    def read_dataset_fact_revisions(
+        self,
+        *,
+        dataset_id: str,
+        series_id: int,
+        known_at_lte: Optional[datetime] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        source_identity_keys: Sequence[str] = (),
+    ) -> list[CanonicalFactRecord]:
+        """Read only revision history explicitly bound into Dataset identity."""
+
+        with db.session() as session:
+            entry = session.execute(
+                text(
+                    """
+                    SELECT dataset_series.range_start, dataset_series.range_end,
+                           dataset_series.max_commit_seq,
+                           dataset_series.source_summary,
+                           series.fact_type, series.contract_version
+                    FROM market.dataset_series AS dataset_series
+                    JOIN market.series AS series ON series.id = dataset_series.series_id
+                    WHERE dataset_series.dataset_id = :dataset_id
+                      AND dataset_series.series_id = :series_id
+                    """
+                ),
+                {"dataset_id": str(dataset_id), "series_id": int(series_id)},
+            ).mappings().first()
+            if entry is None:
+                raise ValueError(
+                    "market_dataset_series_unknown: "
+                    f"dataset_id={dataset_id} series_id={series_id}"
+                )
+            requested = DatasetSeriesRequest(
+                series_id=int(series_id),
+                start=start or entry["range_start"],
+                end=end or entry["range_end"],
+            )
+            if (
+                requested.start < entry["range_start"]
+                or requested.end > entry["range_end"]
+            ):
+                raise ValueError(
+                    "market_dataset_range_expansion_forbidden: requested range is outside "
+                    f"dataset_id={dataset_id} series_id={series_id} frozen bounds"
+                )
+            selection = str(
+                dict(entry.get("source_summary") or {}).get("record_selection")
+                or ""
+            )
+            if (
+                selection != _ALL_CANONICAL_REVISIONS_SELECTION
+                or not _preserves_canonical_revision_history(
+                    str(entry["contract_version"])
+                )
+            ):
+                raise RuntimeError(
+                    "market_dataset_revision_history_unpinned: re-freeze Dataset "
+                    f"dataset_id={dataset_id} series_id={series_id}"
+                )
+            rows = self._read_canonical_rows_with_session(
+                session,
+                series_id=int(series_id),
+                start=requested.start,
+                end=requested.end,
+                as_of_commit_seq=int(entry["max_commit_seq"]),
+                known_at_lte=known_at_lte,
+                latest_only=False,
+                include_invalidated=True,
+                source_identity_keys=source_identity_keys,
+            )
+        return [_canonical_row_to_record(row) for row in rows]
 
 
 market_data_repo = PostgresMarketDataRepository()

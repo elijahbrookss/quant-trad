@@ -73,6 +73,9 @@ class RuntimeMarketDataResolver:
         )
         self._frozen_records: dict[tuple[int, tuple[str, ...]], tuple[Any, ...]] = {}
         self._frozen_numeric_revisions: dict[int, tuple[Any, ...]] = {}
+        self._frozen_canonical_revisions: dict[
+            tuple[int, tuple[str, ...]], tuple[Any, ...]
+        ] = {}
         self.as_of_commit_seq = (
             int(as_of_commit_seq) if as_of_commit_seq is not None else None
         )
@@ -327,6 +330,7 @@ class RuntimeMarketDataResolver:
         series: Mapping[str, Any],
         requirement: MarketDataRequirement,
         evaluation_time: datetime,
+        preserve_revisions: bool = False,
     ) -> tuple[Any, ...]:
         series_id = int(series["series_id"])
         contract = get_fact_contract(requirement.fact_type)
@@ -358,6 +362,32 @@ class RuntimeMarketDataResolver:
             records: Sequence[Any] = tuple(
                 record
                 for record in self._frozen_numeric_revisions[series_id]
+                if record.fact.known_at <= evaluation_time
+            )
+        elif preserve_revisions:
+            selection = str(
+                dict(series.get("source_summary") or {}).get("record_selection")
+                or ""
+            )
+            if selection != "all_canonical_revisions.v1":
+                raise RuntimeError(
+                    "runtime_market_data_history_unpinned: frozen canonical revision "
+                    f"history requires a newly frozen Dataset series_id={series_id}"
+                )
+            revision_key = (series_id, tuple(sorted(allowed_sources)))
+            if revision_key not in self._frozen_canonical_revisions:
+                self._frozen_canonical_revisions[revision_key] = tuple(
+                    self.store.read_dataset_fact_revisions(
+                        dataset_id=str(self.dataset_binding["dataset_id"]),
+                        series_id=series_id,
+                        start=self._utc(series["range_start"]),
+                        end=self._utc(series["range_end"]),
+                        source_identity_keys=tuple(sorted(allowed_sources)),
+                    )
+                )
+            records = tuple(
+                record
+                for record in self._frozen_canonical_revisions[revision_key]
                 if record.fact.known_at <= evaluation_time
             )
         else:
@@ -419,6 +449,7 @@ class RuntimeMarketDataResolver:
                 series=matches[0],
                 requirement=declared,
                 evaluation_time=decision,
+                preserve_revisions=True,
             )
         elif self.as_of_commit_seq is not None:
             instrument_id = self._instrument_id(
@@ -441,7 +472,7 @@ class RuntimeMarketDataResolver:
                 ))
             else:
                 records = tuple(
-                    self.store.read_series_records(
+                    self.store.read_fact_revisions(
                         series_id=series_id,
                         start=lower,
                         end=upper,

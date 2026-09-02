@@ -188,6 +188,13 @@ opening a new session. It:
 5. closes or invalidates prior coverage at its last already-proven event;
 6. records recovery lifecycle evidence and releases the recovery claim.
 
+Recovery discovery selects the definition directory before it opens any spool
+header, so concurrently starting definitions never parse or race sibling
+definition spools. A segment that disappears between that scoped discovery and
+open fails that definition's recovery with the definition, path, and recovery
+phase; disappearance is not proof that another owner archived the segment.
+Corrupt headers and definition-identity mismatches likewise fail loudly.
+
 The next provider connection must establish a new coverage interval. Collector
 downtime is therefore visible and never bridged by invented completeness.
 Trade recovery republishes immutable trades. L2 recovery verifies a typed book

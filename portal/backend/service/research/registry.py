@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from market_data.contracts import SourceIdentity
+from market_data.fact_registry import (
+    FactPayloadKind,
+    get_fact_contract,
+    get_fact_payload_schema,
+)
 from market_data.frozen import semantic_hash
 from research_science.check import (
     CHECK_DEFINITION_SCHEMA_VERSION,
@@ -14,6 +19,7 @@ from research_science.check import (
     CHECK_REQUEST_SCHEMA_VERSION,
     CHECK_RESULT_SCHEMA_VERSION,
     GAP_POLICY_CONTINUE_DEGRADED,
+    GAP_POLICY_RESET_REWARM,
     CheckDefinition,
     CheckRegistry,
     CheckRequest,
@@ -23,6 +29,10 @@ from research_science.check import (
 from . import checks
 from .event_fact_evaluator import (
     EVENT_FACT_ANALYSIS,
+    EVENT_FACT_EVALUATOR_VERSION,
+    EVENT_FACT_RESULT_VERSION,
+    LEGACY_EVENT_FACT_EVALUATOR_VERSION,
+    LEGACY_EVENT_FACT_RESULT_VERSION,
     EventFactEvaluator,
     normalize_event_fact_configuration,
 )
@@ -248,21 +258,43 @@ _register_legacy_families()
 
 
 def _register_event_fact_family() -> None:
+    legacy_evaluator = EventFactEvaluator(
+        version=LEGACY_EVENT_FACT_EVALUATOR_VERSION,
+        result_schema_version=LEGACY_EVENT_FACT_RESULT_VERSION,
+        fact_snapshot_enabled=False,
+    )
     evaluator = EventFactEvaluator()
+    CHECK_REGISTRY.register_evaluator(legacy_evaluator)
     CHECK_REGISTRY.register_evaluator(evaluator)
     CHECK_REGISTRY.register_definition(
         CheckDefinition(
             schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
             definition_id=EVENT_FACT_ANALYSIS,
             definition_version="3",
-            evaluator_id=evaluator.evaluator_id,
-            evaluator_version=evaluator.version,
+            evaluator_id=legacy_evaluator.evaluator_id,
+            evaluator_version=legacy_evaluator.version,
             request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
             result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
             material_rules={
                 "family": EVENT_FACT_ANALYSIS,
                 "event_ownership": "indicator",
                 "operator_model": "registered_event_fact_operators.v2",
+            },
+        )
+    )
+    CHECK_REGISTRY.register_definition(
+        CheckDefinition(
+            schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+            definition_id=EVENT_FACT_ANALYSIS,
+            definition_version="4",
+            evaluator_id=evaluator.evaluator_id,
+            evaluator_version=evaluator.version,
+            request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+            result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            material_rules={
+                "family": EVENT_FACT_ANALYSIS,
+                "event_ownership": "indicator_or_check",
+                "operator_model": "registered_event_fact_operators.v3",
             },
         )
     )
@@ -304,6 +336,16 @@ def normalize_fact_inputs(value: Any, *, mode: str) -> list[dict[str, Any]]:
             raise ValueError(
                 f"check input {alias} requires fact_type and contract_version"
             )
+        contract = get_fact_contract(fact_type)
+        timeframe_seconds = raw.get("timeframe_seconds")
+        contract.validate(
+            contract_version=contract_version,
+            timeframe_seconds=(
+                int(timeframe_seconds)
+                if timeframe_seconds not in (None, "")
+                else None
+            ),
+        )
         source_policy = _mapping(raw.get("source_policy"), field=f"inputs.{alias}.source_policy")
         policy_mode = str(
             source_policy.get("mode")
@@ -375,14 +417,227 @@ def normalize_fact_inputs(value: Any, *, mode: str) -> list[dict[str, Any]]:
     return normalized
 
 
+_NUMERIC_PAYLOAD_KINDS = frozenset(
+    {
+        FactPayloadKind.DECIMAL,
+        FactPayloadKind.FLOAT64,
+        FactPayloadKind.INTEGER,
+    }
+)
+_L2_RESEARCH_FACT_TYPES = frozenset(
+    {"market.bbo", "market.depth_observation"}
+)
+
+
+def _input_by_alias(inputs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(row["alias"]): row for row in inputs}
+
+
+def _require_input(
+    aliases: Mapping[str, Mapping[str, Any]],
+    *,
+    alias: str,
+    consumer: str,
+) -> Mapping[str, Any]:
+    row = aliases.get(alias)
+    if row is None:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} references undeclared input_alias={alias or '<empty>'}"
+        )
+    return row
+
+
+def _structured_payload_schema(
+    raw_input: Mapping[str, Any],
+    *,
+    consumer: str,
+):
+    fact_type = str(raw_input["fact_type"])
+    contract_version = str(raw_input["contract_version"])
+    contract = get_fact_contract(fact_type)
+    try:
+        schema = get_fact_payload_schema(contract_version)
+    except ValueError as exc:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} requires a registered structured payload schema"
+        ) from exc
+    if contract.uses_exact_numeric_storage:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} requires a structured canonical Fact input"
+        )
+    if schema.fact_type != fact_type:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} payload schema does not match fact_type={fact_type}"
+        )
+    if not contract.dataset_eligible or not schema.dataset_eligible:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} input is not Dataset eligible fact_type={fact_type}"
+        )
+    if fact_type not in _L2_RESEARCH_FACT_TYPES:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} structured research currently supports only frozen BBO/depth facts; "
+            f"fact_type={fact_type}"
+        )
+    return schema
+
+
+def _explicit_staleness(raw_input: Mapping[str, Any], *, consumer: str) -> int:
+    raw = raw_input.get("max_staleness_seconds")
+    if raw in (None, "") or isinstance(raw, bool):
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} requires explicit max_staleness_seconds"
+        )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} max_staleness_seconds must be positive"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} max_staleness_seconds must be positive"
+        )
+    return value
+
+
+def _payload_fields(schema: Any) -> dict[str, Any]:
+    return {str(field.name): field for field in schema.fields}
+
+
+def _normalize_schema_where(
+    value: Mapping[str, Any],
+    *,
+    schema: Any,
+    consumer: str,
+) -> dict[str, Any]:
+    fields = _payload_fields(schema)
+    normalized: dict[str, Any] = {}
+    for path, expected in sorted(value.items()):
+        field_name = str(path).split(".", 1)[-1]
+        field = fields.get(field_name)
+        if field is None or field_name not in schema.query_fields:
+            raise ValueError(
+                "event_fact_check_invalid: "
+                f"{consumer} field={path} is not a declared query field"
+            )
+        try:
+            normalized[str(path)] = field.normalize(expected)
+        except ValueError as exc:
+            raise ValueError(
+                "event_fact_check_invalid: "
+                f"{consumer} field={path} predicate is invalid"
+            ) from exc
+    return normalized
+
+
+def _normalize_structured_path(
+    path: str,
+    *,
+    schema: Any,
+    consumer: str,
+) -> str:
+    field_name = str(path).split(".", 1)[-1]
+    field = _payload_fields(schema).get(field_name)
+    if field is None or field_name not in schema.query_fields:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} field={path} is not a declared query field"
+        )
+    if field.kind not in _NUMERIC_PAYLOAD_KINDS:
+        raise ValueError(
+            "event_fact_check_invalid: "
+            f"{consumer} field={path} must be numeric"
+        )
+    return str(path)
+
+
+def _validate_event_fact_bindings(
+    *,
+    detector: Mapping[str, Any],
+    statistics: Mapping[str, Any],
+    inputs: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    """Bind every operator to one declared, schema-constrained Fact input."""
+
+    aliases = _input_by_alias(inputs)
+    normalized_detector = dict(detector)
+    normalized_statistics = dict(statistics)
+    normalized_features = dict(normalized_statistics.get("features") or {})
+    normalized_enriched: list[dict[str, Any]] = []
+
+    if str(normalized_detector.get("type") or "") == "fact_snapshot":
+        alias = str(normalized_detector["input_alias"])
+        raw_input = _require_input(
+            aliases,
+            alias=alias,
+            consumer="detector",
+        )
+        schema = _structured_payload_schema(raw_input, consumer="detector")
+        _explicit_staleness(raw_input, consumer="detector")
+        normalized_detector["where"] = _normalize_schema_where(
+            dict(normalized_detector.get("where") or {}),
+            schema=schema,
+            consumer="detector.where",
+        )
+
+    for raw in normalized_features.get("enriched") or []:
+        feature = dict(raw)
+        name = str(feature["name"])
+        alias = str(feature["input_alias"])
+        raw_input = _require_input(
+            aliases,
+            alias=alias,
+            consumer=f"feature={name}",
+        )
+        contract = get_fact_contract(str(raw_input["fact_type"]))
+        if str(feature["operator"]) == "latest_payload_number":
+            schema = _structured_payload_schema(
+                raw_input,
+                consumer=f"feature={name}",
+            )
+            _explicit_staleness(raw_input, consumer=f"feature={name}")
+            feature["path"] = _normalize_structured_path(
+                str(feature["path"]),
+                schema=schema,
+                consumer=f"feature={name}",
+            )
+            feature["where"] = _normalize_schema_where(
+                dict(feature.get("where") or {}),
+                schema=schema,
+                consumer=f"feature={name}.where",
+            )
+        elif not contract.uses_exact_numeric_storage:
+            raise ValueError(
+                "event_fact_check_invalid: "
+                f"feature={name} operator={feature['operator']} requires an exact numeric Fact input"
+            )
+        normalized_enriched.append(feature)
+
+    normalized_features["enriched"] = normalized_enriched
+    normalized_statistics["features"] = normalized_features
+    return normalized_detector, normalized_statistics, inputs
+
+
 def materialize_check_definition(
     payload: Mapping[str, Any],
     *,
     mode: str,
+    base_version: str | None = None,
 ) -> CheckDefinition:
     family = str(payload.get("check_family") or checks.SUPPORTED_CHECK_FAMILY).strip()
-    base_version = "3" if family == EVENT_FACT_ANALYSIS else "2"
-    base = CHECK_REGISTRY.resolve_definition(family, base_version)
+    resolved_base_version = str(
+        base_version or ("4" if family == EVENT_FACT_ANALYSIS else "2")
+    )
+    base = CHECK_REGISTRY.resolve_definition(family, resolved_base_version)
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")
     statistics = _mapping(payload.get("statistics"), field="statistics")
@@ -398,12 +653,29 @@ def materialize_check_definition(
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
     if family == EVENT_FACT_ANALYSIS and not inputs:
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
+    if family == EVENT_FACT_ANALYSIS:
+        detector, statistics, inputs = _validate_event_fact_bindings(
+            detector=detector,
+            statistics=statistics,
+            inputs=inputs,
+        )
     assertions = _list_of_mappings(payload.get("assertions"), field="assertions")
     if mode == CHECK_MODE_EVIDENCE and not str(payload.get("gap_policy") or "").strip():
         raise ValueError("check_evidence_gap_policy_required")
     gap_rewarm_bars = int(payload.get("gap_rewarm_bars") or 0)
     if gap_rewarm_bars < 0:
         raise ValueError("check gap_rewarm_bars must be nonnegative")
+    gap_policy = str(
+        payload.get("gap_policy") or GAP_POLICY_CONTINUE_DEGRADED
+    ).strip().lower()
+    if (
+        family == EVENT_FACT_ANALYSIS
+        and str(detector.get("type") or "") == "fact_snapshot"
+        and gap_policy == GAP_POLICY_RESET_REWARM
+    ):
+        raise ValueError(
+            "event_fact_check_invalid: fact_snapshot does not support reset_rewarm"
+        )
     material_rules = {
         **dict(base.material_rules),
         "registered_definition": {
@@ -421,9 +693,7 @@ def materialize_check_definition(
         "outcomes": outcomes,
         "statistics": statistics,
         "assertions": assertions,
-        "gap_policy": str(
-            payload.get("gap_policy") or GAP_POLICY_CONTINUE_DEGRADED
-        ).strip().lower(),
+        "gap_policy": gap_policy,
         "gap_rewarm_bars": gap_rewarm_bars,
     }
     configured_version = (
@@ -565,7 +835,12 @@ def reconstruct_pinned_check_definition(
         "gap_policy": request.parameters.get("gap_policy"),
         "gap_rewarm_bars": request.parameters.get("gap_rewarm_bars"),
     }
-    unpinned = materialize_check_definition(payload, mode=request.mode)
+    registered_base_version = str(request.definition_version).split("+", 1)[0]
+    unpinned = materialize_check_definition(
+        payload,
+        mode=request.mode,
+        base_version=registered_base_version,
+    )
     reconstructed, _request, _plan = pin_check_definition_to_plan(
         unpinned,
         CheckRequest(

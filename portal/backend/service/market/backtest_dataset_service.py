@@ -910,12 +910,23 @@ def validate_frozen_dataset_series(
             "backtest_dataset_contract_mismatch: "
             f"series_id={series_id} contract={entry.get('contract_version')}"
         ) from exc
-    records = store.read_dataset_series(
-        dataset_id=str(entry["dataset_id"]),
-        series_id=series_id,
-        start=range_start,
-        end=range_end,
+    record_selection = str(
+        dict(entry.get("source_summary") or {}).get("record_selection") or ""
     )
+    if record_selection == "all_canonical_revisions.v1":
+        records = store.read_dataset_fact_revisions(
+            dataset_id=str(entry["dataset_id"]),
+            series_id=series_id,
+            start=range_start,
+            end=range_end,
+        )
+    else:
+        records = store.read_dataset_series(
+            dataset_id=str(entry["dataset_id"]),
+            series_id=series_id,
+            start=range_start,
+            end=range_end,
+        )
     if len(records) != int(entry["row_count"]):
         raise RuntimeError(
             "backtest_dataset_snapshot_disagreement: "

@@ -1972,27 +1972,34 @@ class PostgresMarketStructureRepository:
             row = session.execute(
                 text(
                     """
-                    SELECT min(facts.source_id) AS source_id,
-                           count(DISTINCT facts.source_id) AS source_count
+                    SELECT min(source_bounds.min_source_id) AS min_source_id,
+                           max(source_bounds.max_source_id) AS max_source_id
                     FROM market.series AS derived_series
                     JOIN market.series AS trade_series
                       ON trade_series.instrument_id = derived_series.instrument_id
                      AND trade_series.fact_type = 'market.trade'
-                    JOIN market.fact_versions AS facts
-                      ON facts.series_id = trade_series.id
+                    JOIN LATERAL (
+                        SELECT min(facts.source_id) AS min_source_id,
+                               max(facts.source_id) AS max_source_id
+                        FROM market.fact_versions AS facts
+                        WHERE facts.series_id = trade_series.id
+                    ) AS source_bounds
+                      ON source_bounds.min_source_id IS NOT NULL
                     WHERE derived_series.id = :series_id
                     """
                 ),
                 {"series_id": int(series_id)},
             ).mappings().one()
-        source_count = int(row["source_count"])
-        if source_count != 1 or row["source_id"] is None:
+        min_source_id = row["min_source_id"]
+        max_source_id = row["max_source_id"]
+        if min_source_id is None or min_source_id != max_source_id:
+            source_count = "0" if min_source_id is None else ">1"
             raise RuntimeError(
                 "market_trade_flow_source_invalid: expected exactly one canonical "
                 f"upstream trade source series_id={int(series_id)} "
                 f"source_count={source_count}"
             )
-        return int(row["source_id"])
+        return int(min_source_id)
 
     def ingest_trades(
         self,

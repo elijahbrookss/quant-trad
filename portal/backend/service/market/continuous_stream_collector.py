@@ -1102,10 +1102,24 @@ class ContinuousStreamRuntime:
         active_projection = projection
         definition_id = str(definition["id"])
         grouped: dict[str, list[tuple[Path, DurableRawSpoolSegment]]] = {}
-        for path in discover_spool_segments(spool_root):
-            probe = DurableRawSpoolSegment.from_path(path)
+        for path in discover_spool_segments(
+            spool_root,
+            definition_id=definition_id,
+        ):
+            try:
+                probe = DurableRawSpoolSegment.from_path(path)
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    "continuous_collector_spool_disappeared_during_recovery: "
+                    f"definition_id={definition_id} path={path} "
+                    "phase=discovery_open"
+                ) from exc
             if probe.definition_id != definition_id:
-                continue
+                raise RuntimeError(
+                    "continuous_collector_spool_definition_mismatch: "
+                    f"definition_id={definition_id} "
+                    f"spool_definition_id={probe.definition_id} path={path}"
+                )
             grouped.setdefault(probe.session_id, []).append((path, probe))
         for session_id, entries in sorted(grouped.items()):
             recovery_lease_seconds = max(float(lease_seconds), 600.0)

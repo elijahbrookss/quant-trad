@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,9 +33,13 @@ from portal.backend.service.market.market_structure_service import _CaptureAnaly
 from portal.backend.service.storage.repos.market_structure import StreamClaim
 
 
-def _claim(*, session_id: str) -> StreamClaim:
+def _claim(
+    *,
+    session_id: str,
+    definition_id: str = "definition-a",
+) -> StreamClaim:
     return StreamClaim(
-        definition_id="definition-a",
+        definition_id=definition_id,
         definition_generation=1,
         source_id=1,
         series_id=2,
@@ -160,6 +166,61 @@ class _RecoveryRepository:
         self.released = True
 
 
+class _DefinitionRecoveryRepository(_RecoveryRepository):
+    def __init__(self, *, definition_id: str, session_id: str) -> None:
+        super().__init__()
+        self.definition_id = definition_id
+        self.session_id = session_id
+
+    def claim_stream(self, **kwargs):
+        assert kwargs["definition_id"] == self.definition_id
+        assert kwargs["resume_session_id"] == self.session_id
+        assert kwargs["bounded"] is True
+        return _claim(
+            session_id=self.session_id,
+            definition_id=self.definition_id,
+        )
+
+
+def _orphaned_heartbeat_segment(
+    *,
+    root: Path,
+    definition_id: str,
+    session_id: str,
+) -> DurableRawSpoolSegment:
+    segment = DurableRawSpoolSegment(
+        root=root,
+        definition_id=definition_id,
+        session_id=session_id,
+        connection_epoch=2,
+        segment_ordinal=7,
+    )
+    message = ProviderRawMessage.build(
+        provider="COINBASE",
+        venue="COINBASE_DIRECT",
+        stream_session_id=session_id,
+        connection_epoch=2,
+        receive_ordinal=1,
+        received_at="2026-08-05T12:00:00Z",
+        raw_frame=(
+            '{"channel":"heartbeats","sequence_num":1,'
+            '"events":[{"current_time":"2026-08-05T12:00:00Z"}]}'
+        ),
+    )
+    segment.append(
+        RawStreamRecord.from_provider_message(
+            message,
+            definition_id=definition_id,
+            spool_segment_id=segment.spool_segment_id,
+            provider_product_id="BTC-USD",
+            requested_channel="market_trades",
+            observed_channel="heartbeats",
+        )
+    )
+    segment.seal()
+    return segment
+
+
 def test_restart_recovery_repairs_archives_and_closes_prior_coverage(
     tmp_path: Path,
 ) -> None:
@@ -222,6 +283,117 @@ def test_restart_recovery_repairs_archives_and_closes_prior_coverage(
     assert repository.events[1]["evidence"]["truncated_tail_bytes"] > 0
     assert not segment.open_path.exists()
     assert not segment.sealed_path.exists()
+
+
+def test_concurrent_restart_recovery_opens_only_own_definition_spools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spool_root = tmp_path / "spool"
+    definitions = ("definition-a", "definition-b")
+    segments = {
+        definition_id: _orphaned_heartbeat_segment(
+            root=spool_root,
+            definition_id=definition_id,
+            session_id=f"session-{definition_id}",
+        )
+        for definition_id in definitions
+    }
+    thread_scope = threading.local()
+    observed_scopes: list[tuple[str, str]] = []
+    observed_lock = threading.Lock()
+    original_from_path = DurableRawSpoolSegment.from_path
+
+    def _observed_from_path(path: Path) -> DurableRawSpoolSegment:
+        probe = original_from_path(path)
+        with observed_lock:
+            observed_scopes.append(
+                (str(thread_scope.definition_id), probe.definition_id)
+            )
+        return probe
+
+    monkeypatch.setattr(
+        DurableRawSpoolSegment,
+        "from_path",
+        staticmethod(_observed_from_path),
+    )
+
+    def _recover(definition_id: str) -> _DefinitionRecoveryRepository:
+        thread_scope.definition_id = definition_id
+        repository = _DefinitionRecoveryRepository(
+            definition_id=definition_id,
+            session_id=f"session-{definition_id}",
+        )
+        ContinuousMarketStructureCollector(
+            repository=repository
+        )._recover_orphaned_spools_sync(
+            definition={"id": definition_id},
+            owner_id=f"worker-{definition_id}",
+            lease_seconds=90,
+            spool_root=spool_root,
+            object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+            temporary_root=tmp_path / "tmp",
+            projection=CoinbaseMarketTradeProjectionAdapter(),
+        )
+        return repository
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(_recover, item) for item in definitions]
+        repositories = [future.result(timeout=15) for future in futures]
+
+    assert set(observed_scopes) == {
+        ("definition-a", "definition-a"),
+        ("definition-b", "definition-b"),
+    }
+    assert all(repository.committed_records == 1 for repository in repositories)
+    assert all(repository.released is True for repository in repositories)
+    assert all(not segment.sealed_path.exists() for segment in segments.values())
+
+
+def test_restart_recovery_fails_when_scoped_spool_disappears_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spool_root = tmp_path / "spool"
+    segment = DurableRawSpoolSegment(
+        root=spool_root,
+        definition_id="definition-a",
+        session_id="session-before-crash",
+        connection_epoch=2,
+    )
+    segment.close()
+
+    def _disappear(path: Path) -> DurableRawSpoolSegment:
+        Path(path).unlink()
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(
+        DurableRawSpoolSegment,
+        "from_path",
+        staticmethod(_disappear),
+    )
+    repository = _RecoveryRepository()
+    with pytest.raises(RuntimeError) as exc_info:
+        ContinuousMarketStructureCollector(
+            repository=repository
+        )._recover_orphaned_spools_sync(
+            definition={"id": "definition-a"},
+            owner_id="worker",
+            lease_seconds=90,
+            spool_root=spool_root,
+            object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+            temporary_root=tmp_path / "tmp",
+            projection=CoinbaseMarketTradeProjectionAdapter(),
+        )
+
+    assert repository.events == []
+    assert repository.released is False
+    assert str(exc_info.value) == (
+        "continuous_collector_spool_disappeared_during_recovery: "
+        f"definition_id=definition-a path={segment.open_path} "
+        "phase=discovery_open"
+    )
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
 
 
 def test_restart_recovery_quarantines_unknown_side_and_releases_spool(
