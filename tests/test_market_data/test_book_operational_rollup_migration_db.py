@@ -258,9 +258,8 @@ def test_book_operational_rollup_migration_guards_seeds_and_reruns() -> None:
             )
 
             with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        """
+                conn.exec_driver_sql(
+                    """
                         INSERT INTO market.fact_versions (
                             series_id, payload_schema_id, payload,
                             market_commit_seq
@@ -269,8 +268,7 @@ def test_book_operational_rollup_migration_guards_seeds_and_reruns() -> None:
                             '{"event_type":"update","entry_count":2}'::jsonb,
                             5
                         )
-                        """
-                    )
+                    """
                 )
                 conn.execute(
                     text(
