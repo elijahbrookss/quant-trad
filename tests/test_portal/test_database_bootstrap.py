@@ -223,6 +223,8 @@ class _Connection:
             return _Result(
                 (self.inspector.book_checkpoint_rollup_trigger_ready,)
             )
+        if "function_body_hash" in statement_text:
+            return _Result(())
         if "FROM pg_trigger" in statement_text:
             return _Result((True,))
         if "operational_index_name" in statement_text:
@@ -541,7 +543,10 @@ def test_book_operational_rollup_requires_durable_checkpoint_trigger(
 
     with pytest.raises(
         RuntimeError,
-        match="always-on durable checkpoint rollup trigger",
+        match=(
+            "always-on durable checkpoint rollup trigger.*"
+            "Observed contract: trigger_row=missing"
+        ),
     ):
         database._assert_book_operational_rollup_migration(connection)
 

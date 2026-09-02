@@ -1193,9 +1193,73 @@ class Database:
             ).scalar_one()
         )
         if not checkpoint_trigger_ready:
+            trigger_contract = conn.execute(
+                text(
+                    """
+                    SELECT
+                        trigger.tgenabled AS trigger_enabled,
+                        trigger.tgtype AS trigger_type,
+                        trigger.tgconstraint AS trigger_constraint_oid,
+                        trigger.tgnargs AS trigger_arg_count,
+                        trigger.tgqual AS trigger_when,
+                        trigger.tgoldtable AS old_transition_table,
+                        trigger.tgnewtable AS new_transition_table,
+                        pg_get_triggerdef(trigger.oid, false)
+                            AS trigger_definition,
+                        procedure_namespace.nspname AS function_schema,
+                        procedure.proname AS function_name,
+                        procedure.prokind AS function_kind,
+                        procedure.prorettype::regtype::text
+                            AS function_return_type,
+                        procedure.pronargs AS function_arg_count,
+                        procedure.proretset AS function_returns_set,
+                        language.lanname AS function_language,
+                        procedure.provolatile AS function_volatility,
+                        procedure.proparallel AS function_parallelism,
+                        procedure.proisstrict AS function_strict,
+                        procedure.prosecdef AS function_security_definer,
+                        procedure.proleakproof AS function_leakproof,
+                        procedure.proconfig AS function_config,
+                        md5(
+                            regexp_replace(
+                                btrim(procedure.prosrc),
+                                '[[:space:]]+',
+                                ' ',
+                                'g'
+                            )
+                        ) AS function_body_hash,
+                        has_function_privilege(
+                            current_user,
+                            procedure.oid,
+                            'EXECUTE'
+                        ) AS caller_can_execute
+                    FROM pg_trigger AS trigger
+                    JOIN pg_proc AS procedure
+                      ON procedure.oid = trigger.tgfoid
+                    JOIN pg_namespace AS procedure_namespace
+                      ON procedure_namespace.oid = procedure.pronamespace
+                    JOIN pg_language AS language
+                      ON language.oid = procedure.prolang
+                    WHERE trigger.tgname =
+                        'trg_record_book_checkpoint_operational_rollup_v1'
+                      AND trigger.tgrelid =
+                        'market.book_checkpoint_manifests'::regclass
+                      AND NOT trigger.tgisinternal
+                    """
+                )
+            ).mappings().first()
+            observed_contract = (
+                "trigger_row=missing"
+                if trigger_contract is None
+                else ", ".join(
+                    f"{key}={value!r}"
+                    for key, value in trigger_contract.items()
+                )
+            )
             raise RuntimeError(
                 "Table 'market.book_checkpoint_manifests' is missing the "
-                "always-on durable checkpoint rollup trigger. Run "
+                "always-on durable checkpoint rollup trigger. "
+                f"Observed contract: {observed_contract}. Run "
                 "scripts/db/manual_migration_book_operational_rollups_v1.sql "
                 "with writers stopped before starting this code."
             )
