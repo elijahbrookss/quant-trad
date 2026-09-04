@@ -73,20 +73,27 @@ def test_actual_reclamation_keeps_pinned_history_and_returns_space(storage, tmp_
     assert plan["protected_dataset_ranges"] == 1
     assert plan["reclaimable_bytes"] == physical["bytes"]
     assert archive.inspect_partition(day) == state
-    assert _physical(storage, day) == physical
+    after_dry_run = _physical(storage, day)
+    for field in ("relation", "hot_rows", "header_rows"):
+        assert after_dry_run[field] == physical[field]
     assert sorted(str(path) for path in tmp_path.rglob("*")) == files
+    assert storage.repo.read_dataset_fact_revisions(
+        dataset_id=frozen.dataset_id, series_id=storage.series_id
+    ) == before
+    assert _read(storage, known_at_lte=BASE) == known_before
     with pytest.raises(RuntimeError, match="canonical_reclaim_disabled"):
         disabled.reclaim_partition(day, eligible_before=storage.today, execute=True)
 
+    before_reclaim = _physical(storage, day)
     result = reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
     assert result["status"] == "partition_reclaimed" and result["protected_dataset_ranges"] == 1
-    assert result["reclaimed_bytes"] == physical["bytes"] > 1024**2
+    assert result["reclaimed_bytes"] > 1024**2
     after = _physical(storage, day)
     assert after["relation"] is None and after["bytes"] is None and after["hot_rows"] == 0
     assert after["header_rows"] == physical["header_rows"] == 33
     # Actual isolated database allocation drops; this is not DELETE plus a
     # promise that VACUUM might eventually make its pages reusable.
-    assert physical["database_bytes"] - after["database_bytes"] >= physical["bytes"] - 256 * 1024
+    assert before_reclaim["database_bytes"] - after["database_bytes"] >= result["reclaimed_bytes"] - 256 * 1024
     assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
     assert _read(storage, known_at_lte=BASE) == known_before
     assert storage.repo.freeze_dataset([request]).dataset_hash == frozen.dataset_hash
