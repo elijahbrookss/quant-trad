@@ -331,8 +331,13 @@ fabricating BBO Facts and retains the broader response-time trade evidence,
 including instrument-bound source candidates where v1 omitted a trade-series ID.
 This intentionally spends additional bounded archive/edge work to preserve
 evidence rather than guess an original source selection. It does not open the
-response deletion gate: owner reconciliation and frozen/physical-retention
-equivalence still need their separate proof.
+response deletion gate: owner reconciliation and the response partition's own
+physical-retention equivalence still need their separate proof. Response
+freezes now preserve all canonical revisions and the same causal raw windows.
+Read-only book/trade prefix reuse validates whole certificates but excludes
+wholly later objects from the returned frozen scope, so certifying a larger
+prefix cannot silently change an earlier Dataset's identity. No certificate
+contents, permanent holds or source clocks are rewritten by this read path.
 
 Book reclamation additionally binds exact canonical source revisions for derived
 BBO/depth facts, checks immutable product/validity scope, and validates checkpoint

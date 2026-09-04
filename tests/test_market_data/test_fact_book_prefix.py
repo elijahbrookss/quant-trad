@@ -270,3 +270,54 @@ def test_coverage_witness_must_belong_to_its_requested_prefix(tmp_path, damage):
     changed = {"session_id": "different-session"} if damage == "scope" else {"receive_ordinal": 3 if damage == "range" else 0}
     with pytest.raises(RuntimeError, match="canonical_raw_prefix_witness_"):
         _resolve_trade(session, store, prefix, [{**prefix, **changed}])
+
+
+@pytest.mark.parametrize("progress", [0, 1, 3])
+def test_book_history_read_checks_exact_witness_and_tail_without_writing(tmp_path, progress):
+    store, records, mappings, rows = _fixture(tmp_path, (1, 2, 3, 4, 5), requested_channel="level2")
+    session = _PrefixSession(mappings)
+    root = _book_root(records[-1], rows[-1])
+    for _ in range(progress):
+        _prepare(session, store, root)
+    before = deepcopy((session.chunks, session.holds))
+    def read():
+        return fact_book_prefix.resolve_book_prefixes_for_read(session, rows=[root], object_store=store,
+            byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+            limits=RawArchiveReadLimits(), max_mapping_rows=20, max_objects=100)
+    assert set(read()) == {"raw-manifest"}
+    assert (session.chunks, session.holds) == before
+    root["provenance"]["_qt_l2_evidence"]["raw_record_id"] = "absent"
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        read()
+
+
+@pytest.mark.parametrize("channel", ["level2", "market_trades"])
+def test_read_identity_does_not_expand_when_a_certificate_includes_later_objects(tmp_path, channel):
+    store, records, mappings, rows = _fixture(tmp_path / "first", (1,), requested_channel=channel)
+    later_store, later_records, later_mappings, later_rows = _fixture(tmp_path / "later", (2,), requested_channel=channel)
+    ack = store.put_verified(object_key="later.parquet", source_path=later_store.local_path("fixture.parquet"),
+        expected_sha256=later_mappings[0]["object_sha256"])
+    for mapping in later_mappings:
+        mapping.update(id="later-manifest", object_key=ack.object_key, object_uri=ack.object_uri)
+    session = _PrefixSession([*mappings, *later_mappings])
+    def read():
+        common = dict(object_store=store, byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+            limits=RawArchiveReadLimits(), max_mapping_rows=20, max_objects=100)
+        if channel == "level2":
+            return fact_book_prefix.resolve_book_prefixes_for_read(session, rows=[_book_root(records[0], rows[0])], **common)
+        prefix = _trade_prefix(records)
+        witness = {**prefix, "raw_record_id": records[0].raw_record_id, "requested_channel": channel}
+        return fact_book_prefix.resolve_trade_prefixes_for_read(session, prefixes=[prefix], witnesses=[witness], rows=rows, **common)
+    before = read()
+    assert set(before) == {"raw-manifest"} and session.chunks == []
+    if channel == "level2":
+        _prepare(session, store, _book_root(later_records[0], later_rows[0]))
+    else:
+        _prepare_trade(session, store, _trade_prefix(later_records))
+    assert len(session.chunks) == 1 and len(session.holds) == 2
+    assert read() == before
+    # Even a wholly later dependency of the reused certificate must still pass
+    # its current byte check. Trimming identity never bypasses receipt integrity.
+    store.local_path("later.parquet").write_bytes(b"corrupt larger-prefix dependency")
+    with pytest.raises(RuntimeError, match="size|sha256|checksum"):
+        read()

@@ -912,14 +912,30 @@ byte checks; repeated root-to-source edges count toward the limit, not just
 distinct documents. Current source placement and raw/checkpoint bytes remain
 subject to the existing final archive-verification handoff.
 
+Response Dataset freezing also binds `all_canonical_revisions.v1`, including
+invalidations, through this same source resolver. Its raw trade/flow and book
+windows use read-only prefix owners: reuse verified history and decode only a
+bounded absent tail, without publishing certificates or changing collection.
+Older latest-only response datasets must be re-frozen for causal history.
+A reused prefix certificate can extend beyond the requested Dataset position.
+Every certificate dependency still undergoes current-byte verification, but
+wholly later objects do not enlarge the Dataset's raw-reference identity. An
+object spanning the boundary remains indivisible. This keeps a repeated freeze
+stable when retention subsequently certifies a larger prefix; certificate and
+hold corruption cannot be bypassed by trimming its returned reference set.
+
 This is source preservation, **not yet response deletion admission**. Full
-response-owner calculation/input-fingerprint reconciliation and all-revision
-frozen/physical-retention proof remain required before opening that family gate.
+response-owner calculation/input-fingerprint reconciliation and the response
+partition's own physical-retention proof remain required before opening that
+family gate.
 The disposable source-closure regression archives response revisions after
 trade/book/flow inputs have physically moved to cold storage, retains an
 intervening non-extremum book event and a later causal trade revision, excludes
 future-known inputs, and rejects corruption of the intervening raw event.
-The response partition itself must still reject reclamation.
+All-revision frozen history, known-at reads, validation and repeated Dataset
+identity remain unchanged after those source partitions are reclaimed, even
+when a source certificate includes a wholly later raw object. The response
+partition itself must still reject reclamation.
 
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence

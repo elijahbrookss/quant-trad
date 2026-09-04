@@ -48,7 +48,7 @@ def _dependencies(session, chunk, *, max_objects):
     found = session.execute(text("""
         SELECT holds.target_id, holds.object_key AS held_key, holds.object_sha256 AS held_sha256,
                manifests.object_key, manifests.object_uri, manifests.object_sha256,
-               manifests.content_fingerprint, manifests.byte_count,
+               manifests.content_fingerprint, manifests.byte_count, manifests.first_receive_ordinal,
                EXISTS (SELECT 1 FROM market.storage_lifecycle_events AS events
                    WHERE events.action='archive_expire' AND events.target_kind='raw_manifest'
                      AND events.target_id=manifests.id AND events.event_type IN ('planned','completed')) AS unavailable
@@ -159,6 +159,25 @@ def resolve_verified_trade_prefixes(session, *, prefixes, witnesses, **kwargs):
 
 def resolve_trade_prefixes_for_read(session, *, prefixes, witnesses, rows, object_store, byte_verifier,
                                    limits, max_mapping_rows, max_objects, check_budget=None):
+    return _resolve_prefixes_for_read(session, prefixes=prefixes, witnesses=witnesses, rows=rows,
+        verifier_version=TRADE_PREFIX_VERIFIER_VERSION, object_store=object_store, byte_verifier=byte_verifier,
+        limits=limits, max_mapping_rows=max_mapping_rows, max_objects=max_objects, check_budget=check_budget)
+
+
+def resolve_book_prefixes_for_read(session, *, rows, **kwargs):
+    witnesses = []
+    for row in rows:
+        _, evidence = _witness(row)
+        if row["fact_type"] == "market.trade":
+            raise ValueError("canonical_book_history_family_invalid")
+        witnesses.append({**evidence, "root_fact_version_id": row["id"],
+            "first_receive_ordinal": evidence["receive_ordinal"], "requested_channel": "level2"})
+    return _resolve_prefixes_for_read(session, prefixes=canonical_book_prefixes(rows), witnesses=witnesses,
+        rows=rows, verifier_version=BOOK_PREFIX_VERIFIER_VERSION, **kwargs)
+
+
+def _resolve_prefixes_for_read(session, *, prefixes, witnesses, rows, verifier_version, object_store, byte_verifier,
+                               limits, max_mapping_rows, max_objects, check_budget=None):
     """Read verified history plus a bounded unverified tail without writing.
 
     A hot Dataset need not wait for retention to publish prefix certificates.
@@ -169,9 +188,9 @@ def resolve_trade_prefixes_for_read(session, *, prefixes, witnesses, rows, objec
     """
     tails = []
     references, bindings = _resolve_verified_prefixes(session, prefixes=prefixes, witnesses=witnesses,
-        verifier_version=TRADE_PREFIX_VERIFIER_VERSION, byte_verifier=byte_verifier, max_objects=max_objects,
+        verifier_version=verifier_version, byte_verifier=byte_verifier, max_objects=max_objects,
         check_budget=check_budget, unverified_ranges=tails)
-    ranges = [{**item, "requested_channel": "market_trades"} for item in tails]
+    ranges = [{**item, "requested_channel": _PREFIX_CHANNELS[verifier_version]} for item in tails]
     ranges.extend(witnesses)
     exact = resolve_canonical_raw_archive_refs(session, rows=rows, object_store=object_store,
         byte_verifier=byte_verifier, limits=limits, max_mapping_rows=max_mapping_rows,
@@ -225,12 +244,22 @@ def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version
                 identity = item["target_id"]
                 if bound_manifest_ids is not None and identity not in bound_manifest_ids:
                     raise RuntimeError(f"canonical_book_prefix_bound_dependency_missing: target_id={identity}")
+                byte_verifier.verify(item["object_key"], item["object_sha256"], expected_bytes=item["byte_count"])
+                # A certificate may extend past this Dataset's requested raw
+                # position. Verify the complete certificate, but do not enlarge
+                # frozen identity with wholly later objects merely because
+                # retention has now certified a larger prefix. An object that
+                # straddles the boundary remains one indivisible dependency.
+                if unverified_ranges is not None:
+                    if type(item["first_receive_ordinal"]) is not int or item["first_receive_ordinal"] < 1:
+                        raise RuntimeError(f"canonical_book_prefix_dependency_range_invalid: target_id={identity}")
+                    if item["first_receive_ordinal"] > prefix["receive_ordinal"]:
+                        continue
                 reference = {name: item[name] for name in _REFERENCE_FIELDS}
                 if references.setdefault(identity, reference) != reference:
                     raise RuntimeError(f"canonical_book_prefix_dependency_conflict: target_id={identity}")
                 if len(references) > max_objects:
                     raise RuntimeError("canonical_book_prefix_object_budget_exceeded")
-                byte_verifier.verify(item["object_key"], item["object_sha256"], expected_bytes=item["byte_count"])
             # A newer placement must not substitute a different frame for an
             # already certified position. Root witnesses bind to THEIR chunk,
             # not the union of objects from later intervals in this connection.

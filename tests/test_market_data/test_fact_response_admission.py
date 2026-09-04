@@ -134,3 +134,24 @@ def test_window_batches_and_edge_limit_include_repeated_sources(monkeypatch):
     assert batches == [128, 1] and found == {row["id"]: row} and len(selections) == 129
     with pytest.raises(RuntimeError, match="request_budget"):
         fact_dependencies.resolve_causal_window_revisions(None, requests=requests, reader=None, max_rows=128, max_logical_bytes=1024**2)
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_response_history_binds_trade_and_book_windows_through_their_read_owners(monkeypatch, conflict):
+    from portal.backend.service.storage.repos import fact_flow_admission, fact_book_prefix
+    sources = [{"id": family, "fact_type": family} for family in
+        ("market.l2_book", "market.trade", "market.trade_flow", "market.trade_flow_feature")]
+    monkeypatch.setattr(admission, "resolve_response_source_revisions", lambda *args, **kwargs: sources)
+    def trades(session, **kwargs):
+        assert {row["fact_type"] for row in kwargs["rows"]} == {"market.trade", "market.trade_flow"}
+        return {"trade": {"object_key": "trade.parquet"}}
+    def books(session, **kwargs):
+        assert [row["fact_type"] for row in kwargs["rows"]] == ["market.l2_book"]
+        return {"trade" if conflict else "book": {"object_key": "book.parquet"}}
+    monkeypatch.setattr(fact_flow_admission, "collect_trade_history_archive_refs", trades)
+    monkeypatch.setattr(fact_book_prefix, "resolve_book_prefixes_for_read", books)
+    if conflict:
+        with pytest.raises(RuntimeError, match="dependency_conflict"):
+            admission.collect_response_history_archive_refs(None, rows=[], object_store=None)
+    else:
+        assert set(admission.collect_response_history_archive_refs(None, rows=[], object_store=None)) == {"trade", "book"}

@@ -111,3 +111,26 @@ def resolve_response_source_revisions(session, *, rows, object_store, max_rows, 
     if len(sources) > max_rows:
         raise RuntimeError("canonical_response_source_budget_exceeded: reduce archive page size")
     return [sources[identity] for identity in sorted(sources)]
+
+
+def collect_response_history_archive_refs(session, *, rows, object_store):
+    """Bind every frozen revision's causal raw windows without writing progress."""
+    from market_data.archive import RawArchiveReadLimits
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from .fact_book_prefix import resolve_book_prefixes_for_read
+    from .fact_flow_admission import collect_trade_history_archive_refs
+    sources = resolve_response_source_revisions(session, rows=rows, object_store=object_store,
+        max_rows=50_000, max_logical_bytes=64 * 1024**2)
+    references = collect_trade_history_archive_refs(session,
+        rows=[row for row in sources if row["fact_type"] in {"market.trade", "market.trade_flow"}], object_store=object_store)
+    objects = ArchiveVerificationBatch(object_store,
+        limits=ArchiveVerificationLimits(max_objects=10_000, max_bytes=4 * 1024**3))
+    books = resolve_book_prefixes_for_read(session, rows=[row for row in sources if row["fact_type"] == "market.l2_book"],
+        object_store=object_store, byte_verifier=objects, limits=RawArchiveReadLimits(),
+        max_mapping_rows=50_000, max_objects=objects.limits.max_objects)
+    for identity, reference in books.items():
+        if references.setdefault(identity, reference) != reference:
+            raise RuntimeError(f"canonical_response_history_dependency_conflict: target_id={identity}")
+    if len(references) > objects.limits.max_objects:
+        raise RuntimeError("canonical_response_history_object_budget_exceeded: reduce Dataset window")
+    return references
