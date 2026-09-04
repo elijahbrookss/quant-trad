@@ -325,6 +325,15 @@ and v9 receipts require explicit additive reverification before reclamation.
 The remaining response/normalized families and production activation still
 require their separate proofs and reviewed rollout.
 
+The v11 response archive proof first preserves named canonical flow/book/trade
+witnesses and full causal windows. It reuses book position lookup without
+fabricating BBO Facts and retains the broader response-time trade evidence,
+including instrument-bound source candidates where v1 omitted a trade-series ID.
+This intentionally spends additional bounded archive/edge work to preserve
+evidence rather than guess an original source selection. It does not open the
+response deletion gate: owner reconciliation and frozen/physical-retention
+equivalence still need their separate proof.
+
 Book reclamation additionally binds exact canonical source revisions for derived
 BBO/depth facts, checks immutable product/validity scope, and validates checkpoint
 bytes and restored state through the existing reconstruction owner. These edges

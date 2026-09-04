@@ -1,5 +1,6 @@
 """Current placement proof for immutable canonical archive source edges."""
 from collections import defaultdict
+import json
 
 from sqlalchemy import text
 
@@ -14,6 +15,72 @@ SELF_CONTAINED_FACT_TYPES = frozenset({
     "candle.ohlcv", "derivatives.funding_rate", "derivatives.open_interest",
     "market.reference_price", "market.reserve_balance", "asset.reserve_state",
 })
+
+
+def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
+    """Keep complete bounded canonical windows, including corrections/invalidations.
+
+    Instrument and family are mandatory. Optional immutable series/source IDs
+    narrow a declared scope; an omitted ID means conservative evidence, never
+    a lookup through today's mutable stream configuration.
+    """
+    indexed = {item["root_id"]: item for item in requests}
+    if len(indexed) != len(requests) or len(requests) > max_rows:
+        raise RuntimeError("canonical_window_request_budget_or_identity_invalid")
+    for item in requests:
+        if (not item["instrument_id"] or not item["fact_type"] or item["range_start"] > item["range_end"]
+                or type(item["root_commit"]) is not int or item["root_commit"] <= 0
+                or type(item["include_end"]) is not bool
+                or any(value is not None and (type(value) is not int or value <= 0)
+                       for value in (item["series_id"], item["source_id"]))):
+            raise RuntimeError(f"canonical_window_request_invalid: fact_version_id={item['root_id']}")
+    selections = defaultdict(list)
+    count = 0
+    for offset in range(0, len(requests), 128):
+        if check_budget is not None:
+            check_budget()
+        batch = [{**item, **{name: item[name].isoformat() for name in ("known_at", "range_start", "range_end")}}
+                 for item in requests[offset:offset + 128]]
+        found = session.execute(text("""
+            SELECT requested.root_id,source.id
+            FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS requested(
+                root_id text,instrument_id text,fact_type text,series_id bigint,source_id bigint,
+                root_commit bigint,known_at timestamptz,range_start timestamptz,range_end timestamptz,include_end boolean)
+            JOIN market.series AS series ON series.instrument_id=requested.instrument_id AND series.fact_type=requested.fact_type
+              AND (requested.series_id IS NULL OR series.id=requested.series_id)
+            JOIN market.fact_versions AS source ON source.series_id=series.id AND source.fact_type=requested.fact_type
+              AND (requested.source_id IS NULL OR source.source_id=requested.source_id)
+              AND source.market_commit_seq<=requested.root_commit AND source.known_at<=requested.known_at
+              AND source.observation_time>=requested.range_start
+              AND (source.observation_time<requested.range_end OR (requested.include_end AND source.observation_time=requested.range_end))
+            ORDER BY requested.root_id,source.series_id,source.observation_key,source.revision LIMIT :limit
+        """), {"requests": json.dumps(batch), "limit": max_rows - count + 1}).all()
+        count += len(found)
+        if count > max_rows:
+            raise RuntimeError("canonical_window_source_budget_exceeded: reduce archive page size")
+        for root_id, identity in found:
+            if root_id not in indexed:
+                raise RuntimeError("canonical_window_source_scope_mismatch")
+            selections[root_id].append(identity)
+    identities = sorted({identity for selected in selections.values() for identity in selected})
+    sources = read_canonical_dependency_rows(session, identities, reader=reader,
+        max_logical_bytes=max_logical_bytes, check_budget=check_budget)
+    if set(sources) != set(identities):
+        raise RuntimeError("canonical_window_source_missing")
+    for root_id, selected in selections.items():
+        request = indexed[root_id]
+        for identity in selected:
+            if check_budget is not None:
+                check_budget()
+            row = sources[identity]
+            if (row["fact_type"] != request["fact_type"]
+                    or (request["series_id"] is not None and row["series_id"] != request["series_id"])
+                    or (request["source_id"] is not None and row["source_id"] != request["source_id"])
+                    or row["market_commit_seq"] > request["root_commit"] or row["known_at"] > request["known_at"]
+                    or row["observation_time"] < request["range_start"] or row["observation_time"] > request["range_end"]
+                    or (not request["include_end"] and row["observation_time"] == request["range_end"])):
+                raise RuntimeError(f"canonical_window_source_scope_mismatch: fact_version_id={root_id} source_id={identity}")
+    return sources, dict(selections)
 
 
 def read_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):

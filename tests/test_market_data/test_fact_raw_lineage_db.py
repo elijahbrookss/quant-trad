@@ -126,7 +126,8 @@ def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
 
 
 def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=False, replay_features=False,
-                      definition_id="book-prefix", instrument_id="storage-fixture", provider_product_id="BTC-USD"):
+                      definition_id="book-prefix", instrument_id="storage-fixture", provider_product_id="BTC-USD",
+                      response_window=False):
     from data_providers.streams.coinbase import CoinbaseMessageParser
     from data_providers.streams.contracts import ProviderRawMessage
     from market_data.canonical_adapters import canonicalize_l2_snapshot, canonicalize_l2_mutation_batch
@@ -166,16 +167,28 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
     reducer = Level2BookReconstructor(series_id=series_id, contract=contract)
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     raws, manifests, facts, results = [], [], [], []
-    for ordinal in ((1, 2, 3, 4) if trailing_heartbeat else (1, 2, 3)):
-        timestamp = (BASE + timedelta(seconds=ordinal)).isoformat()
-        if ordinal in (2, 4):
+    ordinals = (1, 2, 3, 4, 5) if response_window else ((1, 2, 3, 4) if trailing_heartbeat else (1, 2, 3))
+    for ordinal in ordinals:
+        seconds = {1: 1, 2: 1.4, 3: 1.6, 4: 2.2, 5: 10}[ordinal] if response_window else ordinal
+        event_base = BASE.replace(microsecond=0) if response_window else BASE
+        timestamp = (event_base + timedelta(seconds=seconds)).isoformat()
+        heartbeat = ordinal in (2, 4) and not response_window
+        if heartbeat:
             payload = {"channel": "heartbeats", "timestamp": timestamp, "sequence_num": 0,
                        "events": [{"current_time": timestamp, "heartbeat_counter": "1"}]}
         else:
             levels = [("bid", "99", "10"), ("offer", "101", "11")] if ordinal == 1 else [("bid", "99", "12")]
-            payload = {"channel": "l2_data", "timestamp": timestamp, "sequence_num": 0 if ordinal == 1 else 1,
+            if response_window:
+                levels = [("bid", "99.98", "10"), ("offer", "100.02", "11")] if ordinal == 1 else [
+                    ("bid", "99.98", {2: "9", 3: "4", 4: "7", 5: "8"}[ordinal])]
+            sequence = ordinal - 1 if response_window else (0 if ordinal == 1 else 1)
+            # A later received update can refer to an earlier provider event
+            # time. Its genuine fenced canonical known-at must not leak into a
+            # response whose decision clock precedes receipt.
+            event_time = (event_base + timedelta(seconds=1.5)).isoformat() if response_window and ordinal == 5 else timestamp
+            payload = {"channel": "l2_data", "timestamp": timestamp, "sequence_num": sequence,
                 "events": [{"type": "snapshot" if ordinal == 1 else "update", "product_id": provider_product_id,
-                    "updates": [{"side": side, "price_level": price, "new_quantity": quantity, "event_time": timestamp}
+                    "updates": [{"side": side, "price_level": price, "new_quantity": quantity, "event_time": event_time}
                                 for side, price, quantity in levels]}]}
         segment = DurableRawSpoolSegment(root=tmp_path / "spool", definition_id=claim.definition_id,
             session_id=claim.session_id, connection_epoch=0, segment_ordinal=ordinal - 1)
@@ -184,7 +197,7 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
             received_at=timestamp, raw_frame=json.dumps(payload))
         raw = RawStreamRecord.from_provider_message(message, definition_id=claim.definition_id,
             spool_segment_id=segment.spool_segment_id, provider_product_id=provider_product_id, requested_channel="level2",
-            observed_channel="heartbeats" if ordinal in (2, 4) else "level2")
+            observed_channel="heartbeats" if heartbeat else "level2")
         segment.append(raw)
         segment.seal()
         encoded, ack, records = publish_spool_archive(segment, object_store=store, temporary_directory=tmp_path / "raw-staging")
@@ -199,7 +212,7 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
             results.append(result)
             facts.append(canonicalize_l2_snapshot(result.snapshot, source=source) if result.snapshot is not None
                          else canonicalize_l2_mutation_batch(result.batch, source=source))
-    assert len(facts) == 2 and len(raws) == (4 if trailing_heartbeat else 3)
+    assert len(facts) == (5 if response_window else 2) and len(raws) == len(ordinals)
     return SimpleNamespace(day=day, source=source, source_id=source_id, series_id=series_id, store=store,
         raws=raws, manifests=manifests, facts=facts, results=results, structures=structures, claim=claim)
 

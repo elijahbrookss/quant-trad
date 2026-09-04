@@ -32,9 +32,6 @@ def resolve_book_source_revisions(session, *, rows, object_store, max_rows, max_
     ID. Preserve all matching historical revisions, bounded by its own commit
     and known-at clocks, rather than silently selecting a current revision.
     """
-    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
-        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
-                                max_file_bytes=max_file_bytes))
     requests = []
     for row in rows:
         if row["fact_type"] not in BOOK_FACT_TYPES - {"market.l2_book"}:
@@ -43,17 +40,44 @@ def resolve_book_source_revisions(session, *, rows, object_store, max_rows, max_
             check_budget()
         _, position = _witness(row)
         evidence = row["provenance"]["_qt_bbo_evidence" if row["fact_type"] == "market.bbo" else "_qt_depth_evidence"]
-        series_id = evidence.get("source_l2_series_id")
-        event_ordinal = position.get("event_ordinal")
-        if type(series_id) is not int or series_id <= 0 or type(event_ordinal) is not int or event_ordinal < 0:
-            raise RuntimeError(f"canonical_book_source_identity_invalid: fact_version_id={row['id']}")
+        requests.append({"root_id": row["id"], "series_id": evidence.get("source_l2_series_id"),
+            "position": position, "state_hash": row["payload"]["source_state_hash"],
+            "validity_interval_id": row["payload"]["validity_interval_id"],
+            "product_definition_version_id": row["payload"]["product_definition_version_id"] if row["fact_type"] == "market.bbo" else None,
+            "commit_seq": row["market_commit_seq"], "known_at": row["known_at"]})
+    sources, _ = resolve_book_position_revisions(session, requests=requests, object_store=object_store,
+        max_rows=max_rows, max_logical_bytes=max_logical_bytes, max_file_bytes=max_file_bytes, check_budget=check_budget)
+    return [sources[identity] for identity in sorted(sources)]
+
+
+def resolve_book_position_revisions(session, *, requests, object_store, max_rows, max_logical_bytes,
+                                    max_file_bytes=128 * 1024**2, check_budget=None):
+    """Resolve named immutable book witnesses without constructing fake Facts.
+
+    Shared by single-state book features and multi-state composites. A request's
+    opaque root ID may identify a named role. Every causal revision at the exact
+    position is retained; at least one must prove its declared state/validity.
+    """
+    if len(requests) > max_rows or len({item["root_id"] for item in requests}) != len(requests):
+        raise RuntimeError("canonical_book_source_request_budget_or_identity_invalid")
+    indexed = {}
+    for item in requests:
+        position = item["position"]
+        if (type(item["series_id"]) is not int or item["series_id"] <= 0
+                or type(item["commit_seq"]) is not int or item["commit_seq"] <= 0
+                or any(type(position.get(name)) is not int or position[name] < minimum
+                       for name, minimum in (("connection_epoch", 0), ("receive_ordinal", 1), ("event_ordinal", 0)))
+                or any(not isinstance(position.get(name), str) or not position[name].strip()
+                       for name in BOOK_SCOPE_FIELDS if name != "connection_epoch")):
+            raise RuntimeError(f"canonical_book_source_identity_invalid: fact_version_id={item['root_id']}")
         key = ":".join(str(position[name]) for name in
                        ("definition_id", "session_id", "connection_epoch", "receive_ordinal", "event_ordinal"))
-        requests.append({"root_id": row["id"], "series_id": series_id, "observation_key": key,
-                         "commit_seq": row["market_commit_seq"], "known_at": row["known_at"].isoformat()})
+        indexed[item["root_id"]] = {**item, "observation_key": key}
+    locators = [{name: item[name] for name in ("root_id", "series_id", "observation_key", "commit_seq")} |
+                {"known_at": item["known_at"].isoformat()} for item in indexed.values()]
     selections = defaultdict(list)
     count = 0
-    for offset in range(0, len(requests), 128):
+    for offset in range(0, len(locators), 128):
         if check_budget is not None:
             check_budget()
         found = session.execute(text("""
@@ -64,38 +88,47 @@ def resolve_book_source_revisions(session, *, rows, object_store, max_rows, max_
               AND source.fact_type='market.l2_book' AND source.observation_key=requested.observation_key
               AND source.market_commit_seq<=requested.commit_seq AND source.known_at<=requested.known_at
             ORDER BY requested.root_id,source.market_commit_seq,source.id LIMIT :limit
-        """), {"requests": json.dumps(requests[offset:offset + 128]), "limit": max_rows - count + 1}).all()
+        """), {"requests": json.dumps(locators[offset:offset + 128]), "limit": max_rows - count + 1}).all()
         count += len(found)
         if count > max_rows:
             raise RuntimeError("canonical_book_source_budget_exceeded: reduce archive page size")
         for root, identity in found:
             selections[root].append(identity)
-    sources = read_canonical_dependency_rows(session, sorted({identity for ids in selections.values() for identity in ids}),
+    identities = sorted({identity for ids in selections.values() for identity in ids})
+    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
+        limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes,
+                                max_file_bytes=max_file_bytes))
+    sources = read_canonical_dependency_rows(session, identities,
         reader=reader, max_logical_bytes=max_logical_bytes, check_budget=check_budget)
+    if set(sources) != set(identities) or set(selections) != set(indexed):
+        raise RuntimeError("canonical_book_source_missing")
     for source in sources.values():
+        if check_budget is not None:
+            check_budget()
         record_from_storage_row(source)
-    for row in rows:
-        if row["fact_type"] not in BOOK_FACT_TYPES - {"market.l2_book"}:
-            continue
-        _, position = _witness(row)
+    for request in indexed.values():
+        position = request["position"]
         matched = []
-        for identity in selections[row["id"]]:
+        for identity in selections[request["root_id"]]:
             source = sources[identity]
             _, witness = _witness(source)
-            if any(witness.get(name) != position.get(name) for name in
-                   (*BOOK_SCOPE_FIELDS, "receive_ordinal", "event_ordinal", "provider_sequence_num")):
-                raise RuntimeError(f"canonical_book_source_scope_mismatch: fact_version_id={row['id']} source_id={identity}")
-            if (source["payload"]["after_state_hash"] == row["payload"]["source_state_hash"]
-                    and source["payload"]["validity_interval_id"] == row["payload"]["validity_interval_id"]):
-                if (row["fact_type"] == "market.bbo" and source["payload"]["product_definition_version_id"]
-                        != row["payload"]["product_definition_version_id"]):
-                    raise RuntimeError(f"canonical_book_source_product_mismatch: fact_version_id={row['id']}")
+            if (source["series_id"] != request["series_id"] or source["fact_type"] != "market.l2_book"
+                    or source["observation_key"] != request["observation_key"]
+                    or source["market_commit_seq"] > request["commit_seq"] or source["known_at"] > request["known_at"]
+                    or any(witness.get(name) != position.get(name) for name in
+                           (*BOOK_SCOPE_FIELDS, "receive_ordinal", "event_ordinal", "provider_sequence_num"))):
+                raise RuntimeError(f"canonical_book_source_scope_mismatch: fact_version_id={request['root_id']} source_id={identity}")
+            if (source["payload"]["after_state_hash"] == request["state_hash"]
+                    and source["payload"]["validity_interval_id"] == request["validity_interval_id"]):
+                if (request.get("product_definition_version_id") is not None and source["payload"]["product_definition_version_id"]
+                        != request["product_definition_version_id"]):
+                    raise RuntimeError(f"canonical_book_source_product_mismatch: fact_version_id={request['root_id']}")
                 matched.append(identity)
         if not matched:
-            raise RuntimeError(f"canonical_book_source_missing: fact_version_id={row['id']}")
+            raise RuntimeError(f"canonical_book_source_missing: fact_version_id={request['root_id']}")
     # Conservatively retain other causal revisions at the same declared
     # position too. They are evidence, not alternative current-state inputs.
-    return [sources[identity] for identity in sorted(sources)]
+    return sources, dict(selections)
 
 
 def verify_book_metadata_and_checkpoints(session, *, rows, object_store, byte_verifier,

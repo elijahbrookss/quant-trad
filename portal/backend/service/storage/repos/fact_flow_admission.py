@@ -12,7 +12,7 @@ from market_data.canonical_storage import record_from_storage_row
 from market_data.fact_archive import FactArchiveLimits
 from market_data.structure import TradeCoverageIntervalVersion, TradeFlowAggregateFact, aggregate_trade_bucket
 
-from .fact_dependencies import read_canonical_dependency_rows
+from .fact_dependencies import resolve_causal_window_revisions
 from .fact_storage import PostgresCanonicalFactStorageRepository
 
 
@@ -198,40 +198,18 @@ def load_trade_flow_source_closure(session, *, rows, object_store, max_rows, max
     roots = load_trade_flow_roots(session, rows=rows, max_rows=max_rows, max_logical_bytes=max_logical_bytes,
                                  check_budget=check_budget)
     requests = [{"root_id": root.row["id"], "instrument_id": root.instrument_id, "source_id": root.row["source_id"],
-        "root_commit": root.row["market_commit_seq"], "known_at": root.fact.known_at.isoformat(),
-        "range_start": root.fact.bucket_start.isoformat(), "range_end": root.fact.bucket_end.isoformat()} for root in roots]
-    selections = defaultdict(list)
-    count = 0
-    for offset in range(0, len(requests), 128):
-        if check_budget is not None:
-            check_budget()
-        found = session.execute(text("""
-            SELECT requested.root_id,source.id
-            FROM jsonb_to_recordset(CAST(:requests AS jsonb)) AS requested(
-                root_id text,instrument_id text,source_id bigint,root_commit bigint,known_at timestamptz,range_start timestamptz,range_end timestamptz)
-            JOIN market.series AS series ON series.instrument_id=requested.instrument_id AND series.fact_type='market.trade'
-            JOIN market.fact_versions AS source ON source.series_id=series.id AND source.fact_type='market.trade'
-              AND source.source_id=requested.source_id AND source.market_commit_seq<=requested.root_commit
-              AND source.known_at<=requested.known_at AND source.observation_time>=requested.range_start AND source.observation_time<requested.range_end
-            ORDER BY requested.root_id,source.series_id,source.observation_key,source.revision LIMIT :limit
-        """), {"requests": json.dumps(requests[offset:offset + 128]), "limit": max_rows - count + 1}).all()
-        count += len(found)
-        if count > max_rows:
-            raise RuntimeError("canonical_flow_source_budget_exceeded: reduce archive page size")
-        for root_id, source_id in found:
-            selections[root_id].append(source_id)
-    ids = sorted({identity for group in selections.values() for identity in group})
+        "root_commit": root.row["market_commit_seq"], "known_at": root.fact.known_at,
+        "range_start": root.fact.bucket_start, "range_end": root.fact.bucket_end,
+        "fact_type": "market.trade", "series_id": None, "include_end": False} for root in roots]
     reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: object_store,
         limits=FactArchiveLimits(max_rows=max(10_000, max_rows), max_logical_bytes=max_logical_bytes, max_file_bytes=max_file_bytes))
-    sources = read_canonical_dependency_rows(session, ids, reader=reader,
-        max_logical_bytes=max_logical_bytes, check_budget=check_budget)
-    if set(sources) != set(ids):
-        raise RuntimeError("canonical_flow_source_missing")
+    sources, selections = resolve_causal_window_revisions(session, requests=requests, reader=reader,
+        max_rows=max_rows, max_logical_bytes=max_logical_bytes, check_budget=check_budget)
     retained = {}
     for root in roots:
         if check_budget is not None:
             check_budget()
-        for row in select_trade_flow_inputs(root, [sources[identity] for identity in selections[root.row["id"]]], check_budget=check_budget):
+        for row in select_trade_flow_inputs(root, [sources[identity] for identity in selections.get(root.row["id"], ())], check_budget=check_budget):
             retained[row["id"]] = row
     # Sources keep their own exact raw witnesses. An older canonical delivery
     # may legitimately belong to a different session than the derived bucket.

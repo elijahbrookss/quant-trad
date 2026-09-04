@@ -47,6 +47,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_derivative_admission.py
   - portal/backend/service/storage/repos/fact_flow_admission.py
   - portal/backend/service/storage/repos/fact_flow_feature_admission.py
+  - portal/backend/service/storage/repos/fact_response_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
@@ -886,6 +887,39 @@ cold aggregate bytes before feature DROP. v9 feature pages must be explicitly
 reverified under v10 to gain canonical source edges; original page bytes and
 older receipts remain unchanged. This family joins the default-disabled gate;
 response and normalized-window proofs still gate their physical days.
+
+Version `market.canonical_archive_verification.v11` strengthens response archive
+publication with canonical source preservation. The declared flow-feature hash
+resolves every causal matching revision and its aggregate/trade closure. The
+three named book positions use the same bounded exact-position owner as
+BBO/depth inputs, including state/validity witnesses and rechecked source clocks.
+Response, flow and book series must agree on instrument; response and flow use
+the one-second contract, and the named book positions share a stream scope.
+The first and last directed trade IDs must exist at their exact recorded raw,
+sequence, receive, event and trade positions. No synthetic source Facts are
+constructed to reuse the book proof.
+
+Response v1 records no trade series/source ID. Retain the full canonical trade
+window for that instrument and bucket under the response's own clocks, including
+all source candidates, corrections and invalidations. The response clock can be
+later than its aggregate's input clock; preserving only the aggregate closure
+would miss this evidence. Likewise retain the inclusive book observation-time
+envelope of every causal named-state revision, not just three extrema. Exact
+raw prefix proof independently retains the preceding connection history needed
+to reconstruct those states. The common canonical-window reader now also owns
+flow's narrower source-bound lookup. It uses bounded batches and pre-hydration
+byte checks; repeated root-to-source edges count toward the limit, not just
+distinct documents. Current source placement and raw/checkpoint bytes remain
+subject to the existing final archive-verification handoff.
+
+This is source preservation, **not yet response deletion admission**. Full
+response-owner calculation/input-fingerprint reconciliation and all-revision
+frozen/physical-retention proof remain required before opening that family gate.
+The disposable source-closure regression archives response revisions after
+trade/book/flow inputs have physically moved to cold storage, retains an
+intervening non-extremum book event and a later causal trade revision, excludes
+future-known inputs, and rejects corruption of the intervening raw event.
+The response partition itself must still reject reclamation.
 
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence

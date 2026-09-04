@@ -11,6 +11,7 @@ from market_data.canonical_storage import record_to_storage_row
 from market_data.contracts import SourceIdentity
 from market_data.structure import aggregate_trade_bucket, bucket_start_for
 from portal.backend.service.storage.repos import fact_flow_admission as admission
+from portal.backend.service.storage.repos import fact_dependencies
 from tests.test_market_data.test_market_structure_phase1 import _fact, _coverage
 
 SOURCE = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream", adapter_version="flow.fixture.v1")
@@ -189,10 +190,10 @@ def test_bounded_source_query_preserves_the_complete_causal_window(monkeypatch, 
         assert "source.state" not in sql
         found = [(root.row["id"], row["id"]) for row in rows]
         return SimpleNamespace(all=lambda: found)
-    monkeypatch.setattr(admission, "read_canonical_dependency_rows", lambda *args, **kwargs: {} if damage == "missing" else by_id)
+    monkeypatch.setattr(fact_dependencies, "read_canonical_dependency_rows", lambda *args, **kwargs: {} if damage == "missing" else by_id)
     kwargs = dict(rows=[root.row], object_store=None, max_rows=1 if damage == "budget" else 10, max_logical_bytes=1024**2)
     if damage is None:
         assert {row["id"] for row in admission.resolve_trade_flow_source_revisions(SimpleNamespace(execute=execute), **kwargs)} == set(by_id)
     else:
-        with pytest.raises(RuntimeError, match="canonical_flow_"):
+        with pytest.raises(RuntimeError, match="canonical_window_"):
             admission.resolve_trade_flow_source_revisions(SimpleNamespace(execute=execute), **kwargs)

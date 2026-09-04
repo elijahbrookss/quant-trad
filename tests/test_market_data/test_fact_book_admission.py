@@ -1,5 +1,5 @@
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from types import SimpleNamespace
 
@@ -17,6 +17,7 @@ POSITION = {"definition_id": "definition", "session_id": "session", "connection_
 
 def _source(identity="source-1"):
     return {"id": identity, "series_id": 1, "fact_type": "market.l2_book", "row_hash": "a" * 64,
+            "market_commit_seq": 10, "known_at": BASE, "observation_key": "definition:session:0:3:0",
             "provenance": {"_qt_l2_evidence": {**POSITION, "raw_record_id": "raw"}},
             "payload": {"validity_interval_id": "interval", "product_definition_version_id": "product",
                         "reconstruction_version": admission.BOOK_RECONSTRUCTION_VERSION, "after_state_hash": "state",
@@ -30,7 +31,8 @@ def _derived():
                         "source_state_hash": "state"}}
 
 
-@pytest.mark.parametrize("mode", ["valid", "missing", "state", "interval", "scope", "product", "budget"])
+@pytest.mark.parametrize("mode", ["valid", "missing", "state", "interval", "scope", "product", "budget",
+                                 "future_known", "future_commit", "wrong_key", "wrong_series"])
 def test_source_admission_binds_all_causal_revisions_not_latest_aliases(monkeypatch, mode):
     rows = [_source(), _source("source-2")]
     if mode in {"state", "interval", "product"}:
@@ -39,6 +41,14 @@ def test_source_admission_binds_all_causal_revisions_not_latest_aliases(monkeypa
             row["payload"][field] = "wrong"
     if mode == "scope":
         rows[0]["provenance"]["_qt_l2_evidence"]["session_id"] = "another-session"
+    elif mode == "future_known":
+        rows[0]["known_at"] = BASE + timedelta(seconds=1)
+    elif mode == "future_commit":
+        rows[0]["market_commit_seq"] = 13
+    elif mode == "wrong_key":
+        rows[0]["observation_key"] = "another-observation"
+    elif mode == "wrong_series":
+        rows[0]["series_id"] = 99
     pairs = [] if mode == "missing" else [("derived", item["id"]) for item in rows]
     def execute(statement, params):
         assert "source.market_commit_seq<=requested.commit_seq" in str(statement)

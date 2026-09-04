@@ -42,13 +42,13 @@ def test_dependency_acknowledgement_requires_available_verified_bytes_within_bud
     refs = {"raw-id": reference}
     if mode == "objects":
         refs["second-id"] = reference
-    monkeypatch.setattr(market_data, "_collect_material_archive_refs", lambda *_, **__: refs)
     session = SimpleNamespace(execute=lambda *_: SimpleNamespace(scalar_one=lambda: mode == "expired"))
     archive = PostgresCanonicalFactArchiveRepository(
         database=None, object_store=SimpleNamespace(local_path=lambda _: path),
         temporary_directory=tmp_path / "staging", max_dependency_objects=1,
         max_dependency_bytes=1 if mode == "bytes" else 1024,
     )
+    monkeypatch.setattr(archive, "_flow_references", lambda *args, **kwargs: refs)
     # Exercise the external-dependency verifier with a dependent family, not a
     # self-contained funding record whose evidence is already inside the page.
     row = {**_row(), "fact_type": "market.market_response"}
