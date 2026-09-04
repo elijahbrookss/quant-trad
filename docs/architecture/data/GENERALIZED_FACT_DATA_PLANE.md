@@ -37,6 +37,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_storage.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
+  - portal/backend/service/storage/repos/fact_reclamation.py
   - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/controller/market_data.py
@@ -338,8 +339,7 @@ raw source objects with these holds also remain protected; this can increase
 HDD retention compared with ordinary age-only expiration.
 
 Staging deliberately leaves the partition `sealed`; exhausting its source is
-not permission to drop it. Reclamation and the complete normalized-feature
-dependency proof are not enabled by this owner. A normalized page currently fails with
+not permission to drop it. This owner does not perform reclamation. A normalized page currently fails with
 `canonical_archive_dependency_proof_required`; it is never admitted with an
 empty dependency set. These gates must be completed before retention activation.
 
@@ -440,10 +440,10 @@ run. The object-store mount/root guards apply to every path lookup.
 
 On success, the partition becomes `verified` with a hash of the ordered page
 proofs. **All hot payloads remain intact.** This state is cold-copy admission,
-not deletion authorization. A future reclaimer must repeat the current-byte
-gate, safely hand off to the exclusive lifecycle fence, recheck evidence and
-file identity, and commit physical reclamation atomically. No destructive
-retention entrypoint is enabled by these verification methods.
+not deletion authorization. The separate default-disabled reclamation primitive
+repeats the current-byte gate, safely hands off to the exclusive lifecycle fence,
+rechecks evidence and file identity, and commits physical reclamation atomically.
+No scheduled or CLI retention entrypoint is enabled by these verification methods.
 
 Verification holds the lifecycle **shared** fence and the chosen partition's
 worker fence. Expiry and a competing same-day worker cannot pass, while shared
@@ -451,6 +451,69 @@ dataset work and current-day collection can proceed. The lifecycle service
 must not invoke this phase from inside its existing exclusive-lock context on
 another connection: that would wait on its own lock. Expensive shared work and
 the final short exclusive reclamation phase must be orchestrated separately.
+
+### Default-Disabled Physical Reclamation
+
+`PostgresCanonicalFactReclamationRepository` is a one-day execution primitive,
+not an activated retention policy. Both constructor `enabled=True` and call
+`execute=True` are required. The default call performs admission reads only:
+it does not seal a partition, publish files, update progress, or delete anything.
+An explicit `eligible_before` placement-day cutoff must be no later than the
+database's current UTC day; the target must be strictly older than that cutoff.
+Per-family hot windows, budget/pressure planning, scheduler/CLI integration,
+and the final whole-platform cold-reader audit remain rollout gates.
+
+Only standalone candle, funding, open-interest, reference-price, reserve-balance,
+and trade facts are currently admitted. Any other family in the physical day
+blocks the **whole day**, including L2/BBO/depth, composite and normalized facts
+whose complete dependency closures are not yet proven. This is a temporary
+fail-closed compatibility gate, not permission to omit those rows or expire
+their evidence. It cannot be lifted merely because a partition is `verified`.
+
+Reclamation repeats current-byte verification under the shared lifecycle fence,
+then releases that transaction before trying an exclusive transaction fence.
+Existing frozen-read/pin workers cause a retryable busy failure; there is no
+blocking shared-to-exclusive upgrade. The exclusive phase repeats receipt,
+catalog, source-count and dependency-expiry checks, compares the admitted hash,
+and checks file identity again. It verifies the exact generated table's OID,
+regular relation kind, parent, and one-day partition bounds. Parent and child
+`ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting
+table lock causes a safe retry rather than a queued ingestion stall.
+
+The only destructive statement is `DROP TABLE` for that single daily hot-payload
+relation, without `CASCADE`. Table/index/TOAST allocation is reclaimed at commit.
+The drop and `reclaimed` progress/byte count commit together. File stamps and the
+handoff budget are checked after the drop but before commit too; a failure rolls
+back both DDL and progress. An interrupted or unacknowledged commit can be retried:
+an already-reclaimed day must have no remaining relation and still pass current
+cold evidence checks. A reappearing relation or changed proof fails explicitly.
+
+The configured HDD mount must remain writable at initial admission, after byte
+verification, and around the destructive handoff, including after transactional
+DROP. Research reads intentionally permit read-only media; reusing that weaker
+read admission for reclamation would miss a read-only remount with unchanged
+file stamps. Reclamation therefore repeats the existing configured UUID/root
+guard with `require_writable=True`. A failing mount check rolls back the drop.
+
+Canonical headers, archive objects, aliases, dependency holds and frozen dataset
+bindings are never deleted by this primitive. A frozen range protects evidence
+from expiry, not from a byte-equivalent tier move. Complete all-revision archive
+coverage preserves every pinned subset; overlapping dataset-range counts are
+reported for audit and refreshed during the exclusive handoff.
+
+Each SQL statement defaults to a 1-second timeout. The exclusive phase has a
+10-second checked handoff budget, with checks between pages/dependencies and
+before committing deletion. These are conservative failure bounds, not measured
+production capacity or a promise that transaction commit/fsync completes within
+10 seconds. Large catalogs can fail these bounds safely and need measured tuning.
+No production activation is justified by small disposable fixtures alone.
+
+Performance follow-up: final catalog/source checks run twice and temporarily
+exclude frozen-read/pin admission during the exclusive pass. Large header counts,
+many dependency edges, and busy parent-table readers need representative sizing
+and retry/backoff measurements before enabling unattended retention. Expensive
+file reads stay outside the exclusive phase; no freshness checks are removed to
+make the benchmark pass.
 
 ### Explicit Storage Cutover
 

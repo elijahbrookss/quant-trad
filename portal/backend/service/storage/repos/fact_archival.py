@@ -355,7 +355,7 @@ class PostgresCanonicalFactArchiveRepository:
         return {"storage_day": day, "status": "page_verified", "page_ordinal": page["page_ordinal"],
                 "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"]}
 
-    def _partition_evidence(self, session, partition, *, limits, objects=None):
+    def _partition_evidence(self, session, partition, *, limits, objects=None, check_budget=None):
         """Check bounded catalogs/receipts and exact sealed-source coverage.
 
         Supplying a byte verifier additionally checks every current cold object.
@@ -370,6 +370,8 @@ class PostgresCanonicalFactArchiveRepository:
         # Fetch bounded batches of metadata, not all rows or all manifests at
         # once. Each page's aliases/dependencies have their own explicit bounds.
         while True:
+            if check_budget is not None:
+                check_budget()
             pages = session.execute(text("""
                 SELECT * FROM market.fact_archive_manifests
                 WHERE storage_day=:day AND page_ordinal>=:ordinal ORDER BY page_ordinal LIMIT :limit
@@ -377,6 +379,8 @@ class PostgresCanonicalFactArchiveRepository:
             if not pages:
                 break
             for page in pages:
+                if check_budget is not None:
+                    check_budget()
                 if ordinal >= limits.max_pages:
                     raise RuntimeError(f"canonical_archive_partition_page_budget_exceeded: storage_day={day}")
                 manifest = _catalog_manifest(page)
@@ -391,19 +395,24 @@ class PostgresCanonicalFactArchiveRepository:
                     raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
                 if objects is not None:
                     objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
-                    for dependency in catalogs["dependencies"]:
-                        expired = session.execute(text("""
-                            SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
-                                WHERE action='archive_expire' AND event_type='completed'
-                                  AND target_kind=:target_kind AND target_id=:target_id)
-                        """), dependency).scalar_one()
-                        if expired:
-                            raise RuntimeError(f"canonical_archive_dependency_expired: target_id={dependency['target_id']}")
+                for dependency in catalogs["dependencies"]:
+                    if check_budget is not None:
+                        check_budget()
+                    expired = session.execute(text("""
+                        SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
+                            WHERE action='archive_expire' AND event_type='completed'
+                              AND target_kind=:target_kind AND target_id=:target_id)
+                    """), dependency).scalar_one()
+                    if expired:
+                        raise RuntimeError(f"canonical_archive_dependency_expired: target_id={dependency['target_id']}")
+                    if objects is not None:
                         objects.verify(dependency["object_key"], dependency["object_sha256"])
                 proofs.append(receipt["verification_hash"])
                 total_rows += manifest.row_count
                 last_cursor = manifest.last_cursor
                 ordinal += 1
+        if check_budget is not None:
+            check_budget()
         count = session.execute(text(
             "SELECT count(*) FROM market.fact_versions WHERE storage_day=:day"
         ), {"day": day}).scalar_one()

@@ -75,3 +75,32 @@ def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path
                 archive.verify_partition(day)
         assert archive.verify_next_page(day)["status"] == "page_verified"
     assert archive.verify_partition(day)["row_count"] == 2
+
+    from portal.backend.service.storage.repos import market_data
+    from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+    from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+    reader = FilesystemRawArchiveObjectStore(store.root, writable=False)
+    monkeypatch.setattr(market_data, "canonical_fact_storage_repository",
+                        PostgresCanonicalFactStorageRepository(object_store_factory=lambda: reader))
+    request = {"series_id": series_id, "start": canonical[0].observation_time - timedelta(seconds=1),
+               "end": canonical[0].observation_time + timedelta(seconds=1)}
+    before = storage.repo.read_fact_revisions(**request)
+    assert len(before) == 2
+    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    # Once admitted, a missing exact raw dependency must still stop hot
+    # deletion; a canonical page checksum by itself is not sufficient.
+    with storage.database.session() as session:
+        raw_key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
+                                  {"id": manifests[0]}).scalar_one()
+    path = store.local_path(raw_key)
+    original = path.read_bytes()
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert archive.inspect_partition(day)["state"] == "verified"
+    path.write_bytes(original)
+    assert reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)["status"] == "partition_reclaimed"
+    assert storage.repo.read_fact_revisions(**request) == before
+    for identity in manifests:
+        status = structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
+        assert status["canonical_dependency_count"] == 1 and status["pinned"] is True
