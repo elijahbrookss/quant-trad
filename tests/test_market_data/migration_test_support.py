@@ -99,17 +99,8 @@ def fresh_migration_database(label: str) -> Iterator[str]:
         try:
             if database_created:
                 with admin_engine.connect() as conn:
-                    conn.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) "
-                            "FROM pg_stat_activity "
-                            "WHERE datname = :database_name "
-                            "AND pid <> pg_backend_pid()"
-                        ),
-                        {"database_name": database_name},
-                    ).all()
                     conn.exec_driver_sql(
-                        f"DROP DATABASE IF EXISTS {quoted_name}"
+                        f"DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"
                     )
         finally:
             admin_engine.dispose()
