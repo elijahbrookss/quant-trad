@@ -322,6 +322,8 @@ class MarketStorageLifecycleService:
                 blockers.append("explicit_retention_pin")
             if int(row.get("dataset_pin_count") or 0):
                 blockers.append("frozen_dataset_pin")
+            if int(row.get("canonical_dependency_count") or 0):
+                blockers.append("canonical_archive_dependency")
             target_id = str(row["target_id"])
             operation_id = lifecycle_operation_id(
                 action="archive_expire",

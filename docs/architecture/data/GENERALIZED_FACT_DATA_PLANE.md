@@ -33,6 +33,7 @@ code_paths:
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/candles.py
   - portal/backend/service/storage/repos/fact_storage.py
+  - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/controller/market_data.py
@@ -300,6 +301,45 @@ filesystem; ordinary row deletion does not provide that guarantee. The permanent
 revision index and raw-mapping catalog continue to grow and must remain visible
 in pressure/budget reporting. This design does not promise a hard cap on all
 PostgreSQL bytes.
+
+### Canonical Archive Staging
+
+`PostgresCanonicalFactArchiveRepository` seals only placement days older than
+the database's current UTC day. Its lifecycle shared fence protects dependency
+verification and hold creation against raw-object expiration; a per-day
+transaction advisory lock excludes competing archive workers. Sealing waits
+for payload writers, checks that all envelopes have attached hot payloads, and
+records the source count and physical allocation.
+
+Each staging call reads the next ordered source page after the last acknowledged
+cursor. Both row count and a conservative SQL-side JSON byte allowance bound
+transfer to Python; a first row outside the byte allowance fails explicitly and
+never advances the cursor. Exact canonical hashes are checked before dependency
+resolution. Object count and cumulative bytes bound raw dependency verification.
+Publication, complete object read-back, and exact source-page verification
+precede an atomic catalog commit. A crash after publication but before commit
+leaves no acknowledged progress; retry reuses identical immutable bytes.
+
+`fact_archive_material_aliases` indexes legacy typed material hashes retained in
+canonical provenance. Aliases are derived from verified page rows, not invented
+identities. Typed lineage combines hot provenance lookup with the cold alias
+index and verifies every claimed hash against the hydrated payload. Missing or
+conflicting witnesses fail; an index entry alone cannot prove lineage. Derived
+book traversal includes the connection epoch: a repeated receive ordinal in a
+later connection cannot be satisfied by an earlier connection's archive.
+
+Raw/checkpoint retention status, dry-run planning, and execution include
+`canonical_dependency_count`. Such holds cannot be released by user-pin release
+or disappear when no frozen dataset currently references the data. Compacted
+raw source objects with these holds also remain protected; this can increase
+HDD retention compared with ordinary age-only expiration.
+
+Staging deliberately leaves the partition `sealed`; exhausting its source is
+not permission to drop it. Whole-partition verification/reclamation and the
+complete normalized-feature dependency proof are not enabled by this staging
+owner. A normalized page currently fails with
+`canonical_archive_dependency_proof_required`; it is never admitted with an
+empty dependency set. These gates must be completed before retention activation.
 
 ### Explicit Storage Cutover
 

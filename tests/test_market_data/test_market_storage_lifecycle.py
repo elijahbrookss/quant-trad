@@ -175,6 +175,17 @@ def test_archive_expiration_rechecks_new_retention_pin_before_deletion() -> None
     assert repository.events[0]["reason"] == "retention pin appeared after planning"
 
 
+def test_canonical_archive_hold_blocks_planning_without_user_or_dataset_pins():
+    repository = _LifecycleRepository()
+    rows = repository.list_archive_expiration_candidates()
+    rows[0]["canonical_dependency_count"] = 1
+    repository.list_archive_expiration_candidates = lambda **_: rows
+    plan = _service(repository).plan(policy=MarketStorageLifecyclePolicy(), now=datetime(2026, 8, 5, tzinfo=UTC))
+    held = next(item for item in plan["archive_expirations"] if item["target_id"] == "manifest-unpinned")
+    assert held["eligible"] is False
+    assert held["blockers"] == ["canonical_archive_dependency"]
+
+
 def test_lifecycle_policy_rejects_unknown_or_unsafe_values() -> None:
     with pytest.raises(ValueError, match="unsupported fields=unknown"):
         MarketStorageLifecyclePolicy.from_mapping({"unknown": True})

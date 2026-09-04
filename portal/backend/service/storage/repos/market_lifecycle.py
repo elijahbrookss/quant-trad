@@ -104,6 +104,14 @@ class PostgresMarketStorageLifecycleRepository:
                     )
 
     @staticmethod
+    def canonical_dependency_count(session, *, target_kind: str, target_id: str) -> int:
+        """Cold Fact evidence holds survive release of user and dataset pins."""
+        return int(session.execute(text(
+            "SELECT count(*) FROM market.fact_archive_dependencies "
+            "WHERE target_kind=:target_kind AND target_id=:target_id"
+        ), {"target_kind": str(target_kind), "target_id": str(target_id)}).scalar_one())
+
+    @staticmethod
     def acquire_dataset_pin_lock(session) -> None:
         """Block lifecycle expiry while a frozen or explicit pin is committed."""
 
@@ -347,7 +355,10 @@ class PostgresMarketStorageLifecycleRepository:
                            replacements.compacted_at,
                            COALESCE(explicit_pins.pin_count, 0) AS explicit_pin_count,
                            (SELECT count(*) FROM market.dataset_archive_refs AS refs
-                            WHERE refs.raw_archive_manifest_id = manifests.id) AS dataset_pin_count
+                            WHERE refs.raw_archive_manifest_id = manifests.id) AS dataset_pin_count,
+                           (SELECT count(*) FROM market.fact_archive_dependencies AS dependencies
+                            WHERE dependencies.target_kind='raw_manifest'
+                              AND dependencies.target_id=manifests.id) AS canonical_dependency_count
                     FROM market.raw_archive_manifests AS manifests
                     JOIN market.stream_definitions AS definitions
                       ON definitions.id = manifests.definition_id
@@ -406,7 +417,10 @@ class PostgresMarketStorageLifecycleRepository:
                                NULL::text AS replacement_manifest_id,
                                NULL::timestamptz AS compacted_at,
                                COALESCE(explicit_pins.pin_count, 0) AS explicit_pin_count,
-                               0::bigint AS dataset_pin_count
+                               0::bigint AS dataset_pin_count,
+                               (SELECT count(*) FROM market.fact_archive_dependencies AS dependencies
+                                WHERE dependencies.target_kind='book_checkpoint'
+                                  AND dependencies.target_id=checkpoints.id) AS canonical_dependency_count
                         FROM market.book_checkpoint_manifests AS checkpoints
                         LEFT JOIN explicit_pins
                           ON explicit_pins.target_kind = 'book_checkpoint'
@@ -489,12 +503,16 @@ class PostgresMarketStorageLifecycleRepository:
                     {"target_kind": kind, "target_id": str(target_id)},
                 ).scalar_one()
             )
+            canonical_dependency_count = self.canonical_dependency_count(
+                session, target_kind=kind, target_id=target_id,
+            )
         return {
             **dict(target),
             "target_kind": kind,
             "explicit_pin_count": explicit_pin_count,
             "dataset_pin_count": dataset_pin_count,
-            "pinned": bool(explicit_pin_count or dataset_pin_count),
+            "canonical_dependency_count": canonical_dependency_count,
+            "pinned": bool(explicit_pin_count or dataset_pin_count or canonical_dependency_count),
             "expired": expired,
         }
 

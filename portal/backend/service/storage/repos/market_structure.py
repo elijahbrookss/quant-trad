@@ -3893,6 +3893,9 @@ class PostgresMarketStructureRepository:
                         {"target_id": normalized_target_id},
                     ).scalars()
                 ]
+            canonical_dependency_count = market_storage_lifecycle_repository.canonical_dependency_count(
+                session, target_kind=normalized_target, target_id=normalized_target_id,
+            )
             expired_event = session.execute(
                 text(
                     """
@@ -3912,7 +3915,7 @@ class PostgresMarketStructureRepository:
                 },
             ).mappings().first()
         explicit_pin_count = len(active_pins)
-        pinned = bool(dataset_pin_count or explicit_pin_count)
+        pinned = bool(dataset_pin_count or explicit_pin_count or canonical_dependency_count)
         expired = expired_event is not None
         return {
             "schema_version": "market.archive_retention_status.v2",
@@ -3924,6 +3927,7 @@ class PostgresMarketStructureRepository:
             "expired": expired,
             "expiration": dict(expired_event) if expired_event is not None else None,
             "dataset_pin_count": dataset_pin_count,
+            "canonical_dependency_count": canonical_dependency_count,
             "explicit_active_pins": [dict(row) for row in active_pins],
             "replacement_manifest_ids": replacement_ids,
             "source_manifest_ids": source_ids,

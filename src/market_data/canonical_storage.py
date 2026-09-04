@@ -3,10 +3,39 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 from typing import Any
 
 from .canonical import CanonicalFact, CanonicalFactRecord
 from .contracts import SourceIdentity
+
+
+LEGACY_MATERIAL_EVIDENCE_KEYS = {
+    "market.bbo": "_qt_bbo_evidence",
+    "market.depth_observation": "_qt_depth_evidence",
+    "market.trade_flow_feature": "_qt_trade_flow_feature_evidence",
+    "market.futures_spot_relationship": "_qt_basis_evidence",
+    "market.market_response": "_qt_response_evidence",
+}
+
+
+def legacy_material_alias(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Derive one typed-compatibility lookup witness from canonical provenance."""
+    key = LEGACY_MATERIAL_EVIDENCE_KEYS.get(str(row["fact_type"]))
+    if key is None:
+        return None
+    evidence = row["provenance"].get(key)
+    if evidence is None:
+        return None
+    if not isinstance(evidence, Mapping):
+        raise RuntimeError(f"canonical_legacy_material_invalid: fact_version_id={row['id']} evidence_key={key}")
+    material = evidence.get("legacy_material_hash")
+    if material is None:
+        return None
+    if not isinstance(material, str) or re.fullmatch(r"[0-9a-f]{64}", material) is None:
+        raise RuntimeError(f"canonical_legacy_material_invalid: fact_version_id={row['id']} evidence_key={key}")
+    return {"fact_version_id": row["id"], "series_id": row["series_id"],
+            "evidence_key": key, "material_hash": material}
 
 
 def source_from_storage_row(row: Mapping[str, Any]) -> SourceIdentity:

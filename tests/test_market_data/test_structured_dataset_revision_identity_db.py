@@ -638,6 +638,21 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
             series_id=series_id,
         )
         assert [record.revision for record in revisions] == [1, 2, 3]
+        from portal.backend.service.storage.repos.market_data import _load_lineage_material_rows, _collect_typed_archive_refs
+        material_hashes = [record.fact.provenance[evidence_key]["legacy_material_hash"] for record in revisions]
+        with db.session() as session:
+            witnesses = _load_lineage_material_rows(
+                session, series_id=series_id, fact_type=revisions[0].fact.fact_type,
+                material_hashes=material_hashes, evidence_key=evidence_key,
+            )
+            for record, material_hash in zip(revisions, material_hashes, strict=True):
+                assert witnesses[material_hash]["fact_version_id"] == record.fact_version_id
+                assert witnesses[material_hash]["provenance"] == record.fact.provenance
+            references = _collect_typed_archive_refs(session, records=[
+                SimpleNamespace(series_id=series_id, fact=SimpleNamespace(material_hash=value))
+                for value in material_hashes
+            ])
+            assert set(references) == set(manifest_ids)
         assert [record.fact.state for record in revisions] == [
             FactState.ACTIVE,
             FactState.ACTIVE,

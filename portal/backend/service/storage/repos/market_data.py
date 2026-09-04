@@ -21,6 +21,7 @@ from market_data.canonical import (
     build_fact_version_id,
 )
 from market_data.canonical_storage import (
+    LEGACY_MATERIAL_EVIDENCE_KEYS,
     record_from_storage_row as _canonical_row_to_record,
     source_from_storage_row as _canonical_source,
 )
@@ -565,53 +566,81 @@ def _load_lineage_material_rows(
         return {}
     base_params: dict[str, Any] = {"series_id": int(series_id)}
     if evidence_key is None:
-        statement = text(
+        selection = (
             """
-            SELECT series_id, fact_type,
-                   material_hash AS lineage_material_hash,
-                   observation_key, revision,
-                   provenance, quality, payload,
-                   market_commit_seq, id AS fact_version_id
-            FROM market.fact_rows
+            SELECT id, material_hash AS lineage_material_hash
+            FROM market.fact_versions
             WHERE series_id = :series_id
               AND material_hash = ANY(:material_hashes)
-            ORDER BY material_hash, market_commit_seq DESC, id
             """
         )
     else:
+        if LEGACY_MATERIAL_EVIDENCE_KEYS.get(fact_type) != evidence_key:
+            raise ValueError(f"market_dataset_provenance_key_invalid: fact_type={fact_type} evidence_key={evidence_key}")
         base_params["evidence_key"] = str(evidence_key)
-        statement = text(
+        selection = (
             """
-            SELECT series_id, fact_type,
-                   provenance -> :evidence_key
-                       ->> 'legacy_material_hash' AS lineage_material_hash,
-                   provenance -> :evidence_key AS evidence,
-                   observation_key, revision,
-                   provenance, quality, payload,
-                   market_commit_seq, id AS fact_version_id
-            FROM market.fact_rows
-            WHERE series_id = :series_id
-              AND provenance -> :evidence_key
+            SELECT versions.id, hot.provenance -> :evidence_key
+                ->> 'legacy_material_hash' AS lineage_material_hash
+            FROM market.fact_versions AS versions
+            JOIN market.fact_hot_payloads AS hot
+              ON hot.storage_day=versions.storage_day AND hot.id=versions.id
+            WHERE versions.series_id = :series_id
+              AND hot.provenance -> :evidence_key
                   ->> 'legacy_material_hash' = ANY(:material_hashes)
-            ORDER BY lineage_material_hash, market_commit_seq DESC, id
+            UNION ALL
+            SELECT aliases.fact_version_id AS id, aliases.material_hash AS lineage_material_hash
+            FROM market.fact_archive_material_aliases AS aliases
+            JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
+            JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
+              AND manifest.storage_day=versions.storage_day
+            JOIN market.fact_retention_partitions AS partition ON partition.storage_day=versions.storage_day
+              AND partition.state IN ('verified','reclaimed')
+            WHERE aliases.series_id = :series_id AND versions.series_id = :series_id
+              AND aliases.evidence_key = :evidence_key
+              AND aliases.material_hash = ANY(:material_hashes)
+              AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                              WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
             """
         )
+    statement = text(f"""
+        WITH selected AS ({selection})
+        SELECT {CANONICAL_ROW_COLUMNS}, selected.lineage_material_hash
+        {CANONICAL_ROW_FROM}
+        JOIN selected ON selected.id=versions.id
+        ORDER BY selected.lineage_material_hash, versions.market_commit_seq DESC, versions.id
+    """)
     candidates_by_hash: dict[str, list[dict[str, Any]]] = {}
     for material_hash_chunk in _lineage_query_chunks(requested):
         params = {
             **base_params,
             "material_hashes": list(material_hash_chunk),
         }
-        rows = session.execute(statement, params).mappings().all()
+        selected = session.execute(statement, params).mappings().all()
+        claims = [str(row["lineage_material_hash"] or "") for row in selected]
+        rows = canonical_fact_storage_repository.hydrate_rows(session, [
+            {key: value for key, value in row.items() if key != "lineage_material_hash"} for row in selected
+        ])
         chunk_set = set(material_hash_chunk)
-        for row in rows:
+        for row, claim in zip(rows, claims, strict=True):
+            row = dict(row)
+            row["fact_version_id"] = row["id"]
+            if evidence_key is None:
+                actual_material_hash = str(row["material_hash"])
+            else:
+                evidence = row["provenance"].get(evidence_key)
+                if not isinstance(evidence, Mapping):
+                    raise RuntimeError(f"market_dataset_provenance_mismatch: missing evidence fact_version_id={row['id']}")
+                row["evidence"] = dict(evidence)
+                actual_material_hash = str(evidence.get("legacy_material_hash") or "")
+            row["lineage_material_hash"] = actual_material_hash
             actual_series_id = int(row["series_id"])
             actual_fact_type = str(row["fact_type"])
-            actual_material_hash = str(row["lineage_material_hash"] or "")
             if (
                 actual_series_id != int(series_id)
                 or actual_fact_type != str(fact_type)
                 or actual_material_hash not in chunk_set
+                or actual_material_hash != claim
             ):
                 raise RuntimeError(
                     "market_dataset_provenance_mismatch: canonical lineage row "
@@ -891,8 +920,18 @@ def _collect_typed_archive_refs(
 ) -> dict[str, dict[str, str]]:
     """Resolve typed derived lineage back to acknowledged raw objects."""
 
+    return _collect_material_archive_refs(
+        session, roots=[(record.series_id, record.fact.material_hash) for record in records],
+    )
+
+
+def _collect_material_archive_refs(
+    session, *, roots: Sequence[tuple[int, str]],
+) -> dict[str, dict[str, str]]:
+    """Shared immutable material-witness traversal for freeze and archival."""
+
     references: dict[str, dict[str, str]] = {}
-    queue = [(record.series_id, record.fact.material_hash) for record in records]
+    queue = list(roots)
     visited: set[tuple[int, str]] = set()
     fact_types_by_series: dict[int, str] = {}
 
@@ -917,7 +956,9 @@ def _collect_typed_archive_refs(
         definition_id = str(position.get("definition_id") or "")
         session_id = str(position.get("session_id") or "")
         receive_ordinal = int(position.get("receive_ordinal") or 0)
-        if not definition_id or not session_id or receive_ordinal <= 0:
+        connection_epoch = position.get("connection_epoch")
+        if (not definition_id or not session_id or receive_ordinal <= 0
+                or type(connection_epoch) is not int or connection_epoch < 0):
             raise RuntimeError(
                 "market_dataset_archive_incomplete: derived book position is malformed"
             )
@@ -929,6 +970,7 @@ def _collect_typed_archive_refs(
                 FROM market.raw_archive_manifests
                 WHERE definition_id = :definition_id
                   AND session_id = :session_id
+                  AND connection_epoch = :connection_epoch
                   AND first_receive_ordinal <= :receive_ordinal
                   AND last_receive_ordinal >= :receive_ordinal
                 ORDER BY first_receive_ordinal, id
@@ -938,6 +980,7 @@ def _collect_typed_archive_refs(
                 "definition_id": definition_id,
                 "session_id": session_id,
                 "receive_ordinal": receive_ordinal,
+                "connection_epoch": connection_epoch,
             },
         ).mappings().all()
         if not rows:
@@ -1061,13 +1104,7 @@ def _collect_typed_archive_refs(
 
         exact_groups: dict[tuple[int, str], list[str]] = {}
         evidence_groups: dict[tuple[int, str, str], list[str]] = {}
-        evidence_keys = {
-            "market.bbo": "_qt_bbo_evidence",
-            "market.depth_observation": "_qt_depth_evidence",
-            "market.trade_flow_feature": "_qt_trade_flow_feature_evidence",
-            "market.futures_spot_relationship": "_qt_basis_evidence",
-            "market.market_response": "_qt_response_evidence",
-        }
+        evidence_keys = LEGACY_MATERIAL_EVIDENCE_KEYS
         trade_raw_record_ids: list[str] = []
         coverage_interval_ids: list[str] = []
         for series_id, material_hash in wave:

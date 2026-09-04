@@ -202,3 +202,26 @@ class MarketFactArchiveDependencyRecord(Base):
     target_id = Column(String(128), primary_key=True)
     object_key = Column(Text, nullable=False)
     object_sha256 = Column(String(64), nullable=False)
+
+
+class MarketFactArchiveMaterialAliasRecord(Base):
+    """Indexed legacy material witnesses derived from verified cold-page rows.
+
+    These are lookup hints, never alternative Fact identity. Readers verify the
+    matching payload provenance; admission proves the complete alias set.
+    """
+
+    __tablename__ = "fact_archive_material_aliases"
+    __table_args__ = (
+        UniqueConstraint("fact_version_id", "evidence_key", name="uq_market_fact_archive_material_alias"),
+        CheckConstraint("material_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_alias_hash"),
+        CheckConstraint("evidence_key <> ''", name="ck_market_fact_archive_alias_key"),
+        Index("ix_market_fact_archive_alias_lookup", "series_id", "evidence_key", "material_hash"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    evidence_key = Column(String(64), primary_key=True)
+    series_id = Column(BigInteger, ForeignKey("market.series.id", ondelete="RESTRICT"), nullable=False)
+    material_hash = Column(String(64), nullable=False)

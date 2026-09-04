@@ -235,3 +235,41 @@ def test_selected_identity_coverage_must_be_exact(returned_count):
     reader = PostgresCanonicalFactStorageRepository()
     with pytest.raises(RuntimeError, match="canonical_selected_identity_coverage_invalid"):
         reader.read_rows_by_ids(MissingSession(), [_row()["id"]])
+
+
+@pytest.mark.parametrize("wrong_alias", [False, True])
+def test_cold_legacy_lookup_checks_index_claim_against_archived_provenance(tmp_path, monkeypatch, wrong_alias):
+    from market_data.canonical import CanonicalFactRecord
+    from portal.backend.service.storage.repos import market_data as repository
+    from tests.test_market_data.test_structured_dataset_revision_identity_db import _book_feature_revisions
+    source = record_from_storage_row(_row()).fact.source
+    fact, _ = _book_feature_revisions(
+        source=source, l2_series_id=1, bbo_series_id=2, depth_series_id=3,
+        definition_id="definition", session_id="session", receive_ordinal=1,
+    )
+    row = record_to_storage_row(
+        CanonicalFactRecord(series_id=2, source_id=7, revision=1, market_commit_seq=1,
+                            ingestion_run_id="fixture", fact=fact), series_dimensions={},
+    )
+    actual_hash = fact.provenance["_qt_bbo_evidence"]["legacy_material_hash"]
+    claim = "f" * 64 if wrong_alias else actual_hash
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    manifest = publish_canonical_fact_archive([row], object_store=store, temporary_directory=tmp_path / "staging")
+    reader = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: store)
+    monkeypatch.setattr(repository, "canonical_fact_storage_repository", reader)
+    class LineageSession(Session):
+        def execute(self, query, parameters):
+            if "WITH selected AS" in str(query):
+                result = Session()
+                result.matches = [{**_cold(row), "lineage_material_hash": claim}]
+                return result
+            return super().execute(query, parameters)
+    session = LineageSession([_catalog(manifest, row["id"])])
+    arguments = dict(series_id=2, fact_type="market.bbo", material_hashes=[claim], evidence_key="_qt_bbo_evidence")
+    if wrong_alias:
+        with pytest.raises(RuntimeError, match="market_dataset_provenance_mismatch"):
+            repository._load_lineage_material_rows(session, **arguments)
+    else:
+        loaded = repository._load_lineage_material_rows(session, **arguments)
+        assert loaded[claim]["provenance"] == fact.provenance
+        assert loaded[claim]["fact_version_id"] == row["id"]

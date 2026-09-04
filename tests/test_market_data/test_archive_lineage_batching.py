@@ -7,6 +7,9 @@ from typing import Any
 
 import pytest
 
+from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
+from market_data.fact_registry import get_fact_payload_schema
+
 from portal.backend.service.storage.repos.market_data import (
     _LINEAGE_QUERY_BATCH_SIZE,
     _collect_canonical_book_archive_refs,
@@ -18,7 +21,21 @@ from portal.backend.service.storage.repos.market_data import (
 
 class _RowsResult:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = rows
+        self._rows = []
+        for raw in rows:
+            row = dict(raw)
+            if "lineage_material_hash" in row:
+                # Model the canonical hot row selected by the real SQL; these
+                # tests exercise traversal batching, not archive file decoding.
+                schema = get_fact_payload_schema(row["fact_type"] + ".v1")
+                row.update(id=row["fact_version_id"], material_hash=row["lineage_material_hash"],
+                           payload_schema_id=schema.schema_id, payload_contract_hash=schema.contract_hash)
+                key = LEGACY_MATERIAL_EVIDENCE_KEYS.get(row["fact_type"])
+                if key is not None:
+                    row["provenance"] = {**row["provenance"], key: {
+                        **row.get("evidence", {}), "legacy_material_hash": row["lineage_material_hash"],
+                    }}
+            self._rows.append(row)
 
     def mappings(self) -> _RowsResult:
         return self
@@ -300,7 +317,38 @@ def test_repeated_legacy_material_preserves_latest_revision_semantics() -> None:
     )
 
     assert loaded[material_hash]["fact_version_id"] == latest["fact_version_id"]
-    assert loaded[material_hash]["evidence"] == {"revision": "latest"}
+    assert loaded[material_hash]["evidence"] == {"revision": "latest", "legacy_material_hash": material_hash}
+
+
+@pytest.mark.parametrize("epoch", [0, 1, None, True])
+def test_typed_book_lineage_never_resolves_a_reused_ordinal_from_another_epoch(epoch):
+    material = "a" * 64
+    class BookSession(_StaticSession):
+        def execute(self, statement, params):
+            sql = " ".join(str(statement).split()).lower()
+            self.calls.append((sql, dict(params)))
+            if "from market.series" in sql:
+                return _RowsResult([{"series_id": 52, "fact_type": "market.bbo"}])
+            if "from market.raw_archive_manifests" in sql:
+                assert "connection_epoch = :connection_epoch" in sql
+                return _RowsResult([{
+                    "manifest_id": "epoch-zero", "object_sha256": "b" * 64,
+                    "content_fingerprint": "c" * 64, "object_key": "raw/zero.parquet",
+                    "object_uri": "market-archive://raw/zero.parquet",
+                }] if params["connection_epoch"] == 0 else [])
+            row = _lineage_row(material, series_id=52, fact_type="market.bbo")
+            row["evidence"] = {"source_position": {
+                "definition_id": "definition", "session_id": "session",
+                "connection_epoch": epoch, "receive_ordinal": 1,
+            }}
+            return _RowsResult([row])
+    session = BookSession([])
+    records = [SimpleNamespace(series_id=52, fact=SimpleNamespace(material_hash=material))]
+    if epoch is not None and type(epoch) is int and epoch == 0:
+        assert set(_collect_typed_archive_refs(session, records=records)) == {"epoch-zero"}
+    else:
+        with pytest.raises(RuntimeError, match="market_dataset_archive_incomplete"):
+            _collect_typed_archive_refs(session, records=records)
 
 
 class _LineageSession:

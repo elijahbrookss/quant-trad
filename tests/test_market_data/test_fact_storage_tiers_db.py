@@ -139,7 +139,8 @@ def _verified_cold_fixture(storage, tmp_path, monkeypatch):
     """Install known-verified bytes/catalog to test readers, not executor admission."""
     from market_data.archive import FilesystemRawArchiveObjectStore
     from market_data.fact_archive import publish_canonical_fact_archive, verify_canonical_fact_archive_rows
-    from portal.backend.db import MarketFactArchiveManifestRecord
+    from portal.backend.db import MarketFactArchiveManifestRecord, MarketFactArchiveMaterialAliasRecord
+    from market_data.canonical_storage import legacy_material_alias
     from portal.backend.service.storage.repos.fact_storage import (
         CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, PostgresCanonicalFactStorageRepository,
     )
@@ -161,6 +162,11 @@ def _verified_cold_fixture(storage, tmp_path, monkeypatch):
             last_commit_seq=manifest.last_cursor[0], last_id=manifest.last_cursor[1],
             descriptor=manifest.to_dict(),
         ))
+        session.flush()
+        for archived in archive_rows:
+            alias = legacy_material_alias(archived)
+            if alias is not None:
+                session.add(MarketFactArchiveMaterialAliasRecord(manifest_id=manifest.manifest_id, **alias))
         session.flush()
         session.execute(text(
             "UPDATE market.fact_retention_partitions SET state='verified', sealed_at=now(), "
