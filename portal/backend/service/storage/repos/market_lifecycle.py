@@ -105,14 +105,45 @@ class PostgresMarketStorageLifecycleRepository:
                     )
 
     @staticmethod
+    def canonical_book_session_held(session, *, target_kind: str, target_id: str) -> bool:
+        """A committed prefix keeps the complete source session available.
+
+        Replay also needs trailing control frames and can enumerate checkpoints
+        committed after the last canonical page. Exact page edges alone cannot
+        protect those objects. The immutable prefix owner is a conservative
+        lifetime anchor, including while archival is interrupted between pages.
+        Checkpoint ownership comes from its immutable raw-source manifests,
+        never the current stream definition/configuration.
+        """
+        if target_kind == "raw_manifest":
+            scope = "SELECT definition_id,session_id FROM market.raw_archive_manifests WHERE id=:id"
+        elif target_kind == "book_checkpoint":
+            scope = """
+                SELECT DISTINCT sources.definition_id,sources.session_id
+                FROM market.book_checkpoint_manifests AS checkpoints
+                CROSS JOIN LATERAL jsonb_array_elements_text(checkpoints.source_manifest_ids) AS refs(id)
+                JOIN market.raw_archive_manifests AS sources ON sources.id=refs.id
+                WHERE checkpoints.id=:id AND sources.session_id=checkpoints.session_id
+            """
+        else:
+            raise ValueError(f"canonical_book_session_target_invalid: kind={target_kind}")
+        return bool(session.execute(text(f"""
+            SELECT EXISTS (SELECT 1 FROM ({scope}) AS scope
+                JOIN market.fact_book_prefix_chunks AS prefixes
+                  ON prefixes.definition_id=scope.definition_id AND prefixes.session_id=scope.session_id)
+        """), {"id": target_id}).scalar_one())
+
+    @staticmethod
     def canonical_dependency_count(session, *, target_kind: str, target_id: str) -> int:
         """Cold Fact evidence holds survive release of user and dataset pins."""
-        return int(session.execute(text(
+        exact_count = int(session.execute(text(
             "SELECT (SELECT count(*) FROM market.fact_archive_dependencies "
             "WHERE target_kind=:target_kind AND target_id=:target_id) + "
             "(SELECT count(*) FROM market.fact_book_prefix_dependencies "
             "WHERE :target_kind='raw_manifest' AND target_id=:target_id)"
         ), {"target_kind": str(target_kind), "target_id": str(target_id)}).scalar_one())
+        return exact_count or int(PostgresMarketStorageLifecycleRepository.canonical_book_session_held(
+            session, target_kind=target_kind, target_id=target_id))
 
     @staticmethod
     def canonical_backlog_present(session, *, target_kind: str, target_id: str) -> bool:
@@ -531,7 +562,10 @@ class PostgresMarketStorageLifecycleRepository:
                 ).mappings().all()
             results = []
             for row in [*raw_rows, *checkpoint_rows]:
-                results.append({**dict(row), "canonical_backlog_present": self.canonical_backlog_present(
+                held_count = int(row["canonical_dependency_count"]) or int(self.canonical_book_session_held(
+                    session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"])))
+                results.append({**dict(row), "canonical_dependency_count": held_count,
+                    "canonical_backlog_present": self.canonical_backlog_present(
                     session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"]))})
         return results
 

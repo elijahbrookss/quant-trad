@@ -29,13 +29,14 @@ def _book_position(position, *, observation_key):
 
 
 def _unprotected_book_prefixes(session, prefixes):
-    """An immutable hot book row already holds every object in its session.
+    """A hot book row or committed prefix holds every object in its session.
 
     SELECT retains relation locks through this writer's commit, so reclamation
     cannot drop that row between this proof and publication of its successor.
-    This shares the lifecycle backlog predicate; routine streaming must not scan
-    an ever-growing prefix for each update. A late import with no hot holder
-    instead has to lock/check its complete prefix before creating a new hold.
+    A cold-only session's immutable prefix is also a lifetime anchor, sharing
+    the lifecycle session-hold predicate. It needs no hot payload lock and must
+    not rescan an ever-growing prefix for each new update. A late import with
+    neither holder must lock/check its complete prefix before creating a hold.
     """
     if not prefixes:
         return {}
@@ -49,6 +50,8 @@ def _unprotected_book_prefixes(session, prefixes):
                 jsonb_build_object('definition_id',requested.definition_id,'session_id',requested.session_id)))
                OR hot.provenance @> jsonb_build_object('_qt_depth_evidence',jsonb_build_object('source_position',
                 jsonb_build_object('definition_id',requested.definition_id,'session_id',requested.session_id))))
+           OR EXISTS (SELECT 1 FROM market.fact_book_prefix_chunks AS prefixes
+                WHERE prefixes.definition_id=requested.definition_id AND prefixes.session_id=requested.session_id)
     """), {"prefixes": json.dumps(list(prefixes.values()))}).scalars())
     return {key: value for key, value in prefixes.items() if key not in protected}
 

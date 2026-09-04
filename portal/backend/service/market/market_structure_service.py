@@ -1078,16 +1078,6 @@ class MarketStructureService:
             basis_facts=basis_facts,
             derivative_facts=derivative_facts,
         )
-        execution_trade_records = ()
-        if replay_states and config.get("trade_series_id") is not None:
-            execution_trade_records = tuple(
-                self.repository.read_trades(
-                    series_id=int(config["trade_series_id"]),
-                    start=min(row.effective_at for row in replay_states) - timedelta(seconds=2),
-                    end=max(row.effective_at for row in replay_states) + timedelta(seconds=2),
-                    known_at_lte=max(row.known_at for row in replay_states),
-                )
-            )
         fingerprint = _stable_hash(
             {
                 "schema_version": "market.cross_stream_materialization.v1",
@@ -2766,6 +2756,16 @@ class MarketStructureService:
                     raise RuntimeError(
                         "market_book_replay_invalid: persisted features differ from raw replay"
                     )
+        execution_trade_records = ()
+        if replay_states and config.get("trade_series_id") is not None:
+            execution_trade_records = tuple(
+                self.repository.read_trades(
+                    series_id=int(config["trade_series_id"]),
+                    start=min(row.effective_at for row in replay_states) - timedelta(seconds=2),
+                    end=max(row.effective_at for row in replay_states) + timedelta(seconds=2),
+                    known_at_lte=max(row.known_at for row in replay_states),
+                )
+            )
         fingerprint = _stable_hash(
             {
                 "schema_version": "market.book_session_replay.v1",

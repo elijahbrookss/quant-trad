@@ -279,6 +279,41 @@ def test_canonical_archive_hold_blocks_planning_without_user_or_dataset_pins():
     assert held["blockers"] == ["canonical_archive_dependency"]
 
 
+@pytest.mark.parametrize("kind", ["raw_manifest", "book_checkpoint"])
+@pytest.mark.parametrize("session_held", [False, True])
+def test_unreferenced_object_counts_only_its_immutable_book_session_hold(kind, session_held):
+    from portal.backend.service.storage.repos.market_lifecycle import PostgresMarketStorageLifecycleRepository
+    statements = []
+
+    def execute(statement, params):
+        sql = str(statement)
+        statements.append(sql)
+        assert params.get("target_id", params.get("id")) == "object-id"
+        return SimpleNamespace(scalar_one=lambda: 0 if len(statements) == 1 else session_held)
+
+    count = PostgresMarketStorageLifecycleRepository.canonical_dependency_count(
+        SimpleNamespace(execute=execute), target_kind=kind, target_id="object-id")
+    assert count == int(session_held)
+    assert len(statements) == 2
+    assert "prefixes.definition_id=scope.definition_id" in statements[1]
+    assert "prefixes.session_id=scope.session_id" in statements[1]
+    assert "stream_definitions" not in statements[1]
+    assert ("checkpoints.source_manifest_ids" in statements[1]) == (kind == "book_checkpoint")
+
+
+def test_exact_canonical_holds_skip_the_extra_session_lookup():
+    from portal.backend.service.storage.repos.market_lifecycle import PostgresMarketStorageLifecycleRepository
+    statements = []
+
+    def execute(statement, params):
+        statements.append(str(statement))
+        return SimpleNamespace(scalar_one=lambda: 2)
+
+    assert PostgresMarketStorageLifecycleRepository.canonical_dependency_count(
+        SimpleNamespace(execute=execute), target_kind="raw_manifest", target_id="held") == 2
+    assert len(statements) == 1
+
+
 def test_hot_canonical_backlog_blocks_raw_expiration_before_any_cold_hold_exists():
     repository = _LifecycleRepository()
     rows = repository.list_archive_expiration_candidates()

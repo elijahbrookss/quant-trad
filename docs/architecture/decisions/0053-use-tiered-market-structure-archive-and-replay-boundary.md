@@ -266,8 +266,16 @@ the executor must not silently promote an old receipt to the stronger proof.
 Book raw-source admission retains a complete connection prefix, including
 control frames without canonical mutations. A last-frame mapping alone cannot
 prove a reconstructed book's source lifetime. Existing hot session holders
-protect live publication without repeated full-history scans; late imports
-without a holder must fence and check the complete prefix. Checkpoint/validity
+protect live publication without repeated full-history scans. A committed
+immutable prefix also retains the complete definition/session after its hot
+payloads leave: trailing control frames and later checkpoints are needed by
+session replay even when no earlier page names them. Checkpoint ownership comes
+from its immutable raw-source manifests. This conservative lifetime anchor is
+not a new row's byte/reconstruction proof, but allows cold-only writers to avoid
+rescanning old history. Late imports without either holder must fence and check
+the complete prefix. This may keep an entire long-running book session beyond
+its ordinary age window; pressure reporting must expose the cost rather than
+silently release the hold. Checkpoint/validity
 proofs remain required before admitting book reclamation. Long prefixes now
 advance through immutable, shared interval receipts with permanent raw holds.
 Each bounded transaction extends one interval; interruption rolls back that

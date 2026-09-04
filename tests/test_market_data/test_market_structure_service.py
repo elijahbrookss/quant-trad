@@ -5,6 +5,8 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+import hashlib
 
 import portal.backend.service.market.market_structure_service as market_structure_module
 import pytest
@@ -52,6 +54,72 @@ class _SafetyRepository:
 
     def list_safety_events(self, **_kwargs):
         return []
+
+
+@pytest.mark.parametrize("with_trades", [False, True])
+def test_book_replay_initializes_trade_evidence_in_its_own_scope(tmp_path, monkeypatch, with_trades):
+    from market_data.structure import RawStreamRecord
+    at = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    payload = {"channel": "l2_data", "timestamp": at.isoformat(), "sequence_num": 0,
+        "events": [{"type": "snapshot", "product_id": "BTC-USD", "updates": [
+            {"side": side, "price_level": price, "new_quantity": "1", "event_time": at.isoformat()}
+            for side, price in (("bid", "99"), ("offer", "101"))]}]}
+    raw = RawStreamRecord.from_provider_message(
+        ProviderRawMessage.build(provider="COINBASE", venue="COINBASE_DIRECT", stream_session_id="session",
+            connection_epoch=0, receive_ordinal=1, received_at=at.isoformat(), raw_frame=json.dumps(payload)),
+        definition_id="definition", spool_segment_id="segment", provider_product_id="BTC-USD",
+        requested_channel="level2", observed_channel="level2")
+    path = tmp_path / "objects" / "raw.parquet"
+    path.parent.mkdir()
+    path.write_bytes(b"reader fixture")
+    monkeypatch.setattr(market_structure_module, "read_raw_archive_parquet", lambda _: [raw])
+    monkeypatch.setattr(market_structure_module, "derive_book_features", lambda *args, **kwargs: ((), ()))
+    config = {"product_definition_version_id": "product", "provider_size_unit": "base",
+              "base_currency": "BTC", "quote_currency": "USD", "bbo_series_id": 2, "depth_series_id": 3}
+    if with_trades:
+        config["trade_series_id"] = 4
+    calls = []
+
+    def read_trades(**kwargs):
+        calls.append(kwargs)
+        return [SimpleNamespace(version_id="trade-version", fact=SimpleNamespace(material_hash="a" * 64))]
+
+    repository = SimpleNamespace(
+        list_stream_definitions=lambda **_: [{"channels": ["level2"], "provider_product_id": "BTC-USD",
+                                              "series_id": 1, "config": config}],
+        list_session_manifests=lambda **_: [{"id": "manifest", "object_key": "raw.parquet",
+                                             "object_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}],
+        list_session_quality_events=lambda **_: [], list_book_checkpoints=lambda **_: [],
+        reconcile_book_replay=lambda **_: {"equal": True}, read_trades=read_trades)
+    service = MarketStructureService(repository=repository)
+    report = service.replay_book_session(definition_id="definition", session_id="session", storage_root=tmp_path)
+    assert report["snapshot_count"] == 1 and report["reconciliation"]["equal"] is True
+    assert len(report["replay_fingerprint"]) == 64
+    assert calls == ([{"series_id": 4, "start": at - timedelta(seconds=2),
+                      "end": at + timedelta(seconds=2), "known_at_lte": at}] if with_trades else [])
+    if with_trades:
+        repository.read_trades = lambda **_: []
+        assert service.replay_book_session(definition_id="definition", session_id="session",
+            storage_root=tmp_path)["replay_fingerprint"] != report["replay_fingerprint"]
+
+
+def test_pair_materialization_does_not_execute_book_replay_locals(monkeypatch):
+    pair = next(iter(market_structure_module.MARKET_STRUCTURE_PAIRS.values()))
+    repository = SimpleNamespace(cross_stream_input_commit_seq=lambda **_: 7,
+        read_bbo_features=lambda **_: (),
+        ingest_market_state_features=lambda **_: SimpleNamespace(inserted_count=0, noop_count=0, max_commit_seq=7))
+    monkeypatch.setattr(market_structure_module, "market_data_repo", SimpleNamespace(list_series=lambda **_: []))
+    service = MarketStructureService(repository=repository)
+    monkeypatch.setattr(service, "configure_pair", lambda **_: {"pair_id": pair.pair_id, "mapping_id": "mapping",
+        "series": [{"product_id": pair.futures_product_id, "bbo_series_id": 1,
+                    "basis_series_id": 3, "derivative_state_series_id": 4},
+                   {"product_id": pair.spot_product_id, "bbo_series_id": 2}]})
+    at = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    report = service.materialize_pair_features(pair_id=pair.pair_id, start=at, end=at + timedelta(seconds=1),
+                                               known_at=at + timedelta(seconds=2))
+    assert report["source_commit_seq"] == 7
+    assert report["basis_count"] == report["derivative_state_count"] == 0
+    assert len(report["materialization_fingerprint"]) == 64
 
 
 class _EnrollmentMarketDataRepository:

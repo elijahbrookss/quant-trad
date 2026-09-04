@@ -548,7 +548,15 @@ definition/session already protects the session's raw objects. The writer's
 backlog lookup retains PostgreSQL relation locks until commit, preventing that
 holder's partition from being dropped before its successor is published. This
 keeps ordinary collection from rescanning an ever-growing connection prefix on
-every update. Without a hot holder, late book admission checks every ordinal
+every update. A committed immutable book-prefix chunk is also a session lifetime
+anchor after all hot holders leave. Its existence protects that definition/session's
+raw objects and checkpoints, including trailing control frames and later
+checkpoint publications not named by an earlier page's exact edges. Checkpoint
+scope is resolved through its immutable `source_manifest_ids`; mutable stream
+configuration is not ownership evidence. An anchor is never treated as a byte,
+mapping-completeness, or reconstruction proof for the new row.
+
+Without either a hot holder or that durable anchor, late book admission checks every ordinal
 from one through the new position, locks all candidate placements, and rejects
 a missing, ambiguous, expired or unfinished-expiration prefix. Repeated roots
 share their largest definition/session/epoch scope. The existing mapping budget
@@ -563,6 +571,34 @@ scoping. RCA: the earlier shared target query selected `definition_id` from
 checkpoint manifests, where no such column exists. A real-database regression
 reproduced `UndefinedColumn` through retention status, then verifies both the
 unreferenced checkpoint and its protected state after book publication.
+
+Cold session protection is a non-releasable canonical hold. When no exact
+object edge exists, `canonical_dependency_count` reports one logical session
+hold; it is not a count of newly inserted per-object edges. Status and expiration
+candidates use the same predicate. This deliberately retains the complete book
+session, not only the last canonical prefix. RCA: handing off from a hot
+session hold to only exact raw edges left checkpoints and trailing control
+frames unprotected. It also made a cold-only writer rescan its whole prefix.
+The immutable session anchor closes both lifetime and writer-scaling gaps.
+
+The disposable cold-book diagnostic exercises real source parsing, reconstruction,
+checkpoint publication, BBO/depth freeze, physical payload removal, cold reads,
+refreeze, and full/checkpoint-delta replay. It explicitly asserts that the
+production family gate still refuses book reclamation, then overrides only that
+gate inside the test to reach downstream consumers. It is **not** proof that
+the remaining checkpoint/validity/dependency admission work is complete. Raw L2
+events remain replay inputs rather than directly dataset-eligible observations;
+the frozen research series in this test are BBO and depth. A one-mapping writer
+budget proves that a cold-only session no longer rescans three historical frames.
+
+The full service diagnostic also exposed a replay-scope defect before any hot
+data was removed: execution-trade initialization had been placed inside pair
+feature materialization instead of book replay. Replay raised `NameError` for
+`execution_trade_records`, while pair materialization raised it for
+`replay_states` after ingestion. Initialization now belongs to replay, retaining
+the existing source time window and known-at cutoff. Separate regressions cover
+replay with/without a configured trade series and pair materialization; no
+alternate reconstruction path or new fingerprint version is introduced.
 
 An execution `planned` event also makes that placement unavailable for new
 references, even without `completed`: a process can stop after unlink but before
@@ -598,8 +634,10 @@ successful resume. It also keeps an unrelated raw reference writable while
 another object is locked. This is not a claim that every legacy normalized/composite dependency
 or checkpoint chain is now admitted for reclamation; those gates remain explicit.
 
-Performance follow-up: session-scoped backlog is conservative and can retain
-more raw/checkpoint bytes than a minimal per-root proof. Candidate checks still
+Performance follow-up: hot and durable session holds are conservative and can retain
+more raw/checkpoint bytes than a minimal per-root proof, including later objects
+in a long-running session. A missing exact edge adds one indexed session-anchor
+lookup during candidate/status checks; exact held objects skip that lookup. Candidate checks still
 need large-history query-plan measurements. Only writers referencing an object
 being expired wait on its row lock; unrelated objects do not acquire a global
 ingestion fence. Very large historical batches and same-series writer queues
