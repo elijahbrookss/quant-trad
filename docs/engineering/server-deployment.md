@@ -506,3 +506,53 @@ at an old copy would lose acknowledged objects. A code rollback while dedicated
 storage is configured must retain the filesystem guard. Releases predating it
 are not a safe automatic rollback target. Formatting, deleting either copy,
 or clearing the expected UUID is not a recovery procedure.
+
+### Canonical Retention Rollout Gate
+
+The generalized retention executor is implemented but defaults off. Its current
+whole-day dependency gate still excludes L2/derived families whose complete
+closure is not yet admitted. Do not enable unattended retention until those
+proofs and representative disposable stress checks are complete.
+
+After that gate is cleared, use this separate, reviewed rollout order:
+
+1. Finish and validate the HDD move above; retain database backups and a tested
+   restore path. Do not combine disk cutover with deletion activation.
+2. If the deployment still uses inline canonical JSON, stop/drain all writers
+   and run the explicit
+   [canonical storage-tier cutover](../architecture/data/GENERALIZED_FACT_DATA_PLANE.md#explicit-storage-cutover).
+   Runtime startup must not migrate existing columns in place.
+3. Review `market_data_lifecycle.canonical_retention` hot windows, byte targets,
+   page/verification limits and run bounds against measured host capacity.
+   Keep both lifecycle execution flags false while inspecting `qt data
+   market-structure lifecycle-plan` and dry `lifecycle-run` output. Resolve all
+   missing-mount, incomplete-proof, receipt and headroom blockers.
+4. With automatic scheduling disabled for the maintenance window, explicitly
+   enable the outer and canonical execution flags and run one bounded manual
+   `lifecycle-run --execute`. Inspect outcomes, committed page/proof progress,
+   physical bytes, frozen known-at reads, collector lag, and independent NVMe/HDD
+   alerts. A plan or verified page alone is not deletion authority.
+5. Only after repeated bounded runs and a restart/resume check are accepted,
+   enable the recurring lifecycle schedule. Retain the configured filesystem
+   identity and the fail-closed archive/pin checks.
+
+Server Compose reads these operator settings without overriding them with
+hard-coded values: `QT_MARKET_DATA_LIFECYCLE_ENABLED` (schedule, default true),
+`QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED` (outer mutation gate, default false),
+and `QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED` (canonical mutation
+gate, default false). Keeping the schedule off does not prohibit an explicitly
+requested, otherwise enabled manual run. Setting a hot window alone never
+enables mutation.
+
+This release starts honoring outer flag values that the earlier server preset
+hard-coded. Before deploying it, inspect the private operator file and rendered
+Compose configuration and explicitly set **both execution flags false** for the
+cutover. Do not assume an old, previously ignored `true` value is harmless.
+
+Rollback begins by disabling canonical execution and stopping/draining the
+lifecycle worker. Already committed cold movement is not undone by that flag:
+retain every acknowledged archive object, database catalog and dependency hold.
+Keep a release that can read both hot and cold payloads. Do not roll back to an
+inline-only reader after reclaiming a hot partition, drop the cold catalogs, or
+point readers at an older archive copy. Restoration to the old layout requires
+an explicit offline restore/rehydration plan and verification, not a config flip.

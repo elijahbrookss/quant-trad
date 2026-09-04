@@ -22,6 +22,26 @@ from .fact_archival import FACT_ARCHIVE_VERIFIER_VERSION
 from .fact_reclamation import unproven_reclamation_fact_types
 
 
+def archive_admission_blockers(*, policy, filesystem, publication=True):
+    if filesystem["status"] != "available":
+        return ["archive_mount_unavailable"]
+    blockers = ["archive_mount_read_only"] if filesystem["read_only"] else []
+    if not publication:
+        return blockers
+    reserve = 4 * policy.max_page_logical_bytes
+    if filesystem["available_bytes"] < policy.archive_min_free_bytes:
+        blockers.append("archive_free_reserve_reached")
+    elif filesystem["available_bytes"] < policy.archive_min_free_bytes + reserve:
+        blockers.append("archive_publication_headroom_insufficient")
+    budget = policy.archive_filesystem_budget_bytes
+    if budget is not None:
+        if filesystem["used_bytes"] >= budget:
+            blockers.append("archive_filesystem_budget_reached")
+        elif filesystem["used_bytes"] + reserve > budget:
+            blockers.append("archive_publication_budget_insufficient")
+    return blockers
+
+
 class PostgresCanonicalFactRetentionRepository:
     def __init__(self, *, database=db):
         self.database = database
@@ -117,18 +137,9 @@ class PostgresCanonicalFactRetentionRepository:
         hot_pressure = hot_budget is not None and inventory["hot_payload_bytes"] >= hot_budget
         archive_budget = policy.archive_filesystem_budget_bytes
         archive_excess = None
-        archive_blockers = []
-        if filesystem["status"] != "available":
-            archive_blockers.append("archive_mount_unavailable")
-        else:
-            if filesystem["read_only"]:
-                archive_blockers.append("archive_mount_read_only")
-            if filesystem["available_bytes"] < policy.archive_min_free_bytes:
-                archive_blockers.append("archive_free_reserve_reached")
-            if archive_budget is not None:
-                archive_excess = max(0, filesystem["used_bytes"] - archive_budget)
-                if filesystem["used_bytes"] >= archive_budget:
-                    archive_blockers.append("archive_filesystem_budget_reached")
+        archive_blockers = archive_admission_blockers(policy=policy, filesystem=filesystem)
+        if filesystem["status"] == "available" and archive_budget is not None:
+            archive_excess = max(0, filesystem["used_bytes"] - archive_budget)
         actions = []
         for row in inventory["partitions"]:
             day = row["storage_day"]
@@ -187,8 +198,9 @@ class PostgresCanonicalFactRetentionRepository:
         return {
             "schema_version": "market.canonical_retention_plan.v1",
             "database_day": today.isoformat(), "policy": policy.to_dict(),
-            "execution_available": False,
-            "execution_blockers": ["canonical_retention_executor_not_wired"],
+            "execution_available": True,
+            "execution_enabled": policy.execution_enabled,
+            "execution_blockers": [] if policy.execution_enabled else ["canonical_retention_execution_disabled"],
             "inventory": {name: inventory[name] for name in (
                 "database_bytes", "canonical_header_bytes", "raw_mapping_bytes", "hot_payload_bytes", "hot_partition_count")},
             "archive_filesystem": filesystem,
@@ -208,3 +220,21 @@ class PostgresCanonicalFactRetentionRepository:
 
 
 canonical_fact_retention_repository = PostgresCanonicalFactRetentionRepository()
+
+
+def require_hot_window_elapsed(session, partition, *, policy: CanonicalFactRetentionPolicy):
+    """Repeat family/window admission under the partition owner's row lock."""
+    day = partition["storage_day"]
+    today = session.execute(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date")).scalar_one()
+    families = session.execute(text(
+        "SELECT DISTINCT fact_type FROM market.fact_versions WHERE storage_day=:day ORDER BY fact_type LIMIT 257"
+    ), {"day": day}).scalars().all()
+    if len(families) > 256:
+        raise RuntimeError(f"canonical_retention_family_budget_exceeded: storage_day={day}")
+    unsupported = unproven_reclamation_fact_types(families)
+    if unsupported:
+        raise RuntimeError(f"canonical_retention_dependency_proof_required: storage_day={day} fact_types={unsupported}")
+    cutoff = today - timedelta(days=policy.hot_window_days(families))
+    if day >= cutoff:
+        raise RuntimeError(f"canonical_retention_hot_window_not_elapsed: storage_day={day} eligible_before={cutoff}")
+    return cutoff

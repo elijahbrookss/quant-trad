@@ -33,6 +33,15 @@ class CanonicalFactRetentionPolicy:
     max_inventory_partitions: int = 4096
     plan_statement_timeout_ms: int = 5000
     max_plan_seconds: int = 15
+    execution_enabled: bool = False
+    max_steps_per_run: int = 4
+    max_run_seconds: int = 60
+    execution_statement_timeout_ms: int = 5000
+    max_page_rows: int = 10_000
+    max_page_logical_bytes: int = 64 * 1024**2
+    max_verification_bytes: int = 4 * 1024**3
+    max_verification_objects: int = 10_000
+    max_verification_pages: int = 1000
 
     def __post_init__(self) -> None:
         bounds = {
@@ -42,12 +51,22 @@ class CanonicalFactRetentionPolicy:
             "max_inventory_partitions": (1, 10000),
             "plan_statement_timeout_ms": (1, 60000),
             "max_plan_seconds": (1, 300),
+            "max_steps_per_run": (1, 128),
+            "max_run_seconds": (1, 3600),
+            "execution_statement_timeout_ms": (1, 60000),
+            "max_page_rows": (1, 100_000),
+            "max_page_logical_bytes": (1, 1024**3),
+            "max_verification_bytes": (1, 1024**4),
+            "max_verification_objects": (1, 100_000),
+            "max_verification_pages": (1, 100_000),
         }
         for name, (minimum, maximum) in bounds.items():
             value = getattr(self, name)
             if (type(value) is not int or value < minimum
                     or (maximum is not None and value > maximum)):
                 raise ValueError(f"canonical_retention_policy_invalid: field={name}")
+        if type(self.execution_enabled) is not bool:
+            raise ValueError("canonical_retention_policy_invalid: field=execution_enabled")
         for name in ("hot_payload_budget_bytes", "archive_filesystem_budget_bytes"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value <= 0):

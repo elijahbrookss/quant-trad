@@ -67,5 +67,5 @@ def test_real_retention_inventory_is_read_only_bounded_and_resumes_after_cursor(
     final = repository.plan(policy=policy, storage_root=tmp_path)
     assert final["actions"][0]["action"] == "reclaim_partition"
     assert final["metadata_eligible_reclaim_bytes"] > 0
-    assert final["execution_available"] is False
+    assert final["execution_available"] is True and final["execution_enabled"] is False
     assert _state(storage)[0]["state"] == "verified"  # Not reclaimed by planning.

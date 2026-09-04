@@ -40,13 +40,19 @@ class VerifiedArchiveObject:
 class ArchiveVerificationBatch:
     """Verify each distinct object once within explicit count and byte budgets."""
 
-    def __init__(self, object_store: RawArchiveObjectStore, *, limits: ArchiveVerificationLimits):
+    def __init__(self, object_store: RawArchiveObjectStore, *, limits: ArchiveVerificationLimits, check_budget=None):
         self.object_store = object_store
         self.limits = limits
         self.objects: dict[str, VerifiedArchiveObject] = {}
         self.byte_count = 0
+        self.check_budget = check_budget
+
+    def _check_budget(self):
+        if self.check_budget is not None:
+            self.check_budget()
 
     def verify(self, object_key: str, object_sha256: str, *, expected_bytes: int | None = None):
+        self._check_budget()
         if (not isinstance(object_sha256, str) or len(object_sha256) != 64
                 or any(char not in "0123456789abcdef" for char in object_sha256)):
             raise ValueError(f"archive_verification_hash_invalid: object_key={object_key}")
@@ -79,6 +85,7 @@ class ArchiveVerificationBatch:
             digest = hashlib.sha256()
             read_bytes = 0
             for block in iter(lambda: handle.read(1024 * 1024), b""):
+                self._check_budget()
                 self.byte_count += len(block)
                 read_bytes += len(block)
                 if self.byte_count > self.limits.max_bytes:
@@ -94,6 +101,7 @@ class ArchiveVerificationBatch:
         return result
 
     def _assert_unchanged(self, verified: VerifiedArchiveObject):
+        self._check_budget()
         path = self.object_store.local_path(verified.object_key)
         if _stamp(path.stat()) != verified.stamp:
             raise RuntimeError(f"archive_verification_object_changed: object_key={verified.object_key}")

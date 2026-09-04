@@ -32,7 +32,7 @@ from .fact_storage import (
     CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, CANONICAL_ENVELOPE_COLUMNS, CANONICAL_ENVELOPE_FROM,
     _catalog_manifest, ensure_payload_contracts,
 )
-from .market_lifecycle import market_storage_lifecycle_repository
+from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_lifecycle_repository
 
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
@@ -60,7 +60,8 @@ class PostgresCanonicalFactArchiveRepository:
     def __init__(self, *, database, object_store: RawArchiveObjectStore,
                  temporary_directory: Path, limits: FactArchiveLimits = FactArchiveLimits(),
                  max_dependency_bytes: int = 1024**3, max_dependency_objects: int = 5000,
-                 raw_read_limits: RawArchiveReadLimits = RawArchiveReadLimits(), max_raw_mapping_rows: int = 50_000):
+                 raw_read_limits: RawArchiveReadLimits = RawArchiveReadLimits(), max_raw_mapping_rows: int = 50_000,
+                 statement_timeout_ms: int | None = None, partition_guard=None, check_budget=None):
         if (type(max_dependency_bytes) is not int or max_dependency_bytes <= 0
                 or type(max_dependency_objects) is not int or max_dependency_objects <= 0
                 or type(max_raw_mapping_rows) is not int or max_raw_mapping_rows <= 0):
@@ -73,6 +74,15 @@ class PostgresCanonicalFactArchiveRepository:
         self.max_dependency_objects = max_dependency_objects
         self.raw_read_limits = raw_read_limits
         self.max_raw_mapping_rows = max_raw_mapping_rows
+        if statement_timeout_ms is not None and (type(statement_timeout_ms) is not int or statement_timeout_ms <= 0):
+            raise ValueError("canonical_archive_statement_timeout_invalid")
+        self.statement_timeout_ms = statement_timeout_ms
+        self.partition_guard = partition_guard
+        self.check_budget = check_budget
+
+    def _check_budget(self):
+        if self.check_budget is not None:
+            self.check_budget()
 
     @staticmethod
     def _day(day):
@@ -80,19 +90,27 @@ class PostgresCanonicalFactArchiveRepository:
             raise ValueError("canonical_archive_storage_day_invalid")
         return day
 
-    def _lock(self, session, day):
+    def _lock(self, session, day, *, statement_timeout_ms=None):
         self._day(day)
+        self._check_budget()
+        timeout = statement_timeout_ms if statement_timeout_ms is not None else self.statement_timeout_ms
+        if timeout is not None:
+            session.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
+                            {"timeout": str(timeout)})
         market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
         acquired = session.execute(text(
             "SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"
         ), {"name": f"quant-trad:canonical-archive:{day.isoformat()}"}).scalar_one()
         if not acquired:
-            raise RuntimeError(f"canonical_archive_partition_busy: storage_day={day}")
+            raise MarketStorageLifecycleBusyError(f"canonical_archive_partition_busy: storage_day={day}")
         row = session.execute(text(
             "SELECT * FROM market.fact_retention_partitions WHERE storage_day=:day FOR UPDATE"
         ), {"day": day}).mappings().one_or_none()
         if row is None:
             raise RuntimeError(f"canonical_archive_partition_unknown: storage_day={day}")
+        self._check_budget()
+        if self.partition_guard is not None:
+            self.partition_guard(session, row)
         return row
 
     def inspect_partition(self, day: date) -> dict:
@@ -153,14 +171,16 @@ class PostgresCanonicalFactArchiveRepository:
         references = {}
         objects = ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
             max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
-        ))
+        ), check_budget=self.check_budget)
         exact_rows = [row for row in rows if row["fact_type"] in EXACT_RAW_FACT_TYPES]
         references.update(resolve_canonical_raw_archive_refs(
             session, rows=exact_rows, object_store=self.object_store, byte_verifier=objects,
             limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
             bound_manifest_ids=bound_manifest_ids,
+            check_budget=self.check_budget,
         ))
         for (series_id, fact_type), group in groups.items():
+            self._check_budget()
             if fact_type in EXACT_RAW_FACT_TYPES:
                 continue
             if fact_type.startswith("market.normalized."):
@@ -247,6 +267,7 @@ class PostgresCanonicalFactArchiveRepository:
             # Validate canonical payload/provenance hashes before following any
             # claimed source reference or publishing bytes.
             for row in rows:
+                self._check_budget()
                 record_from_storage_row(row)
             dependencies = self._dependencies(session, rows)
             manifest = publish_canonical_fact_archive(
@@ -254,6 +275,7 @@ class PostgresCanonicalFactArchiveRepository:
             )
             read_canonical_fact_archive(self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits)
             verify_canonical_fact_archive_rows(rows, expected=manifest, limits=self.limits)
+            self._check_budget()
             session.add(MarketFactArchiveManifestRecord(
                 id=manifest.manifest_id, storage_day=day, page_ordinal=ordinal,
                 object_key=manifest.object_key, object_sha256=manifest.object_sha256,
@@ -335,6 +357,7 @@ class PostgresCanonicalFactArchiveRepository:
             if len(envelopes) != len(rows):
                 raise RuntimeError(f"canonical_archive_page_source_coverage_mismatch: manifest_id={manifest.manifest_id}")
             for envelope, archived in zip(envelopes, rows):
+                self._check_budget()
                 verify_archived_envelope(envelope, archived)
             aliases = [alias for row in rows if (alias := legacy_material_alias(row)) is not None]
             catalogs = self._page_catalogs(session, manifest.manifest_id)
@@ -349,6 +372,7 @@ class PostgresCanonicalFactArchiveRepository:
                 if catalogs[name] != items:
                     raise RuntimeError(f"canonical_archive_catalog_incomplete: manifest_id={manifest.manifest_id} catalog={name}")
             receipt = _receipt(page, archive_evidence_hash(catalogs))
+            self._check_budget()
             session.add(MarketFactArchiveVerificationRecord(**receipt))
         logger.info("canonical_archive_page_verified | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s verification_hash=%s",
                     day, page["page_ordinal"], manifest.manifest_id, manifest.row_count, receipt["verification_hash"])
@@ -363,6 +387,7 @@ class PostgresCanonicalFactArchiveRepository:
         to delete. The caller must own the partition and lifecycle fences.
         """
         day = partition["storage_day"]
+        check_budget = check_budget or self.check_budget
         last_cursor = (0, "")
         ordinal = 0
         total_rows = 0
@@ -438,7 +463,7 @@ class PostgresCanonicalFactArchiveRepository:
             partition = self._lock(session, day)
             if partition["state"] not in {"sealed", "verified"}:
                 raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
-            objects = ArchiveVerificationBatch(self.object_store, limits=limits)
+            objects = ArchiveVerificationBatch(self.object_store, limits=limits, check_budget=self.check_budget)
             evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
             objects.assert_unchanged()
             if partition["state"] == "verified":

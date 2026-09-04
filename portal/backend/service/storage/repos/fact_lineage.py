@@ -84,7 +84,7 @@ def _raw_records(path, *, manifest_id, limits):
 
 def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_verifier,
                                        limits: RawArchiveReadLimits = RawArchiveReadLimits(),
-                                       max_mapping_rows: int = 50_000, bound_manifest_ids=None):
+                                       max_mapping_rows: int = 50_000, bound_manifest_ids=None, check_budget=None):
     """Prove exact source rows in one current acknowledged placement per witness.
 
     Compacted mappings may be used after an original object's recorded expiry.
@@ -181,6 +181,8 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                             max_logical_bytes=limits.max_logical_bytes - decoded_bytes)
         count = first = last = 0
         for index, record in enumerate(_raw_records(object_store.local_path(manifest["object_key"]), manifest_id=identity, limits=remaining)):
+            if check_budget is not None:
+                check_budget()
             decoded_count += 1
             # int64 epoch/ordinal, timestamp, and 11 variable-column offsets;
             # matches the writer-owned non-null Arrow schema's logical size.

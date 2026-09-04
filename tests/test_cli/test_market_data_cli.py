@@ -40,6 +40,20 @@ def test_lifecycle_plan_passes_bounded_canonical_cursor(monkeypatch):
                         "query": {"canonical_after_storage_day": ["2026-08-04"]}, "body": None}
 
 
+def test_lifecycle_run_cursor_and_degraded_exit_status(monkeypatch):
+    observed = []
+
+    def fake_urlopen(request, timeout):
+        observed.append(json.loads(request.data.decode("utf-8")))
+        return _Response({"status": "degraded", "failure_count": 1,
+                          "outcomes": [{"status": "failed", "error": "checksum mismatch"}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(["--no-audit-log", "data", "market-structure", "lifecycle-run", "--execute",
+                 "--canonical-after-storage-day", "2026-08-04"]) == 1
+    assert observed[0]["canonical_after_storage_day"] == "2026-08-04" and observed[0]["execute"] is True
+
+
 def test_data_ingest_candles_uses_explicit_mutation_contract(monkeypatch) -> None:
     observed = {}
 

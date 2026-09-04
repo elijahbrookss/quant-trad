@@ -80,6 +80,19 @@ def test_canonical_retention_environment_bindings(monkeypatch, request):
     assert policy.archive_filesystem_budget_bytes == 654321
 
 
+def test_canonical_executor_environment_bindings(monkeypatch, request):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    values = {"EXECUTION_ENABLED": True, "MAX_STEPS_PER_RUN": 3, "MAX_RUN_SECONDS": 120,
+              "EXECUTION_STATEMENT_TIMEOUT_MS": 4321, "MAX_PAGE_ROWS": 17,
+              "MAX_PAGE_LOGICAL_BYTES": 100000, "MAX_VERIFICATION_BYTES": 900000,
+              "MAX_VERIFICATION_OBJECTS": 80, "MAX_VERIFICATION_PAGES": 99}
+    for name, value in values.items():
+        monkeypatch.setenv("QT_MARKET_DATA_LIFECYCLE_CANONICAL_" + name, str(value).lower())
+    policy = get_settings(force_reload=True).market_data_lifecycle.canonical_retention
+    for name, value in values.items():
+        assert getattr(policy, name.lower()) == value
+
+
 def test_explicit_dotenv_disable_prevents_repository_file_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

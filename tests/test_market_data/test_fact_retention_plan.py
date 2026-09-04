@@ -41,6 +41,11 @@ def _plan(rows, *, policy=None, filesystem=None):
     ("archive_min_free_bytes", -1), ("max_candidate_partitions", 129),
     ("max_inventory_partitions", 10001), ("plan_statement_timeout_ms", 60001),
     ("max_plan_seconds", 301),
+    ("execution_enabled", "true"), ("execution_enabled", 1),
+    ("max_steps_per_run", True), ("max_steps_per_run", 129), ("max_run_seconds", 0),
+    ("execution_statement_timeout_ms", 60001), ("max_page_rows", 0),
+    ("max_page_logical_bytes", 0), ("max_verification_bytes", False),
+    ("max_verification_objects", 0), ("max_verification_pages", 100001),
     ("hot_days_by_fact_type", {"market.trade": True}),
     ("hot_days_by_fact_type", {"market.*": 7}), ("hot_days_by_fact_type", []),
 ])
@@ -77,7 +82,9 @@ def test_hot_retention_uses_complete_placement_days(age, blocker):
     assert action["blockers"] == ([blocker] if blocker else [])
     assert action["eligible_before"] == (TODAY - timedelta(days=30)).isoformat()
     assert action["requires_execution_recheck"] is True
-    assert plan["execution_available"] is False
+    assert plan["execution_available"] is True
+    assert plan["execution_enabled"] is False
+    assert plan["execution_blockers"] == ["canonical_retention_execution_disabled"]
 
 
 def test_mixed_day_waits_for_longest_family_window_even_under_pressure():
@@ -168,3 +175,11 @@ def test_hot_budget_pressure_begins_at_the_configured_boundary():
     assert plan["pressure"]["hot_payload_excess_bytes"] == 0
     assert plan["pressure"]["hot_payload_budget_reached"] is True
     assert "prioritize_verified_window_eligible_hot_reclamation" in plan["pressure"]["actions"]
+
+
+def test_publication_headroom_includes_encoder_and_atomic_publication_temporary():
+    policy = CanonicalFactRetentionPolicy(archive_min_free_bytes=1000, max_page_logical_bytes=100)
+    plan = _plan([_row(), _row(state="verified")], policy=policy,
+                 filesystem=_filesystem(available_bytes=1399))
+    assert plan["actions"][0]["blockers"] == ["archive_publication_headroom_insufficient"]
+    assert plan["actions"][1]["eligible"] is True

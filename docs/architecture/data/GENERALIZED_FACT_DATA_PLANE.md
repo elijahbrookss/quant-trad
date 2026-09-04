@@ -31,6 +31,7 @@ code_paths:
   - portal/backend/db/fact_storage_schema.py
   - portal/backend/db/session.py
   - portal/backend/service/market
+  - portal/backend/service/market/canonical_retention.py
   - portal/backend/service/research
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/candles.py
@@ -402,10 +403,72 @@ operator review/capacity; pressure never shortens windows, skips evidence, delet
 unarchived data, changes collection policy, or treats pin release as permission
 to break cold lineage. Candidate byte estimates are explicitly metadata-only.
 
-The planner is wired; canonical scheduled/CLI **execution is not yet wired** and
-is reported as `execution_available: false`, independently of the existing raw
-lifecycle execution gate. Bounded execution and complete transitive dependency
-admission remain required before activating canonical retention.
+The executor is wired through the same lifecycle API, CLI and supervisor. Plans
+report `execution_available: true` separately from `execution_enabled`. The
+canonical `execution_enabled` flag defaults false, independently of the existing
+outer lifecycle flag: existing raw-retention enablement must not activate this
+new path. Complete transitive dependency admission and the production rollout
+checks remain required before activation.
+
+### Bounded Canonical Execution
+
+`CanonicalFactRetentionExecutor` invokes the existing archive and reclamation
+owners **after** the raw lifecycle exclusive-lock context exits. It does not
+upgrade that lock or invent a second archive/deletion implementation. Manual
+mutation requires `lifecycle-run --execute`, the outer lifecycle execution flag,
+and the canonical execution flag. The supervisor uses those same policy gates.
+With either mutation gate off, canonical work remains read-only or disabled.
+
+Every iteration reads fresh candidate/progress metadata and performs at most
+one next-phase action. Defaults are four iterations and a 60-second cooperative
+run budget. Empty/blocked candidate-page scans consume an iteration too. A
+fresh per-partition guard, under the owner's row lock, repeats database-time
+cutoffs, **all** family windows/admission, and writable filesystem/headroom
+checks; a previously returned plan cannot authorize a write. The final physical
+reclaimer independently repeats its exact-relation, pin and current-byte gates.
+
+The default page bounds are 10,000 rows and 64 MiB logical bytes, with a
+128 MiB encoded-file ceiling. Publication requires reserve for both the encoder
+file and atomic object-store temporary (256 MiB at defaults), in addition to
+the configured free-space reserve. The plan reports insufficient publication
+headroom before attempting the operation. Byte budgets are admission targets,
+not filesystem quotas: concurrent collectors/other programs can consume space.
+An out-of-space operation must fail without acknowledging a partial object.
+
+Each deep-dependency/final-verification operation defaults to 4 GiB of hashed
+objects, 10,000 distinct objects, and 1,000 canonical pages; existing raw decoder
+row/logical-byte/group bounds still apply. These are per-operation limits, not
+a claim that decoding, encoding, and repeated verification use a single byte
+counter. The iteration limit bounds their repetition. All execution fields have
+typed `QT_MARKET_DATA_LIFECYCLE_CANONICAL_*` environment bindings. Lowering limits
+below existing page sizes fails explicitly; it does not partially verify pages.
+
+Archive SQL defaults to a 5-second statement timeout, capped by the remaining
+run budget when starting a step. Reclamation retains its stricter 1-second SQL
+and 10-second exclusive-handoff bounds. Deadline/stop checks run between phases,
+decoded raw records, canonical envelopes, catalog pages and checksum blocks.
+The supervisor supplies its stop request, allowing an in-flight transaction to
+roll back before acknowledgement/drop commit. This is cooperative cancellation:
+connection checkout, kernel I/O, codec calls and commit/fsync are not hard
+wall-clock interrupt guarantees. An interrupted unacknowledged publication is
+reused safely on retry; acknowledged pages/receipts survive worker restarts.
+
+The worker retains only an in-process **scan hint**, never an executable plan.
+It revisits a partially processed day, advances beyond a failed/busy day or
+fully blocked candidate page so later days are not starved, and wraps at scan
+completion. A process restart may repeat the bounded inventory scan, but resumes
+archive work from committed partition/page/verification records. Manual callers
+can supply `lifecycle-run --canonical-after-storage-day YYYY-MM-DD`; returned
+`next_after_storage_day` and supervisor snapshots expose this hint. Losing it
+does not lose storage progress or weaken admission.
+
+Run outcomes distinguish step/time bounds, stop requests, deferred conflicts,
+blocked scans and failures. Genuine step failures log their storage day/action,
+return an error outcome and make the lifecycle result degraded; `lifecycle-run`
+prints that result and exits nonzero. Progress remains
+in the existing storage tables; the raw `lifecycle-events` ledger does not claim
+to contain canonical phase events. No new scheduling/persistence authority is
+introduced, and no ingestion definition or enablement is changed.
 
 ### Canonical Archive Staging
 
@@ -635,8 +698,9 @@ it does not seal a partition, publish files, update progress, or delete anything
 An explicit `eligible_before` placement-day cutoff must be no later than the
 database's current UTC day; the target must be strictly older than that cutoff.
 Per-family hot windows and budget/pressure planning now have an inspectable CLI
-surface. Scheduler/CLI execution and complete dependency admission remain
-rollout gates.
+surface. The lifecycle executor supplies these windows under the partition lock.
+Complete dependency admission and reviewed production activation remain rollout
+gates; wiring the executor is not itself production permission.
 
 Only standalone candle, funding, open-interest, reference-price, reserve-balance,
 and trade facts are currently admitted. Any other family in the physical day

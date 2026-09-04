@@ -251,8 +251,11 @@ this does not introduce a spool-first publication lane.
 This safety choice can retain raw evidence beyond an ordinary age window, and
 the permanent canonical index still grows on NVMe. Budget pressure must report
 that cost rather than expire unarchived evidence or silently disable collection.
-Minimal dependency closure and bounded execution remain activation requirements;
-the existence of backlog protection alone does not complete those proofs.
+The canonical bounded executor is now wired through the existing lifecycle
+service, outside its raw exclusive fence, with a separate default-off execution
+gate and durable page/verification resume state. Complete dependency closure and
+representative production validation remain activation requirements; the
+existence of backlog protection or orchestration alone does not complete them.
 
 ### Operational Consequences
 

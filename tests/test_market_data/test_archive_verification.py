@@ -82,6 +82,22 @@ def test_mutation_during_checksum_cannot_get_a_verified_stamp(tmp_path, monkeypa
     assert batch.objects == {}
 
 
+def test_cooperative_run_budget_interrupts_hashing_before_receipting(tmp_path):
+    batch, path, checksum = _fixture(tmp_path)
+    checks = 0
+
+    def budget():
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise RuntimeError("test run budget exhausted")
+
+    batch.check_budget = budget
+    with pytest.raises(RuntimeError, match="run budget exhausted"):
+        batch.verify(path.name, checksum)
+    assert checks == 2 and batch.objects == {}
+
+
 @pytest.mark.parametrize("name", ["max_pages", "max_objects", "max_bytes"])
 @pytest.mark.parametrize("value", [0, -1, True, "1000"])
 def test_verification_limits_are_positive_explicit_integers(name, value):

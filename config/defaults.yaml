@@ -109,6 +109,15 @@ market_data_lifecycle:
     max_inventory_partitions: 4096
     plan_statement_timeout_ms: 5000
     max_plan_seconds: 15
+    execution_enabled: false
+    max_steps_per_run: 4
+    max_run_seconds: 60
+    execution_statement_timeout_ms: 5000
+    max_page_rows: 10000
+    max_page_logical_bytes: 67108864
+    max_verification_bytes: 4294967296
+    max_verification_objects: 10000
+    max_verification_pages: 1000
 
 bot_runtime:
   mode: backtest

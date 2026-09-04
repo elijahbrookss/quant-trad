@@ -185,6 +185,37 @@ def test_canonical_inventory_never_runs_inside_raw_exclusive_fence(tmp_path):
     assert repository.lock_entered is True
 
 
+def test_canonical_execution_runs_after_raw_exclusive_fence_is_released(tmp_path):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+    from contextlib import contextmanager
+    repository = _LifecycleRepository()
+    service = _service(repository)
+    repository.list_compaction_manifests = lambda **_: []
+    repository.list_archive_expiration_candidates = lambda **_: []
+
+    @contextmanager
+    def lock(**_):
+        repository.lock_entered = True
+        try:
+            yield
+        finally:
+            repository.lock_entered = False
+
+    repository.lifecycle_lock = lock
+    observed = []
+
+    def execute(**kwargs):
+        assert not repository.lock_entered
+        observed.append(kwargs)
+        return {"outcomes": [{"status": "partition_reclaimed", "reclaimed_bytes": 4096}]}
+
+    service.canonical_executor = SimpleNamespace(run=execute)
+    policy = MarketStorageLifecyclePolicy(execution_enabled=True,
+        canonical_retention=CanonicalFactRetentionPolicy(execution_enabled=True))
+    result = service.run(policy=policy, execute=True, storage_root=tmp_path)
+    assert observed[0]["execute"] is True and result["outcomes"][0]["reclaimed_bytes"] == 4096
+
+
 def test_archive_expiration_rechecks_new_retention_pin_before_deletion() -> None:
     repository = _PinnedDuringExecutionRepository()
     item = {

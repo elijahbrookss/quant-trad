@@ -1,6 +1,6 @@
 """Default-disabled, one-partition physical reclamation after cold admission.
 
-This primitive is intentionally not wired to the scheduler or CLI yet. It never
+The lifecycle executor supplies explicit policy/step bounds. This owner never
 deletes canonical headers, archive bytes, dataset bindings, or dependency pins.
 """
 from __future__ import annotations
@@ -138,11 +138,12 @@ class PostgresCanonicalFactReclamationRepository:
         self._assert_archive_admission()
         with self.archive.database.session() as session:
             self._timeouts(session)
-            partition = self.archive._lock(session, day)
+            partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
             self._eligibility(session, partition, eligible_before=eligible_before)
             already_reclaimed = partition["state"] == "reclaimed"
             relation_oid = self._relation(session, day, reclaimed=already_reclaimed)
-            objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits)
+            objects = ArchiveVerificationBatch(self.archive.object_store, limits=verification_limits,
+                                               check_budget=self.archive.check_budget)
             evidence = self.archive._partition_evidence(session, partition, limits=verification_limits, objects=objects)
             if evidence["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
@@ -156,6 +157,7 @@ class PostgresCanonicalFactReclamationRepository:
 
         started = monotonic()
         def check_budget():
+            self.archive._check_budget()
             if monotonic() - started >= self.limits.max_handoff_seconds:
                 raise RuntimeError(f"canonical_reclaim_handoff_budget_exceeded: storage_day={day}")
 
@@ -168,7 +170,7 @@ class PostgresCanonicalFactReclamationRepository:
                 raise MarketStorageLifecycleBusyError(f"canonical_reclaim_lifecycle_busy: storage_day={day}; retry later")
             # _lock's shared acquisition is reentrant on THIS connection's
             # already-owned exclusive fence, never a second-connection wait.
-            partition = self.archive._lock(session, day)
+            partition = self.archive._lock(session, day, statement_timeout_ms=self.limits.statement_timeout_ms)
             self._eligibility(session, partition, eligible_before=eligible_before)
             if partition["state"] == "reclaimed":
                 self._relation(session, day, reclaimed=True)

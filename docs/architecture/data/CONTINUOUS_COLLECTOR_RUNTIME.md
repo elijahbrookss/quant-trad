@@ -14,6 +14,7 @@ tags:
   - retention
   - timescaledb
 code_paths:
+  - portal/backend/service/market/canonical_retention.py
   - src/core/settings.py
   - src/data_providers/structured_facts.py
   - src/market_data/instrument_enrollment.py
@@ -312,10 +313,13 @@ Continue a bounded inspection using `lifecycle-plan
 --canonical-after-storage-day YYYY-MM-DD` and the returned cursor. Full storage
 totals are separate from paginated candidate details.
 
-Canonical scans run outside the raw exclusive fence. The response explicitly
-marks canonical execution unavailable until its orchestrator and complete
-dependency proofs are finished. The existing raw execution flag does not
-activate this new path. See
+Canonical scans and execution run outside the raw exclusive fence. The
+orchestrator advances bounded seal/stage/verify/reclaim steps, using committed
+page/receipt progress after restarts. It has a separate default-false canonical
+execution flag; the existing raw execution flag alone does not activate it.
+The supervisor passes stop requests and exposes the canonical result/cursor in
+its last-run snapshot. Unsupported dependency families still block their whole
+physical day; complete closure and production proof remain activation gates. See
 [Generalized Fact Data Plane](GENERALIZED_FACT_DATA_PLANE.md#canonical-retention-planning)
 for cutoff, budget, pressure, verification, and physical-reclamation contracts.
 
@@ -325,9 +329,12 @@ Operator surfaces are:
   blocker report;
 - `qt data market-structure lifecycle-run` for the same dry run;
 - `qt data market-structure lifecycle-run --execute` only after the policy gate
-  is enabled;
-- `qt data market-structure lifecycle-events` for immutable deletion,
-  compaction, compression, skip, and failure evidence.
+  is enabled (canonical work also requires its separate execution flag);
+- `qt data market-structure lifecycle-run --canonical-after-storage-day YYYY-MM-DD`
+  to resume a bounded canonical candidate scan; without `--execute` this stays dry;
+- `qt data market-structure lifecycle-events` for immutable raw-object deletion,
+  compaction, compression, skip, and failure evidence. Canonical phase progress
+  remains in its partition/page/receipt tables and structured run outcomes.
 - `qt data collectors create-structured` for a reviewed scheduled structured
   Fact definition; `--enabled` is required to grant collection authority.
 

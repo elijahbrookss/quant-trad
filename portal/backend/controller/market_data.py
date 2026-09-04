@@ -355,6 +355,7 @@ class MarketStorageLifecycleRunRequest(BaseModel):
     execute: bool = False
     storage_root: Optional[str] = None
     owner_id: Optional[str] = None
+    canonical_after_storage_day: date | None = None
 
 
 class MarketStructureRetentionPinRequest(BaseModel):
@@ -1071,6 +1072,8 @@ def run_market_storage_lifecycle(
         }
         if req.storage_root:
             kwargs["storage_root"] = Path(req.storage_root)
+        if req.canonical_after_storage_day is not None:
+            kwargs["canonical_after_storage_day"] = req.canonical_after_storage_day
         return market_storage_lifecycle_service.run(**kwargs)
     except MarketStorageLifecycleBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
