@@ -21,8 +21,8 @@ from .market_lifecycle import _LIFECYCLE_LOCK_NAME, MarketStorageLifecycleBusyEr
 logger = logging.getLogger(__name__)
 
 # Standalone facts, book states and response/flow/basis/derivative composites
-# have lossless dependency admission. Normalized windows still need their
-# transitive proof. A mixed physical day must pass for EVERY family in it.
+# have lossless dependency admission. Spec-bound normalized windows use the
+# recursive v12 proof. A mixed physical day must pass for EVERY family in it.
 _ADMITTED_FACT_TYPES = SELF_CONTAINED_FACT_TYPES | frozenset({
     "market.trade", "market.trade_flow", "market.trade_flow_feature",
     "market.l2_book", "market.bbo", "market.depth_observation",
@@ -34,7 +34,8 @@ _ADMITTED_FACT_TYPES = SELF_CONTAINED_FACT_TYPES | frozenset({
 
 def unproven_reclamation_fact_types(fact_types):
     """Shared admission status for planning and the final destructive gate."""
-    return sorted(set(fact_types) - _ADMITTED_FACT_TYPES)
+    return sorted(family for family in set(fact_types) - _ADMITTED_FACT_TYPES
+                  if not family.startswith("market.normalized."))
 
 
 @dataclass(frozen=True)

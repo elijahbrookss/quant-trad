@@ -112,9 +112,16 @@ def test_plan_next_phase_comes_from_acknowledged_progress(state, progress, actio
 
 
 def test_unproven_family_is_visible_and_blocks_whole_day():
-    plan = _plan([_row(fact_types=["market.trade", "market.normalized.funding_rate"])])
+    plan = _plan([_row(fact_types=["market.trade", "market.normalized.funding_rate", "market.unknown_composite"])])
     assert plan["actions"][0]["blockers"] == ["canonical_dependency_proof_required"]
-    assert plan["actions"][0]["unproven_fact_types"] == ["market.normalized.funding_rate"]
+    assert plan["actions"][0]["unproven_fact_types"] == ["market.unknown_composite"]
+
+
+def test_normalized_family_can_plan_archival_but_still_needs_deep_proof():
+    plan = _plan([_row(fact_types=["market.trade", "market.normalized.funding_rate"])])
+    assert plan["actions"][0]["blockers"] == []
+    assert plan["actions"][0]["action"] == "seal_partition"
+    assert plan["metadata_eligible_reclaim_bytes"] == 0
 
 
 def test_hdd_pressure_blocks_new_publication_not_verified_hot_reclamation():

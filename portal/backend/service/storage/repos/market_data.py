@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -470,6 +471,11 @@ _REVISION_PRESERVING_TYPED_SCHEMAS = frozenset({
 
 def _preserves_canonical_revision_history(contract_version: str) -> bool:
     normalized = str(contract_version or "").strip().lower()
+    if normalized.startswith(f"{NORMALIZED_FACT_VERSION}/"):
+        # Dynamic schemas can be loaded by the canonical reader after this
+        # selection decision. Never silently take a latest-only first freeze
+        # just because this process has not hydrated that registered spec yet.
+        return re.fullmatch(r"market\.normalized_feature\.v1/nsp_[0-9a-f]{31}", normalized) is not None
     try:
         get_fact_payload_schema(normalized)
     except ValueError:
@@ -477,7 +483,6 @@ def _preserves_canonical_revision_history(contract_version: str) -> bool:
     return (
         (normalized not in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS
          or normalized in _REVISION_PRESERVING_TYPED_SCHEMAS)
-        and not normalized.startswith(f"{NORMALIZED_FACT_VERSION}/")
     )
 
 
@@ -4088,13 +4093,19 @@ class PostgresMarketDataRepository:
                     }
                 )
                 if fact_type.startswith("market.normalized."):
+                    from market_data.canonical_adapters import decode_normalized_feature_record
+                    from .fact_normalization_admission import collect_normalized_history_archive_refs
                     typed_records = [
-                        record
+                        decode_normalized_feature_record(record) if isinstance(record, CanonicalFactRecord) else record
                         for record in records
-                        if isinstance(record, TypedFeatureRecord)
                     ]
+                    if any(not isinstance(record, TypedFeatureRecord) for record in typed_records):
+                        raise RuntimeError("market_dataset_normalization_invalid: typed or canonical normalized records required")
+                    if all(isinstance(record, CanonicalFactRecord) for record in records):
+                        archive_refs.update(collect_normalized_history_archive_refs(session, rows=canonical_rows,
+                            object_store=canonical_fact_storage_repository.object_store_factory()))
                     spec_ids = {record.fact.spec_id for record in typed_records}
-                    if len(typed_records) != len(records) or len(spec_ids) != 1:
+                    if len(spec_ids) != 1:
                         raise RuntimeError(
                             "market_dataset_normalization_invalid: one typed spec per output series required"
                         )

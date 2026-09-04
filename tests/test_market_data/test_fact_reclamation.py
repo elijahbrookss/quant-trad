@@ -38,7 +38,7 @@ def test_invalid_requests_fail_before_accessing_storage(params):
 
 
 @pytest.mark.parametrize("fact_type", [
-    "market.normalized.example", "unknown.family",
+    "unknown.family",
 ])
 def test_incomplete_transitive_proofs_block_reclamation(fact_type):
     def execute(statement, *_):
@@ -54,7 +54,8 @@ def test_incomplete_transitive_proofs_block_reclamation(fact_type):
 
 def test_response_admission_does_not_bypass_unproven_families_in_a_mixed_day():
     assert unproven_reclamation_fact_types(["market.market_response", "market.trade"]) == []
-    assert unproven_reclamation_fact_types(["market.market_response", "market.normalized.example"]) == ["market.normalized.example"]
+    assert unproven_reclamation_fact_types(["market.market_response", "market.normalized.example"]) == []
+    assert unproven_reclamation_fact_types(["market.normalized.example", "unknown.family"]) == ["unknown.family"]
 
 
 @pytest.mark.parametrize("changes", [

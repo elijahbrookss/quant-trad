@@ -48,6 +48,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_flow_admission.py
   - portal/backend/service/storage/repos/fact_flow_feature_admission.py
   - portal/backend/service/storage/repos/fact_response_admission.py
+  - portal/backend/service/storage/repos/fact_normalization_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
@@ -515,9 +516,9 @@ raw source objects with these holds also remain protected; this can increase
 HDD retention compared with ordinary age-only expiration.
 
 Staging deliberately leaves the partition `sealed`; exhausting its source is
-not permission to drop it. This owner does not perform reclamation. A normalized page currently fails with
-`canonical_archive_dependency_proof_required`; it is never admitted with an
-empty dependency set. These gates must be completed before retention activation.
+not permission to drop it. This owner does not perform reclamation. A normalized
+page requires the recursive input-window proof below and cannot be admitted with
+an unresolved, empty dependency set. Reviewed activation remains separate.
 
 ### Exact Raw-Revision Evidence
 
@@ -886,8 +887,7 @@ frozen history/known-at/latest reads and re-freeze identity, and reject corrupt
 cold aggregate bytes before feature DROP. v9 feature pages must be explicitly
 reverified under v10 to gain canonical source edges; original page bytes and
 older receipts remain unchanged. This family joins the default-disabled gate;
-Response admission is described below; normalized-window proofs still gate
-their physical days.
+Response and normalized-window admission are described below.
 
 Version `market.canonical_archive_verification.v11` strengthens response archive
 publication with canonical source preservation. The declared flow-feature hash
@@ -952,8 +952,53 @@ blocks the drop; dry-run leaves the table unchanged and retry after successful
 reclamation is idempotent. Older v10 receipts remain stale until explicit
 reverification supplies the v11 canonical source edges. Such an upgrade retains
 the original page bytes, existing raw bindings and old receipt; incomplete
-original raw bindings are not silently replaced. Normalized windows remain the
-only current-family dependency gate; all destructive execution defaults off.
+original raw bindings are not silently replaced. All destructive execution
+defaults off.
+
+Version `market.canonical_archive_verification.v12` admits spec-bound normalized
+history through the same lossless-evidence boundary. It verifies the full stored
+spec hash, output schema, source family/instrument/timeframe and a strictly older
+input watermark. Every canonical revision in the closed recorded input window
+is retained at that watermark and output known-at, including invalidations and
+same-material deliveries. The three diagnostic material witnesses must resolve
+inside that window; distinct source material must cover the recorded input count.
+These are preservation checks, not reconstruction of the producer's original
+selection or recertification of its value, warmup status or fingerprint.
+
+Nested normalized inputs use an iterative, strictly decreasing-watermark graph.
+The shared derived/book/trade owners preserve transitive canonical and raw
+evidence. Response inputs use output known-at as a conservative window end,
+because typed response time is bucket-start while canonical time is post-book.
+Immutable normalization specs and source catalogs stay in PostgreSQL; source
+payloads may move independently between hot and verified cold storage. Dynamic
+normalized legacy hashes use verified cold aliases, never index-only proof.
+Root, unique-source and cumulative window-edge budgets bound the graph; batched
+lookups, a cumulative retained-payload byte budget and hydration/deadline limits
+fail loudly when a smaller page is needed. Per-query bounds alone would not
+bound retained memory across nested depth. Larger causal supersets can cost
+additional archive and metadata work.
+
+Normalized freezes now preserve `all_canonical_revisions.v1`, including on a
+process's first read of a dynamically registered schema. Typed records are only
+an adapter for normalization-reference metadata, not a latest-only replacement
+for frozen history. The same Dataset must still contain the covering transitive
+source ranges. Old latest-only normalized Datasets require re-freezing. Current
+proof receipts, full source/raw integrity and pin checks remain required before
+physical reclamation; a normalized family name alone grants no admission.
+
+Disposable nested-normalization tests physically reclaim both source and output
+partitions in hot-first and cold-first order. They retain an interior input not
+named by the diagnostic witnesses, exclude future-known source revisions, block
+DROP on corrupt cold inputs, and compare frozen history, causal/latest reads,
+validation and repeated Dataset identity. Dry-run is non-mutating and a repeated
+successful reclamation is idempotent.
+
+The normalized source-bundle regression exposed a validator dispatch defect:
+canonical funding history was sent to the typed-v1 `sample_time` branch, causing
+an attribute error before retention. Scheduled canonical records now use the
+existing observation-time/revision validator; typed-v1 uniqueness checks remain
+unchanged. Regression checks retain same-time invalidations while rejecting
+duplicate versions, excess commit watermarks and altered hashes.
 
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence
@@ -1162,11 +1207,11 @@ Complete dependency admission and reviewed production activation remain rollout
 gates; wiring the executor is not itself production permission.
 
 Standalone candle, funding, open-interest, reference-price, reserve-balance, structured reserve-report,
-trade, trade-flow buckets/features, L2/BBO/depth, futures/spot basis, derivative-state and response facts are currently admitted. Any other family in the
-physical day blocks the **whole day**, including remaining composite and normalized facts
-whose complete dependency closures are not yet proven. This is a temporary
-fail-closed compatibility gate, not permission to omit those rows or expire
-their evidence. It cannot be lifted merely because a partition is `verified`.
+trade, trade-flow buckets/features, L2/BBO/depth, futures/spot basis, derivative-state,
+response and spec-bound normalized facts are currently admitted with their full
+dependency proofs. Any unknown family in a physical day blocks the **whole day**.
+This fail-closed compatibility gate is not permission to omit those rows or
+expire their evidence. It cannot be lifted merely because a partition is `verified`.
 
 Reclamation repeats current-byte verification under the shared lifecycle fence,
 then releases that transaction before trying an exclusive transaction fence.

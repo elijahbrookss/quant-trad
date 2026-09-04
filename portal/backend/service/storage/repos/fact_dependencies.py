@@ -83,6 +83,28 @@ def resolve_causal_window_revisions(session, *, requests, reader, max_rows, max_
     return sources, dict(selections)
 
 
+def collect_source_history_archive_refs(session, *, rows, object_store):
+    """Bind raw leaves of an already-resolved canonical source closure."""
+    from market_data.archive import RawArchiveReadLimits
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from .fact_book_prefix import resolve_book_prefixes_for_read
+    from .fact_flow_admission import collect_trade_history_archive_refs
+    references = collect_trade_history_archive_refs(session,
+        rows=[row for row in rows if row["fact_type"] in {"market.trade", "market.trade_flow"}], object_store=object_store)
+    objects = ArchiveVerificationBatch(object_store,
+        limits=ArchiveVerificationLimits(max_objects=10_000, max_bytes=4 * 1024**3))
+    books = resolve_book_prefixes_for_read(session,
+        rows=[row for row in rows if row["fact_type"] in {"market.l2_book", "market.bbo", "market.depth_observation"}],
+        object_store=object_store, byte_verifier=objects, limits=RawArchiveReadLimits(),
+        max_mapping_rows=50_000, max_objects=objects.limits.max_objects)
+    for identity, reference in books.items():
+        if references.setdefault(identity, reference) != reference:
+            raise RuntimeError(f"canonical_history_dependency_conflict: target_id={identity}")
+    if len(references) > objects.limits.max_objects:
+        raise RuntimeError("canonical_history_object_budget_exceeded: reduce Dataset window")
+    return references
+
+
 def read_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):
     """Size the bounded identity set before transferring hot JSON/decoding cold.
 

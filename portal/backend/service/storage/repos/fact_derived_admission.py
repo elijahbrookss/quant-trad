@@ -11,7 +11,7 @@ import re
 from sqlalchemy import text
 
 from market_data.canonical_adapters import canonicalize_basis_feature, decode_bbo_feature_record
-from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS, legacy_material_alias, record_from_storage_row
+from market_data.canonical_storage import legacy_material_evidence_key, legacy_material_alias, record_from_storage_row
 from market_data.fact_archive import FactArchiveLimits
 from market_data.market_state import derive_basis_features
 
@@ -46,7 +46,7 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
         if check_budget is not None:
             check_budget()
         batch = [{**request, "known_at": request["known_at"].isoformat(),
-                  "evidence_key": LEGACY_MATERIAL_EVIDENCE_KEYS.get(request["fact_type"])}
+                  "evidence_key": legacy_material_evidence_key(request["fact_type"])}
                  for request in requests[offset:offset + 128]]
         found = session.execute(text("""
             WITH requested AS (
@@ -190,6 +190,7 @@ def resolve_derived_source_revisions(session, *, rows, max_rows, **kwargs):
     from .fact_flow_admission import resolve_trade_flow_source_revisions
     from .fact_flow_feature_admission import resolve_flow_feature_source_revisions
     from .fact_response_admission import resolve_response_source_revisions
+    from .fact_normalization_admission import resolve_normalized_source_revisions
     resolvers = {"market.futures_spot_relationship": resolve_basis_source_revisions,
                  "market.derivative_state": resolve_derivative_source_revisions,
                  "market.trade_flow": resolve_trade_flow_source_revisions,
@@ -199,6 +200,9 @@ def resolve_derived_source_revisions(session, *, rows, max_rows, **kwargs):
     for row in rows:
         if row["fact_type"] in resolvers:
             grouped[row["fact_type"]].append(row)
+        elif row["fact_type"].startswith("market.normalized."):
+            grouped["normalized"].append(row)
+    resolvers["normalized"] = resolve_normalized_source_revisions
     sources = {}
     for fact_type, group in grouped.items():
         found = resolvers[fact_type](session, rows=group, max_rows=max_rows, **kwargs)

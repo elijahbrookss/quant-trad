@@ -322,8 +322,8 @@ preserves deduplicated snapshot/update material without inventing delivery IDs;
 arbitrary correction subsets are not searched. Total derivation input visits
 are bounded as well as source edges. Feature freezes preserve all revisions,
 and v9 receipts require explicit additive reverification before reclamation.
-The remaining normalized families and production activation still
-require their separate proofs and reviewed rollout.
+Normalized admission is described below; production activation still requires
+its reviewed rollout.
 
 The v11 response archive proof first preserves named canonical flow/book/trade
 witnesses and full causal windows. It reuses book position lookup without
@@ -350,7 +350,21 @@ the DROP. Physical disposable tests compare actual hot versus cold research
 reads and Dataset identity, reject corrupt cold inputs, and prove idempotent
 reclamation and explicit additive upgrade of older compatible proof receipts.
 This does not change ingestion policy, recompute Facts or introduce an alternate
-book engine. Normalized-window admission and reviewed activation remain separate.
+book engine. Reviewed activation remains separate.
+
+The v12 proof extends lossless preservation to normalized outputs. Up to three
+diagnostic hashes cannot represent a complete normalization window: retain every
+causal canonical revision in the recorded source window, verify the named
+witnesses and full immutable spec, and recursively preserve nested normalized
+inputs plus their derived/raw dependencies. Strictly decreasing commit bounds,
+batched lookups, cumulative edge budgets and byte/deadline limits bound this work.
+Preserve original values, invalidations, statuses and fingerprints without
+guessing unrecorded materialization bounds or rerunning formulas at archival time.
+Specs/catalogs remain durable PostgreSQL evidence, while source payloads can move
+to verified cold pages. All-revision normalized freezes use this same closure and
+still require covering source series in the Dataset; older latest-only freezes
+must be re-frozen. This can retain a larger causal superset and incur repeated
+window hydration, an explicit bounded cost rather than invented source identity.
 
 Book reclamation additionally binds exact canonical source revisions for derived
 BBO/depth facts, checks immutable product/validity scope, and validates checkpoint
@@ -372,9 +386,8 @@ only through explicit current-version verification without changing historical
 bytes or receipts. Typed v1 reading accepts the serializer's exact retained
 28-digit OI log change as well as the 38-digit in-memory calculation; this repairs
 a reader/serializer mismatch without rehashing or upgrading historical evidence.
-Remaining normalized/composite dependency closure remains a separate admission
-gate; admitting book, basis or derivative data does not authorize deployment or
-retention activation.
+Unknown families remain behind the whole-day admission gate. Admitting current
+families does not authorize deployment or retention activation.
 
 ### Operational Consequences
 

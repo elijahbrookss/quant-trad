@@ -117,8 +117,10 @@ contradictory fingerprints at one watermark, or rematerialize identical inputs.
 Alias catalog entries locate candidates but cannot prove a witness without its
 actual payload. Historical unindexed provenance and retired-spec reference
 checks retain their existing meaning through logged, batched cold scans; these
-rare paths are not constant-cost lookups. Destructive retention of normalized
-outputs still requires separate complete input-window dependency admission.
+rare paths are not constant-cost lookups. Normalized retention and all-revision
+freezing use the [generalized input-window admission proof](GENERALIZED_FACT_DATA_PLANE.md#exact-raw-revision-evidence):
+full causal windows, immutable specs and nested source closure, not just three
+diagnostic witnesses. Destructive execution remains disabled by default.
 
 ### Frozen dataset boundary
 

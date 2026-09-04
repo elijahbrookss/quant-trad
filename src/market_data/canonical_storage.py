@@ -20,9 +20,15 @@ LEGACY_MATERIAL_EVIDENCE_KEYS = {
 }
 
 
+def legacy_material_evidence_key(fact_type: str) -> str | None:
+    if fact_type.startswith("market.normalized."):
+        return "_qt_normalization_evidence"
+    return LEGACY_MATERIAL_EVIDENCE_KEYS.get(fact_type)
+
+
 def legacy_material_alias(row: Mapping[str, Any]) -> dict[str, Any] | None:
     """Derive one typed-compatibility lookup witness from canonical provenance."""
-    key = LEGACY_MATERIAL_EVIDENCE_KEYS.get(str(row["fact_type"]))
+    key = legacy_material_evidence_key(str(row["fact_type"]))
     if key is None:
         return None
     evidence = row["provenance"].get(key)

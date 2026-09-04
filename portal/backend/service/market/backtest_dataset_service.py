@@ -1016,7 +1016,12 @@ def validate_frozen_dataset_series(
             "start": iso_utc(records[0].fact.open_time),
             "end_exclusive": iso_utc(records[-1].fact.close_time),
         }
-    elif fact_type in {OPEN_INTEREST_FACT_TYPE, FUNDING_RATE_FACT_TYPE}:
+    elif fact_type in {OPEN_INTEREST_FACT_TYPE, FUNDING_RATE_FACT_TYPE} and not all(
+        isinstance(record, CanonicalFactRecord) for record in records
+    ):
+        # Typed v1 samples are unique per scheduled instant. Canonical history
+        # instead uses observation_time and legitimately includes revisions at
+        # that same instant; validate it through the generic revision path.
         previous_sample: datetime | None = None
         for record in records:
             fact = record.fact

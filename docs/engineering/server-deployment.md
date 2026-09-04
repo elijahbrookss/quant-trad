@@ -509,12 +509,13 @@ or clearing the expected UUID is not a recovery procedure.
 
 ### Canonical Retention Rollout Gate
 
-The generalized retention executor is implemented but defaults off. Its current
-whole-day dependency gate still excludes normalized families whose
-complete closure is not yet admitted. The current family proofs are listed in
+The generalized retention executor is implemented but defaults off. Current
+families, including spec-bound normalized windows, require complete dependency
+proofs; unknown families block the whole physical day. Those proofs are listed in
 the [generalized fact data plane](../architecture/data/GENERALIZED_FACT_DATA_PLANE.md).
-Do not enable unattended retention until those
-proofs and representative disposable stress checks are complete.
+Do not enable unattended retention until representative disposable stress
+checks and the separate operator rollout are complete. Older proof receipts
+require explicit current-version reverification; do not bypass a stale receipt.
 
 After that gate is cleared, use this separate, reviewed rollout order:
 

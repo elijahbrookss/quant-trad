@@ -38,7 +38,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v11"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v12"
 
 
 def _series_catalog(manifest):
@@ -195,6 +195,8 @@ class PostgresCanonicalFactArchiveRepository:
         from .fact_book_admission import verify_book_metadata_and_checkpoints
         from .fact_derived_admission import DERIVED_FACT_TYPES
         from .fact_dependencies import SELF_CONTAINED_FACT_TYPES
+        if not source_rows and any(row["fact_type"].startswith("market.normalized.") for row in rows):
+            raise RuntimeError("canonical_archive_dependency_proof_required: normalized sources were not resolved")
         rows = list({row["id"]: row for row in (*rows, *source_rows)}.values())
         groups = defaultdict(list)
         for row in rows:
@@ -221,12 +223,9 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError(f"canonical_flow_dependency_conflict: target_id={identity}")
         for (series_id, fact_type), group in groups.items():
             self._check_budget()
-            if fact_type in EXACT_RAW_FACT_TYPES or fact_type in DERIVED_FACT_TYPES or fact_type in SELF_CONTAINED_FACT_TYPES:
+            if (fact_type in EXACT_RAW_FACT_TYPES or fact_type in DERIVED_FACT_TYPES or fact_type in SELF_CONTAINED_FACT_TYPES
+                    or fact_type.startswith("market.normalized.")):
                 continue
-            if fact_type.startswith("market.normalized."):
-                # A normalized row's window witnesses need a separate recursive
-                # admission proof; do not pretend its source dependencies are empty.
-                raise RuntimeError(f"canonical_archive_dependency_proof_required: series_id={series_id} fact_type={fact_type}")
             roots = []
             for row in group:
                 alias = legacy_material_alias(row)
