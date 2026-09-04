@@ -44,6 +44,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_book_admission.py
   - portal/backend/service/storage/repos/fact_derived_admission.py
   - portal/backend/service/storage/repos/fact_derivative_admission.py
+  - portal/backend/service/storage/repos/fact_flow_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
@@ -770,6 +771,47 @@ own certified chunks, including control frames without canonical trade rows.
 Uncovered or out-of-scope endpoints fail. This is supporting proof machinery;
 trade-flow reclamation still requires the separate canonical-input and coverage
 admission below and is not enabled by this prefix API alone.
+
+Version `market.canonical_archive_verification.v9` wires this proof into flow
+archive staging and verification. The exact immutable coverage revision must
+match the bucket's source/instrument/product/channel and causal clock; its
+metadata hash and exact opening/last/closing raw witnesses are checked. Shared
+prefix receipts retain every raw position through the declared coverage and
+archive/canonicalization watermarks, including control frames and deliveries
+without their own canonical rows. Existing session holds also protect trailing
+raw evidence. Missing or corrupt selected bytes fail; reverification cannot
+silently substitute newly bound raw objects.
+
+Flow v1 does not name canonical input IDs or a source trade series. Bounded
+captures can use a live update whose provider trade identity was already
+canonicalized from a snapshot or another coverage interval. `ingest_trades`
+deliberately deduplicates that delivery; requiring a matching canonical delivery
+revision would reject genuine retained evidence. Flow archive closure therefore
+keeps **every** candidate canonical trade revision in the exact instrument,
+source and bucket window below the root's commit and known-at clocks, plus the
+complete raw coverage proof. Candidates include other coverage labels, snapshots,
+corrections and invalidations. Each canonical candidate independently binds its
+own exact raw delivery; it is not relabeled as belonging to the root's session.
+The root's clock, not coverage registration time, bounds canonical inputs:
+bounded capture registers coverage before accepting translated trades.
+
+This is deliberately conservative evidence preservation, not an assertion that
+every retained candidate was used or that historical market quality is correct.
+No raw replay becomes a synthetic canonical revision, and no completeness flag
+or known-at timestamp is repaired by storage movement. Explicit zero and partial
+buckets retain their original evidence too. An uncovered historical bucket has
+no raw-session witness and additionally requires reconciliation through the
+existing aggregation owner; retention does not search arbitrary correction
+subsets to make it match. The same batched edge and pre-hydration byte budgets
+apply. Broad/repeated bucket windows can retain more source edges and raw bytes
+than minimal exact-input provenance; pressure must expose that cost.
+
+The disposable flow regression uses the actual parser and ingestion deduplication,
+then stages partial/complete revisions and a zero bucket after the canonical
+snapshot source has physically moved to cold storage. Corrupt cold source bytes
+and a corrupt raw update with no separate canonical row both block publication.
+This staging proof does **not** yet admit flow reclamation: all-revision frozen
+delivery and physical flow-removal equivalence remain separate required gates.
 
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence

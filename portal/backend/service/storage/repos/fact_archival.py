@@ -38,7 +38,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v8"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v9"
 
 
 def _series_catalog(manifest):
@@ -216,6 +216,9 @@ class PostgresCanonicalFactArchiveRepository:
             check_budget=self.check_budget,
             witness_manifest_ids=root_bindings,
         ))
+        for identity, reference in self._flow_references(session, rows, objects, bound_manifest_ids=bound_manifest_ids).items():
+            if references.setdefault(identity, reference) != reference:
+                raise RuntimeError(f"canonical_flow_dependency_conflict: target_id={identity}")
         for (series_id, fact_type), group in groups.items():
             self._check_budget()
             if fact_type in EXACT_RAW_FACT_TYPES or fact_type in DERIVED_FACT_TYPES or fact_type in SELF_CONTAINED_FACT_TYPES:
@@ -280,7 +283,8 @@ class PostgresCanonicalFactArchiveRepository:
         return result, [sources[identity] for identity in sorted(sources)]
 
     def _prepare_book_prefix(self, session, rows, day, *, bound_manifest_ids=None):
-        from .fact_book_prefix import prepare_next_book_prefix
+        from .fact_book_prefix import prepare_next_book_prefix, prepare_next_trade_prefix
+        from .fact_flow_admission import load_trade_flow_roots, trade_flow_prefix_requirements
         progress = prepare_next_book_prefix(
             session, rows=rows, object_store=self.object_store,
             byte_verifier=ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
@@ -294,13 +298,45 @@ class PostgresCanonicalFactArchiveRepository:
             logger.info("canonical_archive_book_prefix_prepared | storage_day=%s chunk_id=%s first_ordinal=%s last_ordinal=%s required_ordinal=%s",
                 day, progress["chunk_id"], progress["first_receive_ordinal"], progress["last_receive_ordinal"], progress["required_receive_ordinal"])
             return {"storage_day": day, **progress}
+        roots = load_trade_flow_roots(session, rows=rows, max_rows=self.max_raw_mapping_rows,
+            max_logical_bytes=self.limits.max_logical_bytes, check_budget=self.check_budget)
+        prefixes, _ = trade_flow_prefix_requirements(roots)
+        progress = prepare_next_trade_prefix(session, prefixes=prefixes, object_store=self.object_store,
+            byte_verifier=ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
+                max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
+            ), check_budget=self.check_budget), limits=self.raw_read_limits,
+            max_mapping_rows=self.max_raw_mapping_rows, max_objects=self.max_dependency_objects,
+            check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids)
+        if progress is not None:
+            logger.info("canonical_archive_trade_prefix_prepared | storage_day=%s chunk_id=%s first_ordinal=%s last_ordinal=%s required_ordinal=%s",
+                day, progress["chunk_id"], progress["first_receive_ordinal"], progress["last_receive_ordinal"], progress["required_receive_ordinal"])
+            return {"storage_day": day, **progress}
         return None
+
+    def _flow_references(self, session, rows, objects, *, bound_manifest_ids=None):
+        from .fact_book_prefix import resolve_verified_trade_prefixes
+        from .fact_flow_admission import load_trade_flow_roots, trade_flow_prefix_requirements
+        from .fact_lineage import resolve_canonical_raw_archive_refs
+        roots = load_trade_flow_roots(session, rows=rows, max_rows=self.max_raw_mapping_rows,
+            max_logical_bytes=self.limits.max_logical_bytes, check_budget=self.check_budget)
+        prefixes, witnesses = trade_flow_prefix_requirements(roots)
+        references, bindings = resolve_verified_trade_prefixes(session, prefixes=prefixes, witnesses=witnesses,
+            byte_verifier=objects, max_objects=self.max_dependency_objects,
+            bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget)
+        endpoints = resolve_canonical_raw_archive_refs(session, rows=[], object_store=self.object_store,
+            byte_verifier=objects, limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
+            bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
+            book_prefix_ranges=witnesses, witness_manifest_ids=bindings)
+        for identity, reference in endpoints.items():
+            if references.setdefault(identity, reference) != reference:
+                raise RuntimeError(f"canonical_flow_dependency_conflict: target_id={identity}")
+        return references
 
     def stage_next_page(self, day: date) -> dict:
         """Publish/read back one complete source page, then atomically acknowledge it.
 
-        Missing book-prefix evidence advances one committed interval first and
-        returns book_prefix_verified; a later call publishes the same hot page.
+        Missing book/trade prefix evidence advances one committed interval first
+        and returns its prefix status; a later call publishes the same hot page.
         An interrupted publication can leave an unreferenced immutable object.
         Retrying reads the same source cursor and safely reuses identical bytes;
         progress advances only in the catalog transaction.

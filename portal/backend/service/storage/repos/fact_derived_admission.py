@@ -19,7 +19,7 @@ from .fact_dependencies import read_canonical_dependency_rows
 from .fact_storage import PostgresCanonicalFactStorageRepository
 
 
-DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.derivative_state"})
+DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.derivative_state", "market.trade_flow"})
 
 
 def resolve_material_source_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
@@ -187,8 +187,10 @@ def resolve_basis_source_revisions(session, *, rows, object_store, max_rows, max
 def resolve_derived_source_revisions(session, *, rows, max_rows, **kwargs):
     """Compose the admitted family owners under one bounded source-edge set."""
     from .fact_derivative_admission import resolve_derivative_source_revisions
+    from .fact_flow_admission import resolve_trade_flow_source_revisions
     resolvers = {"market.futures_spot_relationship": resolve_basis_source_revisions,
-                 "market.derivative_state": resolve_derivative_source_revisions}
+                 "market.derivative_state": resolve_derivative_source_revisions,
+                 "market.trade_flow": resolve_trade_flow_source_revisions}
     grouped = defaultdict(list)
     for row in rows:
         if row["fact_type"] in resolvers:

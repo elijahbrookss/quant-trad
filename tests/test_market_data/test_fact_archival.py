@@ -51,7 +51,7 @@ def test_dependency_acknowledgement_requires_available_verified_bytes_within_bud
     )
     # Exercise the external-dependency verifier with a dependent family, not a
     # self-contained funding record whose evidence is already inside the page.
-    row = {**_row(), "fact_type": "market.trade_flow"}
+    row = {**_row(), "fact_type": "market.trade_flow_feature"}
     if mode == "valid":
         assert archive._dependencies(session, [row]) == ([{
             "target_kind": "raw_manifest", "target_id": "raw-id", **reference,

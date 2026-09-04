@@ -12,7 +12,7 @@ from market_data.archive import (
     RAW_ARCHIVE_SCHEMA_VERSION,
 )
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
-from portal.backend.service.storage.repos.fact_lineage import resolve_canonical_raw_archive_refs
+from portal.backend.service.storage.repos.fact_lineage import BOOK_SCOPE_FIELDS, resolve_canonical_raw_archive_refs
 from tests.test_market_data.test_market_structure_archive import _record, _segment
 
 
@@ -260,6 +260,19 @@ def test_book_prefix_rejects_wrong_product_channel_and_work_beyond_its_bound(tmp
         _resolve(store, mappings, [root], preserve_book_prefixes=True)
     with pytest.raises(RuntimeError, match="prefix_budget_exceeded"):
         _resolve(store, mappings, [root], preserve_book_prefixes=True, max_mapping_rows=2)
+
+
+@pytest.mark.parametrize("field", ["provider", "venue"])
+def test_trade_coverage_endpoint_rechecks_raw_source_identity(tmp_path, field):
+    store, records, mappings, _ = _fixture(tmp_path, (1,))
+    record = records[0]
+    endpoint = {name: getattr(record, name) for name in (*BOOK_SCOPE_FIELDS, "provider", "venue", "raw_record_id")}
+    endpoint.update(root_fact_version_id="flow:opening", first_receive_ordinal=1, receive_ordinal=1,
+                    requested_channel="market_trades")
+    assert _resolve(store, mappings, [], book_prefix_ranges=[endpoint])[0]
+    endpoint[field] = "different-source"
+    with pytest.raises(RuntimeError, match=f"witness_mismatch.*field={field}"):
+        _resolve(store, mappings, [], book_prefix_ranges=[endpoint])
 
 
 def test_qt_authored_book_features_bind_provider_frames_without_relabeling_the_author(tmp_path):

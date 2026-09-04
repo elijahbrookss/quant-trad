@@ -295,6 +295,22 @@ mistake an L2 frame for a trade-channel frame. This reuse avoids a second progre
 store and an unbounded full-session scan. A prefix alone is still not a complete
 trade-flow input proof or authorization to reclaim that family.
 
+Flow archival now combines the exact immutable coverage revision and complete
+raw-prefix proof with all causal canonical trade candidates in the bucket's
+instrument/source window. This conservative closure is necessary because v1
+flow evidence does not name canonical input IDs: bounded captures may aggregate
+a live delivery deduplicated against an older snapshot or another session's
+canonical trade. Requiring a fabricated delivery revision, or reconstructing it
+with a guessed canonical acceptance time, would alter historical evidence.
+Candidate edges therefore preserve all matching revisions and invalidations;
+each retains its own raw source, while the coverage prefix retains redeliveries
+and controls that never produced canonical rows. This can cost additional cold
+storage and metadata, but avoids guessing a minimal input subset. It preserves
+historical completeness/quality flags rather than recertifying them. Uncovered
+roots still need owner-based input reconciliation. The v9 archive receipt binds
+this stronger closure; flow deletion remains gated pending all-revision frozen
+and physical-reclamation equivalence tests.
+
 Book reclamation additionally binds exact canonical source revisions for derived
 BBO/depth facts, checks immutable product/validity scope, and validates checkpoint
 bytes and restored state through the existing reconstruction owner. These edges

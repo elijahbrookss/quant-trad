@@ -63,7 +63,7 @@ def _verify_witness(row, evidence, record):
         "provider_product_id": evidence["provider_product_id"],
         "connection_epoch": evidence["connection_epoch"], "receive_ordinal": evidence["receive_ordinal"],
     }
-    for name in ("raw_record_id", "definition_id", "session_id"):
+    for name in ("raw_record_id", "definition_id", "session_id", "provider", "venue"):
         if name in evidence:
             expected[name] = evidence[name]
     if row is None:
