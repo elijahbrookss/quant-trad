@@ -38,7 +38,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v9"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v10"
 
 
 def _series_catalog(manifest):

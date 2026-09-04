@@ -38,7 +38,7 @@ def test_invalid_requests_fail_before_accessing_storage(params):
 
 
 @pytest.mark.parametrize("fact_type", [
-    "market.trade_flow_feature", "market.market_response", "market.normalized.example", "unknown.family",
+    "market.market_response", "market.normalized.example", "unknown.family",
 ])
 def test_incomplete_transitive_proofs_block_reclamation(fact_type):
     def execute(statement, *_):

@@ -464,6 +464,7 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
 _ALL_CANONICAL_REVISIONS_SELECTION = "all_canonical_revisions.v1"
 _REVISION_PRESERVING_TYPED_SCHEMAS = frozenset({
     "market.futures_spot_basis.v1", "market.derivative_state.v1", "market.trade.v1", "market.trade_flow.v1",
+    "market.trade_flow_feature.v1",
 })
 
 
@@ -3888,6 +3889,12 @@ class PostgresMarketDataRepository:
                             records=records,
                         )
                     )
+                elif records and all(
+                    isinstance(record, CanonicalFactRecord) for record in records
+                ) and fact_type == "market.trade_flow_feature":
+                    from .fact_flow_feature_admission import collect_flow_feature_history_archive_refs
+                    archive_refs.update(collect_flow_feature_history_archive_refs(session, rows=canonical_rows,
+                        object_store=canonical_fact_storage_repository.object_store_factory()))
                 elif records and all(
                     isinstance(record, CanonicalFactRecord) for record in records
                 ) and fact_type == "market.futures_spot_relationship":

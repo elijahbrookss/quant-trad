@@ -314,7 +314,15 @@ Read-only freeze can reuse existing prefix certificates and verify a bounded
 missing tail without writing retention progress. Physical flow-removal tests
 cover frozen, typed-latest and known-at equivalence, including old-receipt
 reverification; flow now shares the existing default-disabled reclamation gate.
-The remaining composite/normalized families and production activation still
+Flow features extend this closure under the v10 verifier: exact causal aggregate
+hash matches retain every matching revision and its bounded trade/raw evidence.
+Immutable series scope and the original feature derivation owner must reconcile
+the payload and combined input fingerprint. Conservative candidate retention
+preserves deduplicated snapshot/update material without inventing delivery IDs;
+arbitrary correction subsets are not searched. Total derivation input visits
+are bounded as well as source edges. Feature freezes preserve all revisions,
+and v9 receipts require explicit additive reverification before reclamation.
+The remaining response/normalized families and production activation still
 require their separate proofs and reviewed rollout.
 
 Book reclamation additionally binds exact canonical source revisions for derived

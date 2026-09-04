@@ -46,6 +46,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_derived_admission.py
   - portal/backend/service/storage/repos/fact_derivative_admission.py
   - portal/backend/service/storage/repos/fact_flow_admission.py
+  - portal/backend/service/storage/repos/fact_flow_feature_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
@@ -849,6 +850,43 @@ now checks the exact pinned quality document once, alongside the independent
 canonical/typed material and provenance hashes. Tampered quality still fails;
 no source data, historical hashes or quality records are rewritten.
 
+Version `market.canonical_archive_verification.v10` extends the same canonical
+edges to trade-flow features. The declared source flow series and aggregate
+material hash select **all** causally available matching aggregate revisions,
+using hot provenance or cold aliases only as locators. Hydrated rows must prove
+the hash and clocks; immutable series must agree on instrument and interval.
+The feature's bucket and aggregate input fingerprint must match too. Each
+aggregate retains its complete causal trade window and coverage/raw-prefix
+proof through the existing flow admission owner. Later-known aggregate revisions
+cannot enter an earlier feature's dependency set.
+
+The existing `derive_trade_flow_feature` owner must reproduce the feature's
+payload, legacy material hash and combined trade fingerprint from a historical
+producer selection: latest active covered inputs, latest active material, or
+bounded deliveries. Delivery-independent trade material permits a deduplicated
+snapshot to witness the same update content without fabricating a revision.
+Arbitrary correction subsets are not searched, and missing/nonmatching material
+fails before reclamation. Every causal candidate remains retained even when
+only one producer selection reconciles; the proof does not claim those are
+individual original input IDs or repair original quality flags.
+
+Feature freezing binds `all_canonical_revisions.v1`, including invalidations,
+with the same read-only aggregate/trade/raw closure. Old latest-only datasets
+require re-freezing. Root, source-match, transitive-edge and total derivation
+input visits are separately bounded to 50,000 rows for each frozen series;
+64 MiB bounds each canonical source hydration stage. Repeated feature revisions
+cannot multiply an unbounded input scan: reduce the requested/archive page
+window when the work limit is exceeded. The existing raw-object and prefix
+limits still apply. Repeated owner decoding and repeated freeze closure lookup
+are a bounded performance opportunity, not a second source of truth.
+
+Disposable tests remove trade, aggregate and feature hot partitions, compare
+frozen history/known-at/latest reads and re-freeze identity, and reject corrupt
+cold aggregate bytes before feature DROP. v9 feature pages must be explicitly
+reverified under v10 to gain canonical source edges; original page bytes and
+older receipts remain unchanged. This family joins the default-disabled gate;
+response and normalized-window proofs still gate their physical days.
+
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence
 identifies an L2 position and state rather than a delivery revision ID. Admission
@@ -901,7 +939,7 @@ Old v6 receipts cannot authorize this stronger composite admission. Reverificati
 retains the original page and raw bindings, appends required canonical/checkpoint
 edges only, and fails if the originally bound raw evidence cannot prove the full
 closure. It does not silently substitute later material deliveries or archives.
-Trade-flow feature, response and normalized-window closure remain
+Response and normalized-window closure remain
 separate gates before complete retention activation. Individual objects and final
 current-byte checks must fit their budgets even when a connection spans many
 resumable intervals.
@@ -1056,7 +1094,7 @@ Complete dependency admission and reviewed production activation remain rollout
 gates; wiring the executor is not itself production permission.
 
 Standalone candle, funding, open-interest, reference-price, reserve-balance, structured reserve-report,
-trade, trade-flow buckets, L2/BBO/depth, futures/spot basis and derivative-state facts are currently admitted. Any other family in the
+trade, trade-flow buckets/features, L2/BBO/depth, futures/spot basis and derivative-state facts are currently admitted. Any other family in the
 physical day blocks the **whole day**, including remaining composite and normalized facts
 whose complete dependency closures are not yet proven. This is a temporary
 fail-closed compatibility gate, not permission to omit those rows or expire

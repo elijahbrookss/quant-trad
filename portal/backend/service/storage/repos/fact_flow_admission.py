@@ -193,7 +193,7 @@ def select_trade_flow_inputs(root, rows, *, check_budget=None):
     return sorted(rows, key=lambda row: row["id"])
 
 
-def resolve_trade_flow_source_revisions(session, *, rows, object_store, max_rows, max_logical_bytes,
+def load_trade_flow_source_closure(session, *, rows, object_store, max_rows, max_logical_bytes,
                                          max_file_bytes=128 * 1024**2, check_budget=None):
     roots = load_trade_flow_roots(session, rows=rows, max_rows=max_rows, max_logical_bytes=max_logical_bytes,
                                  check_budget=check_budget)
@@ -235,6 +235,11 @@ def resolve_trade_flow_source_revisions(session, *, rows, object_store, max_rows
             retained[row["id"]] = row
     # Sources keep their own exact raw witnesses. An older canonical delivery
     # may legitimately belong to a different session than the derived bucket.
+    return roots, retained, dict(selections)
+
+
+def resolve_trade_flow_source_revisions(session, **kwargs):
+    _, retained, _ = load_trade_flow_source_closure(session, **kwargs)
     return [retained[identity] for identity in sorted(retained)]
 
 
