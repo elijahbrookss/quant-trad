@@ -789,6 +789,7 @@ class _Level2Repository:
                 "interval_id": validity.interval_id,
                 "revision": validity.revision,
                 "series_id": validity.series_id,
+                "reconstruction_version": "coinbase_advanced_trade_l2_absolute.v1",
                 "status": validity.status.value,
                 "ordering_assurance": validity.ordering_assurance.value,
                 "opening_snapshot_id": validity.opening_snapshot_id,

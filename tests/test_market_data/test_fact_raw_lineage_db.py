@@ -78,6 +78,11 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
                                            contract_version="market.l2_book.v1", timeframe_seconds=None)
     contract = L2ProductContract(provider_product_id="BTC-USD", provider_size_unit="base",
                                  product_definition_version_id="book-prefix.product.v1")
+    structures.register_product_definition(definition_version_id=contract.product_definition_version_id,
+        source_id=source_id, instrument_id="storage-fixture", provider_product_id="BTC-USD", product_type="spot",
+        venue=source.venue, status="fixture", base_currency="BTC", quote_currency="USD", provider_size_unit="base",
+        contract_size=None, price_increment=None, base_increment=None, effective_at=BASE, received_at=BASE,
+        provenance={"fixture": "book-retention"})
     config = {"product_definition_version_id": contract.product_definition_version_id, "provider_size_unit": "base"}
     if replay_features:
         from market_data.market_state import BBO_FACT_TYPE, BBO_FACT_VERSION, DEPTH_FACT_TYPE, DEPTH_FACT_VERSION
@@ -86,11 +91,6 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
             fact_type=BBO_FACT_TYPE, contract_version=BBO_FACT_VERSION, timeframe_seconds=1)
         config["depth_series_id"] = storage.repo.register_series(instrument_id="storage-fixture",
             fact_type=DEPTH_FACT_TYPE, contract_version=DEPTH_FACT_VERSION, timeframe_seconds=1)
-        structures.register_product_definition(definition_version_id=contract.product_definition_version_id,
-            source_id=source_id, instrument_id="storage-fixture", provider_product_id="BTC-USD", product_type="spot",
-            venue=source.venue, status="fixture", base_currency="BTC", quote_currency="USD", provider_size_unit="base",
-            contract_size=None, price_increment=None, base_increment=None, effective_at=BASE, received_at=BASE,
-            provenance={"fixture": "book-retention"})
     structures.upsert_stream_definition(definition_id="book-prefix", source_id=source_id, series_id=series_id,
         provider=source.provider, venue=source.venue, provider_product_id="BTC-USD", channels=("level2",), auth_mode="public",
         contract_version="market.l2_book.v1", max_spool_bytes=1024**3, max_segment_bytes=128 * 1024**2,

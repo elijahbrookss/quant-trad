@@ -25,6 +25,7 @@ from portal.backend.db import (
     MarketFactArchiveManifestRecord, MarketFactArchiveSeriesRecord,
     MarketFactArchiveDependencyRecord, MarketFactArchiveMaterialAliasRecord,
     MarketFactArchiveVerificationRecord,
+    MarketFactArchiveCanonicalDependencyRecord,
 )
 from portal.backend.db.fact_storage_schema import fact_partition_name
 
@@ -37,7 +38,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v5"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v6"
 
 
 def _series_catalog(manifest):
@@ -169,10 +170,19 @@ class PostgresCanonicalFactArchiveRepository:
         logger.info("canonical_archive_partition_sealed | storage_day=%s rows=%s source_bytes=%s", day, count, source_bytes)
         return dict(result)
 
-    def _dependencies(self, session, rows, *, bound_manifest_ids=None):
+    def _book_sources(self, session, rows):
+        from .fact_book_admission import resolve_book_source_revisions
+        return resolve_book_source_revisions(session, rows=rows, object_store=self.object_store,
+            max_rows=self.max_raw_mapping_rows, max_logical_bytes=self.limits.max_logical_bytes,
+            max_file_bytes=self.limits.max_file_bytes,
+            check_budget=self.check_budget)
+
+    def _dependencies(self, session, rows, *, bound_manifest_ids=None, source_rows=(), bound_checkpoint_ids=None):
         from .market_data import _collect_material_archive_refs
         from .fact_lineage import EXACT_RAW_FACT_TYPES, resolve_canonical_raw_archive_refs
         from .fact_book_prefix import resolve_verified_book_prefixes
+        from .fact_book_admission import verify_book_metadata_and_checkpoints
+        rows = list({row["id"]: row for row in (*rows, *source_rows)}.values())
         groups = defaultdict(list)
         for row in rows:
             groups[(row["series_id"], row["fact_type"])].append(row)
@@ -225,8 +235,36 @@ class PostgresCanonicalFactArchiveRepository:
             objects.verify(reference["object_key"], reference["object_sha256"])
             result.append({"target_kind": "raw_manifest", "target_id": identity,
                            "object_key": reference["object_key"], "object_sha256": reference["object_sha256"]})
+        checkpoints, checkpoint_sources = verify_book_metadata_and_checkpoints(session, rows=rows, object_store=self.object_store,
+            byte_verifier=objects, max_objects=self.max_dependency_objects,
+            max_rows=self.max_raw_mapping_rows, max_logical_bytes=self.limits.max_logical_bytes,
+            max_file_bytes=self.limits.max_file_bytes,
+            bound_checkpoint_ids=bound_checkpoint_ids, check_budget=self.check_budget)
+        exact_ids = {row["id"] for row in exact_rows}
+        additional = [row for row in checkpoint_sources if row["id"] not in exact_ids]
+        if additional:
+            checkpoint_refs, checkpoint_bindings = resolve_verified_book_prefixes(
+                session, rows=additional, byte_verifier=objects, max_objects=self.max_dependency_objects,
+                bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget)
+            checkpoint_refs.update(resolve_canonical_raw_archive_refs(
+                session, rows=additional, object_store=self.object_store, byte_verifier=objects,
+                limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
+                bound_manifest_ids=bound_manifest_ids, witness_manifest_ids=checkpoint_bindings,
+                check_budget=self.check_budget))
+            for identity, reference in sorted(checkpoint_refs.items()):
+                if identity not in references:
+                    result.append({"target_kind": "raw_manifest", "target_id": identity,
+                        "object_key": reference["object_key"], "object_sha256": reference["object_sha256"]})
+                elif references[identity] != reference:
+                    raise RuntimeError(f"canonical_archive_dependency_conflict: target_id={identity}")
+        result.extend(checkpoints)
+        if len(result) > self.max_dependency_objects:
+            raise RuntimeError("canonical_archive_dependency_object_budget_exceeded: reduce page row limit")
         objects.assert_unchanged()
-        return result
+        sources = {row["id"]: row for row in (*source_rows, *checkpoint_sources)}
+        if len(sources) > self.max_raw_mapping_rows:
+            raise RuntimeError("canonical_archive_source_dependency_budget_exceeded: reduce page row limit")
+        return result, [sources[identity] for identity in sorted(sources)]
 
     def _prepare_book_prefix(self, session, rows, day, *, bound_manifest_ids=None):
         from .fact_book_prefix import prepare_next_book_prefix
@@ -305,7 +343,8 @@ class PostgresCanonicalFactArchiveRepository:
             progress = self._prepare_book_prefix(session, rows, day)
             if progress is not None:
                 return progress
-            dependencies = self._dependencies(session, rows)
+            source_rows = self._book_sources(session, rows)
+            dependencies, source_rows = self._dependencies(session, rows, source_rows=source_rows)
             manifest = publish_canonical_fact_archive(
                 rows, object_store=self.object_store, temporary_directory=self.temporary_directory, limits=self.limits,
             )
@@ -328,6 +367,9 @@ class PostgresCanonicalFactArchiveRepository:
                     session.add(MarketFactArchiveMaterialAliasRecord(manifest_id=manifest.manifest_id, **alias))
             for dependency in dependencies:
                 session.add(MarketFactArchiveDependencyRecord(manifest_id=manifest.manifest_id, **dependency))
+            for source in source_rows:
+                session.add(MarketFactArchiveCanonicalDependencyRecord(manifest_id=manifest.manifest_id,
+                    fact_version_id=source["id"], row_hash=source["row_hash"]))
         logger.info("canonical_archive_page_acknowledged | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s bytes=%s dependencies=%s",
                     day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies))
         return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
@@ -345,6 +387,8 @@ class PostgresCanonicalFactArchiveRepository:
              "fact_version_id, series_id, evidence_key, material_hash", "fact_version_id, evidence_key", self.limits.max_rows),
             ("dependencies", "fact_archive_dependencies",
              "target_kind, target_id, object_key, object_sha256", "target_kind, target_id", self.max_dependency_objects),
+            ("canonical_dependencies", "fact_archive_canonical_dependencies",
+             "fact_version_id, row_hash", "fact_version_id", self.max_raw_mapping_rows),
         ):
             rows = session.execute(text(
                 f"SELECT {columns} FROM market.{table} WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
@@ -436,12 +480,35 @@ class PostgresCanonicalFactArchiveRepository:
             progress = self._prepare_book_prefix(session, rows, day, bound_manifest_ids=bound_ids)
             if progress is not None:
                 return progress
+            source_rows = self._book_sources(session, rows)
+            bound_checkpoints = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "book_checkpoint"]
+            dependencies, source_rows = self._dependencies(session, rows, bound_manifest_ids=bound_ids,
+                source_rows=source_rows, bound_checkpoint_ids=bound_checkpoints or None)
             expected = {
                 "series": _series_catalog(manifest),
                 "aliases": sorted(aliases, key=lambda item: (item["fact_version_id"], item["evidence_key"])),
-                "dependencies": sorted(self._dependencies(session, rows, bound_manifest_ids=bound_ids),
-                                       key=lambda item: (item["target_kind"], item["target_id"])),
+                "dependencies": sorted(dependencies, key=lambda item: (item["target_kind"], item["target_id"])),
+                "canonical_dependencies": [{"fact_version_id": row["id"], "row_hash": row["row_hash"]} for row in source_rows],
             }
+            # Older pages can gain newly required monotone proof edges under
+            # this explicit verification transaction. Never rewrite bytes,
+            # existing raw bindings, an existing edge, or a prior receipt.
+            additions = 0
+            for name, model, identity_fields in (
+                ("canonical_dependencies", MarketFactArchiveCanonicalDependencyRecord, ("fact_version_id",)),
+                ("dependencies", MarketFactArchiveDependencyRecord, ("target_kind", "target_id")),
+            ):
+                existing = {tuple(item[key] for key in identity_fields): item for item in catalogs[name]}
+                for item in expected[name]:
+                    identity = tuple(item[key] for key in identity_fields)
+                    if identity not in existing and (name == "canonical_dependencies" or item["target_kind"] == "book_checkpoint"):
+                        session.add(model(manifest_id=manifest.manifest_id, **item))
+                        additions += 1
+            if additions:
+                session.flush()
+                catalogs = self._page_catalogs(session, manifest.manifest_id)
+                logger.info("canonical_archive_proof_edges_added | manifest_id=%s verifier_version=%s edges=%s",
+                            manifest.manifest_id, FACT_ARCHIVE_VERIFIER_VERSION, additions)
             for name, items in expected.items():
                 if catalogs[name] != items:
                     raise RuntimeError(f"canonical_archive_catalog_incomplete: manifest_id={manifest.manifest_id} catalog={name}")
@@ -466,6 +533,8 @@ class PostgresCanonicalFactArchiveRepository:
         ordinal = 0
         total_rows = 0
         proofs = []
+        source_placements = []
+        from .fact_dependencies import verify_canonical_source_placements
         # Fetch bounded batches of metadata, not all rows or all manifests at
         # once. Each page's aliases/dependencies have their own explicit bounds.
         while True:
@@ -494,6 +563,8 @@ class PostgresCanonicalFactArchiveRepository:
                     raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
                 if objects is not None:
                     objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
+                source_placements.append(verify_canonical_source_placements(
+                    session, catalogs["canonical_dependencies"], objects=objects, check_budget=check_budget))
                 for dependency in catalogs["dependencies"]:
                     if check_budget is not None:
                         check_budget()
@@ -521,7 +592,8 @@ class PostgresCanonicalFactArchiveRepository:
         if count != partition["expected_rows"] or total_rows != count:
             raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day} source_rows={count} archived_rows={total_rows}")
         return {"storage_day": day, "page_count": ordinal, "row_count": total_rows,
-                "manifest_set_hash": _partition_manifest_set_hash(day, count, proofs)}
+                "manifest_set_hash": _partition_manifest_set_hash(day, count, proofs),
+                "source_placement_hash": archive_evidence_hash({"pages": source_placements})}
 
     def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits()) -> dict:
         """Admit complete, currently readable cold coverage; retain all hot data.

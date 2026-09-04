@@ -6,7 +6,7 @@ bounded number of pages. Rerun until ready. The immutable old table is retained
 for operator rollback; this command never drops the source or enables retention.
 Run PR #196/#197's required migrations first. PG_DSN is the only connection input.
 On an already-ready older tiered layout, the same explicit execution adds only
-the two empty book-prefix proof tables. It never backfills verification receipts.
+missing empty proof tables. It never backfills verification receipts.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, inspect, text
 from portal.backend.db import Base, MarketFactVersionRecord
 from portal.backend.db.fact_storage_schema import (
     FACT_STORAGE_LAYOUT_VERSION, FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES,
-    FACT_BOOK_PREFIX_TABLES,
+    FACT_BOOK_PREFIX_TABLES, FACT_CANONICAL_DEPENDENCY_TABLES,
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
 )
 from portal.backend.db.session import Database
@@ -54,17 +54,30 @@ def _assert_source(conn, name):
         raise RuntimeError("fact_storage_cutover_source_layout_mismatch: run the earlier canonical migrations first")
 
 
+def _missing_proof_tables(conn):
+    prefix = [name for name in FACT_BOOK_PREFIX_TABLES if _relation(conn, "market." + name) is None]
+    if prefix and len(prefix) != len(FACT_BOOK_PREFIX_TABLES):
+        raise RuntimeError("fact_storage_book_prefix_partial_layout: inspect before retrying")
+    canonical = [name for name in FACT_CANONICAL_DEPENDENCY_TABLES if _relation(conn, "market." + name) is None]
+    return prefix, canonical
+
+
+def _assert_prior_ready_layout(conn, prefix, canonical):
+    assert_fact_storage_contract(conn, allow_missing_book_prefix_tables=bool(prefix),
+                                 allow_missing_canonical_dependency_tables=bool(canonical))
+
+
 def inspect_cutover(conn):
     """Read-only catalog/preflight report; does not acquire DDL or mutation locks."""
     state = _state(conn)
     source = SOURCE if _relation(conn, SOURCE) else "market.fact_versions"
     if state and state["state"] == "ready":
-        missing = [name for name in FACT_BOOK_PREFIX_TABLES if _relation(conn, "market." + name) is None]
-        if missing:
-            if len(missing) != len(FACT_BOOK_PREFIX_TABLES):
-                raise RuntimeError("fact_storage_book_prefix_partial_layout: inspect before retrying")
-            assert_fact_storage_contract(conn, allow_missing_book_prefix_tables=True)
-            return {"status": "book_prefix_metadata_required", "missing_tables": missing,
+        prefix, canonical = _missing_proof_tables(conn)
+        if prefix or canonical:
+            _assert_prior_ready_layout(conn, prefix, canonical)
+            status = ("proof_metadata_required" if prefix and canonical else
+                      "book_prefix_metadata_required" if prefix else "canonical_dependency_metadata_required")
+            return {"status": status, "missing_tables": prefix + canonical,
                     "source_retained": bool(_relation(conn, SOURCE)), "evidence": state["evidence"]}
         assert_fact_storage_contract(conn)
         return {"status": "ready", "source_retained": bool(_relation(conn, SOURCE)),
@@ -83,14 +96,15 @@ def inspect_cutover(conn):
 def _prepare(conn):
     state = _state(conn)
     if state is not None:
-        missing = [name for name in FACT_BOOK_PREFIX_TABLES if _relation(conn, "market." + name) is None]
+        prefix, canonical = _missing_proof_tables(conn)
+        missing = prefix + canonical
         if missing:
-            if state["state"] != "ready" or len(missing) != len(FACT_BOOK_PREFIX_TABLES):
-                raise RuntimeError("fact_storage_book_prefix_partial_layout: finish the prior cutover before upgrading")
-            assert_fact_storage_contract(conn, allow_missing_book_prefix_tables=True)
+            if state["state"] != "ready":
+                raise RuntimeError("fact_storage_proof_partial_layout: finish the prior cutover before upgrading")
+            _assert_prior_ready_layout(conn, prefix, canonical)
             conn.execute(text("SET LOCAL lock_timeout='5s'"))
             for table in Base.metadata.sorted_tables:
-                if table.schema == "market" and table.name in FACT_BOOK_PREFIX_TABLES:
+                if table.schema == "market" and table.name in missing:
                     table.create(conn)
                     conn.execute(text(
                         f"CREATE TRIGGER trg_reject_mutation_{table.name} BEFORE UPDATE OR DELETE ON market.{table.name} "

@@ -41,6 +41,8 @@ code_paths:
   - portal/backend/service/storage/repos/normalization.py
   - portal/backend/service/storage/repos/fact_storage.py
   - portal/backend/service/storage/repos/fact_book_prefix.py
+  - portal/backend/service/storage/repos/fact_book_admission.py
+  - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
   - portal/backend/service/storage/repos/fact_references.py
@@ -581,12 +583,12 @@ session hold to only exact raw edges left checkpoints and trailing control
 frames unprotected. It also made a cold-only writer rescan its whole prefix.
 The immutable session anchor closes both lifetime and writer-scaling gaps.
 
-The disposable cold-book diagnostic exercises real source parsing, reconstruction,
+The disposable cold-book regression exercises real source parsing, reconstruction,
 checkpoint publication, BBO/depth freeze, physical payload removal, cold reads,
-refreeze, and full/checkpoint-delta replay. It explicitly asserts that the
-production family gate still refuses book reclamation, then overrides only that
-gate inside the test to reach downstream consumers. It is **not** proof that
-the remaining checkpoint/validity/dependency admission work is complete. Raw L2
+refreeze, and full/checkpoint-delta replay through the production admission gate.
+Missing/corrupt checkpoint objects and corrupt cold source pages block removal.
+It covers shared and separate placement days, including a source moving to cold
+during the final handoff, which must force a retry. Raw L2
 events remain replay inputs rather than directly dataset-eligible observations;
 the frozen research series in this test are BBO and depth. A one-mapping writer
 budget proves that a cold-only session no longer rescans three historical frames.
@@ -632,7 +634,7 @@ checks both transaction orderings and preservation across the hot-to-cold hold
 handoff, plus an injected completion-write failure after actual unlink and a
 successful resume. It also keeps an unrelated raw reference writable while
 another object is locked. This is not a claim that every legacy normalized/composite dependency
-or checkpoint chain is now admitted for reclamation; those gates remain explicit.
+dependency is now admitted for reclamation; those gates remain explicit.
 
 Performance follow-up: hot and durable session holds are conservative and can retain
 more raw/checkpoint bytes than a minimal per-root proof, including later objects
@@ -756,13 +758,31 @@ objects, then resumes page verification. It does not stall waiting for the
 publication phase or rewrite the old page's dependency catalog. Missing or
 conflicting historical bindings still fail rather than being replaced silently.
 
-This proves and preserves the complete raw book prefix; it does **not** by
-itself verify the checkpoint/validity reconstruction boundary, normalized
-input-window closure, or every transitive feature dependency. Those completion
-gates still precede destructive activation. Individual raw objects and final
-current-byte checks must fit their explicit budgets even when the connection
-spans many resumable intervals. The six-family reclamation gate has not been
-broadened by this step; L2 retention is not yet ready for activation.
+Version `market.canonical_archive_verification.v6` adds immutable canonical
+source-revision edges and book metadata/checkpoint admission. BBO/depth evidence
+identifies an L2 position and state rather than a delivery revision ID. Admission
+therefore preserves every matching-position source revision within the derived
+record's commit and known-at bounds, verifies the declared state/interval, and
+binds exact IDs and row hashes in `fact_archive_canonical_dependencies`. SQL
+selection is batched; row/mapping and logical-byte limits bound the closure before
+hot JSON is fetched or cold pages are decoded. Immutable product definitions and
+validity openings are checked by ID/scope, never from mutable stream settings.
+
+Existing relevant checkpoints must match a causally eligible canonical L2 state
+at their exact source position, in addition to exact raw mappings and restoration
+through the single book-state owner. Those source revisions and object keys/hashes receive permanent
+holds. A book without a saved checkpoint remains valid; checkpoints accelerate
+replay and are not fabricated to permit retention. Reverification binds the
+committed checkpoint set rather than replacing it with future publications.
+Before the first v6 receipt, verification can append newly required source and
+checkpoint edges atomically; it never rewrites existing edges, old receipts,
+raw-object bindings, or canonical bytes. The whole raw prefix remains required.
+
+This admits L2/BBO/depth in addition to the six standalone source families, not
+normalized input windows or other composite dependencies. Those remaining gates
+still precede complete retention activation. Individual objects and final
+current-byte checks must fit their budgets even when a connection spans many
+resumable intervals.
 
 ### Checkpoint File Admission
 
@@ -783,11 +803,13 @@ longer load a whole checkpoint file into a bytes buffer merely to hash it. A
 read still returns one complete bounded checkpoint because reconstruction needs
 that state; bounded Arrow batches are not a claim of constant total state memory.
 
-This verifies the checkpoint object, not its reconstruction from raw history.
-State restoration remains owned by `Level2BookReconstructor.from_checkpoint`,
-and the complete raw/validity/known-at dependency proof is still required before
-canonical L2 reclamation is admitted. No checkpoint is fabricated, re-frozen,
-or rewritten by this reader, and no schema migration is needed for these checks.
+Collector recovery and retention share `restore_book_checkpoint_parquet` for
+immutable manifest/validity hydration and `Level2BookReconstructor.from_checkpoint`
+for state validation. This verifies checkpoint state consistency, not a second
+raw-history reconstruction path. Full raw prefixes are independently admitted;
+real cold-book regressions compare full and checkpoint-delta replay. No checkpoint
+is fabricated, re-frozen, or rewritten. The source-edge metadata requires the
+explicit schema upgrade below; the checkpoint wire format is unchanged.
 
 ### Resumable Canonical Verification
 
@@ -865,9 +887,9 @@ surface. The lifecycle executor supplies these windows under the partition lock.
 Complete dependency admission and reviewed production activation remain rollout
 gates; wiring the executor is not itself production permission.
 
-Only standalone candle, funding, open-interest, reference-price, reserve-balance,
-and trade facts are currently admitted. Any other family in the physical day
-blocks the **whole day**, including L2/BBO/depth, composite and normalized facts
+Standalone candle, funding, open-interest, reference-price, reserve-balance,
+trade, and L2/BBO/depth facts are currently admitted. Any other family in the
+physical day blocks the **whole day**, including composite and normalized facts
 whose complete dependency closures are not yet proven. This is a temporary
 fail-closed compatibility gate, not permission to omit those rows or expire
 their evidence. It cannot be lifted merely because a partition is `verified`.
@@ -877,7 +899,12 @@ then releases that transaction before trying an exclusive transaction fence.
 Existing frozen-read/pin workers cause a retryable busy failure; there is no
 blocking shared-to-exclusive upgrade. The exclusive phase repeats receipt,
 catalog, source-count and dependency-expiry checks, compares the admitted hash,
-and checks file identity again. It verifies the exact generated table's OID,
+and checks file identity again. Canonical source edges recheck exact headers and
+current placement; each cold source page is freshly hashed too. A separate
+ephemeral placement hash detects a hot-to-cold move between the two phases and
+requires a retry. Placement is deliberately excluded from immutable receipt
+hashes so a legitimate move cannot invalidate a dependent forever.
+It verifies the exact generated table's OID,
 regular relation kind, parent, and one-day partition bounds. Parent and child
 `ACCESS EXCLUSIVE` locks use `NOWAIT`; a reader or collector holding a conflicting
 table lock causes a safe retry rather than a queued ingestion stall.
@@ -925,13 +952,14 @@ both `--execute` and `--writers-stopped`; it never stops services itself. Apply
 the prior canonical and operational-rollup migrations first. Capacity planning
 must allow both copies plus WAL; the tool does not remove the old copy.
 
-For an already-ready older tiered layout missing both book-prefix proof tables,
-inspection returns `book_prefix_metadata_required` without creating anything.
-The same command with explicit execution and stopped-writer acknowledgement
-creates both empty tables and their append-only guards in one transaction.
+For an already-ready older tiered layout, inspection reports missing book-prefix
+tables as `book_prefix_metadata_required`, the canonical-source edge table as
+`canonical_dependency_metadata_required`, or both as `proof_metadata_required`.
+It creates nothing. Explicit execution and stopped-writer acknowledgement create
+only the missing empty tables and their append-only guards in one transaction.
 Startup refuses the missing tables; it cannot install this upgrade. Existing
 Facts, storage placement, and page receipts are untouched, and no prefix is
-presumed verified. A partially present pair or an unfinished older cutover must
+presumed verified. A partially present prefix pair or an unfinished older cutover must
 be inspected/completed before this upgrade; the command does not adopt it.
 
 Preparation locks the old relation, refuses incoming foreign keys or dependent

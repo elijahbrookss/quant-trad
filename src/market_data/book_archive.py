@@ -15,12 +15,18 @@ from core.storage_mounts import require_configured_archive_mount
 from .archive import ArchiveObjectAcknowledgement, RawArchiveObjectStore
 from .order_book import (
     BOOK_CHECKPOINT_SCHEMA_VERSION,
+    BOOK_RECONSTRUCTION_VERSION,
     BookCheckpointFact,
     BookSide,
+    BookSourcePosition,
+    BookValidityIntervalVersion,
+    BookValidityStatus,
+    L2ProductContract,
+    Level2BookReconstructor,
     checkpoint_canonical_rows,
     book_checkpoint_content_fingerprint,
 )
-from .structure import ProviderSizeUnit
+from .structure import OrderingAssurance, ProviderSizeUnit
 
 
 BOOK_CHECKPOINT_FORMAT = "parquet"
@@ -273,6 +279,67 @@ def read_book_checkpoint_parquet(path: Path, *, limits: BookCheckpointReadLimits
         return tuple(rows)
 
 
+def restore_book_checkpoint_parquet(
+    path: Path, *, expected: Mapping, opening: Mapping, definition_id: str,
+    contract: L2ProductContract, limits: BookCheckpointReadLimits = BookCheckpointReadLimits(),
+    check_budget=None,
+) -> tuple[BookCheckpointFact, Level2BookReconstructor]:
+    """Restore verified bytes through the single book-state owner.
+
+    Recovery and retention share the same immutable manifest/validity hydration.
+    This proves checkpoint state consistency, not reconstruction of its raw
+    prefix; callers must separately preserve and admit that source lineage.
+    """
+    context = f"checkpoint_id={expected.get('id')}"
+    if (expected.get("reconstruction_version") != BOOK_RECONSTRUCTION_VERSION
+            or opening.get("reconstruction_version") != BOOK_RECONSTRUCTION_VERSION):
+        raise RuntimeError(f"market_book_checkpoint_reconstruction_version_mismatch: {context}")
+    if (opening.get("interval_id") != expected.get("validity_interval_id")
+            or opening.get("series_id") != expected.get("series_id")
+            or opening.get("revision") != 1
+            or opening.get("status") != BookValidityStatus.OPEN_VALID.value
+            or opening.get("opening_session_id") != expected.get("session_id")):
+        raise RuntimeError(f"market_book_checkpoint_validity_mismatch: {context}")
+
+    def position(row, prefix=""):
+        field = lambda name: row[prefix + name]
+        sequence = row.get(prefix + ("sequence_num" if prefix else "provider_sequence_num"))
+        return BookSourcePosition(
+            definition_id=definition_id, session_id=str(field("session_id")),
+            connection_epoch=int(field("connection_epoch")), provider_product_id=contract.provider_product_id,
+            provider_sequence_num=int(sequence) if sequence is not None else None,
+            receive_ordinal=int(field("receive_ordinal")), event_ordinal=int(field("event_ordinal")))
+
+    opening_position = position(opening, "opening_")
+    checkpoint_position = position(expected)
+    if (opening_position.connection_epoch != checkpoint_position.connection_epoch
+            or (opening_position.receive_ordinal, opening_position.event_ordinal)
+            > (checkpoint_position.receive_ordinal, checkpoint_position.event_ordinal)):
+        raise RuntimeError(f"market_book_checkpoint_validity_position_mismatch: {context}")
+    validity = BookValidityIntervalVersion(
+        version_id=str(opening["id"]), interval_id=str(opening["interval_id"]), revision=int(opening["revision"]),
+        series_id=int(opening["series_id"]), status=BookValidityStatus(str(opening["status"])),
+        ordering_assurance=OrderingAssurance(str(opening["ordering_assurance"])),
+        opening_snapshot_id=str(opening["opening_snapshot_id"]), opening_position=opening_position,
+        opening_effective_at=opening["opening_effective_at"], opening_known_at=opening["opening_known_at"],
+        last_valid_position=position(opening, "last_"), last_valid_effective_at=opening["last_valid_effective_at"],
+        last_state_hash=str(opening["last_state_hash"]), known_at=opening["known_at"])
+    rows = read_book_checkpoint_parquet(path, expected=expected, limits=limits, check_budget=check_budget)
+    checkpoint = BookCheckpointFact(
+        checkpoint_id=str(expected["id"]), series_id=int(expected["series_id"]),
+        validity_interval_id=str(expected["validity_interval_id"]), source_position=checkpoint_position,
+        product_definition_version_id=str(expected["product_definition_version_id"]),
+        provider_size_unit=ProviderSizeUnit(str(expected["provider_size_unit"])),
+        ordering_assurance=validity.ordering_assurance, effective_at=expected["effective_at"],
+        known_at=expected["known_at"], state_hash=str(expected["state_hash"]),
+        bids=tuple((Decimal(row["price"]), Decimal(row["quantity"])) for row in rows if row["side"] == BookSide.BID.value),
+        asks=tuple((Decimal(row["price"]), Decimal(row["quantity"])) for row in rows if row["side"] == BookSide.ASK.value),
+        mutation_count_since_prior=int(expected["mutation_count_since_prior"]))
+    if check_budget is not None:
+        check_budget()
+    return checkpoint, Level2BookReconstructor.from_checkpoint(checkpoint, contract=contract, validity=validity)
+
+
 def publish_book_checkpoint(
     checkpoint: BookCheckpointFact,
     *,
@@ -307,4 +374,5 @@ __all__ = [
     "encode_book_checkpoint_parquet",
     "publish_book_checkpoint",
     "read_book_checkpoint_parquet",
+    "restore_book_checkpoint_parquet",
 ]

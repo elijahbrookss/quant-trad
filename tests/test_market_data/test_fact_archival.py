@@ -50,9 +50,9 @@ def test_dependency_acknowledgement_requires_available_verified_bytes_within_bud
         max_dependency_bytes=1 if mode == "bytes" else 1024,
     )
     if mode == "valid":
-        assert archive._dependencies(session, [_row()]) == [{
+        assert archive._dependencies(session, [_row()]) == ([{
             "target_kind": "raw_manifest", "target_id": "raw-id", **reference,
-        }]
+        }], [])
     else:
         with pytest.raises(FileNotFoundError if mode == "missing" else RuntimeError):
             archive._dependencies(session, [_row()])

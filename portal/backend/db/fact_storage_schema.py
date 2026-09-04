@@ -19,17 +19,20 @@ logger = logging.getLogger(__name__)
 
 FACT_STORAGE_LAYOUT_VERSION = "market.fact_storage_tiers.v1"
 FACT_BOOK_PREFIX_TABLES = ("fact_book_prefix_chunks", "fact_book_prefix_dependencies")
+FACT_CANONICAL_DEPENDENCY_TABLES = ("fact_archive_canonical_dependencies",)
 FACT_STORAGE_TABLES = (
     "fact_hot_payloads", "fact_retention_partitions", "fact_archive_manifests",
     "fact_archive_series", "fact_archive_dependencies", "fact_archive_material_aliases",
     "fact_archive_verifications", "fact_storage_state",
     *FACT_BOOK_PREFIX_TABLES,
+    *FACT_CANONICAL_DEPENDENCY_TABLES,
 )
 FACT_STORAGE_IMMUTABLE_TABLES = (
     "fact_hot_payloads", "fact_archive_manifests", "fact_archive_series", "fact_archive_dependencies",
     "fact_archive_material_aliases",
     "fact_archive_verifications",
     *FACT_BOOK_PREFIX_TABLES,
+    *FACT_CANONICAL_DEPENDENCY_TABLES,
 )
 FACT_PAYLOAD_INDEXES = frozenset(index.name for index in MarketFactHotPayloadRecord.__table__.indexes)
 FACT_STORAGE_CUTOVER = "scripts/db/manual_migration_fact_storage_tiers_v1.py"
@@ -187,7 +190,9 @@ def current_fact_storage_day(session) -> date:
     return day
 
 
-def assert_fact_storage_contract(conn, *, allow_missing_book_prefix_tables=False) -> None:
+def assert_fact_storage_contract(
+    conn, *, allow_missing_book_prefix_tables=False, allow_missing_canonical_dependency_tables=False,
+) -> None:
     """Refuse an old, partial, or incompatible layout without altering it."""
     inspector = inspect(conn)
     columns = {item["name"] for item in inspector.get_columns("fact_versions", schema="market")}
@@ -204,6 +209,8 @@ def assert_fact_storage_contract(conn, *, allow_missing_book_prefix_tables=False
             # Only the explicit offline metadata cutover may inspect the older
             # layout this way; normal startup must require the complete layout.
             if allow_missing_book_prefix_tables and name in FACT_BOOK_PREFIX_TABLES:
+                continue
+            if allow_missing_canonical_dependency_tables and name in FACT_CANONICAL_DEPENDENCY_TABLES:
                 continue
             raise RuntimeError(f"Canonical Fact storage is missing market.{name}. Run {FACT_STORAGE_CUTOVER}")
     ready = conn.execute(text(

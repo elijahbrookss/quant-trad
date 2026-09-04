@@ -130,43 +130,28 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
 
 
 def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_pins(storage, tmp_path, monkeypatch):
-    from market_data.canonical_adapters import DERIVED_MARKET_STATE_SOURCE
-    from market_data.contracts import SourceIdentity
-    from market_data.fact_registry import get_fact_contract
+    from market_data.market_state import derive_book_features, MarketStateValuationContract
+    from tests.test_market_data.test_fact_storage_tiers_db import BASE
     from portal.backend.service.storage.repos import market_structure, market_lifecycle
-    from tests.test_market_data.test_structured_dataset_revision_identity_db import (
-        _commit_book_source_archives, _book_feature_revisions,
-    )
+    from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture, _publish_book_result
     monkeypatch.setattr(market_structure, "db", storage.database)
     monkeypatch.setattr(market_lifecycle, "db", storage.database)
     structures = market_structure.market_structure_repository
     lifecycle = market_lifecycle.market_storage_lifecycle_repository
-    day = storage.today - timedelta(days=2)
-    _placement(monkeypatch, day)
-    source = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream", adapter_version="archive.holds.fixture.v1")
-    source_id = storage.repo.register_source(source, lineage={"fixture": "canonical-archive-holds"})
-    derived_source_id = storage.repo.register_source(DERIVED_MARKET_STATE_SOURCE, lineage={"fixture": "canonical-archive-holds"})
-    series = {}
-    for fact_type in ("market.l2_book", "market.bbo", "market.depth_observation"):
-        series[fact_type] = storage.repo.register_series(
-            instrument_id="storage-fixture", fact_type=fact_type, contract_version=get_fact_contract(fact_type).contract_version,
-            timeframe_seconds=None if fact_type == "market.l2_book" else 1,
-        )
-    structures.upsert_stream_definition(
-        definition_id="archive-holds", source_id=source_id, series_id=series["market.l2_book"],
-        provider="COINBASE", venue="COINBASE_DIRECT", provider_product_id="BTC-USD", channels=("level2",),
-        auth_mode="public", contract_version="market.l2_book.v1", max_spool_bytes=1024**3,
-        max_segment_bytes=128 * 1024**2, config={"fixture": "canonical-archive-holds"},
-    )
-    claim = structures.claim_stream(definition_id="archive-holds", owner_id="archive-holds-test", lease_seconds=600, bounded=True)
-    raw_ids = _commit_book_source_archives(tmp_path=tmp_path, claim=claim, receive_ordinals=(1, 2))
-    for ordinal in (1, 2):
-        bbo, _ = _book_feature_revisions(
-            source=DERIVED_MARKET_STATE_SOURCE, l2_series_id=series["market.l2_book"], bbo_series_id=series["market.bbo"],
-            depth_series_id=series["market.depth_observation"], definition_id=claim.definition_id,
-            session_id=claim.session_id, receive_ordinal=ordinal,
-        )
-        storage.repo.ingest_facts(series_id=series["market.bbo"], source_id=derived_source_id, facts=[bbo])
+    # Use real retained L2 source revisions and operational metadata. The old
+    # fixture fabricated orphan BBO states, which cannot satisfy source proof.
+    fixture = _raw_book_fixture(storage, tmp_path, monkeypatch, replay_features=True)
+    day = fixture.day
+    for index in range(len(fixture.results)):
+        _publish_book_result(fixture, index)
+    config = fixture.claim.config
+    bbo, _ = derive_book_features((item.state for item in fixture.results),
+        contract=MarketStateValuationContract(product_definition_version_id=config["product_definition_version_id"],
+            provider_size_unit="base", base_currency="BTC", quote_currency="USD"),
+        bbo_series_id=config["bbo_series_id"], depth_series_id=config["depth_series_id"],
+        computed_at=BASE + timedelta(minutes=1))
+    structures.ingest_market_state_features(bbo_facts=bbo, depth_facts=())
+    raw_ids = fixture.manifests
     for identity in raw_ids:
         status = structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
         assert status["pinned"] is True
@@ -191,25 +176,29 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
         archive.stage_next_page(day)
     assert archive.inspect_partition(day)["page_count"] == 0
     path.write_bytes(original)
-    archive.stage_next_page(day)
-    assert archive.inspect_partition(day)["archived_rows"] == 2
+    for _ in range(10):
+        if archive.stage_next_page(day)["status"] == "source_exhausted":
+            break
+    assert archive.inspect_partition(day)["archived_rows"] == 4
     for identity in raw_ids:
         public_status = structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
         execution_status = lifecycle.archive_target_status(target_kind="raw_manifest", target_id=identity)
         assert public_status["dataset_pin_count"] == execution_status["dataset_pin_count"] == 0
-        assert public_status["canonical_dependency_count"] == execution_status["canonical_dependency_count"] == 1
+        # One page edge and one shared-prefix edge independently hold each raw object.
+        assert public_status["canonical_dependency_count"] == execution_status["canonical_dependency_count"] == 2
         assert public_status["pinned"] is execution_status["pinned"] is True
         assert public_status["ordinary_retention_eligible"] is False
     with storage.database.session() as session:
         assert session.execute(text("SELECT count(*) FROM market.fact_archive_material_aliases")).scalar_one() == 2
-        assert session.execute(text("SELECT count(*) FROM market.fact_archive_dependencies")).scalar_one() == 2
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_dependencies")).scalar_one() == 3
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies")).scalar_one() == 2
     assert archive.verify_next_page(day)["status"] == "page_verified"
     path.write_bytes(b"x" * len(original))
     with pytest.raises(RuntimeError, match="checksum_mismatch"):
         archive.verify_partition(day)
     assert archive.inspect_partition(day)["state"] == "sealed"
     path.write_bytes(original)
-    assert archive.verify_partition(day)["verified_objects"] == 3
+    assert archive.verify_partition(day)["verified_objects"] == 4
 
 
 def test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs(storage, tmp_path, monkeypatch):

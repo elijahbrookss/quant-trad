@@ -204,6 +204,21 @@ class MarketFactArchiveDependencyRecord(Base):
     object_sha256 = Column(String(64), nullable=False)
 
 
+class MarketFactArchiveCanonicalDependencyRecord(Base):
+    """Exact immutable source revisions, independent of their hot/cold placement."""
+
+    __tablename__ = "fact_archive_canonical_dependencies"
+    __table_args__ = (
+        CheckConstraint("row_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_canonical_dependency_hash"),
+        Index("ix_market_fact_canonical_dependency_source", "fact_version_id"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    row_hash = Column(String(64), nullable=False)
+
+
 class MarketFactBookPrefixChunkRecord(Base):
     """Immutable, shared progress for a dense range of raw L2 source positions.
 

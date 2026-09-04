@@ -19,12 +19,13 @@ from .market_lifecycle import _LIFECYCLE_LOCK_NAME, MarketStorageLifecycleBusyEr
 
 logger = logging.getLogger(__name__)
 
-# Only standalone source facts have complete dependency admission today. Book
-# state, trade-flow, derivative composites, and normalized windows still need
-# transitive proofs. A mixed physical day must pass for EVERY family in it.
+# Standalone facts and book states have complete dependency admission. Trade-
+# flow, derivative composites, and normalized windows still need transitive
+# proofs. A mixed physical day must pass for EVERY family in it.
 _ADMITTED_FACT_TYPES = frozenset({
     "candle.ohlcv", "derivatives.funding_rate", "derivatives.open_interest",
     "market.reference_price", "market.reserve_balance", "market.trade",
+    "market.l2_book", "market.bbo", "market.depth_observation",
 })
 
 
@@ -180,6 +181,8 @@ class PostgresCanonicalFactReclamationRepository:
             current = self.archive._partition_evidence(session, partition, limits=verification_limits, check_budget=check_budget)
             if current["manifest_set_hash"] != evidence["manifest_set_hash"] or current["manifest_set_hash"] != partition["manifest_set_hash"]:
                 raise RuntimeError(f"canonical_reclaim_evidence_changed: storage_day={day}")
+            if current["source_placement_hash"] != evidence["source_placement_hash"]:
+                raise RuntimeError(f"canonical_reclaim_source_placement_changed: storage_day={day}; retry to verify current files")
             current["protected_dataset_ranges"] = self._pinned_ranges(session, day)
             self._assert_archive_admission(objects)
             check_budget()

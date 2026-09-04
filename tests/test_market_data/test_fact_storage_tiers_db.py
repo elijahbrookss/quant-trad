@@ -457,35 +457,40 @@ def _rewind_disposable_storage_to_old_layout(storage):
     return storage.database._engine
 
 
-def test_prefix_metadata_cutover_is_explicit_atomic_and_preserves_ready_facts(storage):
+@pytest.mark.parametrize("metadata_group", ["prefix", "canonical", "both"])
+def test_prefix_metadata_cutover_is_explicit_atomic_and_preserves_ready_facts(storage, metadata_group):
     from sqlalchemy import event
-    from portal.backend.db.fact_storage_schema import FACT_BOOK_PREFIX_TABLES
+    from portal.backend.db.fact_storage_schema import FACT_BOOK_PREFIX_TABLES, FACT_CANONICAL_DEPENDENCY_TABLES
     from scripts.db.manual_migration_fact_storage_tiers_v1 import run_cutover
     _ingest(storage)
     original = _read(storage)
     engine = storage.database._engine
+    tables = ((FACT_BOOK_PREFIX_TABLES if metadata_group != "canonical" else ()) +
+              (FACT_CANONICAL_DEPENDENCY_TABLES if metadata_group != "prefix" else ()))
+    statuses = {"prefix": "book_prefix_metadata_required", "canonical": "canonical_dependency_metadata_required",
+                "both": "proof_metadata_required"}
     # This fixture owns a disposable DB. Simulate the earlier ready layout by
     # removing exactly the two still-empty metadata tables, never Fact data.
     with engine.begin() as conn:
-        for name in reversed(FACT_BOOK_PREFIX_TABLES):
+        for name in reversed(tables):
             assert conn.execute(text(f"SELECT count(*) FROM market.{name}")).scalar_one() == 0
             conn.execute(text(f"DROP TABLE market.{name}"))
     inspected = run_cutover(engine)
-    assert inspected["status"] == "book_prefix_metadata_required"
-    assert inspected["missing_tables"] == list(FACT_BOOK_PREFIX_TABLES)
+    assert inspected["status"] == statuses[metadata_group]
+    assert inspected["missing_tables"] == list(tables)
     with engine.connect() as conn:
         assert all(conn.execute(text("SELECT to_regclass(:name)"), {"name": "market." + name}).scalar_one() is None
-                   for name in FACT_BOOK_PREFIX_TABLES)
+                   for name in tables)
     with pytest.raises(ValueError, match="writers_stopped"):
         run_cutover(engine, execute=True)
     interrupted = Database(storage.dsn)
     try:
         assert interrupted.ensure_schema() is False
-        assert "fact_book_prefix" in str(interrupted.last_error)
+        assert tables[0] in str(interrupted.last_error)
     finally:
         interrupted._reset_engine()
     def interrupt_second_table(conn, cursor, statement, parameters, context, executemany):
-        if "CREATE TABLE market.fact_book_prefix_dependencies" in statement:
+        if "CREATE TRIGGER trg_reject_mutation_" + tables[-1] in statement:
             raise RuntimeError("injected metadata cutover interruption")
     event.listen(engine, "before_cursor_execute", interrupt_second_table)
     try:
@@ -493,12 +498,12 @@ def test_prefix_metadata_cutover_is_explicit_atomic_and_preserves_ready_facts(st
             run_cutover(engine, execute=True, writers_stopped=True)
     finally:
         event.remove(engine, "before_cursor_execute", interrupt_second_table)
-    assert run_cutover(engine)["missing_tables"] == list(FACT_BOOK_PREFIX_TABLES)
+    assert run_cutover(engine)["missing_tables"] == list(tables)
     final = run_cutover(engine, execute=True, writers_stopped=True)
     assert final["status"] == "ready"
     assert run_cutover(engine, execute=True, writers_stopped=True) == final
     with engine.connect() as conn:
-        for name in FACT_BOOK_PREFIX_TABLES:
+        for name in tables:
             assert conn.execute(text(f"SELECT count(*) FROM market.{name}")).scalar_one() == 0
             assert conn.execute(text("SELECT tgtype FROM pg_trigger WHERE tgrelid=to_regclass(:name) AND tgname=:trigger"),
                 {"name": "market." + name, "trigger": "trg_reject_mutation_" + name}).scalar_one() == 27

@@ -275,8 +275,7 @@ not a new row's byte/reconstruction proof, but allows cold-only writers to avoid
 rescanning old history. Late imports without either holder must fence and check
 the complete prefix. This may keep an entire long-running book session beyond
 its ordinary age window; pressure reporting must expose the cost rather than
-silently release the hold. Checkpoint/validity
-proofs remain required before admitting book reclamation. Long prefixes now
+silently release the hold. Long prefixes now
 advance through immutable, shared interval receipts with permanent raw holds.
 Each bounded transaction extends one interval; interruption rolls back that
 interval, and restarting resumes committed progress. This adds metadata to the
@@ -287,6 +286,17 @@ cannot rewrite that proof. This deliberately trades some retained objects and
 receipt metadata for safe restart and avoids repeatedly decoding an entire
 connection history. It does not remove per-object/final verification budgets or
 establish checkpoint/replay equivalence by itself.
+
+Book reclamation additionally binds exact canonical source revisions for derived
+BBO/depth facts, checks immutable product/validity scope, and validates checkpoint
+bytes and restored state through the existing reconstruction owner. These edges
+survive source movement between hot and cold storage. The final destructive
+handoff freshly verifies cold source pages and rejects a placement change between
+preflight and commit, without encoding mutable placement in immutable receipts.
+This requires an explicit empty-metadata-table upgrade, not a data backfill or
+implicit startup migration. Normalized/composite dependency closure remains a
+separate admission gate; admitting book data does not authorize deployment or
+retention activation.
 
 ### Operational Consequences
 
