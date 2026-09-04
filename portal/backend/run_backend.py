@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from core.settings import get_settings
+from core.storage_mounts import require_configured_archive_mount
 
 _SETTINGS = get_settings()
 
@@ -78,6 +79,7 @@ def _terminate_all(processes: List[ManagedProcess], timeout_seconds: float = 8.0
 def main() -> int:
     global _STOP
     _configure_logging()
+    require_configured_archive_mount()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)

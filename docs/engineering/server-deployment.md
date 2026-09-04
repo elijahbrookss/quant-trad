@@ -445,6 +445,38 @@ Never enable live broker mode as a side effect of an application release.
 
 ## Storage Move And Recovery
 
+For a dedicated HDD, configure both values in the private operator environment:
+
+```dotenv
+QT_MARKET_DATA_ROOT=/mnt/quanttrad-archive/market-structure
+QT_MARKET_DATA_EXPECTED_UUID=<filesystem-uuid-from-findmnt-or-blkid>
+```
+
+The second value is the filesystem UUID, not the drive serial or partition UUID.
+An empty UUID preserves the initial directory-backed mode; it does not provide
+missing-disk protection. Host admission reads `/run/udev/data`; the native Linux
+host must run udev and expose current filesystem metadata there. Containers
+receive a read-only metadata bind and need no block-device privileges. Do not
+use a copied marker file as proof that the HDD is mounted.
+
+Before deployment, run the non-mutating probe:
+
+```bash
+bash scripts/automation/server_deploy.sh validate-storage
+```
+
+It reports filesystem identity and capacity or fails with the exact path and
+reason. `doctor` and `deploy` use the same probe; deploy repeats it after image
+builds. All archive-writing process entrypoints recheck after container restart.
+Compose refuses to create missing host bind directories. Never clear the UUID
+or create a fallback directory just to bypass a failed check.
+
+Mount the filesystem by UUID using the host's normal mount configuration and
+ensure it is mounted before Docker starts these containers after reboot. Disk
+formatting, fstab/systemd changes, and data moves are separate operator actions;
+the deploy helper performs none of them. Do not combine an unverified archive
+move with enabling destructive retention.
+
 Schedule database backups outside application containers and restore-test them.
 Loki retains seven days in its single-host filesystem store. Docker JSON logs
 rotate independently so a failed log pipeline cannot consume the host without
@@ -454,12 +486,23 @@ unmanaged database-log volume.
 
 Moving archives to an HDD is an explicit maintenance event:
 
-1. stop and drain the collector;
-2. verify no active stream lease remains;
-3. copy and checksum the archive tree;
-4. mount the HDD at the configured market-data root;
-5. restart the stack; and
-6. verify archive reads, checksums, worker health, and new writes.
+1. identify the intended disk by model/serial and filesystem UUID, prepare and
+   mount it, and keep PostgreSQL on its existing NVMe-backed named volume;
+2. stop and drain the collector and backend writers, then verify no active
+   stream lease remains;
+3. copy and checksum the archive tree to the already-mounted HDD;
+4. set the host root and expected UUID, then run `validate-storage` and `doctor`;
+5. deploy the reviewed storage-aware release and restart the stack; and
+6. verify existing archive reads/checksums, frozen dataset reads, worker health,
+   new writes on the HDD, and reboot recovery before retiring the old copy.
 
 Do not rewrite stored archive keys or bypass checksum verification during the
 move.
+
+If admission or verification fails, leave writers stopped and retain both
+copies. A rollback to the old path requires checking its UUID and reconciling
+all writes made after the move before restoring configuration; merely pointing
+at an old copy would lose acknowledged objects. A code rollback while dedicated
+storage is configured must retain the filesystem guard. Releases predating it
+are not a safe automatic rollback target. Formatting, deleting either copy,
+or clearing the expected UUID is not a recovery procedure.

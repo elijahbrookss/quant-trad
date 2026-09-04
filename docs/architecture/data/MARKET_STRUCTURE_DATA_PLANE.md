@@ -15,6 +15,7 @@ tags:
   - known-at
   - active
 code_paths:
+  - src/core/storage_mounts.py
   - src/market_data/stream_quality.py
   - src/data_providers/streams
   - src/data_providers/providers/coinbase.py
@@ -27,6 +28,8 @@ code_paths:
   - portal/backend/workers
   - cli/main.py
   - docker/docker-compose.yml
+  - docker/docker-compose.server.yml
+  - scripts/automation/server_deploy.sh
   - cli/mcp_server.py
   - config/defaults.yaml
   - scripts/db
@@ -803,6 +806,40 @@ missing/invalid, or trade coverage is incomplete. The absorption primitive
 uses `clamp(depth_replenishment,0,1)` and preserves the unclipped source feature.
 
 ## Bounded Storage And Retention Architecture
+
+### Dedicated Local Archive Filesystem Admission
+
+The native single-node preset keeps PostgreSQL in its NVMe-backed named volume
+and may place the existing filesystem object-store adapter on a dedicated HDD.
+`QT_MARKET_DATA_ROOT` chooses the host directory; `QT_MARKET_DATA_EXPECTED_UUID`
+opts into fail-closed dedicated-filesystem admission. An empty UUID retains
+directory-backed development/initial-install behavior, not a claim of HDD
+identity protection. Container archive paths and manifest object keys do not
+change when the host root moves. `MARKET_STRUCTURE_STORAGE_ROOT` selects the
+same root for collection, lifecycle, and frozen-object verification.
+
+`core.storage_mounts` checks the kernel device number of the actual archive
+path against the host udev filesystem UUID and checks writability. It never
+creates directories to make admission pass and does not trust marker files.
+Deployment checks before builds and again before service replacement. Backend,
+collector, and initializer check at process startup, including automatic Docker
+restarts. Spool creation/rotation, archive reads/writes/deletion, and encoding
+staging recheck their configured storage boundary. Paths escaping the root via
+symlinks or crossing a nested filesystem are rejected. Existing open WAL file
+descriptors remain attached to their filesystem; the guard is not a per-frame
+metadata scan or a substitute for handling actual I/O failures.
+
+Containers receive only a read-only `/run/udev` metadata bind, not host block
+devices or extra privileges. Archive and metadata binds disable Docker's
+automatic host-directory creation. Missing UUID metadata, the wrong device,
+read-only storage, or a missing configured root is an explicit failure, never
+permission to write into a fallback NVMe directory. A disk replaced with a new
+filesystem UUID requires an explicit operator config update and verification.
+This is local object-store durability, not off-host backup or replication.
+
+See [single-node storage move and recovery](../../engineering/server-deployment.md#storage-move-and-recovery)
+for the operator-controlled rollout. This admission layer does not enable
+retention, move bytes, or provision filesystems.
 
 ### Storage Roles
 

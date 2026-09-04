@@ -1288,9 +1288,12 @@ def _verify_local_archive_objects(references: Mapping[str, Mapping[str, str]]) -
 
     if not references:
         return
+    from core.storage_mounts import require_configured_archive_mount
+
     storage_root = Path(
         os.environ.get("MARKET_STRUCTURE_STORAGE_ROOT", "logs/market-structure")
     ).resolve()
+    require_configured_archive_mount(storage_root, require_writable=False)
     object_root = (storage_root / "objects").resolve()
     for manifest_id, reference in sorted(references.items()):
         uri = str(reference.get("object_uri") or "")

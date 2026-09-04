@@ -9,6 +9,8 @@ x-runtime-environment: &runtime-environment
   QT_MARKET_DATA_LIFECYCLE_ENABLED: "true"
   QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED: "false"
   MARKET_STRUCTURE_STORAGE_ROOT: /app/logs/market-structure
+  QT_MARKET_DATA_EXPECTED_UUID: "${QT_MARKET_DATA_EXPECTED_UUID:-}"
+  QT_STORAGE_UDEV_ROOT: /run/qt-host-udev/data
 
 x-backend-build: &backend-build
   context: ..
@@ -29,6 +31,15 @@ x-service-logging: &service-logging
   options:
     max-size: "50m"
     max-file: "5"
+
+# Read-only host filesystem metadata, not block-device or privileged access.
+x-host-udev: &host-udev
+  type: bind
+  source: /run/udev
+  target: /run/qt-host-udev
+  read_only: true
+  bind:
+    create_host_path: false
 
 services:
   tsdb:
@@ -127,6 +138,9 @@ services:
       - type: bind
         source: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
         target: /app/logs/market-structure
+        bind:
+          create_host_path: false
+      - *host-udev
     networks:
       quanttrad:
         aliases:
@@ -170,6 +184,9 @@ services:
       - type: bind
         source: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
         target: /app/logs/market-structure
+        bind:
+          create_host_path: false
+      - *host-udev
     networks:
       - quanttrad
     logging: *service-logging
@@ -216,6 +233,9 @@ services:
       - type: bind
         source: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
         target: /app/logs/market-structure
+        bind:
+          create_host_path: false
+      - *host-udev
     networks:
       quanttrad:
         aliases:

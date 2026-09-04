@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+from core.storage_mounts import require_configured_archive_mount
 from .archive import ArchiveObjectAcknowledgement, RawArchiveObjectStore
 from .order_book import (
     BOOK_CHECKPOINT_SCHEMA_VERSION,
@@ -81,6 +82,7 @@ def encode_book_checkpoint_parquet(
     )
     table = pa.Table.from_pylist(list(rows), schema=schema)
     temporary_root = Path(temporary_directory or tempfile.gettempdir())
+    require_configured_archive_mount(temporary_root)
     temporary_root.mkdir(parents=True, exist_ok=True)
     descriptor, raw_path = tempfile.mkstemp(
         prefix=f"{checkpoint.checkpoint_id}.",

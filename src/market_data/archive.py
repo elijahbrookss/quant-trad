@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from core.storage_mounts import require_configured_archive_mount
 from .structure import RawStreamRecord, build_spool_segment_id
 
 
@@ -355,6 +356,7 @@ class DurableRawSpoolSegment:
             / _safe_component(self.session_id)
             / f"epoch={self.connection_epoch}"
         )
+        require_configured_archive_mount(directory)
         directory.mkdir(parents=True, exist_ok=True)
         self.open_path = directory / f"{self.spool_segment_id}.open"
         self.sealed_path = directory / f"{self.spool_segment_id}.sealed"
@@ -706,6 +708,7 @@ class FilesystemRawArchiveObjectStore:
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root).resolve()
+        require_configured_archive_mount(self.root)
         self.root.mkdir(parents=True, exist_ok=True)
 
     def local_path(self, object_key: str) -> Path:
@@ -715,6 +718,7 @@ class FilesystemRawArchiveObjectStore:
         target = (self.root / Path(*parts)).resolve()
         if self.root not in target.parents:
             raise ValueError("market_archive_invalid: object key escapes root")
+        require_configured_archive_mount(target, require_writable=False)
         return target
 
     def put_verified(
@@ -725,6 +729,7 @@ class FilesystemRawArchiveObjectStore:
         if _sha256_file(source) != expected:
             raise ValueError("market_archive_upload_invalid: source checksum mismatch")
         destination = self.local_path(object_key)
+        require_configured_archive_mount(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             existing_hash = _sha256_file(destination)
@@ -770,6 +775,7 @@ class FilesystemRawArchiveObjectStore:
     ) -> ArchiveObjectDeletionAcknowledgement:
         expected = str(expected_sha256 or "").strip().lower()
         target = self.local_path(object_key)
+        require_configured_archive_mount(target)
         if not target.exists():
             if not allow_missing:
                 raise FileNotFoundError(
@@ -915,6 +921,7 @@ def encode_raw_records_to_parquet(
         schema=schema,
     )
     temporary_root = Path(temporary_directory) if temporary_directory else Path(tempfile.gettempdir())
+    require_configured_archive_mount(temporary_root)
     temporary_root.mkdir(parents=True, exist_ok=True)
     descriptor, raw_path = tempfile.mkstemp(
         prefix=f"{segment_id}.", suffix=".parquet", dir=temporary_root

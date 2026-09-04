@@ -41,6 +41,7 @@ first_value() {
 }
 
 data_root="$(first_value "${QT_MARKET_DATA_ROOT:-}" "$(env_value QT_MARKET_DATA_ROOT)" "/srv/quanttrad/market-structure")"
+archive_uuid="$(first_value "${QT_MARKET_DATA_EXPECTED_UUID:-}" "$(env_value QT_MARKET_DATA_EXPECTED_UUID)")"
 single_node_profiles="$(first_value "${QT_SINGLE_NODE_PROFILES:-}" "$(env_value QT_SINGLE_NODE_PROFILES)" "${QT_SERVER_PROFILES:-}" "$(env_value QT_SERVER_PROFILES)")"
 state_root="$(first_value "${QT_SINGLE_NODE_STATE_ROOT:-}" "$(env_value QT_SINGLE_NODE_STATE_ROOT)" "$deployment_root/deploy-state")"
 state_file="$state_root/release.env"
@@ -48,12 +49,14 @@ history_file="$state_root/release-history.ndjson"
 alert_preview_state_file="$state_root/alert-preview.env"
 alerts_enabled="$(first_value "$(env_value QT_ALERTS_ENABLED)" "false")"
 export QT_MARKET_DATA_ROOT="$data_root"
+export QT_MARKET_DATA_EXPECTED_UUID="$archive_uuid"
 
 usage() {
   cat <<'EOF'
 Usage:
   scripts/automation/server_deploy.sh init-env
   scripts/automation/server_deploy.sh doctor
+  scripts/automation/server_deploy.sh validate-storage
   scripts/automation/server_deploy.sh validate-alerts
   scripts/automation/server_deploy.sh apply-alerts
   scripts/automation/server_deploy.sh preview-alerts
@@ -128,6 +131,8 @@ values = {
     ).decode("ascii"),
     "CHAINLINK_ARBITRUM_RPC_URL": "https://arb1.arbitrum.io/rpc",
     "QT_MARKET_DATA_ROOT": str(single_node_root / "market-structure"),
+    # Empty preserves directory mode until an operator wires a dedicated disk.
+    "QT_MARKET_DATA_EXPECTED_UUID": "",
     "QT_SINGLE_NODE_STATE_ROOT": str(single_node_root / "deploy-state"),
     "QT_COMPOSE_PROJECT_NAME": "quant-trad-single-node",
     "QT_SINGLE_NODE_BOOTSTRAP_MARKET_DATA": "true",
@@ -293,6 +298,9 @@ validate_storage_root() {
   test "$data_root" != "/" || die "QT_MARKET_DATA_ROOT cannot be /"
   test -d "$data_root" || die "market-data directory not found: $data_root"
   test -w "$data_root" || die "market-data directory is not writable: $data_root"
+  python3 "$repo_root/src/core/storage_mounts.py" \
+    --path "$data_root" --expected-uuid "$archive_uuid" \
+    || die "archive filesystem admission failed; do not create a fallback directory"
   [[ "$state_root" = /* ]] || die "QT_SINGLE_NODE_STATE_ROOT must be an absolute path"
   test "$state_root" != "/" || die "QT_SINGLE_NODE_STATE_ROOT cannot be /"
 }
@@ -729,6 +737,8 @@ deploy_release() {
   echo "Source tree hash $QT_SOURCE_TREE_HASH"
   compose config --quiet
   build_release_images
+  # Building can take minutes. Recheck before replacing any running services.
+  validate_storage_root
   compose up --detach --remove-orphans --wait \
     --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}"
   verify_initializer
@@ -751,6 +761,10 @@ case "$action" in
     ;;
   doctor)
     run_doctor
+    ;;
+  validate-storage)
+    require_command python3
+    validate_storage_root
     ;;
   validate-alerts)
     require_command python3
