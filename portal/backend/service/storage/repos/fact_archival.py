@@ -37,7 +37,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v2"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v3"
 
 
 def _series_catalog(manifest):
@@ -54,6 +54,13 @@ def _receipt(page, catalog_hash):
     return {key: value for key, value in evidence.items() if key not in {"storage_day", "page_ordinal"}} | {
         "verification_hash": archive_evidence_hash(evidence),
     }
+
+
+def _partition_manifest_set_hash(day, expected_rows, page_verifications):
+    return archive_evidence_hash({
+        "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION, "storage_day": day.isoformat(),
+        "expected_rows": expected_rows, "page_verifications": page_verifications,
+    })
 
 
 class PostgresCanonicalFactArchiveRepository:
@@ -318,6 +325,39 @@ class PostgresCanonicalFactArchiveRepository:
             catalogs[name] = [dict(row) for row in rows]
         return catalogs
 
+    def restart_partition_verification(self, day: date) -> dict:
+        """Withdraw an older verifier's admission, without deleting any evidence.
+
+        Page receipts stay immutable. The sealed partition resumes current-version
+        page verification and whole-partition admission before reclamation. This
+        is not a repair path for a changed proof from the current verifier.
+        """
+        with self.database.session() as session:
+            partition = self._lock(session, day)
+            if partition["state"] == "sealed":
+                return {"storage_day": day, "status": "verification_already_restarted"}
+            if partition["state"] != "verified":
+                raise RuntimeError(f"canonical_archive_partition_not_verified: storage_day={day} state={partition['state']}")
+            counts = session.execute(text("""
+                SELECT count(*) AS page_count, count(receipts.manifest_id) AS verified_page_count
+                FROM market.fact_archive_manifests AS pages
+                LEFT JOIN market.fact_archive_verifications AS receipts
+                  ON receipts.manifest_id=pages.id AND receipts.verifier_version=:version
+                WHERE pages.storage_day=:day
+            """), {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one()
+            if (counts["page_count"] == counts["verified_page_count"]
+                    and (counts["page_count"] or partition["manifest_set_hash"] == _partition_manifest_set_hash(day, 0, []))):
+                raise RuntimeError(f"canonical_archive_verification_not_stale: storage_day={day}")
+            self._check_budget()
+            session.execute(text("""
+                UPDATE market.fact_retention_partitions
+                SET state='sealed', verified_at=NULL, manifest_set_hash=NULL WHERE storage_day=:day
+            """), {"day": day})
+        logger.warning("canonical_archive_verification_restarted | storage_day=%s prior_manifest_set_hash=%s verifier_version=%s",
+                       day, partition["manifest_set_hash"], FACT_ARCHIVE_VERIFIER_VERSION)
+        return {"storage_day": day, "status": "partition_verification_restarted",
+                "prior_manifest_set_hash": partition["manifest_set_hash"], "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION}
+
     def verify_next_page(self, day: date) -> dict:
         """Deep-check one unverified page; commit its receipt only after all checks.
 
@@ -447,10 +487,7 @@ class PostgresCanonicalFactArchiveRepository:
         if count != partition["expected_rows"] or total_rows != count:
             raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day} source_rows={count} archived_rows={total_rows}")
         return {"storage_day": day, "page_count": ordinal, "row_count": total_rows,
-                "manifest_set_hash": archive_evidence_hash({
-                    "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION, "storage_day": day.isoformat(),
-                    "expected_rows": count, "page_verifications": proofs,
-                })}
+                "manifest_set_hash": _partition_manifest_set_hash(day, count, proofs)}
 
     def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits()) -> dict:
         """Admit complete, currently readable cold coverage; retain all hot data.

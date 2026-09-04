@@ -317,6 +317,9 @@ Canonical scans and execution run outside the raw exclusive fence. The
 orchestrator advances bounded seal/stage/verify/reclaim steps, using committed
 page/receipt progress after restarts. It has a separate default-false canonical
 execution flag; the existing raw execution flag alone does not activate it.
+An older verifier's admitted partition first takes a `restart_verification`
+step: all hot data and old receipts remain, and current page/partition checks
+must finish before any reclamation.
 The supervisor passes stop requests and exposes the canonical result/cursor in
 its last-run snapshot. Unsupported dependency families still block their whole
 physical day; complete closure and production proof remain activation gates. See

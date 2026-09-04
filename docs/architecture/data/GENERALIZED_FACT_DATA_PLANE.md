@@ -364,7 +364,8 @@ responses include `canonical_retention`. Its next-phase candidates distinguish
 seal, page publication, page verification, whole-partition verification, and
 physical reclamation. Persisted page/receipt progress selects the next phase;
 file presence alone does not. Unproven dependency families block the entire day.
-Old verifier receipts require review. All eligibility is metadata-only and
+Older verifier receipts select `restart_verification`, not reclamation: the
+executor withdraws the old admission and resumes current verification. All eligibility is metadata-only and
 `requires_execution_recheck`: it does not replace fresh bytes, complete lineage,
 pin checks, mount admission, or the final physical-relation gate.
 
@@ -607,6 +608,15 @@ their author; their declared input position binds the exchange frame without
 relabeling the derived source. Mapping row offsets are global within a v1 object;
 the writer's `object_row_group=0` field is a placeholder, not random-access proof.
 
+The object's ordered `content_fingerprint` is independently recomputed from
+**all** stored raw IDs and frame hashes, not just the page's requested witnesses.
+Writer and verifier share the unchanged v1 canonical-JSON serialization. Two
+bounded identity-column passes preserve that format without retaining all IDs
+or decoding large raw frames twice. The same physical-schema, row-group and
+file/logical-byte bounds apply, with cooperative cancellation during hashing.
+The surrounding checksum and file-stability gates still bind those columns to
+the fully decoded object; a fingerprint alone is not raw-frame verification.
+
 Default per-call bounds are 50,000 mapping candidates, 1,000,000 decoded raw
 records, and 2 GiB logical data. Individual files are limited to 1 GiB and
 declared row groups to 256 MiB; decoding uses 128-row batches, with additional
@@ -629,8 +639,12 @@ revisions could therefore have identical trade values but different raw IDs;
 the older page incorrectly held only the newer delivery's archive. The real
 database regression reproduces this mismatch. Exact-root mapping/physical-row
 admission fixes it without changing Fact values, clocks, or ingestion policy.
-`market.canonical_archive_verification.v2` supersedes v1 receipts; earlier
-receipts cannot satisfy the stronger gate. Old incomplete draft catalogs are
+Version v2 closed that exact-revision gap. Version
+`market.canonical_archive_verification.v3` additionally recomputes the raw
+content fingerprint: previously a valid object SHA could accompany an incorrect
+manifest fingerprint without rejection. A regression reproduces that mismatch,
+including fingerprints that omit raw rows not requested by the canonical page.
+Earlier receipts cannot satisfy the stronger gate. Old incomplete draft catalogs are
 not silently rewritten or blessed and require explicit review before reuse.
 
 This proof preserves each direct raw frame; it does **not** by itself prove the
@@ -656,6 +670,18 @@ silently becoming trusted lineage.
 The verifier version names the complete deep-admission rules. Strengthening
 lineage/dependency checks requires a new version; an older receipt must never
 bypass a new check simply because its unchanged file checksum still matches.
+
+For an already-verified hot partition with older receipts,
+`restart_partition_verification` explicitly returns progress to `sealed` and
+clears only its deletion-admission hash/time under the existing fences. It
+retains every payload, manifest, dependency hold and immutable old receipt, and
+logs the previous hash and new verifier version. The bounded executor reports
+this as a separate `restart_verification` step; subsequent runs verify missing
+current-version pages and then the whole partition. Reclamation stays blocked
+through interruptions or corrupt/missing evidence. Empty partitions follow the
+same versioned-admission rule. Current-version proof changes are not repaired
+by this path, and a reclaimed partition cannot be reopened. No schema migration
+or rewriting/re-freezing of Fact identities is involved in receipt renewal.
 
 `verify_partition` checks contiguous page ordinals, disjoint ordered ranges,
 all current receipt/catalog bindings, and exact equality of the sealed source

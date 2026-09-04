@@ -16,6 +16,7 @@ import shutil
 import tempfile
 import threading
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,6 +100,38 @@ def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
+
+
+def raw_archive_content_fingerprint(*, raw_record_ids: Iterable[str], raw_frame_sha256: Iterable[str],
+                                    check_budget=None) -> str:
+    """Hash the unchanged v1 canonical JSON, without materializing both arrays.
+
+    The two streams must have the same physical record order. Frame hashes
+    precede IDs because v1 sorts JSON object keys; changing that changes identity.
+    """
+    digest = hashlib.sha256()
+    counts = []
+    digest.update(b"{")
+    for name, values in (("raw_frame_sha256", raw_frame_sha256), ("raw_record_ids", raw_record_ids)):
+        if counts:
+            digest.update(b",")
+        digest.update(json.dumps(name).encode("ascii") + b":[")
+        count = 0
+        for value in values:
+            if check_budget is not None:
+                check_budget()
+            if not isinstance(value, str) or not value:
+                raise RuntimeError(f"market_archive_content_identity_invalid: field={name}")
+            if count:
+                digest.update(b",")
+            digest.update(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+            count += 1
+        digest.update(b"]")
+        counts.append(count)
+    if not counts[0] or counts[0] != counts[1]:
+        raise RuntimeError("market_archive_content_identity_count_mismatch")
+    digest.update(b',"schema_version":"market.raw_archive_content.v1"}')
+    return digest.hexdigest()
 
 
 def _sha256_file(path: Path) -> str:
@@ -978,15 +1011,10 @@ def encode_raw_records_to_parquet(
         if path.exists():
             path.unlink()
         raise
-    content_fingerprint = hashlib.sha256(
-        _canonical_json_bytes(
-            {
-                "schema_version": "market.raw_archive_content.v1",
-                "raw_record_ids": [record.raw_record_id for record in rows],
-                "raw_frame_sha256": [record.raw_frame_sha256 for record in rows],
-            }
-        )
-    ).hexdigest()
+    content_fingerprint = raw_archive_content_fingerprint(
+        raw_record_ids=(record.raw_record_id for record in rows),
+        raw_frame_sha256=(record.raw_frame_sha256 for record in rows),
+    )
     return EncodedRawArchive(
         spool_segment_id=segment_id,
         path=path,
@@ -1079,13 +1107,16 @@ def iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits) -> Ite
     yield from _iter_raw_archive_parquet(path, limits=limits)
 
 
-def _iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits | None = None) -> Iterator[RawStreamRecord]:
+@contextmanager
+def _open_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits | None, check_budget=None):
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("market_archive_requires_pyarrow") from exc
     # Read one physical file. Dataset discovery would reinterpret object-layout
     # components such as ``provider=coinbase`` as Hive partition columns.
+    if check_budget is not None:
+        check_budget()
     if limits is not None and Path(path).stat().st_size > limits.max_file_bytes:
         raise RuntimeError("market_archive_read_file_budget_exceeded")
     with pq.ParquetFile(Path(path), page_checksum_verification=True,
@@ -1100,6 +1131,8 @@ def _iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits | None
                 raise RuntimeError("market_archive_read_row_budget_exceeded")
             declared_bytes = 0
             for index in range(parquet.metadata.num_row_groups):
+                if check_budget is not None:
+                    check_budget()
                 group = parquet.metadata.row_group(index)
                 group_bytes = sum(group.column(column).total_uncompressed_size for column in range(group.num_columns))
                 if any(group.column(column).compression != "ZSTD" for column in range(group.num_columns)):
@@ -1109,6 +1142,45 @@ def _iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits | None
                 declared_bytes += group_bytes
                 if declared_bytes > limits.max_logical_bytes:
                     raise RuntimeError("market_archive_read_logical_budget_exceeded")
+        yield parquet
+
+
+def read_raw_archive_content_fingerprint(path: Path, *, limits: RawArchiveReadLimits,
+                                         check_budget=None) -> str:
+    """Hash every physical row's identity columns in bounded batches.
+
+    This is an additional manifest check, not a substitute for decoding and
+    validating RawStreamRecord or verifying the file checksum. Separate narrow
+    column passes preserve v1 JSON ordering without retaining all IDs in memory
+    or decoding large frame payloads a second time.
+    """
+    with _open_raw_archive_parquet(path, limits=limits, check_budget=check_budget) as parquet:
+        logical_bytes = 0
+
+        def values(column):
+            nonlocal logical_bytes
+            count = 0
+            for batch in parquet.iter_batches(batch_size=limits.batch_rows, columns=[column], use_threads=False):
+                if check_budget is not None:
+                    check_budget()
+                logical_bytes += batch.nbytes
+                if batch.nbytes > limits.max_row_group_bytes or logical_bytes > limits.max_logical_bytes:
+                    raise RuntimeError("market_archive_read_logical_budget_exceeded")
+                for value in batch.column(0).to_pylist():
+                    count += 1
+                    if count > limits.max_rows:
+                        raise RuntimeError("market_archive_read_row_budget_exceeded")
+                    yield value
+            if count != parquet.metadata.num_rows:
+                raise RuntimeError("market_archive_replay_invalid: record count mismatch")
+
+        return raw_archive_content_fingerprint(raw_record_ids=values("raw_record_id"),
+                                               raw_frame_sha256=values("raw_frame_sha256"),
+                                               check_budget=check_budget)
+
+
+def _iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits | None = None) -> Iterator[RawStreamRecord]:
+    with _open_raw_archive_parquet(path, limits=limits) as parquet:
         prior = 0
         count = logical_bytes = 0
         for batch in parquet.iter_batches(batch_size=limits.batch_rows if limits else 128, use_threads=False):
@@ -1208,6 +1280,8 @@ __all__ = [
     "publish_compacted_raw_archives",
     "publish_spool_archive",
     "read_raw_archive_parquet",
+    "raw_archive_content_fingerprint",
+    "read_raw_archive_content_fingerprint",
     "iter_raw_archive_parquet",
     "require_spool_capacity",
     "spool_backlog_bytes",

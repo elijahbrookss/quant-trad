@@ -1,11 +1,14 @@
 from types import SimpleNamespace
+from contextlib import contextmanager
+import hashlib
 import json
 
 import pytest
 
 from market_data.archive import (
     FilesystemRawArchiveObjectStore, RawArchiveReadLimits, encode_raw_records_to_parquet,
-    iter_raw_archive_parquet, RAW_ARCHIVE_SCHEMA_VERSION,
+    iter_raw_archive_parquet, raw_archive_content_fingerprint, read_raw_archive_content_fingerprint,
+    RAW_ARCHIVE_SCHEMA_VERSION,
 )
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from portal.backend.service.storage.repos.fact_lineage import resolve_canonical_raw_archive_refs
@@ -74,12 +77,86 @@ def test_exact_revisions_check_each_raw_row_and_share_one_object_read(tmp_path):
     assert len(verified.objects) == 1
 
 
+@pytest.mark.parametrize("ids", [["one"], ["one", 'quote"\\newline\n', "\u03b1\U0001f680"]])
+def test_streamed_content_fingerprint_preserves_exact_v1_identity(ids):
+    hashes = [hashlib.sha256(identity.encode()).hexdigest() for identity in ids]
+    expected = hashlib.sha256(json.dumps({"schema_version": "market.raw_archive_content.v1",
+        "raw_record_ids": ids, "raw_frame_sha256": hashes}, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode()).hexdigest()
+    assert raw_archive_content_fingerprint(raw_record_ids=iter(ids), raw_frame_sha256=iter(hashes)) == expected
+
+
+@pytest.mark.parametrize("ids,hashes", [([], []), (["one"], []), ([], ["a" * 64]), ([None], ["a" * 64]), (["one"], [""])])
+def test_content_fingerprint_rejects_missing_or_misaligned_identity_streams(ids, hashes):
+    with pytest.raises(RuntimeError, match="market_archive_content_identity_"):
+        raw_archive_content_fingerprint(raw_record_ids=iter(ids), raw_frame_sha256=iter(hashes))
+
+
+@pytest.mark.parametrize("batch_rows", [1, 2, 128])
+def test_file_fingerprint_uses_bounded_identity_columns_not_a_second_frame_decode(tmp_path, monkeypatch, batch_rows):
+    from market_data import archive
+    import pyarrow.parquet as pq
+    store, _, mappings, _ = _fixture(tmp_path, (1, 2, 3))
+    path = store.local_path("fixture.parquet")
+    with pq.ParquetFile(path) as parquet:
+        table = parquet.read()
+    pq.write_table(table, path, compression="zstd", row_group_size=1)
+    open_file = archive._open_raw_archive_parquet
+    selected = []
+
+    @contextmanager
+    def inspect_columns(*args, **kwargs):
+        with open_file(*args, **kwargs) as parquet:
+            def batches(**options):
+                selected.append(options["columns"])
+                assert options["batch_size"] == batch_rows and options["use_threads"] is False
+                return parquet.iter_batches(**options)
+            yield SimpleNamespace(iter_batches=batches, metadata=parquet.metadata)
+
+    monkeypatch.setattr(archive, "_open_raw_archive_parquet", inspect_columns)
+    assert read_raw_archive_content_fingerprint(path, limits=RawArchiveReadLimits(batch_rows=batch_rows)) == mappings[0]["content_fingerprint"]
+    assert selected == [["raw_frame_sha256"], ["raw_record_id"]]
+
+
+def test_fingerprint_includes_raw_rows_not_referenced_by_this_canonical_page(tmp_path):
+    store, records, mappings, rows = _fixture(tmp_path)
+    mappings[0]["content_fingerprint"] = raw_archive_content_fingerprint(
+        raw_record_ids=[records[0].raw_record_id], raw_frame_sha256=[records[0].raw_frame_sha256])
+    with pytest.raises(RuntimeError, match="content_fingerprint_mismatch"):
+        _resolve(store, mappings, rows[:1])
+
+
+def test_fingerprint_verification_obeys_cancellation_and_file_stability(tmp_path, monkeypatch):
+    from portal.backend.service.market.canonical_retention import CanonicalRetentionStopRequested
+    from portal.backend.service.storage.repos import fact_lineage
+    store, _, mappings, rows = _fixture(tmp_path)
+    path = store.local_path("fixture.parquet")
+    checks = 0
+    def cancel():
+        nonlocal checks
+        checks += 1
+        if checks == 5:
+            raise CanonicalRetentionStopRequested("stop fingerprint scan")
+    with pytest.raises(CanonicalRetentionStopRequested, match="stop fingerprint scan"):
+        read_raw_archive_content_fingerprint(path, limits=RawArchiveReadLimits(batch_rows=1), check_budget=cancel)
+    original_reader = fact_lineage.read_raw_archive_content_fingerprint
+    def changed(*args, **kwargs):
+        result = original_reader(*args, **kwargs)
+        with path.open("ab") as file:
+            file.write(b"changed after identity scan")
+        return result
+    monkeypatch.setattr(fact_lineage, "read_raw_archive_content_fingerprint", changed)
+    with pytest.raises(RuntimeError, match="changed"):
+        _resolve(store, mappings, rows)
+
+
 @pytest.mark.parametrize("field,value,match", [
     ("object_row_index", 1, "mapping_mismatch"), ("object_row_index", 9, "row_index_invalid"),
     ("object_row_group", 1, "row_index_invalid"), ("mapped_frame_sha256", "a" * 64, "mapping_mismatch"),
     ("mapped_segment_id", "wrong-segment", "mapping_mismatch"), ("mapped_epoch", 1, "mapping_mismatch"),
     ("record_count", 3, "archive_coverage_mismatch"), ("last_receive_ordinal", 3, "archive_coverage_mismatch"),
     ("session_id", "wrong-session", "archive_scope_mismatch"), ("schema_version", "unknown", "archive_format_invalid"),
+    ("content_fingerprint", "a" * 64, "content_fingerprint_mismatch"),
 ])
 def test_manifest_or_mapping_claim_is_not_proof_of_the_physical_raw_row(tmp_path, field, value, match):
     store, _, mappings, rows = _fixture(tmp_path)
@@ -155,6 +232,8 @@ def test_streaming_raw_reader_rejects_work_outside_its_budget(tmp_path, limit):
     assert list(iter_raw_archive_parquet(path, limits=RawArchiveReadLimits(batch_rows=1))) == records
     with pytest.raises(RuntimeError, match="budget_exceeded"):
         list(iter_raw_archive_parquet(path, limits=RawArchiveReadLimits(**{limit: 1})))
+    with pytest.raises(RuntimeError, match="budget_exceeded"):
+        read_raw_archive_content_fingerprint(path, limits=RawArchiveReadLimits(**{limit: 1}))
 
 
 def test_mapping_result_limits_never_silently_truncate_lineage(tmp_path):
@@ -202,6 +281,8 @@ def test_bounded_raw_reader_rejects_physical_type_drift(tmp_path):
     pq.write_table(table.cast(changed), path, compression="zstd")
     with pytest.raises(RuntimeError, match="raw schema differs"):
         list(iter_raw_archive_parquet(path, limits=RawArchiveReadLimits()))
+    with pytest.raises(RuntimeError, match="raw schema differs"):
+        read_raw_archive_content_fingerprint(path, limits=RawArchiveReadLimits())
 
 
 @pytest.mark.parametrize("name", ["max_rows", "max_file_bytes", "max_logical_bytes", "max_row_group_bytes", "batch_rows"])

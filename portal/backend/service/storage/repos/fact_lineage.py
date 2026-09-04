@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from market_data.archive import (
     RAW_ARCHIVE_COMPRESSION, RAW_ARCHIVE_FORMAT, RAW_ARCHIVE_SCHEMA_VERSION,
-    RawArchiveReadLimits, iter_raw_archive_parquet,
+    RawArchiveReadLimits, iter_raw_archive_parquet, read_raw_archive_content_fingerprint,
 )
 from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
@@ -207,6 +207,11 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                     _verify_witness(row, evidence, record)
         if required or (count, first, last) != (manifest["record_count"], manifest["first_receive_ordinal"], manifest["last_receive_ordinal"]):
             raise RuntimeError(f"canonical_raw_lineage_archive_coverage_mismatch: manifest_id={identity}")
+        fingerprint = read_raw_archive_content_fingerprint(
+            object_store.local_path(manifest["object_key"]), limits=remaining, check_budget=check_budget,
+        )
+        if fingerprint != manifest["content_fingerprint"]:
+            raise RuntimeError(f"canonical_raw_lineage_content_fingerprint_mismatch: manifest_id={identity}")
         references[identity] = {name: manifest[name] for name in ("object_key", "object_uri", "object_sha256", "content_fingerprint")}
     byte_verifier.assert_unchanged()
     return references

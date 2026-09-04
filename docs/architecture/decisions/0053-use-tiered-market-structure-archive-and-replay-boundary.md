@@ -257,6 +257,12 @@ gate and durable page/verification resume state. Complete dependency closure and
 representative production validation remain activation requirements; the
 existence of backlog protection or orchestration alone does not complete them.
 
+Deep verification receipts are versioned safety evidence, not permanent deletion
+permission. Strengthening raw-lineage checks requires a new receipt version.
+Previously verified hot partitions withdraw their old admission and resume
+bounded current-version verification while retaining all data and old receipts;
+the executor must not silently promote an old receipt to the stronger proof.
+
 ### Operational Consequences
 
 The platform gains deterministic forensic replay and can correct parser or

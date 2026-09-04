@@ -18,7 +18,7 @@ from core.storage_mounts import (
 )
 from portal.backend.db.fact_storage_schema import fact_partition_name
 from ._shared import db
-from .fact_archival import FACT_ARCHIVE_VERIFIER_VERSION
+from .fact_archival import FACT_ARCHIVE_VERIFIER_VERSION, _partition_manifest_set_hash
 from .fact_reclamation import unproven_reclamation_fact_types
 
 
@@ -68,7 +68,7 @@ class PostgresCanonicalFactRetentionRepository:
                        pg_total_relation_size('market.raw_archive_record_mappings') AS raw_mapping_bytes
             """)).mappings().one())
             partitions = [dict(row) for row in query(text("""
-                SELECT storage_day,state,expected_rows FROM market.fact_retention_partitions
+                SELECT storage_day,state,expected_rows,manifest_set_hash FROM market.fact_retention_partitions
                 WHERE state <> 'reclaimed' ORDER BY storage_day LIMIT :limit
             """), {"limit": policy.max_inventory_partitions + 1}).mappings()]
             physical = list(query(text("""
@@ -164,9 +164,9 @@ class PostgresCanonicalFactRetentionRepository:
             elif row["state"] == "verified":
                 if row["archived_rows"] != row["expected_rows"]:
                     raise RuntimeError(f"canonical_retention_progress_invalid: storage_day={day} verified source coverage disagrees")
-                if row["verified_page_count"] != row["page_count"]:
-                    blockers.append("archive_receipts_require_review")
-                action = "reclaim_partition"
+                stale = (row["verified_page_count"] != row["page_count"]
+                         or (row["page_count"] == 0 and row["manifest_set_hash"] != _partition_manifest_set_hash(day, 0, [])))
+                action = "restart_verification" if stale else "reclaim_partition"
             else:
                 raise RuntimeError(f"canonical_retention_progress_invalid: storage_day={day} state={row['state']}")
             # Lack of HDD headroom blocks publication, not byte-preserving

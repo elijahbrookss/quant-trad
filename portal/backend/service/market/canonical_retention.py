@@ -81,6 +81,8 @@ class CanonicalFactRetentionExecutor:
             return archive.verify_next_page(day)
         if action == "verify_partition":
             return archive.verify_partition(day, limits=verification)
+        if action == "restart_verification":
+            return archive.restart_partition_verification(day)
         if action == "reclaim_partition":
             reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True,
                 limits=FactReclamationLimits(statement_timeout_ms=min(1000, policy.execution_statement_timeout_ms)))

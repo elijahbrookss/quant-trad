@@ -166,8 +166,18 @@ def test_inconsistent_sealed_progress_fails_loud():
 
 def test_old_verifier_receipts_do_not_become_deletion_authority():
     plan = _plan([_row(state="verified", verified_page_count=0)])
-    assert plan["actions"][0]["blockers"] == ["archive_receipts_require_review"]
+    assert plan["actions"][0]["action"] == "restart_verification"
+    assert plan["actions"][0]["eligible"] is True
     assert plan["metadata_eligible_reclaim_bytes"] == 0
+
+
+def test_empty_partition_requires_current_verifier_admission_too():
+    from portal.backend.service.storage.repos.fact_archival import _partition_manifest_set_hash
+    row = _row(state="verified", archived_rows=0, expected_rows=0, page_count=0, verified_page_count=0,
+               manifest_set_hash="a" * 64)
+    assert _plan([row])["actions"][0]["action"] == "restart_verification"
+    row["manifest_set_hash"] = _partition_manifest_set_hash(row["storage_day"], 0, [])
+    assert _plan([row])["actions"][0]["action"] == "reclaim_partition"
 
 
 def test_hot_budget_pressure_begins_at_the_configured_boundary():

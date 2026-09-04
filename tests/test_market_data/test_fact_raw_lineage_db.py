@@ -122,3 +122,96 @@ def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path
         status = structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
         assert status["canonical_dependency_count"] == 1 and status["pinned"] is True
         assert status["canonical_backlog_present"] is False
+
+
+def test_older_verified_partitions_restart_without_reusing_deletion_authority(storage, tmp_path, monkeypatch):
+    from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+    from portal.backend.db.fact_storage_schema import ensure_fact_payload_partition
+    from portal.backend.service.market.canonical_retention import CanonicalFactRetentionExecutor
+    from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
+    from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
+    from tests.test_market_data.test_fact_reclamation_db import _physical
+
+    fixture = _raw_trade_fixture(storage, tmp_path, monkeypatch)
+    day = fixture.day
+    for raw in fixture.raws:
+        storage.repo.ingest_facts(series_id=fixture.series_id, source_id=fixture.source_id,
+                                 facts=[_canonical_trade(fixture, raw)])
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=storage.database, object_store=fixture.store, temporary_directory=tmp_path / "staging",
+        limits=fact_archival.FactArchiveLimits(max_rows=1, row_group_size=1))
+    archive.seal_partition(day)
+    pages = [archive.stage_next_page(day), archive.stage_next_page(day)]
+    legacy_version = "market.canonical_archive_verification.v2"
+    with monkeypatch.context() as legacy:
+        legacy.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", legacy_version)
+        archive.verify_next_page(day)
+        archive.verify_next_page(day)
+        legacy_proof = archive.verify_partition(day)
+    with storage.database.session() as session:
+        receipts_before = session.execute(text("SELECT * FROM market.fact_archive_verifications ORDER BY manifest_id")).mappings().all()
+        raw_key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
+                                  {"id": fixture.manifests[0]}).scalar_one()
+    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    assert _physical(storage, day)["hot_rows"] == 2
+    policy = CanonicalFactRetentionPolicy(execution_enabled=True, hot_days=1, max_steps_per_run=1,
+                                          max_page_rows=1, archive_min_free_bytes=0)
+    repository = PostgresCanonicalFactRetentionRepository(database=storage.database)
+    def restarted_worker():
+        return CanonicalFactRetentionExecutor(repository=repository).run(policy=policy, storage_root=tmp_path, execute=True)
+
+    plan = repository.plan(policy=policy, storage_root=tmp_path)
+    action = next(row for row in plan["actions"] if row["storage_day"] == day.isoformat())
+    assert action["action"] == "restart_verification" and action["eligible"]
+    assert archive.inspect_partition(day)["state"] == "verified", "planning must not withdraw an admission"
+    restarted = restarted_worker()
+    assert restarted["failure_count"] == 0
+    assert restarted["outcomes"][0]["status"] == "partition_verification_restarted"
+    assert restarted["outcomes"][0]["prior_manifest_set_hash"] == legacy_proof["manifest_set_hash"]
+    partition = archive.inspect_partition(day)
+    assert partition["state"] == "sealed" and partition["manifest_set_hash"] is None and partition["verified_at"] is None
+    assert archive.restart_partition_verification(day)["status"] == "verification_already_restarted"
+    with pytest.raises(RuntimeError, match="canonical_reclaim_not_verified"):
+        reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+
+    # The new verifier must really reread raw evidence; resuming cannot merely
+    # copy old receipts into the new namespace, even with canonical bytes intact.
+    path = fixture.store.local_path(raw_key)
+    original = path.read_bytes()
+    path.write_bytes(b"x" * len(original))
+    failed = restarted_worker()
+    assert failed["failure_count"] == 1 and "checksum_mismatch" in failed["outcomes"][0]["error"]
+    assert archive.inspect_partition(day)["state"] == "sealed" and _physical(storage, day)["hot_rows"] == 2
+    path.write_bytes(original)
+    for page in pages:
+        outcome = restarted_worker()["outcomes"][0]
+        assert outcome["action"] == "verify_page" and outcome["manifest_id"] == page["manifest_id"]
+    with pytest.raises(RuntimeError, match="canonical_reclaim_not_verified"):
+        reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
+    proof = restarted_worker()["outcomes"][0]
+    assert proof["status"] == "partition_verified" and proof["manifest_set_hash"] != legacy_proof["manifest_set_hash"]
+    with pytest.raises(RuntimeError, match="verification_not_stale"):
+        archive.restart_partition_verification(day)
+    with storage.database.session() as session:
+        old_receipts = session.execute(text("SELECT * FROM market.fact_archive_verifications WHERE verifier_version=:version ORDER BY manifest_id"),
+                                       {"version": legacy_version}).mappings().all()
+        assert old_receipts == receipts_before, "older receipts are historical evidence, never overwritten or deleted"
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_verifications")).scalar_one() == 4
+    assert restarted_worker()["outcomes"][0]["status"] == "partition_reclaimed"
+    assert _physical(storage, day)["relation"] is None
+    with pytest.raises(RuntimeError, match="partition_not_verified"):
+        archive.restart_partition_verification(day)
+
+    # Empty physical partitions also have verifier-versioned admission hashes.
+    empty_day = storage.today - timedelta(days=3)
+    with storage.database.session() as session:
+        ensure_fact_payload_partition(session.connection(), empty_day)
+    archive.seal_partition(empty_day)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", legacy_version)
+        archive.verify_partition(empty_day)
+    assert restarted_worker()["outcomes"][0]["status"] == "partition_verification_restarted"
+    assert restarted_worker()["outcomes"][0]["status"] == "partition_verified"
+    assert restarted_worker()["outcomes"][0]["status"] == "partition_reclaimed"
