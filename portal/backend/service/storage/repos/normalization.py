@@ -294,8 +294,12 @@ class PostgresNormalizationRepository:
                             logger.warning("market_normalization_legacy_reference_scan | reason=verify_unreferenced_legacy_specs")
                             announced = True
                         evidence = cold_row["provenance"].get("_qt_normalization_evidence")
-                        if isinstance(evidence, Mapping) and evidence.get("spec_id") in requested_ids:
-                            cold_references.add(evidence["spec_id"])
+                        referenced_id = evidence.get("spec_id") if isinstance(evidence, Mapping) else None
+                        # SQL ->> cannot match an object/array/number to an
+                        # nsp_* identity. Opaque unrelated provenance is not a
+                        # reference and need not be hashable for this check.
+                        if isinstance(referenced_id, str) and referenced_id in requested_ids:
+                            cold_references.add(referenced_id)
             if stored_id in cold_references:
                 raise RuntimeError(f"market_normalization_legacy_identity_referenced: spec_id={stored_id}")
             if stored_id not in _WARNED_LEGACY_SPEC_IDS:

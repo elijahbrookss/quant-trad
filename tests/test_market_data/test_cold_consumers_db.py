@@ -100,7 +100,8 @@ def test_legacy_witness_and_referenced_spec_guard_survive_cooling(storage, tmp_p
         session.add(MarketNormalizationSpecRecord(id=legacy_id, spec_hash=spec.spec_hash, **material))
     assert repo.list_specs() == ()
     # An external event name alone is not the old provenance-reference test.
-    unreferenced = replace(storage.fact, external_event_group_key=legacy_id)
+    unreferenced = replace(storage.fact, external_event_group_key=legacy_id,
+                           provenance={"_qt_normalization_evidence": {"spec_id": ["opaque_not_a_spec"]}})
     _ingest(storage, unreferenced)
     assert repo.list_specs() == ()
     _ingest(storage, replace(unreferenced, provenance={
@@ -144,6 +145,7 @@ def _persist_reader_fixture(storage, series_id, facts):
 
 def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_path, monkeypatch):
     from market_data.canonical_adapters import canonicalize_l2_snapshot, canonicalize_trade_flow
+    from market_data.market_state import DEPTH_FACT_TYPE, DEPTH_FACT_VERSION
     from market_data.order_book import Level2BookReconstructor
     from market_data.structure import MarketSide
     from tests.test_market_data.test_market_state_phase3 import _aggregate, _trade
@@ -164,8 +166,8 @@ def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_
         contract_version="market.bbo.v1",
     )
     depth_series = storage.repo.register_series(
-        instrument_id="storage-fixture", fact_type="market.depth_band", timeframe_seconds=1,
-        contract_version="market.depth_band.v1",
+        instrument_id="storage-fixture", fact_type=DEPTH_FACT_TYPE, timeframe_seconds=1,
+        contract_version=DEPTH_FACT_VERSION,
     )
     snapshot = Level2BookReconstructor(series_id=book_series, contract=_contract()).process(_snapshot()).snapshot
     book = canonicalize_l2_snapshot(snapshot, source=storage.fact.source)
