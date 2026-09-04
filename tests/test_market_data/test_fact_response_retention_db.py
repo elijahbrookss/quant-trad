@@ -1,4 +1,4 @@
-"""Response archive source closure, before enabling its physical deletion gate."""
+"""Lossless response history after physical source and response reclamation."""
 from collections import Counter
 from dataclasses import replace
 from datetime import timedelta
@@ -17,12 +17,13 @@ from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalF
 from tests.test_market_data.test_fact_derived_retention_db import _archive_day
 from tests.test_market_data.test_fact_flow_retention_db import _flow_fixture
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture, _publish_book_result
+from tests.test_market_data.test_fact_reclamation_db import _physical
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement
 
 pytestmark = pytest.mark.db
 
 
-@pytest.mark.parametrize("source_cold", [False, True])
+@pytest.mark.parametrize("source_cold", [False, True, "legacy"])
 def test_response_archive_keeps_exact_witnesses_and_wider_causal_windows(storage, tmp_path, monkeypatch, source_cold):
     flow = _flow_fixture(storage, tmp_path, monkeypatch)
     book = _raw_book_fixture(storage, tmp_path, monkeypatch, definition_id="response-book", response_window=True)
@@ -83,6 +84,7 @@ def test_response_archive_keeps_exact_witnesses_and_wider_causal_windows(storage
     assert len(history) == 2 and history[-1].fact.state.value == "invalidated"
     binding = validate_frozen_dataset_series(store=storage.repo, entry=entry)
     causal = storage.repo.read_facts(series_id=response_series, **window, known_at_lte=response.known_at)
+    latest = storage.repo.read_series_records(series_id=response_series, **window)
     assert len(causal) == 1
     with storage.database.session() as session:
         assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 0
@@ -109,14 +111,48 @@ def test_response_archive_keeps_exact_witnesses_and_wider_causal_windows(storage
         for _ in range(32):
             archive.stage_next_page(response_day)
     path.write_bytes(original)
-    for _ in range(32):
-        page = archive.stage_next_page(response_day)
-        if page["status"] == "page_acknowledged":
-            break
-    else:
-        pytest.fail("response page did not finish bounded source prefix preparation")
-    assert archive.verify_next_page(response_day)["status"] == "page_verified"
-    assert archive.verify_partition(response_day)["row_count"] == 2
+    legacy = source_cold == "legacy"
+    with monkeypatch.context() as old:
+        if legacy:
+            # An older receipt with complete immutable raw holds, but no
+            # canonical source edges. Reverification must add the exact edges
+            # without rewriting those existing holds, page bytes or receipt.
+            source_resolver, dependencies = archive._source_revisions, archive._dependencies
+            old.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", "market.canonical_archive_verification.v10")
+            old.setattr(archive, "_source_revisions", lambda session, rows: [])
+            def older_dependencies(session, rows, **kwargs):
+                kwargs["source_rows"] = source_resolver(session, rows)
+                result, _ = dependencies(session, rows, **kwargs)
+                return result, []
+            old.setattr(archive, "_dependencies", older_dependencies)
+        for _ in range(32):
+            page = archive.stage_next_page(response_day)
+            if page["status"] == "page_acknowledged":
+                break
+        else:
+            pytest.fail("response page did not finish bounded source prefix preparation")
+        assert archive.verify_next_page(response_day)["status"] == "page_verified"
+        assert archive.verify_partition(response_day)["row_count"] == 2
+    if legacy:
+        with storage.database.session() as session:
+            page_before = dict(session.execute(text("SELECT * FROM market.fact_archive_manifests WHERE id=:id"),
+                {"id": page["manifest_id"]}).mappings().one())
+            receipt_before = dict(session.execute(text("SELECT * FROM market.fact_archive_verifications WHERE manifest_id=:id"),
+                {"id": page["manifest_id"]}).mappings().one())
+        with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+            reclaimer.reclaim_partition(response_day, eligible_before=storage.today, execute=True)
+        archive.restart_partition_verification(response_day)
+        for _ in range(32):
+            if archive.verify_next_page(response_day)["status"] == "no_unverified_pages":
+                break
+        else:
+            pytest.fail("response archive did not finish bounded reverification")
+        archive.verify_partition(response_day)
+        with storage.database.session() as session:
+            assert dict(session.execute(text("SELECT * FROM market.fact_archive_manifests WHERE id=:id"),
+                {"id": page["manifest_id"]}).mappings().one()) == page_before
+            assert dict(session.execute(text("SELECT * FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version"),
+                {"id": page["manifest_id"], "version": receipt_before["verifier_version"]}).mappings().one()) == receipt_before
     with storage.database.session() as session:
         sources = session.execute(text("""
             SELECT source.* FROM market.fact_archive_canonical_dependencies AS edge
@@ -134,12 +170,30 @@ def test_response_archive_keeps_exact_witnesses_and_wider_causal_windows(storage
             _archive_day(archive, day)
             reclaimer.reclaim_partition(day, eligible_before=storage.today, execute=True)
         archive.verify_partition(response_day)
+    # The parent's own valid page/receipt does not excuse corruption of a cold
+    # canonical source. Failure must leave the physical response table intact.
+    with storage.database.session() as session:
+        source_key = session.execute(text("SELECT object_key FROM market.fact_archive_manifests WHERE storage_day=:day"),
+            {"day": book.day}).scalar_one()
+    source_path = flow.store.local_path(source_key)
+    source_bytes = source_path.read_bytes()
+    source_path.write_bytes(b"corrupt cold book source page")
+    with pytest.raises(RuntimeError, match="archive_verification"):
+        reclaimer.reclaim_partition(response_day, eligible_before=storage.today, execute=True)
+    assert _physical(storage, response_day)["relation"] is not None
+    source_path.write_bytes(source_bytes)
+    before = _physical(storage, response_day)
+    dry_run = reclaimer.reclaim_partition(response_day, eligible_before=storage.today)
+    assert dry_run["status"] == "dry_run" and _physical(storage, response_day) == before
+    removed = reclaimer.reclaim_partition(response_day, eligible_before=storage.today, execute=True)
+    assert removed["reclaimed_bytes"] == before["bytes"] > 0
+    assert removed["protected_dataset_ranges"] >= 2
+    assert all(_physical(storage, day)["relation"] is None for day in (flow.source_day, book.day, response_day))
     assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=response_series) == history
     assert validate_frozen_dataset_series(store=storage.repo, entry=entry) == binding
     assert storage.repo.read_facts(series_id=response_series, **window, known_at_lte=response.known_at) == causal
+    assert storage.repo.read_series_records(series_id=response_series, **window) == latest
     # The book archive certifies through fifth/future-known raw position. That
     # larger certificate must not add its wholly later object to this Dataset.
     assert storage.repo.freeze_dataset([request]).dataset_hash == frozen.dataset_hash
-    # This source-closure proof is not yet final response-family admission.
-    with pytest.raises(RuntimeError, match="dependency_proof_required"):
-        reclaimer.reclaim_partition(response_day, eligible_before=storage.today, execute=True)
+    assert reclaimer.reclaim_partition(response_day, eligible_before=storage.today, execute=True)["status"] == "already_reclaimed"

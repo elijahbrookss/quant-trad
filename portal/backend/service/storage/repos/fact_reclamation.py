@@ -20,14 +20,15 @@ from .market_lifecycle import _LIFECYCLE_LOCK_NAME, MarketStorageLifecycleBusyEr
 
 logger = logging.getLogger(__name__)
 
-# Standalone facts, book states, basis, derivative state and flow/features have dependency admission.
-# Response composites and normalized windows still need transitive
-# proofs. A mixed physical day must pass for EVERY family in it.
+# Standalone facts, book states and response/flow/basis/derivative composites
+# have lossless dependency admission. Normalized windows still need their
+# transitive proof. A mixed physical day must pass for EVERY family in it.
 _ADMITTED_FACT_TYPES = SELF_CONTAINED_FACT_TYPES | frozenset({
     "market.trade", "market.trade_flow", "market.trade_flow_feature",
     "market.l2_book", "market.bbo", "market.depth_observation",
     "market.futures_spot_relationship",
     "market.derivative_state",
+    "market.market_response",
 })
 
 

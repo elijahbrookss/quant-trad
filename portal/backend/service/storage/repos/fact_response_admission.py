@@ -1,8 +1,9 @@
-"""Conservative causal source preservation for response archive publication.
+"""Lossless response preservation through named witnesses and complete windows.
 
-Named witnesses and full input windows are necessary, not yet sufficient, for
-physical response reclamation. The separate family gate remains closed pending
-owner reconciliation and all-revision frozen/physical-retention proof.
+The archive preserves canonical outputs and their causal evidence; it does not
+recertify a historical calculation or guess v1's omitted processing-chunk scope.
+Physical reclamation separately requires verified complete cold placement and
+current source, raw/checkpoint, and Dataset dependency checks.
 """
 import json
 

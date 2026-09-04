@@ -322,7 +322,7 @@ preserves deduplicated snapshot/update material without inventing delivery IDs;
 arbitrary correction subsets are not searched. Total derivation input visits
 are bounded as well as source edges. Feature freezes preserve all revisions,
 and v9 receipts require explicit additive reverification before reclamation.
-The remaining response/normalized families and production activation still
+The remaining normalized families and production activation still
 require their separate proofs and reviewed rollout.
 
 The v11 response archive proof first preserves named canonical flow/book/trade
@@ -330,14 +330,27 @@ witnesses and full causal windows. It reuses book position lookup without
 fabricating BBO Facts and retains the broader response-time trade evidence,
 including instrument-bound source candidates where v1 omitted a trade-series ID.
 This intentionally spends additional bounded archive/edge work to preserve
-evidence rather than guess an original source selection. It does not open the
-response deletion gate: owner reconciliation and the response partition's own
-physical-retention equivalence still need their separate proof. Response
+evidence rather than guess an original source selection. Response
 freezes now preserve all canonical revisions and the same causal raw windows.
 Read-only book/trade prefix reuse validates whole certificates but excludes
 wholly later objects from the returned frozen scope, so certifying a larger
 prefix cannot silently change an earlier Dataset's identity. No certificate
 contents, permanent holds or source clocks are rewritten by this read path.
+
+Response reclamation is admitted on lossless output and complete evidence
+preservation, not recalculation of a historical result. The initial plan to
+require full response-owner recalculation at this storage boundary is superseded:
+v1 does not record its original processing-chunk bounds, so reconstructing an
+assumed subset would invent evidence. Keeping every causal candidate preserves
+research capability without certifying that any historic conclusion was correct.
+Every canonical output revision, original fingerprint, correction/invalidation
+and named source witness survives unchanged; the existing source placement,
+raw/checkpoint, immutable metadata, pin and complete-archive checks still gate
+the DROP. Physical disposable tests compare actual hot versus cold research
+reads and Dataset identity, reject corrupt cold inputs, and prove idempotent
+reclamation and explicit additive upgrade of older compatible proof receipts.
+This does not change ingestion policy, recompute Facts or introduce an alternate
+book engine. Normalized-window admission and reviewed activation remain separate.
 
 Book reclamation additionally binds exact canonical source revisions for derived
 BBO/depth facts, checks immutable product/validity scope, and validates checkpoint

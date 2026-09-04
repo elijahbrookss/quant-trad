@@ -510,7 +510,7 @@ or clearing the expected UUID is not a recovery procedure.
 ### Canonical Retention Rollout Gate
 
 The generalized retention executor is implemented but defaults off. Its current
-whole-day dependency gate still excludes response and normalized families whose
+whole-day dependency gate still excludes normalized families whose
 complete closure is not yet admitted. The current family proofs are listed in
 the [generalized fact data plane](../architecture/data/GENERALIZED_FACT_DATA_PLANE.md).
 Do not enable unattended retention until those

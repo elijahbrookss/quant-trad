@@ -886,7 +886,8 @@ frozen history/known-at/latest reads and re-freeze identity, and reject corrupt
 cold aggregate bytes before feature DROP. v9 feature pages must be explicitly
 reverified under v10 to gain canonical source edges; original page bytes and
 older receipts remain unchanged. This family joins the default-disabled gate;
-response and normalized-window proofs still gate their physical days.
+Response admission is described below; normalized-window proofs still gate
+their physical days.
 
 Version `market.canonical_archive_verification.v11` strengthens response archive
 publication with canonical source preservation. The declared flow-feature hash
@@ -924,18 +925,35 @@ object spanning the boundary remains indivisible. This keeps a repeated freeze
 stable when retention subsequently certifies a larger prefix; certificate and
 hold corruption cannot be bypassed by trimming its returned reference set.
 
-This is source preservation, **not yet response deletion admission**. Full
-response-owner calculation/input-fingerprint reconciliation and the response
-partition's own physical-retention proof remain required before opening that
-family gate.
+Response physical admission uses lossless preservation, not historical research
+recertification. Its v1 evidence omits the producer's processing-chunk bounds as
+well as the trade series/source ID. Re-running today's calculation on a guessed
+subset would invent input identity; running it on every preserved candidate
+would not necessarily reproduce the original chunk. Instead, archive exactly
+every canonical output revision, including its original input fingerprint and
+invalidations, and preserve the complete causal source superset and raw prefix.
+The selected named witnesses, immutable metadata, current raw/checkpoint bytes,
+canonical source placements, Dataset pins and complete page coverage must all
+pass their existing checks. This grants no claim that an old research result
+was correct, changes no calculation or known-at clock, and introduces no second
+book reconstruction path. Historical recalculation belongs to the existing
+research/replay owners using the retained evidence.
 The disposable source-closure regression archives response revisions after
 trade/book/flow inputs have physically moved to cold storage, retains an
 intervening non-extremum book event and a later causal trade revision, excludes
 future-known inputs, and rejects corruption of the intervening raw event.
 All-revision frozen history, known-at reads, validation and repeated Dataset
 identity remain unchanged after those source partitions are reclaimed, even
-when a source certificate includes a wholly later raw object. The response
-partition itself must still reject reclamation.
+when a source certificate includes a wholly later raw object. The regression
+then drops the response hot partition itself, measures reclaimed bytes, and
+checks identical frozen history, typed latest reads, known-at reads, validation
+and repeated Dataset identity from cold storage. A corrupt cold book source
+blocks the drop; dry-run leaves the table unchanged and retry after successful
+reclamation is idempotent. Older v10 receipts remain stale until explicit
+reverification supplies the v11 canonical source edges. Such an upgrade retains
+the original page bytes, existing raw bindings and old receipt; incomplete
+original raw bindings are not silently replaced. Normalized windows remain the
+only current-family dependency gate; all destructive execution defaults off.
 
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence
@@ -989,8 +1007,8 @@ Old v6 receipts cannot authorize this stronger composite admission. Reverificati
 retains the original page and raw bindings, appends required canonical/checkpoint
 edges only, and fails if the originally bound raw evidence cannot prove the full
 closure. It does not silently substitute later material deliveries or archives.
-Response and normalized-window closure remain
-separate gates before complete retention activation. Individual objects and final
+Normalized-window closure remains a separate gate before complete retention
+activation. Individual objects and final
 current-byte checks must fit their budgets even when a connection spans many
 resumable intervals.
 
@@ -1144,7 +1162,7 @@ Complete dependency admission and reviewed production activation remain rollout
 gates; wiring the executor is not itself production permission.
 
 Standalone candle, funding, open-interest, reference-price, reserve-balance, structured reserve-report,
-trade, trade-flow buckets/features, L2/BBO/depth, futures/spot basis and derivative-state facts are currently admitted. Any other family in the
+trade, trade-flow buckets/features, L2/BBO/depth, futures/spot basis, derivative-state and response facts are currently admitted. Any other family in the
 physical day blocks the **whole day**, including remaining composite and normalized facts
 whose complete dependency closures are not yet proven. This is a temporary
 fail-closed compatibility gate, not permission to omit those rows or expire

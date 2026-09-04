@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from portal.backend.service.storage.repos.fact_reclamation import (
-    FactReclamationLimits, PostgresCanonicalFactReclamationRepository,
+    FactReclamationLimits, PostgresCanonicalFactReclamationRepository, unproven_reclamation_fact_types,
 )
 
 
@@ -38,7 +38,7 @@ def test_invalid_requests_fail_before_accessing_storage(params):
 
 
 @pytest.mark.parametrize("fact_type", [
-    "market.market_response", "market.normalized.example", "unknown.family",
+    "market.normalized.example", "unknown.family",
 ])
 def test_incomplete_transitive_proofs_block_reclamation(fact_type):
     def execute(statement, *_):
@@ -50,6 +50,11 @@ def test_incomplete_transitive_proofs_block_reclamation(fact_type):
             SimpleNamespace(execute=execute), {"storage_day": date(2026, 1, 1), "state": "verified"},
             eligible_before=date(2026, 1, 2),
         )
+
+
+def test_response_admission_does_not_bypass_unproven_families_in_a_mixed_day():
+    assert unproven_reclamation_fact_types(["market.market_response", "market.trade"]) == []
+    assert unproven_reclamation_fact_types(["market.market_response", "market.normalized.example"]) == ["market.normalized.example"]
 
 
 @pytest.mark.parametrize("changes", [
