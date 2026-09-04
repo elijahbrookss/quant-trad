@@ -20,6 +20,10 @@ from market_data.canonical import (
     build_canonical_fact_series_material_hash,
     build_fact_version_id,
 )
+from market_data.canonical_storage import (
+    record_from_storage_row as _canonical_row_to_record,
+    source_from_storage_row as _canonical_source,
+)
 from market_data.contracts import (
     CANDLE_FACT_TYPE,
     FUNDING_RATE_FACT_TYPE,
@@ -104,71 +108,6 @@ def _observation_key(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
-
-
-def _canonical_source(row: Mapping[str, Any]) -> SourceIdentity:
-    source = SourceIdentity(
-        provider=str(row["source_provider"]),
-        venue=str(row["source_venue"]),
-        source_kind=str(row["source_kind"]),
-        adapter_version=str(row["source_adapter_version"]),
-    )
-    if source.identity_key != str(row["source_identity_key"]):
-        raise RuntimeError(
-            "market_data_corrupt: canonical source identity mismatch "
-            f"source_id={row.get('source_id')}"
-        )
-    return source
-
-
-def _canonical_row_to_record(row: Mapping[str, Any]) -> CanonicalFactRecord:
-    fact = CanonicalFact(
-        fact_type=str(row["fact_type"]),
-        payload_schema_id=str(row["payload_schema_id"]),
-        observation_key=str(row["observation_key"]),
-        observation_time=row["observation_time"],
-        observation_time_method=str(row["observation_time_method"]),
-        source_published_at=row.get("source_published_at"),
-        received_at=row.get("received_at"),
-        accepted_at=row["accepted_at"],
-        known_at=row["known_at"],
-        known_at_method=str(row["known_at_method"]),
-        source=_canonical_source(row),
-        transformation_id=str(row["transformation_id"]),
-        external_event_key=row.get("external_event_key"),
-        external_event_group_key=row.get("external_event_group_key"),
-        external_event_component_key=row.get("external_event_component_key"),
-        state=str(row["state"]),
-        payload=dict(row.get("payload") or {}),
-        provenance_schema_id=str(row["provenance_schema_id"]),
-        provenance=dict(row.get("provenance") or {}),
-        quality_schema_id=str(row["quality_schema_id"]),
-        quality=dict(row.get("quality") or {}),
-    )
-    expected = {
-        "payload_contract_hash": fact.payload_contract_hash,
-        "payload_hash": fact.payload_hash,
-        "material_hash": fact.material_hash,
-        "provenance_hash": fact.provenance_hash,
-        "quality_hash": fact.quality_hash,
-        "row_hash": fact.row_hash,
-    }
-    for field_name, expected_hash in expected.items():
-        if str(row.get(field_name) or "") != expected_hash:
-            raise RuntimeError(
-                "market_data_corrupt: canonical Fact hash mismatch "
-                f"field={field_name} fact_version_id={row.get('id')}"
-            )
-    return CanonicalFactRecord(
-        series_id=int(row["series_id"]),
-        source_id=int(row["source_id"]),
-        revision=int(row["revision"]),
-        market_commit_seq=int(row["market_commit_seq"]),
-        ingestion_run_id=row.get("ingestion_run_id"),
-        fact_version_id=str(row["id"]),
-        row_hash=str(row["row_hash"]),
-        fact=fact,
-    )
 
 
 def _source_provenance(fact: CanonicalFact) -> dict[str, Any]:

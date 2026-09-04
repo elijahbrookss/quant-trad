@@ -18,6 +18,8 @@ tags:
 code_paths:
   - src/market_data/contracts.py
   - src/market_data/canonical.py
+  - src/market_data/canonical_storage.py
+  - src/market_data/fact_archive.py
   - src/market_data/canonical_adapters.py
   - src/market_data/fact_registry.py
   - src/market_data/store.py
@@ -203,6 +205,43 @@ they can supply causal structured history. Book-derived archive lookup binds
 the complete `(definition_id, session_id, connection_epoch, receive_ordinal)`
 position; a reused ordinal after reconnect cannot be satisfied by an object
 from an earlier connection epoch.
+
+## Canonical Archive Codec
+
+The bounded `market.canonical_fact_archive.v1` codec preserves complete
+canonical rows in Parquet/ZSTD. Its selection is always
+`all_canonical_revisions.v1`; encoding does not select latest state, discard
+invalidations, reconstruct facts, or change their acceptance/known-at clocks.
+Envelope fields are typed columns, timestamps retain UTC microseconds, and
+schema-owned payload/provenance/quality documents retain canonical JSON and
+ordered child entries. Source identity, ingestion run, series dimensions,
+version IDs, commit order, and existing hashes survive the round trip. The
+PostgreSQL and archive paths share `canonical_storage` decoding and validation;
+there is no archive-specific interpretation of a fact family.
+
+Each object descriptor binds the exact byte checksum, ordered full-row content
+fingerprint, row and logical-byte counts, first/last commit-and-ID cursor, and
+per-series observation/known-at/acceptance bounds, source IDs, and payload
+contracts. Its persisted JSON has a separate manifest hash. Reload rejects
+changed descriptors and unsupported format/selection contracts. Files are
+checked against their descriptor before any decoded rows are returned, with
+schema, ZSTD, Parquet page-checksum, canonical envelope, content-fingerprint,
+row-count, and index-bound verification. Encoding and publication both read
+back their completed bytes; object-store acknowledgement alone is insufficient.
+
+Default pages are limited to 10,000 rows, 64 MiB of logical content, and 128 MiB
+of file/declared uncompressed Parquet data, with 512-row groups. Limits are
+explicit codec inputs, not truncation policies: an oversized, duplicate,
+unordered, malformed, or empty page fails and removes only its own staging
+file. These limits bound one object, not a complete retention run.
+
+This codec is a retention building block, **not retention admission**. It
+preserves the lineage supplied in canonical provenance; it does not prove that
+every referenced raw mapping/object exists. Manifest registration, raw-lineage
+dependency/pin checks, hot/cold reader integration, resumable execution, and
+actual hot-space reclamation remain separate lifecycle responsibilities.
+Destructive canonical retention stays disabled until those boundaries and the
+operator-run schema cutover are implemented and validated together.
 
 ## Causal Selection
 

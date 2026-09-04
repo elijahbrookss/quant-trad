@@ -7,6 +7,18 @@ import pytest
 import market_data.archive as archive
 
 
+def test_reuse_syncs_a_competing_publication_before_acknowledgement(tmp_path, monkeypatch):
+    store = archive.FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    destination = store.local_path("fact.parquet")
+    destination.write_bytes(b"already linked immutable bytes")
+    synced = []
+    monkeypatch.setattr(archive, "_fsync_directory", synced.append)
+    result = store.put_verified(object_key="fact.parquet", source_path=destination,
+                                expected_sha256=hashlib.sha256(destination.read_bytes()).hexdigest())
+    assert result.reused_existing is True
+    assert synced == [destination.parent]
+
+
 @pytest.mark.parametrize("identical", [False, True])
 def test_publication_never_replaces_a_winner_during_copy(tmp_path, monkeypatch, identical):
     store = archive.FilesystemRawArchiveObjectStore(tmp_path / "objects")

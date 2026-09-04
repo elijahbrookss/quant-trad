@@ -358,7 +358,9 @@ dataset-eligible.
 
 Filesystem publication uses a unique staging file, verifies and fsyncs the
 bytes, then atomically creates the destination with a same-filesystem hard
-link. An existing identical object is reused; conflicting bytes fail loud.
+link. An existing identical object is reused after syncing its parent directory
+so a competing publisher's not-yet-synced link cannot yield an early durable
+acknowledgement; conflicting bytes fail loud.
 There is no replacing-rename fallback. This also applies to canonical archives
 using the same object-store boundary.
 

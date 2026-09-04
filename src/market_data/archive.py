@@ -737,6 +737,9 @@ class FilesystemRawArchiveObjectStore:
                 raise RuntimeError(
                     "market_archive_object_conflict: immutable key has different bytes"
                 )
+            # A competing publisher may have linked the object but not yet
+            # synced the directory. Reuse must itself establish a durable ack.
+            _fsync_directory(destination.parent)
             return ArchiveObjectAcknowledgement(
                 object_key=str(object_key),
                 object_uri=f"market-archive://{object_key}",
