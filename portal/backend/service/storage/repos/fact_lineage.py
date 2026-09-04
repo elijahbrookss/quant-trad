@@ -20,6 +20,7 @@ from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
 
 
 EXACT_RAW_FACT_TYPES = frozenset({"market.trade", "market.l2_book", "market.bbo", "market.depth_observation"})
+BOOK_SCOPE_FIELDS = ("definition_id", "session_id", "connection_epoch", "provider_product_id")
 
 
 def _witness(row):
@@ -86,10 +87,29 @@ def _raw_records(path, *, manifest_id, limits):
         raise RuntimeError(f"canonical_raw_lineage_decode_failed: manifest_id={manifest_id} {exc}") from exc
 
 
+def canonical_book_prefixes(rows):
+    """Collapse book roots without materializing the preceding raw positions."""
+    prefixes = {}
+    for row in rows:
+        if row["fact_type"] not in EXACT_RAW_FACT_TYPES or row["fact_type"] == "market.trade":
+            continue
+        _, evidence = _witness(row)
+        scope = tuple(evidence[name] for name in BOOK_SCOPE_FIELDS[:3])
+        prior = prefixes.get(scope)
+        if prior is not None and prior["provider_product_id"] != evidence["provider_product_id"]:
+            raise RuntimeError(f"canonical_raw_lineage_prefix_scope_conflict: fact_version_id={row['id']}")
+        if prior is None or evidence["receive_ordinal"] > prior["receive_ordinal"]:
+            prefixes[scope] = {name: evidence[name] for name in (*BOOK_SCOPE_FIELDS, "receive_ordinal")} | {
+                "first_receive_ordinal": 1, "root_fact_version_id": row["id"],
+            }
+    return list(prefixes.values())
+
+
 def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_verifier,
                                        limits: RawArchiveReadLimits = RawArchiveReadLimits(),
                                        max_mapping_rows: int = 50_000, bound_manifest_ids=None, check_budget=None,
-                                       preserve_book_prefixes: bool = False):
+                                       preserve_book_prefixes: bool = False, book_prefix_ranges=None,
+                                       witness_manifest_ids=None):
     """Prove exact source rows in one current acknowledged placement per witness.
 
     Compacted mappings may be used after an original object's recorded expiry.
@@ -107,30 +127,28 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     for row in rows:
         key, evidence = _witness(row)
         wanted[key].append((row, evidence))
-    if not wanted:
-        return {}
     record_ids = [key[1] for key in wanted if key[0] == "record"]
     positions = [dict(zip(("definition_id", "session_id", "connection_epoch", "receive_ordinal"), key[1:]))
                  for key in wanted if key[0] == "position"]
-    prefixes = {}
-    if preserve_book_prefixes:
-        for row in rows:
-            if row["fact_type"] == "market.trade":
-                continue
-            _, evidence = _witness(row)
-            scope = tuple(evidence[name] for name in ("definition_id", "session_id", "connection_epoch"))
-            prior = prefixes.get(scope)
-            if prior is not None and prior["provider_product_id"] != evidence["provider_product_id"]:
-                raise RuntimeError(f"canonical_raw_lineage_prefix_scope_conflict: fact_version_id={row['id']}")
-            if prior is None or evidence["receive_ordinal"] > prior["receive_ordinal"]:
-                prefixes[scope] = {name: evidence[name] for name in (
-                    "definition_id", "session_id", "connection_epoch", "receive_ordinal", "provider_product_id"
-                )} | {"root_fact_version_id": row["id"]}
-        if sum(scope["receive_ordinal"] for scope in prefixes.values()) > max_mapping_rows:
+    if preserve_book_prefixes and book_prefix_ranges is not None:
+        raise ValueError("canonical_raw_lineage_prefix_modes_conflict")
+    prefixes = canonical_book_prefixes(rows) if preserve_book_prefixes else list(book_prefix_ranges or ())
+    if prefixes:
+        for scope in prefixes:
+            if (any(not isinstance(scope.get(name), str) or not scope[name].strip()
+                    for name in ("definition_id", "session_id", "provider_product_id", "root_fact_version_id"))
+                    or type(scope.get("connection_epoch")) is not int or not 0 <= scope["connection_epoch"] <= 2**63 - 1
+                    or type(scope.get("first_receive_ordinal")) is not int or type(scope.get("receive_ordinal")) is not int
+                    or not 1 <= scope["first_receive_ordinal"] <= scope["receive_ordinal"] <= 2**63 - 1):
+                raise ValueError("canonical_raw_lineage_prefix_range_invalid")
+        if sum(scope["receive_ordinal"] - scope["first_receive_ordinal"] + 1 for scope in prefixes) > max_mapping_rows:
             raise RuntimeError("canonical_raw_lineage_prefix_budget_exceeded: complete book prefixes exceed the mapping budget")
-        for key, scope in prefixes.items():
-            for ordinal in range(1, scope["receive_ordinal"] + 1):
+        for scope in prefixes:
+            key = tuple(scope[name] for name in BOOK_SCOPE_FIELDS[:3])
+            for ordinal in range(scope["first_receive_ordinal"], scope["receive_ordinal"] + 1):
                 wanted[("position", *key, ordinal)].append((None, {**scope, "receive_ordinal": ordinal}))
+    if not wanted:
+        return {}
     matches = []
     bound_predicate = "" if bound_manifest_ids is None else "AND manifests.id = ANY(:bound_ids)"
     bound_params = {} if bound_manifest_ids is None else {"bound_ids": sorted(set(bound_manifest_ids))}
@@ -146,12 +164,12 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
          "AND positions.connection_epoch=mappings.connection_epoch AND positions.receive_ordinal=mappings.receive_ordinal)",
          {"positions": json.dumps(positions)}),
         ("EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:prefixes AS jsonb)) "
-         "AS prefixes(definition_id text, session_id text, connection_epoch bigint, receive_ordinal bigint) "
+         "AS prefixes(definition_id text, session_id text, connection_epoch bigint, first_receive_ordinal bigint, receive_ordinal bigint) "
          "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
          "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
          "AND prefixes.connection_epoch=mappings.connection_epoch "
-         "AND mappings.receive_ordinal BETWEEN 1 AND prefixes.receive_ordinal)",
-         {"prefixes": json.dumps(list(prefixes.values()))}),
+         "AND mappings.receive_ordinal BETWEEN prefixes.first_receive_ordinal AND prefixes.receive_ordinal)",
+         {"prefixes": json.dumps(prefixes)}),
     ]
     for predicate, params in queries:
         if not (record_ids if "ids" in params else positions if "positions" in params else prefixes):
@@ -187,6 +205,10 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     manifests = {}
     for key, witnesses in wanted.items():
         available = list(candidates[key].values())
+        if witness_manifest_ids is not None:
+            for row, _ in witnesses:
+                if row is not None and row["id"] in witness_manifest_ids:
+                    available = [item for item in available if item["id"] in witness_manifest_ids[row["id"]]]
         context = witnesses[0][0]["id"] if witnesses[0][0] is not None else witnesses[0][1]["root_fact_version_id"]
         if not available:
             raise RuntimeError(f"canonical_raw_lineage_mapping_missing: fact_version_id={context} raw_position={key}")

@@ -108,8 +108,10 @@ class PostgresMarketStorageLifecycleRepository:
     def canonical_dependency_count(session, *, target_kind: str, target_id: str) -> int:
         """Cold Fact evidence holds survive release of user and dataset pins."""
         return int(session.execute(text(
-            "SELECT count(*) FROM market.fact_archive_dependencies "
-            "WHERE target_kind=:target_kind AND target_id=:target_id"
+            "SELECT (SELECT count(*) FROM market.fact_archive_dependencies "
+            "WHERE target_kind=:target_kind AND target_id=:target_id) + "
+            "(SELECT count(*) FROM market.fact_book_prefix_dependencies "
+            "WHERE :target_kind='raw_manifest' AND target_id=:target_id)"
         ), {"target_kind": str(target_kind), "target_id": str(target_id)}).scalar_one())
 
     @staticmethod
@@ -436,7 +438,9 @@ class PostgresMarketStorageLifecycleRepository:
                             WHERE refs.raw_archive_manifest_id = manifests.id) AS dataset_pin_count,
                            (SELECT count(*) FROM market.fact_archive_dependencies AS dependencies
                             WHERE dependencies.target_kind='raw_manifest'
-                              AND dependencies.target_id=manifests.id) AS canonical_dependency_count
+                              AND dependencies.target_id=manifests.id) +
+                           (SELECT count(*) FROM market.fact_book_prefix_dependencies AS prefixes
+                            WHERE prefixes.target_id=manifests.id) AS canonical_dependency_count
                     FROM market.raw_archive_manifests AS manifests
                     JOIN market.stream_definitions AS definitions
                       ON definitions.id = manifests.definition_id

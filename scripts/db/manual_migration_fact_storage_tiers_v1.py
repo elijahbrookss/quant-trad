@@ -5,6 +5,8 @@ Default: read-only inspection. --execute --writers-stopped prepares/copies a
 bounded number of pages. Rerun until ready. The immutable old table is retained
 for operator rollback; this command never drops the source or enables retention.
 Run PR #196/#197's required migrations first. PG_DSN is the only connection input.
+On an already-ready older tiered layout, the same explicit execution adds only
+the two empty book-prefix proof tables. It never backfills verification receipts.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ from sqlalchemy import create_engine, inspect, text
 from portal.backend.db import Base, MarketFactVersionRecord
 from portal.backend.db.fact_storage_schema import (
     FACT_STORAGE_LAYOUT_VERSION, FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES,
+    FACT_BOOK_PREFIX_TABLES,
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
 )
 from portal.backend.db.session import Database
@@ -56,6 +59,13 @@ def inspect_cutover(conn):
     state = _state(conn)
     source = SOURCE if _relation(conn, SOURCE) else "market.fact_versions"
     if state and state["state"] == "ready":
+        missing = [name for name in FACT_BOOK_PREFIX_TABLES if _relation(conn, "market." + name) is None]
+        if missing:
+            if len(missing) != len(FACT_BOOK_PREFIX_TABLES):
+                raise RuntimeError("fact_storage_book_prefix_partial_layout: inspect before retrying")
+            assert_fact_storage_contract(conn, allow_missing_book_prefix_tables=True)
+            return {"status": "book_prefix_metadata_required", "missing_tables": missing,
+                    "source_retained": bool(_relation(conn, SOURCE)), "evidence": state["evidence"]}
         assert_fact_storage_contract(conn)
         return {"status": "ready", "source_retained": bool(_relation(conn, SOURCE)),
                 "evidence": state["evidence"]}
@@ -71,7 +81,22 @@ def inspect_cutover(conn):
 
 
 def _prepare(conn):
-    if _state(conn) is not None:
+    state = _state(conn)
+    if state is not None:
+        missing = [name for name in FACT_BOOK_PREFIX_TABLES if _relation(conn, "market." + name) is None]
+        if missing:
+            if state["state"] != "ready" or len(missing) != len(FACT_BOOK_PREFIX_TABLES):
+                raise RuntimeError("fact_storage_book_prefix_partial_layout: finish the prior cutover before upgrading")
+            assert_fact_storage_contract(conn, allow_missing_book_prefix_tables=True)
+            conn.execute(text("SET LOCAL lock_timeout='5s'"))
+            for table in Base.metadata.sorted_tables:
+                if table.schema == "market" and table.name in FACT_BOOK_PREFIX_TABLES:
+                    table.create(conn)
+                    conn.execute(text(
+                        f"CREATE TRIGGER trg_reject_mutation_{table.name} BEFORE UPDATE OR DELETE ON market.{table.name} "
+                        "FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()"
+                    ))
+            assert_fact_storage_contract(conn)
         return
     _assert_source(conn, "market.fact_versions")
     if _relation(conn, SOURCE) is not None:

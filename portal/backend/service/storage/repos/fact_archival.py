@@ -37,7 +37,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v4"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v5"
 
 
 def _series_catalog(manifest):
@@ -172,6 +172,7 @@ class PostgresCanonicalFactArchiveRepository:
     def _dependencies(self, session, rows, *, bound_manifest_ids=None):
         from .market_data import _collect_material_archive_refs
         from .fact_lineage import EXACT_RAW_FACT_TYPES, resolve_canonical_raw_archive_refs
+        from .fact_book_prefix import resolve_verified_book_prefixes
         groups = defaultdict(list)
         for row in rows:
             groups[(row["series_id"], row["fact_type"])].append(row)
@@ -180,12 +181,17 @@ class PostgresCanonicalFactArchiveRepository:
             max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
         ), check_budget=self.check_budget)
         exact_rows = [row for row in rows if row["fact_type"] in EXACT_RAW_FACT_TYPES]
+        prefix_refs, root_bindings = resolve_verified_book_prefixes(
+            session, rows=exact_rows, byte_verifier=objects, max_objects=self.max_dependency_objects,
+            bound_manifest_ids=bound_manifest_ids, check_budget=self.check_budget,
+        )
+        references.update(prefix_refs)
         references.update(resolve_canonical_raw_archive_refs(
             session, rows=exact_rows, object_store=self.object_store, byte_verifier=objects,
             limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
             bound_manifest_ids=bound_manifest_ids,
             check_budget=self.check_budget,
-            preserve_book_prefixes=True,
+            witness_manifest_ids=root_bindings,
         ))
         for (series_id, fact_type), group in groups.items():
             self._check_budget()
@@ -222,9 +228,28 @@ class PostgresCanonicalFactArchiveRepository:
         objects.assert_unchanged()
         return result
 
+    def _prepare_book_prefix(self, session, rows, day, *, bound_manifest_ids=None):
+        from .fact_book_prefix import prepare_next_book_prefix
+        progress = prepare_next_book_prefix(
+            session, rows=rows, object_store=self.object_store,
+            byte_verifier=ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
+                max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
+            ), check_budget=self.check_budget), limits=self.raw_read_limits,
+            max_mapping_rows=self.max_raw_mapping_rows, max_objects=self.max_dependency_objects,
+            check_budget=self.check_budget, bound_manifest_ids=bound_manifest_ids,
+        )
+        if progress is not None:
+            # The executor logs completion only after this transaction commits.
+            logger.info("canonical_archive_book_prefix_prepared | storage_day=%s chunk_id=%s first_ordinal=%s last_ordinal=%s required_ordinal=%s",
+                day, progress["chunk_id"], progress["first_receive_ordinal"], progress["last_receive_ordinal"], progress["required_receive_ordinal"])
+            return {"storage_day": day, **progress}
+        return None
+
     def stage_next_page(self, day: date) -> dict:
         """Publish/read back one complete source page, then atomically acknowledge it.
 
+        Missing book-prefix evidence advances one committed interval first and
+        returns book_prefix_verified; a later call publishes the same hot page.
         An interrupted publication can leave an unreferenced immutable object.
         Retrying reads the same source cursor and safely reuses identical bytes;
         progress advances only in the catalog transaction.
@@ -277,6 +302,9 @@ class PostgresCanonicalFactArchiveRepository:
             for row in rows:
                 self._check_budget()
                 record_from_storage_row(row)
+            progress = self._prepare_book_prefix(session, rows, day)
+            if progress is not None:
+                return progress
             dependencies = self._dependencies(session, rows)
             manifest = publish_canonical_fact_archive(
                 rows, object_store=self.object_store, temporary_directory=self.temporary_directory, limits=self.limits,
@@ -365,6 +393,8 @@ class PostgresCanonicalFactArchiveRepository:
         The codec validates every full-row hash. Comparing every permanent
         envelope then proves document equality without rereading hot JSON.
         This progress survives process restarts; it cannot authorize a DROP.
+        Older pages can first advance one book_prefix_verified interval using
+        their existing dependency bindings, without republishing their bytes.
         """
         with self.database.session() as session:
             partition = self._lock(session, day)
@@ -402,12 +432,15 @@ class PostgresCanonicalFactArchiveRepository:
                 verify_archived_envelope(envelope, archived)
             aliases = [alias for row in rows if (alias := legacy_material_alias(row)) is not None]
             catalogs = self._page_catalogs(session, manifest.manifest_id)
+            bound_ids = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"]
+            progress = self._prepare_book_prefix(session, rows, day, bound_manifest_ids=bound_ids)
+            if progress is not None:
+                return progress
             expected = {
                 "series": _series_catalog(manifest),
                 "aliases": sorted(aliases, key=lambda item: (item["fact_version_id"], item["evidence_key"])),
-                "dependencies": sorted(self._dependencies(session, rows, bound_manifest_ids=[
-                    item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"
-                ]), key=lambda item: (item["target_kind"], item["target_id"])),
+                "dependencies": sorted(self._dependencies(session, rows, bound_manifest_ids=bound_ids),
+                                       key=lambda item: (item["target_kind"], item["target_id"])),
             }
             for name, items in expected.items():
                 if catalogs[name] != items:

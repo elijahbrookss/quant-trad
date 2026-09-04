@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,7 @@ def _record(segment: DurableRawSpoolSegment, ordinal: int) -> RawStreamRecord:
         stream_session_id=segment.session_id,
         connection_epoch=segment.connection_epoch,
         receive_ordinal=ordinal,
-        received_at=f"2026-08-02T07:20:{ordinal:02d}Z",
+        received_at=(datetime(2026, 8, 2, 7, 20, tzinfo=UTC) + timedelta(seconds=ordinal)).isoformat(),
         raw_frame=frame,
     )
     return RawStreamRecord.from_provider_message(

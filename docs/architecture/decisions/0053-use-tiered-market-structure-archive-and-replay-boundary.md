@@ -268,7 +268,17 @@ control frames without canonical mutations. A last-frame mapping alone cannot
 prove a reconstructed book's source lifetime. Existing hot session holders
 protect live publication without repeated full-history scans; late imports
 without a holder must fence and check the complete prefix. Checkpoint/validity
-and long-prefix resume proofs remain required before admitting book reclamation.
+proofs remain required before admitting book reclamation. Long prefixes now
+advance through immutable, shared interval receipts with permanent raw holds.
+Each bounded transaction extends one interval; interruption rolls back that
+interval, and restarting resumes committed progress. This adds metadata to the
+existing PostgreSQL authority, not a second store or a new source of Fact truth.
+Final admission validates the contiguous receipt chain and current object bytes,
+and exact roots bind to their own certified interval. Later archive aliases
+cannot rewrite that proof. This deliberately trades some retained objects and
+receipt metadata for safe restart and avoids repeatedly decoding an entire
+connection history. It does not remove per-object/final verification budgets or
+establish checkpoint/replay equivalence by itself.
 
 ### Operational Consequences
 

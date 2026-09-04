@@ -11,6 +11,7 @@ from market_data.canonical_adapters import canonicalize_market_trade
 from market_data.contracts import SourceIdentity
 from market_data.structure import MarketSide
 from portal.backend.service.storage.repos import fact_archival, market_structure
+from portal.backend.service.storage.repos.market_lifecycle import market_storage_lifecycle_repository
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement
 from tests.test_market_data.test_market_structure_archive import _record
 from tests.test_market_data.test_market_state_phase3 import _trade
@@ -314,8 +315,30 @@ def test_book_archival_holds_intermediate_control_frames_not_only_canonical_muta
                         reclaimer.execute(text("LOCK TABLE market." + fact_partition_name(fixture.day) + " IN ACCESS EXCLUSIVE MODE NOWAIT"))
                 assert busy.value.orig.pgcode == "55P03", "the holder cannot be dropped before its successor commits"
     archive = fact_archival.PostgresCanonicalFactArchiveRepository(database=storage.database,
-        object_store=fixture.store, temporary_directory=tmp_path / "staging")
+        object_store=fixture.store, temporary_directory=tmp_path / "staging", max_raw_mapping_rows=4)
     archive.seal_partition(fixture.day)
+    first = archive.stage_next_page(fixture.day)
+    assert first["status"] == "book_prefix_verified" and first["last_receive_ordinal"] == 1
+    from market_data.fact_archive import archive_evidence_hash
+    from portal.backend.service.storage.repos.fact_book_prefix import BOOK_PREFIX_VERIFIER_VERSION
+    from portal.backend.service.storage.repos.market_lifecycle import MarketStorageLifecycleBusyError
+    with storage.database.session() as blocker:
+        descriptor = blocker.execute(text("SELECT descriptor FROM market.fact_book_prefix_chunks WHERE id=:id"),
+                                     {"id": first["chunk_id"]}).scalar_one()
+        scope = {name: descriptor[name] for name in ("definition_id", "session_id", "connection_epoch", "provider_product_id")}
+        scope["verifier_version"] = BOOK_PREFIX_VERIFIER_VERSION
+        blocker.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:name,0))"),
+                        {"name": "quant-trad:book-prefix:" + archive_evidence_hash(scope)})
+        with pytest.raises(MarketStorageLifecycleBusyError, match="book_prefix_busy"):
+            archive.stage_next_page(fixture.day)
+    for table in ("fact_book_prefix_chunks", "fact_book_prefix_dependencies"):
+        with pytest.raises(DBAPIError, match="immutable"):
+            with storage.database.session() as attempt:
+                attempt.execute(text(f"DELETE FROM market.{table}"))
+    # The receipt and its hold commit even though the canonical page is not
+    # ready. A restarted worker must continue at two, not decode one again.
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(database=storage.database,
+        object_store=fixture.store, temporary_directory=tmp_path / "staging", max_raw_mapping_rows=4)
     with storage.database.session() as session:
         key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
                               {"id": fixture.manifests[1]}).scalar_one()
@@ -326,7 +349,24 @@ def test_book_archival_holds_intermediate_control_frames_not_only_canonical_muta
         archive.stage_next_page(fixture.day)
     progress = archive.inspect_partition(fixture.day)
     assert progress["state"] == "sealed" and progress["page_count"] == 0
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 1
+        assert market_storage_lifecycle_repository.canonical_dependency_count(session,
+            target_kind="raw_manifest", target_id=fixture.manifests[0]) == 1
     path.write_bytes(original)
+    from portal.backend.service.storage.repos import fact_book_prefix
+    original_dependencies = fact_book_prefix._dependencies
+    def interrupted_after_flush(*args, **kwargs):
+        original_dependencies(*args, **kwargs)
+        raise RuntimeError("injected interruption after chunk and hold flush")
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(fact_book_prefix, "_dependencies", interrupted_after_flush)
+        with pytest.raises(RuntimeError, match="injected interruption"):
+            archive.stage_next_page(fixture.day)
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 1
+    assert archive.stage_next_page(fixture.day)["last_receive_ordinal"] == 2
+    assert archive.stage_next_page(fixture.day)["last_receive_ordinal"] == 3
     page = archive.stage_next_page(fixture.day)
     assert archive.verify_next_page(fixture.day)["status"] == "page_verified"
     assert archive.verify_partition(fixture.day)["row_count"] == 2
@@ -336,3 +376,40 @@ def test_book_archival_holds_intermediate_control_frames_not_only_canonical_muta
         assert held == sorted(fixture.manifests), "the heartbeat has no canonical row but remains replay evidence"
         assert session.execute(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
                                {"day": fixture.day}).scalar_one() == 2
+
+
+def test_older_book_page_reverification_builds_resumable_prefixes_without_rewriting_catalogs(storage, tmp_path, monkeypatch):
+    from portal.backend.service.storage.repos import fact_book_prefix, fact_lineage
+    fixture = _raw_book_fixture(storage, tmp_path, monkeypatch)
+    for index in range(len(fixture.facts)):
+        _publish_book_result(fixture, index)
+    def worker():
+        return fact_archival.PostgresCanonicalFactArchiveRepository(database=storage.database,
+            object_store=fixture.store, temporary_directory=tmp_path / "staging", max_raw_mapping_rows=4)
+    archive = worker()
+    archive.seal_partition(fixture.day)
+    def previous_prefix_admission(session, *, rows, byte_verifier, bound_manifest_ids=None, **kwargs):
+        # Reproduce v4's one-shot deep prefix proof and complete raw holds,
+        # without installing any new shared interval receipts.
+        return fact_lineage.resolve_canonical_raw_archive_refs(session, rows=rows,
+            object_store=fixture.store, byte_verifier=byte_verifier, preserve_book_prefixes=True,
+            bound_manifest_ids=bound_manifest_ids), {}
+    with monkeypatch.context() as legacy:
+        legacy.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", "market.canonical_archive_verification.v4")
+        legacy.setattr(archive, "_prepare_book_prefix", lambda *args, **kwargs: None)
+        legacy.setattr(fact_book_prefix, "resolve_verified_book_prefixes", previous_prefix_admission)
+        page = archive.stage_next_page(fixture.day)
+        archive.verify_next_page(fixture.day)
+        archive.verify_partition(fixture.day)
+    with storage.database.session() as session:
+        catalogs_before = archive._page_catalogs(session, page["manifest_id"])
+        assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 0
+    assert archive.restart_partition_verification(fixture.day)["status"] == "partition_verification_restarted"
+    for ordinal in (1, 2, 3):
+        progress = worker().verify_next_page(fixture.day)
+        assert progress["status"] == "book_prefix_verified" and progress["last_receive_ordinal"] == ordinal
+    assert worker().verify_next_page(fixture.day)["status"] == "page_verified"
+    assert worker().verify_partition(fixture.day)["row_count"] == 2
+    with storage.database.session() as session:
+        assert archive._page_catalogs(session, page["manifest_id"]) == catalogs_before
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_verifications")).scalar_one() == 2

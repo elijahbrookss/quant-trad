@@ -38,6 +38,7 @@ code_paths:
   - portal/backend/service/storage/repos/collector_operations.py
   - portal/backend/service/storage/repos/normalization.py
   - portal/backend/service/storage/repos/fact_storage.py
+  - portal/backend/service/storage/repos/fact_book_prefix.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
   - portal/backend/service/storage/repos/fact_references.py
@@ -619,7 +620,7 @@ their author; their declared input position binds the exchange frame without
 relabeling the derived source. Mapping row offsets are global within a v1 object;
 the writer's `object_row_group=0` field is a placeholder, not random-access proof.
 
-Canonical staging now requests **complete book raw prefixes**: for each
+Canonical staging requests **complete book raw prefixes**: for each
 definition/session/epoch it takes the greatest L2/BBO/depth source ordinal on
 the page and proves every physical position from one through it. Coinbase
 receive ordinals restart at one per connection. Each position must have one
@@ -627,9 +628,29 @@ unambiguous raw identity in an acknowledged placement, with exact mapping,
 product and requested-Level-2 scope. This includes subscriptions, heartbeats and
 other frames that produced no canonical mutation. The chosen object IDs become
 permanent cold dependency holds; rechecking cannot silently switch placements.
-The real-database test removes an intervening heartbeat object and verifies
-that staging fails with all hot payloads retained, then restores it and proves
-the heartbeat is held alongside the canonical snapshot/update sources.
+`fact_book_prefix_chunks` records immutable, hash-bound verification progress;
+`fact_book_prefix_dependencies` keeps each chunk's chosen raw objects alive even
+before a canonical page is published. A staging call verifies at most one next
+dense interval (by default 12,500 positions, leaving room within the 50,000-row
+mapping budget for alternate placements), returns `book_prefix_verified`, and
+commits that interval and its holds together. A per-scope transaction lock
+serializes extensions from different days. Restarted workers resume at the
+last committed ordinal; no in-memory cursor or partially written proof counts.
+The real-database test commits the opening interval, removes an intervening
+heartbeat object, and verifies that the next step fails without losing the
+opening proof or any hot payloads. An interruption after flushing a new chunk
+rolls it and its holds back together; restoring the object permits the same
+ordinal to resume.
+
+Before publishing or verifying a canonical page, admission validates the whole
+contiguous chunk chain, its scope, descriptor hashes, and permanent dependency
+catalogs, then checks current object checksums. This reuses deep raw decoding,
+not old filesystem stamps. Each exact canonical root binds to objects from its
+own certified interval: a later placement cannot substitute another raw frame
+at the same position. A previously certified larger interval may conservatively
+hold additional frames for a smaller root; it grants no access to future Facts
+and changes no known-at selection. Receipts and holds are append-only, and user
+pin release cannot remove them. New placements do not rewrite admitted lineage.
 
 The object's ordered `content_fingerprint` is independently recomputed from
 **all** stored raw IDs and frame hashes, not just the page's requested witnesses.
@@ -649,10 +670,13 @@ automatically enlarged or treated as permission to skip evidence. The existing
 list-returning raw reader remains available to existing callers, but retention
 uses the shared streaming decoder and exact writer-owned Parquet schema.
 
-Performance follow-up: different canonical pages can require repeated decoding
-of the same large compacted raw object. A bounded, hash-bound proof reuse design
-could reduce that work, but it must not turn file timestamps into content proof
-or remove final fresh checksums. Exact-position SQL also needs representative
+Performance follow-up: separate intervals and exact roots can still require
+repeated decoding of the same large compacted raw object. Per-object proof reuse
+could reduce that work, but must not turn file timestamps into content proof
+or remove final fresh checksums. Chunk-chain inspection is capped at 5,000
+receipts per call; page dependency object/byte and final verification budgets
+still apply. Shared interval progress removes full-prefix re-decoding on every
+retry, not all size limits. Exact-position SQL also needs representative
 plan/capacity measurements before activation; small disposable fixtures do not
 prove production-scale throughput.
 
@@ -671,15 +695,24 @@ Earlier receipts cannot satisfy the stronger gate. Old incomplete draft catalogs
 not silently rewritten or blessed and require explicit review before reuse.
 Version `market.canonical_archive_verification.v4` additionally requires the
 complete raw book-prefix proof. Earlier last-frame receipts cannot satisfy it.
+Version `market.canonical_archive_verification.v5` binds the shared immutable
+prefix-chain proof and each root's own interval. Its two new clean metadata
+tables are included in the storage layout and explicit offline cutover; no raw
+or canonical history is backfilled, changed, or presumed verified. Old page
+receipts still need current-version verification before reclamation.
+When an older complete page lacks shared prefix receipts, `verify_next_page`
+builds one bounded interval per call using only that page's already-bound raw
+objects, then resumes page verification. It does not stall waiting for the
+publication phase or rewrite the old page's dependency catalog. Missing or
+conflicting historical bindings still fail rather than being replaced silently.
 
 This proves and preserves the complete raw book prefix; it does **not** by
 itself verify the checkpoint/validity reconstruction boundary, normalized
 input-window closure, or every transitive feature dependency. Those completion
-gates still precede destructive activation. Prefix verification currently shares
-the 50,000-row mapping and per-call decode budgets. Long epochs therefore still
-need a resumable shared-prefix proof path before the whole L2 retention path can
-be considered ready; smaller canonical pages alone do not shorten a root's
-source prefix. The six-family reclamation gate has not been broadened by this step.
+gates still precede destructive activation. Individual raw objects and final
+current-byte checks must fit their explicit budgets even when the connection
+spans many resumable intervals. The six-family reclamation gate has not been
+broadened by this step; L2 retention is not yet ready for activation.
 
 ### Resumable Canonical Verification
 
@@ -816,6 +849,15 @@ tool using only `PG_DSN`. Without flags it inspects read-only. Execution require
 both `--execute` and `--writers-stopped`; it never stops services itself. Apply
 the prior canonical and operational-rollup migrations first. Capacity planning
 must allow both copies plus WAL; the tool does not remove the old copy.
+
+For an already-ready older tiered layout missing both book-prefix proof tables,
+inspection returns `book_prefix_metadata_required` without creating anything.
+The same command with explicit execution and stopped-writer acknowledgement
+creates both empty tables and their append-only guards in one transaction.
+Startup refuses the missing tables; it cannot install this upgrade. Existing
+Facts, storage placement, and page receipts are untouched, and no prefix is
+presumed verified. A partially present pair or an unfinished older cutover must
+be inspected/completed before this upgrade; the command does not adopt it.
 
 Preparation locks the old relation, refuses incoming foreign keys or dependent
 views, moves it to `qt_fact_storage_cutover_v1.fact_versions`, blocks further

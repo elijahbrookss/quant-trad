@@ -63,7 +63,7 @@ class _Session:
             found = [row for row in self.mappings if any(
                 (row["definition_id"], row["mapped_session_id"], row["mapped_epoch"]) ==
                 (item["definition_id"], item["session_id"], item["connection_epoch"])
-                and 1 <= row["mapped_ordinal"] <= item["receive_ordinal"] for item in prefixes)]
+                and item["first_receive_ordinal"] <= row["mapped_ordinal"] <= item["receive_ordinal"] for item in prefixes)]
         if "bound_ids" in params:
             found = [row for row in found if row["id"] in params["bound_ids"]]
         return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: found[:params["limit"]]))

@@ -78,6 +78,8 @@ from .market_storage_models import (
     MarketFactArchiveDependencyRecord,
     MarketFactArchiveMaterialAliasRecord,
     MarketFactArchiveVerificationRecord,
+    MarketFactBookPrefixChunkRecord,
+    MarketFactBookPrefixDependencyRecord,
 )
 from .session import Database, db
 

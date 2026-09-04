@@ -457,6 +457,54 @@ def _rewind_disposable_storage_to_old_layout(storage):
     return storage.database._engine
 
 
+def test_prefix_metadata_cutover_is_explicit_atomic_and_preserves_ready_facts(storage):
+    from sqlalchemy import event
+    from portal.backend.db.fact_storage_schema import FACT_BOOK_PREFIX_TABLES
+    from scripts.db.manual_migration_fact_storage_tiers_v1 import run_cutover
+    _ingest(storage)
+    original = _read(storage)
+    engine = storage.database._engine
+    # This fixture owns a disposable DB. Simulate the earlier ready layout by
+    # removing exactly the two still-empty metadata tables, never Fact data.
+    with engine.begin() as conn:
+        for name in reversed(FACT_BOOK_PREFIX_TABLES):
+            assert conn.execute(text(f"SELECT count(*) FROM market.{name}")).scalar_one() == 0
+            conn.execute(text(f"DROP TABLE market.{name}"))
+    inspected = run_cutover(engine)
+    assert inspected["status"] == "book_prefix_metadata_required"
+    assert inspected["missing_tables"] == list(FACT_BOOK_PREFIX_TABLES)
+    with engine.connect() as conn:
+        assert all(conn.execute(text("SELECT to_regclass(:name)"), {"name": "market." + name}).scalar_one() is None
+                   for name in FACT_BOOK_PREFIX_TABLES)
+    with pytest.raises(ValueError, match="writers_stopped"):
+        run_cutover(engine, execute=True)
+    interrupted = Database(storage.dsn)
+    try:
+        assert interrupted.ensure_schema() is False
+        assert "fact_book_prefix" in str(interrupted.last_error)
+    finally:
+        interrupted._reset_engine()
+    def interrupt_second_table(conn, cursor, statement, parameters, context, executemany):
+        if "CREATE TABLE market.fact_book_prefix_dependencies" in statement:
+            raise RuntimeError("injected metadata cutover interruption")
+    event.listen(engine, "before_cursor_execute", interrupt_second_table)
+    try:
+        with pytest.raises(RuntimeError, match="injected metadata cutover"):
+            run_cutover(engine, execute=True, writers_stopped=True)
+    finally:
+        event.remove(engine, "before_cursor_execute", interrupt_second_table)
+    assert run_cutover(engine)["missing_tables"] == list(FACT_BOOK_PREFIX_TABLES)
+    final = run_cutover(engine, execute=True, writers_stopped=True)
+    assert final["status"] == "ready"
+    assert run_cutover(engine, execute=True, writers_stopped=True) == final
+    with engine.connect() as conn:
+        for name in FACT_BOOK_PREFIX_TABLES:
+            assert conn.execute(text(f"SELECT count(*) FROM market.{name}")).scalar_one() == 0
+            assert conn.execute(text("SELECT tgtype FROM pg_trigger WHERE tgrelid=to_regclass(:name) AND tgname=:trigger"),
+                {"name": "market." + name, "trigger": "trg_reject_mutation_" + name}).scalar_one() == 27
+    assert _read(storage) == original
+
+
 def test_offline_cutover_dry_run_and_resume_preserve_every_field(storage):
     from scripts.db.manual_migration_fact_storage_tiers_v1 import SOURCE, run_cutover
     _ingest(storage)

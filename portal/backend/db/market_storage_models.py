@@ -204,6 +204,57 @@ class MarketFactArchiveDependencyRecord(Base):
     object_sha256 = Column(String(64), nullable=False)
 
 
+class MarketFactBookPrefixChunkRecord(Base):
+    """Immutable, shared progress for a dense range of raw L2 source positions.
+
+    Chunks retain their own raw objects even before a canonical page is ready.
+    They certify lineage work, not book reconstruction or deletion permission.
+    """
+
+    __tablename__ = "fact_book_prefix_chunks"
+    __table_args__ = (
+        UniqueConstraint("definition_id", "session_id", "connection_epoch", "provider_product_id",
+                         "verifier_version", "first_receive_ordinal", name="uq_market_book_prefix_start"),
+        CheckConstraint("connection_epoch >= 0 AND first_receive_ordinal >= 1 AND "
+                        "last_receive_ordinal >= first_receive_ordinal", name="ck_market_book_prefix_bounds"),
+        CheckConstraint("(first_receive_ordinal = 1) = (previous_chunk_id IS NULL)",
+                        name="ck_market_book_prefix_predecessor"),
+        CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(descriptor) = 'object'",
+                        name="ck_market_book_prefix_evidence"),
+        Index("ix_market_book_prefix_progress", "definition_id", "session_id", "connection_epoch",
+              "provider_product_id", "verifier_version", "last_receive_ordinal"),
+        {"schema": "market"},
+    )
+
+    id = Column(String(128), primary_key=True)
+    definition_id = Column(String(128), ForeignKey("market.stream_definitions.id", ondelete="RESTRICT"), nullable=False)
+    session_id = Column(String(128), nullable=False)
+    connection_epoch = Column(BigInteger, nullable=False)
+    provider_product_id = Column(String(128), nullable=False)
+    verifier_version = Column(String(64), nullable=False)
+    first_receive_ordinal = Column(BigInteger, nullable=False)
+    last_receive_ordinal = Column(BigInteger, nullable=False)
+    previous_chunk_id = Column(String(128), ForeignKey("market.fact_book_prefix_chunks.id", ondelete="RESTRICT"))
+    evidence_hash = Column(String(64), nullable=False)
+    descriptor = Column(JSONB, nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactBookPrefixDependencyRecord(Base):
+    """Permanent raw lifetime holds for committed verification progress."""
+
+    __tablename__ = "fact_book_prefix_dependencies"
+    __table_args__ = (
+        CheckConstraint("object_sha256 ~ '^[0-9a-f]{64}$'", name="ck_market_book_prefix_dependency_hash"),
+        Index("ix_market_book_prefix_dependency_target", "target_id"),
+        {"schema": "market"},
+    )
+    chunk_id = Column(String(128), ForeignKey("market.fact_book_prefix_chunks.id", ondelete="RESTRICT"), primary_key=True)
+    target_id = Column(String(128), ForeignKey("market.raw_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    object_key = Column(Text, nullable=False)
+    object_sha256 = Column(String(64), nullable=False)
+
+
 class MarketFactArchiveVerificationRecord(Base):
     """Resumable full-page verification bound to immutable archive catalogs.
 
