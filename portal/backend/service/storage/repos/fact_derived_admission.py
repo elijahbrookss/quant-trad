@@ -19,7 +19,7 @@ from .fact_dependencies import read_canonical_dependency_rows
 from .fact_storage import PostgresCanonicalFactStorageRepository
 
 
-DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship"})
+DERIVED_FACT_TYPES = frozenset({"market.futures_spot_relationship", "market.derivative_state"})
 
 
 def resolve_material_source_revisions(session, *, requests, reader, max_rows, max_logical_bytes, check_budget=None):
@@ -115,7 +115,7 @@ def resolve_material_source_revisions(session, *, requests, reader, max_rows, ma
     return sources, dict(selections)
 
 
-def resolve_derived_source_revisions(session, *, rows, object_store, max_rows, max_logical_bytes,
+def resolve_basis_source_revisions(session, *, rows, object_store, max_rows, max_logical_bytes,
                                      max_file_bytes=128 * 1024**2, check_budget=None):
     """Verify basis against its declared BBO pair using the derivation owner.
 
@@ -123,7 +123,7 @@ def resolve_derived_source_revisions(session, *, rows, object_store, max_rows, m
     must agree, but retention does not retroactively change the existing basis
     known-at contract to include mapping registration time.
     """
-    roots = [row for row in rows if row["fact_type"] in DERIVED_FACT_TYPES]
+    roots = [row for row in rows if row["fact_type"] == "market.futures_spot_relationship"]
     requests = []
     for row in roots:
         record_from_storage_row(row)
@@ -181,4 +181,25 @@ def resolve_derived_source_revisions(session, *, rows, object_store, max_rows, m
                 or expected[0].effective_at != row["observation_time"]
                 or alias is None or alias["material_hash"] != expected[0].material_hash):
             raise RuntimeError(f"canonical_basis_source_derivation_mismatch: fact_version_id={row['id']}")
+    return [sources[identity] for identity in sorted(sources)]
+
+
+def resolve_derived_source_revisions(session, *, rows, max_rows, **kwargs):
+    """Compose the admitted family owners under one bounded source-edge set."""
+    from .fact_derivative_admission import resolve_derivative_source_revisions
+    resolvers = {"market.futures_spot_relationship": resolve_basis_source_revisions,
+                 "market.derivative_state": resolve_derivative_source_revisions}
+    grouped = defaultdict(list)
+    for row in rows:
+        if row["fact_type"] in resolvers:
+            grouped[row["fact_type"]].append(row)
+    sources = {}
+    for fact_type, group in grouped.items():
+        found = resolvers[fact_type](session, rows=group, max_rows=max_rows, **kwargs)
+        for row in found:
+            if row["id"] in sources and sources[row["id"]] != row:
+                raise RuntimeError(f"canonical_derived_source_conflict: fact_version_id={row['id']}")
+            sources[row["id"]] = row
+        if len(sources) > max_rows:
+            raise RuntimeError("canonical_archive_source_dependency_budget_exceeded: reduce archive page size")
     return [sources[identity] for identity in sorted(sources)]

@@ -58,6 +58,7 @@ from market_data.market_state import (
     DEPTH_FACT_VERSION,
     DERIVATIVE_STATE_FACT_TYPE,
     DERIVATIVE_STATE_FACT_VERSION,
+    DERIVATIVE_OI_INTERVAL_SECONDS,
     RESPONSE_FACT_TYPE,
     RESPONSE_FACT_VERSION,
     TRADE_FLOW_FEATURE_FACT_TYPE,
@@ -1069,7 +1070,7 @@ class MarketStructureService:
                 funding_records=funding_records,
                 oi_gaps=oi_gaps,
                 series_id=int(futures["derivative_state_series_id"]),
-                expected_oi_interval_seconds=60,
+                expected_oi_interval_seconds=DERIVATIVE_OI_INTERVAL_SECONDS,
                 computed_at=decision_time,
             )
             if start_at <= fact.effective_at < end_at

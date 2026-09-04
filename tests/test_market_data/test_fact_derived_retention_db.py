@@ -162,8 +162,8 @@ def test_basis_reclaims_with_every_causal_source_and_preserves_frozen_research(s
         receipts = session.execute(text("SELECT verifier_version FROM market.fact_archive_verifications AS proof "
             "JOIN market.fact_archive_manifests AS manifest ON manifest.id=proof.manifest_id WHERE manifest.storage_day=:day"),
             {"day": day}).scalars().all()
-        assert set(receipts) == ({"market.canonical_archive_verification.v6", "market.canonical_archive_verification.v7"}
-                                 if legacy else {"market.canonical_archive_verification.v7"})
+        assert set(receipts) == ({"market.canonical_archive_verification.v6", fact_archival.FACT_ARCHIVE_VERIFIER_VERSION}
+                                 if legacy else {fact_archival.FACT_ARCHIVE_VERIFIER_VERSION})
     if not source_cold:
         # Legitimate source movement after receipt must not invalidate immutable
         # basis evidence. Final destructive admission still rereads current bytes.

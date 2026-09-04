@@ -298,8 +298,17 @@ implicit startup migration. Futures/spot basis extends these same edges through
 both declared BBO inputs: every causally eligible material revision is retained,
 with immutable role-mapping scope and owner-derived pair validation. A new
 verifier version prevents older receipts from bypassing that stronger closure.
+Derivative state uses these edges for explicit OI/funding commits and the exact
+previous OI commit bound by its existing input fingerprint. It reuses the original
+derivation owner and legacy numeric semantics, not today's latest source values.
+Missing predecessors remain absent when the original gap/window selection omitted
+them. Older pages may gain newly required material aliases and canonical edges
+only through explicit current-version verification without changing historical
+bytes or receipts. Typed v1 reading accepts the serializer's exact retained
+28-digit OI log change as well as the 38-digit in-memory calculation; this repairs
+a reader/serializer mismatch without rehashing or upgrading historical evidence.
 Remaining normalized/composite dependency closure remains a separate admission
-gate; admitting book or basis data does not authorize deployment or
+gate; admitting book, basis or derivative data does not authorize deployment or
 retention activation.
 
 ### Operational Consequences

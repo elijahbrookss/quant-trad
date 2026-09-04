@@ -43,6 +43,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_book_prefix.py
   - portal/backend/service/storage/repos/fact_book_admission.py
   - portal/backend/service/storage/repos/fact_derived_admission.py
+  - portal/backend/service/storage/repos/fact_derivative_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
@@ -811,7 +812,7 @@ Old v6 receipts cannot authorize this stronger composite admission. Reverificati
 retains the original page and raw bindings, appends required canonical/checkpoint
 edges only, and fails if the originally bound raw evidence cannot prove the full
 closure. It does not silently substitute later material deliveries or archives.
-Trade-flow, derivative-state, response and normalized-window closure remain
+Trade-flow, response and normalized-window closure remain
 separate gates before complete retention activation. Individual objects and final
 current-byte checks must fit their budgets even when a connection spans many
 resumable intervals.
@@ -825,6 +826,35 @@ self-contained-family classification. The reserve regression physically removes
 hot payloads and checks unchanged provider response evidence, corrections,
 invalidations, frozen binding validation and known-at reads. Corrupt page bytes
 block removal just as they do for other source families.
+
+Version `market.canonical_archive_verification.v8` admits derivative state through
+its explicit OI/funding commit references. The previous OI commit is not a payload
+field, but is bound by the retained input fingerprint. Admission bounds and loads
+all eligible predecessor revisions at the producer's 60-second interval, then
+uses the same fingerprint owner to select exactly one. An equal-valued later
+revision is not interchangeable. Immutable series/instrument scope, active source
+state, observation time and both root clocks constrain every candidate; missing,
+ambiguous or unsupported inputs fail before reclamation. The current producer
+uses legacy v1 OI/funding. Admission does not pass exact-numeric v2 through a float
+decoder or invent a predecessor when the original gap/window selection omitted it.
+The existing derivation owner recomputes the declared output from those inputs;
+canonical source edges retain only the exact selected commits. Input placement is
+not part of immutable identity and is freshly checked at destructive handoff.
+
+Derivative Dataset freeze now also binds all canonical revisions, with unchanged
+ordinary typed/latest reads. Older latest-only freezes must be re-frozen rather
+than relabeled. The physical-retention regression covers hot and cold inputs,
+same-valued competing predecessor revisions, source movement/corruption, frozen
+binding validation, known-at reads, invalidations and re-freeze identity. V7 pages
+require explicit reverification: it may append newly required material-alias and
+canonical-source edges, never rewrite the page, existing bindings or old receipt.
+
+This admission exposed a retained-v1 reader defect: the OI log change is computed
+at 38 decimal digits, while the existing canonical serializer stores the exact
+28-digit half-even representation. The typed validator now accepts either that
+specific stored representation or the original full-precision calculation. It
+preserves the supplied value and hashes; it does not apply an arbitrary tolerance,
+rewrite historical precision, or change the global decimal serialization schema.
 
 Performance follow-up: material-source and book-source waves each enforce their
 logical-byte limits before hydration, but may decode the same whole cold page
@@ -937,7 +967,7 @@ Complete dependency admission and reviewed production activation remain rollout
 gates; wiring the executor is not itself production permission.
 
 Standalone candle, funding, open-interest, reference-price, reserve-balance, structured reserve-report,
-trade, L2/BBO/depth, and futures/spot basis facts are currently admitted. Any other family in the
+trade, L2/BBO/depth, futures/spot basis and derivative-state facts are currently admitted. Any other family in the
 physical day blocks the **whole day**, including remaining composite and normalized facts
 whose complete dependency closures are not yet proven. This is a temporary
 fail-closed compatibility gate, not permission to omit those rows or expire

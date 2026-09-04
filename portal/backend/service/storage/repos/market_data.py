@@ -462,7 +462,7 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
     }
 )
 _ALL_CANONICAL_REVISIONS_SELECTION = "all_canonical_revisions.v1"
-_REVISION_PRESERVING_TYPED_SCHEMAS = frozenset({"market.futures_spot_basis.v1"})
+_REVISION_PRESERVING_TYPED_SCHEMAS = frozenset({"market.futures_spot_basis.v1", "market.derivative_state.v1"})
 
 
 def _preserves_canonical_revision_history(contract_version: str) -> bool:

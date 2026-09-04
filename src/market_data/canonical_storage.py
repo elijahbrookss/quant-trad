@@ -15,6 +15,7 @@ LEGACY_MATERIAL_EVIDENCE_KEYS = {
     "market.depth_observation": "_qt_depth_evidence",
     "market.trade_flow_feature": "_qt_trade_flow_feature_evidence",
     "market.futures_spot_relationship": "_qt_basis_evidence",
+    "market.derivative_state": "_qt_derivative_state_evidence",
     "market.market_response": "_qt_response_evidence",
 }
 

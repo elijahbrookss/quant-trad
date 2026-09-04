@@ -38,7 +38,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v7"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v8"
 
 
 def _series_catalog(manifest):
@@ -508,13 +508,14 @@ class PostgresCanonicalFactArchiveRepository:
             # existing raw bindings, an existing edge, or a prior receipt.
             additions = 0
             for name, model, identity_fields in (
+                ("aliases", MarketFactArchiveMaterialAliasRecord, ("fact_version_id", "evidence_key")),
                 ("canonical_dependencies", MarketFactArchiveCanonicalDependencyRecord, ("fact_version_id",)),
                 ("dependencies", MarketFactArchiveDependencyRecord, ("target_kind", "target_id")),
             ):
                 existing = {tuple(item[key] for key in identity_fields): item for item in catalogs[name]}
                 for item in expected[name]:
                     identity = tuple(item[key] for key in identity_fields)
-                    if identity not in existing and (name == "canonical_dependencies" or item["target_kind"] == "book_checkpoint"):
+                    if identity not in existing and (name in {"canonical_dependencies", "aliases"} or item["target_kind"] == "book_checkpoint"):
                         session.add(model(manifest_id=manifest.manifest_id, **item))
                         additions += 1
             if additions:
