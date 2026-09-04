@@ -999,6 +999,11 @@ an attribute error before retention. Scheduled canonical records now use the
 existing observation-time/revision validator; typed-v1 uniqueness checks remain
 unchanged. Regression checks retain same-time invalidations while rejecting
 duplicate versions, excess commit watermarks and altered hashes.
+The broad database pass also caught eager construction of the cold object store
+during a fully hot, self-contained normalization freeze. Archive access is now
+deferred until a source payload or raw-history owner actually needs it. A hot-only
+freeze therefore does not require an archive directory, while a required cold
+read still invokes the same fail-closed mount and checksum boundary.
 
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence

@@ -153,3 +153,18 @@ def collect_normalized_history_archive_refs(session, *, rows, object_store):
     sources = resolve_normalized_source_revisions(session, rows=rows, object_store=object_store,
         max_rows=50_000, max_logical_bytes=64 * 1024**2)
     return collect_source_history_archive_refs(session, rows=sources, object_store=object_store)
+
+
+def collect_normalized_history_archive_refs_deferred(session, *, rows, object_store_factory):
+    """Avoid requiring an archive root when the complete closure is still hot."""
+    loaded = []
+
+    class DeferredObjectStore:
+        def __getattr__(self, name):
+            if not loaded:
+                loaded.append(object_store_factory())
+            return getattr(loaded[0], name)
+
+    return collect_normalized_history_archive_refs(
+        session, rows=rows, object_store=DeferredObjectStore()
+    )

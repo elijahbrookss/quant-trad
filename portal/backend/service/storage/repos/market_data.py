@@ -4094,7 +4094,7 @@ class PostgresMarketDataRepository:
                 )
                 if fact_type.startswith("market.normalized."):
                     from market_data.canonical_adapters import decode_normalized_feature_record
-                    from .fact_normalization_admission import collect_normalized_history_archive_refs
+                    from .fact_normalization_admission import collect_normalized_history_archive_refs_deferred
                     typed_records = [
                         decode_normalized_feature_record(record) if isinstance(record, CanonicalFactRecord) else record
                         for record in records
@@ -4102,8 +4102,10 @@ class PostgresMarketDataRepository:
                     if any(not isinstance(record, TypedFeatureRecord) for record in typed_records):
                         raise RuntimeError("market_dataset_normalization_invalid: typed or canonical normalized records required")
                     if all(isinstance(record, CanonicalFactRecord) for record in records):
-                        archive_refs.update(collect_normalized_history_archive_refs(session, rows=canonical_rows,
-                            object_store=canonical_fact_storage_repository.object_store_factory()))
+                        archive_refs.update(collect_normalized_history_archive_refs_deferred(
+                            session, rows=canonical_rows,
+                            object_store_factory=canonical_fact_storage_repository.object_store_factory,
+                        ))
                     spec_ids = {record.fact.spec_id for record in typed_records}
                     if len(spec_ids) != 1:
                         raise RuntimeError(

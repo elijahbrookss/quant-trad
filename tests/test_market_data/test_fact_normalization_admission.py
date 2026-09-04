@@ -156,3 +156,18 @@ def test_normalized_response_keeps_post_book_canonical_time(monkeypatch):
     found = admission.resolve_normalized_source_revisions(session, rows=[root], object_store=None,
         max_rows=20, max_logical_bytes=1024**2)
     assert found == [source]
+
+
+def test_hot_self_contained_normalization_does_not_open_cold_store(monkeypatch):
+    source = {"id": "funding", "fact_type": "derivatives.funding_rate"}
+    monkeypatch.setattr(admission, "resolve_normalized_source_revisions",
+                        lambda *args, **kwargs: [source])
+    monkeypatch.setattr(
+        "portal.backend.service.storage.repos.fact_dependencies.collect_source_history_archive_refs",
+        lambda session, *, rows, object_store: {} if rows == [source] else pytest.fail("wrong rows"),
+    )
+    def cold_store():
+        raise AssertionError("hot-only closure must not initialize cold storage")
+    assert admission.collect_normalized_history_archive_refs_deferred(
+        None, rows=[], object_store_factory=cold_store
+    ) == {}
