@@ -1418,13 +1418,7 @@ class ContinuousStreamRuntime:
                 "continuous_l2_recovery_checkpoint_object_missing: "
                 f"checkpoint_id={checkpoint_row['id']}"
             )
-        checkpoint_digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
-        if checkpoint_digest != str(checkpoint_row["object_sha256"]):
-            raise RuntimeError(
-                "continuous_l2_recovery_checkpoint_checksum_mismatch: "
-                f"checkpoint_id={checkpoint_row['id']}"
-            )
-        level_rows = read_book_checkpoint_parquet(checkpoint_path)
+        level_rows = read_book_checkpoint_parquet(checkpoint_path, expected=checkpoint_row)
         bids = tuple(
             (Decimal(str(row["price"])), Decimal(str(row["quantity"])))
             for row in level_rows

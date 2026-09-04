@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,28 @@ from core.market_storage_lifecycle import MarketStorageLifecyclePolicy
 from portal.backend.service.market.market_storage_lifecycle import (
     MarketStorageLifecycleService,
 )
+
+
+@pytest.mark.parametrize("kind", ["raw_manifest", "book_checkpoint"])
+def test_hot_backlog_uses_only_the_target_records_actual_scope(kind):
+    from portal.backend.service.storage.repos.market_lifecycle import PostgresMarketStorageLifecycleRepository
+    calls = []
+    target = {"session_id": "session-a"}
+    if kind == "raw_manifest":
+        target["definition_id"] = "definition-a"
+    class Session:
+        def execute(self, statement, params):
+            calls.append((str(statement), params))
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(one_or_none=lambda: target), scalar_one=lambda: True)
+    assert PostgresMarketStorageLifecycleRepository.canonical_backlog_present(Session(), target_kind=kind, target_id="target")
+    query, params = calls[1]
+    assert json.loads(params["l2"]) == {"_qt_l2_evidence": target}
+    assert json.loads(params["bbo"]) == {"_qt_bbo_evidence": {"source_position": target}}
+    assert ("coverage.definition_id=:definition_id" in query) is (kind == "raw_manifest")
+    if kind == "book_checkpoint":
+        assert "definition_id" not in calls[0][0]
+        assert "definition_id" not in params
+        assert json.loads(params["collector"]) == {"stream_session_id": "session-a"}
 
 
 class _LifecycleRepository:

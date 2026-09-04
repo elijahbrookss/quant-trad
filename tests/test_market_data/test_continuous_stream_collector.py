@@ -759,6 +759,7 @@ class _Level2Repository:
                 "object_key": acknowledgement.object_key,
                 "object_sha256": acknowledgement.sha256,
                 "content_fingerprint": checkpoint.content_fingerprint,
+                "byte_count": encoded.byte_count,
                 "format": "parquet",
                 "compression": "zstd",
                 "schema_version": "market.book_checkpoint_levels.v1",

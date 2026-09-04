@@ -128,18 +128,26 @@ class PostgresMarketStorageLifecycleRepository:
                  "book_checkpoint": "market.book_checkpoint_manifests"}.get(target_kind)
         if table is None:
             raise ValueError(f"canonical_backlog_target_invalid: kind={target_kind}")
-        target = session.execute(text(f"SELECT definition_id,session_id FROM {table} WHERE id=:id"),
+        columns = "definition_id,session_id" if target_kind == "raw_manifest" else "session_id"
+        target = session.execute(text(f"SELECT {columns} FROM {table} WHERE id=:id"),
                                  {"id": target_id}).mappings().one_or_none()
         if target is None:
             raise ValueError(f"canonical_backlog_target_missing: kind={target_kind} id={target_id}")
-        scope = {"definition_id": target["definition_id"], "session_id": target["session_id"]}
+        # Checkpoints carry a source session, not a definition_id. Conservatively
+        # retain them for any hot book/coverage holder in that session; deriving
+        # historical ownership from mutable stream configuration is unnecessary.
+        scope = dict(target)
+        collector = {"stream_session_id": scope["session_id"]}
+        coverage_scope = "coverage.session_id=:session_id"
+        if target_kind == "raw_manifest":
+            collector["stream_definition_id"] = scope["definition_id"]
+            coverage_scope += " AND coverage.definition_id=:definition_id"
         parameters = {"id": target_id, **scope,
-                      "collector": _json({"stream_definition_id": scope["definition_id"],
-                                           "stream_session_id": scope["session_id"]}),
+                      "collector": _json(collector),
                       "l2": _json({"_qt_l2_evidence": scope}),
                       "bbo": _json({"_qt_bbo_evidence": {"source_position": scope}}),
                       "depth": _json({"_qt_depth_evidence": {"source_position": scope}})}
-        scoped = session.execute(text("""
+        scoped = session.execute(text(f"""
             SELECT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
                 WHERE hot.provenance @> CAST(:collector AS jsonb)
                    OR hot.provenance @> CAST(:l2 AS jsonb)
@@ -150,7 +158,7 @@ class PostgresMarketStorageLifecycleRepository:
                     JOIN market.fact_hot_payloads AS hot ON hot.provenance @>
                         jsonb_build_object('_qt_trade_flow_evidence',
                             jsonb_build_object('coverage_interval_id', coverage.interval_id))
-                    WHERE coverage.definition_id=:definition_id AND coverage.session_id=:session_id)
+                    WHERE {coverage_scope})
         """), parameters).scalar_one()
         if scoped or target_kind == "book_checkpoint":
             return bool(scoped)

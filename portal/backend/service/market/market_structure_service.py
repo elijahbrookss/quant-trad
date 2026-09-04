@@ -2660,12 +2660,8 @@ class MarketStructureService:
                     "market_book_replay_invalid: persisted checkpoint was not reproduced"
                 )
             path = store.local_path(str(row["object_key"]))
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != str(row["object_sha256"]):
-                raise RuntimeError(
-                    "market_book_replay_invalid: checkpoint object checksum mismatch"
-                )
-            rows = read_book_checkpoint_parquet(path)
+            rows = read_book_checkpoint_parquet(path, expected=row)
+            digest = str(row["object_sha256"])
             if rows != checkpoint_canonical_rows(checkpoint):
                 raise RuntimeError(
                     "market_book_replay_invalid: checkpoint typed levels differ"

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+from itertools import chain
+from collections.abc import Iterable
 from typing import Any, Mapping, Optional, Sequence
 
 from data_providers.streams.contracts import CanonicalMarketEvent
@@ -501,21 +503,29 @@ class BookCheckpointFact:
 
     @property
     def content_fingerprint(self) -> str:
-        return _stable_hash(
-            {
-                "schema_version": BOOK_CHECKPOINT_SCHEMA_VERSION,
-                "checkpoint_id": self.checkpoint_id,
-                "state_hash": self.state_hash,
-                "levels": [
-                    ("bid", _canonical_decimal(price), _canonical_decimal(quantity))
-                    for price, quantity in self.bids
-                ]
-                + [
-                    ("ask", _canonical_decimal(price), _canonical_decimal(quantity))
-                    for price, quantity in self.asks
-                ],
-            }
+        return book_checkpoint_content_fingerprint(
+            checkpoint_id=self.checkpoint_id, state_hash=self.state_hash,
+            levels=chain((("bid", price, quantity) for price, quantity in self.bids),
+                         (("ask", price, quantity) for price, quantity in self.asks)),
         )
+
+
+def book_checkpoint_content_fingerprint(*, checkpoint_id: str, state_hash: str,
+                                        levels: Iterable[tuple[str, Decimal, Decimal]]) -> str:
+    """Stream the unchanged v1 canonical JSON, shared by writer and verifier."""
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str).encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(b'{"checkpoint_id":' + encoded(checkpoint_id) + b',"levels":[')
+    first = True
+    for side, price, quantity in levels:
+        if not first:
+            digest.update(b",")
+        digest.update(encoded((side, _canonical_decimal(price), _canonical_decimal(quantity))))
+        first = False
+    digest.update(b'],"schema_version":' + encoded(BOOK_CHECKPOINT_SCHEMA_VERSION)
+                  + b',"state_hash":' + encoded(state_hash) + b"}")
+    return digest.hexdigest()
 
 
 
@@ -1194,6 +1204,7 @@ __all__ = [
     "BookSourcePosition",
     "BookValidityIntervalVersion",
     "BookValidityStatus",
+    "book_checkpoint_content_fingerprint",
     "L2EventFact",
     "L2EventType",
     "L2Mutation",

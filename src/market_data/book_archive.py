@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -16,11 +18,41 @@ from .order_book import (
     BookCheckpointFact,
     BookSide,
     checkpoint_canonical_rows,
+    book_checkpoint_content_fingerprint,
 )
+from .structure import ProviderSizeUnit
 
 
 BOOK_CHECKPOINT_FORMAT = "parquet"
 BOOK_CHECKPOINT_COMPRESSION = "zstd"
+
+
+@dataclass(frozen=True)
+class BookCheckpointReadLimits:
+    max_rows: int = 1_000_000
+    max_file_bytes: int = 1024**3
+    max_logical_bytes: int = 2 * 1024**3
+    max_row_group_bytes: int = 256 * 1024**2
+    batch_rows: int = 128
+    max_decimal_chars: int = 256
+
+    def __post_init__(self):
+        for name in self.__dataclass_fields__:
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise ValueError(f"market_book_checkpoint_read_limit_invalid: field={name}")
+
+
+def _checkpoint_schema(metadata=None):
+    import pyarrow as pa
+    return pa.schema([
+        pa.field("schema_version", pa.string(), nullable=False),
+        pa.field("checkpoint_id", pa.string(), nullable=False),
+        pa.field("side", pa.string(), nullable=False),
+        pa.field("level_ordinal", pa.int64(), nullable=False),
+        pa.field("price", pa.string(), nullable=False),
+        pa.field("quantity", pa.string(), nullable=False),
+        pa.field("provider_size_unit", pa.string(), nullable=False),
+    ], metadata=metadata)
 
 
 @dataclass(frozen=True)
@@ -33,10 +65,16 @@ class EncodedBookCheckpoint:
     level_count: int
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path, *, max_bytes=None, check_budget=None) -> str:
     digest = hashlib.sha256()
+    count = 0
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            if check_budget is not None:
+                check_budget()
+            count += len(chunk)
+            if max_bytes is not None and count > max_bytes:
+                raise RuntimeError("market_book_checkpoint_read_file_budget_exceeded")
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -63,16 +101,7 @@ def encode_book_checkpoint_parquet(
     rows = checkpoint_canonical_rows(checkpoint)
     if not rows:
         raise ValueError("market_book_checkpoint_invalid: checkpoint has no levels")
-    schema = pa.schema(
-        [
-            pa.field("schema_version", pa.string(), nullable=False),
-            pa.field("checkpoint_id", pa.string(), nullable=False),
-            pa.field("side", pa.string(), nullable=False),
-            pa.field("level_ordinal", pa.int64(), nullable=False),
-            pa.field("price", pa.string(), nullable=False),
-            pa.field("quantity", pa.string(), nullable=False),
-            pa.field("provider_size_unit", pa.string(), nullable=False),
-        ],
+    schema = _checkpoint_schema(
         metadata={
             b"schema_version": BOOK_CHECKPOINT_SCHEMA_VERSION.encode("ascii"),
             b"checkpoint_id": checkpoint.checkpoint_id.encode("ascii"),
@@ -119,45 +148,129 @@ def encode_book_checkpoint_parquet(
     )
 
 
-def read_book_checkpoint_parquet(path: Path) -> tuple[dict[str, object], ...]:
+def read_book_checkpoint_parquet(path: Path, *, limits: BookCheckpointReadLimits = BookCheckpointReadLimits(),
+                                 expected: Mapping[str, object] | None = None,
+                                 check_budget=None) -> tuple[dict[str, object], ...]:
+    """Bounded physical-file read and full level/fingerprint admission.
+
+    Optional expected metadata is the immutable database checkpoint manifest.
+    With expected metadata, the reader also checks CURRENT object SHA and file
+    stability. Reconstruction still belongs to Level2BookReconstructor; a valid
+    content fingerprint is not a state proof.
+    """
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("market_book_checkpoint_requires_pyarrow") from exc
-    table = pq.ParquetFile(Path(path)).read()
-    metadata = table.schema.metadata or {}
-    if metadata.get(b"schema_version") != BOOK_CHECKPOINT_SCHEMA_VERSION.encode("ascii"):
-        raise RuntimeError("market_book_checkpoint_replay_invalid: schema mismatch")
-    rows = tuple(dict(row) for row in table.to_pylist())
-    previous_side: BookSide | None = None
-    previous_price: Decimal | None = None
-    side_rank = {BookSide.BID: 0, BookSide.ASK: 1}
-    for row in rows:
+    def check():
+        if check_budget is not None:
+            check_budget()
+    check()
+    path = Path(path)
+    before = path.stat()
+    byte_count = before.st_size
+    if byte_count > limits.max_file_bytes:
+        raise RuntimeError("market_book_checkpoint_read_file_budget_exceeded")
+    if expected is not None:
+        if type(expected.get("byte_count")) is not int or expected["byte_count"] != byte_count:
+            raise RuntimeError(f"market_book_checkpoint_manifest_mismatch: checkpoint_id={expected.get('id')} field=byte_count")
+        expected_sha = expected.get("object_sha256")
+        if not isinstance(expected_sha, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+            raise RuntimeError(f"market_book_checkpoint_manifest_mismatch: checkpoint_id={expected.get('id')} field=object_sha256")
+        if _sha256_file(path, max_bytes=limits.max_file_bytes, check_budget=check_budget) != expected_sha:
+            raise RuntimeError(f"market_book_checkpoint_manifest_mismatch: checkpoint_id={expected.get('id')} field=object_sha256")
+    with pq.ParquetFile(path, page_checksum_verification=True,
+                        thrift_string_size_limit=8 * 1024**2, thrift_container_size_limit=100_000) as parquet:
+        if not parquet.schema_arrow.remove_metadata().equals(_checkpoint_schema()):
+            raise RuntimeError("market_book_checkpoint_replay_invalid: physical schema mismatch")
+        metadata = parquet.schema_arrow.metadata or {}
         try:
-            side = BookSide(str(row["side"]))
-            price = Decimal(str(row["price"]))
-            quantity = Decimal(str(row["quantity"]))
-        except Exception as exc:  # noqa: BLE001 - normalized archive failure
-            raise RuntimeError(
-                "market_book_checkpoint_replay_invalid: malformed typed level"
-            ) from exc
-        if price <= 0 or quantity <= 0:
-            raise RuntimeError(
-                "market_book_checkpoint_replay_invalid: nonpositive level"
-            )
-        if previous_side is side and previous_price is not None and price <= previous_price:
-            raise RuntimeError(
-                "market_book_checkpoint_replay_invalid: levels are not sorted"
-            )
-        if previous_side is not None and side_rank[side] < side_rank[previous_side]:
-            raise RuntimeError(
-                "market_book_checkpoint_replay_invalid: sides are not sorted"
-            )
-        if previous_side is not side:
-            previous_price = None
-        previous_side = side
-        previous_price = price
-    return rows
+            identity = metadata[b"checkpoint_id"].decode("ascii")
+            state_hash = metadata[b"state_hash"].decode("ascii")
+            fingerprint = metadata[b"content_fingerprint"].decode("ascii")
+        except (KeyError, UnicodeDecodeError) as exc:
+            raise RuntimeError("market_book_checkpoint_replay_invalid: identity metadata missing") from exc
+        if (metadata.get(b"schema_version") != BOOK_CHECKPOINT_SCHEMA_VERSION.encode("ascii") or not identity
+                or re.fullmatch(r"[0-9a-f]{64}", state_hash) is None
+                or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None):
+            raise RuntimeError("market_book_checkpoint_replay_invalid: identity metadata mismatch")
+        if not 0 < parquet.metadata.num_rows <= limits.max_rows:
+            raise RuntimeError("market_book_checkpoint_read_row_budget_exceeded")
+        declared_bytes = 0
+        for index in range(parquet.metadata.num_row_groups):
+            check()
+            group = parquet.metadata.row_group(index)
+            group_bytes = sum(group.column(column).total_uncompressed_size for column in range(group.num_columns))
+            if any(group.column(column).compression != "ZSTD" for column in range(group.num_columns)):
+                raise RuntimeError("market_book_checkpoint_replay_invalid: compression mismatch")
+            if group_bytes > limits.max_row_group_bytes:
+                raise RuntimeError("market_book_checkpoint_read_row_group_budget_exceeded")
+            declared_bytes += group_bytes
+            if declared_bytes > limits.max_logical_bytes:
+                raise RuntimeError("market_book_checkpoint_read_logical_budget_exceeded")
+        rows, counts = [], {BookSide.BID: 0, BookSide.ASK: 0}
+        previous_side = previous_price = unit = None
+        logical_bytes = 0
+        for batch in parquet.iter_batches(batch_size=limits.batch_rows, use_threads=False):
+            check()
+            logical_bytes += batch.nbytes
+            if batch.nbytes > limits.max_row_group_bytes or logical_bytes > limits.max_logical_bytes:
+                raise RuntimeError("market_book_checkpoint_read_logical_budget_exceeded")
+            for row in batch.to_pylist():
+                check()
+                if row["schema_version"] != BOOK_CHECKPOINT_SCHEMA_VERSION or row["checkpoint_id"] != identity:
+                    raise RuntimeError("market_book_checkpoint_replay_invalid: row identity mismatch")
+                try:
+                    side = BookSide(row["side"])
+                    row_unit = ProviderSizeUnit(row["provider_size_unit"])
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError("market_book_checkpoint_replay_invalid: malformed side or unit") from exc
+                if unit is not None and row_unit is not unit:
+                    raise RuntimeError("market_book_checkpoint_replay_invalid: mixed units")
+                unit = row_unit
+                # The writer emits fixed-point strings. Reject exponents before
+                # Decimal formatting so a tiny '1e999999999' cannot allocate GBs.
+                for name in ("price", "quantity"):
+                    value = row[name]
+                    if (not isinstance(value, str) or len(value) > limits.max_decimal_chars
+                            or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value) is None):
+                        raise RuntimeError(f"market_book_checkpoint_replay_invalid: malformed decimal field={name}")
+                price, quantity = Decimal(row["price"]), Decimal(row["quantity"])
+                if not price.is_finite() or not quantity.is_finite() or price <= 0 or quantity <= 0:
+                    raise RuntimeError("market_book_checkpoint_replay_invalid: nonpositive level")
+                if (type(row["level_ordinal"]) is not int or row["level_ordinal"] != counts[side]
+                        or (previous_side is side and price <= previous_price)
+                        or (previous_side is BookSide.ASK and side is BookSide.BID)):
+                    raise RuntimeError("market_book_checkpoint_replay_invalid: level order or ordinal mismatch")
+                counts[side] += 1
+                rows.append(row)
+                if len(rows) > limits.max_rows:
+                    raise RuntimeError("market_book_checkpoint_read_row_budget_exceeded")
+                previous_side, previous_price = side, price
+        if len(rows) != parquet.metadata.num_rows or not all(counts.values()):
+            raise RuntimeError("market_book_checkpoint_replay_invalid: incomplete level coverage")
+        def levels():
+            for row in rows:
+                check()
+                yield row["side"], Decimal(row["price"]), Decimal(row["quantity"])
+        actual_fingerprint = book_checkpoint_content_fingerprint(checkpoint_id=identity, state_hash=state_hash, levels=levels())
+        if fingerprint != actual_fingerprint:
+            raise RuntimeError("market_book_checkpoint_replay_invalid: content fingerprint mismatch")
+        if expected is not None:
+            actual = {"id": identity, "schema_version": BOOK_CHECKPOINT_SCHEMA_VERSION,
+                "format": BOOK_CHECKPOINT_FORMAT, "compression": BOOK_CHECKPOINT_COMPRESSION,
+                "state_hash": state_hash, "content_fingerprint": actual_fingerprint,
+                "byte_count": byte_count, "level_count": len(rows), "bid_level_count": counts[BookSide.BID],
+                "ask_level_count": counts[BookSide.ASK], "provider_size_unit": unit.value}
+            for name, value in actual.items():
+                if name not in expected or type(expected[name]) is not type(value) or expected[name] != value:
+                    raise RuntimeError(f"market_book_checkpoint_manifest_mismatch: checkpoint_id={identity} field={name}")
+        check()
+        after = path.stat()
+        if any(getattr(before, name) != getattr(after, name)
+               for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")):
+            raise RuntimeError(f"market_book_checkpoint_changed_during_verification: checkpoint_id={identity}")
+        return tuple(rows)
 
 
 def publish_book_checkpoint(
@@ -188,6 +301,7 @@ def publish_book_checkpoint(
 __all__ = [
     "BOOK_CHECKPOINT_COMPRESSION",
     "BOOK_CHECKPOINT_FORMAT",
+    "BookCheckpointReadLimits",
     "EncodedBookCheckpoint",
     "checkpoint_object_key",
     "encode_book_checkpoint_parquet",

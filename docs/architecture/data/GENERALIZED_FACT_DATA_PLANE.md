@@ -22,6 +22,8 @@ code_paths:
   - src/market_data/fact_archive.py
   - src/market_data/archive.py
   - src/market_data/archive_verification.py
+  - src/market_data/book_archive.py
+  - src/market_data/order_book.py
   - src/market_data/canonical_adapters.py
   - src/market_data/fact_registry.py
   - src/market_data/store.py
@@ -552,6 +554,16 @@ a missing, ambiguous, expired or unfinished-expiration prefix. Repeated roots
 share their largest definition/session/epoch scope. The existing mapping budget
 still applies; a large unprotected import fails rather than scanning unboundedly.
 
+Checkpoint backlog protection uses the checkpoint's recorded **session**, not a
+stream-definition field that exists only on raw manifests. It conservatively
+holds a checkpoint while any hot book/coverage reference in that session still
+needs preservation. This may retain extra evidence when sessions overlap, but
+does not consult mutable stream configuration or weaken raw definition/session
+scoping. RCA: the earlier shared target query selected `definition_id` from
+checkpoint manifests, where no such column exists. A real-database regression
+reproduced `UndefinedColumn` through retention status, then verifies both the
+unreferenced checkpoint and its protected state after book publication.
+
 An execution `planned` event also makes that placement unavailable for new
 references, even without `completed`: a process can stop after unlink but before
 recording completion. A failed/skipped event cannot prove the bytes survived.
@@ -713,6 +725,31 @@ gates still precede destructive activation. Individual raw objects and final
 current-byte checks must fit their explicit budgets even when the connection
 spans many resumable intervals. The six-family reclamation gate has not been
 broadened by this step; L2 retention is not yet ready for activation.
+
+### Checkpoint File Admission
+
+The shared checkpoint reader uses physical Parquet files and 128-row Arrow
+batches, with explicit bounds on file bytes, levels, decoded bytes, row groups,
+and decimal text length. It checks the exact non-null column schema, ZSTD,
+metadata and per-row identities, homogeneous provider units, contiguous
+per-side ordinals, strictly increasing positive Decimal prices, positive
+quantities, and both sides' complete counts. Non-finite values and exponent text
+are rejected before formatting can amplify a tiny input into a huge string.
+The checkpoint writer and reader share the unchanged v1 content-fingerprint
+serialization; verification recomputes it across every sorted level.
+
+Replay and collector recovery pass the recorded checkpoint manifest to this
+reader. It streams the current SHA-256, checks every byte/count/unit/format/hash
+binding, and rejects a file that changes during verification. These callers no
+longer load a whole checkpoint file into a bytes buffer merely to hash it. A
+read still returns one complete bounded checkpoint because reconstruction needs
+that state; bounded Arrow batches are not a claim of constant total state memory.
+
+This verifies the checkpoint object, not its reconstruction from raw history.
+State restoration remains owned by `Level2BookReconstructor.from_checkpoint`,
+and the complete raw/validity/known-at dependency proof is still required before
+canonical L2 reclamation is admitted. No checkpoint is fabricated, re-frozen,
+or rewritten by this reader, and no schema migration is needed for these checks.
 
 ### Resumable Canonical Verification
 
