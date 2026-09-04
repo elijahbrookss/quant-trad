@@ -77,6 +77,7 @@ from .market_storage_models import (
     MarketFactArchiveSeriesRecord,
     MarketFactArchiveDependencyRecord,
     MarketFactArchiveMaterialAliasRecord,
+    MarketFactArchiveVerificationRecord,
 )
 from .session import Database, db
 
@@ -135,6 +136,7 @@ __all__ = [
     "MarketFactArchiveSeriesRecord",
     "MarketFactArchiveDependencyRecord",
     "MarketFactArchiveMaterialAliasRecord",
+    "MarketFactArchiveVerificationRecord",
     "MarketBookOperationalRollupRecord",
     "MarketCollectorSafetyEventRecord",
     "MarketCollectorSafetyStateRecord",

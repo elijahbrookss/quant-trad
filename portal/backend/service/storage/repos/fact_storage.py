@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from core.storage_mounts import configured_archive_root
 from market_data.archive import FilesystemRawArchiveObjectStore, RawArchiveObjectStore
+from market_data.canonical_storage import verify_archived_envelope
 from market_data.fact_archive import FactArchiveLimits, FactArchiveManifest, read_canonical_fact_archive
 from market_data.fact_registry import (
     NORMALIZED_FACT_VERSION, build_normalized_fact_payload_schema,
@@ -20,17 +21,20 @@ from market_data.fact_registry import (
 )
 
 
-CANONICAL_ROW_COLUMNS = """
-    versions.*, hot.payload, hot.provenance, hot.quality,
+CANONICAL_ENVELOPE_COLUMNS = """
+    versions.*,
     sources.identity_key AS source_identity_key,
     sources.provider AS source_provider, sources.venue AS source_venue,
     sources.source_kind, sources.adapter_version AS source_adapter_version,
     series.dimensions AS series_dimensions
 """
-CANONICAL_ROW_FROM = """
+CANONICAL_ENVELOPE_FROM = """
     FROM market.fact_versions AS versions
     JOIN market.sources AS sources ON sources.id = versions.source_id
     JOIN market.series AS series ON series.id = versions.series_id
+"""
+CANONICAL_ROW_COLUMNS = CANONICAL_ENVELOPE_COLUMNS + ", hot.payload, hot.provenance, hot.quality"
+CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + """
     LEFT JOIN market.fact_hot_payloads AS hot
       ON hot.storage_day = versions.storage_day AND hot.id = versions.id
 """
@@ -234,13 +238,7 @@ class PostgresCanonicalFactStorageRepository:
                     raise RuntimeError(f"canonical_archive_revision_missing: fact_version_id={identity}")
                 # Check every selected envelope/source field against the cold
                 # copy, not just ID or row_hash. storage_day is not market truth.
-                for name, value in envelope.items():
-                    if name in _DOCUMENTS or name == "storage_day":
-                        continue
-                    if name not in archived or archived[name] != value:
-                        raise RuntimeError(
-                            f"canonical_archive_envelope_mismatch: fact_version_id={identity} field={name}"
-                        )
+                verify_archived_envelope(envelope, archived)
                 envelope.update({name: archived[name] for name in _DOCUMENTS})
         return result
 

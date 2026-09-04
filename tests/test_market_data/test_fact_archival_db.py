@@ -2,10 +2,12 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError
 
 from market_data.archive import FilesystemRawArchiveObjectStore
 from market_data.fact_archive import FactArchiveLimits
+from market_data.archive_verification import ArchiveVerificationLimits
 from portal.backend.service.storage.repos import fact_archival
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement, _ingest, _read
 
@@ -74,6 +76,58 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
                                {"day": day}).scalar_one() == 3
         assert session.execute(text("SELECT sum(row_count) FROM market.fact_archive_series")).scalar_one() == 3
 
+    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        restarted.verify_partition(day)
+    assert restarted.verify_next_page(day)["page_ordinal"] == 0
+
+    def fail_receipt_commit(_conn, _cursor, statement, *_):
+        if statement.startswith("INSERT INTO market.fact_archive_verifications"):
+            raise RuntimeError("injected interruption after receipt insert")
+    event.listen(storage.database._engine, "after_cursor_execute", fail_receipt_commit)
+    try:
+        with pytest.raises(RuntimeError, match="injected interruption after receipt insert"):
+            restarted.verify_next_page(day)
+    finally:
+        event.remove(storage.database._engine, "after_cursor_execute", fail_receipt_commit)
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_verifications")).scalar_one() == 1
+    # A fresh repository resumes the same failed page, not the first page.
+    assert archive.verify_next_page(day)["page_ordinal"] == 1
+    assert archive.verify_next_page(day)["status"] == "no_unverified_pages"
+    with pytest.raises(DBAPIError, match="immutable market-data relation"):
+        with storage.database.session() as session:
+            session.execute(text("DELETE FROM market.fact_archive_verifications"))
+    with pytest.raises(RuntimeError, match="partition_page_budget_exceeded"):
+        archive.verify_partition(day, limits=ArchiveVerificationLimits(max_pages=1))
+    with pytest.raises(RuntimeError, match="byte_budget_exceeded"):
+        archive.verify_partition(day, limits=ArchiveVerificationLimits(max_bytes=1))
+    with storage.database.session() as session:
+        key = session.execute(text("SELECT object_key FROM market.fact_archive_manifests WHERE page_ordinal=0")).scalar_one()
+    path = store.local_path(key)
+    data = path.read_bytes()
+    path.write_bytes(b"x" * len(data))
+    with pytest.raises(RuntimeError, match="checksum_mismatch"):
+        archive.verify_partition(day)
+    assert archive.inspect_partition(day)["state"] == "sealed"
+    path.write_bytes(data)
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        archive.verify_partition(day)
+    path.write_bytes(data)
+
+    # Resumed whole-partition verification rehashes bytes without decoding all
+    # canonical rows again; the immutable page receipts carry that deep proof.
+    with monkeypatch.context() as patch:
+        patch.setattr(fact_archival, "read_canonical_fact_archive", lambda *_, **__: pytest.fail("unexpected page re-decode"))
+        verified = archive.verify_partition(day)
+    assert verified["row_count"] == 3 and verified["page_count"] == verified["verified_objects"] == 2
+    assert archive.verify_partition(day) == verified
+    assert archive.inspect_partition(day)["state"] == "verified"
+    assert _read(storage) == before
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
+                               {"day": day}).scalar_one() == 3
+
 
 def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_pins(storage, tmp_path, monkeypatch):
     from market_data.contracts import SourceIdentity
@@ -124,7 +178,7 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
     path = store.local_path(key)
     original = path.read_bytes()
     path.write_bytes(b"corrupted raw archive")
-    with pytest.raises(RuntimeError, match="canonical_archive_dependency_corrupt"):
+    with pytest.raises(RuntimeError, match="archive_verification_checksum_mismatch"):
         archive.stage_next_page(day)
     assert archive.inspect_partition(day)["page_count"] == 0
     path.write_bytes(original)
@@ -140,3 +194,95 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
     with storage.database.session() as session:
         assert session.execute(text("SELECT count(*) FROM market.fact_archive_material_aliases")).scalar_one() == 2
         assert session.execute(text("SELECT count(*) FROM market.fact_archive_dependencies")).scalar_one() == 2
+    assert archive.verify_next_page(day)["status"] == "page_verified"
+    path.write_bytes(b"x" * len(original))
+    with pytest.raises(RuntimeError, match="checksum_mismatch"):
+        archive.verify_partition(day)
+    assert archive.inspect_partition(day)["state"] == "sealed"
+    path.write_bytes(original)
+    assert archive.verify_partition(day)["verified_objects"] == 3
+
+
+def test_page_receipts_do_not_cover_unstaged_rows_or_changed_catalogs(storage, tmp_path, monkeypatch):
+    from portal.backend.db import MarketFactArchiveMaterialAliasRecord
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    for revision in range(2):
+        _ingest(storage, replace(storage.fact, observation_key=f"receipt-coverage-{revision}"))
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=storage.database, object_store=store, temporary_directory=tmp_path / "staging",
+        limits=FactArchiveLimits(max_rows=1, row_group_size=1),
+    )
+    archive.seal_partition(day)
+    first = archive.stage_next_page(day)
+    actual_catalogs = archive._page_catalogs
+    def missing_series(*args):
+        return {**actual_catalogs(*args), "series": []}
+    with monkeypatch.context() as patch:
+        patch.setattr(archive, "_page_catalogs", missing_series)
+        with pytest.raises(RuntimeError, match="catalog_incomplete.*catalog=series"):
+            archive.verify_next_page(day)
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_archive_verifications")).scalar_one() == 0
+    archive.verify_next_page(day)
+    with pytest.raises(RuntimeError, match="source_coverage_mismatch"):
+        archive.verify_partition(day)
+    archive.stage_next_page(day)
+    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        archive.verify_partition(day)
+    archive.verify_next_page(day)
+    # Immutability prevents changing existing entries, but inserting a new
+    # false alias after a receipt must invalidate its exact catalog binding.
+    with storage.database.session() as session:
+        fact_id = session.execute(text("SELECT first_id FROM market.fact_archive_manifests WHERE id=:id"),
+                                  {"id": first["manifest_id"]}).scalar_one()
+        session.add(MarketFactArchiveMaterialAliasRecord(
+            manifest_id=first["manifest_id"], fact_version_id=fact_id, series_id=storage.series_id,
+            evidence_key="forged-test-alias", material_hash="a" * 64,
+        ))
+    with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+        archive.verify_partition(day)
+    assert archive.inspect_partition(day)["state"] == "sealed"
+
+
+def test_page_verification_fences_expiry_and_other_workers_but_allows_collection(storage, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    _ingest(storage)
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(
+        database=storage.database, object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
+        temporary_directory=tmp_path / "staging",
+    )
+    archive.seal_partition(day)
+    archive.stage_next_page(day)
+    started, release = Event(), Event()
+    real_read = fact_archival.read_canonical_fact_archive
+    def paused_read(*args, **kwargs):
+        started.set()
+        assert release.wait(30), "test did not release the verification worker"
+        return real_read(*args, **kwargs)
+    monkeypatch.setattr(fact_archival, "read_canonical_fact_archive", paused_read)
+    _placement(monkeypatch, storage.today)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(archive.verify_next_page, day)
+        try:
+            assert started.wait(30), "verification worker did not reach archive read"
+            with storage.database.session() as session:
+                assert session.execute(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
+                                       {"name": _LIFECYCLE_LOCK_NAME}).scalar_one() is False
+                assert session.execute(text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:name,0))"),
+                                       {"name": _LIFECYCLE_LOCK_NAME}).scalar_one() is True
+            with pytest.raises(RuntimeError, match="canonical_archive_partition_busy"):
+                archive.verify_next_page(day)
+            fresh = _ingest(storage, replace(storage.fact, observation_key="collected-during-verification"))
+            assert fresh.inserted_count == 1
+        finally:
+            release.set()
+        assert future.result(timeout=30)["status"] == "page_verified"
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
+                               {"name": _LIFECYCLE_LOCK_NAME}).scalar_one() is True

@@ -204,6 +204,31 @@ class MarketFactArchiveDependencyRecord(Base):
     object_sha256 = Column(String(64), nullable=False)
 
 
+class MarketFactArchiveVerificationRecord(Base):
+    """Resumable full-page verification bound to immutable archive catalogs.
+
+    A receipt is not permission to delete. Final admission must verify complete
+    source coverage and recheck current bytes, including every dependency.
+    """
+
+    __tablename__ = "fact_archive_verifications"
+    __table_args__ = (
+        CheckConstraint("verifier_version <> ''", name="ck_market_fact_archive_verifier"),
+        CheckConstraint(
+            "manifest_hash ~ '^[0-9a-f]{64}$' AND catalog_hash ~ '^[0-9a-f]{64}$' AND "
+            "verification_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_verification_hashes",
+        ),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    verifier_version = Column(String(64), primary_key=True)
+    manifest_hash = Column(String(64), nullable=False)
+    catalog_hash = Column(String(64), nullable=False)
+    verification_hash = Column(String(64), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class MarketFactArchiveMaterialAliasRecord(Base):
     """Indexed legacy material witnesses derived from verified cold-page rows.
 

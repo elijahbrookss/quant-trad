@@ -20,6 +20,7 @@ code_paths:
   - src/market_data/canonical.py
   - src/market_data/canonical_storage.py
   - src/market_data/fact_archive.py
+  - src/market_data/archive_verification.py
   - src/market_data/canonical_adapters.py
   - src/market_data/fact_registry.py
   - src/market_data/store.py
@@ -335,11 +336,61 @@ raw source objects with these holds also remain protected; this can increase
 HDD retention compared with ordinary age-only expiration.
 
 Staging deliberately leaves the partition `sealed`; exhausting its source is
-not permission to drop it. Whole-partition verification/reclamation and the
-complete normalized-feature dependency proof are not enabled by this staging
-owner. A normalized page currently fails with
+not permission to drop it. Reclamation and the complete normalized-feature
+dependency proof are not enabled by this owner. A normalized page currently fails with
 `canonical_archive_dependency_proof_required`; it is never admitted with an
 empty dependency set. These gates must be completed before retention activation.
+
+### Resumable Canonical Verification
+
+`verify_next_page` fully decodes one unverified archive page and checks every
+retained envelope/source field against PostgreSQL, including document hashes,
+identity, revision, and causal clocks. It reads immutable headers, not another
+copy of the hot JSON documents. Its inclusive ordered header range must match
+every archived row. The series, legacy-alias, and dependency catalogs must equal
+the sets derived from the decoded page; all referenced raw bytes are rechecked.
+
+Only that successful transaction inserts an immutable, versioned
+`fact_archive_verifications` receipt. It binds the page descriptor, placement,
+ordinal, and exact catalog hash. A failed transaction leaves no receipt, so a
+restarted worker retries that page. Receipt updates/deletes are prohibited.
+Additional catalog entries after a receipt invalidate its binding rather than
+silently becoming trusted lineage.
+The verifier version names the complete deep-admission rules. Strengthening
+lineage/dependency checks requires a new version; an older receipt must never
+bypass a new check simply because its unchanged file checksum still matches.
+
+`verify_partition` checks contiguous page ordinals, disjoint ordered ranges,
+all current receipt/catalog bindings, and exact equality of the sealed source
+count, current header count, and sum of page counts. Full range proofs plus
+nonoverlap and equal cardinality exclude gaps before, between, or after pages.
+Page metadata is fetched in batches of at most 100; each page's metadata has
+separate row/dependency limits. Full canonical payload decoding is not repeated
+on every final-pass retry.
+
+The final pass nevertheless streams a **fresh checksum of every distinct
+canonical/dependency object**, verifies canonical file sizes, and checks that
+no dependency has an expiration event. Shared objects are read once per pass.
+Default final-pass bounds are 10,000 pages, 100,000 objects, and 64 GiB; exceeding
+a bound fails rather than skipping evidence. These are explicit work limits,
+not claims about production throughput or the appropriate daily storage budget.
+File device/inode/mode/size/mtime/ctime are checked around reads and again before
+admission. These short-handoff checks never replace a fresh checksum on a later
+run. The object-store mount/root guards apply to every path lookup.
+
+On success, the partition becomes `verified` with a hash of the ordered page
+proofs. **All hot payloads remain intact.** This state is cold-copy admission,
+not deletion authorization. A future reclaimer must repeat the current-byte
+gate, safely hand off to the exclusive lifecycle fence, recheck evidence and
+file identity, and commit physical reclamation atomically. No destructive
+retention entrypoint is enabled by these verification methods.
+
+Verification holds the lifecycle **shared** fence and the chosen partition's
+worker fence. Expiry and a competing same-day worker cannot pass, while shared
+dataset work and current-day collection can proceed. The lifecycle service
+must not invoke this phase from inside its existing exclusive-lock context on
+another connection: that would wait on its own lock. Expensive shared work and
+the final short exclusive reclamation phase must be orchestrated separately.
 
 ### Explicit Storage Cutover
 

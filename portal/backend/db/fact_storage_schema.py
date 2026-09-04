@@ -20,11 +20,13 @@ logger = logging.getLogger(__name__)
 FACT_STORAGE_LAYOUT_VERSION = "market.fact_storage_tiers.v1"
 FACT_STORAGE_TABLES = (
     "fact_hot_payloads", "fact_retention_partitions", "fact_archive_manifests",
-    "fact_archive_series", "fact_archive_dependencies", "fact_archive_material_aliases", "fact_storage_state",
+    "fact_archive_series", "fact_archive_dependencies", "fact_archive_material_aliases",
+    "fact_archive_verifications", "fact_storage_state",
 )
 FACT_STORAGE_IMMUTABLE_TABLES = (
     "fact_hot_payloads", "fact_archive_manifests", "fact_archive_series", "fact_archive_dependencies",
     "fact_archive_material_aliases",
+    "fact_archive_verifications",
 )
 FACT_PAYLOAD_INDEXES = frozenset(index.name for index in MarketFactHotPayloadRecord.__table__.indexes)
 FACT_STORAGE_CUTOVER = "scripts/db/manual_migration_fact_storage_tiers_v1.py"

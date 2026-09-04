@@ -77,6 +77,11 @@ def _json_bytes(value: object) -> bytes:
                       ensure_ascii=True, allow_nan=False).encode("utf-8")
 
 
+def archive_evidence_hash(evidence: Mapping[str, Any]) -> str:
+    """Hash versioned archive admission evidence, not a new market Fact identity."""
+    return hashlib.sha256(_json_bytes(dict(evidence))).hexdigest()
+
+
 @dataclass(frozen=True)
 class FactArchiveLimits:
     max_rows: int = 10_000

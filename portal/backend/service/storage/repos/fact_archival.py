@@ -1,36 +1,59 @@
 """Bounded, resumable publication of sealed canonical payload partitions.
 
-This owner stages independently verified pages and their immutable lookup/hold
-catalogs. It never marks a partition reclaimable or drops a table; whole-source
-coverage and reclamation are separate lifecycle gates.
+This owner stages pages, persists resumable full-page verification receipts,
+and checks whole-source coverage plus current bytes. It never drops a table;
+reclamation is a separate lifecycle gate.
 """
 from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import date, timedelta
-import hashlib
 import logging
 from pathlib import Path
 
 from sqlalchemy import text
 
 from market_data.archive import RawArchiveObjectStore
-from market_data.canonical_storage import legacy_material_alias, record_from_storage_row
+from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+from market_data.canonical_storage import legacy_material_alias, record_from_storage_row, verify_archived_envelope
 from market_data.fact_archive import (
     FactArchiveLimits, publish_canonical_fact_archive, read_canonical_fact_archive,
-    verify_canonical_fact_archive_rows,
+    verify_canonical_fact_archive_rows, archive_evidence_hash,
 )
 from portal.backend.db import (
     MarketFactArchiveManifestRecord, MarketFactArchiveSeriesRecord,
     MarketFactArchiveDependencyRecord, MarketFactArchiveMaterialAliasRecord,
+    MarketFactArchiveVerificationRecord,
 )
 from portal.backend.db.fact_storage_schema import fact_partition_name
 
-from .fact_storage import CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, _catalog_manifest, ensure_payload_contracts
+from .fact_storage import (
+    CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, CANONICAL_ENVELOPE_COLUMNS, CANONICAL_ENVELOPE_FROM,
+    _catalog_manifest, ensure_payload_contracts,
+)
 from .market_lifecycle import market_storage_lifecycle_repository
 
 logger = logging.getLogger(__name__)
+# Increase when deep admission rules change: old receipts must not bypass new
+# dependency/lineage requirements during the metadata-only final coverage pass.
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v1"
+
+
+def _series_catalog(manifest):
+    return [{key: value for key, value in asdict(bounds).items()
+             if key not in {"source_ids", "payload_contracts"}} for bounds in manifest.series]
+
+
+def _receipt(page, catalog_hash):
+    evidence = {
+        "manifest_id": page["id"], "manifest_hash": page["manifest_hash"],
+        "storage_day": page["storage_day"].isoformat(), "page_ordinal": page["page_ordinal"],
+        "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION, "catalog_hash": catalog_hash,
+    }
+    return {key: value for key, value in evidence.items() if key not in {"storage_day", "page_ordinal"}} | {
+        "verification_hash": archive_evidence_hash(evidence),
+    }
 
 
 class PostgresCanonicalFactArchiveRepository:
@@ -148,7 +171,9 @@ class PostgresCanonicalFactArchiveRepository:
         result = []
         if len(references) > self.max_dependency_objects:
             raise RuntimeError("canonical_archive_dependency_object_budget_exceeded: reduce page row limit")
-        dependency_bytes = 0
+        objects = ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
+            max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
+        ))
         for identity, reference in sorted(references.items()):
             expired = session.execute(text("""
                 SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
@@ -159,18 +184,10 @@ class PostgresCanonicalFactArchiveRepository:
                 raise RuntimeError(f"canonical_archive_dependency_expired: target_id={identity}")
             # The lifecycle shared fence remains held while bytes are read and
             # permanent hold edges commit. Expiry cannot race this admission.
-            path = self.object_store.local_path(reference["object_key"])
-            digest = hashlib.sha256()
-            with path.open("rb") as handle:
-                for block in iter(lambda: handle.read(1024 * 1024), b""):
-                    dependency_bytes += len(block)
-                    if dependency_bytes > self.max_dependency_bytes:
-                        raise RuntimeError("canonical_archive_dependency_byte_budget_exceeded: reduce page row limit")
-                    digest.update(block)
-            if digest.hexdigest() != reference["object_sha256"]:
-                raise RuntimeError(f"canonical_archive_dependency_corrupt: target_id={identity}")
+            objects.verify(reference["object_key"], reference["object_sha256"])
             result.append({"target_kind": "raw_manifest", "target_id": identity,
                            "object_key": reference["object_key"], "object_sha256": reference["object_sha256"]})
+        objects.assert_unchanged()
         return result
 
     def stage_next_page(self, day: date) -> dict:
@@ -241,8 +258,7 @@ class PostgresCanonicalFactArchiveRepository:
                 last_commit_seq=manifest.last_cursor[0], last_id=manifest.last_cursor[1], descriptor=manifest.to_dict(),
             ))
             session.flush()
-            for bounds in manifest.series:
-                values = {key: value for key, value in asdict(bounds).items() if key not in {"source_ids", "payload_contracts"}}
+            for values in _series_catalog(manifest):
                 session.add(MarketFactArchiveSeriesRecord(manifest_id=manifest.manifest_id, **values))
             for row in rows:
                 alias = legacy_material_alias(row)
@@ -254,3 +270,173 @@ class PostgresCanonicalFactArchiveRepository:
                     day, ordinal, manifest.manifest_id, manifest.row_count, manifest.byte_count, len(dependencies))
         return {"storage_day": day, "status": "page_acknowledged", "page_ordinal": ordinal,
                 "manifest_id": manifest.manifest_id, "row_count": manifest.row_count}
+
+    def _page_catalogs(self, session, manifest_id):
+        catalogs = {}
+        # Explicit projections define the versioned proof. Fetch one extra row
+        # to reject excess metadata without transferring an unbounded catalog.
+        for name, table, columns, order, limit in (
+            ("series", "fact_archive_series",
+             "series_id, row_count, first_observation_at, last_observation_at, first_known_at, "
+             "last_known_at, first_accepted_at, last_accepted_at", "series_id", self.limits.max_rows),
+            ("aliases", "fact_archive_material_aliases",
+             "fact_version_id, series_id, evidence_key, material_hash", "fact_version_id, evidence_key", self.limits.max_rows),
+            ("dependencies", "fact_archive_dependencies",
+             "target_kind, target_id, object_key, object_sha256", "target_kind, target_id", self.max_dependency_objects),
+        ):
+            rows = session.execute(text(
+                f"SELECT {columns} FROM market.{table} WHERE manifest_id=:id ORDER BY {order} LIMIT :limit"
+            ), {"id": manifest_id, "limit": limit + 1}).mappings().all()
+            if len(rows) > limit:
+                raise RuntimeError(f"canonical_archive_catalog_budget_exceeded: manifest_id={manifest_id} catalog={name}")
+            catalogs[name] = [dict(row) for row in rows]
+        return catalogs
+
+    def verify_next_page(self, day: date) -> dict:
+        """Deep-check one unverified page; commit its receipt only after all checks.
+
+        The codec validates every full-row hash. Comparing every permanent
+        envelope then proves document equality without rereading hot JSON.
+        This progress survives process restarts; it cannot authorize a DROP.
+        """
+        with self.database.session() as session:
+            partition = self._lock(session, day)
+            if partition["state"] != "sealed":
+                raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
+            page = session.execute(text("""
+                SELECT pages.* FROM market.fact_archive_manifests AS pages
+                LEFT JOIN market.fact_archive_verifications AS proof
+                  ON proof.manifest_id=pages.id AND proof.verifier_version=:version
+                WHERE pages.storage_day=:day AND proof.manifest_id IS NULL
+                ORDER BY pages.page_ordinal LIMIT 1
+            """), {"day": day, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+            if page is None:
+                return {"storage_day": day, "status": "no_unverified_pages"}
+            manifest = _catalog_manifest(page)
+            if manifest.row_count > self.limits.max_rows:
+                raise RuntimeError(f"canonical_archive_page_row_budget_exceeded: manifest_id={manifest.manifest_id}")
+            ensure_payload_contracts(session, [contract for bounds in manifest.series for contract in bounds.payload_contracts])
+            rows = read_canonical_fact_archive(
+                self.object_store.local_path(manifest.object_key), expected=manifest, limits=self.limits,
+            )
+            envelopes = session.execute(text(f"""
+                SELECT {CANONICAL_ENVELOPE_COLUMNS} {CANONICAL_ENVELOPE_FROM}
+                WHERE versions.storage_day=:day
+                  AND (versions.market_commit_seq, versions.id) >= (:first_seq, :first_id)
+                  AND (versions.market_commit_seq, versions.id) <= (:last_seq, :last_id)
+                ORDER BY versions.market_commit_seq, versions.id LIMIT :limit
+            """), {"day": day, "first_seq": manifest.first_cursor[0], "first_id": manifest.first_cursor[1],
+                   "last_seq": manifest.last_cursor[0], "last_id": manifest.last_cursor[1],
+                   "limit": self.limits.max_rows + 1}).mappings().all()
+            if len(envelopes) != len(rows):
+                raise RuntimeError(f"canonical_archive_page_source_coverage_mismatch: manifest_id={manifest.manifest_id}")
+            for envelope, archived in zip(envelopes, rows):
+                verify_archived_envelope(envelope, archived)
+            aliases = [alias for row in rows if (alias := legacy_material_alias(row)) is not None]
+            expected = {
+                "series": _series_catalog(manifest),
+                "aliases": sorted(aliases, key=lambda item: (item["fact_version_id"], item["evidence_key"])),
+                "dependencies": sorted(self._dependencies(session, rows), key=lambda item: (item["target_kind"], item["target_id"])),
+            }
+            catalogs = self._page_catalogs(session, manifest.manifest_id)
+            for name, items in expected.items():
+                if catalogs[name] != items:
+                    raise RuntimeError(f"canonical_archive_catalog_incomplete: manifest_id={manifest.manifest_id} catalog={name}")
+            receipt = _receipt(page, archive_evidence_hash(catalogs))
+            session.add(MarketFactArchiveVerificationRecord(**receipt))
+        logger.info("canonical_archive_page_verified | storage_day=%s page_ordinal=%s manifest_id=%s rows=%s verification_hash=%s",
+                    day, page["page_ordinal"], manifest.manifest_id, manifest.row_count, receipt["verification_hash"])
+        return {"storage_day": day, "status": "page_verified", "page_ordinal": page["page_ordinal"],
+                "manifest_id": manifest.manifest_id, "verification_hash": receipt["verification_hash"]}
+
+    def _partition_evidence(self, session, partition, *, limits, objects=None):
+        """Check bounded catalogs/receipts and exact sealed-source coverage.
+
+        Supplying a byte verifier additionally checks every current cold object.
+        With no verifier this returns metadata evidence only, never permission
+        to delete. The caller must own the partition and lifecycle fences.
+        """
+        day = partition["storage_day"]
+        last_cursor = (0, "")
+        ordinal = 0
+        total_rows = 0
+        proofs = []
+        # Fetch bounded batches of metadata, not all rows or all manifests at
+        # once. Each page's aliases/dependencies have their own explicit bounds.
+        while True:
+            pages = session.execute(text("""
+                SELECT * FROM market.fact_archive_manifests
+                WHERE storage_day=:day AND page_ordinal>=:ordinal ORDER BY page_ordinal LIMIT :limit
+            """), {"day": day, "ordinal": ordinal, "limit": min(100, limits.max_pages - ordinal + 1)}).mappings().all()
+            if not pages:
+                break
+            for page in pages:
+                if ordinal >= limits.max_pages:
+                    raise RuntimeError(f"canonical_archive_partition_page_budget_exceeded: storage_day={day}")
+                manifest = _catalog_manifest(page)
+                if page["page_ordinal"] != ordinal or manifest.first_cursor <= last_cursor:
+                    raise RuntimeError(f"canonical_archive_partition_page_order_invalid: storage_day={day} page_ordinal={page['page_ordinal']}")
+                catalogs = self._page_catalogs(session, manifest.manifest_id)
+                receipt = session.execute(text("""
+                    SELECT manifest_id, verifier_version, manifest_hash, catalog_hash, verification_hash
+                    FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version
+                """), {"id": manifest.manifest_id, "version": FACT_ARCHIVE_VERIFIER_VERSION}).mappings().one_or_none()
+                if receipt is None or dict(receipt) != _receipt(page, archive_evidence_hash(catalogs)):
+                    raise RuntimeError(f"canonical_archive_verification_missing_or_stale: manifest_id={manifest.manifest_id}")
+                if objects is not None:
+                    objects.verify(manifest.object_key, manifest.object_sha256, expected_bytes=manifest.byte_count)
+                    for dependency in catalogs["dependencies"]:
+                        expired = session.execute(text("""
+                            SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
+                                WHERE action='archive_expire' AND event_type='completed'
+                                  AND target_kind=:target_kind AND target_id=:target_id)
+                        """), dependency).scalar_one()
+                        if expired:
+                            raise RuntimeError(f"canonical_archive_dependency_expired: target_id={dependency['target_id']}")
+                        objects.verify(dependency["object_key"], dependency["object_sha256"])
+                proofs.append(receipt["verification_hash"])
+                total_rows += manifest.row_count
+                last_cursor = manifest.last_cursor
+                ordinal += 1
+        count = session.execute(text(
+            "SELECT count(*) FROM market.fact_versions WHERE storage_day=:day"
+        ), {"day": day}).scalar_one()
+        # Each verified interval equals its complete header range. Nonoverlap
+        # plus equal total cardinality proves no headers were skipped between
+        # pages, before the first, or after the last page.
+        if count != partition["expected_rows"] or total_rows != count:
+            raise RuntimeError(f"canonical_archive_source_coverage_mismatch: storage_day={day} source_rows={count} archived_rows={total_rows}")
+        return {"storage_day": day, "page_count": ordinal, "row_count": total_rows,
+                "manifest_set_hash": archive_evidence_hash({
+                    "verifier_version": FACT_ARCHIVE_VERIFIER_VERSION, "storage_day": day.isoformat(),
+                    "expected_rows": count, "page_verifications": proofs,
+                })}
+
+    def verify_partition(self, day: date, *, limits: ArchiveVerificationLimits = ArchiveVerificationLimits()) -> dict:
+        """Admit complete, currently readable cold coverage; retain all hot data.
+
+        Expensive per-page decoding resumes via immutable receipts. This final
+        bounded pass still rehashes current files; stale receipts cannot hide
+        missing/corrupted bytes. Reclamation must repeat this fresh-byte gate.
+        """
+        with self.database.session() as session:
+            partition = self._lock(session, day)
+            if partition["state"] not in {"sealed", "verified"}:
+                raise RuntimeError(f"canonical_archive_partition_not_sealed: storage_day={day} state={partition['state']}")
+            objects = ArchiveVerificationBatch(self.object_store, limits=limits)
+            evidence = self._partition_evidence(session, partition, limits=limits, objects=objects)
+            objects.assert_unchanged()
+            if partition["state"] == "verified":
+                if partition["manifest_set_hash"] != evidence["manifest_set_hash"]:
+                    raise RuntimeError(f"canonical_archive_partition_verification_changed: storage_day={day}")
+            else:
+                session.execute(text("""
+                    UPDATE market.fact_retention_partitions
+                    SET state='verified', verified_at=clock_timestamp(), manifest_set_hash=:manifest_set_hash
+                    WHERE storage_day=:storage_day
+                """), evidence)
+        logger.info("canonical_archive_partition_verified | storage_day=%s pages=%s rows=%s objects=%s bytes=%s manifest_set_hash=%s",
+                    day, evidence["page_count"], evidence["row_count"], len(objects.objects), objects.byte_count,
+                    evidence["manifest_set_hash"])
+        return {**evidence, "status": "partition_verified", "verified_objects": len(objects.objects),
+                "verified_bytes": objects.byte_count}

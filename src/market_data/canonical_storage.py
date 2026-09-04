@@ -38,6 +38,21 @@ def legacy_material_alias(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "evidence_key": key, "material_hash": material}
 
 
+def verify_archived_envelope(envelope: Mapping[str, Any], archived: Mapping[str, Any]) -> None:
+    """Match retained identity/causal/source fields, independent of payload placement.
+
+    The archive codec must already have validated all document hashes. This
+    comparison then binds those documents to PostgreSQL without loading hot JSON.
+    """
+    for name, value in envelope.items():
+        if name in {"payload", "provenance", "quality", "storage_day"}:
+            continue
+        if name not in archived or archived[name] != value:
+            raise RuntimeError(
+                f"canonical_archive_envelope_mismatch: fact_version_id={envelope.get('id')} field={name}"
+            )
+
+
 def source_from_storage_row(row: Mapping[str, Any]) -> SourceIdentity:
     source = SourceIdentity(
         provider=str(row["source_provider"]),
