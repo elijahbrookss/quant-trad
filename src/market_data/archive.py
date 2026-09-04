@@ -745,17 +745,28 @@ class FilesystemRawArchiveObjectStore:
                 acknowledged_at=datetime.now(UTC),
                 reused_existing=True,
             )
-        temporary = destination.with_name(
-            f".{destination.name}.{os.getpid()}.partial"
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
         )
+        temporary = Path(temporary_path)
+        reused_existing = False
         try:
-            with source.open("rb") as source_handle, temporary.open("xb") as target:
+            with os.fdopen(descriptor, "wb") as target, source.open("rb") as source_handle:
                 shutil.copyfileobj(source_handle, target, length=1024 * 1024)
                 target.flush()
                 os.fsync(target.fileno())
             if _sha256_file(temporary) != expected:
                 raise RuntimeError("market_archive_upload_invalid: copied checksum mismatch")
-            os.replace(temporary, destination)
+            # Linking is atomic create-if-absent on this same filesystem. A
+            # check followed by replace could overwrite a concurrent publisher.
+            try:
+                os.link(temporary, destination)
+            except FileExistsError:
+                if _sha256_file(destination) != expected:
+                    raise RuntimeError(
+                        "market_archive_object_conflict: immutable key has different bytes"
+                    ) from None
+                reused_existing = True
             _fsync_directory(destination.parent)
         finally:
             if temporary.exists():
@@ -768,6 +779,7 @@ class FilesystemRawArchiveObjectStore:
             sha256=expected,
             byte_count=destination.stat().st_size,
             acknowledged_at=datetime.now(UTC),
+            reused_existing=reused_existing,
         )
 
     def delete_verified(

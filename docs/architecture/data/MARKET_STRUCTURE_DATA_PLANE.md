@@ -356,6 +356,19 @@ mapping appended after upload does not revise the canonical fact. A lost
 unmapped spool record creates `archive_loss` evidence and can never become
 dataset-eligible.
 
+Filesystem publication uses a unique staging file, verifies and fsyncs the
+bytes, then atomically creates the destination with a same-filesystem hard
+link. An existing identical object is reused; conflicting bytes fail loud.
+There is no replacing-rename fallback. This also applies to canonical archives
+using the same object-store boundary.
+
+Publication-race RCA: a check-before-copy followed by `os.replace` could
+overwrite a competing writer's immutable object, and PID-only staging names
+collided between threads. The create-only publication and unique staging fix
+both causes. `test_archive_publication_concurrency.py` reproduces a competing
+publication during copy and exercises simultaneous identical/conflicting
+writers. This is a reproduced local defect, not evidence of production loss.
+
 ### Product And Relationship Tables
 
 | Table | Purpose and grain | Key/idempotency | Important columns and time | Mutability/revision | Partition/index, writes, retention |
