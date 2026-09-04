@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from core.storage_mounts import require_configured_archive_mount
+from core.storage_mounts import configured_archive_root, require_configured_archive_mount
 from data_providers.providers.factory import get_provider
 from data_providers.streams.coinbase import (
     CoinbaseAdvancedTradeStream,
@@ -133,9 +133,7 @@ AUTHENTICATED_STREAM_PROOF_SHA256 = (
 )
 DEFAULT_SPOOL_BYTES = 8 * 1024**3
 DEFAULT_SEGMENT_BYTES = 128 * 1024**2
-DEFAULT_STORAGE_ROOT = Path(
-    os.environ.get("MARKET_STRUCTURE_STORAGE_ROOT", "logs/market-structure")
-)
+DEFAULT_STORAGE_ROOT = configured_archive_root()
 MAX_ANALYZER_SEQUENCE_HASHES = 8192
 DEFAULT_TRADE_FLEET_MANIFEST = Path(
     "config/market_data/coinbase_perpetual_trade_fleet.v1.json"

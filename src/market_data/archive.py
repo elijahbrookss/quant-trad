@@ -706,10 +706,14 @@ def _raw_record_from_spool_row(row: Mapping[str, Any]) -> RawStreamRecord:
 class FilesystemRawArchiveObjectStore:
     """Local immutable object-store semantics for implementation and tests."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, writable: bool = True) -> None:
         self.root = Path(root).resolve()
-        require_configured_archive_mount(self.root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.writable = writable
+        require_configured_archive_mount(self.root, require_writable=writable)
+        if writable:
+            self.root.mkdir(parents=True, exist_ok=True)
+        elif not self.root.is_dir():
+            raise FileNotFoundError(f"market_archive_root_missing: root={self.root}")
 
     def local_path(self, object_key: str) -> Path:
         parts = Path(str(object_key or "")).parts
@@ -724,6 +728,8 @@ class FilesystemRawArchiveObjectStore:
     def put_verified(
         self, *, object_key: str, source_path: Path, expected_sha256: str
     ) -> ArchiveObjectAcknowledgement:
+        if not self.writable:
+            raise PermissionError("market_archive_read_only: publication is disabled")
         source = Path(source_path)
         expected = str(expected_sha256 or "").strip().lower()
         if _sha256_file(source) != expected:
@@ -788,6 +794,8 @@ class FilesystemRawArchiveObjectStore:
     def delete_verified(
         self, *, object_key: str, expected_sha256: str, allow_missing: bool = False
     ) -> ArchiveObjectDeletionAcknowledgement:
+        if not self.writable:
+            raise PermissionError("market_archive_read_only: deletion is disabled")
         expected = str(expected_sha256 or "").strip().lower()
         target = self.local_path(object_key)
         require_configured_archive_mount(target)

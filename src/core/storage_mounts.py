@@ -99,6 +99,11 @@ def inspect_filesystem(
         ) from exc
 
 
+def configured_archive_root() -> Path:
+    """One configuration owner for the local archive placement (without mkdir)."""
+    return Path(os.environ.get("MARKET_STRUCTURE_STORAGE_ROOT", "logs/market-structure"))
+
+
 def require_configured_archive_mount(
     path: Path | None = None, *, require_writable: bool = True
 ) -> FilesystemEvidence | None:
@@ -112,9 +117,7 @@ def require_configured_archive_mount(
     expected_uuid = os.environ.get("QT_MARKET_DATA_EXPECTED_UUID", "").strip()
     if not expected_uuid:
         return None
-    configured_root = Path(
-        os.environ.get("MARKET_STRUCTURE_STORAGE_ROOT", "logs/market-structure")
-    )
+    configured_root = configured_archive_root()
     if not configured_root.is_absolute() or configured_root == Path("/"):
         raise StorageMountError(
             "storage_mount_invalid: dedicated archive root must be absolute and not /"

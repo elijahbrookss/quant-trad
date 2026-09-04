@@ -250,7 +250,7 @@ class PostgresNormalizationRepository:
                     SELECT specs.*,
                            (
                                SELECT COUNT(*)
-                               FROM market.fact_versions AS values
+                               FROM market.fact_rows AS values
                                WHERE values.provenance
                                      -> '_qt_normalization_evidence'
                                      ->> 'spec_id' = specs.id
@@ -349,7 +349,7 @@ class PostgresNormalizationRepository:
                         text(
                             """
                             SELECT 1
-                            FROM market.fact_versions AS source
+                            FROM market.fact_rows AS source
                             WHERE source.series_id = ANY(:source_series_ids)
                               AND (
                                   source.material_hash = :material_hash
@@ -383,7 +383,7 @@ class PostgresNormalizationRepository:
                     text(
                         """
                         SELECT row_hash, known_at, market_commit_seq, payload
-                        FROM market.fact_versions
+                        FROM market.fact_rows
                         WHERE series_id = :series_id
                           AND observation_key = :observation_key
                         ORDER BY revision DESC

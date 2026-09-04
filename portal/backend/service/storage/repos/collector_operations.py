@@ -428,7 +428,7 @@ class PostgresCollectorOperationsRepository:
                                external_event_group_key, state, payload,
                                provenance_schema_id, provenance,
                                quality_schema_id, quality
-                        FROM market.fact_versions
+                        FROM market.fact_rows
                         WHERE series_id = ANY(:series_ids)
                         ORDER BY series_id, observation_key, revision DESC
                     )

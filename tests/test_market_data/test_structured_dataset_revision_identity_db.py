@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 import pytest
 
@@ -482,13 +483,20 @@ def test_structured_dataset_pins_all_causal_revisions_and_excludes_post_freeze_c
     assert market_data_repo.get_dataset(dataset_id).dataset_hash == frozen.dataset_hash
 
 
+@pytest.mark.parametrize("cooled", [False, True])
 def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cooled: bool,
 ) -> None:
     token = uuid.uuid4().hex
     instrument_id = f"book-lineage-{token[:18]}"
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    if cooled:
+        # A private placement day prevents this destructive fixture from
+        # touching any other test's canonical payload partition.
+        from tests.test_market_data.test_fact_storage_tiers_db import _placement, _verified_cold_fixture
+        _placement(monkeypatch, date(1900, 1, 1))
     with db.session() as session:
         session.add(
             InstrumentRecord(
@@ -606,6 +614,18 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
         metadata={"fixture": "book-feature-revision-lineage"},
     )
     series_entries = {int(entry["series_id"]): entry for entry in frozen.series}
+    additional_pin = 0
+    if cooled:
+        _verified_cold_fixture(SimpleNamespace(database=db, today=date(1900, 1, 1)), tmp_path, monkeypatch)
+        refrozen = market_data_repo.freeze_dataset(
+            (DatasetSeriesRequest(bbo_series_id, _RANGE_START, _RANGE_END),
+             DatasetSeriesRequest(depth_series_id, _RANGE_START, _RANGE_END)),
+            name=f"Book revision lineage {token[:8]}", purpose="test", created_by="pytest",
+            metadata={"fixture": "book-feature-revision-lineage"},
+        )
+        assert refrozen.dataset_hash == frozen.dataset_hash
+        additional_pin = int(refrozen.dataset_id != frozen.dataset_id)
+        _placement(monkeypatch, date(1900, 1, 2))
     assert series_entries[bbo_series_id]["row_count"] == 3
     assert series_entries[depth_series_id]["row_count"] == 3
 
@@ -650,7 +670,7 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
             target_kind="raw_manifest",
             target_id=manifest_id,
         )
-        assert retention["dataset_pin_count"] == 1
+        assert retention["dataset_pin_count"] == 1 + additional_pin
         assert retention["pinned"] is True
 
     reconnect_without_archive_bbo, _reconnect_without_archive_depth = (

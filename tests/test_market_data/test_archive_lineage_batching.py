@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -101,7 +102,17 @@ def test_lineage_error_context_is_deterministic_and_bounded() -> None:
     )
 
 
-def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -> None:
+def _book_records(count, *, series_id=52, fact_type="market.depth_observation"):
+    key = "_qt_depth_evidence" if fact_type == "market.depth_observation" else "_qt_bbo_evidence"
+    return [SimpleNamespace(
+        series_id=series_id, market_commit_seq=99,
+        fact=SimpleNamespace(fact_type=fact_type, observation_time=datetime(2026, 8, 21, tzinfo=UTC),
+            provenance={key: {"source_position": {"definition_id": "definition", "session_id": "session",
+                                                "connection_epoch": 1, "receive_ordinal": ordinal + 1}}}),
+    ) for ordinal in range(count)]
+
+
+def test_canonical_book_archive_lineage_uses_selected_revision_positions() -> None:
     reference = {
         "manifest_id": "manifest-1",
         "object_sha256": "1" * 64,
@@ -112,9 +123,9 @@ def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -
     session = _StaticSession(
         [
             {
-                "fact_count": 4_000_000,
+                "fact_count": 4,
                 "malformed_count": 0,
-                "position_count": 1_000_000,
+                "position_count": 4,
                 "missing_count": 0,
                 "archive_refs": [reference],
             }
@@ -130,7 +141,8 @@ def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -
         start=start,
         end=end,
         as_of_commit_seq=99,
-        expected_record_count=4_000_000,
+        expected_record_count=4,
+        records=_book_records(4),
     )
 
     assert references == {
@@ -145,14 +157,34 @@ def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -
     assert "left join market.raw_archive_manifests" in sql
     assert "manifests.connection_epoch = positions.connection_epoch" in sql
     assert "jsonb_agg" in sql
-    assert params == {
-        "evidence_key": "_qt_depth_evidence",
-        "series_id": 52,
-        "fact_type": "market.depth_observation",
-        "start": start,
-        "end": end,
-        "as_of_commit_seq": 99,
-    }
+    assert "market.fact_rows" not in sql
+    assert "market.fact_versions" not in sql
+    assert [position["receive_ordinal"] for position in json.loads(params["source_positions"])] == [1, 2, 3, 4]
+
+def test_large_canonical_book_lineage_bounds_queries_and_preserves_every_position():
+    class PositionSession(_StaticSession):
+        def execute(self, statement, params):
+            positions = json.loads(params["source_positions"])
+            self.rows = [{
+                "fact_count": len(positions), "malformed_count": 0,
+                "position_count": len(positions), "missing_count": 0,
+                "archive_refs": [{"manifest_id": "manifest", "object_sha256": "1" * 64,
+                                  "content_fingerprint": "2" * 64, "object_key": "raw/manifest",
+                                  "object_uri": "market-archive://raw/manifest"}],
+            }]
+            return super().execute(statement, params)
+    session = PositionSession([])
+    records = _book_records(10_001)
+    result = _collect_canonical_book_archive_refs(
+        session, series_id=52, fact_type="market.depth_observation",
+        start=datetime(2026, 8, 21, tzinfo=UTC), end=datetime(2026, 9, 1, tzinfo=UTC),
+        as_of_commit_seq=99, expected_record_count=len(records), records=records,
+    )
+    assert set(result) == {"manifest"}
+    assert len(session.calls) == 2
+    batches = [json.loads(params["source_positions"]) for _, params in session.calls]
+    assert [len(batch) for batch in batches] == [10_000, 1]
+    assert [position["receive_ordinal"] for batch in batches for position in batch] == list(range(1, 10_002))
 
 
 @pytest.mark.parametrize(
@@ -205,6 +237,7 @@ def test_canonical_book_archive_lineage_fails_loud(
             end=datetime(2026, 9, 1, tzinfo=UTC),
             as_of_commit_seq=99,
             expected_record_count=3,
+            records=_book_records(3, series_id=51, fact_type="market.bbo"),
         )
 
 

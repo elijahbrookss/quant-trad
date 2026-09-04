@@ -69,6 +69,10 @@ def _relation(table_name: str) -> tuple[str, str]:
 class PostgresMarketStorageLifecycleRepository:
     """Fenced planning and evidence for object and Timescale lifecycle work."""
 
+    @staticmethod
+    def dataset_snapshot_session(*, database=db):
+        return database.locked_snapshot_session(shared_lock_name=_LIFECYCLE_LOCK_NAME)
+
     @contextmanager
     def lifecycle_lock(self, *, owner_id: str) -> Iterator[None]:
         owner = str(owner_id or "").strip()

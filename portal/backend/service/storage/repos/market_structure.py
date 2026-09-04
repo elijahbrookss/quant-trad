@@ -318,7 +318,7 @@ def _advance_book_fact_rollup(
                        END
                    ), 0) AS mutation_count,
                    COALESCE(max(market_commit_seq), :high_water) AS high_water
-            FROM market.fact_versions
+            FROM market.fact_rows
             WHERE series_id = :series_id
               AND market_commit_seq > :high_water
               AND payload_schema_id = 'market.l2_book.v1'
@@ -373,7 +373,7 @@ def _require_book_state_source(
         text(
             """
             SELECT 1
-            FROM market.fact_versions
+            FROM market.fact_rows
             WHERE series_id = :series_id
               AND observation_key = :observation_key
               AND payload_schema_id = 'market.l2_book.v1'
@@ -439,7 +439,7 @@ def _require_canonical_typed_material_source(
         text(
             """
             SELECT 1
-            FROM market.fact_versions
+            FROM market.fact_rows
             WHERE series_id = :series_id
               AND provenance -> :evidence_key ->> 'legacy_material_hash'
                     = :material_hash
@@ -3012,7 +3012,7 @@ class PostgresMarketStructureRepository:
                 for value in session.execute(
                     text(
                         "SELECT external_event_component_key "
-                        "FROM market.fact_versions "
+                        "FROM market.fact_rows "
                         "WHERE payload_schema_id = 'market.l2_book.v1' "
                         "AND payload ->> 'event_type' = 'snapshot' "
                         "AND provenance -> '_qt_l2_evidence' ->> 'definition_id' "
@@ -3035,7 +3035,7 @@ class PostgresMarketStructureRepository:
                 for value in session.execute(
                     text(
                         "SELECT external_event_component_key "
-                        "FROM market.fact_versions "
+                        "FROM market.fact_rows "
                         "WHERE payload_schema_id = 'market.l2_book.v1' "
                         "AND payload ->> 'event_type' = 'update' "
                         "AND provenance -> '_qt_l2_evidence' ->> 'definition_id' "
@@ -3469,7 +3469,7 @@ class PostgresMarketStructureRepository:
                                market.canonical_fact_utc_timestamp(
                                    payload ->> 'bucket_end'
                                ) AS bucket_end
-                        FROM market.fact_versions
+                        FROM market.fact_rows
                         WHERE series_id = ANY(:series_ids)
                           AND fact_type = 'market.trade_flow'
                         ORDER BY series_id, observation_key, revision DESC,

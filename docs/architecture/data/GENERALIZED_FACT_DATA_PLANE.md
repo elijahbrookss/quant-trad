@@ -25,10 +25,15 @@ code_paths:
   - src/market_data/store.py
   - src/data_providers
   - portal/backend/db/market_data_models.py
+  - portal/backend/db/market_storage_models.py
+  - portal/backend/db/fact_storage_schema.py
   - portal/backend/db/session.py
   - portal/backend/service/market
   - portal/backend/service/research
   - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/storage/repos/candles.py
+  - portal/backend/service/storage/repos/fact_storage.py
+  - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/controller/market_data.py
   - cli/main.py
@@ -206,6 +211,122 @@ the complete `(definition_id, session_id, connection_epoch, receive_ordinal)`
 position; a reused ordinal after reconnect cannot be satisfied by an object
 from an earlier connection epoch.
 
+## Canonical Storage Placement
+
+The storage-tier layout keeps the immutable revision envelope and all global
+identity constraints in `market.fact_versions`. The three bulky JSON documents
+(`payload`, `provenance`, `quality`) live in `market.fact_hot_payloads`, partitioned
+by a database-owned UTC `storage_day`. Placement is not a market clock and never
+participates in Fact identity, revision, known-at selection, or frozen hashes.
+Fresh ingestion uses the database's current day; the offline cutover places old
+rows by their unchanged acceptance day. Backfilled observations are not
+immediately expired because their observation time happens to be old.
+
+One transaction writes both envelope and payload. An always-on insert guard
+checks copied identity fields and holds a SHARE lock on the open partition's
+lifecycle row through commit. A deferred always-on constraint trigger rejects
+an envelope without its payload. Sealing therefore waits for in-flight writes,
+and later writes cannot enter a sealed partition. Immutable triggers protect
+both relations from row updates/deletes. Provisioning creates only new empty
+daily tables; it never changes existing columns or performs a runtime backfill.
+
+`market.fact_rows` is the guarded logical projection used by remaining direct
+hot SQL readers, not a second Fact store or legacy fallback. A demanded payload
+absent from hot storage raises `canonical_fact_cold_read_required` rather than
+dropping the Fact or returning null. Core canonical readers select envelopes
+with nullable hot documents and hydrate absent documents through the immutable
+cold-page catalog. The catalog's indexed fields must match its hashed descriptor;
+exactly one verified/reclaimed page must cover each requested revision. Every
+page is fully checked before use and every selected envelope/source field must
+equal its archived copy. Missing, corrupt, overlapping, or inconsistent evidence
+fails loud. Hot-only reads do not open or create the archive root. Indexed
+metadata/dedupe/watermark queries stay on the permanent envelope.
+
+Mixed pages can include spec-bound normalized features that were not selected by
+the caller. Before decoding, the reader reloads every such page schema from the
+immutable normalization spec and checks its identity/hash, repository-built
+contract, and stored schema contract. Process-local registration is not sufficient
+proof. Lookups use at most 1,000 specs per query and are read-only; a missing or
+changed definition fails even if it was previously cached in that process.
+
+Candle pages and overlapping chart windows select immutable IDs in SQL before
+hydrating the selected payloads. Identity lookups deduplicate overlaps and use
+at most 1,000 IDs per query. Candle availability summaries stream batches of
+1,000 selected IDs and verify payload availability rather than treating an
+unreadable cold object as healthy inventory. This bounds the working batch, not
+the total bytes read for a long summary window. Cold summaries may cost more I/O
+than hot-only SQL aggregation; measure that on the intended window before
+increasing scan frequency.
+
+Hydration never selects revisions. The SQL selector owns time, source, watermark,
+revision, and invalidation constraints. Candle interval-close filtering is
+applied to hydrated documents before choosing the latest eligible revision, so
+a late correction cannot hide an earlier causal candle. Canonical BBO/depth
+freeze lineage reuses the already decoded revisions and resolves source
+positions in batches of at most 10,000; it does not reread hot-only provenance.
+Object/query batching does not bound a complete in-memory frozen history: large
+campaigns still need bounded dataset windows. Remaining direct SQL consumers
+must be converted before destructive retention is enabled.
+
+### Snapshot And Binding Failure Modes
+
+Freeze acquires the shared lifecycle fence under autocommit, then establishes a
+repeatable snapshot on the same connection. The fence is held through manifest
+and pin commit and released on success or failure. Taking a blocking advisory
+lock inside REPEATABLE READ is unsafe: PostgreSQL can establish the snapshot
+before the wait, leaving it older than completed archive/reclaim work. Failed
+or interrupted lock ownership cannot return a locked connection to the pool.
+The concurrency regression also keeps the exclusive test connection checked out
+across commits: committing an ordinary Session can return its connection to the
+pool while a session advisory lock remains held, allowing a reader to borrow
+that same connection and bypass the intended test wait.
+
+Canonical numeric v2 schemas also use their schema-level history selection,
+not the legacy family selector. Previously, the funding/OI family path could
+select only latest state while labeling its v2 manifest
+`all_canonical_revisions.v1`. New freezes bind every revision, including
+invalidations. An older incorrectly bound numeric artifact is not repaired by
+rewriting source Facts; normal frozen hash/count admission must reject it and
+the dataset must be re-frozen. Valid existing bindings and their source clocks
+are unchanged by storage movement.
+
+`market.fact_retention_partitions` owns mutable open/sealed/verified/reclaimed
+progress. The immutable `fact_archive_manifests`, `fact_archive_series`, and
+`fact_archive_dependencies` relations provide ordered page descriptors, series
+bounds, and raw/checkpoint holds for the executor. Their presence alone is not
+proof of completeness or permission to delete. Payload partitions can eventually
+be removed to return their table/index/TOAST allocation to PostgreSQL's
+filesystem; ordinary row deletion does not provide that guarantee. The permanent
+revision index and raw-mapping catalog continue to grow and must remain visible
+in pressure/budget reporting. This design does not promise a hard cap on all
+PostgreSQL bytes.
+
+### Explicit Storage Cutover
+
+`scripts/db/manual_migration_fact_storage_tiers_v1.py` is an offline operator
+tool using only `PG_DSN`. Without flags it inspects read-only. Execution requires
+both `--execute` and `--writers-stopped`; it never stops services itself. Apply
+the prior canonical and operational-rollup migrations first. Capacity planning
+must allow both copies plus WAL; the tool does not remove the old copy.
+
+Preparation locks the old relation, refuses incoming foreign keys or dependent
+views, moves it to `qt_fact_storage_cutover_v1.fact_versions`, blocks further
+inserts, and creates clean current table definitions. A `copying` certificate
+keeps runtime startup closed. Each bounded transaction copies an ordered page,
+compares every canonical field against the immutable source, and commits its
+resume cursor with the copied rows. Repeating the command resumes that cursor;
+a failed page rolls back. Exact source/target/payload counts must match before
+the certificate becomes `ready`. Readiness also checks storage enforcement.
+
+The source remains fenced and intact for a separately reviewed rollback/cleanup.
+Do not restart old code against the new layout. Before allowing new writes,
+rollback can restore the retained source after removing only the new empty
+catalog/copy and its projection; after new writes, restoring the old source alone
+would lose those revisions and is prohibited. Never drop the retained source
+until the complete rollout gate, including frozen-read equality, has passed.
+The cutover and its migration tests are foundations: destructive retention stays
+disabled until cold readers, archive admission, and the executor are validated.
+
 ## Canonical Archive Codec
 
 The bounded `market.canonical_fact_archive.v1` codec preserves complete
@@ -242,6 +363,13 @@ dependency/pin checks, hot/cold reader integration, resumable execution, and
 actual hot-space reclamation remain separate lifecycle responsibilities.
 Destructive canonical retention stays disabled until those boundaries and the
 operator-run schema cutover are implemented and validated together.
+
+`verify_canonical_fact_archive_rows` supplies the shared exact source-page
+comparison for admission: it checks all columns, ordering, counts, bounds, and
+content fingerprint against the independently verified object descriptor.
+The lifecycle repository must choose that source page authoritatively; a
+caller-supplied subset is not proof that a partition is completely archived.
+Read-only object-store handles never create roots, publish, or delete objects.
 
 ## Causal Selection
 

@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
-from market_data.fact_registry import supported_fact_payload_schemas
+from market_data.fact_registry import supported_static_fact_payload_schemas
 from portal.backend.db.session import Database
 from tests.test_market_data.migration_test_support import (
     PRE_CUTOVER_TABLES,
@@ -485,7 +485,7 @@ def test_canonical_fact_store_migration_is_explicit_strict_and_idempotent() -> N
         )
         expected_registry = tuple(
             (schema.schema_id, schema.fact_type, schema.contract_hash)
-            for schema in supported_fact_payload_schemas()
+            for schema in supported_static_fact_payload_schemas()
         )
         assert second["registry"] == expected_registry
 

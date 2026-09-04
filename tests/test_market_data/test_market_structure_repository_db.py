@@ -1362,7 +1362,7 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
                 "       payload ->> 'event_type' AS event_type, "
                 "       CAST(payload ->> 'entry_count' AS bigint) AS entry_count, "
                 "       jsonb_array_length(payload -> 'entries') AS stored_entry_count "
-                "FROM market.fact_versions "
+                "FROM market.fact_rows "
                 "WHERE series_id = :series_id "
                 "  AND external_event_component_key = ANY(:component_ids)"
             ),

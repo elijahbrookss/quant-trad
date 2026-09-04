@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import date
 import logging
 from typing import Any, Iterable
 
@@ -26,6 +27,7 @@ _CLEAN_BOOTSTRAP_TABLES = frozenset(
         ("market", "fact_versions"),
         ("market", "fact_acquisition_coverage"),
         ("market", "book_operational_rollups"),
+        *(("market", name) for name in db_session.FACT_STORAGE_TABLES),
     }
 )
 
@@ -211,6 +213,8 @@ class _Connection:
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _Result:
         self.executed.append(statement)
         statement_text = str(statement)
+        if "SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date" in statement_text:
+            return _Result((date(2026, 9, 3),))
         if "FROM pg_extension" in statement_text:
             return _Result(("2.14.2",))
         if "timescaledb_information.hypertables" in statement_text:
@@ -341,6 +345,11 @@ def _database_with_fake_engine(
     # Canonical registry equality is covered separately; these metadata tests
     # isolate clean/current table provisioning and drift behavior.
     monkeypatch.setattr(database, "_assert_canonical_fact_migration", lambda _conn: None)
+    # Physical partitions, enforcement triggers, and admission are exercised
+    # against PostgreSQL in test_fact_storage_tiers_db, not emulated here.
+    monkeypatch.setattr(db_session, "install_fact_storage_functions", lambda _conn: None)
+    monkeypatch.setattr(db_session, "ensure_fact_payload_partition", lambda _conn, _day: None)
+    monkeypatch.setattr(db_session, "assert_fact_storage_contract", lambda _conn: None)
     return database, connection
 
 

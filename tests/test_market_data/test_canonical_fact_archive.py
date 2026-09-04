@@ -18,6 +18,7 @@ from market_data.contracts import SourceIdentity
 from market_data.fact_archive import (
     FACT_ARCHIVE_RECORD_SELECTION, FactArchiveLimits, FactArchiveManifest,
     encode_canonical_fact_archive, publish_canonical_fact_archive, read_canonical_fact_archive,
+    verify_canonical_fact_archive_rows,
 )
 
 
@@ -76,6 +77,31 @@ def test_every_revision_round_trips_with_exact_clocks_payloads_and_lineage(tmp_p
     assert encoded.manifest.to_dict()["record_selection"] == FACT_ARCHIVE_RECORD_SELECTION
     assert len(encoded.manifest.manifest_hash) == 64
     assert pq.ParquetFile(encoded.path).metadata.row_group(0).column(0).compression == "ZSTD"
+
+
+def test_source_page_verification_requires_every_exact_revision(tmp_path, history):
+    encoded = encode_canonical_fact_archive(history, temporary_directory=tmp_path)
+    verify_canonical_fact_archive_rows(iter(history), expected=encoded.manifest)
+    for incomplete in (history[:-1], history[1:], history[::2]):
+        with pytest.raises(RuntimeError, match="canonical_archive_source_mismatch"):
+            verify_canonical_fact_archive_rows(incomplete, expected=encoded.manifest)
+
+
+def test_read_only_store_never_creates_publishes_or_deletes(tmp_path, history):
+    missing = tmp_path / "not-created"
+    with pytest.raises(FileNotFoundError, match="market_archive_root_missing"):
+        FilesystemRawArchiveObjectStore(missing, writable=False)
+    assert not missing.exists()
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    manifest = publish_canonical_fact_archive(history, object_store=store, temporary_directory=tmp_path / "staging")
+    reader = FilesystemRawArchiveObjectStore(store.root, writable=False)
+    path = reader.local_path(manifest.object_key)
+    assert read_canonical_fact_archive(path, expected=manifest) == tuple(history)
+    with pytest.raises(PermissionError, match="publication is disabled"):
+        reader.put_verified(object_key=manifest.object_key, source_path=path, expected_sha256=manifest.object_sha256)
+    with pytest.raises(PermissionError, match="deletion is disabled"):
+        reader.delete_verified(object_key=manifest.object_key, expected_sha256=manifest.object_sha256)
+    assert path.exists()
 
 
 def test_codec_does_not_change_causal_revision_selection(tmp_path, history):

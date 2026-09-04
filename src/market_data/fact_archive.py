@@ -300,6 +300,23 @@ def _hash_handle(handle, *, max_bytes: int) -> tuple[str, int]:
     return digest.hexdigest(), byte_count
 
 
+def verify_canonical_fact_archive_rows(
+    rows: Iterable[Mapping[str, Any]], *, expected: FactArchiveManifest,
+    limits: FactArchiveLimits = FactArchiveLimits(),
+) -> None:
+    """Prove a source page equals a separately verified object's full contents.
+
+    This checks completeness and exact fields, not the object's bytes. Callers
+    must also use read_canonical_fact_archive before committing admission.
+    """
+    contents = _Contents(limits)
+    for row in rows:
+        contents.add(row)
+    observed = contents.manifest(sha256=expected.object_sha256, byte_count=expected.byte_count)
+    if observed != expected:
+        raise RuntimeError(f"canonical_archive_source_mismatch: manifest_id={expected.manifest_id}")
+
+
 def read_canonical_fact_archive(
     path: Path, *, expected: FactArchiveManifest,
     limits: FactArchiveLimits = FactArchiveLimits(),
