@@ -50,6 +50,71 @@ def _raw_trade_fixture(storage, tmp_path, monkeypatch):
                            store=store, raws=raws, manifests=manifests, structures=structures, claim=claim)
 
 
+def test_trade_prefix_progress_holds_raw_evidence_and_resumes_after_interruption(storage, tmp_path, monkeypatch):
+    from market_data.archive import RawArchiveReadLimits
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from portal.backend.service.storage.repos import fact_book_prefix, fact_lineage
+    fixture = _raw_trade_fixture(storage, tmp_path, monkeypatch)
+    last = fixture.raws[-1]
+    prefix = {name: getattr(last, name) for name in fact_lineage.BOOK_SCOPE_FIELDS} | {
+        "first_receive_ordinal": 1, "receive_ordinal": last.receive_ordinal, "root_fact_version_id": "coverage-root",
+    }
+    witnesses = [{**prefix, "receive_ordinal": raw.receive_ordinal, "raw_record_id": raw.raw_record_id,
+                  "root_fact_version_id": f"coverage-root:{raw.receive_ordinal}"} for raw in fixture.raws]
+    def verifier():
+        return ArchiveVerificationBatch(fixture.store, limits=ArchiveVerificationLimits())
+    def advance():
+        with storage.database.session() as session:
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+            return fact_book_prefix.prepare_next_trade_prefix(session, prefixes=[prefix], object_store=fixture.store,
+                byte_verifier=verifier(), limits=RawArchiveReadLimits(), max_mapping_rows=4, max_objects=100)
+    def verify():
+        with storage.database.session() as session:
+            market_storage_lifecycle_repository.acquire_dataset_pin_lock(session)
+            refs, bindings = fact_book_prefix.resolve_verified_trade_prefixes(session, prefixes=[prefix], witnesses=witnesses,
+                byte_verifier=verifier(), max_objects=100)
+            exact = fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[], object_store=fixture.store,
+                byte_verifier=verifier(), book_prefix_ranges=[{**item, "first_receive_ordinal": item["receive_ordinal"],
+                    "requested_channel": "market_trades"} for item in witnesses], witness_manifest_ids=bindings)
+            assert exact == refs
+            return refs
+    first = advance()
+    assert first["status"] == "trade_prefix_verified" and first["last_receive_ordinal"] == 1
+    with pytest.raises(RuntimeError, match="not_ready"):
+        verify()
+    original_dependencies = fact_book_prefix._dependencies
+    def interrupt(*args, **kwargs):
+        original_dependencies(*args, **kwargs)
+        raise RuntimeError("injected trade-prefix interruption after flush")
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(fact_book_prefix, "_dependencies", interrupt)
+        with pytest.raises(RuntimeError, match="injected trade-prefix interruption"):
+            advance()
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 1
+        assert market_storage_lifecycle_repository.canonical_dependency_count(session,
+            target_kind="raw_manifest", target_id=fixture.manifests[0]) > 0
+        key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
+                              {"id": fixture.manifests[1]}).scalar_one()
+    path = fixture.store.local_path(key)
+    original = path.read_bytes()
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        advance()
+    path.write_bytes(original)
+    assert advance()["last_receive_ordinal"] == 2
+    assert advance() is None
+    assert set(verify()) == set(fixture.manifests)
+    with storage.database.session() as session:
+        versions = session.execute(text("SELECT DISTINCT verifier_version FROM market.fact_book_prefix_chunks")).scalars().all()
+        assert versions == [fact_book_prefix.TRADE_PREFIX_VERIFIER_VERSION]
+    path.write_bytes(b"corrupted verified trade prefix")
+    with pytest.raises(RuntimeError, match="archive_verification"):
+        verify()
+    path.write_bytes(original)
+    assert set(verify()) == set(fixture.manifests)
+
+
 def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
     trade = replace(_trade(trade_id, offset="0", side=MarketSide.BUY, price="100", receive_ordinal=1),
                     provider_product_id="BTC-USD", provider_event_time=fixture.raws[0].received_at - timedelta(seconds=1),

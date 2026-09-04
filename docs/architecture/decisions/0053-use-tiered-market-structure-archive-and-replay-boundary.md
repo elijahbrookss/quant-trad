@@ -287,6 +287,14 @@ receipt metadata for safe restart and avoids repeatedly decoding an entire
 connection history. It does not remove per-object/final verification budgets or
 establish checkpoint/replay equivalence by itself.
 
+Trade coverage reuses this bounded raw-prefix mechanism, with a distinct verifier
+version whose scope/hash cannot be confused with the L2 verifier. Historical
+book table names and descriptors stay unchanged. Exact opening/closing witnesses
+bind to their own certified chunks; they do not borrow a later archive alias or
+mistake an L2 frame for a trade-channel frame. This reuse avoids a second progress
+store and an unbounded full-session scan. A prefix alone is still not a complete
+trade-flow input proof or authorization to reclaim that family.
+
 Book reclamation additionally binds exact canonical source revisions for derived
 BBO/depth facts, checks immutable product/validity scope, and validates checkpoint
 bytes and restored state through the existing reconstruction owner. These edges

@@ -68,7 +68,7 @@ def _verify_witness(row, evidence, record):
             expected[name] = evidence[name]
     if row is None:
         # A prefix position is a raw-scope obligation, not a synthesized Fact.
-        expected["requested_channel"] = "level2"
+        expected["requested_channel"] = evidence.get("requested_channel", "level2")
     elif row["fact_type"] in {"market.trade", "market.l2_book"}:
         expected.update(provider=row["source_provider"], venue=row["source_venue"], received_at=row["received_at"])
     # A derived BBO/depth Fact is authored by QT, not by the exchange. Its
@@ -139,7 +139,8 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
                     for name in ("definition_id", "session_id", "provider_product_id", "root_fact_version_id"))
                     or type(scope.get("connection_epoch")) is not int or not 0 <= scope["connection_epoch"] <= 2**63 - 1
                     or type(scope.get("first_receive_ordinal")) is not int or type(scope.get("receive_ordinal")) is not int
-                    or not 1 <= scope["first_receive_ordinal"] <= scope["receive_ordinal"] <= 2**63 - 1):
+                    or not 1 <= scope["first_receive_ordinal"] <= scope["receive_ordinal"] <= 2**63 - 1
+                    or scope.get("requested_channel", "level2") not in {"level2", "market_trades"}):
                 raise ValueError("canonical_raw_lineage_prefix_range_invalid")
         if sum(scope["receive_ordinal"] - scope["first_receive_ordinal"] + 1 for scope in prefixes) > max_mapping_rows:
             raise RuntimeError("canonical_raw_lineage_prefix_budget_exceeded: complete book prefixes exceed the mapping budget")
@@ -206,9 +207,10 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     for key, witnesses in wanted.items():
         available = list(candidates[key].values())
         if witness_manifest_ids is not None:
-            for row, _ in witnesses:
-                if row is not None and row["id"] in witness_manifest_ids:
-                    available = [item for item in available if item["id"] in witness_manifest_ids[row["id"]]]
+            for row, evidence in witnesses:
+                witness_id = row["id"] if row is not None else evidence["root_fact_version_id"]
+                if witness_id in witness_manifest_ids:
+                    available = [item for item in available if item["id"] in witness_manifest_ids[witness_id]]
         context = witnesses[0][0]["id"] if witnesses[0][0] is not None else witnesses[0][1]["root_fact_version_id"]
         if not available:
             raise RuntimeError(f"canonical_raw_lineage_mapping_missing: fact_version_id={context} raw_position={key}")

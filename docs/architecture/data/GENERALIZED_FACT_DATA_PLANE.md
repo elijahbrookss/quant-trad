@@ -760,6 +760,17 @@ objects, then resumes page verification. It does not stall waiting for the
 publication phase or rewrite the old page's dependency catalog. Missing or
 conflicting historical bindings still fail rather than being replaced silently.
 
+The same bounded prefix engine now exposes a trade-channel proof under
+`market.trade_prefix_verification.v1`. The verifier version is part of the
+immutable scope and descriptor hash, so book and trade certificates cannot
+satisfy each other's admission. The existing metadata tables and book descriptors
+remain unchanged; no schema migration or rewriting of earlier certificates is
+needed for this reuse. Trade coverage endpoints can bind exact raw IDs to their
+own certified chunks, including control frames without canonical trade rows.
+Uncovered or out-of-scope endpoints fail. This is supporting proof machinery;
+trade-flow reclamation still requires the separate canonical-input and coverage
+admission below and is not enabled by this prefix API alone.
+
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence
 identifies an L2 position and state rather than a delivery revision ID. Admission

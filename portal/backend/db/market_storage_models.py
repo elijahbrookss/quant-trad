@@ -220,10 +220,12 @@ class MarketFactArchiveCanonicalDependencyRecord(Base):
 
 
 class MarketFactBookPrefixChunkRecord(Base):
-    """Immutable, shared progress for a dense range of raw L2 source positions.
+    """Immutable, shared progress for a dense range of raw source positions.
 
     Chunks retain their own raw objects even before a canonical page is ready.
     They certify lineage work, not book reconstruction or deletion permission.
+    The verifier version separates L2 and trade proofs; historical table names
+    and existing book descriptors remain unchanged.
     """
 
     __tablename__ = "fact_book_prefix_chunks"

@@ -1,4 +1,4 @@
-"""Shared, bounded raw-prefix proofs for canonical book archival.
+"""Shared, bounded raw-prefix proofs for canonical stream archival.
 
 Each transaction certifies only the next dense interval and holds its chosen
 immutable objects permanently. Later transactions extend that chain rather than
@@ -15,12 +15,16 @@ from .fact_lineage import BOOK_SCOPE_FIELDS, _witness, canonical_book_prefixes, 
 from .market_lifecycle import MarketStorageLifecycleBusyError
 
 BOOK_PREFIX_VERIFIER_VERSION = "market.book_prefix_verification.v1"
+TRADE_PREFIX_VERIFIER_VERSION = "market.trade_prefix_verification.v1"
+_PREFIX_CHANNELS = {BOOK_PREFIX_VERIFIER_VERSION: "level2", TRADE_PREFIX_VERIFIER_VERSION: "market_trades"}
 _SCOPE_WHERE = " AND ".join(f"{name}=:{name}" for name in (*BOOK_SCOPE_FIELDS, "verifier_version"))
 _REFERENCE_FIELDS = ("object_key", "object_uri", "object_sha256", "content_fingerprint")
 
 
-def _scope(prefix):
-    return {name: prefix[name] for name in BOOK_SCOPE_FIELDS} | {"verifier_version": BOOK_PREFIX_VERIFIER_VERSION}
+def _scope(prefix, verifier_version=BOOK_PREFIX_VERIFIER_VERSION):
+    if verifier_version not in _PREFIX_CHANNELS:
+        raise ValueError("canonical_raw_prefix_verifier_unsupported")
+    return {name: prefix[name] for name in BOOK_SCOPE_FIELDS} | {"verifier_version": verifier_version}
 
 
 def _validate_chunk(chunk, scope):
@@ -64,16 +68,28 @@ def _dependencies(session, chunk, *, max_objects):
 
 def prepare_next_book_prefix(session, *, rows, object_store, byte_verifier, limits,
                              max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None):
+    return _prepare_next_prefix(session, prefixes=canonical_book_prefixes(rows),
+        verifier_version=BOOK_PREFIX_VERIFIER_VERSION, object_store=object_store, byte_verifier=byte_verifier,
+        limits=limits, max_mapping_rows=max_mapping_rows, max_objects=max_objects,
+        check_budget=check_budget, bound_manifest_ids=bound_manifest_ids)
+
+
+def prepare_next_trade_prefix(session, *, prefixes, **kwargs):
+    return _prepare_next_prefix(session, prefixes=prefixes, verifier_version=TRADE_PREFIX_VERIFIER_VERSION, **kwargs)
+
+
+def _prepare_next_prefix(session, *, prefixes, verifier_version, object_store, byte_verifier, limits,
+                          max_mapping_rows, max_objects, check_budget=None, bound_manifest_ids=None):
     """Commit at most one bounded interval through the caller's transaction.
 
     The caller holds the lifecycle shared fence and retains the hot page. A
     per-scope transaction lock serializes extensions from different partitions.
     Nothing commits if decoding, cancellation, or catalog validation fails.
     """
-    for prefix in sorted(canonical_book_prefixes(rows), key=lambda item: tuple(item[name] for name in BOOK_SCOPE_FIELDS)):
+    for prefix in sorted(prefixes, key=lambda item: tuple(item[name] for name in BOOK_SCOPE_FIELDS)):
         if check_budget is not None:
             check_budget()
-        scope = _scope(prefix)
+        scope = _scope(prefix, verifier_version)
         acquired = session.execute(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
             {"name": "quant-trad:book-prefix:" + archive_evidence_hash(scope)}).scalar_one()
         if not acquired:
@@ -94,7 +110,8 @@ def prepare_next_book_prefix(session, *, rows, object_store, byte_verifier, limi
             session, rows=[], object_store=object_store, byte_verifier=byte_verifier,
             limits=limits, max_mapping_rows=max_mapping_rows, check_budget=check_budget,
             bound_manifest_ids=bound_manifest_ids,
-            book_prefix_ranges=[{**prefix, "first_receive_ordinal": first, "receive_ordinal": last}],
+            book_prefix_ranges=[{**prefix, "first_receive_ordinal": first, "receive_ordinal": last,
+                                 "requested_channel": _PREFIX_CHANNELS[verifier_version]}],
         )
         if len(references) > max_objects:
             raise RuntimeError("canonical_book_prefix_object_budget_exceeded")
@@ -115,7 +132,8 @@ def prepare_next_book_prefix(session, *, rows, object_store, byte_verifier, limi
         byte_verifier.assert_unchanged()
         if check_budget is not None:
             check_budget()
-        return {"status": "book_prefix_verified", "chunk_id": chunk["id"],
+        status = "book_prefix_verified" if verifier_version == BOOK_PREFIX_VERIFIER_VERSION else "trade_prefix_verified"
+        return {"status": status, "chunk_id": chunk["id"],
             "definition_id": prefix["definition_id"], "session_id": prefix["session_id"],
             "connection_epoch": prefix["connection_epoch"], "first_receive_ordinal": first,
             "last_receive_ordinal": last, "required_receive_ordinal": prefix["receive_ordinal"]}
@@ -124,6 +142,23 @@ def prepare_next_book_prefix(session, *, rows, object_store, byte_verifier, limi
 
 def resolve_verified_book_prefixes(session, *, rows, byte_verifier, max_objects,
                                     bound_manifest_ids=None, check_budget=None, max_chunks=5000):
+    witnesses = []
+    for row in rows:
+        if row["fact_type"] in {"market.l2_book", "market.bbo", "market.depth_observation"}:
+            _, evidence = _witness(row)
+            witnesses.append({**evidence, "root_fact_version_id": row["id"]})
+    return _resolve_verified_prefixes(session, prefixes=canonical_book_prefixes(rows), witnesses=witnesses,
+        verifier_version=BOOK_PREFIX_VERIFIER_VERSION, byte_verifier=byte_verifier, max_objects=max_objects,
+        bound_manifest_ids=bound_manifest_ids, check_budget=check_budget, max_chunks=max_chunks)
+
+
+def resolve_verified_trade_prefixes(session, *, prefixes, witnesses, **kwargs):
+    return _resolve_verified_prefixes(session, prefixes=prefixes, witnesses=witnesses,
+        verifier_version=TRADE_PREFIX_VERIFIER_VERSION, **kwargs)
+
+
+def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version, byte_verifier, max_objects,
+                                 bound_manifest_ids=None, check_budget=None, max_chunks=5000):
     """Validate contiguous receipts and CURRENT bytes, without re-decoding history.
 
     Earlier admitted placements remain bound even after new aliases appear.
@@ -132,14 +167,15 @@ def resolve_verified_book_prefixes(session, *, rows, byte_verifier, max_objects,
     """
     references, root_bindings = {}, {}
     inspected = 0
-    for prefix in canonical_book_prefixes(rows):
-        scope = _scope(prefix)
+    for prefix in prefixes:
+        scope = _scope(prefix, verifier_version)
         roots = []
-        for row in rows:
-            if row["fact_type"] in {"market.l2_book", "market.bbo", "market.depth_observation"}:
-                _, evidence = _witness(row)
-                if all(evidence[name] == prefix[name] for name in BOOK_SCOPE_FIELDS):
-                    roots.append((evidence["receive_ordinal"], row["id"]))
+        for evidence in witnesses:
+            if all(evidence[name] == prefix[name] for name in BOOK_SCOPE_FIELDS):
+                if (type(evidence.get("receive_ordinal")) is not int
+                        or not 1 <= evidence["receive_ordinal"] <= prefix["receive_ordinal"]):
+                    raise RuntimeError(f"canonical_raw_prefix_witness_range_invalid: fact_version_id={evidence['root_fact_version_id']}")
+                roots.append((evidence["receive_ordinal"], evidence["root_fact_version_id"]))
         roots.sort(reverse=True)
         chunks = session.execute(text(
             f"SELECT * FROM market.fact_book_prefix_chunks WHERE {_SCOPE_WHERE} "
@@ -175,5 +211,9 @@ def resolve_verified_book_prefixes(session, *, rows, byte_verifier, max_objects,
             first, previous_id = chunk["last_receive_ordinal"] + 1, chunk["id"]
         if first <= prefix["receive_ordinal"]:
             raise RuntimeError(f"canonical_book_prefix_not_ready: fact_version_id={prefix['root_fact_version_id']} next_ordinal={first}")
+        if roots:
+            raise RuntimeError(f"canonical_raw_prefix_witness_uncovered: fact_version_id={roots[-1][1]}")
+    if set(root_bindings) != {item["root_fact_version_id"] for item in witnesses}:
+        raise RuntimeError("canonical_raw_prefix_witness_scope_missing")
     byte_verifier.assert_unchanged()
     return references, root_bindings

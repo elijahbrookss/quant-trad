@@ -145,3 +145,88 @@ def test_exact_root_cannot_substitute_a_new_mapping_outside_its_certified_chunk(
     with pytest.raises(RuntimeError, match="mapping_missing"):
         fact_lineage.resolve_canonical_raw_archive_refs(_Session([alternate]), rows=[root], object_store=store,
             byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), witness_manifest_ids=bindings)
+
+
+def _trade_prefix(records):
+    last = records[-1]
+    return {name: getattr(last, name) for name in fact_lineage.BOOK_SCOPE_FIELDS} | {
+        "first_receive_ordinal": 1, "receive_ordinal": last.receive_ordinal,
+        "root_fact_version_id": "flow-root",
+    }
+
+
+def _prepare_trade(session, store, prefix):
+    return fact_book_prefix.prepare_next_trade_prefix(session, prefixes=[prefix], object_store=store,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), limits=RawArchiveReadLimits(),
+        max_mapping_rows=8, max_objects=100)
+
+
+def _resolve_trade(session, store, prefix, witnesses):
+    return fact_book_prefix.resolve_verified_trade_prefixes(session, prefixes=[prefix], witnesses=witnesses,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), max_objects=100)
+
+
+def test_trade_prefix_resumes_separately_and_binds_exact_coverage_endpoints(tmp_path):
+    store, records, mappings, rows = _fixture(tmp_path, (1, 2, 3, 4, 5), requested_channel="market_trades")
+    session = _PrefixSession(mappings)
+    prefix = _trade_prefix(records)
+    endpoints = [{**prefix, "receive_ordinal": record.receive_ordinal,
+        "root_fact_version_id": f"flow-root:{role}", "raw_record_id": record.raw_record_id}
+        for role, record in (("opening", records[0]), ("closing", records[-1]))]
+    for first, last in ((1, 2), (3, 4), (5, 5)):
+        progress = _prepare_trade(session, store, prefix)
+        assert progress["status"] == "trade_prefix_verified"
+        assert (progress["first_receive_ordinal"], progress["last_receive_ordinal"]) == (first, last)
+    assert _prepare_trade(session, store, prefix) is None
+    assert all(chunk["verifier_version"] == fact_book_prefix.TRADE_PREFIX_VERIFIER_VERSION for chunk in session.chunks)
+    assert all("requested_channel" not in chunk["descriptor"] for chunk in session.chunks), "retain the existing descriptor schema"
+    refs, bindings = _resolve_trade(session, store, prefix, endpoints)
+    assert set(refs) == {"raw-manifest"} and set(bindings) == {item["root_fact_version_id"] for item in endpoints}
+    ranges = [{**item, "first_receive_ordinal": item["receive_ordinal"], "requested_channel": "market_trades"}
+              for item in endpoints]
+    exact = fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[], object_store=store,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+        book_prefix_ranges=ranges, witness_manifest_ids=bindings)
+    assert exact == refs
+    with pytest.raises(RuntimeError, match="not_ready"):
+        _resolve(session, store, [_book_root(records[-1], rows[-1])])
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[], object_store=store,
+            byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+            book_prefix_ranges=ranges, witness_manifest_ids={item["root_fact_version_id"]: set() for item in endpoints})
+    wrong_endpoint = [{**ranges[0], "raw_record_id": "wrong-coverage-opening"}]
+    with pytest.raises(RuntimeError, match="witness_mismatch"):
+        fact_lineage.resolve_canonical_raw_archive_refs(session, rows=[], object_store=store,
+            byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+            book_prefix_ranges=wrong_endpoint, witness_manifest_ids=bindings)
+
+
+@pytest.mark.parametrize("channel", ["level2", "market_trades"])
+def test_prefix_channels_cannot_certify_each_other(tmp_path, channel):
+    store, records, mappings, rows = _fixture(tmp_path, (1,), requested_channel=channel)
+    session = _PrefixSession(mappings)
+    with pytest.raises(RuntimeError, match="witness_mismatch"):
+        if channel == "level2":
+            _prepare_trade(session, store, _trade_prefix(records))
+        else:
+            _prepare(session, store, _book_root(records[0], rows[0]))
+    assert session.chunks == [] and session.holds == []
+    if channel == "level2":
+        _prepare(session, store, _book_root(records[0], rows[0]))
+        with pytest.raises(RuntimeError, match="not_ready"):
+            _resolve_trade(session, store, _trade_prefix(records), [_trade_prefix(records)])
+    else:
+        _prepare_trade(session, store, _trade_prefix(records))
+        with pytest.raises(RuntimeError, match="not_ready"):
+            _resolve(session, store, [_book_root(records[0], rows[0])])
+
+
+@pytest.mark.parametrize("damage", ["scope", "range", "negative"])
+def test_coverage_witness_must_belong_to_its_requested_prefix(tmp_path, damage):
+    store, records, mappings, _ = _fixture(tmp_path, (1, 2), requested_channel="market_trades")
+    session = _PrefixSession(mappings)
+    prefix = _trade_prefix(records)
+    _prepare_trade(session, store, prefix)
+    changed = {"session_id": "different-session"} if damage == "scope" else {"receive_ordinal": 3 if damage == "range" else 0}
+    with pytest.raises(RuntimeError, match="canonical_raw_prefix_witness_"):
+        _resolve_trade(session, store, prefix, [{**prefix, **changed}])
