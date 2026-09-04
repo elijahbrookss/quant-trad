@@ -1,0 +1,31 @@
+services:
+  loki:
+    image: grafana/loki:3.7.6
+    command: [-config.file=/etc/loki/server-config.yml]
+    ports:
+      - "127.0.0.1::3100"
+    volumes:
+      - ../loki/server-config.yml:/etc/loki/server-config.yml:ro
+      - loki-data:/loki
+
+  grafana:
+    image: grafana/grafana:13.2.0
+    depends_on:
+      - loki
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: storage-test-only
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SMTP_ENABLED: "false"
+    ports:
+      - "127.0.0.1::3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../grafana/provisioning/datasources/loki.yml:/etc/grafana/provisioning/datasources/loki.yml:ro
+      - ../grafana/provisioning/alerting/storage-safety.yml:/etc/grafana/provisioning/alerting/storage-safety.yml:ro
+
+volumes:
+  loki-data:
+  grafana-data:

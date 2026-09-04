@@ -386,7 +386,8 @@ services:
     logging: *service-logging
 
   docker-stats:
-    image: docker:29.7.0-cli-alpine3.24
+    build: *backend-build
+    image: quanttrad-backend:${QT_RELEASE_REVISION:?QT_RELEASE_REVISION is required}
     restart: unless-stopped
     init: true
     labels:
@@ -395,6 +396,11 @@ services:
     environment:
       QT_DOCKER_CAPACITY_INTERVAL_SECONDS: "${QT_DOCKER_CAPACITY_INTERVAL_SECONDS:-15}"
       QT_DOCKER_STORAGE_MOUNT: /host-docker
+      QT_DOCKER_HOST_STORAGE_ROOT: ${QT_DOCKER_STORAGE_ROOT:-/var/lib/docker}
+      QT_ARCHIVE_STORAGE_MOUNT: /host-archive
+      QT_MARKET_DATA_EXPECTED_UUID: "${QT_MARKET_DATA_EXPECTED_UUID:-}"
+      QT_STORAGE_UDEV_ROOT: /run/qt-host-udev/data
+      QT_FILESYSTEM_CAPACITY_PROBE: /opt/quanttrad/server_filesystem_capacity.py
     command:
       - /bin/sh
       - /opt/quanttrad/docker_capacity_sampler.sh
@@ -402,8 +408,21 @@ services:
       - alloy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${QT_DOCKER_STORAGE_ROOT:-/var/lib/docker}:/host-docker:ro
+      - type: bind
+        source: ${QT_DOCKER_STORAGE_ROOT:-/var/lib/docker}
+        target: /host-docker
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
+        target: /host-archive
+        read_only: true
+        bind:
+          create_host_path: false
+      - *host-udev
       - ../scripts/reporting/docker_capacity_sampler.sh:/opt/quanttrad/docker_capacity_sampler.sh:ro
+      - ../scripts/reporting/server_filesystem_capacity.py:/opt/quanttrad/server_filesystem_capacity.py:ro
     networks:
       - quanttrad
     logging: *service-logging
@@ -460,6 +479,12 @@ services:
       - type: bind
         source: ./grafana/provisioning/alerting/platform-safety.yml
         target: /etc/grafana/provisioning/alerting/platform-safety.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./grafana/provisioning/alerting/storage-safety.yml
+        target: /etc/grafana/provisioning/alerting/storage-safety.yml
         read_only: true
         bind:
           create_host_path: false

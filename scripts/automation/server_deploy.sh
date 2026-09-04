@@ -744,6 +744,7 @@ deploy_release() {
   verify_initializer
   verify_release_image backend
   verify_release_image market-data-collector
+  verify_release_image docker-stats
   verify_release_image frontend
   verify_release_image frontend-v2
   compose exec -T backend /app/scripts/qt data collectors fleet >/dev/null

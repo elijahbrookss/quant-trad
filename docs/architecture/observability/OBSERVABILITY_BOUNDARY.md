@@ -47,6 +47,10 @@ code_paths:
   - docker/grafana/provisioning/alerting
   - docker/grafana/server-alerting/operator-email.yml
   - scripts/reporting/docker_capacity_sampler.sh
+  - scripts/reporting/server_filesystem_capacity.py
+  - src/core/storage_mounts.py
+  - scripts/ci/test_storage_alerts.py
+  - docker/test/storage-alerting.compose.yml
   - scripts/reporting/host_capacity_sampler.ps1
   - docs/architecture/observability/diagrams/observability-flow.mmd
 ---
@@ -181,6 +185,26 @@ The configured Docker log shipper and Loki retain that short-horizon
 operational stream; the sidecar does not post directly to Loki and does not add
 a second database.
 
+On the native server the same sidecar uses the reviewed backend image (Python
+and Docker CLI), without its private env file, database credentials, or runtime
+services. Its existing shell loop delegates filesystem sampling to
+`server_filesystem_capacity.py`: one bounded Docker-info probe plus filesystem
+metadata reads, never a recursive directory scan. Read-only binds expose the
+Docker data root, archive root, and host udev metadata. Docker's reported data
+root must agree with the configured host bind; the archive must match its
+configured UUID. The two resource identities are `docker-engine-storage` and
+`market-archive-storage`, even when an initial directory-mode installation puts
+both on one disk.
+
+Each resource independently emits capacity or explicit unavailability, plus a
+numeric availability sample. Missing paths/UUID metadata, wrong UUIDs, Docker
+root mismatch, invalid capacity, and underlying read-only filesystems never
+produce fabricated zero usage. The probe distinguishes its intentional
+read-only bind from the filesystem's kernel superblock mode. It does not prove
+writer permissions through that read-only view; archive-writer admission owns
+that check. Docker Desktop/WSL evidence remains virtual guest capacity and
+cannot satisfy a native server's physical-storage health rule.
+
 On Windows Docker Desktop, `host_capacity_sampler.ps1` optionally supplies the
 missing physical authority. It discovers Docker's configured WSL VHDX and its
 backing volume from Docker metadata rather than a drive literal, writes bounded
@@ -198,8 +222,18 @@ logical-table drilldown, while Loki panels show pressure that can grow before a
 market-structure segment publishes its archive and canonical facts. Separate
 panels show engine/guest storage, physical Docker backing-volume headroom, VHDX
 allocation growth, projected days to reserve, and discovery/authority state.
-Alert rules may consume these panels later, but alert thresholds are operator
-policy rather than trading truth.
+The native server provisions `storage-safety.yml` with separate labeled
+NVMe/archive usage and per-resource availability. Non-overlapping usage bands
+are warning at 70% (five minutes), critical at 85% (two minutes), and emergency
+at 92% (one minute), using a two-minute peak window. A failed sample or missing
+physical evidence alerts independently per disk after a two-minute hold; a
+stopped sampler becomes missing once its two-minute query window expires.
+Loki query errors also alert. Capacity percentages exclude filesystem-reserved
+blocks from application headroom, matching `df` semantics. These rules notify
+operators; they never delete data or change ingestion policy. Existing native
+Grafana routing owns notifications. The disposable storage-alert proof exercises
+the actual provisioned Loki queries and Grafana math at exact thresholds, with
+per-disk failure, missing samples, and virtual-guest rejection.
 
 ## Grafana Dashboard Lifecycle
 

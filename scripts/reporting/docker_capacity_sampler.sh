@@ -30,6 +30,10 @@ emit_container_samples() {
 }
 
 emit_filesystem_sample() {
+  if [ -n "${QT_FILESYSTEM_CAPACITY_PROBE:-}" ]; then
+    python3 "$QT_FILESYSTEM_CAPACITY_PROBE"
+    return
+  fi
   observed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   operating_system="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)"
   kernel_version="$(docker info --format '{{.KernelVersion}}' 2>/dev/null || true)"
