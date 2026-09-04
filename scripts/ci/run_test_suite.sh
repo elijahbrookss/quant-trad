@@ -103,7 +103,12 @@ case "$SUITE" in
     run_suite "pytest -q"
     ;;
   db)
-    run_suite "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db"
+    # Optional pytest arguments narrow a disposable DB iteration without
+    # weakening isolation or relying on a developer's ambient PG_DSN.
+    shift
+    printf -v db_pytest_args '%q ' "$@"
+    if [[ "$#" -eq 0 ]]; then db_pytest_args=""; fi
+    run_suite "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db ${db_pytest_args}"
     ;;
   core)
     run_profiles core

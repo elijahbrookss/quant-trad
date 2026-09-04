@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 
@@ -44,8 +45,9 @@ def test_database_compose_route_has_no_checkout_secret_or_host_boundary() -> Non
     assert "secrets.env" in dockerignore
 
 
+@pytest.mark.parametrize("pytest_args", [(), ("tests/test_market_data", "-k", "cutover and not archived")])
 def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_runs(
-    tmp_path: Path,
+    tmp_path: Path, pytest_args: tuple[str, ...],
 ) -> None:
     docker_log = tmp_path / "docker.log"
     fake_docker = tmp_path / "docker"
@@ -76,7 +78,7 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
 
     for expected_status in (0, 23):
         completed = subprocess.run(
-            ["bash", str(_RUNNER), "db"],
+            ["bash", str(_RUNNER), "db", *pytest_args],
             cwd=_ROOT,
             env={**environment, "QT_TEST_FAKE_RUN_STATUS": str(expected_status)},
             check=False,
@@ -101,6 +103,8 @@ def test_database_runner_uses_unique_identity_and_cleans_successful_and_failed_r
         assert len(projects) == 1
         assert "build" in commands[0]
         assert "run" in commands[1]
+        if pytest_args:
+            assert "tests/test_market_data -k cutover\\ and\\ not\\ archived" in invocation[1][0]
         assert commands[2][-5:] == [
             "down",
             "--volumes",
