@@ -7,6 +7,15 @@ from market_data.fact_archive import archive_evidence_hash
 from .fact_storage import _catalog_manifest, CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM
 
 
+# These registered source families retain their evidence in the canonical row
+# and permanent source/acquisition metadata, not separate raw Parquet objects.
+# Structured reserve reports include the provider response bundle in provenance.
+SELF_CONTAINED_FACT_TYPES = frozenset({
+    "candle.ohlcv", "derivatives.funding_rate", "derivatives.open_interest",
+    "market.reference_price", "market.reserve_balance", "asset.reserve_state",
+})
+
+
 def read_canonical_dependency_rows(session, identities, *, reader, max_logical_bytes, check_budget=None):
     """Size the bounded identity set before transferring hot JSON/decoding cold.
 

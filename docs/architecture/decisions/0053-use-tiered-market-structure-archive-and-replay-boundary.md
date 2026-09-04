@@ -294,8 +294,12 @@ survive source movement between hot and cold storage. The final destructive
 handoff freshly verifies cold source pages and rejects a placement change between
 preflight and commit, without encoding mutable placement in immutable receipts.
 This requires an explicit empty-metadata-table upgrade, not a data backfill or
-implicit startup migration. Normalized/composite dependency closure remains a
-separate admission gate; admitting book data does not authorize deployment or
+implicit startup migration. Futures/spot basis extends these same edges through
+both declared BBO inputs: every causally eligible material revision is retained,
+with immutable role-mapping scope and owner-derived pair validation. A new
+verifier version prevents older receipts from bypassing that stronger closure.
+Remaining normalized/composite dependency closure remains a separate admission
+gate; admitting book or basis data does not authorize deployment or
 retention activation.
 
 ### Operational Consequences

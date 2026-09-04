@@ -49,13 +49,21 @@ def test_dependency_acknowledgement_requires_available_verified_bytes_within_bud
         temporary_directory=tmp_path / "staging", max_dependency_objects=1,
         max_dependency_bytes=1 if mode == "bytes" else 1024,
     )
+    # Exercise the external-dependency verifier with a dependent family, not a
+    # self-contained funding record whose evidence is already inside the page.
+    row = {**_row(), "fact_type": "market.trade_flow"}
     if mode == "valid":
-        assert archive._dependencies(session, [_row()]) == ([{
+        assert archive._dependencies(session, [row]) == ([{
             "target_kind": "raw_manifest", "target_id": "raw-id", **reference,
         }], [])
     else:
         with pytest.raises(FileNotFoundError if mode == "missing" else RuntimeError):
-            archive._dependencies(session, [_row()])
+            archive._dependencies(session, [row])
+
+
+def test_structured_reserve_evidence_is_self_contained_not_a_missing_trade_archive(tmp_path):
+    archive = PostgresCanonicalFactArchiveRepository(database=None, object_store=None, temporary_directory=tmp_path)
+    assert archive._dependencies(None, [{**_row(), "fact_type": "asset.reserve_state"}]) == ([], [])
 
 
 def test_normalized_page_never_gets_an_empty_dependency_acknowledgement(tmp_path):

@@ -42,6 +42,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_storage.py
   - portal/backend/service/storage/repos/fact_book_prefix.py
   - portal/backend/service/storage/repos/fact_book_admission.py
+  - portal/backend/service/storage/repos/fact_derived_admission.py
   - portal/backend/service/storage/repos/fact_dependencies.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
@@ -778,11 +779,59 @@ Before the first v6 receipt, verification can append newly required source and
 checkpoint edges atomically; it never rewrites existing edges, old receipts,
 raw-object bindings, or canonical bytes. The whole raw prefix remains required.
 
-This admits L2/BBO/depth in addition to the six standalone source families, not
-normalized input windows or other composite dependencies. Those remaining gates
-still precede complete retention activation. Individual objects and final
+This admitted L2/BBO/depth in addition to the six standalone source families.
+Version `market.canonical_archive_verification.v7` additionally admits
+`market.futures_spot_relationship` through exact canonical BBO inputs and their
+complete L2/raw/checkpoint closure. Each declared material witness binds **all**
+matching revisions at or before the root's commit and known-at clocks, not the
+latest alias. Requests are batched at 128; total matched edges are bounded by
+the canonical source row budget. Hot lookup uses containment supported by the
+existing provenance GIN index; cold aliases are candidate locators only. Hydrated rows must
+prove their actual material, series, family, observation and causal clocks.
+
+The existing BBO decoder and basis derivation owner validate the declared pair,
+mids, staleness, input fingerprint and retained typed material hash. Immutable
+role-mapping metadata must exist with matching instruments, `spot_reference`
+role and effective range. This preserves, rather than revises, the existing basis
+known-at contract: mapping registration time does not retroactively change a
+canonical fact's clocks. Basis publication can advance the source books' prefix
+receipts even if those source facts remain hot on another day. Cold source
+movement and corruption use the same final placement/current-byte gate.
+
+Basis Dataset freeze also binds `all_canonical_revisions.v1`, including
+corrections and invalidations, with canonical material/provenance identity and
+raw lineage collected from every retained root. Ordinary typed/latest basis
+readers remain unchanged. Previously frozen basis datasets had latest-only typed
+identity; they are not relabeled in place and must be re-frozen to supply causal
+revision-history research. The physical-retention regression checks frozen
+history, typed latest reads, known-at reads and re-freeze identity before/after
+DROP, including old source deliveries beside later hot revisions.
+
+Old v6 receipts cannot authorize this stronger composite admission. Reverification
+retains the original page and raw bindings, appends required canonical/checkpoint
+edges only, and fails if the originally bound raw evidence cannot prove the full
+closure. It does not silently substitute later material deliveries or archives.
+Trade-flow, derivative-state, response and normalized-window closure remain
+separate gates before complete retention activation. Individual objects and final
 current-byte checks must fit their budgets even when a connection spans many
 resumable intervals.
+
+Structured reserve reports (`asset.reserve_state`) are also admitted as a
+self-contained source family. Their exact response bundle and provider metadata
+are retained inline in canonical provenance, alongside the report payload and
+immutable source/acquisition metadata; there is no separate raw-stream Parquet
+object to invent or require. Archival and reclamation share the explicit
+self-contained-family classification. The reserve regression physically removes
+hot payloads and checks unchanged provider response evidence, corrections,
+invalidations, frozen binding validation and known-at reads. Corrupt page bytes
+block removal just as they do for other source families.
+
+Performance follow-up: material-source and book-source waves each enforce their
+logical-byte limits before hydration, but may decode the same whole cold page
+again across waves or resumed steps. These are bounded per-wave costs, not a
+single shared memory/I/O allowance. Measure representative HDD windows before
+raising budgets or scheduling frequent runs; verified page reuse is an
+optimization opportunity, not permission to skip source checks.
 
 ### Checkpoint File Admission
 
@@ -887,9 +936,9 @@ surface. The lifecycle executor supplies these windows under the partition lock.
 Complete dependency admission and reviewed production activation remain rollout
 gates; wiring the executor is not itself production permission.
 
-Standalone candle, funding, open-interest, reference-price, reserve-balance,
-trade, and L2/BBO/depth facts are currently admitted. Any other family in the
-physical day blocks the **whole day**, including composite and normalized facts
+Standalone candle, funding, open-interest, reference-price, reserve-balance, structured reserve-report,
+trade, L2/BBO/depth, and futures/spot basis facts are currently admitted. Any other family in the
+physical day blocks the **whole day**, including remaining composite and normalized facts
 whose complete dependency closures are not yet proven. This is a temporary
 fail-closed compatibility gate, not permission to omit those rows or expire
 their evidence. It cannot be lifted merely because a partition is `verified`.

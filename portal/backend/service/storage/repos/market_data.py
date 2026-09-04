@@ -462,6 +462,7 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
     }
 )
 _ALL_CANONICAL_REVISIONS_SELECTION = "all_canonical_revisions.v1"
+_REVISION_PRESERVING_TYPED_SCHEMAS = frozenset({"market.futures_spot_basis.v1"})
 
 
 def _preserves_canonical_revision_history(contract_version: str) -> bool:
@@ -471,7 +472,8 @@ def _preserves_canonical_revision_history(contract_version: str) -> bool:
     except ValueError:
         return False
     return (
-        normalized not in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS
+        (normalized not in _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS
+         or normalized in _REVISION_PRESERVING_TYPED_SCHEMAS)
         and not normalized.startswith(f"{NORMALIZED_FACT_VERSION}/")
     )
 
@@ -3872,6 +3874,16 @@ class PostgresMarketDataRepository:
                             records=records,
                         )
                     )
+                elif records and all(
+                    isinstance(record, CanonicalFactRecord) for record in records
+                ) and fact_type == "market.futures_spot_relationship":
+                    # Dataset identity uses every canonical revision. Decode
+                    # all of those same roots only for the existing typed raw
+                    # lineage traversal; never replace them with latest state.
+                    from market_data.canonical_adapters import decode_basis_feature_record
+                    archive_refs.update(_collect_typed_archive_refs(
+                        session, records=[decode_basis_feature_record(record) for record in records],
+                    ))
                 if fact_type == MARKET_TRADE_FACT_TYPE:
                     source_ids = sorted({record.source_id for record in records})
                     source_rows = session.execute(

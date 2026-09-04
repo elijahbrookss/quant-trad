@@ -15,17 +15,18 @@ from sqlalchemy import text
 from core.storage_mounts import require_configured_archive_mount
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from portal.backend.db.fact_storage_schema import fact_partition_name
+from .fact_dependencies import SELF_CONTAINED_FACT_TYPES
 from .market_lifecycle import _LIFECYCLE_LOCK_NAME, MarketStorageLifecycleBusyError
 
 logger = logging.getLogger(__name__)
 
-# Standalone facts and book states have complete dependency admission. Trade-
+# Standalone facts, book states and paired basis have dependency admission. Trade-
 # flow, derivative composites, and normalized windows still need transitive
 # proofs. A mixed physical day must pass for EVERY family in it.
-_ADMITTED_FACT_TYPES = frozenset({
-    "candle.ohlcv", "derivatives.funding_rate", "derivatives.open_interest",
-    "market.reference_price", "market.reserve_balance", "market.trade",
+_ADMITTED_FACT_TYPES = SELF_CONTAINED_FACT_TYPES | frozenset({
+    "market.trade",
     "market.l2_book", "market.bbo", "market.depth_observation",
+    "market.futures_spot_relationship",
 })
 
 

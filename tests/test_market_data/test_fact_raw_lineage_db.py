@@ -60,7 +60,8 @@ def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
     return canonicalize_market_trade(trade, source=fixture.source)
 
 
-def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=False, replay_features=False):
+def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=False, replay_features=False,
+                      definition_id="book-prefix", instrument_id="storage-fixture", provider_product_id="BTC-USD"):
     from data_providers.streams.coinbase import CoinbaseMessageParser
     from data_providers.streams.contracts import ProviderRawMessage
     from market_data.canonical_adapters import canonicalize_l2_snapshot, canonicalize_l2_mutation_batch
@@ -74,12 +75,12 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
     _placement(monkeypatch, day)
     source = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream", adapter_version="book-prefix.fixture.v1")
     source_id = storage.repo.register_source(source)
-    series_id = storage.repo.register_series(instrument_id="storage-fixture", fact_type="market.l2_book",
+    series_id = storage.repo.register_series(instrument_id=instrument_id, fact_type="market.l2_book",
                                            contract_version="market.l2_book.v1", timeframe_seconds=None)
-    contract = L2ProductContract(provider_product_id="BTC-USD", provider_size_unit="base",
-                                 product_definition_version_id="book-prefix.product.v1")
+    contract = L2ProductContract(provider_product_id=provider_product_id, provider_size_unit="base",
+                                 product_definition_version_id=f"{definition_id}.product.v1")
     structures.register_product_definition(definition_version_id=contract.product_definition_version_id,
-        source_id=source_id, instrument_id="storage-fixture", provider_product_id="BTC-USD", product_type="spot",
+        source_id=source_id, instrument_id=instrument_id, provider_product_id=provider_product_id, product_type="spot",
         venue=source.venue, status="fixture", base_currency="BTC", quote_currency="USD", provider_size_unit="base",
         contract_size=None, price_increment=None, base_increment=None, effective_at=BASE, received_at=BASE,
         provenance={"fixture": "book-retention"})
@@ -87,16 +88,16 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
     if replay_features:
         from market_data.market_state import BBO_FACT_TYPE, BBO_FACT_VERSION, DEPTH_FACT_TYPE, DEPTH_FACT_VERSION
         config.update(base_currency="BTC", quote_currency="USD")
-        config["bbo_series_id"] = storage.repo.register_series(instrument_id="storage-fixture",
+        config["bbo_series_id"] = storage.repo.register_series(instrument_id=instrument_id,
             fact_type=BBO_FACT_TYPE, contract_version=BBO_FACT_VERSION, timeframe_seconds=1)
-        config["depth_series_id"] = storage.repo.register_series(instrument_id="storage-fixture",
+        config["depth_series_id"] = storage.repo.register_series(instrument_id=instrument_id,
             fact_type=DEPTH_FACT_TYPE, contract_version=DEPTH_FACT_VERSION, timeframe_seconds=1)
-    structures.upsert_stream_definition(definition_id="book-prefix", source_id=source_id, series_id=series_id,
-        provider=source.provider, venue=source.venue, provider_product_id="BTC-USD", channels=("level2",), auth_mode="public",
+    structures.upsert_stream_definition(definition_id=definition_id, source_id=source_id, series_id=series_id,
+        provider=source.provider, venue=source.venue, provider_product_id=provider_product_id, channels=("level2",), auth_mode="public",
         contract_version="market.l2_book.v1", max_spool_bytes=1024**3, max_segment_bytes=128 * 1024**2,
         config=config)
-    claim = structures.claim_stream(definition_id="book-prefix", owner_id="book-prefix-test", lease_seconds=600, bounded=True)
-    parser = CoinbaseMessageParser(symbol_by_product_id={"BTC-USD": "BTC-USD"})
+    claim = structures.claim_stream(definition_id=definition_id, owner_id="book-prefix-test", lease_seconds=600, bounded=True)
+    parser = CoinbaseMessageParser(symbol_by_product_id={provider_product_id: provider_product_id})
     reducer = Level2BookReconstructor(series_id=series_id, contract=contract)
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     raws, manifests, facts, results = [], [], [], []
@@ -108,7 +109,7 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
         else:
             levels = [("bid", "99", "10"), ("offer", "101", "11")] if ordinal == 1 else [("bid", "99", "12")]
             payload = {"channel": "l2_data", "timestamp": timestamp, "sequence_num": 0 if ordinal == 1 else 1,
-                "events": [{"type": "snapshot" if ordinal == 1 else "update", "product_id": "BTC-USD",
+                "events": [{"type": "snapshot" if ordinal == 1 else "update", "product_id": provider_product_id,
                     "updates": [{"side": side, "price_level": price, "new_quantity": quantity, "event_time": timestamp}
                                 for side, price, quantity in levels]}]}
         segment = DurableRawSpoolSegment(root=tmp_path / "spool", definition_id=claim.definition_id,
@@ -117,7 +118,7 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
             stream_session_id=claim.session_id, connection_epoch=0, receive_ordinal=ordinal,
             received_at=timestamp, raw_frame=json.dumps(payload))
         raw = RawStreamRecord.from_provider_message(message, definition_id=claim.definition_id,
-            spool_segment_id=segment.spool_segment_id, provider_product_id="BTC-USD", requested_channel="level2",
+            spool_segment_id=segment.spool_segment_id, provider_product_id=provider_product_id, requested_channel="level2",
             observed_channel="heartbeats" if ordinal in (2, 4) else "level2")
         segment.append(raw)
         segment.seal()

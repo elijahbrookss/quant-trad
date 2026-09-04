@@ -38,7 +38,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v6"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v7"
 
 
 def _series_catalog(manifest):
@@ -177,11 +177,24 @@ class PostgresCanonicalFactArchiveRepository:
             max_file_bytes=self.limits.max_file_bytes,
             check_budget=self.check_budget)
 
+    def _source_revisions(self, session, rows):
+        from .fact_derived_admission import resolve_derived_source_revisions
+        derived = resolve_derived_source_revisions(session, rows=rows, object_store=self.object_store,
+            max_rows=self.max_raw_mapping_rows, max_logical_bytes=self.limits.max_logical_bytes,
+            max_file_bytes=self.limits.max_file_bytes, check_budget=self.check_budget)
+        books = self._book_sources(session, list({row["id"]: row for row in (*rows, *derived)}.values()))
+        sources = {row["id"]: row for row in (*derived, *books)}
+        if len(sources) > self.max_raw_mapping_rows:
+            raise RuntimeError("canonical_archive_source_dependency_budget_exceeded: reduce archive page size")
+        return [sources[identity] for identity in sorted(sources)]
+
     def _dependencies(self, session, rows, *, bound_manifest_ids=None, source_rows=(), bound_checkpoint_ids=None):
         from .market_data import _collect_material_archive_refs
         from .fact_lineage import EXACT_RAW_FACT_TYPES, resolve_canonical_raw_archive_refs
         from .fact_book_prefix import resolve_verified_book_prefixes
         from .fact_book_admission import verify_book_metadata_and_checkpoints
+        from .fact_derived_admission import DERIVED_FACT_TYPES
+        from .fact_dependencies import SELF_CONTAINED_FACT_TYPES
         rows = list({row["id"]: row for row in (*rows, *source_rows)}.values())
         groups = defaultdict(list)
         for row in rows:
@@ -205,7 +218,7 @@ class PostgresCanonicalFactArchiveRepository:
         ))
         for (series_id, fact_type), group in groups.items():
             self._check_budget()
-            if fact_type in EXACT_RAW_FACT_TYPES:
+            if fact_type in EXACT_RAW_FACT_TYPES or fact_type in DERIVED_FACT_TYPES or fact_type in SELF_CONTAINED_FACT_TYPES:
                 continue
             if fact_type.startswith("market.normalized."):
                 # A normalized row's window witnesses need a separate recursive
@@ -340,10 +353,10 @@ class PostgresCanonicalFactArchiveRepository:
             for row in rows:
                 self._check_budget()
                 record_from_storage_row(row)
-            progress = self._prepare_book_prefix(session, rows, day)
+            source_rows = self._source_revisions(session, rows)
+            progress = self._prepare_book_prefix(session, (*rows, *source_rows), day)
             if progress is not None:
                 return progress
-            source_rows = self._book_sources(session, rows)
             dependencies, source_rows = self._dependencies(session, rows, source_rows=source_rows)
             manifest = publish_canonical_fact_archive(
                 rows, object_store=self.object_store, temporary_directory=self.temporary_directory, limits=self.limits,
@@ -477,10 +490,10 @@ class PostgresCanonicalFactArchiveRepository:
             aliases = [alias for row in rows if (alias := legacy_material_alias(row)) is not None]
             catalogs = self._page_catalogs(session, manifest.manifest_id)
             bound_ids = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"]
-            progress = self._prepare_book_prefix(session, rows, day, bound_manifest_ids=bound_ids)
+            source_rows = self._source_revisions(session, rows)
+            progress = self._prepare_book_prefix(session, (*rows, *source_rows), day, bound_manifest_ids=bound_ids)
             if progress is not None:
                 return progress
-            source_rows = self._book_sources(session, rows)
             bound_checkpoints = [item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "book_checkpoint"]
             dependencies, source_rows = self._dependencies(session, rows, bound_manifest_ids=bound_ids,
                 source_rows=source_rows, bound_checkpoint_ids=bound_checkpoints or None)
