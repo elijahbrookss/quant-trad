@@ -10,7 +10,8 @@ from sqlalchemy import text
 from data_providers.streams.coinbase import CoinbaseMessageParser
 from data_providers.streams.contracts import ProviderRawMessage
 from market_data.archive import DurableRawSpoolSegment, FilesystemRawArchiveObjectStore, publish_spool_archive
-from market_data.contracts import SourceIdentity
+from market_data.contracts import DatasetSeriesRequest, SourceIdentity
+from market_data.canonical_adapters import canonicalize_market_trade, canonicalize_trade_flow
 from market_data.structure import (
     ArchiveStatus, ProductContract, RawStreamRecord, TradeCoverageIntervalVersion,
     aggregate_trade_bucket, translate_coinbase_market_trade,
@@ -18,12 +19,15 @@ from market_data.structure import (
 from portal.backend.service.storage.repos import fact_archival, market_data, market_structure
 from portal.backend.service.storage.repos.fact_reclamation import PostgresCanonicalFactReclamationRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+from portal.backend.service.market.backtest_dataset_service import validate_frozen_dataset_series
+from tests.test_market_data.test_fact_derived_retention_db import _archive_day
+from tests.test_market_data.test_fact_reclamation_db import _physical
 from tests.test_market_data.test_fact_storage_tiers_db import BASE, _placement, storage
 
 pytestmark = pytest.mark.db
 
 
-def _flow_fixture(storage, tmp_path, monkeypatch):
+def _flow_fixture(storage, tmp_path, monkeypatch, *, include_partial=True):
     monkeypatch.setattr(market_structure, "db", storage.database)
     structures = market_structure.market_structure_repository
     start = BASE.replace(microsecond=0)
@@ -99,7 +103,8 @@ def _flow_fixture(storage, tmp_path, monkeypatch):
     _placement(monkeypatch, flow_day)
     partial = aggregate_trade_bucket([trades[1]], interval_seconds=1, bucket_start=start + timedelta(seconds=1),
         coverage=coverage, computed_at=start + timedelta(seconds=6))
-    assert structures.ingest_aggregates(series_id=flow_series, facts=[partial]).inserted_count == 1
+    if include_partial:
+        assert structures.ingest_aggregates(series_id=flow_series, facts=[partial]).inserted_count == 1
     coverage = replace(coverage, revision=2, archive_status=ArchiveStatus.COMPLETE,
         known_at=start + timedelta(seconds=4, milliseconds=2))
     structures.append_coverage_version(claim, coverage=coverage, opening_session_event_id=opening, closing_session_event_id=closing)
@@ -110,7 +115,8 @@ def _flow_fixture(storage, tmp_path, monkeypatch):
     assert structures.ingest_aggregates(series_id=flow_series, facts=[complete, zero]).inserted_count == 2
     return SimpleNamespace(start=start, source_day=source_day, flow_day=flow_day, source_id=source_id,
         trade_series=trade_series, flow_series=flow_series, structures=structures, store=store,
-        raws=raws, manifests=manifests, canonical=canonical, partial=partial, complete=complete, zero=zero)
+        raws=raws, manifests=manifests, canonical=canonical, partial=partial, complete=complete, zero=zero,
+        trades=trades, source=source)
 
 
 def test_flow_archival_keeps_deduplicated_raw_delivery_and_all_causal_evidence(storage, tmp_path, monkeypatch):
@@ -168,7 +174,119 @@ def test_flow_archival_keeps_deduplicated_raw_delivery_and_all_causal_evidence(s
         assert session.execute(text("SELECT count(*) FROM market.fact_versions WHERE series_id=:series"),
             {"series": fixture.trade_series}).scalar_one() == 1
     assert storage.repo.read_fact_revisions(**request) == before
-    # Flow archive publication is not deletion admission. All-revision frozen
-    # delivery and physical flow reclamation remain a separate validation gate.
-    with pytest.raises(RuntimeError, match="dependency_proof_required"):
+    assert reclaimer.reclaim_partition(fixture.flow_day, eligible_before=storage.today, execute=True)["status"] == "partition_reclaimed"
+    assert _physical(storage, fixture.flow_day)["relation"] is None
+    assert storage.repo.read_fact_revisions(**request) == before
+
+
+@pytest.mark.parametrize("source_cold", [False, True, "legacy"])
+def test_trade_and_flow_frozen_histories_survive_physical_reclamation(storage, tmp_path, monkeypatch, source_cold):
+    legacy = source_cold == "legacy"
+    fixture = _flow_fixture(storage, tmp_path, monkeypatch, include_partial=not legacy)
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    cold = FilesystemRawArchiveObjectStore(fixture.store.root, writable=False)
+    tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: cold)
+    monkeypatch.setattr(market_data, "canonical_fact_storage_repository", tiered)
+    window = dict(start=fixture.start, end=fixture.start + timedelta(seconds=5))
+    requests = [DatasetSeriesRequest(series, **window) for series in (fixture.trade_series, fixture.flow_series)]
+    with monkeypatch.context() as old:
+        old.setattr(market_data, "_preserves_canonical_revision_history", lambda version: False)
+        older_dataset = storage.repo.freeze_dataset(requests)
+    for request in requests:
+        with pytest.raises(RuntimeError, match="revision_history_unpinned"):
+            storage.repo.read_dataset_fact_revisions(dataset_id=older_dataset.dataset_id, series_id=request.series_id)
+    # Generic historical/import revisions are distinct from the real stream's
+    # no-op delivery above. Keep every one, including explicit invalidations.
+    _placement(monkeypatch, fixture.source_day)
+    second = canonicalize_market_trade(fixture.trades[1], source=fixture.source)
+    invalid = replace(second, state="invalidated", accepted_at=fixture.start + timedelta(seconds=8),
+        known_at=fixture.start + timedelta(seconds=8), provenance={**second.provenance, "fixture_revision": "invalidated"})
+    for fact in (second, invalid):
+        storage.repo.ingest_facts(series_id=fixture.trade_series, source_id=fixture.source_id, facts=[fact])
+    _placement(monkeypatch, fixture.flow_day)
+    flow = canonicalize_trade_flow(fixture.complete, source=fixture.source)
+    storage.repo.ingest_facts(series_id=fixture.flow_series, source_id=fixture.source_id,
+        facts=[replace(flow, state="invalidated", accepted_at=fixture.start + timedelta(seconds=8),
+            known_at=fixture.start + timedelta(seconds=8))])
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 0
+    frozen = storage.repo.freeze_dataset(requests)
+    assert frozen.dataset_hash != older_dataset.dataset_hash
+    before, bindings, latest, causal = {}, {}, {}, {}
+    for entry in frozen.series:
+        series = entry["series_id"]
+        assert entry["source_summary"]["record_selection"] == "all_canonical_revisions.v1"
+        before[series] = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series)
+        assert any(record.fact.state.value == "invalidated" for record in before[series])
+        bindings[series] = validate_frozen_dataset_series(store=storage.repo, entry={**entry, "dataset_id": frozen.dataset_id})
+        latest[series] = storage.repo.read_series_records(series_id=series, **window)
+        causal[series] = storage.repo.read_facts(series_id=series, **window, known_at_lte=fixture.complete.known_at)
+    assert len(before[fixture.trade_series]) == 3
+    assert len(before[fixture.flow_series]) == (3 if legacy else 4)
+    if not legacy:
+        from market_data.canonical_adapters import decode_trade_flow_record
+        assert decode_trade_flow_record(before[fixture.flow_series][0]).fact.archive_complete is False
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_book_prefix_chunks")).scalar_one() == 0, "freeze must not write retention progress"
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(database=storage.database, object_store=fixture.store,
+        temporary_directory=tmp_path / "staging")
+    reclaimer = PostgresCanonicalFactReclamationRepository(archive_repository=archive, enabled=True)
+    if source_cold:
+        _archive_day(archive, fixture.source_day)
+        reclaimer.reclaim_partition(fixture.source_day, eligible_before=storage.today, execute=True)
+    with monkeypatch.context() as old:
+        if legacy:
+            from portal.backend.service.storage.repos.fact_flow_admission import collect_trade_history_archive_refs
+            old.setattr(fact_archival, "FACT_ARCHIVE_VERIFIER_VERSION", "market.canonical_archive_verification.v8")
+            old.setattr(archive, "_source_revisions", lambda session, rows: [])
+            old.setattr(archive, "_prepare_book_prefix", lambda *args, **kwargs: None)
+            old.setattr(archive, "_flow_references", lambda session, rows, objects, **kwargs:
+                collect_trade_history_archive_refs(session, rows=rows, object_store=fixture.store))
+        _archive_day(archive, fixture.flow_day)
+    if legacy:
+        with storage.database.session() as session:
+            page_before = dict(session.execute(text("SELECT * FROM market.fact_archive_manifests WHERE storage_day=:day"),
+                {"day": fixture.flow_day}).mappings().one())
+            receipt_before = dict(session.execute(text("SELECT * FROM market.fact_archive_verifications WHERE manifest_id=:id"),
+                {"id": page_before["id"]}).mappings().one())
+            assert session.execute(text("SELECT count(*) FROM market.fact_archive_canonical_dependencies WHERE manifest_id=:id"),
+                {"id": page_before["id"]}).scalar_one() == 0
+        with pytest.raises(RuntimeError, match="verification_missing_or_stale"):
+            reclaimer.reclaim_partition(fixture.flow_day, eligible_before=storage.today, execute=True)
+        archive.restart_partition_verification(fixture.flow_day)
+        for _ in range(16):
+            if archive.verify_next_page(fixture.flow_day)["status"] == "no_unverified_pages":
+                break
+        else:
+            pytest.fail("old flow page did not complete bounded reverification")
+        archive.verify_partition(fixture.flow_day)
+        with storage.database.session() as session:
+            assert dict(session.execute(text("SELECT * FROM market.fact_archive_manifests WHERE id=:id"),
+                {"id": page_before["id"]}).mappings().one()) == page_before
+            assert dict(session.execute(text("SELECT * FROM market.fact_archive_verifications WHERE manifest_id=:id AND verifier_version=:version"),
+                {"id": page_before["id"], "version": receipt_before["verifier_version"]}).mappings().one()) == receipt_before
+    if not source_cold:
+        _archive_day(archive, fixture.source_day)
+        reclaimer.reclaim_partition(fixture.source_day, eligible_before=storage.today, execute=True)
+    with storage.database.session() as session:
+        key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
+            {"id": fixture.manifests[2]}).scalar_one()
+    path = fixture.store.local_path(key)
+    original = path.read_bytes()
+    path.write_bytes(b"corrupt flow raw evidence after page verification")
+    with pytest.raises(RuntimeError, match="archive_verification"):
         reclaimer.reclaim_partition(fixture.flow_day, eligible_before=storage.today, execute=True)
+    assert _physical(storage, fixture.flow_day)["relation"] is not None
+    path.write_bytes(original)
+    physical = _physical(storage, fixture.flow_day)
+    removed = reclaimer.reclaim_partition(fixture.flow_day, eligible_before=storage.today, execute=True)
+    assert removed["reclaimed_bytes"] == physical["bytes"] > 0
+    assert _physical(storage, fixture.flow_day)["relation"] is None
+    assert _physical(storage, fixture.source_day)["relation"] is None
+    for entry in frozen.series:
+        series = entry["series_id"]
+        assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=series) == before[series]
+        assert validate_frozen_dataset_series(store=storage.repo, entry={**entry, "dataset_id": frozen.dataset_id}) == bindings[series]
+        assert storage.repo.read_series_records(series_id=series, **window) == latest[series]
+        assert storage.repo.read_facts(series_id=series, **window, known_at_lte=fixture.complete.known_at) == causal[series]
+    assert storage.repo.freeze_dataset(requests).dataset_hash == frozen.dataset_hash

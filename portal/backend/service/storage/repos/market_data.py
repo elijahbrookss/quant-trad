@@ -462,7 +462,9 @@ _TYPED_RECORD_DECODER_PAYLOAD_SCHEMAS = frozenset(
     }
 )
 _ALL_CANONICAL_REVISIONS_SELECTION = "all_canonical_revisions.v1"
-_REVISION_PRESERVING_TYPED_SCHEMAS = frozenset({"market.futures_spot_basis.v1", "market.derivative_state.v1"})
+_REVISION_PRESERVING_TYPED_SCHEMAS = frozenset({
+    "market.futures_spot_basis.v1", "market.derivative_state.v1", "market.trade.v1", "market.trade_flow.v1",
+})
 
 
 def _preserves_canonical_revision_history(contract_version: str) -> bool:
@@ -3761,11 +3763,23 @@ class PostgresMarketDataRepository:
                     as_of_commit_seq=watermark,
                     include_source_identity=True,
                 )
+                canonical_trade_history = fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE} and all(
+                    isinstance(record, CanonicalFactRecord) for record in records)
+                trade_records = records
+                if canonical_trade_history:
+                    from market_data.canonical_adapters import decode_market_trade_record, decode_trade_flow_record
+                    from .fact_flow_admission import collect_trade_history_archive_refs
+                    decoder = decode_market_trade_record if fact_type == MARKET_TRADE_FACT_TYPE else decode_trade_flow_record
+                    trade_records = [decoder(record) for record in records]
+                    # Identity remains the full canonical history. Typed views
+                    # are only for unchanged source/quality presentation fields.
+                    archive_refs.update(collect_trade_history_archive_refs(session, rows=canonical_rows,
+                        object_store=canonical_fact_storage_repository.object_store_factory()))
                 if fact_type == MARKET_TRADE_FACT_TYPE:
                     raw_record_ids = sorted(
-                        {record.fact.raw_record_id for record in records}
+                        {record.fact.raw_record_id for record in trade_records}
                     )
-                    archive_rows = session.execute(
+                    archive_rows = [] if canonical_trade_history else session.execute(
                         text(
                             """
                             SELECT mappings.raw_record_id,
@@ -3781,7 +3795,7 @@ class PostgresMarketDataRepository:
                         {"raw_record_ids": raw_record_ids},
                     ).mappings().all()
                     mapped_ids = {str(row["raw_record_id"]) for row in archive_rows}
-                    if mapped_ids != set(raw_record_ids):
+                    if not canonical_trade_history and mapped_ids != set(raw_record_ids):
                         raise RuntimeError(
                             "market_dataset_archive_incomplete: one or more trades lack an acknowledged raw mapping"
                         )
@@ -3806,10 +3820,10 @@ class PostgresMarketDataRepository:
                                 "raw_record_id": record.fact.raw_record_id,
                                 "coverage_interval_id": record.fact.coverage_interval_id,
                             }
-                            for record in records
+                            for record in trade_records
                         ],
                     ]
-                elif fact_type == TRADE_FLOW_FACT_TYPE:
+                elif fact_type == TRADE_FLOW_FACT_TYPE and not canonical_trade_history:
                     if any(
                         not row.fact.archive_complete
                         or not row.fact.canonicalization_complete
@@ -3915,7 +3929,7 @@ class PostgresMarketDataRepository:
                         }
                         for row in source_rows
                     }
-                elif fact_type == TRADE_FLOW_FACT_TYPE:
+                elif fact_type == TRADE_FLOW_FACT_TYPE and not canonical_trade_history:
                     source_key = "derived:market.trade_flow.v1"
                     source_counts = Counter({source_key: len(records)})
                     source_details = {
@@ -3966,7 +3980,7 @@ class PostgresMarketDataRepository:
                             "coverage_interval_id": record.fact.coverage_interval_id,
                             "coverage_revision": record.fact.coverage_revision,
                         }
-                        for record in records
+                        for record in trade_records
                     ]
                     quality = [*quality, *structure_quality]
                 if records and all(

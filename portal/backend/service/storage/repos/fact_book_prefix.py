@@ -157,8 +157,36 @@ def resolve_verified_trade_prefixes(session, *, prefixes, witnesses, **kwargs):
         verifier_version=TRADE_PREFIX_VERIFIER_VERSION, **kwargs)
 
 
+def resolve_trade_prefixes_for_read(session, *, prefixes, witnesses, rows, object_store, byte_verifier,
+                                   limits, max_mapping_rows, max_objects, check_budget=None):
+    """Read verified history plus a bounded unverified tail without writing.
+
+    A hot Dataset need not wait for retention to publish prefix certificates.
+    Existing certificates are fully checked, never bypassed on corruption; only
+    their genuinely absent tail uses the same exact-frame decoder directly.
+    Large tails fail the existing work budgets rather than creating progress or
+    extending the caller's frozen range implicitly.
+    """
+    tails = []
+    references, bindings = _resolve_verified_prefixes(session, prefixes=prefixes, witnesses=witnesses,
+        verifier_version=TRADE_PREFIX_VERIFIER_VERSION, byte_verifier=byte_verifier, max_objects=max_objects,
+        check_budget=check_budget, unverified_ranges=tails)
+    ranges = [{**item, "requested_channel": "market_trades"} for item in tails]
+    ranges.extend(witnesses)
+    exact = resolve_canonical_raw_archive_refs(session, rows=rows, object_store=object_store,
+        byte_verifier=byte_verifier, limits=limits, max_mapping_rows=max_mapping_rows,
+        check_budget=check_budget, book_prefix_ranges=ranges, witness_manifest_ids=bindings)
+    for identity, reference in exact.items():
+        if references.setdefault(identity, reference) != reference:
+            raise RuntimeError(f"canonical_raw_prefix_dependency_conflict: target_id={identity}")
+    if len(references) > max_objects:
+        raise RuntimeError("canonical_book_prefix_object_budget_exceeded")
+    byte_verifier.assert_unchanged()
+    return references
+
+
 def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version, byte_verifier, max_objects,
-                                 bound_manifest_ids=None, check_budget=None, max_chunks=5000):
+                                 bound_manifest_ids=None, check_budget=None, max_chunks=5000, unverified_ranges=None):
     """Validate contiguous receipts and CURRENT bytes, without re-decoding history.
 
     Earlier admitted placements remain bound even after new aliases appear.
@@ -166,6 +194,7 @@ def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version
     this changes no Fact or known-at selection and grants no future data access.
     """
     references, root_bindings = {}, {}
+    tail_witness_ids = set()
     inspected = 0
     for prefix in prefixes:
         scope = _scope(prefix, verifier_version)
@@ -210,10 +239,14 @@ def _resolve_verified_prefixes(session, *, prefixes, witnesses, verifier_version
                 root_bindings[identity] = {item["target_id"] for item in dependencies}
             first, previous_id = chunk["last_receive_ordinal"] + 1, chunk["id"]
         if first <= prefix["receive_ordinal"]:
-            raise RuntimeError(f"canonical_book_prefix_not_ready: fact_version_id={prefix['root_fact_version_id']} next_ordinal={first}")
+            if unverified_ranges is None:
+                raise RuntimeError(f"canonical_book_prefix_not_ready: fact_version_id={prefix['root_fact_version_id']} next_ordinal={first}")
+            unverified_ranges.append({**prefix, "first_receive_ordinal": first})
+            tail_witness_ids.update(identity for _, identity in roots)
+            roots.clear()
         if roots:
             raise RuntimeError(f"canonical_raw_prefix_witness_uncovered: fact_version_id={roots[-1][1]}")
-    if set(root_bindings) != {item["root_fact_version_id"] for item in witnesses}:
+    if set(root_bindings) | tail_witness_ids != {item["root_fact_version_id"] for item in witnesses}:
         raise RuntimeError("canonical_raw_prefix_witness_scope_missing")
     byte_verifier.assert_unchanged()
     return references, root_bindings

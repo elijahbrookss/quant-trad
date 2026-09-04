@@ -135,6 +135,14 @@ identity is a deterministic hash over the resolved typed series, revisions,
 quality, provenance, archive references, normalization references, and request
 metadata. Repeating an identical freeze is idempotent.
 
+The current generalized trade/flow history contract is defined in
+[Generalized Fact Data Plane](GENERALIZED_FACT_DATA_PLANE.md#exact-raw-revision-evidence).
+It preserves canonical corrections, invalidations and historical partial flags
+across hot/cold storage, rather than relabeling older latest-only datasets.
+Validation checks the exact frozen quality document once. Re-appending its
+already-recorded typed quality notes caused false hash disagreements; the
+validator no longer regenerates or duplicates them.
+
 The existing dataset endpoint accepts either a legacy candle selector
 (`instrument_id` plus `timeframe`) or an exact typed `series_id`; mixing both is
 rejected. This preserves old callers while making the same frozen-data boundary

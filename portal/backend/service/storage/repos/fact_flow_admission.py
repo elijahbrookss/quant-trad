@@ -236,3 +236,31 @@ def resolve_trade_flow_source_revisions(session, *, rows, object_store, max_rows
     # Sources keep their own exact raw witnesses. An older canonical delivery
     # may legitimately belong to a different session than the derived bucket.
     return [retained[identity] for identity in sorted(retained)]
+
+
+def collect_trade_history_archive_refs(session, *, rows, object_store, max_rows=50_000,
+                                       max_logical_bytes=64 * 1024**2):
+    """Freeze every trade/flow root's raw evidence without latest-row lookup.
+
+    Historical completeness flags describe their original publication, not
+    whether those exact archived bytes are readable today. Preserve the flags
+    while requiring complete current physical lineage for every revision.
+    This read-only proof writes neither prefix progress nor canonical facts.
+    """
+    from market_data.archive import RawArchiveReadLimits
+    from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
+    from .fact_book_prefix import resolve_trade_prefixes_for_read
+    if any(row["fact_type"] not in {"market.trade", "market.trade_flow"} for row in rows):
+        raise ValueError("canonical_trade_history_family_invalid")
+    if len(rows) > max_rows:
+        raise RuntimeError("canonical_trade_history_root_budget_exceeded: reduce Dataset window")
+    roots = load_trade_flow_roots(session, rows=rows, max_rows=max_rows, max_logical_bytes=max_logical_bytes)
+    sources = resolve_trade_flow_source_revisions(session, rows=rows, object_store=object_store,
+        max_rows=max_rows, max_logical_bytes=max_logical_bytes)
+    trades = {row["id"]: row for row in (*rows, *sources) if row["fact_type"] == "market.trade"}
+    prefixes, witnesses = trade_flow_prefix_requirements(roots)
+    objects = ArchiveVerificationBatch(object_store,
+        limits=ArchiveVerificationLimits(max_objects=10_000, max_bytes=4 * 1024**3))
+    return resolve_trade_prefixes_for_read(session, prefixes=prefixes, witnesses=witnesses,
+        rows=list(trades.values()), object_store=object_store, byte_verifier=objects, limits=RawArchiveReadLimits(),
+        max_mapping_rows=max_rows, max_objects=objects.limits.max_objects)

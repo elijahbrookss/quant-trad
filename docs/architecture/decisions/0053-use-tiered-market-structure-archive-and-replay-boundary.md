@@ -308,8 +308,14 @@ and controls that never produced canonical rows. This can cost additional cold
 storage and metadata, but avoids guessing a minimal input subset. It preserves
 historical completeness/quality flags rather than recertifying them. Uncovered
 roots still need owner-based input reconciliation. The v9 archive receipt binds
-this stronger closure; flow deletion remains gated pending all-revision frozen
-and physical-reclamation equivalence tests.
+this stronger closure. Trade/flow freezes also bind every canonical revision,
+keeping original partial-quality flags while checking current physical evidence.
+Read-only freeze can reuse existing prefix certificates and verify a bounded
+missing tail without writing retention progress. Physical flow-removal tests
+cover frozen, typed-latest and known-at equivalence, including old-receipt
+reverification; flow now shares the existing default-disabled reclamation gate.
+The remaining composite/normalized families and production activation still
+require their separate proofs and reviewed rollout.
 
 Book reclamation additionally binds exact canonical source revisions for derived
 BBO/depth facts, checks immutable product/validity scope, and validates checkpoint

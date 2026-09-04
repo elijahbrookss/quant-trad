@@ -34,6 +34,7 @@ code_paths:
   - portal/backend/db/session.py
   - portal/backend/service/market
   - portal/backend/service/market/canonical_retention.py
+  - portal/backend/service/market/backtest_dataset_service.py
   - portal/backend/service/research
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/candles.py
@@ -810,8 +811,43 @@ The disposable flow regression uses the actual parser and ingestion deduplicatio
 then stages partial/complete revisions and a zero bucket after the canonical
 snapshot source has physically moved to cold storage. Corrupt cold source bytes
 and a corrupt raw update with no separate canonical row both block publication.
-This staging proof does **not** yet admit flow reclamation: all-revision frozen
-delivery and physical flow-removal equivalence remain separate required gates.
+Trade and flow Dataset freezes now bind `all_canonical_revisions.v1`, including
+explicit invalidations and historical partial flow revisions. Canonical rows
+own material/provenance identity and source counts; typed decoding is used only
+to render the original trade/flow quality fields. Every root's exact raw
+delivery, causal candidate window and immutable coverage revision participate
+in archive admission. A historical `archive_complete=false` is not rewritten
+or mistaken for today's physical archive availability: the original flag stays
+visible, while the current raw evidence must independently pass verification.
+Uncovered flow requires the existing owner reconciliation. Missing bytes or
+unprovable lineage still fail, and old latest-only datasets must be re-frozen
+before they can provide canonical revision history.
+
+Freeze reuses valid prefix certificates and directly checks only a genuinely
+unverified tail plus exact root/source witnesses. It never writes retention
+progress or silently bypasses a corrupt certificate. Per requested series,
+50,000 root/source-edge/mapping rows and 64 MiB canonical dependency JSON bound
+admission; current-object checks allow 10,000 objects and 4 GiB, and the existing
+raw decoder's row/file/logical-byte bounds apply independently. An oversized
+unverified tail fails rather than partially freezing it. Existing bounded
+retention prefix work can supply reusable proof for long sessions. These are
+per-operation limits, not a claim that a whole multi-series Dataset is held in
+constant memory or that repeat hashing has no cost.
+
+Physical flow reclamation now passes the same canonical/current-byte gate as
+its trade inputs. Disposable regressions compare frozen histories, original
+partial quality, typed latest and known-at reads, and re-freeze identity across
+actual removal of both source and flow payload partitions. They cover sources
+cooling before or after flow verification, and explicit v8-to-v9 reverification
+that adds required edges/prefix proof without modifying old pages or receipts.
+
+RCA: the Dataset validator appended trade/flow/feature quality notes to the
+already-complete frozen quality document a second time. This changed its hash
+and rejected valid typed bindings; canonical trade history also exposed the
+validator's assumption that every record had legacy typed attributes. Validation
+now checks the exact pinned quality document once, alongside the independent
+canonical/typed material and provenance hashes. Tampered quality still fails;
+no source data, historical hashes or quality records are rewritten.
 
 Version `market.canonical_archive_verification.v6` adds immutable canonical
 source-revision edges and book metadata/checkpoint admission. BBO/depth evidence
@@ -865,7 +901,7 @@ Old v6 receipts cannot authorize this stronger composite admission. Reverificati
 retains the original page and raw bindings, appends required canonical/checkpoint
 edges only, and fails if the originally bound raw evidence cannot prove the full
 closure. It does not silently substitute later material deliveries or archives.
-Trade-flow, response and normalized-window closure remain
+Trade-flow feature, response and normalized-window closure remain
 separate gates before complete retention activation. Individual objects and final
 current-byte checks must fit their budgets even when a connection spans many
 resumable intervals.
@@ -1020,7 +1056,7 @@ Complete dependency admission and reviewed production activation remain rollout
 gates; wiring the executor is not itself production permission.
 
 Standalone candle, funding, open-interest, reference-price, reserve-balance, structured reserve-report,
-trade, L2/BBO/depth, futures/spot basis and derivative-state facts are currently admitted. Any other family in the
+trade, trade-flow buckets, L2/BBO/depth, futures/spot basis and derivative-state facts are currently admitted. Any other family in the
 physical day blocks the **whole day**, including remaining composite and normalized facts
 whose complete dependency closures are not yet proven. This is a temporary
 fail-closed compatibility gate, not permission to omit those rows or expire

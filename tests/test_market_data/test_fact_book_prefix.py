@@ -166,6 +166,46 @@ def _resolve_trade(session, store, prefix, witnesses):
         byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), max_objects=100)
 
 
+@pytest.mark.parametrize("progress", [0, 1, 3])
+def test_trade_history_read_verifies_absent_tail_without_writing_prefix_progress(tmp_path, progress):
+    store, records, mappings, _ = _fixture(tmp_path, (1, 2, 3, 4, 5))
+    session = _PrefixSession(mappings)
+    prefix = _trade_prefix(records)
+    for _ in range(progress):
+        _prepare_trade(session, store, prefix)
+    witnesses = [{**prefix, "root_fact_version_id": f"flow:{record.receive_ordinal}",
+        "first_receive_ordinal": record.receive_ordinal, "receive_ordinal": record.receive_ordinal,
+        "raw_record_id": record.raw_record_id, "requested_channel": "market_trades"} for record in (records[0], records[-1])]
+    before = deepcopy((session.chunks, session.holds))
+    result = fact_book_prefix.resolve_trade_prefixes_for_read(session, prefixes=[prefix], witnesses=witnesses, rows=[],
+        object_store=store, byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+        limits=RawArchiveReadLimits(), max_mapping_rows=20, max_objects=100)
+    assert set(result) == {"raw-manifest"}
+    assert (session.chunks, session.holds) == before
+    if progress:
+        session.holds.pop(0)
+        with pytest.raises(RuntimeError, match="dependencies_invalid"):
+            fact_book_prefix.resolve_trade_prefixes_for_read(session, prefixes=[prefix], witnesses=witnesses, rows=[],
+                object_store=store, byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()),
+                limits=RawArchiveReadLimits(), max_mapping_rows=20, max_objects=100)
+
+
+def test_trade_history_read_bounds_missing_tail_and_reuses_completed_certificate(tmp_path):
+    store, records, mappings, _ = _fixture(tmp_path, (1, 2, 3, 4, 5))
+    session = _PrefixSession(mappings)
+    prefix = _trade_prefix(records)
+    kwargs = dict(prefixes=[prefix], witnesses=[], rows=[], object_store=store,
+        limits=RawArchiveReadLimits(), max_mapping_rows=2, max_objects=100)
+    with pytest.raises(RuntimeError, match="prefix_budget_exceeded"):
+        fact_book_prefix.resolve_trade_prefixes_for_read(session,
+            byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), **kwargs)
+    assert session.chunks == session.holds == []
+    for _ in range(3):
+        _prepare_trade(session, store, prefix)
+    assert fact_book_prefix.resolve_trade_prefixes_for_read(session,
+        byte_verifier=ArchiveVerificationBatch(store, limits=ArchiveVerificationLimits()), **kwargs)
+
+
 def test_trade_prefix_resumes_separately_and_binds_exact_coverage_endpoints(tmp_path):
     store, records, mappings, rows = _fixture(tmp_path, (1, 2, 3, 4, 5), requested_channel="market_trades")
     session = _PrefixSession(mappings)
