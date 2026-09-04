@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
+import json
 
 import pytest
 from sqlalchemy import text
@@ -56,6 +57,85 @@ def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
                     receive_ordinal=raw.receive_ordinal, raw_record_id=raw.raw_record_id,
                     coverage_interval_id=None)
     return canonicalize_market_trade(trade, source=fixture.source)
+
+
+def _raw_book_fixture(storage, tmp_path, monkeypatch):
+    from data_providers.streams.coinbase import CoinbaseMessageParser
+    from data_providers.streams.contracts import ProviderRawMessage
+    from market_data.canonical_adapters import canonicalize_l2_snapshot, canonicalize_l2_mutation_batch
+    from market_data.order_book import L2ProductContract, Level2BookReconstructor, translate_coinbase_l2_event
+    from market_data.structure import RawStreamRecord
+    from tests.test_market_data.test_fact_storage_tiers_db import BASE
+
+    monkeypatch.setattr(market_structure, "db", storage.database)
+    structures = market_structure.market_structure_repository
+    day = storage.today - timedelta(days=2)
+    _placement(monkeypatch, day)
+    source = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream", adapter_version="book-prefix.fixture.v1")
+    source_id = storage.repo.register_source(source)
+    series_id = storage.repo.register_series(instrument_id="storage-fixture", fact_type="market.l2_book",
+                                           contract_version="market.l2_book.v1", timeframe_seconds=None)
+    contract = L2ProductContract(provider_product_id="BTC-USD", provider_size_unit="base",
+                                 product_definition_version_id="book-prefix.product.v1")
+    structures.upsert_stream_definition(definition_id="book-prefix", source_id=source_id, series_id=series_id,
+        provider=source.provider, venue=source.venue, provider_product_id="BTC-USD", channels=("level2",), auth_mode="public",
+        contract_version="market.l2_book.v1", max_spool_bytes=1024**3, max_segment_bytes=128 * 1024**2,
+        config={"product_definition_version_id": contract.product_definition_version_id, "provider_size_unit": "base"})
+    claim = structures.claim_stream(definition_id="book-prefix", owner_id="book-prefix-test", lease_seconds=600, bounded=True)
+    parser = CoinbaseMessageParser(symbol_by_product_id={"BTC-USD": "BTC-USD"})
+    reducer = Level2BookReconstructor(series_id=series_id, contract=contract)
+    store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
+    raws, manifests, facts, results = [], [], [], []
+    for ordinal in (1, 2, 3):
+        timestamp = (BASE + timedelta(seconds=ordinal)).isoformat()
+        if ordinal == 2:
+            payload = {"channel": "heartbeats", "timestamp": timestamp, "sequence_num": 0,
+                       "events": [{"current_time": timestamp, "heartbeat_counter": "1"}]}
+        else:
+            levels = [("bid", "99", "10"), ("offer", "101", "11")] if ordinal == 1 else [("bid", "99", "12")]
+            payload = {"channel": "l2_data", "timestamp": timestamp, "sequence_num": 0 if ordinal == 1 else 1,
+                "events": [{"type": "snapshot" if ordinal == 1 else "update", "product_id": "BTC-USD",
+                    "updates": [{"side": side, "price_level": price, "new_quantity": quantity, "event_time": timestamp}
+                                for side, price, quantity in levels]}]}
+        segment = DurableRawSpoolSegment(root=tmp_path / "spool", definition_id=claim.definition_id,
+            session_id=claim.session_id, connection_epoch=0, segment_ordinal=ordinal - 1)
+        message = ProviderRawMessage.build(provider=source.provider, venue=source.venue,
+            stream_session_id=claim.session_id, connection_epoch=0, receive_ordinal=ordinal,
+            received_at=timestamp, raw_frame=json.dumps(payload))
+        raw = RawStreamRecord.from_provider_message(message, definition_id=claim.definition_id,
+            spool_segment_id=segment.spool_segment_id, provider_product_id="BTC-USD", requested_channel="level2",
+            observed_channel="heartbeats" if ordinal == 2 else "level2")
+        segment.append(raw)
+        segment.seal()
+        encoded, ack, records = publish_spool_archive(segment, object_store=store, temporary_directory=tmp_path / "raw-staging")
+        manifests.append(structures.commit_archive(claim, encoded=encoded, acknowledgement=ack, records=records).manifest_id)
+        raws.append(raw)
+        for parsed in parser.parse_raw(raw.raw_frame, received_at=timestamp, raw_ref={"raw_record_id": raw.raw_record_id}):
+            if parsed.event_kind not in {"market_l2_snapshot", "market_l2_update"}:
+                continue
+            event = translate_coinbase_l2_event(parsed, raw_record=raw, contract=contract, accepted_at=raw.received_at)
+            result = reducer.process(event)
+            assert result.accepted
+            results.append(result)
+            facts.append(canonicalize_l2_snapshot(result.snapshot, source=source) if result.snapshot is not None
+                         else canonicalize_l2_mutation_batch(result.batch, source=source))
+    assert len(facts) == 2 and len(raws) == 3
+    return SimpleNamespace(day=day, source=source, source_id=source_id, series_id=series_id, store=store,
+        raws=raws, manifests=manifests, facts=facts, results=results, structures=structures, claim=claim)
+
+
+def _publish_book_result(fixture, index):
+    from market_data.order_book import BookLifecycle
+    result = fixture.results[index]
+    position = result.state.source_position
+    return fixture.structures.ingest_book_facts(fixture.claim,
+        snapshots=[result.snapshot] if result.snapshot is not None else [],
+        batches=[result.batch] if result.batch is not None else [],
+        validity_versions=result.validity_versions, lifecycle=BookLifecycle.VALID,
+        final_validity_interval_id=result.state.validity_interval_id, checkpoint_id=None,
+        final_state_hash=result.state.state_hash, final_connection_epoch=position.connection_epoch,
+        final_receive_ordinal=position.receive_ordinal, final_event_ordinal=position.event_ordinal,
+        final_sequence_num=position.provider_sequence_num)
 
 
 def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path, monkeypatch):
@@ -215,3 +295,44 @@ def test_older_verified_partitions_restart_without_reusing_deletion_authority(st
     assert restarted_worker()["outcomes"][0]["status"] == "partition_verification_restarted"
     assert restarted_worker()["outcomes"][0]["status"] == "partition_verified"
     assert restarted_worker()["outcomes"][0]["status"] == "partition_reclaimed"
+
+
+def test_book_archival_holds_intermediate_control_frames_not_only_canonical_mutations(storage, tmp_path, monkeypatch):
+    from sqlalchemy.exc import DBAPIError
+    from portal.backend.db.fact_storage_schema import fact_partition_name
+    from portal.backend.service.storage.repos.fact_references import lock_canonical_raw_references
+    fixture = _raw_book_fixture(storage, tmp_path, monkeypatch)
+    for index, fact in enumerate(fixture.facts):
+        _publish_book_result(fixture, index)
+        if index == 0:
+            with storage.database.session() as writer:
+                # Three prefix positions exceed this two-row mapping budget:
+                # success proves the real hot-holder fast path, not a rescan.
+                lock_canonical_raw_references(writer, [fixture.facts[-1]], max_mapping_rows=2)
+                with pytest.raises(DBAPIError) as busy:
+                    with storage.database.session() as reclaimer:
+                        reclaimer.execute(text("LOCK TABLE market." + fact_partition_name(fixture.day) + " IN ACCESS EXCLUSIVE MODE NOWAIT"))
+                assert busy.value.orig.pgcode == "55P03", "the holder cannot be dropped before its successor commits"
+    archive = fact_archival.PostgresCanonicalFactArchiveRepository(database=storage.database,
+        object_store=fixture.store, temporary_directory=tmp_path / "staging")
+    archive.seal_partition(fixture.day)
+    with storage.database.session() as session:
+        key = session.execute(text("SELECT object_key FROM market.raw_archive_manifests WHERE id=:id"),
+                              {"id": fixture.manifests[1]}).scalar_one()
+    path = fixture.store.local_path(key)
+    original = path.read_bytes()
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        archive.stage_next_page(fixture.day)
+    progress = archive.inspect_partition(fixture.day)
+    assert progress["state"] == "sealed" and progress["page_count"] == 0
+    path.write_bytes(original)
+    page = archive.stage_next_page(fixture.day)
+    assert archive.verify_next_page(fixture.day)["status"] == "page_verified"
+    assert archive.verify_partition(fixture.day)["row_count"] == 2
+    with storage.database.session() as session:
+        held = session.execute(text("SELECT target_id FROM market.fact_archive_dependencies WHERE manifest_id=:id ORDER BY target_id"),
+                               {"id": page["manifest_id"]}).scalars().all()
+        assert held == sorted(fixture.manifests), "the heartbeat has no canonical row but remains replay evidence"
+        assert session.execute(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
+                               {"day": fixture.day}).scalar_one() == 2

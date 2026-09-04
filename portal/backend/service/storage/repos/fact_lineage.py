@@ -65,14 +65,18 @@ def _verify_witness(row, evidence, record):
     for name in ("raw_record_id", "definition_id", "session_id"):
         if name in evidence:
             expected[name] = evidence[name]
-    if row["fact_type"] in {"market.trade", "market.l2_book"}:
+    if row is None:
+        # A prefix position is a raw-scope obligation, not a synthesized Fact.
+        expected["requested_channel"] = "level2"
+    elif row["fact_type"] in {"market.trade", "market.l2_book"}:
         expected.update(provider=row["source_provider"], venue=row["source_venue"], received_at=row["received_at"])
     # A derived BBO/depth Fact is authored by QT, not by the exchange. Its
     # provider frame is bound by its declared source position; never relabel
     # the derived author or compare it with the raw transport's provider.
     for name, value in expected.items():
         if getattr(record, name) != value:
-            raise RuntimeError(f"canonical_raw_lineage_witness_mismatch: fact_version_id={row['id']} field={name}")
+            identity = row["id"] if row is not None else evidence["root_fact_version_id"]
+            raise RuntimeError(f"canonical_raw_lineage_witness_mismatch: fact_version_id={identity} field={name}")
 
 
 def _raw_records(path, *, manifest_id, limits):
@@ -84,7 +88,8 @@ def _raw_records(path, *, manifest_id, limits):
 
 def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_verifier,
                                        limits: RawArchiveReadLimits = RawArchiveReadLimits(),
-                                       max_mapping_rows: int = 50_000, bound_manifest_ids=None, check_budget=None):
+                                       max_mapping_rows: int = 50_000, bound_manifest_ids=None, check_budget=None,
+                                       preserve_book_prefixes: bool = False):
     """Prove exact source rows in one current acknowledged placement per witness.
 
     Compacted mappings may be used after an original object's recorded expiry.
@@ -92,6 +97,9 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     Decode count and logical-frame budgets apply across the complete call.
     A recheck uses its already acknowledged dependency IDs so a later compacted
     placement cannot change an otherwise valid immutable page's proof.
+    Book-prefix admission additionally proves every receive ordinal from one
+    through each root position. Raw control frames are included even when they
+    produced no canonical book mutation; this does not reconstruct book state.
     """
     if type(max_mapping_rows) is not int or max_mapping_rows <= 0 or len(rows) > max_mapping_rows:
         raise ValueError("canonical_raw_lineage_mapping_budget_invalid")
@@ -104,12 +112,31 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     record_ids = [key[1] for key in wanted if key[0] == "record"]
     positions = [dict(zip(("definition_id", "session_id", "connection_epoch", "receive_ordinal"), key[1:]))
                  for key in wanted if key[0] == "position"]
+    prefixes = {}
+    if preserve_book_prefixes:
+        for row in rows:
+            if row["fact_type"] == "market.trade":
+                continue
+            _, evidence = _witness(row)
+            scope = tuple(evidence[name] for name in ("definition_id", "session_id", "connection_epoch"))
+            prior = prefixes.get(scope)
+            if prior is not None and prior["provider_product_id"] != evidence["provider_product_id"]:
+                raise RuntimeError(f"canonical_raw_lineage_prefix_scope_conflict: fact_version_id={row['id']}")
+            if prior is None or evidence["receive_ordinal"] > prior["receive_ordinal"]:
+                prefixes[scope] = {name: evidence[name] for name in (
+                    "definition_id", "session_id", "connection_epoch", "receive_ordinal", "provider_product_id"
+                )} | {"root_fact_version_id": row["id"]}
+        if sum(scope["receive_ordinal"] for scope in prefixes.values()) > max_mapping_rows:
+            raise RuntimeError("canonical_raw_lineage_prefix_budget_exceeded: complete book prefixes exceed the mapping budget")
+        for key, scope in prefixes.items():
+            for ordinal in range(1, scope["receive_ordinal"] + 1):
+                wanted[("position", *key, ordinal)].append((None, {**scope, "receive_ordinal": ordinal}))
     matches = []
     bound_predicate = "" if bound_manifest_ids is None else "AND manifests.id = ANY(:bound_ids)"
     bound_params = {} if bound_manifest_ids is None else {"bound_ids": sorted(set(bound_manifest_ids))}
     # Both predicates address the exact record mapping, never a manifest's
     # min/max ordinal range (which can contain holes or another reconnect).
-    for predicate, params in (
+    queries = [
         ("mappings.raw_record_id = ANY(:ids)", {"ids": record_ids}),
         ("EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:positions AS jsonb)) "
          "AS positions(definition_id text, session_id text, connection_epoch bigint, receive_ordinal bigint) "
@@ -118,8 +145,16 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
          "AND manifests.first_receive_ordinal<=positions.receive_ordinal AND manifests.last_receive_ordinal>=positions.receive_ordinal "
          "AND positions.connection_epoch=mappings.connection_epoch AND positions.receive_ordinal=mappings.receive_ordinal)",
          {"positions": json.dumps(positions)}),
-    ):
-        if not (record_ids if "ids" in params else positions):
+        ("EXISTS (SELECT 1 FROM jsonb_to_recordset(CAST(:prefixes AS jsonb)) "
+         "AS prefixes(definition_id text, session_id text, connection_epoch bigint, receive_ordinal bigint) "
+         "WHERE prefixes.definition_id=manifests.definition_id AND prefixes.session_id=manifests.session_id "
+         "AND prefixes.session_id=mappings.session_id AND prefixes.connection_epoch=manifests.connection_epoch "
+         "AND prefixes.connection_epoch=mappings.connection_epoch "
+         "AND mappings.receive_ordinal BETWEEN 1 AND prefixes.receive_ordinal)",
+         {"prefixes": json.dumps(list(prefixes.values()))}),
+    ]
+    for predicate, params in queries:
+        if not (record_ids if "ids" in params else positions if "positions" in params else prefixes):
             continue
         found = session.execute(text(f"""
             SELECT manifests.*, mappings.raw_record_id, mappings.object_row_index, mappings.object_row_group,
@@ -152,10 +187,11 @@ def resolve_canonical_raw_archive_refs(session, *, rows, object_store, byte_veri
     manifests = {}
     for key, witnesses in wanted.items():
         available = list(candidates[key].values())
+        context = witnesses[0][0]["id"] if witnesses[0][0] is not None else witnesses[0][1]["root_fact_version_id"]
         if not available:
-            raise RuntimeError(f"canonical_raw_lineage_mapping_missing: fact_version_id={witnesses[0][0]['id']}")
+            raise RuntimeError(f"canonical_raw_lineage_mapping_missing: fact_version_id={context} raw_position={key}")
         if len({item["raw_record_id"] for item in available}) != 1:
-            raise RuntimeError(f"canonical_raw_lineage_position_ambiguous: fact_version_id={witnesses[0][0]['id']}")
+            raise RuntimeError(f"canonical_raw_lineage_position_ambiguous: fact_version_id={context}")
         mapping = min(available, key=lambda item: (item["byte_count"], item["id"]))
         manifests[mapping["id"]] = mapping
         selected[mapping["id"]].append((mapping, witnesses))

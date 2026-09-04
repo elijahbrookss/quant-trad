@@ -540,6 +540,17 @@ placement; a surviving compacted copy can satisfy it, but an unrelated live
 object cannot. This catalog/lifetime check does not replace deep byte, mapping,
 causal, or complete-chain verification during archive admission.
 
+For a book reference, an existing immutable hot L2/BBO/depth row in the same
+definition/session already protects the session's raw objects. The writer's
+backlog lookup retains PostgreSQL relation locks until commit, preventing that
+holder's partition from being dropped before its successor is published. This
+keeps ordinary collection from rescanning an ever-growing connection prefix on
+every update. Without a hot holder, late book admission checks every ordinal
+from one through the new position, locks all candidate placements, and rejects
+a missing, ambiguous, expired or unfinished-expiration prefix. Repeated roots
+share their largest definition/session/epoch scope. The existing mapping budget
+still applies; a large unprotected import fails rather than scanning unboundedly.
+
 An execution `planned` event also makes that placement unavailable for new
 references, even without `completed`: a process can stop after unlink but before
 recording completion. A failed/skipped event cannot prove the bytes survived.
@@ -608,6 +619,18 @@ their author; their declared input position binds the exchange frame without
 relabeling the derived source. Mapping row offsets are global within a v1 object;
 the writer's `object_row_group=0` field is a placeholder, not random-access proof.
 
+Canonical staging now requests **complete book raw prefixes**: for each
+definition/session/epoch it takes the greatest L2/BBO/depth source ordinal on
+the page and proves every physical position from one through it. Coinbase
+receive ordinals restart at one per connection. Each position must have one
+unambiguous raw identity in an acknowledged placement, with exact mapping,
+product and requested-Level-2 scope. This includes subscriptions, heartbeats and
+other frames that produced no canonical mutation. The chosen object IDs become
+permanent cold dependency holds; rechecking cannot silently switch placements.
+The real-database test removes an intervening heartbeat object and verifies
+that staging fails with all hot payloads retained, then restores it and proves
+the heartbeat is held alongside the canonical snapshot/update sources.
+
 The object's ordered `content_fingerprint` is independently recomputed from
 **all** stored raw IDs and frame hashes, not just the page's requested witnesses.
 Writer and verifier share the unchanged v1 canonical-JSON serialization. Two
@@ -646,11 +669,17 @@ manifest fingerprint without rejection. A regression reproduces that mismatch,
 including fingerprints that omit raw rows not requested by the canonical page.
 Earlier receipts cannot satisfy the stronger gate. Old incomplete draft catalogs are
 not silently rewritten or blessed and require explicit review before reuse.
+Version `market.canonical_archive_verification.v4` additionally requires the
+complete raw book-prefix proof. Earlier last-frame receipts cannot satisfy it.
 
-This proof preserves each direct raw frame; it does **not** by itself prove the
-complete L2 snapshot/update or checkpoint chain, normalized input-window
-closure, or every transitive feature dependency. Those completion gates and the
-remaining cold-reader conversions still precede destructive activation.
+This proves and preserves the complete raw book prefix; it does **not** by
+itself verify the checkpoint/validity reconstruction boundary, normalized
+input-window closure, or every transitive feature dependency. Those completion
+gates still precede destructive activation. Prefix verification currently shares
+the 50,000-row mapping and per-call decode budgets. Long epochs therefore still
+need a resumable shared-prefix proof path before the whole L2 retention path can
+be considered ready; smaller canonical pages alone do not shorten a root's
+source prefix. The six-family reclamation gate has not been broadened by this step.
 
 ### Resumable Canonical Verification
 

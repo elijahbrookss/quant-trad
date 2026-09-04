@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -140,3 +141,77 @@ def test_malformed_book_position_is_not_silently_ignored(position):
                            provenance={"_qt_bbo_evidence": {"source_position": position}})
     with pytest.raises(ValueError, match="reference_invalid"):
         lock_canonical_raw_references(_Session(), [fact])
+
+
+class _BookSession(_Session):
+    def __init__(self, mappings, *, protected=False, **kwargs):
+        super().__init__(**kwargs)
+        self.book_mappings = mappings
+        self.protected = protected
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        if "fact_hot_payloads AS hot" in sql:
+            self.statements.append((sql, params))
+            return _Result([row["request_key"] for row in json.loads(params["prefixes"])] if self.protected else [])
+        if "raw_archive_record_mappings AS mappings" in sql:
+            self.statements.append((sql, params))
+            result = []
+            if "ids" in params:
+                result = [{**row, "request_key": "record:" + row["raw_record_id"]} for row in self.book_mappings
+                          if row["raw_record_id"] in params["ids"]]
+            else:
+                for request in json.loads(params["requests"]):
+                    result.extend({**row, "request_key": request["request_key"]} for row in self.book_mappings
+                                  if 1 <= row["receive_ordinal"] <= request["receive_ordinal"])
+            return _Result(result[:params["limit"]])
+        return super().execute(statement, params)
+
+
+def _book(ordinal=3):
+    return SimpleNamespace(fact_type="market.l2_book", observation_key="book",
+        provenance={"_qt_l2_evidence": {"raw_record_id": f"raw-{ordinal}", "definition_id": "book-definition",
+            "session_id": "book-session", "connection_epoch": 0, "receive_ordinal": ordinal}})
+
+
+def _book_mappings(ordinals=(1, 2, 3)):
+    return [{"raw_record_id": f"raw-{ordinal}", "manifest_id": f"manifest-{ordinal}", "receive_ordinal": ordinal}
+            for ordinal in ordinals]
+
+
+def test_late_book_import_locks_every_prefix_placement_before_fresh_expiry_check():
+    session = _BookSession(_book_mappings())
+    lock_canonical_raw_references(session, [_book()])
+    assert session.statements[-2][1]["ids"] == ["manifest-1", "manifest-2", "manifest-3"]
+    assert "FOR KEY SHARE" in session.statements[-2][0]
+    assert "storage_lifecycle_events" in session.statements[-1][0]
+
+
+@pytest.mark.parametrize("kind", ["expired", "pending"])
+def test_live_final_frame_cannot_admit_an_expired_or_uncertain_prefix(kind):
+    session = _BookSession(_book_mappings(), **{kind: ["manifest-2"]})
+    with pytest.raises(RuntimeError, match="reference_(expired|expiration_pending).*raw-2"):
+        lock_canonical_raw_references(session, [_book()])
+
+
+def test_late_book_import_rejects_missing_and_ambiguous_intermediate_positions():
+    with pytest.raises(RuntimeError, match="prefix_incomplete"):
+        lock_canonical_raw_references(_BookSession(_book_mappings((1, 3))), [_book()])
+    rows = [*_book_mappings(), {"raw_record_id": "different", "manifest_id": "alias", "receive_ordinal": 2}]
+    with pytest.raises(RuntimeError, match="prefix_ambiguous"):
+        lock_canonical_raw_references(_BookSession(rows), [_book()])
+
+
+def test_existing_hot_backlog_avoids_rescanning_an_unbounded_live_epoch():
+    session = _BookSession(_book_mappings((100_000,)), protected=True)
+    lock_canonical_raw_references(session, [_book(100_000)], max_mapping_rows=2)
+    assert any("fact_hot_payloads AS hot" in sql for sql, _ in session.statements)
+    assert not any("BETWEEN 1" in sql for sql, _ in session.statements)
+    assert session.statements[-2][1]["ids"] == ["manifest-100000"]
+
+
+def test_large_unprotected_prefix_fails_before_an_unbounded_mapping_query():
+    session = _BookSession(_book_mappings((100_000,)))
+    with pytest.raises(RuntimeError, match="reference_prefix_budget_exceeded"):
+        lock_canonical_raw_references(session, [_book(100_000)], max_mapping_rows=2)
+    assert not any("raw_archive_record_mappings AS mappings" in sql for sql, _ in session.statements)

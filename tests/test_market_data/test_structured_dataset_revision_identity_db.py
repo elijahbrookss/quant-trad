@@ -706,16 +706,18 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
     ]["source_position"]
     assert reconnect_position["connection_epoch"] == 1
     assert reconnect_position["receive_ordinal"] == 1
-    missing_outcome = market_data_repo.ingest_facts(
-        series_id=bbo_series_id,
-        source_id=source_id,
-        facts=(reconnect_without_archive_bbo,),
-        request={
-            "fixture": "book-feature-revision-lineage-unarchived-reconnect",
-            "revision": 4,
-        },
-    )
-    assert missing_outcome.corrected_count == 1
+    # New references are now rejected at publication, before they can poison
+    # later freezes. Keep testing the freeze resolver's historical defense too.
+    with pytest.raises(RuntimeError, match="canonical_raw_reference_missing"):
+        market_data_repo.ingest_facts(
+            series_id=bbo_series_id,
+            source_id=source_id,
+            facts=(reconnect_without_archive_bbo,),
+            request={"fixture": "book-feature-revision-lineage-unarchived-reconnect", "revision": 4},
+        )
+    assert [row.revision for row in market_data_repo.read_fact_revisions(
+        series_id=bbo_series_id, start=_RANGE_START, end=_RANGE_END)] == [1, 2, 3]
+    from portal.backend.service.storage.repos.market_data import _resolve_canonical_book_archive_positions
     with pytest.raises(
         RuntimeError,
         match=(
@@ -723,15 +725,7 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
             "has no acknowledged archive"
         ),
     ):
-        market_data_repo.freeze_dataset(
-            (
-                DatasetSeriesRequest(
-                    series_id=bbo_series_id,
-                    start=_RANGE_START,
-                    end=_RANGE_END,
-                ),
-            ),
-            purpose="test",
-            created_by="pytest",
-        )
+        with db.session() as session:
+            _resolve_canonical_book_archive_positions(session, positions=[reconnect_position], series_id=bbo_series_id,
+                fact_type="market.bbo", start=_RANGE_START, end=_RANGE_END, as_of_commit_seq=2**63 - 1)
     market_structure_repository.release(claim)

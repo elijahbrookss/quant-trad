@@ -263,6 +263,13 @@ Previously verified hot partitions withdraw their old admission and resume
 bounded current-version verification while retaining all data and old receipts;
 the executor must not silently promote an old receipt to the stronger proof.
 
+Book raw-source admission retains a complete connection prefix, including
+control frames without canonical mutations. A last-frame mapping alone cannot
+prove a reconstructed book's source lifetime. Existing hot session holders
+protect live publication without repeated full-history scans; late imports
+without a holder must fence and check the complete prefix. Checkpoint/validity
+and long-prefix resume proofs remain required before admitting book reclamation.
+
 ### Operational Consequences
 
 The platform gains deterministic forensic replay and can correct parser or

@@ -37,7 +37,7 @@ from .market_lifecycle import MarketStorageLifecycleBusyError, market_storage_li
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v3"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v4"
 
 
 def _series_catalog(manifest):
@@ -185,6 +185,7 @@ class PostgresCanonicalFactArchiveRepository:
             limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
             bound_manifest_ids=bound_manifest_ids,
             check_budget=self.check_budget,
+            preserve_book_prefixes=True,
         ))
         for (series_id, fact_type), group in groups.items():
             self._check_budget()

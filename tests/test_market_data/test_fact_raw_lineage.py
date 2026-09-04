@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import json
 
@@ -15,9 +16,9 @@ from portal.backend.service.storage.repos.fact_lineage import resolve_canonical_
 from tests.test_market_data.test_market_structure_archive import _record, _segment
 
 
-def _fixture(tmp_path, ordinals=(1, 2)):
+def _fixture(tmp_path, ordinals=(1, 2), *, requested_channel="market_trades"):
     segment = _segment(tmp_path / "spool")
-    records = [_record(segment, ordinal) for ordinal in ordinals]
+    records = [replace(_record(segment, ordinal), requested_channel=requested_channel) for ordinal in ordinals]
     encoded = encode_raw_records_to_parquet(records, archive_segment_id=segment.spool_segment_id,
                                            temporary_directory=tmp_path / "encode")
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
@@ -51,12 +52,18 @@ class _Session:
         assert "first_receive_ordinal <=" not in sql
         if "ids" in params:
             found = [row for row in self.mappings if row["raw_record_id"] in params["ids"]]
-        else:
+        elif "positions" in params:
             wanted = json.loads(params["positions"])
             found = [row for row in self.mappings if any(
                 (row["definition_id"], row["mapped_session_id"], row["mapped_epoch"], row["mapped_ordinal"]) ==
                 (item["definition_id"], item["session_id"], item["connection_epoch"], item["receive_ordinal"])
                 for item in wanted)]
+        else:
+            prefixes = json.loads(params["prefixes"])
+            found = [row for row in self.mappings if any(
+                (row["definition_id"], row["mapped_session_id"], row["mapped_epoch"]) ==
+                (item["definition_id"], item["session_id"], item["connection_epoch"])
+                and 1 <= row["mapped_ordinal"] <= item["receive_ordinal"] for item in prefixes)]
         if "bound_ids" in params:
             found = [row for row in found if row["id"] in params["bound_ids"]]
         return SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: found[:params["limit"]]))
@@ -204,6 +211,55 @@ def test_exact_l2_evidence_binds_both_identity_and_connection_position(tmp_path)
     evidence["session_id"] = "different-connection"
     with pytest.raises(RuntimeError, match="witness_mismatch.*session_id"):
         _resolve(store, mappings, [row])
+
+
+def _book_root(record, trade_row):
+    return {**trade_row, "fact_type": "market.l2_book", "provenance": {"_qt_l2_evidence": {
+        **trade_row["provenance"]["_qt_trade_evidence"], "definition_id": record.definition_id,
+        "session_id": record.session_id}}}
+
+
+def test_book_prefix_proves_each_unreferenced_position_not_just_the_last_frame(tmp_path):
+    store, records, mappings, rows = _fixture(tmp_path, (1, 2, 3), requested_channel="level2")
+    root = _book_root(records[-1], rows[-1])
+    assert _resolve(store, mappings, [root], preserve_book_prefixes=True)[0]
+    for missing in (0, 1):
+        without = [row for index, row in enumerate(mappings) if index != missing]
+        assert _resolve(store, without, [root])[0], "the previous last-frame proof cannot see this hole"
+        with pytest.raises(RuntimeError, match="mapping_missing.*raw_position"):
+            _resolve(store, without, [root], preserve_book_prefixes=True)
+    changed = [dict(row) for row in mappings]
+    changed[1]["mapped_frame_sha256"] = "a" * 64
+    with pytest.raises(RuntimeError, match="mapping_mismatch"):
+        _resolve(store, changed, [root], preserve_book_prefixes=True)
+
+
+def test_book_prefix_binds_all_required_objects_and_respects_the_root_boundary(tmp_path):
+    store, records, mappings, rows = _fixture(tmp_path / "opening", (1,), requested_channel="level2")
+    other_store, later_records, later_mappings, later_rows = _fixture(tmp_path / "tail", (2, 3), requested_channel="level2")
+    ack = store.put_verified(object_key="tail.parquet", source_path=other_store.local_path("fixture.parquet"),
+                             expected_sha256=later_mappings[0]["object_sha256"])
+    for mapping in later_mappings:
+        mapping.update(id="tail", object_key=ack.object_key, object_uri=ack.object_uri)
+    root = _book_root(later_records[-1], later_rows[-1])
+    references = _resolve(store, [*mappings, *later_mappings], [root], preserve_book_prefixes=True)[0]
+    assert set(references) == {"raw-manifest", "tail"}
+    with pytest.raises(RuntimeError, match="mapping_missing"):
+        _resolve(store, [*mappings, *later_mappings], [root], preserve_book_prefixes=True, bound_manifest_ids={"tail"})
+    opening = _book_root(records[0], rows[0])
+    assert set(_resolve(store, [*mappings, *later_mappings], [opening], preserve_book_prefixes=True)[0]) == {"raw-manifest"}
+    store.local_path("fixture.parquet").unlink()
+    with pytest.raises(FileNotFoundError):
+        _resolve(store, [*mappings, *later_mappings], [root], preserve_book_prefixes=True)
+
+
+def test_book_prefix_rejects_wrong_product_channel_and_work_beyond_its_bound(tmp_path):
+    store, records, mappings, rows = _fixture(tmp_path, (1, 2, 3))
+    root = _book_root(records[-1], rows[-1])
+    with pytest.raises(RuntimeError, match="witness_mismatch.*requested_channel"):
+        _resolve(store, mappings, [root], preserve_book_prefixes=True)
+    with pytest.raises(RuntimeError, match="prefix_budget_exceeded"):
+        _resolve(store, mappings, [root], preserve_book_prefixes=True, max_mapping_rows=2)
 
 
 def test_qt_authored_book_features_bind_provider_frames_without_relabeling_the_author(tmp_path):

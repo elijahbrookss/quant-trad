@@ -10,7 +10,7 @@ from core.market_storage_lifecycle import MarketStorageLifecyclePolicy
 from portal.backend.service.market.market_storage_lifecycle import MarketStorageLifecycleService
 from portal.backend.service.storage.repos import market_lifecycle
 from portal.backend.service.storage.repos.fact_references import lock_canonical_raw_references
-from tests.test_market_data.test_fact_raw_lineage_db import _raw_trade_fixture, _canonical_trade
+from tests.test_market_data.test_fact_raw_lineage_db import _raw_trade_fixture, _canonical_trade, _raw_book_fixture, _publish_book_result
 from tests.test_market_data.test_fact_storage_tiers_db import storage
 
 pytestmark = pytest.mark.db
@@ -126,6 +126,28 @@ def test_interrupted_unlink_blocks_new_references_until_expiration_resumes(stora
     assert resumed["status"] == "completed" and resumed["recovered_after_prior_plan"] is True
     with pytest.raises(RuntimeError, match="canonical_raw_reference_expired"):
         storage.repo.ingest_facts(series_id=fixture.series_id, source_id=fixture.source_id, facts=[fact])
+    with storage.database.session() as session:
+        assert session.execute(text("SELECT count(*) FROM market.fact_versions WHERE series_id=:id"),
+                               {"id": fixture.series_id}).scalar_one() == 0
+
+
+def test_late_book_prefix_admission_and_control_frame_expiry_exclude_each_other(storage, tmp_path, monkeypatch):
+    fixture = _raw_book_fixture(storage, tmp_path, monkeypatch)
+    monkeypatch.setattr(market_lifecycle, "db", storage.database)
+    lifecycle = market_lifecycle.market_storage_lifecycle_repository
+    service = MarketStorageLifecycleService(lifecycle_repository=lifecycle, market_repository=fixture.structures)
+    control = _expiration_item(storage, fixture.manifests[1])
+    tail = fixture.facts[-1]
+    with storage.database.session() as writer:
+        lock_canonical_raw_references(writer, [tail])
+        deferred = service._execute_archive_expiration(item=control, store=fixture.store)
+        assert deferred["reason"] == "canonical_reference_busy" and deferred["status"] == "skipped"
+        assert fixture.store.local_path(control["object_key"]).exists()
+    # No new Fact was published. Expiry can now win; having the final frame
+    # still available must not allow a late import to hide the missing prefix.
+    assert service._execute_archive_expiration(item=control, store=fixture.store)["status"] == "completed"
+    with pytest.raises(RuntimeError, match="canonical_raw_reference_expired.*prefix"):
+        _publish_book_result(fixture, 1)
     with storage.database.session() as session:
         assert session.execute(text("SELECT count(*) FROM market.fact_versions WHERE series_id=:id"),
                                {"id": fixture.series_id}).scalar_one() == 0
