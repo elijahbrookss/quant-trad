@@ -23,6 +23,7 @@ code_paths:
   - portal/backend/service/market/market_storage_lifecycle.py
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/market_lifecycle.py
+  - portal/backend/service/storage/repos/fact_references.py
   - portal/backend/workers
   - cli/main.py
   - docker/docker-compose.yml
@@ -227,6 +228,33 @@ physical/cloud resource budget remain production-readiness gates. That proof is
 not a 24-hour process lifetime: admitted production has no duration cap.
 
 ## Consequences
+
+### Canonical Tier Retention Addendum
+
+The generalized canonical tier keeps immutable revision headers in PostgreSQL,
+verified immutable Parquet payloads on the configured archive filesystem, and
+explicit daily hot-payload progress. The current implementation and rollout
+gates are defined in
+[Generalized Fact Data Plane](../data/GENERALIZED_FACT_DATA_PLANE.md#canonical-retention-planning);
+the historical family-table compression script above is not its cutover.
+
+Raw retention windows do not override canonical source lifetime. Hot backlog
+protects source objects until cold publication creates permanent dependency
+holds. Expiration takes an object-specific manifest row lock through final
+admission/unlink/completion; canonical writers take a conflicting shared row
+lock and recheck expiry before committing new references. This closes the
+check-versus-publication race without serializing all ingestion behind a global
+archive fence. New reference writes use READ COMMITTED, and identical existing
+canonical rows remain no-ops. Current stream publication remains archive-first;
+this does not introduce a spool-first publication lane.
+
+This safety choice can retain raw evidence beyond an ordinary age window, and
+the permanent canonical index still grows on NVMe. Budget pressure must report
+that cost rather than expire unarchived evidence or silently disable collection.
+Minimal dependency closure and bounded execution remain activation requirements;
+the existence of backlog protection alone does not complete those proofs.
+
+### Operational Consequences
 
 The platform gains deterministic forensic replay and can correct parser or
 feature implementations without pretending the corrected result was known

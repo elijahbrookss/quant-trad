@@ -346,6 +346,8 @@ class MarketStorageLifecycleService:
                 blockers.append("frozen_dataset_pin")
             if int(row.get("canonical_dependency_count") or 0):
                 blockers.append("canonical_archive_dependency")
+            if bool(row.get("canonical_backlog_present")):
+                blockers.append("canonical_hot_backlog")
             target_id = str(row["target_id"])
             operation_id = lifecycle_operation_id(
                 action="archive_expire",
@@ -461,6 +463,28 @@ class MarketStorageLifecycleService:
             return self._failure_outcome(item=item, error=exc)
 
     def _execute_archive_expiration(
+        self, *, item: Mapping[str, Any], store: FilesystemRawArchiveObjectStore,
+    ) -> dict[str, Any]:
+        try:
+            with self.lifecycle_repository.archive_expiration_lock(
+                target_kind=str(item["target_kind"]), target_id=str(item["target_id"]),
+            ):
+                return self._execute_locked_archive_expiration(item=item, store=store)
+        except MarketStorageLifecycleBusyError as exc:
+            self.lifecycle_repository.append_event(
+                operation_id=str(item["operation_id"]), action="archive_expire", event_type="skipped",
+                target_kind=str(item["target_kind"]), target_id=str(item["target_id"]),
+                reason=str(exc), evidence={"object_key": item["object_key"]},
+            )
+            logger.info("market_archive_expiration_deferred | target_kind=%s target_id=%s reason=%s",
+                        item["target_kind"], item["target_id"], exc)
+            return {"action": "archive_expire", "operation_id": str(item["operation_id"]),
+                    "status": "skipped", "reason": "canonical_reference_busy"}
+        except Exception as exc:
+            self._record_failure(item=item, error=exc, evidence={"object_key": item["object_key"]})
+            return self._failure_outcome(item=item, error=exc)
+
+    def _execute_locked_archive_expiration(
         self,
         *,
         item: Mapping[str, Any],

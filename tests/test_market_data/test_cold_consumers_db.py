@@ -131,16 +131,19 @@ def test_legacy_witness_and_referenced_spec_guard_survive_cooling(storage, tmp_p
 
 def _persist_reader_fixture(storage, series_id, facts):
     # This fixture exercises canonical read semantics, not fenced stream/raw
-    # archive admission. Production L2 ingestion still requires its owner.
+    # archive admission. Production L2 ingestion still requires its owner;
+    # reference lifetime/admission has its own real-archive database proofs.
+    from unittest.mock import patch
     run_id = str(uuid4())
     storage.repo._start_ingestion_run(
         run_id=run_id, source_id=storage.source_id, request={"fixture": "cold_reader"},
         source_revision=None, requested_start=BASE, requested_end=BASE + timedelta(days=1),
         requested_count=len(facts),
     )
-    return storage.repo._ingest_canonical_rows(
-        run_id=run_id, series_id=series_id, rows=facts, allow_corrections=True,
-    )
+    with patch("portal.backend.service.storage.repos.fact_references.lock_canonical_raw_references"):
+        return storage.repo._ingest_canonical_rows(
+            run_id=run_id, series_id=series_id, rows=facts, allow_corrections=True,
+        )
 
 
 def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_path, monkeypatch):

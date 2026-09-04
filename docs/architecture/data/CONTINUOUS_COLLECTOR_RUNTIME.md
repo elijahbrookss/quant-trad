@@ -30,6 +30,7 @@ code_paths:
   - portal/backend/service/market/market_structure_service.py
   - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/fact_retention.py
+  - portal/backend/service/storage/repos/fact_references.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/workers/market_data_collector.py
   - portal/backend/workers/market_data_collector_health.py
@@ -284,6 +285,15 @@ The active raw lifecycle has two action types:
   replacement checksums, fsyncs filesystem deletion, then records immutable
   completion evidence. A manifest remains visible as `expired` and replay fails
   with that explicit state.
+
+Expiration additionally protects hot canonical backlog and permanent cold
+dependency holds. Its final status check/unlink holds a narrow manifest row lock
+that conflicts with new canonical reference publication. Busy targets defer to
+a later run; an expiry completion prevents subsequent publication of a new
+reference to that expired copy. Other objects do not take a global ingestion
+fence. Canonical no-ops remain envelope-only. The complete lifetime protocol and
+its bounded mapping work are described in
+[Generalized Fact Data Plane](GENERALIZED_FACT_DATA_PLANE.md#hot-backlog-and-reference-lifetime).
 
 Legacy `chunk_compress`/`chunk_expire` arrays remain empty. Their retired
 family-table policy keys are rejected and must not operate on generalized Facts.

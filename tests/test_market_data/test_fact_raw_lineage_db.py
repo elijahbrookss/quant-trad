@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -16,7 +17,7 @@ from tests.test_market_data.test_market_state_phase3 import _trade
 pytestmark = pytest.mark.db
 
 
-def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path, monkeypatch):
+def _raw_trade_fixture(storage, tmp_path, monkeypatch):
     monkeypatch.setattr(market_structure, "db", storage.database)
     structures = market_structure.market_structure_repository
     day = storage.today - timedelta(days=2)
@@ -43,19 +44,35 @@ def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path
         encoded, ack, records = publish_spool_archive(segment, object_store=store, temporary_directory=tmp_path / "raw-staging")
         manifests.append(structures.commit_archive(claim, encoded=encoded, acknowledgement=ack, records=records).manifest_id)
         raws.append(raw)
+    return SimpleNamespace(day=day, source=source, source_id=source_id, series_id=series_id,
+                           store=store, raws=raws, manifests=manifests, structures=structures, claim=claim)
+
+
+def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
+    trade = replace(_trade(trade_id, offset="0", side=MarketSide.BUY, price="100", receive_ordinal=1),
+                    provider_product_id="BTC-USD", provider_event_time=fixture.raws[0].received_at - timedelta(seconds=1),
+                    provider_message_time=raw.received_at, received_at=raw.received_at,
+                    accepted_at=raw.received_at, known_at=raw.received_at, connection_epoch=raw.connection_epoch,
+                    receive_ordinal=raw.receive_ordinal, raw_record_id=raw.raw_record_id,
+                    coverage_interval_id=None)
+    return canonicalize_market_trade(trade, source=fixture.source)
+
+
+def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path, monkeypatch):
+    fixture = _raw_trade_fixture(storage, tmp_path, monkeypatch)
+    day, store, raws, manifests = fixture.day, fixture.store, fixture.raws, fixture.manifests
+    structures, series_id, source_id = fixture.structures, fixture.series_id, fixture.source_id
     canonical = []
     for raw in raws:
-        trade = replace(_trade("same-trade", offset="0", side=MarketSide.BUY, price="100", receive_ordinal=1),
-                        provider_product_id="BTC-USD", provider_event_time=raws[0].received_at - timedelta(seconds=1),
-                        provider_message_time=raw.received_at, received_at=raw.received_at,
-                        accepted_at=raw.received_at, known_at=raw.received_at, connection_epoch=raw.connection_epoch,
-                        receive_ordinal=raw.receive_ordinal, raw_record_id=raw.raw_record_id,
-                        coverage_interval_id=None)
-        fact = canonicalize_market_trade(trade, source=source)
+        fact = _canonical_trade(fixture, raw)
         canonical.append(fact)
         storage.repo.ingest_facts(series_id=series_id, source_id=source_id, facts=[fact])
     assert canonical[0].material_hash == canonical[1].material_hash
     assert canonical[0].row_hash != canonical[1].row_hash
+    for identity in manifests:
+        status = structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
+        assert status["canonical_backlog_present"] is True and status["pinned"] is True
+        assert status["canonical_dependency_count"] == 0
     archive = fact_archival.PostgresCanonicalFactArchiveRepository(
         database=storage.database, object_store=store, temporary_directory=tmp_path / "staging",
         limits=fact_archival.FactArchiveLimits(max_rows=1, row_group_size=1),
@@ -104,3 +121,4 @@ def test_archive_keeps_each_trade_revisions_exact_raw_delivery(storage, tmp_path
     for identity in manifests:
         status = structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
         assert status["canonical_dependency_count"] == 1 and status["pinned"] is True
+        assert status["canonical_backlog_present"] is False

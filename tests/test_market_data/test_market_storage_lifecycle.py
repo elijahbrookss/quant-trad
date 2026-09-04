@@ -92,6 +92,10 @@ class _PinnedDuringExecutionRepository(_LifecycleRepository):
     def append_event(self, **kwargs):
         self.events.append(dict(kwargs))
 
+    @contextmanager
+    def archive_expiration_lock(self, **_kwargs):
+        yield
+
 
 def _service(repository: _LifecycleRepository) -> MarketStorageLifecycleService:
     return MarketStorageLifecycleService(
@@ -219,6 +223,17 @@ def test_canonical_archive_hold_blocks_planning_without_user_or_dataset_pins():
     held = next(item for item in plan["archive_expirations"] if item["target_id"] == "manifest-unpinned")
     assert held["eligible"] is False
     assert held["blockers"] == ["canonical_archive_dependency"]
+
+
+def test_hot_canonical_backlog_blocks_raw_expiration_before_any_cold_hold_exists():
+    repository = _LifecycleRepository()
+    rows = repository.list_archive_expiration_candidates()
+    rows[0]["canonical_backlog_present"] = True
+    repository.list_archive_expiration_candidates = lambda **_: rows
+    plan = _service(repository).plan(policy=MarketStorageLifecyclePolicy(), now=datetime(2026, 8, 5, tzinfo=UTC))
+    held = next(item for item in plan["archive_expirations"] if item["target_id"] == "manifest-unpinned")
+    assert held["eligible"] is False
+    assert held["blockers"] == ["canonical_hot_backlog"]
 
 
 def test_lifecycle_policy_rejects_unknown_or_unsafe_values() -> None:

@@ -39,6 +39,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_storage.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
+  - portal/backend/service/storage/repos/fact_references.py
   - portal/backend/service/storage/repos/fact_reclamation.py
   - portal/backend/service/storage/repos/fact_retention.py
   - portal/backend/service/storage/repos/market_lifecycle.py
@@ -444,6 +445,79 @@ not permission to drop it. This owner does not perform reclamation. A normalized
 empty dependency set. These gates must be completed before retention activation.
 
 ### Exact Raw-Revision Evidence
+
+#### Hot Backlog And Reference Lifetime
+
+Ordinary raw/checkpoint expiration reports `canonical_backlog_present` as well
+as permanent `canonical_dependency_count`. An attached hot payload can still
+need its raw source before any archive page or frozen dataset exists. Collector
+session provenance, L2/BBO/depth source positions, and trade-flow coverage bind
+session-scoped backlog protection; exact trade/L2 raw-ID mappings also cover
+generic canonical imports without collector-session metadata. Book/coverage
+scope deliberately protects earlier frames, not only the last source position.
+These checks use the existing JSON-containment GIN indexes and do not decode
+cold files. Planning lists `canonical_hot_backlog`; final expiry repeats the
+check. User-pin release cannot remove either class of canonical protection.
+
+The final check alone is insufficient. `archive_expiration_lock` holds an
+`UPDATE` row lock on the exact immutable raw/checkpoint manifest through the
+final status check, verified unlink, and recorded completion. It uses `NOWAIT`:
+an in-flight reference writer defers expiry with a visible skipped/retry outcome.
+The existing lifecycle fence still excludes competing expiry/compaction/pin
+operations. No manifest is updated by this row-lock protocol.
+
+The canonical writer binds declared direct raw references before publishing a
+genuine new revision. `fact_references` resolves raw IDs, exact book positions,
+and exact coverage revisions to acknowledged mappings, locks manifest rows in
+deterministic order with `KEY SHARE`, then checks expiration in a **separate**
+READ COMMITTED statement. If expiry completed while the writer waited, a new
+reference cannot be published to deleted evidence. Each raw record needs a live
+placement; a surviving compacted copy can satisfy it, but an unrelated live
+object cannot. This catalog/lifetime check does not replace deep byte, mapping,
+causal, or complete-chain verification during archive admission.
+
+An execution `planned` event also makes that placement unavailable for new
+references, even without `completed`: a process can stop after unlink but before
+recording completion. A failed/skipped event cannot prove the bytes survived.
+Admission reports `canonical_raw_reference_expiration_pending` and requires
+resuming the recorded expiration; an independently live compacted copy can still
+satisfy the reference. A dry-run plan writes no execution intent and does not
+cause this exclusion.
+
+The implemented stream lane already requires archive acknowledgement before
+canonical publication. Generic writes declaring raw references now share that
+same admission; a missing declared mapping or a set of wholly expired copies
+fails explicitly. Source fields, identities, ingestion schedules and collection
+enablement are not rewritten. A caller-supplied repeatable-read snapshot is
+rejected for reference writes because it could hide an expiry completion after
+the snapshot. Canonical no-ops remain envelope-only and do not create new pins.
+Pending revisions are identified under the existing series fence with one
+batched header query, and only their reference set is locked. Reference mapping
+work is limited to 50,000 rows per canonical batch; overflow requests a smaller
+batch rather than partially admitting evidence. Repeated observation keys are
+evaluated in batch order, so an A-to-B-to-A correction admits both new revisions
+instead of mistaking the final A for an existing-state no-op.
+
+RCA: the prior expiry gate knew about user/frozen pins and already-created cold
+holds, but not hot source facts awaiting cold archival. It could therefore treat
+their raw objects as unpinned. A second gap was the interval between checking
+acknowledged mappings and committing a new canonical reference. Backlog checks
+close the first gap; mutually conflicting, object-specific manifest row locks
+plus post-lock expiry admission close the second. The real-database regression
+checks both transaction orderings and preservation across the hot-to-cold hold
+handoff, plus an injected completion-write failure after actual unlink and a
+successful resume. It also keeps an unrelated raw reference writable while
+another object is locked. This is not a claim that every legacy normalized/composite dependency
+or checkpoint chain is now admitted for reclamation; those gates remain explicit.
+
+Performance follow-up: session-scoped backlog is conservative and can retain
+more raw/checkpoint bytes than a minimal per-root proof. Candidate checks still
+need large-history query-plan measurements. Only writers referencing an object
+being expired wait on its row lock; unrelated objects do not acquire a global
+ingestion fence. Very large historical batches and same-series writer queues
+need bounded-latency measurements before unattended activation.
+
+#### Deep Raw Admission
 
 Canonical archive admission resolves trade and L2 raw IDs from each archived
 revision's own provenance. BBO/depth use their exact definition/session/epoch/

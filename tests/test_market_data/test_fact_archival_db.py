@@ -168,7 +168,10 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
         )
         storage.repo.ingest_facts(series_id=series["market.bbo"], source_id=derived_source_id, facts=[bbo])
     for identity in raw_ids:
-        assert structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)["pinned"] is False
+        status = structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)
+        assert status["pinned"] is True
+        assert status["canonical_backlog_present"] is True
+        assert status["canonical_dependency_count"] == 0
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
     archive = fact_archival.PostgresCanonicalFactArchiveRepository(
         database=storage.database, object_store=store, temporary_directory=tmp_path / "staging",

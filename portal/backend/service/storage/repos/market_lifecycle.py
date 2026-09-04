@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from core.market_storage_lifecycle import (
     DEFAULT_HOT_TABLE_POLICIES,
@@ -110,6 +111,83 @@ class PostgresMarketStorageLifecycleRepository:
             "SELECT count(*) FROM market.fact_archive_dependencies "
             "WHERE target_kind=:target_kind AND target_id=:target_id"
         ), {"target_kind": str(target_kind), "target_id": str(target_id)}).scalar_one())
+
+    @staticmethod
+    def canonical_backlog_present(session, *, target_kind: str, target_id: str) -> bool:
+        """Protect raw/recovery evidence before permanent cold holds exist.
+
+        Session-scoped book/coverage holds are deliberately conservative: a
+        current book feature can depend on earlier snapshot/mutation frames,
+        not just the one frame at its source position. Exact trade raw IDs also
+        cover generic imports that did not carry collector-session provenance.
+        JSON containment uses the existing hot-provenance GIN indexes.
+        """
+        table = {"raw_manifest": "market.raw_archive_manifests",
+                 "book_checkpoint": "market.book_checkpoint_manifests"}.get(target_kind)
+        if table is None:
+            raise ValueError(f"canonical_backlog_target_invalid: kind={target_kind}")
+        target = session.execute(text(f"SELECT definition_id,session_id FROM {table} WHERE id=:id"),
+                                 {"id": target_id}).mappings().one_or_none()
+        if target is None:
+            raise ValueError(f"canonical_backlog_target_missing: kind={target_kind} id={target_id}")
+        scope = {"definition_id": target["definition_id"], "session_id": target["session_id"]}
+        parameters = {"id": target_id, **scope,
+                      "collector": _json({"stream_definition_id": scope["definition_id"],
+                                           "stream_session_id": scope["session_id"]}),
+                      "l2": _json({"_qt_l2_evidence": scope}),
+                      "bbo": _json({"_qt_bbo_evidence": {"source_position": scope}}),
+                      "depth": _json({"_qt_depth_evidence": {"source_position": scope}})}
+        scoped = session.execute(text("""
+            SELECT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                WHERE hot.provenance @> CAST(:collector AS jsonb)
+                   OR hot.provenance @> CAST(:l2 AS jsonb)
+                   OR hot.provenance @> CAST(:bbo AS jsonb)
+                   OR hot.provenance @> CAST(:depth AS jsonb))
+                OR EXISTS (
+                    SELECT 1 FROM market.stream_coverage_interval_versions AS coverage
+                    JOIN market.fact_hot_payloads AS hot ON hot.provenance @>
+                        jsonb_build_object('_qt_trade_flow_evidence',
+                            jsonb_build_object('coverage_interval_id', coverage.interval_id))
+                    WHERE coverage.definition_id=:definition_id AND coverage.session_id=:session_id)
+        """), parameters).scalar_one()
+        if scoped or target_kind == "book_checkpoint":
+            return bool(scoped)
+        return bool(session.execute(text("""
+            SELECT EXISTS (SELECT 1 FROM market.raw_archive_record_mappings AS mappings
+                JOIN market.fact_hot_payloads AS hot ON
+                    hot.provenance @> jsonb_build_object('_qt_trade_evidence',
+                        jsonb_build_object('raw_record_id', mappings.raw_record_id))
+                    OR hot.provenance @> jsonb_build_object('_qt_l2_evidence',
+                        jsonb_build_object('raw_record_id', mappings.raw_record_id))
+                WHERE mappings.manifest_id=:id)
+        """), {"id": target_id}).scalar_one())
+
+    @contextmanager
+    def archive_expiration_lock(self, *, target_kind: str, target_id: str):
+        """Exclude new canonical references through the final check/unlink.
+
+        The caller still owns the existing global lifecycle fence. This narrow
+        row lock conflicts with the reference writer's KEY SHARE, not unrelated
+        current collection. Lifecycle-event writes use separate sessions and
+        do not update or lock this immutable manifest row.
+        """
+        table = {"raw_manifest": "market.raw_archive_manifests",
+                 "book_checkpoint": "market.book_checkpoint_manifests"}.get(target_kind)
+        if table is None:
+            raise ValueError(f"market_storage_lifecycle_target_invalid: kind={target_kind}")
+        with db.session() as session:
+            try:
+                row = session.execute(text(f"SELECT id FROM {table} WHERE id=:id FOR UPDATE NOWAIT"),
+                                      {"id": target_id}).scalar_one_or_none()
+            except DBAPIError as exc:
+                if getattr(exc.orig, "pgcode", None) == "55P03":
+                    raise MarketStorageLifecycleBusyError(
+                        f"market_archive_reference_busy: kind={target_kind} id={target_id}; retry later"
+                    ) from exc
+                raise
+            if row is None:
+                raise ValueError(f"market_storage_lifecycle_target_missing: kind={target_kind} id={target_id}")
+            yield
 
     @staticmethod
     def acquire_dataset_pin_lock(session) -> None:
@@ -439,7 +517,11 @@ class PostgresMarketStorageLifecycleRepository:
                     ),
                     {"checkpoint_cutoff": checkpoint_cutoff, "limit": remaining},
                 ).mappings().all()
-        return [dict(row) for row in [*raw_rows, *checkpoint_rows]]
+            results = []
+            for row in [*raw_rows, *checkpoint_rows]:
+                results.append({**dict(row), "canonical_backlog_present": self.canonical_backlog_present(
+                    session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"]))})
+        return results
 
     def archive_target_status(
         self, *, target_kind: str, target_id: str
@@ -506,13 +588,17 @@ class PostgresMarketStorageLifecycleRepository:
             canonical_dependency_count = self.canonical_dependency_count(
                 session, target_kind=kind, target_id=target_id,
             )
+            canonical_backlog_present = self.canonical_backlog_present(
+                session, target_kind=kind, target_id=target_id,
+            )
         return {
             **dict(target),
             "target_kind": kind,
             "explicit_pin_count": explicit_pin_count,
             "dataset_pin_count": dataset_pin_count,
             "canonical_dependency_count": canonical_dependency_count,
-            "pinned": bool(explicit_pin_count or dataset_pin_count or canonical_dependency_count),
+            "canonical_backlog_present": canonical_backlog_present,
+            "pinned": bool(explicit_pin_count or dataset_pin_count or canonical_dependency_count or canonical_backlog_present),
             "expired": expired,
         }
 

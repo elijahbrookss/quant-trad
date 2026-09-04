@@ -2594,6 +2594,8 @@ class PostgresMarketDataRepository:
         noop_count = 0
         max_commit_seq = 0
         storage_day = None
+        from .fact_references import lock_canonical_raw_references
+
         session.execute(
             text("SELECT pg_advisory_xact_lock(:series_id)"),
             {"series_id": series_id},
@@ -2604,28 +2606,28 @@ class PostgresMarketDataRepository:
             collection_fence=collection_fence,
         )
         source_id, source = self._canonical_source_for_run(session, run_id)
+        latest_by_key = {row["observation_key"]: row for row in session.execute(text("""
+            SELECT DISTINCT ON (observation_key) observation_key,revision,row_hash,market_commit_seq
+            FROM market.fact_versions WHERE series_id=:series_id AND observation_key=ANY(:keys)
+            ORDER BY observation_key,revision DESC
+        """), {"series_id": series_id, "keys": [fact.observation_key for fact in rows]}).mappings()}
+        # A true no-op creates no reference and must remain envelope-only,
+        # including after cold movement. Acquire a deterministic manifest-lock
+        # set for the genuine writes before inserting any of their payloads.
+        pending_rows = []
+        pending_hashes = {key: row["row_hash"] for key, row in latest_by_key.items()}
+        for fact in rows:
+            if pending_hashes.get(fact.observation_key) != fact.row_hash:
+                pending_rows.append(fact)
+                pending_hashes[fact.observation_key] = fact.row_hash
+        lock_canonical_raw_references(session, pending_rows)
         for fact in rows:
             if fact.source.identity_key != source.identity_key:
                 raise ValueError(
                     "market_data_ingest_invalid: canonical Fact source disagrees "
                     f"with ingestion run run_id={run_id}"
                 )
-            latest = session.execute(
-                text(
-                    """
-                    SELECT revision, row_hash, market_commit_seq
-                    FROM market.fact_versions
-                    WHERE series_id = :series_id
-                      AND observation_key = :observation_key
-                    ORDER BY revision DESC
-                    LIMIT 1
-                    """
-                ),
-                {
-                    "series_id": series_id,
-                    "observation_key": fact.observation_key,
-                },
-            ).mappings().first()
+            latest = latest_by_key.get(fact.observation_key)
             if latest is not None:
                 max_commit_seq = max(
                     max_commit_seq, int(latest["market_commit_seq"])
@@ -2730,6 +2732,8 @@ class PostgresMarketDataRepository:
                 "quality": _json_text(fact.quality),
             })
             max_commit_seq = max(max_commit_seq, commit_seq)
+            latest_by_key[fact.observation_key] = {"revision": revision, "row_hash": fact.row_hash,
+                                                  "market_commit_seq": commit_seq}
             if latest is None:
                 inserted_count += 1
             else:
