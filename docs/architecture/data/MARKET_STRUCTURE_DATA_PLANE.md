@@ -970,8 +970,14 @@ skipped, and failed work. A manifest remains and reports
 replayable. No frozen dataset result may depend on an object or typed chunk
 eligible for ordinary retention deletion.
 
-Only raw provider evidence and book checkpoints currently use Parquet cold
-storage. Typed derived facts do not yet have a cold Parquet tier; their bounded
+The deployed lifecycle's cold objects are raw provider evidence and book checkpoints.
+The in-development generalized canonical Fact archive adds verified Parquet
+pages and resumable admission, described in
+[Generalized Fact Data Plane](GENERALIZED_FACT_DATA_PLANE.md#exact-raw-revision-evidence).
+Its direct raw proof uses exact immutable mappings and bounded streaming reads;
+manifest ordinal ranges alone are insufficient. Physical canonical reclamation
+and complete transitive dependency admission remain activation gates. Existing
+typed derived lifecycle policies still lack an enabled cold-reclamation path; their bounded
 hot expiry must remain disabled or conservatively sized wherever later
 rehydration is a requirement.
 

@@ -20,6 +20,7 @@ code_paths:
   - src/market_data/canonical.py
   - src/market_data/canonical_storage.py
   - src/market_data/fact_archive.py
+  - src/market_data/archive.py
   - src/market_data/archive_verification.py
   - src/market_data/canonical_adapters.py
   - src/market_data/fact_registry.py
@@ -35,6 +36,7 @@ code_paths:
   - portal/backend/service/storage/repos/candles.py
   - portal/backend/service/storage/repos/fact_storage.py
   - portal/backend/service/storage/repos/fact_archival.py
+  - portal/backend/service/storage/repos/fact_lineage.py
   - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/controller/market_data.py
@@ -340,6 +342,64 @@ not permission to drop it. Reclamation and the complete normalized-feature
 dependency proof are not enabled by this owner. A normalized page currently fails with
 `canonical_archive_dependency_proof_required`; it is never admitted with an
 empty dependency set. These gates must be completed before retention activation.
+
+### Exact Raw-Revision Evidence
+
+Canonical archive admission resolves trade and L2 raw IDs from each archived
+revision's own provenance. BBO/depth use their exact definition/session/epoch/
+receive-ordinal position. `fact_lineage` joins **record mappings**, not a
+manifest's min/max ordinal range: a range can contain a hole and cannot prove
+that a particular received frame is present.
+
+For each witness, admission chooses one current acknowledged placement; an
+original with a completed expiry event is not eligible. Initial selection is
+deterministic by object size and manifest ID. A resumed page check is restricted
+to its already acknowledged dependency IDs, so later compaction cannot retarget
+an immutable page. A missing/corrupt selected copy fails without silently
+switching to another copy. Multiple different raw IDs at the same claimed book
+position are ambiguous and rejected.
+
+Every selected object receives a fresh byte checksum and bounded streaming
+decode. The complete object's row count, order, source session/epoch, and ordinal
+bounds must agree with its manifest. Each requested physical row must match its
+stored raw ID, original segment ID, frame checksum, session, epoch, and ordinal.
+The decoder independently recomputes raw identity from frame bytes. Each root
+revision must also agree on product and source position. Trade/L2 roots additionally
+bind the provider, venue, and receipt time. Derived book features retain QT as
+their author; their declared input position binds the exchange frame without
+relabeling the derived source. Mapping row offsets are global within a v1 object;
+the writer's `object_row_group=0` field is a placeholder, not random-access proof.
+
+Default per-call bounds are 50,000 mapping candidates, 1,000,000 decoded raw
+records, and 2 GiB logical data. Individual files are limited to 1 GiB and
+declared row groups to 256 MiB; decoding uses 128-row batches, with additional
+decoded-byte checks. The archive owner's dependency object/byte limits also
+apply. These explicit limits can be supplied to the repository; no bound is
+automatically enlarged or treated as permission to skip evidence. The existing
+list-returning raw reader remains available to existing callers, but retention
+uses the shared streaming decoder and exact writer-owned Parquet schema.
+
+Performance follow-up: different canonical pages can require repeated decoding
+of the same large compacted raw object. A bounded, hash-bound proof reuse design
+could reduce that work, but it must not turn file timestamps into content proof
+or remove final fresh checksums. Exact-position SQL also needs representative
+plan/capacity measurements before activation; small disposable fixtures do not
+prove production-scale throughput.
+
+RCA: the initial staging implementation reused a latest-by-material-hash lookup.
+Trade material hashes intentionally exclude delivery details. Two immutable
+revisions could therefore have identical trade values but different raw IDs;
+the older page incorrectly held only the newer delivery's archive. The real
+database regression reproduces this mismatch. Exact-root mapping/physical-row
+admission fixes it without changing Fact values, clocks, or ingestion policy.
+`market.canonical_archive_verification.v2` supersedes v1 receipts; earlier
+receipts cannot satisfy the stronger gate. Old incomplete draft catalogs are
+not silently rewritten or blessed and require explicit review before reuse.
+
+This proof preserves each direct raw frame; it does **not** by itself prove the
+complete L2 snapshot/update or checkpoint chain, normalized input-window
+closure, or every transitive feature dependency. Those completion gates and the
+remaining cold-reader conversions still precede destructive activation.
 
 ### Resumable Canonical Verification
 

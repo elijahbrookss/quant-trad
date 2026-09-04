@@ -865,6 +865,34 @@ def encode_spool_segment_to_parquet(
     )
 
 
+def _raw_archive_schema(segment_id: str):
+    import pyarrow as pa
+
+    schema = pa.schema(
+        [
+            pa.field("raw_record_id", pa.string(), nullable=False),
+            pa.field("spool_segment_id", pa.string(), nullable=False),
+            pa.field("definition_id", pa.string(), nullable=False),
+            pa.field("session_id", pa.string(), nullable=False),
+            pa.field("connection_epoch", pa.int64(), nullable=False),
+            pa.field("receive_ordinal", pa.int64(), nullable=False),
+            pa.field("received_at", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("provider", pa.string(), nullable=False),
+            pa.field("venue", pa.string(), nullable=False),
+            pa.field("provider_product_id", pa.string(), nullable=False),
+            pa.field("requested_channel", pa.string(), nullable=False),
+            pa.field("observed_channel", pa.string(), nullable=False),
+            pa.field("raw_frame", pa.binary(), nullable=False),
+            pa.field("raw_frame_sha256", pa.string(), nullable=False),
+        ],
+        metadata={
+            b"schema_version": RAW_ARCHIVE_SCHEMA_VERSION.encode("ascii"),
+            b"spool_segment_id": segment_id.encode("ascii"),
+        },
+    )
+    return schema
+
+
 def encode_raw_records_to_parquet(
     records: Iterable[RawStreamRecord],
     *,
@@ -899,28 +927,7 @@ def encode_raw_records_to_parquet(
     ordinals = [row.receive_ordinal for row in rows]
     if ordinals != sorted(set(ordinals)):
         raise ValueError("market_archive_invalid: records are not strictly ordered")
-    schema = pa.schema(
-        [
-            pa.field("raw_record_id", pa.string(), nullable=False),
-            pa.field("spool_segment_id", pa.string(), nullable=False),
-            pa.field("definition_id", pa.string(), nullable=False),
-            pa.field("session_id", pa.string(), nullable=False),
-            pa.field("connection_epoch", pa.int64(), nullable=False),
-            pa.field("receive_ordinal", pa.int64(), nullable=False),
-            pa.field("received_at", pa.timestamp("us", tz="UTC"), nullable=False),
-            pa.field("provider", pa.string(), nullable=False),
-            pa.field("venue", pa.string(), nullable=False),
-            pa.field("provider_product_id", pa.string(), nullable=False),
-            pa.field("requested_channel", pa.string(), nullable=False),
-            pa.field("observed_channel", pa.string(), nullable=False),
-            pa.field("raw_frame", pa.binary(), nullable=False),
-            pa.field("raw_frame_sha256", pa.string(), nullable=False),
-        ],
-        metadata={
-            b"schema_version": RAW_ARCHIVE_SCHEMA_VERSION.encode("ascii"),
-            b"spool_segment_id": segment_id.encode("ascii"),
-        },
-    )
+    schema = _raw_archive_schema(segment_id)
     table = pa.Table.from_pylist(
         [
             {
@@ -1049,40 +1056,79 @@ def publish_compacted_raw_archives(
     return encoded, acknowledgement, records
 
 
-def read_raw_archive_parquet(path: Path) -> list[RawStreamRecord]:
+@dataclass(frozen=True)
+class RawArchiveReadLimits:
+    max_rows: int = 1_000_000
+    max_file_bytes: int = 1024**3
+    max_logical_bytes: int = 2 * 1024**3
+    max_row_group_bytes: int = 256 * 1024**2
+    batch_rows: int = 128
+
+    def __post_init__(self):
+        for name in self.__dataclass_fields__:
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise ValueError(f"market_archive_read_limit_invalid: field={name}")
+
+
+def iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits) -> Iterator[RawStreamRecord]:
+    """Decode bounded batches; caller must exhaust the iterator to prove an object.
+
+    This validates raw identities and ordering, not the external manifest hash.
+    Retention also verifies current object checksums and exact database mappings.
+    """
+    yield from _iter_raw_archive_parquet(path, limits=limits)
+
+
+def _iter_raw_archive_parquet(path: Path, *, limits: RawArchiveReadLimits | None = None) -> Iterator[RawStreamRecord]:
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("market_archive_requires_pyarrow") from exc
     # Read one physical file. Dataset discovery would reinterpret object-layout
     # components such as ``provider=coinbase`` as Hive partition columns.
-    table = pq.ParquetFile(Path(path)).read()
-    metadata = table.schema.metadata or {}
-    if metadata.get(b"schema_version") != RAW_ARCHIVE_SCHEMA_VERSION.encode("ascii"):
-        raise RuntimeError("market_archive_replay_invalid: schema version mismatch")
-    rows: list[RawStreamRecord] = []
-    for value in table.to_pylist():
-        rows.append(
-            RawStreamRecord(
-                raw_record_id=value["raw_record_id"],
-                spool_segment_id=value["spool_segment_id"],
-                definition_id=value["definition_id"],
-                session_id=value["session_id"],
-                connection_epoch=value["connection_epoch"],
-                receive_ordinal=value["receive_ordinal"],
-                received_at=value["received_at"],
-                provider=value["provider"],
-                venue=value["venue"],
-                provider_product_id=value["provider_product_id"],
-                requested_channel=value["requested_channel"],
-                observed_channel=value["observed_channel"],
-                raw_frame=value["raw_frame"],
-                raw_frame_sha256=value["raw_frame_sha256"],
-            )
-        )
-    if rows != sorted(rows, key=lambda item: item.receive_ordinal):
-        raise RuntimeError("market_archive_replay_invalid: record order mismatch")
-    return rows
+    if limits is not None and Path(path).stat().st_size > limits.max_file_bytes:
+        raise RuntimeError("market_archive_read_file_budget_exceeded")
+    with pq.ParquetFile(Path(path), page_checksum_verification=True,
+                        thrift_string_size_limit=8 * 1024**2, thrift_container_size_limit=100_000) as parquet:
+        metadata = parquet.schema_arrow.metadata or {}
+        if metadata.get(b"schema_version") != RAW_ARCHIVE_SCHEMA_VERSION.encode("ascii"):
+            raise RuntimeError("market_archive_replay_invalid: schema version mismatch")
+        if limits is not None:
+            if not parquet.schema_arrow.remove_metadata().equals(_raw_archive_schema("").remove_metadata()):
+                raise RuntimeError("market_archive_replay_invalid: raw schema differs")
+            if parquet.metadata.num_rows > limits.max_rows:
+                raise RuntimeError("market_archive_read_row_budget_exceeded")
+            declared_bytes = 0
+            for index in range(parquet.metadata.num_row_groups):
+                group = parquet.metadata.row_group(index)
+                group_bytes = sum(group.column(column).total_uncompressed_size for column in range(group.num_columns))
+                if any(group.column(column).compression != "ZSTD" for column in range(group.num_columns)):
+                    raise RuntimeError("market_archive_replay_invalid: compression differs")
+                if group_bytes > limits.max_row_group_bytes:
+                    raise RuntimeError("market_archive_read_row_group_budget_exceeded")
+                declared_bytes += group_bytes
+                if declared_bytes > limits.max_logical_bytes:
+                    raise RuntimeError("market_archive_read_logical_budget_exceeded")
+        prior = 0
+        count = logical_bytes = 0
+        for batch in parquet.iter_batches(batch_size=limits.batch_rows if limits else 128, use_threads=False):
+            logical_bytes += batch.nbytes
+            if limits is not None and (batch.nbytes > limits.max_row_group_bytes or logical_bytes > limits.max_logical_bytes):
+                raise RuntimeError("market_archive_read_logical_budget_exceeded")
+            for value in batch.to_pylist():
+                record = RawStreamRecord(**{name: value[name] for name in RawStreamRecord.__dataclass_fields__})
+                if record.receive_ordinal <= prior:
+                    raise RuntimeError("market_archive_replay_invalid: record order mismatch")
+                count += 1
+                prior = record.receive_ordinal
+                yield record
+        if count != parquet.metadata.num_rows:
+            raise RuntimeError("market_archive_replay_invalid: record count mismatch")
+
+
+def read_raw_archive_parquet(path: Path) -> list[RawStreamRecord]:
+    """Compatibility list reader; bounded retention uses the streaming interface."""
+    return list(_iter_raw_archive_parquet(path))
 
 
 def publish_spool_archive(
@@ -1149,6 +1195,7 @@ __all__ = [
     "RAW_ARCHIVE_FORMAT",
     "RAW_ARCHIVE_SCHEMA_VERSION",
     "RawArchiveObjectStore",
+    "RawArchiveReadLimits",
     "SPOOL_SCHEMA_VERSION",
     "SpoolBackpressureError",
     "SpoolBacklogReconciliation",
@@ -1161,6 +1208,7 @@ __all__ = [
     "publish_compacted_raw_archives",
     "publish_spool_archive",
     "read_raw_archive_parquet",
+    "iter_raw_archive_parquet",
     "require_spool_capacity",
     "spool_backlog_bytes",
 ]

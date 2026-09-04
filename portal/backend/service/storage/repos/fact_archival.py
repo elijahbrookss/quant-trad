@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date
 import logging
 from pathlib import Path
 
 from sqlalchemy import text
 
-from market_data.archive import RawArchiveObjectStore
+from market_data.archive import RawArchiveObjectStore, RawArchiveReadLimits
 from market_data.archive_verification import ArchiveVerificationBatch, ArchiveVerificationLimits
 from market_data.canonical_storage import legacy_material_alias, record_from_storage_row, verify_archived_envelope
 from market_data.fact_archive import (
@@ -37,7 +37,7 @@ from .market_lifecycle import market_storage_lifecycle_repository
 logger = logging.getLogger(__name__)
 # Increase when deep admission rules change: old receipts must not bypass new
 # dependency/lineage requirements during the metadata-only final coverage pass.
-FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v1"
+FACT_ARCHIVE_VERIFIER_VERSION = "market.canonical_archive_verification.v2"
 
 
 def _series_catalog(manifest):
@@ -59,9 +59,11 @@ def _receipt(page, catalog_hash):
 class PostgresCanonicalFactArchiveRepository:
     def __init__(self, *, database, object_store: RawArchiveObjectStore,
                  temporary_directory: Path, limits: FactArchiveLimits = FactArchiveLimits(),
-                 max_dependency_bytes: int = 1024**3, max_dependency_objects: int = 5000):
+                 max_dependency_bytes: int = 1024**3, max_dependency_objects: int = 5000,
+                 raw_read_limits: RawArchiveReadLimits = RawArchiveReadLimits(), max_raw_mapping_rows: int = 50_000):
         if (type(max_dependency_bytes) is not int or max_dependency_bytes <= 0
-                or type(max_dependency_objects) is not int or max_dependency_objects <= 0):
+                or type(max_dependency_objects) is not int or max_dependency_objects <= 0
+                or type(max_raw_mapping_rows) is not int or max_raw_mapping_rows <= 0):
             raise ValueError("canonical_archive_dependency_budget_invalid")
         self.database = database
         self.object_store = object_store
@@ -69,6 +71,8 @@ class PostgresCanonicalFactArchiveRepository:
         self.limits = limits
         self.max_dependency_bytes = max_dependency_bytes
         self.max_dependency_objects = max_dependency_objects
+        self.raw_read_limits = raw_read_limits
+        self.max_raw_mapping_rows = max_raw_mapping_rows
 
     @staticmethod
     def _day(day):
@@ -140,40 +144,40 @@ class PostgresCanonicalFactArchiveRepository:
         logger.info("canonical_archive_partition_sealed | storage_day=%s rows=%s source_bytes=%s", day, count, source_bytes)
         return dict(result)
 
-    def _dependencies(self, session, rows):
-        from .market_data import _collect_material_archive_refs, _resolve_canonical_book_archive_positions
+    def _dependencies(self, session, rows, *, bound_manifest_ids=None):
+        from .market_data import _collect_material_archive_refs
+        from .fact_lineage import EXACT_RAW_FACT_TYPES, resolve_canonical_raw_archive_refs
         groups = defaultdict(list)
         for row in rows:
             groups[(row["series_id"], row["fact_type"])].append(row)
         references = {}
+        objects = ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
+            max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
+        ))
+        exact_rows = [row for row in rows if row["fact_type"] in EXACT_RAW_FACT_TYPES]
+        references.update(resolve_canonical_raw_archive_refs(
+            session, rows=exact_rows, object_store=self.object_store, byte_verifier=objects,
+            limits=self.raw_read_limits, max_mapping_rows=self.max_raw_mapping_rows,
+            bound_manifest_ids=bound_manifest_ids,
+        ))
         for (series_id, fact_type), group in groups.items():
+            if fact_type in EXACT_RAW_FACT_TYPES:
+                continue
             if fact_type.startswith("market.normalized."):
                 # A normalized row's window witnesses need a separate recursive
                 # admission proof; do not pretend its source dependencies are empty.
                 raise RuntimeError(f"canonical_archive_dependency_proof_required: series_id={series_id} fact_type={fact_type}")
-            if fact_type == "market.l2_book":
-                positions = [row["provenance"].get("_qt_l2_evidence") for row in group]
-                found = _resolve_canonical_book_archive_positions(
-                    session, positions=positions, series_id=series_id, fact_type=fact_type,
-                    start=min(row["observation_time"] for row in group),
-                    end=max(row["observation_time"] for row in group) + timedelta(microseconds=1),
-                    as_of_commit_seq=max(row["market_commit_seq"] for row in group),
-                )
-            else:
-                roots = []
-                for row in group:
-                    alias = legacy_material_alias(row)
-                    roots.append((series_id, alias["material_hash"] if alias else row["material_hash"]))
-                found = _collect_material_archive_refs(session, roots=roots)
+            roots = []
+            for row in group:
+                alias = legacy_material_alias(row)
+                roots.append((series_id, alias["material_hash"] if alias else row["material_hash"]))
+            found = _collect_material_archive_refs(session, roots=roots)
             for identity, reference in found.items():
                 if references.setdefault(identity, reference) != reference:
                     raise RuntimeError(f"canonical_archive_dependency_conflict: target_id={identity}")
         result = []
         if len(references) > self.max_dependency_objects:
             raise RuntimeError("canonical_archive_dependency_object_budget_exceeded: reduce page row limit")
-        objects = ArchiveVerificationBatch(self.object_store, limits=ArchiveVerificationLimits(
-            max_objects=self.max_dependency_objects, max_bytes=self.max_dependency_bytes,
-        ))
         for identity, reference in sorted(references.items()):
             expired = session.execute(text("""
                 SELECT EXISTS (SELECT 1 FROM market.storage_lifecycle_events
@@ -333,12 +337,14 @@ class PostgresCanonicalFactArchiveRepository:
             for envelope, archived in zip(envelopes, rows):
                 verify_archived_envelope(envelope, archived)
             aliases = [alias for row in rows if (alias := legacy_material_alias(row)) is not None]
+            catalogs = self._page_catalogs(session, manifest.manifest_id)
             expected = {
                 "series": _series_catalog(manifest),
                 "aliases": sorted(aliases, key=lambda item: (item["fact_version_id"], item["evidence_key"])),
-                "dependencies": sorted(self._dependencies(session, rows), key=lambda item: (item["target_kind"], item["target_id"])),
+                "dependencies": sorted(self._dependencies(session, rows, bound_manifest_ids=[
+                    item["target_id"] for item in catalogs["dependencies"] if item["target_kind"] == "raw_manifest"
+                ]), key=lambda item: (item["target_kind"], item["target_id"])),
             }
-            catalogs = self._page_catalogs(session, manifest.manifest_id)
             for name, items in expected.items():
                 if catalogs[name] != items:
                     raise RuntimeError(f"canonical_archive_catalog_incomplete: manifest_id={manifest.manifest_id} catalog={name}")

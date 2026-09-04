@@ -130,6 +130,7 @@ def test_staging_is_bounded_source_complete_and_resumes_after_unacknowledged_pub
 
 
 def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_pins(storage, tmp_path, monkeypatch):
+    from market_data.canonical_adapters import DERIVED_MARKET_STATE_SOURCE
     from market_data.contracts import SourceIdentity
     from market_data.fact_registry import get_fact_contract
     from portal.backend.service.storage.repos import market_structure, market_lifecycle
@@ -144,6 +145,7 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
     _placement(monkeypatch, day)
     source = SourceIdentity(provider="COINBASE", venue="COINBASE_DIRECT", source_kind="stream", adapter_version="archive.holds.fixture.v1")
     source_id = storage.repo.register_source(source, lineage={"fixture": "canonical-archive-holds"})
+    derived_source_id = storage.repo.register_source(DERIVED_MARKET_STATE_SOURCE, lineage={"fixture": "canonical-archive-holds"})
     series = {}
     for fact_type in ("market.l2_book", "market.bbo", "market.depth_observation"):
         series[fact_type] = storage.repo.register_series(
@@ -160,11 +162,11 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
     raw_ids = _commit_book_source_archives(tmp_path=tmp_path, claim=claim, receive_ordinals=(1, 2))
     for ordinal in (1, 2):
         bbo, _ = _book_feature_revisions(
-            source=source, l2_series_id=series["market.l2_book"], bbo_series_id=series["market.bbo"],
+            source=DERIVED_MARKET_STATE_SOURCE, l2_series_id=series["market.l2_book"], bbo_series_id=series["market.bbo"],
             depth_series_id=series["market.depth_observation"], definition_id=claim.definition_id,
             session_id=claim.session_id, receive_ordinal=ordinal,
         )
-        storage.repo.ingest_facts(series_id=series["market.bbo"], source_id=source_id, facts=[bbo])
+        storage.repo.ingest_facts(series_id=series["market.bbo"], source_id=derived_source_id, facts=[bbo])
     for identity in raw_ids:
         assert structures.archive_retention_status(target_kind="raw_manifest", target_id=identity)["pinned"] is False
     store = FilesystemRawArchiveObjectStore(tmp_path / "objects")
@@ -178,6 +180,10 @@ def test_book_page_checks_raw_bytes_and_commits_permanent_holds_without_dataset_
     path = store.local_path(key)
     original = path.read_bytes()
     path.write_bytes(b"corrupted raw archive")
+    with pytest.raises(RuntimeError, match="archive_verification_size_mismatch"):
+        archive.stage_next_page(day)
+    assert archive.inspect_partition(day)["page_count"] == 0
+    path.write_bytes(b"x" * len(original))
     with pytest.raises(RuntimeError, match="archive_verification_checksum_mismatch"):
         archive.stage_next_page(day)
     assert archive.inspect_partition(day)["page_count"] == 0
