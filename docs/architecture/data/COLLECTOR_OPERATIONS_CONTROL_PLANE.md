@@ -109,6 +109,12 @@ endpoint evaluates periodically but emits only when the material summary
 changes. Collector rows are fetched in bounded pages only for the expanded
 provider or the explicit all-collector search.
 
+Recent-Fact inspection selects latest active revisions and its bounded result
+from permanent canonical headers, then loads the same public payload documents
+through the shared verified hot/cold reader. Moving a Fact to the archive tier
+does not remove it from inspection or change its ordering. Missing or corrupt
+archived evidence fails explicitly; it is not reported as an empty result.
+
 ## Lifecycle and health projection
 
 Operational state and health are separate backend-owned dimensions.

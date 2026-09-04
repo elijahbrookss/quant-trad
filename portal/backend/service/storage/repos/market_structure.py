@@ -50,6 +50,7 @@ from market_data.canonical_adapters import (
     decode_trade_flow_record,
 )
 from market_data.contracts import TypedFeatureRecord
+from market_data.canonical_storage import record_from_storage_row
 from market_data.market_state import (
     BasisFeatureFact,
     BboFeatureFact,
@@ -85,6 +86,7 @@ from market_data.stream_quality import normalize_stream_quality_classification
 from ._shared import db
 from .market_data import market_data_repo
 from .market_lifecycle import market_storage_lifecycle_repository
+from .fact_storage import canonical_fact_storage_repository
 
 
 class MarketStructureOwnershipError(RuntimeError):
@@ -301,34 +303,20 @@ def _advance_book_fact_rollup(
             series_id=series_id,
             phase="canonical_fact_fold",
         )
-    folded = session.execute(
-        text(
-            """
-            SELECT count(*) AS fact_count,
-                   count(*) FILTER (
-                       WHERE payload ->> 'event_type' = 'snapshot'
-                   ) AS snapshot_count,
-                   count(*) FILTER (
-                       WHERE payload ->> 'event_type' = 'update'
-                   ) AS batch_count,
-                   COALESCE(sum(
-                       CASE WHEN payload ->> 'event_type' = 'update'
-                            THEN CAST(payload ->> 'entry_count' AS bigint)
-                            ELSE 0
-                       END
-                   ), 0) AS mutation_count,
-                   COALESCE(max(market_commit_seq), :high_water) AS high_water
-            FROM market.fact_rows
-            WHERE series_id = :series_id
-              AND market_commit_seq > :high_water
-              AND payload_schema_id = 'market.l2_book.v1'
-            """
-        ),
-        {
-            "series_id": int(series_id),
-            "high_water": int(high_water),
-        },
-    ).mappings().one()
+    folded = dict(fact_count=0, snapshot_count=0, batch_count=0, mutation_count=0, high_water=int(high_water))
+    with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
+        SELECT id FROM market.fact_versions
+        WHERE series_id=:series_id AND market_commit_seq>:high_water AND payload_schema_id='market.l2_book.v1'
+        ORDER BY market_commit_seq,id
+    """), {"series_id": int(series_id), "high_water": int(high_water)}) as rows:
+        for row in rows:
+            payload = row["payload"]
+            folded["fact_count"] += 1
+            folded["snapshot_count"] += int(payload["event_type"] == "snapshot")
+            folded["batch_count"] += int(payload["event_type"] == "update")
+            if payload["event_type"] == "update":
+                folded["mutation_count"] += int(payload["entry_count"])
+            folded["high_water"] = max(folded["high_water"], row["market_commit_seq"])
     fact_count = int(folded["fact_count"])
     if fact_count != int(expected_new_fact_count):
         raise RuntimeError(
@@ -369,39 +357,20 @@ def _require_book_state_source(
     """Require a canonical archive-acknowledged snapshot or mutation state."""
 
     observation_key = _book_observation_key(position)
-    found = session.execute(
-        text(
-            """
-            SELECT 1
-            FROM market.fact_rows
-            WHERE series_id = :series_id
-              AND observation_key = :observation_key
-              AND payload_schema_id = 'market.l2_book.v1'
-              AND provenance -> '_qt_l2_evidence' ->> 'connection_epoch'
-                    = CAST(:connection_epoch AS text)
-              AND provenance -> '_qt_l2_evidence' ->> 'receive_ordinal'
-                    = CAST(:receive_ordinal AS text)
-              AND provenance -> '_qt_l2_evidence' ->> 'event_ordinal'
-                    = CAST(:event_ordinal AS text)
-              AND payload ->> 'validity_interval_id' = :validity_interval_id
-              AND payload ->> 'after_state_hash' = :state_hash
-            LIMIT 1
-            """
-        ),
-        {
-            "series_id": int(series_id),
-            "observation_key": observation_key,
-            "connection_epoch": int(position["connection_epoch"]),
-            "receive_ordinal": int(position["receive_ordinal"]),
-            "event_ordinal": int(position["event_ordinal"]),
-            "validity_interval_id": str(validity_interval_id),
-            "state_hash": str(state_hash),
-        },
-    ).scalar_one_or_none()
-    if found is None:
-        raise ValueError(
-            "market_feature_source_incomplete: canonical acknowledged book state is missing"
-        )
+    with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
+        SELECT id FROM market.fact_versions
+        WHERE series_id=:series_id AND observation_key=:observation_key AND payload_schema_id='market.l2_book.v1'
+        ORDER BY revision DESC,id
+    """), {"series_id": int(series_id), "observation_key": observation_key}) as rows:
+        for row in rows:
+            evidence = row["provenance"].get("_qt_l2_evidence", {})
+            if (isinstance(evidence, Mapping)
+                    and all(str(evidence.get(key)) == str(int(position[key]))
+                            for key in ("connection_epoch", "receive_ordinal", "event_ordinal"))
+                    and row["payload"].get("validity_interval_id") == str(validity_interval_id)
+                    and row["payload"].get("after_state_hash") == str(state_hash)):
+                return
+    raise ValueError("market_feature_source_incomplete: canonical acknowledged book state is missing")
 
 
 def _require_material_source(
@@ -435,28 +404,37 @@ def _require_canonical_typed_material_source(
 ) -> None:
     if not str(evidence_key).startswith("_qt_"):
         raise ValueError("market_feature_storage_invalid: unsafe evidence key")
-    found = session.execute(
-        text(
-            """
-            SELECT 1
-            FROM market.fact_rows
-            WHERE series_id = :series_id
-              AND provenance -> :evidence_key ->> 'legacy_material_hash'
-                    = :material_hash
-            LIMIT 1
-            """
-        ),
-        {
-            "series_id": int(series_id),
-            "evidence_key": str(evidence_key),
-            "material_hash": str(material_hash),
-        },
-    ).scalar_one_or_none()
-    if found is None:
+    if not canonical_fact_storage_repository.material_witness_exists(
+        session, series_ids=[series_id], evidence_key=evidence_key,
+        material_hash=material_hash, include_canonical=False,
+    ):
         raise ValueError(
             "market_feature_source_incomplete: canonical typed source material "
             "is missing"
         )
+
+
+def _trade_flow_status_rows(session, series_ids):
+    aggregates = {}
+    with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
+        WITH latest AS (
+            SELECT DISTINCT ON (series_id,observation_key) id
+            FROM market.fact_versions WHERE series_id=ANY(:series_ids) AND fact_type='market.trade_flow'
+            ORDER BY series_id,observation_key,revision DESC,market_commit_seq DESC
+        ) SELECT id FROM latest ORDER BY id
+    """), {"series_ids": list(series_ids)}) as rows:
+        for row in rows:
+            fact = decode_trade_flow_record(record_from_storage_row(row)).fact
+            key = (row["series_id"], fact.interval_seconds)
+            summary = aggregates.setdefault(key, dict(
+                series_id=key[0], interval_seconds=key[1], bucket_count=0,
+                complete_bucket_count=0, incomplete_bucket_count=0, latest_bucket_end=fact.bucket_end,
+            ))
+            summary["bucket_count"] += 1
+            summary["complete_bucket_count"] += int(fact.aggregate_complete)
+            summary["incomplete_bucket_count"] += int(not fact.aggregate_complete)
+            summary["latest_bucket_end"] = max(summary["latest_bucket_end"], fact.bucket_end)
+    return sorted(aggregates.values(), key=lambda row: (row["interval_seconds"], row["series_id"]))
 
 def _book_position_from_material(value: Mapping[str, Any]) -> BookSourcePosition:
     return BookSourcePosition(
@@ -3006,53 +2984,26 @@ class PostgresMarketStructureRepository:
         batch_ids: Sequence[str],
         final_state_hash: Optional[str],
     ) -> dict[str, Any]:
-        with db.session() as session:
-            stored_snapshots = tuple(
-                str(value)
-                for value in session.execute(
-                    text(
-                        "SELECT external_event_component_key "
-                        "FROM market.fact_rows "
-                        "WHERE payload_schema_id = 'market.l2_book.v1' "
-                        "AND payload ->> 'event_type' = 'snapshot' "
-                        "AND provenance -> '_qt_l2_evidence' ->> 'definition_id' "
-                        "= :definition_id "
-                        "AND provenance -> '_qt_l2_evidence' ->> 'session_id' "
-                        "= :session_id "
-                        "ORDER BY "
-                        "CAST(provenance -> '_qt_l2_evidence' ->> "
-                        "'connection_epoch' AS bigint), "
-                        "CAST(provenance -> '_qt_l2_evidence' ->> "
-                        "'receive_ordinal' AS bigint), "
-                        "CAST(provenance -> '_qt_l2_evidence' ->> "
-                        "'event_ordinal' AS bigint)"
-                    ),
-                    {"definition_id": definition_id, "session_id": session_id},
-                ).scalars()
-            )
-            stored_batches = tuple(
-                str(value)
-                for value in session.execute(
-                    text(
-                        "SELECT external_event_component_key "
-                        "FROM market.fact_rows "
-                        "WHERE payload_schema_id = 'market.l2_book.v1' "
-                        "AND payload ->> 'event_type' = 'update' "
-                        "AND provenance -> '_qt_l2_evidence' ->> 'definition_id' "
-                        "= :definition_id "
-                        "AND provenance -> '_qt_l2_evidence' ->> 'session_id' "
-                        "= :session_id "
-                        "ORDER BY "
-                        "CAST(provenance -> '_qt_l2_evidence' ->> "
-                        "'connection_epoch' AS bigint), "
-                        "CAST(provenance -> '_qt_l2_evidence' ->> "
-                        "'receive_ordinal' AS bigint), "
-                        "CAST(provenance -> '_qt_l2_evidence' ->> "
-                        "'event_ordinal' AS bigint)"
-                    ),
-                    {"definition_id": definition_id, "session_id": session_id},
-                ).scalars()
-            )
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
+            ordered = {"snapshot": [], "update": []}
+            # Canonical L2 observation keys carry this exact source prefix.
+            # Check the hydrated provenance too; the key is a lookup bound,
+            # never substitute evidence for another definition/session.
+            with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
+                SELECT id FROM market.fact_versions
+                WHERE payload_schema_id='market.l2_book.v1' AND starts_with(observation_key,:prefix)
+                ORDER BY market_commit_seq,id
+            """), {"prefix": f"{definition_id}:{session_id}:"}) as rows:
+                for row in rows:
+                    evidence = row["provenance"].get("_qt_l2_evidence", {})
+                    if evidence.get("definition_id") != definition_id or evidence.get("session_id") != session_id:
+                        continue
+                    event_type = row["payload"]["event_type"]
+                    if event_type in ordered:
+                        position = tuple(int(evidence[key]) for key in ("connection_epoch", "receive_ordinal", "event_ordinal"))
+                        ordered[event_type].append((position, str(row["external_event_component_key"])))
+            stored_snapshots = tuple(identity for _position, identity in sorted(ordered["snapshot"], key=lambda item: item[0]))
+            stored_batches = tuple(identity for _position, identity in sorted(ordered["update"], key=lambda item: item[0]))
             stored_final_hash = session.execute(
                 text(
                     "SELECT state_hash FROM market.book_reconstruction_state "
@@ -3352,7 +3303,7 @@ class PostgresMarketStructureRepository:
         }
 
     def archive_status(self, *, definition_id: str) -> dict[str, Any]:
-        with db.session() as session:
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
             definition = session.execute(
                 text(
                     """
@@ -3440,47 +3391,7 @@ class PostgresMarketStructureRepository:
                     },
                 ).scalar_one()
             )
-            aggregates = session.execute(
-                text(
-                    """
-                    SELECT series_id, interval_seconds,
-                           count(*) AS bucket_count,
-                           count(*) FILTER (
-                               WHERE aggregate_complete
-                           ) AS complete_bucket_count,
-                           count(*) FILTER (
-                               WHERE NOT aggregate_complete
-                           ) AS incomplete_bucket_count,
-                           max(bucket_end) AS latest_bucket_end
-                    FROM (
-                        SELECT DISTINCT ON (series_id, observation_key)
-                               series_id,
-                               (
-                                   provenance -> '_qt_trade_flow_evidence'
-                                   ->> 'interval_seconds'
-                               )::integer AS interval_seconds,
-                               COALESCE(
-                                   (
-                                       quality -> '_qt_trade_flow_quality'
-                                       ->> 'aggregate_complete'
-                                   )::boolean,
-                                   false
-                               ) AS aggregate_complete,
-                               market.canonical_fact_utc_timestamp(
-                                   payload ->> 'bucket_end'
-                               ) AS bucket_end
-                        FROM market.fact_rows
-                        WHERE series_id = ANY(:series_ids)
-                          AND fact_type = 'market.trade_flow'
-                        ORDER BY series_id, observation_key, revision DESC,
-                                 market_commit_seq DESC
-                    ) AS selected
-                    GROUP BY series_id, interval_seconds
-                    ORDER BY interval_seconds, series_id
-                    """
-                ),
-                {"series_ids": aggregate_series_ids or [-1]},
-            ).mappings().all()
+            aggregates = _trade_flow_status_rows(session, aggregate_series_ids)
             book_state = session.execute(
                 text(
                     """

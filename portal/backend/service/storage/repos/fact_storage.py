@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+import logging
 from typing import Any
 
 from sqlalchemy import text
@@ -39,6 +41,7 @@ CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + """
       ON hot.storage_day = versions.storage_day AND hot.id = versions.id
 """
 _DOCUMENTS = frozenset(("payload", "provenance", "quality"))
+logger = logging.getLogger(__name__)
 
 
 def ensure_payload_contracts(session, contracts: Sequence[tuple[str, str]]) -> None:
@@ -130,6 +133,123 @@ class PostgresCanonicalFactStorageRepository:
     ):
         self.object_store_factory = object_store_factory
         self.limits = limits
+
+    @contextmanager
+    def stream_rows_by_ids(self, session, statement, params=None, *, batch_size=128):
+        """Hydrate an ordered SQL identity stream without retaining all payloads.
+
+        The caller's statement selects one ID column and owns filtering/order.
+        The context closes the server cursor even after an early match/error.
+        Multi-page causal selections require a snapshot fenced before its first
+        read, just like other canonical repository reads.
+        """
+        if type(batch_size) is not int or not 1 <= batch_size <= 1000:
+            raise ValueError("canonical_stream_batch_invalid: expected 1..1000")
+        selected = session.execute(statement, params or {}, execution_options={
+            "stream_results": True, "yield_per": batch_size,
+        })
+        def hydrate():
+            for batch in selected.scalars().partitions(batch_size):
+                identities = list(batch)
+                if len(identities) != len(set(identities)):
+                    raise RuntimeError("canonical_selected_identity_duplicate")
+                rows = self.read_rows_by_ids(session, identities)
+                yield from (rows[identity] for identity in identities)
+        rows = hydrate()
+        try:
+            yield rows
+        finally:
+            rows.close()
+            selected.close()
+
+    def material_witness_exists(self, session, *, series_ids, material_hash,
+                                evidence_key=None, include_canonical=True):
+        """Evaluate the existing canonical/legacy material predicate across tiers.
+
+        Archive aliases are lookup hints, never proof. Verify selected payloads
+        before accepting a hint. Generic legacy provenance remains supported:
+        if no indexed witness exists, stream cold rows for unindexed keys rather
+        than turning absent index entries into false 'missing source' claims.
+        """
+        ids = sorted({int(value) for value in series_ids})
+        if not ids:
+            return False
+        material_hash = str(material_hash)
+        params = {"series_ids": ids, "material_hash": material_hash}
+        key_predicate = ""
+        alias_predicate = ""
+        if evidence_key is not None:
+            params["evidence_key"] = str(evidence_key)
+            key_predicate = "AND evidence.key=:evidence_key"
+            alias_predicate = "AND aliases.evidence_key=:evidence_key"
+        direct = """
+            SELECT id FROM market.fact_versions
+            WHERE series_id=ANY(:series_ids) AND material_hash=:material_hash
+            UNION ALL
+        """ if include_canonical else ""
+        selected = session.execute(text(f"""
+            SELECT DISTINCT id FROM (
+                {direct}
+                SELECT versions.id FROM market.fact_versions AS versions
+                JOIN market.fact_hot_payloads AS hot ON hot.storage_day=versions.storage_day AND hot.id=versions.id
+                WHERE versions.series_id=ANY(:series_ids) AND EXISTS (
+                    SELECT 1 FROM jsonb_each(hot.provenance) AS evidence
+                    WHERE jsonb_typeof(evidence.value)='object'
+                      AND evidence.value->>'legacy_material_hash'=:material_hash {key_predicate})
+                UNION ALL
+                SELECT versions.id FROM market.fact_archive_material_aliases AS aliases
+                JOIN market.fact_versions AS versions ON versions.id=aliases.fact_version_id
+                JOIN market.fact_archive_manifests AS manifest ON manifest.id=aliases.manifest_id
+                  AND manifest.storage_day=versions.storage_day
+                JOIN market.fact_retention_partitions AS partition ON partition.storage_day=versions.storage_day
+                  AND partition.state IN ('verified','reclaimed')
+                WHERE versions.series_id=ANY(:series_ids) AND aliases.series_id=versions.series_id
+                  AND aliases.material_hash=:material_hash {alias_predicate}
+                  AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                                  WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
+            ) AS candidates ORDER BY id LIMIT 1
+        """), params).scalar_one_or_none()
+
+        def matches(row):
+            if int(row["series_id"]) not in ids:
+                raise RuntimeError(f"canonical_material_source_scope_mismatch: fact_version_id={row['id']}")
+            if include_canonical and row["material_hash"] == material_hash:
+                return True
+            for key, value in row["provenance"].items():
+                if (evidence_key is not None and key != evidence_key) or not isinstance(value, Mapping):
+                    continue
+                legacy_hash = value.get("legacy_material_hash")
+                # PostgreSQL ->> also accepts a numeric JSON legacy witness.
+                # A digits-only SHA can have been retained as an integer; do
+                # not change that historical admission predicate after cooling.
+                if type(legacy_hash) in (str, int) and str(legacy_hash) == material_hash:
+                    return True
+            return False
+
+        if selected is not None:
+            row = self.read_rows_by_ids(session, [selected])[selected]
+            if not matches(row):
+                raise RuntimeError(f"canonical_material_alias_mismatch: fact_version_id={selected} material_hash={material_hash}")
+            return True
+        # Old source admission accepted any object-valued legacy witness, not
+        # only the standard per-family key indexed by archive admission. Keep
+        # that meaning without a new ingestion policy or an unbounded list.
+        with self.stream_rows_by_ids(session, text("""
+            SELECT versions.id FROM market.fact_versions AS versions
+            WHERE versions.series_id=ANY(:series_ids)
+              AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                              WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
+            ORDER BY versions.id
+        """), {"series_ids": ids}) as rows:
+            announced = False
+            for row in rows:
+                if not announced:
+                    logger.warning("canonical_material_unindexed_cold_search | series_ids=%s material_hash=%s evidence_key=%s reason=no_indexed_witness",
+                                   ids, material_hash, evidence_key)
+                    announced = True
+                if matches(row):
+                    return True
+        return False
 
     def read_rows_by_ids(self, session, fact_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
         """Hydrate an already selected immutable identity set in bounded SQL batches."""

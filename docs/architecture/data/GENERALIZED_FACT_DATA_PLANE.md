@@ -34,6 +34,8 @@ code_paths:
   - portal/backend/service/research
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/candles.py
+  - portal/backend/service/storage/repos/collector_operations.py
+  - portal/backend/service/storage/repos/normalization.py
   - portal/backend/service/storage/repos/fact_storage.py
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
@@ -262,6 +264,43 @@ unreadable cold object as healthy inventory. This bounds the working batch, not
 the total bytes read for a long summary window. Cold summaries may cost more I/O
 than hot-only SQL aggregation; measure that on the intended window before
 increasing scan frequency.
+
+Collector recent-Fact inspection applies its existing latest/active selection,
+ordering, and maximum 500-row limit to permanent headers before hydrating the
+same public payload/provenance/quality fields. Normalization source admission
+and latest-output conflict checks, book-state source checks, recovery rollup
+folds, replay reconciliation, and trade-flow status use the shared reader too.
+They no longer demand hot-only payloads from the guarded SQL view.
+
+`stream_rows_by_ids` keeps the caller's SQL identity order and hydrates batches
+of 128 IDs by default (configurable within 1..1,000). Its context closes the
+server cursor on completion, early match, and failure. A batch bounds selected
+IDs, not total scan work or a strict byte-memory ceiling. Multi-query spec
+inspection, archive status, and replay reconciliation acquire the lifecycle
+fence before establishing their repeatable snapshot. Replay inspects retained
+canonical events; it does not introduce another book reconstruction engine.
+
+Material-alias indexes are candidate locators, not evidence: the reader verifies
+the selected archived row and its actual source witness before admission. The
+existing generic object-valued legacy witness predicate still applies. If no
+indexed candidate exists, an explicitly logged cold scan checks older,
+unindexed provenance keys. Retired normalization-spec quarantine likewise
+checks exact hot/cold provenance references before declaring a legacy spec
+unreferenced; an external-event name alone is not such a reference. Missing or
+corrupt pages fail these operations, rather than silently dropping evidence.
+
+Performance follow-up: these cold scans bound payload batches but not elapsed
+time, total I/O, or the replay result's required ID list. A page can be verified
+again in later batches. Broad trade-flow status windows, missing-witness probes,
+and legacy-spec reference audits need representative measurements and explicit
+caller windows before frequent unattended use. A complete alias catalog or
+verified page reuse is a future optimization, not permission to omit checks.
+
+`test_cold_consumers_db.py` exercises collector inspection after physical
+reclamation and other consumers against verified cold-reader fixtures. Those
+fixtures prove read compatibility, not admission of L2/normalized dependency
+graphs for destructive retention. The executor's supported-family gate remains
+unchanged until those separate dependency proofs are complete.
 
 Hydration never selects revisions. The SQL selector owns time, source, watermark,
 revision, and invalidation constraints. Candle interval-close filtering is

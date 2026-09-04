@@ -89,8 +89,9 @@ not yet proven.
 
 ### Materialized normalized facts
 
-`market.normalized_feature_versions` is append-only and shares
-`market.fact_commit_seq`. Each row records effective time, known-at time,
+Normalized features use append-only canonical `market.fact_versions` and share
+`market.fact_commit_seq`; payloads follow the generalized hot/cold storage
+boundary, not a separate normalized version table. Each row records effective time, known-at time,
 status/value, input range/count, input-only watermark, source series, up to
 three bounded witness hashes, the full input fingerprint, provenance, quality,
 and revision.
@@ -109,6 +110,15 @@ Two watermarks have distinct meanings:
 Output commits therefore cannot change their own future input identity. Gap
 evidence is causal at its detection/creation time; it invalidates a
 materialization only when it was knowable by the requested decision time.
+
+Source-witness lookup and latest-output checks use verified payloads from either
+tier. Cooling does not weaken the older-watermark/known-at rejection, permit
+contradictory fingerprints at one watermark, or rematerialize identical inputs.
+Alias catalog entries locate candidates but cannot prove a witness without its
+actual payload. Historical unindexed provenance and retired-spec reference
+checks retain their existing meaning through logged, batched cold scans; these
+rare paths are not constant-cost lookups. Destructive retention of normalized
+outputs still requires separate complete input-window dependency admission.
 
 ### Frozen dataset boundary
 
