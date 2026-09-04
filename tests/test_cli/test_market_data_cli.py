@@ -24,6 +24,22 @@ class _Response:
         return self._body
 
 
+def test_lifecycle_plan_passes_bounded_canonical_cursor(monkeypatch):
+    observed = {}
+
+    def fake_urlopen(request, timeout):
+        parsed = urllib.parse.urlparse(request.full_url)
+        observed.update(method=request.get_method(), path=parsed.path,
+                        query=urllib.parse.parse_qs(parsed.query), body=request.data)
+        return _Response({"canonical_retention": {"candidate_scan_complete": True}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(["--no-audit-log", "data", "market-structure", "lifecycle-plan",
+                 "--canonical-after-storage-day", "2026-08-04"]) == 0
+    assert observed == {"method": "GET", "path": "/api/market-data/market-structure/storage-lifecycle/plan",
+                        "query": {"canonical_after_storage_day": ["2026-08-04"]}, "body": None}
+
+
 def test_data_ingest_candles_uses_explicit_mutation_contract(monkeypatch) -> None:
     observed = {}
 

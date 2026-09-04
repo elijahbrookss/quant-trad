@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -1046,10 +1046,15 @@ def get_market_structure_retention_status(
 
 
 @router.get("/market-structure/storage-lifecycle/plan")
-def plan_market_storage_lifecycle() -> dict[str, Any]:
+def plan_market_storage_lifecycle(
+    canonical_after_storage_day: date | None = None,
+) -> dict[str, Any]:
     try:
         policy = get_settings().market_data_lifecycle
-        return market_storage_lifecycle_service.plan(policy=policy)
+        kwargs: dict[str, Any] = {"policy": policy}
+        if canonical_after_storage_day is not None:
+            kwargs["canonical_after_storage_day"] = canonical_after_storage_day
+        return market_storage_lifecycle_service.plan(**kwargs)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,6 +97,7 @@ def _service(repository: _LifecycleRepository) -> MarketStorageLifecycleService:
     return MarketStorageLifecycleService(
         lifecycle_repository=repository,
         market_repository=object(),
+        canonical_repository=SimpleNamespace(plan=lambda **_: {"actions": [], "execution_available": False}),
     )
 
 
@@ -144,6 +146,39 @@ def test_lifecycle_execution_requires_explicit_policy_gate() -> None:
             execute=True,
         )
     assert repository.lock_entered is False
+
+
+def test_lifecycle_dry_run_passes_requested_storage_root_to_canonical_plan(tmp_path):
+    observed = {}
+    service = _service(_LifecycleRepository())
+
+    def plan(**kwargs):
+        observed.update(kwargs)
+        return {"actions": [], "execution_available": False}
+
+    service.canonical_repository = SimpleNamespace(plan=plan)
+    policy = MarketStorageLifecyclePolicy()
+    result = service.run(policy=policy, storage_root=tmp_path)
+    assert observed["policy"] is policy.canonical_retention
+    assert observed["storage_root"] == tmp_path
+    assert result["plan"]["canonical_retention"]["execution_available"] is False
+
+
+def test_canonical_inventory_never_runs_inside_raw_exclusive_fence(tmp_path):
+    repository = _LifecycleRepository()
+    service = _service(repository)
+    repository.list_compaction_manifests = lambda **_: []
+    repository.list_archive_expiration_candidates = lambda **_: []
+
+    def plan(**_kwargs):
+        assert repository.lock_entered is False
+        return {"actions": [], "execution_available": False}
+
+    service.canonical_repository = SimpleNamespace(plan=plan)
+    result = service.run(policy=MarketStorageLifecyclePolicy(execution_enabled=True),
+                         execute=True, storage_root=tmp_path)
+    assert result["status"] == "completed" and result["outcomes"] == []
+    assert repository.lock_entered is True
 
 
 def test_archive_expiration_rechecks_new_retention_pin_before_deletion() -> None:

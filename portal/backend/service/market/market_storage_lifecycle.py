@@ -7,7 +7,7 @@ import logging
 import socket
 import threading
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -30,6 +30,7 @@ from ..storage.repos.market_structure import (
     PostgresMarketStructureRepository,
     market_structure_repository,
 )
+from ..storage.repos.fact_retention import canonical_fact_retention_repository
 from .market_structure_service import DEFAULT_STORAGE_ROOT
 
 
@@ -62,17 +63,28 @@ class MarketStorageLifecycleService:
         market_repository: PostgresMarketStructureRepository = (
             market_structure_repository
         ),
+        canonical_repository=canonical_fact_retention_repository,
     ) -> None:
         self.lifecycle_repository = lifecycle_repository
         self.market_repository = market_repository
+        self.canonical_repository = canonical_repository
 
     def plan(
         self,
         *,
         policy: MarketStorageLifecyclePolicy,
         now: Optional[datetime] = None,
+        storage_root: Path = DEFAULT_STORAGE_ROOT,
+        canonical_after_storage_day: date | None = None,
     ) -> dict[str, Any]:
         observed_at = _utc(now or datetime.now(UTC))
+        canonical = self.canonical_repository.plan(
+            policy=policy.canonical_retention, storage_root=storage_root,
+            after_storage_day=canonical_after_storage_day,
+        )
+        return self._assemble_plan(policy=policy, observed_at=observed_at, canonical=canonical)
+
+    def _assemble_plan(self, *, policy, observed_at, canonical):
         compactions = (
             self._plan_compactions(policy=policy, now=observed_at)
             if policy.archive_compaction_enabled
@@ -96,12 +108,15 @@ class MarketStorageLifecycleService:
             "policy": policy.to_dict(),
             "observed_at": observed_at.isoformat(),
             "execution_enabled": policy.execution_enabled,
+            "canonical_retention": canonical,
             "summary": {
                 "action_count": len(actions),
                 "eligible_count": sum(bool(item["eligible"]) for item in actions),
                 "blocked_count": sum(not bool(item["eligible"]) for item in actions),
                 "archive_compaction_count": len(compactions),
                 "archive_expiration_count": len(archive_expirations),
+                "canonical_candidate_count": len(canonical["actions"]),
+                "canonical_execution_available": canonical["execution_available"],
                 "chunk_compression_count": len(chunk_compressions),
                 "chunk_expiration_count": len(chunk_expirations),
                 "estimated_reclaim_bytes": sum(
@@ -132,7 +147,7 @@ class MarketStorageLifecycleService:
                 "enable the policy only after reviewing a dry-run plan"
             )
         if not requested_execute:
-            plan = self.plan(policy=policy, now=now)
+            plan = self.plan(policy=policy, now=now, storage_root=storage_root)
             return {
                 "schema_version": "market.storage_lifecycle_run.v1",
                 "status": "dry_run",
@@ -146,8 +161,15 @@ class MarketStorageLifecycleService:
             or f"market-lifecycle:{socket.gethostname()}:{threading.get_native_id()}"
         )
         outcomes: list[dict[str, Any]] = []
+        # Capacity/family scans are observations, not destructive authority.
+        # Keep them outside the raw-expiry exclusive fence. Raw action planning
+        # retains its previous lock scope; final canonical execution will own
+        # its separate shared-verification/exclusive-handoff phases.
+        canonical = self.canonical_repository.plan(
+            policy=policy.canonical_retention, storage_root=storage_root,
+        )
         with self.lifecycle_repository.lifecycle_lock(owner_id=owner):
-            plan = self.plan(policy=policy, now=now)
+            plan = self._assemble_plan(policy=policy, observed_at=_utc(now or datetime.now(UTC)), canonical=canonical)
             store = FilesystemRawArchiveObjectStore(
                 Path(storage_root).expanduser().resolve() / "objects"
             )

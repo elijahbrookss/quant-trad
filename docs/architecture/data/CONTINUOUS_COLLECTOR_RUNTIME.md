@@ -29,6 +29,7 @@ code_paths:
   - portal/backend/service/market/market_storage_lifecycle.py
   - portal/backend/service/market/market_structure_service.py
   - portal/backend/service/storage/repos/market_lifecycle.py
+  - portal/backend/service/storage/repos/fact_retention.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/workers/market_data_collector.py
   - portal/backend/workers/market_data_collector_health.py
@@ -263,18 +264,18 @@ supervisor. It plans bounded work on an hourly default cadence and never blocks
 the acquisition loop. Planning and execution share one typed policy; the safe
 default is `execution_enabled: false`, so deployment produces plans without
 mutation until an operator reviews the output and explicitly enables execution.
-Archive windows, hot-table windows, compaction thresholds, batch limits, and
+Archive windows, canonical hot windows, compaction thresholds, batch limits, and
 the execution gate are configuration values with environment bindings shared
 by the backend API and collector worker; moving to a different volume or cloud
 deployment does not require a code change.
 
-Every execution run takes one global PostgreSQL advisory fence. Dataset freeze
+Raw lifecycle execution takes one global PostgreSQL advisory fence. Dataset freeze
 and explicit archive-pin transactions take the corresponding shared fence, so
 an object or Timescale chunk cannot pass its final pin check while a new pin is
 being committed. Operations are idempotent and append `planned`, `completed`,
 `skipped`, or `failed` evidence to `market.storage_lifecycle_events`.
 
-The lifecycle has four bounded action types:
+The active raw lifecycle has two action types:
 
 - `archive_compact` combines a contiguous, same-session/same-epoch raw manifest
   set into verified Parquet/ZSTD without taking or interrupting the live stream
@@ -283,21 +284,30 @@ The lifecycle has four bounded action types:
   replacement checksums, fsyncs filesystem deletion, then records immutable
   completion evidence. A manifest remains visible as `expired` and replay fails
   with that explicit state.
-- `chunk_compress` compresses only old, fully closed Timescale chunks. L2 parent
-  and child chunks are treated as one layout group.
-- `chunk_expire` drops a complete chunk group only after a last-moment frozen
-  dataset overlap check. Candle, open-interest, and funding rows are
-  compression-only by default; raw trades, L2, and reproducible feature tables
-  have separate configured hot windows.
 
-No Timescale `add_retention_policy` job is installed because it cannot enforce
-Quant-Trad's dataset pins. Chunk removal stays in the application lifecycle.
-The one-time
-`scripts/db/manual_enable_market_storage_lifecycle_v1.sql` script converts the
-two L2 child tables to hypertables and configures compression for all covered
-tables. It takes the same lifecycle fence and fails if any stream lease is
-active; it is an out-of-band activation step and is never run by application
-startup.
+Legacy `chunk_compress`/`chunk_expire` arrays remain empty. Their retired
+family-table policy keys are rejected and must not operate on generalized Facts.
+`scripts/db/manual_enable_market_storage_lifecycle_v1.sql` is historical
+family-table cutover evidence, not the activation procedure for today's schema.
+No Timescale automatic-retention job can replace QT's evidence/pin checks.
+
+Canonical daily hot-payload planning is included separately in these same
+operator responses. Configuration is under
+`market_data_lifecycle.canonical_retention`: a default 30-complete-day placement
+window, exact per-family overrides, optional hot-payload/archive-filesystem byte
+budgets, a free-space reserve, and bounded candidate inventory. The longest
+family window protects each mixed day, including late-arriving revisions.
+Every field has a `QT_MARKET_DATA_LIFECYCLE_CANONICAL_*` environment binding.
+Continue a bounded inspection using `lifecycle-plan
+--canonical-after-storage-day YYYY-MM-DD` and the returned cursor. Full storage
+totals are separate from paginated candidate details.
+
+Canonical scans run outside the raw exclusive fence. The response explicitly
+marks canonical execution unavailable until its orchestrator and complete
+dependency proofs are finished. The existing raw execution flag does not
+activate this new path. See
+[Generalized Fact Data Plane](GENERALIZED_FACT_DATA_PLANE.md#canonical-retention-planning)
+for cutoff, budget, pressure, verification, and physical-reclamation contracts.
 
 Operator surfaces are:
 

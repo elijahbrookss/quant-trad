@@ -28,6 +28,11 @@ _ADMITTED_FACT_TYPES = frozenset({
 })
 
 
+def unproven_reclamation_fact_types(fact_types):
+    """Shared admission status for planning and the final destructive gate."""
+    return sorted(set(fact_types) - _ADMITTED_FACT_TYPES)
+
+
 @dataclass(frozen=True)
 class FactReclamationLimits:
     statement_timeout_ms: int = 1000
@@ -72,7 +77,7 @@ class PostgresCanonicalFactReclamationRepository:
         families = session.execute(text(
             "SELECT DISTINCT fact_type FROM market.fact_versions WHERE storage_day=:day LIMIT 65"
         ), {"day": day}).scalars().all()
-        unsupported = set(families) - _ADMITTED_FACT_TYPES
+        unsupported = unproven_reclamation_fact_types(families)
         if unsupported:
             raise RuntimeError(f"canonical_reclaim_dependency_proof_required: storage_day={day} fact_types={sorted(unsupported)}")
 

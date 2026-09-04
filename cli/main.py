@@ -1805,6 +1805,7 @@ def _cmd_data_market_structure_lifecycle_plan(args: argparse.Namespace) -> int:
         _client(args).request_json(
             "GET",
             "/api/market-data/market-structure/storage-lifecycle/plan",
+            params={"canonical_after_storage_day": args.canonical_after_storage_day},
         )
     )
     return 0
@@ -4194,7 +4195,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_market_structure_lifecycle_plan = data_market_structure_sub.add_parser(
         "lifecycle-plan",
-        help="Plan pin-safe archive and Timescale lifecycle work without mutation.",
+        help="Inspect archive work, canonical hot windows, storage budgets, and blockers without mutation.",
+    )
+    data_market_structure_lifecycle_plan.add_argument(
+        "--canonical-after-storage-day",
+        help="Continue a bounded canonical candidate scan after this UTC storage date (YYYY-MM-DD).",
     )
     data_market_structure_lifecycle_plan.set_defaults(
         func=_cmd_data_market_structure_lifecycle_plan

@@ -40,6 +40,7 @@ code_paths:
   - portal/backend/service/storage/repos/fact_archival.py
   - portal/backend/service/storage/repos/fact_lineage.py
   - portal/backend/service/storage/repos/fact_reclamation.py
+  - portal/backend/service/storage/repos/fact_retention.py
   - portal/backend/service/storage/repos/market_lifecycle.py
   - portal/backend/service/storage/repos/market_structure.py
   - portal/backend/controller/market_data.py
@@ -345,6 +346,66 @@ revision index and raw-mapping catalog continue to grow and must remain visible
 in pressure/budget reporting. This design does not promise a hard cap on all
 PostgreSQL bytes.
 
+### Canonical Retention Planning
+
+`market_data_lifecycle.canonical_retention` is the typed policy for generalized
+hot payloads. The default hot window is 30 complete UTC placement days, with
+exact `hot_days_by_fact_type` overrides. A daily partition waits for the longest
+window of **every** family present. A late correction starts its own hot lifetime
+from `storage_day`, not its older observation or known-at clock. A day must be
+strictly older than database-today minus its window; the current and pre-created
+next day are never eligible. These are reviewable defaults, not production
+retention activation.
+
+The existing `qt data market-structure lifecycle-plan` and dry `lifecycle-run`
+responses include `canonical_retention`. Its next-phase candidates distinguish
+seal, page publication, page verification, whole-partition verification, and
+physical reclamation. Persisted page/receipt progress selects the next phase;
+file presence alone does not. Unproven dependency families block the entire day.
+Old verifier receipts require review. All eligibility is metadata-only and
+`requires_execution_recheck`: it does not replace fresh bytes, complete lineage,
+pin checks, mount admission, or the final physical-relation gate.
+
+Planning reads a PostgreSQL read-only transaction and filesystem metadata. It
+does not create directories, publish/read archive objects, seal progress, acquire
+the lifecycle mutation fence, or delete data. Database UTC time owns the cutoff.
+Missing/wrong/read-only mounts appear as explicit blockers. Canonical metadata
+planning runs outside the raw lifecycle's exclusive fence, including on an
+explicit raw execution run; raw planning/execution retains its existing fence.
+
+The complete hot-partition inventory defaults to a 4,096-partition limit, while
+family/progress inspection defaults to 16 candidate days per response. Inventory
+overflow fails rather than reporting partial storage totals. Continue candidate
+inspection with `--canonical-after-storage-day` using `next_after_storage_day`;
+`candidate_scan_complete` describes that scan, not an evidence verification.
+Physical hot-byte totals still cover every hot partition on every page. SQL
+statements default to 5 seconds, reduced by the remaining 15-second checked
+inventory budget. These bound query work, not connection checkout, filesystem
+system calls, or a hard wall-clock completion guarantee. Distinct-family scans
+still need production-scale measurements; timeouts fail instead of guessing.
+
+Optional `hot_payload_budget_bytes` and `archive_filesystem_budget_bytes` default
+to null until reviewed against actual capacity. The former measures attached
+payload table/index/TOAST allocation only. The latter measures **all used bytes
+on the archive filesystem**, not just QT objects. `archive_min_free_bytes`
+defaults to 1 GiB. The plan separately reports whole-database bytes, permanent
+canonical-header bytes, and raw-mapping bytes: reclaiming payloads is not a cap
+on PostgreSQL, WAL, or the NVMe filesystem. The independently provisioned
+filesystem alerts remain necessary.
+
+Hot pressure prioritizes already-verified, window-eligible reclamation within
+the inspected candidate page. HDD budget/reserve pressure blocks new publication
+but need not prevent reclamation of a fully verified copy already there. A bad
+mount blocks both. If safe work cannot restore headroom, the output requests
+operator review/capacity; pressure never shortens windows, skips evidence, deletes
+unarchived data, changes collection policy, or treats pin release as permission
+to break cold lineage. Candidate byte estimates are explicitly metadata-only.
+
+The planner is wired; canonical scheduled/CLI **execution is not yet wired** and
+is reported as `execution_available: false`, independently of the existing raw
+lifecycle execution gate. Bounded execution and complete transitive dependency
+admission remain required before activating canonical retention.
+
 ### Canonical Archive Staging
 
 `PostgresCanonicalFactArchiveRepository` seals only placement days older than
@@ -499,8 +560,9 @@ not an activated retention policy. Both constructor `enabled=True` and call
 it does not seal a partition, publish files, update progress, or delete anything.
 An explicit `eligible_before` placement-day cutoff must be no later than the
 database's current UTC day; the target must be strictly older than that cutoff.
-Per-family hot windows, budget/pressure planning, scheduler/CLI integration,
-and the final whole-platform cold-reader audit remain rollout gates.
+Per-family hot windows and budget/pressure planning now have an inspectable CLI
+surface. Scheduler/CLI execution and complete dependency admission remain
+rollout gates.
 
 Only standalone candle, funding, open-interest, reference-price, reserve-balance,
 and trade facts are currently admitted. Any other family in the physical day

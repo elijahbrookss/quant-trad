@@ -68,6 +68,18 @@ def test_config_file_cannot_define_a_second_database_dsn_authority(
         get_settings(force_reload=True)
 
 
+def test_canonical_retention_environment_bindings(monkeypatch, request):
+    request.addfinalizer(settings_module.clear_settings_cache)
+    monkeypatch.setenv("QT_MARKET_DATA_LIFECYCLE_CANONICAL_HOT_DAYS", "14")
+    monkeypatch.setenv("QT_MARKET_DATA_LIFECYCLE_CANONICAL_HOT_DAYS_BY_FACT_TYPE", '{"market.trade": 7}')
+    monkeypatch.setenv("QT_MARKET_DATA_LIFECYCLE_CANONICAL_HOT_PAYLOAD_BUDGET_BYTES", "123456")
+    monkeypatch.setenv("QT_MARKET_DATA_LIFECYCLE_CANONICAL_ARCHIVE_FILESYSTEM_BUDGET_BYTES", "654321")
+    policy = get_settings(force_reload=True).market_data_lifecycle.canonical_retention
+    assert policy.hot_days == 14 and policy.hot_days_by_fact_type == {"market.trade": 7}
+    assert policy.hot_payload_budget_bytes == 123456
+    assert policy.archive_filesystem_budget_bytes == 654321
+
+
 def test_explicit_dotenv_disable_prevents_repository_file_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
