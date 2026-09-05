@@ -39,6 +39,7 @@ services:
     hostname: tsdb.quanttrad
     restart: unless-stopped
     init: true
+    shm_size: "1g"
     labels:
       loki.job: quanttrad
       loki.service: tsdb

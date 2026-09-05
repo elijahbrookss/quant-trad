@@ -383,6 +383,38 @@ revision are known.
 | `market.book_validity_interval_versions` | one version of a valid or invalid reconstruction interval | PK UUID; natural `(series_id, interval_id, revision)` | start/end source positions and event/receipt/known-at times, status, reason, opening snapshot, closing quality event, reconstruction version | append-only; open revision has null end, closure appends final revision | series/time/status indexes; indefinite quality evidence |
 | `market.book_quality_event_links` | typed relationship from a stream quality event to the affected book interval | PK `(quality_event_id, validity_interval_id, link_role)` | link role and known-at | append-only | interval and quality-event lookups; indefinite quality evidence |
 | `market.book_reconstruction_state` | disposable current operational projection | PK series | current checkpoint/sequence/ordinal/state hash/validity/fence/updated | mutable; never dataset truth; rebuilt from archive/checkpoint | hot only |
+| `market.book_operational_rollups` | bounded rebuildable Level 2 status counters | PK series | exact snapshot, update-batch, mutation, and checkpoint counts; represented canonical Fact commit high-water; latest checkpoint acknowledged-at/id; projection update time | mutable operational projection; fact counters advance in the fenced canonical transaction and an always-on database trigger advances checkpoint count only on a new immutable insert; never dataset or replay truth | one hot row per L2 series; primary-key status lookup plus bounded latest-row guards replace lifetime L2 count scans |
+
+The rollup preserves the exact totals previously derived from canonical facts
+and checkpoint manifests, but it does not replace either authority. L2 series
+registration creates or reuses its zero row in the same transaction; stream
+definition enrollment only asserts that invariant, so a crash between those
+two enrollment stages cannot strand an unstartable series. Existing stores are
+seeded once, with writers stopped, by
+`scripts/db/manual_migration_book_operational_rollups_v1.sql`; startup fails
+loudly if the table or an enrolled L2 row is absent. Fact ingestion folds only
+the per-series commit suffix above the stored high-water while holding the
+existing series fence, so exact and mixed retries cannot double-count. The
+status response keeps its existing v1 fields and reads these four totals by
+primary key. The migration also installs an always-on checkpoint insert trigger
+that atomically advances the exact count even for older writers and backdated
+acknowledgements. Bounded latest-commit and latest-checkpoint index lookups
+verify that no canonical L2 Fact write bypassed the owning book transaction and
+that the checkpoint marker agrees with the trigger-maintained projection; a
+mismatch fails startup or status loudly and requires an absolute reseed.
+The generic Fact writer rejects `market.l2_book.v1`, while the fenced book path
+uses its explicit transaction-scoped writer lane, forbids corrections, and
+requires the newly observed commit suffix to equal the current transaction's
+insert count. Other manifest, quality, trade, aggregate, and interval portions
+of that response remain separate lifetime projections and are not claimed to
+be O(1).
+
+The stream fence compares the complete claim scope back to the stored
+definition, not only the lease token and generation. Checkpoint commit further
+requires every acknowledged source manifest to match the definition, session,
+connection epoch, and provider product, and to contain the checkpoint's receive
+ordinal. A caller cannot retarget a valid lease token or
+attach evidence from a different session.
 
 ### Derived, Reconciliation, Normalization, And Dataset Tables
 
@@ -947,7 +979,7 @@ effects. It does not claim distributed exactly-once delivery.
 | Raw archive uploader | sealed segment -> immutable object + manifest | content-addressed object key; repeat PUT/HEAD safe; manifest insert after checksum verification | upload ownership follows segment/session; partial upload never acknowledged; attempt failures logged | per sealed segment; object bytes authoritative raw evidence |
 | Deterministic parser/canonicalizer | acknowledged/spooled frame -> typed trade/L2/product facts | at-least-once consumption, raw/source keys dedupe; schema-versioned parser; malformed input fails that event visibly | fence checked again in append transaction; replay may republish identical facts; parser error quality event | product/channel partition; typed store authoritative query truth |
 | Trade aggregator | ordered canonical trade revisions -> 1s/1m aggregate revisions | source-position watermarks; duplicate invariant; late input appends later-known revision | lease by output series/window; restart from last committed watermark; incomplete bucket/gap flags | series × interval; aggregate rows authoritative derived truth |
-| Book reconstructor | snapshot/mutation facts + product definitions -> validity, state hashes, BBO/depth | state machine above; exact duplicate no-op; invalid evidence closes interval | fenced per L2 series; restart from checkpoint/archive; never publishes from invalid state | one product book; archive + reconstruction version authoritative |
+| Book reconstructor | snapshot/mutation facts + product definitions -> validity, state hashes, BBO/depth | state machine above; exact duplicate no-op; invalid evidence closes interval; bounded status counters advance with canonical commit high-water | fenced per L2 series; restart from checkpoint/archive; never publishes from invalid state; status rollup is rebuildable and fail-loud when unseeded | one product book; archive + reconstruction version authoritative |
 | Checkpoint generator | valid deterministic state -> checkpoint object/manifest | source-position content identity; repeat generation yields same state/content fingerprint | same book fence or read-only replay job; checksum mismatch invalidates checkpoint | series/checkpoint; checkpoint is acceleration, not independent truth |
 | Relationship joiner | explicit mapping + futures/spot facts -> paired relationship revisions | causal as-of join with staleness and input fingerprints; retries idempotent | lease per mapping/spec; gap/invalid side suppresses output and records diagnostic | mapping × spec; typed relationship rows authoritative |
 | Feature materializer | typed source/derived rows + normalization spec -> normalized revisions | input fingerprint dedupe; bounded trailing recomputation after late revisions; append only | lease by output series/spec/range; restart from input watermark; invalid/warmup evidence preserved | series × spec × time range; spec + inputs authoritative |
@@ -1352,7 +1384,7 @@ shows implementation, not supported production behavior.
 | Provider semantics | `src/data_providers/facts.py`, `src/data_providers/providers/coinbase.py`, `src/data_providers/registry.py` | typed product/trade validation and implemented provider capability declarations |
 | Core market contracts and state | `src/market_data/contracts.py`, `src/market_data/requirements.py`, `src/market_data/store.py`, `src/market_data/archive.py`, `src/market_data/order_book.py`, `src/market_data/market_state.py`, `src/market_data/normalization.py`, `src/market_data/frozen.py`, `src/market_data/acquisition_coverage.py` | typed source positions, archive manifests, exact-scope coverage, reconstruction, normalization, fingerprints, and frozen material |
 | Database models/bootstrap | `portal/backend/db/market_data_models.py`, `portal/backend/db/session.py` | current market tables, shared fact clock, hypertables, immutability, and strict drift checks |
-| Manual migrations | `scripts/db/manual_migration_market_data_v2_hard_cutover.sql`, `scripts/db/manual_migration_market_fact_commit_clock_v1.sql`, `scripts/db/manual_enable_market_storage_lifecycle_v1.sql` | reviewed out-of-band schema and storage-lifecycle changes; runtime code does not patch schema |
+| Manual migrations | `scripts/db/manual_migration_market_data_v2_hard_cutover.sql`, `scripts/db/manual_migration_market_fact_commit_clock_v1.sql`, `scripts/db/manual_migration_book_operational_rollups_v1.sql`, `scripts/db/manual_enable_market_storage_lifecycle_v1.sql` | reviewed out-of-band schema, bounded-status seed, and storage-lifecycle changes; runtime code does not patch schema |
 | Repositories | `portal/backend/service/storage/repos/market_data.py`, `portal/backend/service/storage/repos/market_collection.py`, `portal/backend/service/storage/repos/market_structure.py`, `portal/backend/service/storage/repos/market_lifecycle.py` | fenced append/range reads plus archive, pin, validity, checkpoint, coverage, and lifecycle persistence |
 | Services | `portal/backend/service/market/continuous_stream_collector.py`, `portal/backend/service/market/continuous_stream_runtime.py`, `portal/backend/service/market/market_structure_service.py`, `portal/backend/service/market/market_storage_lifecycle.py`, `portal/backend/service/market/normalization_service.py`, `portal/backend/service/market/backtest_dataset_service.py`, `portal/backend/service/market/runtime_market_data.py` | bounded and continuous collection, replay/reconstruction, lifecycle planning, normalization, dataset planning, and causal delivery |
 | Workers | `portal/backend/workers/market_data_collector.py`, `portal/backend/workers/market_data_collector_health.py` | supervised collection and health projection over the service-owned plane |

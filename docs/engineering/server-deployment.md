@@ -32,11 +32,13 @@ One release moves through five visible boundaries:
    heartbeat. The deploy helper verifies image attestations and records the
    current and previous successful revisions for rollback.
 
-Deploy never executes historical upgrade scripts. An update replaces
-application containers only after the new images have built. The collector gets
-a five-minute stop window to close its provider connections, seal and finalize
-its WAL segments, and release fenced leases. Any real provider downtime remains
-gap evidence.
+Deploy never executes historical upgrade scripts. An update reconciles services
+only after the new images have built and the reviewed Compose model has rendered
+successfully. Application containers are replaced for new commit-tagged images;
+a service whose reviewed runtime configuration changed may also be recreated.
+The collector gets a five-minute stop window to close its provider connections,
+seal and finalize its WAL segments, and release fenced leases. Any real provider
+downtime remains gap evidence.
 
 ## Full Service Surface
 
@@ -56,6 +58,53 @@ gap evidence.
 
 All published ports are loopback-only by default. Use SSH forwarding. Do not
 expose the V1 operator surfaces with a public firewall rule or reverse proxy.
+
+The server preset gives the `tsdb` container an isolated 1 GiB `/dev/shm`
+allocation. PostgreSQL parallel workers use this container-local filesystem for
+dynamic shared-memory segments; the explicit size avoids relying on Docker's
+small default. It does not change `shared_buffers`, durable database storage,
+query admission, or the schema, and it is not a substitute for bounding
+expensive status queries.
+
+A pull-request merge does not change the running server. This capacity setting
+becomes active only after an operator runs `deploy` for a reviewed commit and
+Compose recreates `tsdb`. The recreate briefly restarts PostgreSQL but preserves
+the `postgres-data` named volume. The deployment helper does not run a migration
+before, during, or after that recreate; any separately required historical
+schema transition remains an explicit operator-run procedure.
+
+For the Level 2 bounded-status change, use this future rollout order after its
+pull request is reviewed; merging alone performs none of these steps:
+
+1. Take a database backup and prove it can be restored.
+2. Stop the backend and collector writers, then wait for every stream lease to
+   expire.
+3. Against the still-running old database release, run
+   `scripts/db/manual_migration_book_operational_rollups_v1.sql`. The seed is
+   single-worker and disables both parallel query and parallel index-maintenance
+   workers so the current 64 MiB shared-memory allocation is sufficient. It
+   repairs and verifies the two exact bounded-read indexes and installs the
+   always-on checkpoint counter trigger. Its database lock wait is bounded at
+   30 seconds; a lock-timeout error means a writer is still active and must be
+   investigated instead of retrying blindly.
+4. Deploy the reviewed release. Compose recreates `tsdb`, preserves the named
+   data volume, and activates the 1 GiB shared-memory allocation.
+5. Reconcile every seeded rollup against canonical facts and checkpoints, run
+   eight concurrent market-structure status reads, and then verify database,
+   backend, and collector health before declaring the rollout complete.
+
+If the migration, reconciliation, concurrency proof, or health gate fails,
+stop and retain the failure evidence for RCA. Do not start the new application
+code against an unseeded store.
+
+Rolling back from this release to code that predates the bounded counters is
+allowed only as an explicit compatibility window. The old code can write new
+book Facts without advancing their rollup; the database trigger continues to
+count checkpoint inserts while the migration remains installed. Before
+promoting the new release again, stop writers and unconditionally rerun the
+absolute seed migration. Startup and status verify the trigger plus bounded
+Fact/checkpoint markers, but those guards do not replace the mandatory reseed;
+do not assume a later collector cycle will repair an old-code interval.
 
 The backend controls Docker to launch isolated bot runtimes, so its Docker
 socket mount is a privileged trust boundary. Alloy and the Docker evidence

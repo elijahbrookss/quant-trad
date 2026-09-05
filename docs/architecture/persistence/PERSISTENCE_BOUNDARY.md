@@ -42,6 +42,7 @@ code_paths:
   - scripts/db/manual_migration_canonical_lifecycle_ledger_v1.sql
   - scripts/db/manual_migration_async_job_fencing_v1.sql
   - scripts/db/manual_migration_numeric_fact_store_v1.sql
+  - scripts/db/manual_migration_book_operational_rollups_v1.sql
   - scripts/db/manual_add_operator_read_path_indexes_v1.sql
 ---
 # Persistence Boundary
@@ -202,6 +203,16 @@ Active schema surfaces are justified by role:
   excluded; hypertable size and activity are aggregated into the logical
   schema/table identity. These rows support capacity planning and alerts but
   cannot certify market facts, runtime semantics, or research validity.
+- Keep as bounded Level 2 operator projection:
+  `market.book_operational_rollups` stores one row per L2 series with exact
+  snapshot, update-batch, mutation, and checkpoint totals plus the represented
+  canonical Fact commit high-water. Fenced canonical Fact transactions advance
+  their suffix counters, and an always-on checkpoint insert trigger advances
+  the checkpoint counter atomically even through an older writer. It is
+  rebuildable and cannot certify replay or frozen-dataset contents. Existing
+  databases require the explicit
+  `scripts/db/manual_migration_book_operational_rollups_v1.sql` seed with
+  writers stopped, while clean bootstrap creates the empty current table.
 - Keep as bounded profiler data: `portal_bot_run_step_rollups` stores typed
   bucketed phase-duration metrics with mergeable histogram counts for p95/p99
   estimates. Raw `portal_bot_run_steps` rows are not part of the schema

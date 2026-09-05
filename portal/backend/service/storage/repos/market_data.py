@@ -70,6 +70,7 @@ from .market_lifecycle import market_storage_lifecycle_repository
 
 _SERIES_IDENTITY_VERSION = "market_series.v1"
 _DIMENSIONAL_SERIES_IDENTITY_VERSION = "market_series.v2"
+_MANAGED_L2_BOOK_CONTRACT_VERSION = "market.l2_book.v1"
 
 
 def _json_text(value: Mapping[str, Any] | None) -> str:
@@ -1656,25 +1657,43 @@ class PostgresMarketDataRepository:
                 ),
                 {"identity_key": identity_key},
             ).mappings().one()
-        actual = (
-            str(row["instrument_id"]),
-            str(row["fact_type"]),
-            row.get("timeframe_seconds"),
-            str(row["contract_version"]),
-            dict(row.get("dimensions") or {}),
-        )
-        expected = (
-            instrument_id,
-            fact_type,
-            timeframe,
-            contract_version,
-            normalized_dimensions,
-        )
-        if actual != expected:
-            raise RuntimeError(
-                "market_data_series_conflict: identity hash resolved to different series"
+            actual = (
+                str(row["instrument_id"]),
+                str(row["fact_type"]),
+                row.get("timeframe_seconds"),
+                str(row["contract_version"]),
+                dict(row.get("dimensions") or {}),
             )
-        return int(row["id"])
+            expected = (
+                instrument_id,
+                fact_type,
+                timeframe,
+                contract_version,
+                normalized_dimensions,
+            )
+            if actual != expected:
+                raise RuntimeError(
+                    "market_data_series_conflict: identity hash resolved to "
+                    "different series"
+                )
+            series_id = int(row["id"])
+            if contract_version == _MANAGED_L2_BOOK_CONTRACT_VERSION:
+                session.execute(
+                    text(
+                        """
+                        INSERT INTO market.book_operational_rollups (
+                            series_id, snapshot_count, batch_count,
+                            mutation_count, checkpoint_count,
+                            fact_high_water_commit_seq, updated_at
+                        ) VALUES (
+                            :series_id, 0, 0, 0, 0, 0, now()
+                        )
+                        ON CONFLICT (series_id) DO NOTHING
+                        """
+                    ),
+                    {"series_id": series_id},
+                )
+        return series_id
 
     def resolve_series_id(
         self,
@@ -1762,6 +1781,11 @@ class PostgresMarketDataRepository:
                 "market_data_ingest_invalid: duplicate canonical observation_key"
             )
         series = self._get_series(series_id)
+        if str(series["contract_version"]) == _MANAGED_L2_BOOK_CONTRACT_VERSION:
+            raise ValueError(
+                "market_data_ingest_invalid: market.l2_book.v1 is owned by the "
+                f"fenced market-structure book writer series_id={series_id}"
+            )
         source = self._get_source_identity(source_id)
         for fact in rows:
             if (
@@ -1811,7 +1835,77 @@ class PostgresMarketDataRepository:
         allow_corrections: bool = True,
         collection_fence: Optional[Mapping[str, Any]] = None,
     ) -> IngestionOutcome:
-        """Persist canonical Facts inside an existing operational transaction."""
+        """Persist non-book canonical Facts inside an existing transaction."""
+
+        return self._ingest_facts_in_session(
+            session,
+            series_id=series_id,
+            source_id=source_id,
+            facts=facts,
+            request=request,
+            source_revision=source_revision,
+            ingestion_run_id=ingestion_run_id,
+            allow_corrections=allow_corrections,
+            collection_fence=collection_fence,
+            require_l2_book=False,
+        )
+
+    def ingest_l2_book_facts_in_session(
+        self,
+        session,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[CanonicalFact],
+        request: Optional[Mapping[str, Any]] = None,
+        source_revision: Optional[str] = None,
+        ingestion_run_id: Optional[str] = None,
+        allow_corrections: bool = False,
+        collection_fence: Optional[Mapping[str, Any]] = None,
+    ) -> IngestionOutcome:
+        """Persist managed book Facts inside the owning fenced transaction."""
+
+        if allow_corrections:
+            raise ValueError(
+                "market_data_ingest_invalid: managed L2 book Facts forbid corrections"
+            )
+        if (
+            not isinstance(collection_fence, Mapping)
+            or str(collection_fence.get("fence_kind") or "") != "stream"
+        ):
+            raise ValueError(
+                "market_data_ingest_invalid: managed L2 book Facts require an "
+                "explicit stream collection fence"
+            )
+
+        return self._ingest_facts_in_session(
+            session,
+            series_id=series_id,
+            source_id=source_id,
+            facts=facts,
+            request=request,
+            source_revision=source_revision,
+            ingestion_run_id=ingestion_run_id,
+            allow_corrections=False,
+            collection_fence=collection_fence,
+            require_l2_book=True,
+        )
+
+    def _ingest_facts_in_session(
+        self,
+        session,
+        *,
+        series_id: int,
+        source_id: int,
+        facts: Iterable[CanonicalFact],
+        request: Optional[Mapping[str, Any]],
+        source_revision: Optional[str],
+        ingestion_run_id: Optional[str],
+        allow_corrections: bool,
+        collection_fence: Optional[Mapping[str, Any]],
+        require_l2_book: bool,
+    ) -> IngestionOutcome:
+        """Persist canonical Facts through an explicitly selected writer lane."""
 
         series_id = int(series_id)
         source_id = int(source_id)
@@ -1845,6 +1939,20 @@ class PostgresMarketDataRepository:
         ).mappings().first()
         if series is None:
             raise ValueError(f"market_data_series_unknown: series_id={series_id}")
+        is_l2_book = (
+            str(series["contract_version"])
+            == _MANAGED_L2_BOOK_CONTRACT_VERSION
+        )
+        if is_l2_book and not require_l2_book:
+            raise ValueError(
+                "market_data_ingest_invalid: market.l2_book.v1 is owned by the "
+                f"fenced market-structure book writer series_id={series_id}"
+            )
+        if require_l2_book and not is_l2_book:
+            raise ValueError(
+                "market_data_ingest_invalid: canonical Fact series is assigned "
+                f"to the generic writer series_id={series_id}"
+            )
         source_row = session.execute(
             text(
                 """

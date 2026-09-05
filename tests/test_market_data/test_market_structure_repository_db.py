@@ -3,9 +3,12 @@ from __future__ import annotations
 import gzip
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from sqlalchemy import text
@@ -19,6 +22,7 @@ from market_data.archive import (
     publish_spool_archive,
 )
 from market_data.book_archive import publish_book_checkpoint
+from market_data.canonical_adapters import canonicalize_l2_snapshot
 from market_data.contracts import DatasetSeriesRequest, SourceIdentity
 from market_data.market_state import (
     BBO_FACT_TYPE,
@@ -37,6 +41,7 @@ from market_data.normalization import (
 )
 from market_data.order_book import (
     BookLifecycle,
+    L2_BOOK_FACT_VERSION,
     L2ProductContract,
     Level2BookReconstructor,
     translate_coinbase_l2_event,
@@ -180,6 +185,24 @@ def test_stream_storage_accepts_future_channels_and_preserves_lifecycle() -> Non
         timeframe_seconds=None,
         contract_version=MARKET_TRADE_FACT_VERSION,
     )
+    with pytest.raises(
+        ValueError,
+        match="contract_version disagrees with series",
+    ):
+        market_structure_repository.upsert_stream_definition(
+            definition_id=f"mismatched_stream_{token}",
+            source_id=source_id,
+            series_id=series_id,
+            provider="FUTURE_PROVIDER",
+            venue="DIRECT",
+            provider_product_id="ABC-USD",
+            channels=("level2",),
+            auth_mode="public",
+            contract_version=L2_BOOK_FACT_VERSION,
+            max_spool_bytes=1024**3,
+            max_segment_bytes=128 * 1024**2,
+            enabled=False,
+        )
     definition_id = f"generic_stream_{token}"
     market_structure_repository.upsert_stream_definition(
         definition_id=definition_id,
@@ -895,6 +918,19 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
         timeframe_seconds=None,
         contract_version="market.l2_book.v1",
     )
+    with db.session() as session:
+        initial_rollup = session.execute(
+            text(
+                """
+                SELECT snapshot_count, batch_count, mutation_count,
+                       checkpoint_count, fact_high_water_commit_seq
+                FROM market.book_operational_rollups
+                WHERE series_id = :series_id
+                """
+            ),
+            {"series_id": series_id},
+        ).one()
+    assert tuple(int(value) for value in initial_rollup) == (0, 0, 0, 0, 0)
     bbo_series_id = market_data_repo.register_series(
         instrument_id=instrument_id,
         fact_type=BBO_FACT_TYPE,
@@ -1017,6 +1053,46 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
             last_fact = fact
     assert len(snapshots) == len(batches) == len(checkpoints) == 1
     assert last_fact is not None
+    canonical_snapshot = canonicalize_l2_snapshot(
+        snapshots[0],
+        source=market_data_repo.get_source_identity(source_id),
+    )
+    with pytest.raises(
+        ValueError,
+        match="market.l2_book.v1 is owned by the fenced market-structure book writer",
+    ):
+        market_data_repo.ingest_facts(
+            series_id=series_id,
+            source_id=source_id,
+            facts=(canonical_snapshot,),
+            request={"fixture": "generic-l2-writer-must-fail"},
+        )
+    with db.session() as session:
+        with pytest.raises(
+            ValueError,
+            match=(
+                "market.l2_book.v1 is owned by the fenced "
+                "market-structure book writer"
+            ),
+        ):
+            market_data_repo.ingest_facts_in_session(
+                session,
+                series_id=series_id,
+                source_id=source_id,
+                facts=(canonical_snapshot,),
+                request={"fixture": "generic-session-l2-writer-must-fail"},
+            )
+        with pytest.raises(
+            ValueError,
+            match="managed L2 book Facts require an explicit stream collection fence",
+        ):
+            market_data_repo.ingest_l2_book_facts_in_session(
+                session,
+                series_id=series_id,
+                source_id=source_id,
+                facts=(canonical_snapshot,),
+                request={"fixture": "unfenced-l2-writer-must-fail"},
+            )
     final_state_hash = reducer.current_state_hash
     final_interval_id = reducer.current_interval.interval_id
     validity_versions.extend(reducer.close_bounded(at_event=last_fact))
@@ -1119,6 +1195,43 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
         object_store=object_store,
         temporary_directory=tmp_path / "tmp",
     )
+    with db.session() as session:
+        checkpoint_source_bounds = session.execute(
+            text(
+                """
+                SELECT first_receive_ordinal, last_receive_ordinal
+                FROM market.raw_archive_manifests
+                WHERE id = :manifest_id
+                """
+            ),
+            {"manifest_id": compacted_archive.manifest_id},
+        ).one()
+    assert (
+        int(checkpoint_source_bounds[0])
+        <= checkpoints[0].source_position.receive_ordinal
+        <= int(checkpoint_source_bounds[1])
+    )
+    with pytest.raises(
+        ValueError,
+        match="checkpoint scope disagrees with stream claim",
+    ):
+        market_structure_repository.commit_book_checkpoint(
+            claim,
+            checkpoint=replace(checkpoints[0], series_id=bbo_series_id),
+            encoded=checkpoint_encoded,
+            acknowledgement=checkpoint_ack,
+            source_manifest_ids=[compacted_archive.manifest_id],
+        )
+    forged_claim = replace(claim, series_id=bbo_series_id)
+    forged_checkpoint = replace(checkpoints[0], series_id=bbo_series_id)
+    with pytest.raises(MarketStructureOwnershipError, match="ownership_lost"):
+        market_structure_repository.commit_book_checkpoint(
+            forged_claim,
+            checkpoint=forged_checkpoint,
+            encoded=checkpoint_encoded,
+            acknowledgement=checkpoint_ack,
+            source_manifest_ids=[compacted_archive.manifest_id],
+        )
     assert market_structure_repository.commit_book_checkpoint(
         claim,
         checkpoint=checkpoints[0],
@@ -1301,9 +1414,124 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
     status = market_structure_repository.archive_status(definition_id=definition_id)
     assert status["book_reconstruction"]["snapshot_count"] == 1
     assert status["book_reconstruction"]["batch_count"] == 1
+    assert status["book_reconstruction"]["mutation_count"] == len(
+        batches[0].event.mutations
+    )
     assert status["book_reconstruction"]["checkpoint_count"] == 1
+    assert (
+        status["book_reconstruction"]["checkpoint_high_water_id"]
+        == checkpoints[0].checkpoint_id
+    )
+    assert (
+        status["book_reconstruction"][
+            "checkpoint_high_water_acknowledged_at"
+        ]
+        is not None
+    )
+    assert (
+        status["book_reconstruction"]["counter_fact_high_water_commit_seq"]
+        == first.max_commit_seq
+    )
+    assert status["book_reconstruction"]["counter_updated_at"] is not None
     assert status["quality_counts"]["unknown_zero_delete"] == 1
+    reader_barrier = Barrier(8)
+
+    def read_status_concurrently(_index: int) -> dict:
+        reader_barrier.wait(timeout=10)
+        return market_structure_repository.archive_status(
+            definition_id=definition_id
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        concurrent_statuses = list(
+            executor.map(
+                read_status_concurrently,
+                range(8),
+            )
+        )
+    assert {
+        (
+            item["book_reconstruction"]["snapshot_count"],
+            item["book_reconstruction"]["batch_count"],
+            item["book_reconstruction"]["mutation_count"],
+            item["book_reconstruction"]["checkpoint_count"],
+        )
+        for item in concurrent_statuses
+    } == {(1, 1, len(batches[0].event.mutations), 1)}
+    with db.session() as session:
+        session.execute(
+            text(
+                "UPDATE market.book_operational_rollups "
+                "SET fact_high_water_commit_seq = 0 "
+                "WHERE series_id = :series_id"
+            ),
+            {"series_id": claim.series_id},
+        )
+    with pytest.raises(RuntimeError, match="market_book_operational_rollup_stale"):
+        market_structure_repository.ingest_book_facts(claim, **ingest_kwargs)
+    with pytest.raises(RuntimeError, match="market_book_operational_rollup_stale"):
+        market_structure_repository.archive_status(definition_id=definition_id)
+    with db.session() as session:
+        session.execute(
+            text(
+                "UPDATE market.book_operational_rollups "
+                "SET fact_high_water_commit_seq = :high_water "
+                "WHERE series_id = :series_id"
+            ),
+            {
+                "series_id": claim.series_id,
+                "high_water": first.max_commit_seq,
+            },
+        )
+        session.execute(
+            text(
+                "UPDATE market.book_operational_rollups "
+                "SET checkpoint_high_water_id = 'stale-checkpoint' "
+                "WHERE series_id = :series_id"
+            ),
+            {"series_id": claim.series_id},
+        )
+    with pytest.raises(RuntimeError, match="market_book_operational_rollup_stale"):
+        market_structure_repository.archive_status(definition_id=definition_id)
+    with db.session() as session:
+        session.execute(
+            text(
+                "UPDATE market.book_operational_rollups "
+                "SET checkpoint_high_water_id = :checkpoint_id "
+                "WHERE series_id = :series_id"
+            ),
+            {
+                "series_id": claim.series_id,
+                "checkpoint_id": checkpoints[0].checkpoint_id,
+            },
+        )
 
     market_structure_repository.release(claim)
     with pytest.raises(MarketStructureOwnershipError, match="ownership_lost"):
         market_structure_repository.ingest_book_facts(claim, **ingest_kwargs)
+
+    next_claim = market_structure_repository.claim_stream(
+        definition_id=definition_id,
+        owner_id="market-structure-l2-db-test-next-session",
+        lease_seconds=600,
+        bounded=True,
+    )
+    next_session_checkpoint = replace(
+        checkpoints[0],
+        source_position=replace(
+            checkpoints[0].source_position,
+            session_id=next_claim.session_id,
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="market_book_checkpoint_archive_incomplete",
+    ):
+        market_structure_repository.commit_book_checkpoint(
+            next_claim,
+            checkpoint=next_session_checkpoint,
+            encoded=checkpoint_encoded,
+            acknowledgement=checkpoint_ack,
+            source_manifest_ids=[compacted_archive.manifest_id],
+        )
+    market_structure_repository.release(next_claim)

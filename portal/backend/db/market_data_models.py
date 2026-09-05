@@ -1557,6 +1557,12 @@ class MarketBookCheckpointManifestRecord(Base):
         CheckConstraint("level_count > 0", name="ck_market_book_checkpoint_levels"),
         CheckConstraint("byte_count > 0", name="ck_market_book_checkpoint_bytes"),
         Index("ix_market_book_checkpoint_series_time", "series_id", "effective_at"),
+        Index(
+            "ix_market_book_checkpoint_series_acknowledged",
+            "series_id",
+            "acknowledged_at",
+            "id",
+        ),
         {"schema": MARKET_DATA_SCHEMA},
     )
 
@@ -1637,6 +1643,70 @@ class MarketBookReconstructionStateRecord(Base):
     state_hash = Column(String(64), nullable=True)
     lease_generation = Column(BigInteger, nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketBookOperationalRollupRecord(Base):
+    """Bounded rebuildable counters for Level 2 operator status reads."""
+
+    __tablename__ = "book_operational_rollups"
+    __table_args__ = (
+        CheckConstraint(
+            "snapshot_count >= 0",
+            name="ck_market_book_rollup_snapshot_count",
+        ),
+        CheckConstraint(
+            "batch_count >= 0",
+            name="ck_market_book_rollup_batch_count",
+        ),
+        CheckConstraint(
+            "mutation_count >= 0",
+            name="ck_market_book_rollup_mutation_count",
+        ),
+        CheckConstraint(
+            "checkpoint_count >= 0",
+            name="ck_market_book_rollup_checkpoint_count",
+        ),
+        CheckConstraint(
+            "fact_high_water_commit_seq >= 0",
+            name="ck_market_book_rollup_high_water",
+        ),
+        CheckConstraint(
+            "(checkpoint_count = 0 "
+            "AND checkpoint_high_water_acknowledged_at IS NULL "
+            "AND checkpoint_high_water_id IS NULL) OR "
+            "(checkpoint_count > 0 "
+            "AND checkpoint_high_water_acknowledged_at IS NOT NULL "
+            "AND checkpoint_high_water_id IS NOT NULL)",
+            name="ck_market_book_rollup_checkpoint_high_water",
+        ),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+
+    series_id = Column(
+        BigInteger,
+        ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    snapshot_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    batch_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    mutation_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    checkpoint_count = Column(BigInteger, nullable=False, default=0, server_default="0")
+    checkpoint_high_water_acknowledged_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    checkpoint_high_water_id = Column(String(128), nullable=True)
+    fact_high_water_commit_seq = Column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
 
 
 class MarketNormalizationSpecRecord(Base):
@@ -1787,6 +1857,7 @@ __all__ = [
     "MarketStorageLifecycleEventRecord",
     "MarketInstrumentRoleMappingVersionRecord",
     "MarketBookCheckpointManifestRecord",
+    "MarketBookOperationalRollupRecord",
     "MarketBookQualityEventLinkRecord",
     "MarketBookReconstructionStateRecord",
     "MarketBookValidityIntervalVersionRecord",
