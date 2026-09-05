@@ -120,6 +120,42 @@ def _list(value: Any, *, field: str) -> list[dict[str, Any]]:
     return [dict(row) for row in value]
 
 
+def _candle_rows(value: Any, *, field: str) -> list[dict[str, Any]]:
+    """Normalize supported execution candle containers into evaluator rows."""
+
+    if value is None:
+        return []
+    if isinstance(value, pd.DataFrame):
+        raw_rows: Sequence[Any] = value.to_dict(orient="records")
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        raw_rows = value
+    else:
+        raise ValueError(
+            f"event_fact_check_invalid: {field} must be a pandas DataFrame "
+            "or a sequence of objects; "
+            f"received_type={type(value).__name__}"
+        )
+
+    normalized: list[dict[str, Any]] = []
+    for index, raw_row in enumerate(raw_rows):
+        if not isinstance(raw_row, Mapping):
+            raise ValueError(
+                f"event_fact_check_invalid: {field}[{index}] must be an object; "
+                f"received_type={type(raw_row).__name__}"
+            )
+        row = dict(raw_row)
+        if (
+            "open_time" not in row
+            and "time" not in row
+            and "timestamp" in row
+        ):
+            row["open_time"] = row["timestamp"]
+        normalized.append(row)
+    return normalized
+
+
 def _positive_int(value: Any, *, field: str) -> int:
     if isinstance(value, bool):
         raise ValueError(f"event_fact_check_invalid: {field} must be positive")
@@ -1584,15 +1620,17 @@ class EventFactEvaluator:
                 "caveats": ["Recorded Dataset gaps intersect the bound evidence."],
             }
 
-        candles = [
-            dict(row)
-            for row in (
-                indicator_evidence.get("candles")
-                if detector_type == _INDICATOR_EVENT_DETECTOR
-                else inputs.get("candles")
-            )
-            or []
-        ]
+        candle_field = (
+            "indicator_evidence.candles"
+            if detector_type == _INDICATOR_EVENT_DETECTOR
+            else "candles"
+        )
+        candles = _candle_rows(
+            indicator_evidence.get("candles")
+            if detector_type == _INDICATOR_EVENT_DETECTOR
+            else inputs.get("candles"),
+            field=candle_field,
+        )
         candle_by_open = {
             _utc(row.get("open_time") or row.get("time"), field="candle.open_time"): row
             for row in candles
