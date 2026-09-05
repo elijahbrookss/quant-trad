@@ -29,6 +29,8 @@ from market_data.normalization import (
 
 from ._shared import db
 from .market_data import market_data_repo
+from .fact_storage import canonical_fact_storage_repository
+from .market_lifecycle import market_storage_lifecycle_repository
 
 
 logger = logging.getLogger(__name__)
@@ -243,18 +245,12 @@ class PostgresNormalizationRepository:
         return _spec_from_row(row)
 
     def list_specs(self) -> tuple[NormalizationSpec, ...]:
-        with db.session() as session:
-            rows = session.execute(
-                text(
-                    """
+        with market_storage_lifecycle_repository.dataset_snapshot_session(database=db) as session:
+            return self._list_specs_with_session(session)
+
+    def _list_specs_with_session(self, session) -> tuple[NormalizationSpec, ...]:
+        rows = session.execute(text("""
                     SELECT specs.*,
-                           (
-                               SELECT COUNT(*)
-                               FROM market.fact_versions AS values
-                               WHERE values.provenance
-                                     -> '_qt_normalization_evidence'
-                                     ->> 'spec_id' = specs.id
-                           ) AS materialized_ref_count,
                            (
                                SELECT COUNT(*)
                                FROM market.dataset_normalization_refs AS refs
@@ -262,10 +258,9 @@ class PostgresNormalizationRepository:
                            ) AS dataset_ref_count
                     FROM market.normalization_specs AS specs
                     ORDER BY feature_name, semantic_version, id
-                    """
-                )
-            ).mappings().all()
+        """)).mappings().all()
         specs: list[NormalizationSpec] = []
+        cold_references = None
         for row in rows:
             try:
                 specs.append(_spec_from_row(row))
@@ -275,6 +270,38 @@ class PostgresNormalizationRepository:
                 if legacy is None:
                     raise
             stored_id = str(row["id"])
+            # The retired identity guard counted exact opaque provenance
+            # references, not similarly named external-event keys. Preserve
+            # that predicate before quarantining a spec, across both tiers.
+            hot_reference = session.execute(text("""
+                SELECT 1 FROM market.fact_hot_payloads
+                WHERE provenance->'_qt_normalization_evidence'->>'spec_id'=:id LIMIT 1
+            """), {"id": stored_id}).scalar_one_or_none()
+            if hot_reference is not None:
+                raise RuntimeError(f"market_normalization_legacy_identity_referenced: spec_id={stored_id}")
+            if cold_references is None:
+                cold_references = set()
+                requested_ids = {item["id"] for item in rows}
+                with canonical_fact_storage_repository.stream_rows_by_ids(session, text("""
+                    SELECT versions.id FROM market.fact_versions AS versions
+                    WHERE NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                                      WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
+                    ORDER BY versions.id
+                """)) as cold_rows:
+                    announced = False
+                    for cold_row in cold_rows:
+                        if not announced:
+                            logger.warning("market_normalization_legacy_reference_scan | reason=verify_unreferenced_legacy_specs")
+                            announced = True
+                        evidence = cold_row["provenance"].get("_qt_normalization_evidence")
+                        referenced_id = evidence.get("spec_id") if isinstance(evidence, Mapping) else None
+                        # SQL ->> cannot match an object/array/number to an
+                        # nsp_* identity. Opaque unrelated provenance is not a
+                        # reference and need not be hashable for this check.
+                        if isinstance(referenced_id, str) and referenced_id in requested_ids:
+                            cold_references.add(referenced_id)
+            if stored_id in cold_references:
+                raise RuntimeError(f"market_normalization_legacy_identity_referenced: spec_id={stored_id}")
             if stored_id not in _WARNED_LEGACY_SPEC_IDS:
                 logger.warning(
                     "market_normalization_legacy_spec_quarantined | spec_id=%s | spec_hash=%s | references=0",
@@ -345,31 +372,9 @@ class PostgresNormalizationRepository:
                         "market_normalized_ingest_invalid: spec hash disagreement"
                     )
                 for material_hash in fact.source_material_hashes:
-                    found = session.execute(
-                        text(
-                            """
-                            SELECT 1
-                            FROM market.fact_versions AS source
-                            WHERE source.series_id = ANY(:source_series_ids)
-                              AND (
-                                  source.material_hash = :material_hash
-                                  OR EXISTS (
-                                      SELECT 1
-                                      FROM jsonb_each(source.provenance) AS evidence
-                                      WHERE jsonb_typeof(evidence.value) = 'object'
-                                        AND evidence.value
-                                            ->> 'legacy_material_hash' = :material_hash
-                                  )
-                              )
-                            LIMIT 1
-                            """
-                        ),
-                        {
-                            "source_series_ids": list(fact.source_series_ids),
-                            "material_hash": material_hash,
-                        },
-                    ).scalar_one_or_none()
-                    if found is None:
+                    if not canonical_fact_storage_repository.material_witness_exists(
+                        session, series_ids=fact.source_series_ids, material_hash=material_hash,
+                    ):
                         raise ValueError(
                             "market_normalized_ingest_invalid: canonical source "
                             f"witness is missing material_hash={material_hash}"
@@ -382,7 +387,7 @@ class PostgresNormalizationRepository:
                 existing = session.execute(
                     text(
                         """
-                        SELECT row_hash, known_at, market_commit_seq, payload
+                        SELECT id
                         FROM market.fact_versions
                         WHERE series_id = :series_id
                           AND observation_key = :observation_key
@@ -394,7 +399,9 @@ class PostgresNormalizationRepository:
                         "series_id": fact.series_id,
                         "observation_key": canonical_fact.observation_key,
                     },
-                ).mappings().first()
+                ).scalar_one_or_none()
+                existing = (canonical_fact_storage_repository.read_rows_by_ids(session, [existing])[existing]
+                            if existing is not None else None)
                 if (
                     existing is not None
                     and str(existing["row_hash"]) != canonical_fact.row_hash

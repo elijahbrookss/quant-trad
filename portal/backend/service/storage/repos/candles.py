@@ -11,6 +11,24 @@ from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION
 from sqlalchemy import text
 
 from ._shared import _parse_optional_timestamp, db
+from .fact_storage import canonical_fact_storage_repository
+
+
+def _hydrate_candles(session, selected: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Keep SQL selection/paging unchanged; resolve payload placement afterward."""
+    facts = canonical_fact_storage_repository.read_rows_by_ids(session, [row["id"] for row in selected])
+    result = []
+    for row in selected:
+        fact = facts[row["id"]]
+        if fact["fact_type"] != CANDLE_FACT_TYPE:
+            raise ValueError(f"market_candle_fact_type_invalid: fact_version_id={row['id']}")
+        payload = fact["payload"]
+        result.append({
+            **row, "candle_open_time": fact["observation_time"],
+            **{name: payload[name] for name in ("open", "high", "low", "close", "volume")},
+            "revision": fact["revision"], "market_commit_seq": fact["market_commit_seq"],
+        })
+    return result
 
 
 def _seconds_to_timeframe(seconds: int) -> str:
@@ -55,16 +73,12 @@ def get_candle_storage_summary(
         "end_at": end_at,
     }
     with db.session() as session:
-        stats = session.execute(
+        selected = session.execute(
             text(
                 """
                 WITH visible AS (
                     SELECT DISTINCT ON (versions.observation_key)
-                        versions.observation_time AS candle_open_time,
-                        (versions.payload ->> 'open')::double precision AS open,
-                        (versions.payload ->> 'high')::double precision AS high,
-                        (versions.payload ->> 'low')::double precision AS low,
-                        (versions.payload ->> 'close')::double precision AS close
+                        versions.id, versions.observation_time AS candle_open_time
                     FROM market.series AS series
                     JOIN market.fact_versions AS versions
                       ON versions.series_id = series.id
@@ -75,40 +89,28 @@ def get_candle_storage_summary(
                       AND versions.observation_time >= :start_at
                       AND versions.observation_time < :end_at
                     ORDER BY versions.observation_key, versions.revision DESC
-                ),
-                ordered AS (
-                    SELECT *, lag(candle_open_time) OVER (ORDER BY candle_open_time) AS previous_time
-                    FROM visible
                 )
-                SELECT
-                    count(*) AS candle_count,
-                    min(candle_open_time) AS first_candle,
-                    max(candle_open_time) AS last_candle,
-                    count(*) FILTER (
-                        WHERE open IS NULL OR high IS NULL OR low IS NULL OR close IS NULL
-                    ) AS missing_ohlc_count,
-                    count(*) - count(DISTINCT candle_open_time) AS duplicate_count,
-                    count(*) FILTER (
-                        WHERE previous_time IS NOT NULL
-                          AND extract(epoch FROM (candle_open_time - previous_time)) > :timeframe_seconds
-                    ) AS gap_count,
-                    coalesce(
-                        sum(
-                            greatest(
-                                floor(
-                                    extract(epoch FROM (candle_open_time - previous_time))
-                                    / :timeframe_seconds
-                                )::int - 1,
-                                0
-                            )
-                        ) FILTER (WHERE previous_time IS NOT NULL),
-                        0
-                    ) AS missing_count
-                FROM ordered
+                SELECT * FROM visible ORDER BY candle_open_time, id
                 """
-            ),
+            ).execution_options(stream_results=True, yield_per=1000),
             params,
-        ).mappings().first()
+        ).mappings()
+        stats = {"candle_count": 0, "first_candle": None, "last_candle": None,
+                 "missing_ohlc_count": 0, "duplicate_count": 0, "gap_count": 0, "missing_count": 0}
+        previous_time = None
+        for batch in selected.partitions(1000):
+            for candle in _hydrate_candles(session, batch):
+                candle_time = candle["candle_open_time"]
+                stats["candle_count"] += 1
+                stats["first_candle"] = stats["first_candle"] or candle_time
+                stats["last_candle"] = candle_time
+                stats["missing_ohlc_count"] += any(candle[name] is None for name in ("open", "high", "low", "close"))
+                if previous_time is not None:
+                    elapsed = (candle_time - previous_time).total_seconds()
+                    stats["duplicate_count"] += candle_time == previous_time
+                    stats["gap_count"] += elapsed > timeframe_seconds
+                    stats["missing_count"] += max(int(elapsed // timeframe_seconds) - 1, 0)
+                previous_time = candle_time
         available = session.execute(
             text(
                 """
@@ -252,13 +254,7 @@ def list_candles_for_series(
                 f"""
                 WITH visible AS (
                     SELECT DISTINCT ON (versions.observation_key)
-                        versions.observation_time AS candle_open_time,
-                        (versions.payload ->> 'open')::double precision AS open,
-                        (versions.payload ->> 'high')::double precision AS high,
-                        (versions.payload ->> 'low')::double precision AS low,
-                        (versions.payload ->> 'close')::double precision AS close,
-                        (versions.payload ->> 'volume')::double precision AS volume,
-                        versions.revision, versions.market_commit_seq
+                        versions.id, versions.observation_time AS candle_open_time
                     FROM market.series AS series
                     JOIN market.fact_versions AS versions
                       ON versions.series_id = series.id
@@ -276,6 +272,7 @@ def list_candles_for_series(
             ),
             params,
         ).mappings().all()
+        rows = _hydrate_candles(session, rows)
     normalized = [
         {
             "time": int(row["candle_open_time"].timestamp()),
@@ -358,21 +355,13 @@ def list_candles_for_series_windows(
                           AND series.contract_version = :contract_version
                           AND series.timeframe_seconds = :timeframe_seconds
                     )
-                    SELECT requested.window_id, requested.ordinal,
-                           visible.candle_open_time, visible.open, visible.high,
-                           visible.low, visible.close, visible.volume,
-                           visible.revision, visible.market_commit_seq
+                    SELECT requested.window_id, requested.ordinal, visible.id,
+                           visible.candle_open_time
                     FROM requested
                     CROSS JOIN series_match
                     JOIN LATERAL (
                         SELECT DISTINCT ON (versions.observation_key)
-                            versions.observation_time AS candle_open_time,
-                            (versions.payload ->> 'open')::double precision AS open,
-                            (versions.payload ->> 'high')::double precision AS high,
-                            (versions.payload ->> 'low')::double precision AS low,
-                            (versions.payload ->> 'close')::double precision AS close,
-                            (versions.payload ->> 'volume')::double precision AS volume,
-                            versions.revision, versions.market_commit_seq
+                            versions.id, versions.observation_time AS candle_open_time
                         FROM market.fact_versions AS versions
                         WHERE versions.series_id = series_match.id
                           AND versions.observation_time >= requested.start_at
@@ -391,6 +380,7 @@ def list_candles_for_series_windows(
                     "timeframe_seconds": timeframe_seconds,
                 },
             ).mappings().all()
+            rows = _hydrate_candles(session, rows)
         for row in rows:
             results[str(row["window_id"])].append(
                 {
@@ -493,13 +483,7 @@ def read_frozen_dataset_candles(
                 f"""
                 WITH visible AS (
                     SELECT DISTINCT ON (observation_key)
-                        observation_time AS candle_open_time,
-                        (payload ->> 'open')::double precision AS open,
-                        (payload ->> 'high')::double precision AS high,
-                        (payload ->> 'low')::double precision AS low,
-                        (payload ->> 'close')::double precision AS close,
-                        (payload ->> 'volume')::double precision AS volume,
-                        revision, market_commit_seq
+                        id, observation_time AS candle_open_time
                     FROM market.fact_versions
                     WHERE series_id = :series_id
                       AND market_commit_seq <= :max_commit_seq
@@ -520,6 +504,7 @@ def read_frozen_dataset_candles(
                 "page_limit": normalized_limit + 1,
             },
         ).mappings().all()
+        rows = _hydrate_candles(session, rows)
 
     has_extra = len(rows) > normalized_limit
     has_more_before, has_more_after = _frozen_dataset_page_flags(

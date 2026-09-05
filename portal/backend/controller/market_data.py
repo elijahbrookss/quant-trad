@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -355,6 +355,7 @@ class MarketStorageLifecycleRunRequest(BaseModel):
     execute: bool = False
     storage_root: Optional[str] = None
     owner_id: Optional[str] = None
+    canonical_after_storage_day: date | None = None
 
 
 class MarketStructureRetentionPinRequest(BaseModel):
@@ -1046,10 +1047,15 @@ def get_market_structure_retention_status(
 
 
 @router.get("/market-structure/storage-lifecycle/plan")
-def plan_market_storage_lifecycle() -> dict[str, Any]:
+def plan_market_storage_lifecycle(
+    canonical_after_storage_day: date | None = None,
+) -> dict[str, Any]:
     try:
         policy = get_settings().market_data_lifecycle
-        return market_storage_lifecycle_service.plan(policy=policy)
+        kwargs: dict[str, Any] = {"policy": policy}
+        if canonical_after_storage_day is not None:
+            kwargs["canonical_after_storage_day"] = canonical_after_storage_day
+        return market_storage_lifecycle_service.plan(**kwargs)
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1066,6 +1072,8 @@ def run_market_storage_lifecycle(
         }
         if req.storage_root:
             kwargs["storage_root"] = Path(req.storage_root)
+        if req.canonical_after_storage_day is not None:
+            kwargs["canonical_after_storage_day"] = req.canonical_after_storage_day
         return market_storage_lifecycle_service.run(**kwargs)
     except MarketStorageLifecycleBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

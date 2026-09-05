@@ -1,0 +1,180 @@
+apiVersion: 1
+
+# Percentage rules have non-overlapping severity bands. Per-resource health
+# rules own missing-data alerts; silence is never interpreted as free space.
+groups:
+  - orgId: 1
+    name: Storage safety
+    folder: Quant Trad
+    interval: 1m
+    rules:
+      - uid: qt-storage-warning
+        title: Quant-Trad storage usage warning
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: quanttrad-loki
+            model:
+              datasource: {type: loki, uid: quanttrad-loki}
+              editorMode: code
+              queryType: instant
+              instant: true
+              expr: 'max by (resource_id) (max_over_time({compose_service="docker-stats"} | json | sample_kind="filesystem" | physical_host_visible="true" | keep resource_id, used_percent | unwrap used_percent | __error__="" [2m]))'
+              refId: A
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              datasource: {type: __expr__, uid: __expr__}
+              type: math
+              expression: '($A >= 70) && ($A < 85)'
+              refId: C
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: Storage usage is at least 70%. Review growth and the verified retention plan.
+          first_action: Inspect the resource_id in the capacity dashboard. Check growth and retention dry-run; never delete unverified or pinned data.
+          recovery: Usage must remain below 70%, or the higher-severity storage alert takes over.
+        labels:
+          component: storage
+          owner: qt-infra
+          severity: warning
+        isPaused: false
+      - uid: qt-storage-critical
+        title: Quant-Trad storage usage critical
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: quanttrad-loki
+            model:
+              datasource: {type: loki, uid: quanttrad-loki}
+              editorMode: code
+              queryType: instant
+              instant: true
+              expr: 'max by (resource_id) (max_over_time({compose_service="docker-stats"} | json | sample_kind="filesystem" | physical_host_visible="true" | keep resource_id, used_percent | unwrap used_percent | __error__="" [2m]))'
+              refId: A
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              datasource: {type: __expr__, uid: __expr__}
+              type: math
+              expression: '($A >= 85) && ($A < 92)'
+              refId: C
+        noDataState: OK
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Storage usage is at least 85%. Available operating headroom is low.
+          first_action: Inspect the affected disk and archival backlog. Restore headroom using only verified retention or an operator-approved capacity change.
+          recovery: Usage must remain below 85%, or the emergency storage alert takes over.
+        labels:
+          component: storage
+          owner: qt-infra
+          severity: critical
+        isPaused: false
+      - uid: qt-storage-emergency
+        title: Quant-Trad storage usage emergency
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: quanttrad-loki
+            model:
+              datasource: {type: loki, uid: quanttrad-loki}
+              editorMode: code
+              queryType: instant
+              instant: true
+              expr: 'max by (resource_id) (max_over_time({compose_service="docker-stats"} | json | sample_kind="filesystem" | physical_host_visible="true" | keep resource_id, used_percent | unwrap used_percent | __error__="" [2m]))'
+              refId: A
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              datasource: {type: __expr__, uid: __expr__}
+              type: math
+              expression: '$A >= 92'
+              refId: C
+        noDataState: OK
+        execErrState: Alerting
+        for: 1m
+        annotations:
+          summary: Storage usage is at least 92%. Ingestion may exhaust the filesystem.
+          first_action: Immediately assess free bytes and growth. If headroom cannot be restored safely, explicitly stop collectors; this alert does not execute deletion or a shutdown.
+          recovery: Verify filesystem and collector health, and restore usage below 92%.
+        labels:
+          component: storage
+          owner: qt-infra
+          severity: critical
+        isPaused: false
+      - uid: qt-nvme-storage-unavailable
+        title: Quant-Trad database disk evidence unavailable
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: quanttrad-loki
+            model:
+              datasource: {type: loki, uid: quanttrad-loki}
+              editorMode: code
+              queryType: instant
+              instant: true
+              expr: 'min by (resource_id) (min_over_time({compose_service="docker-stats"} | json | sample_kind="storage_health" | physical_host_visible="true" | resource_id="docker-engine-storage" | keep resource_id, available | unwrap available | __error__="" [2m]))'
+              refId: A
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              datasource: {type: __expr__, uid: __expr__}
+              type: math
+              expression: '$A < 1'
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Valid physical filesystem evidence is missing or failed for docker-engine-storage.
+          first_action: Inspect docker-stats capacity_unavailable logs, expected UUID, mount state and Loki/Alloy health. Do not create a fallback directory or clear the UUID guard.
+          recovery: Restore the expected mounted filesystem and successful physical capacity samples. Confirm writer startup admission before resuming work.
+        labels:
+          component: storage
+          owner: qt-infra
+          severity: critical
+        isPaused: false
+      - uid: qt-archive-storage-unavailable
+        title: Quant-Trad archive storage evidence unavailable
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: quanttrad-loki
+            model:
+              datasource: {type: loki, uid: quanttrad-loki}
+              editorMode: code
+              queryType: instant
+              instant: true
+              expr: 'min by (resource_id) (min_over_time({compose_service="docker-stats"} | json | sample_kind="storage_health" | physical_host_visible="true" | resource_id="market-archive-storage" | keep resource_id, available | unwrap available | __error__="" [2m]))'
+              refId: A
+          - refId: C
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: __expr__
+            model:
+              datasource: {type: __expr__, uid: __expr__}
+              type: math
+              expression: '$A < 1'
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 2m
+        annotations:
+          summary: Valid physical filesystem evidence is missing or failed for market-archive-storage.
+          first_action: Inspect docker-stats capacity_unavailable logs, expected UUID, mount state and Loki/Alloy health. Do not create a fallback directory or clear the UUID guard.
+          recovery: Restore the expected mounted filesystem and successful physical capacity samples. Confirm writer startup admission before resuming work.
+        labels:
+          component: storage
+          owner: qt-infra
+          severity: critical
+        isPaused: false

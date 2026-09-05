@@ -35,7 +35,44 @@ This slice provides:
 - strict configuration validation without printing provider secrets;
 - a CI proof that a real Grafana rule reaches two captured recipients;
 - the existing collector safety rules, a sustained per-stream reconnect-storm
-  rule, and a two-minute database-unavailable rule.
+  rule, a two-minute database-unavailable rule, and native-server storage rules.
+
+### Storage rules
+
+`Storage safety` tracks `docker-engine-storage` (the Docker/PostgreSQL disk)
+and `market-archive-storage` (the configured archive disk) separately. The
+capacity dashboard labels both resources; directory-mode installations may
+initially put both on the same physical disk.
+
+- 70% to below 85%: warning after five minutes.
+- 85% to below 92%: critical after two minutes.
+- 92% or above: emergency after one minute.
+- Missing or failed physical filesystem evidence: critical per resource.
+
+Usage rules use the peak of the last two minutes. Their severity bands do not
+overlap, so an escalation does not create three simultaneous usage alerts.
+Availability rules use that same two-minute window and a two-minute hold:
+missing telemetry is not zero usage or a healthy disk. Query failures alert too.
+Warnings apply to available application capacity, excluding filesystem-reserved
+space. Check free bytes and growth as well as percentages.
+
+Use `docker-stats` logs filtered to `capacity_unavailable` to diagnose missing
+mounts, UUID mismatches, read-only filesystems, Docker-root mismatch, or probe
+failure. Never clear the expected UUID or create a fallback directory to make
+an alert disappear. At critical/emergency pressure, inspect archival backlog
+and a retention dry run. Delete only through the verified retention contract;
+if safe headroom cannot be restored, explicitly stop collectors. Alerts do not
+automatically stop ingestion, migrate data, or delete anything.
+
+The isolated validation command is:
+
+```bash
+python3 scripts/ci/test_storage_alerts.py
+```
+
+It requires local Docker, creates only a uniquely named disposable Loki/Grafana
+project with loopback ports and SMTP disabled, loads the production storage
+rules, verifies their queries/math, and removes only its own containers/volumes.
 
 It does not provide SMS, escalation schedules, acknowledgements, an incident
 record, or an external monitor for the host itself. If the host, Grafana, its

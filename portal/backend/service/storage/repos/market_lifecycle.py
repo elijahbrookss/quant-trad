@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from core.market_storage_lifecycle import (
     DEFAULT_HOT_TABLE_POLICIES,
@@ -69,6 +70,10 @@ def _relation(table_name: str) -> tuple[str, str]:
 class PostgresMarketStorageLifecycleRepository:
     """Fenced planning and evidence for object and Timescale lifecycle work."""
 
+    @staticmethod
+    def dataset_snapshot_session(*, database=db):
+        return database.locked_snapshot_session(shared_lock_name=_LIFECYCLE_LOCK_NAME)
+
     @contextmanager
     def lifecycle_lock(self, *, owner_id: str) -> Iterator[None]:
         owner = str(owner_id or "").strip()
@@ -98,6 +103,132 @@ class PostgresMarketStorageLifecycleRepository:
                     raise RuntimeError(
                         f"market_storage_lifecycle_unlock_failed: owner_id={owner}"
                     )
+
+    @staticmethod
+    def canonical_book_session_held(session, *, target_kind: str, target_id: str) -> bool:
+        """A committed prefix keeps the complete source session available.
+
+        Replay also needs trailing control frames and can enumerate checkpoints
+        committed after the last canonical page. Exact page edges alone cannot
+        protect those objects. The immutable prefix owner is a conservative
+        lifetime anchor, including while archival is interrupted between pages.
+        Checkpoint ownership comes from its immutable raw-source manifests,
+        never the current stream definition/configuration.
+        """
+        if target_kind == "raw_manifest":
+            scope = "SELECT definition_id,session_id FROM market.raw_archive_manifests WHERE id=:id"
+        elif target_kind == "book_checkpoint":
+            scope = """
+                SELECT DISTINCT sources.definition_id,sources.session_id
+                FROM market.book_checkpoint_manifests AS checkpoints
+                CROSS JOIN LATERAL jsonb_array_elements_text(checkpoints.source_manifest_ids) AS refs(id)
+                JOIN market.raw_archive_manifests AS sources ON sources.id=refs.id
+                WHERE checkpoints.id=:id AND sources.session_id=checkpoints.session_id
+            """
+        else:
+            raise ValueError(f"canonical_book_session_target_invalid: kind={target_kind}")
+        return bool(session.execute(text(f"""
+            SELECT EXISTS (SELECT 1 FROM ({scope}) AS scope
+                JOIN market.fact_book_prefix_chunks AS prefixes
+                  ON prefixes.definition_id=scope.definition_id AND prefixes.session_id=scope.session_id)
+        """), {"id": target_id}).scalar_one())
+
+    @staticmethod
+    def canonical_dependency_count(session, *, target_kind: str, target_id: str) -> int:
+        """Cold Fact evidence holds survive release of user and dataset pins."""
+        exact_count = int(session.execute(text(
+            "SELECT (SELECT count(*) FROM market.fact_archive_dependencies "
+            "WHERE target_kind=:target_kind AND target_id=:target_id) + "
+            "(SELECT count(*) FROM market.fact_book_prefix_dependencies "
+            "WHERE :target_kind='raw_manifest' AND target_id=:target_id)"
+        ), {"target_kind": str(target_kind), "target_id": str(target_id)}).scalar_one())
+        return exact_count or int(PostgresMarketStorageLifecycleRepository.canonical_book_session_held(
+            session, target_kind=target_kind, target_id=target_id))
+
+    @staticmethod
+    def canonical_backlog_present(session, *, target_kind: str, target_id: str) -> bool:
+        """Protect raw/recovery evidence before permanent cold holds exist.
+
+        Session-scoped book/coverage holds are deliberately conservative: a
+        current book feature can depend on earlier snapshot/mutation frames,
+        not just the one frame at its source position. Exact trade raw IDs also
+        cover generic imports that did not carry collector-session provenance.
+        JSON containment uses the existing hot-provenance GIN indexes.
+        """
+        table = {"raw_manifest": "market.raw_archive_manifests",
+                 "book_checkpoint": "market.book_checkpoint_manifests"}.get(target_kind)
+        if table is None:
+            raise ValueError(f"canonical_backlog_target_invalid: kind={target_kind}")
+        columns = "definition_id,session_id" if target_kind == "raw_manifest" else "session_id"
+        target = session.execute(text(f"SELECT {columns} FROM {table} WHERE id=:id"),
+                                 {"id": target_id}).mappings().one_or_none()
+        if target is None:
+            raise ValueError(f"canonical_backlog_target_missing: kind={target_kind} id={target_id}")
+        # Checkpoints carry a source session, not a definition_id. Conservatively
+        # retain them for any hot book/coverage holder in that session; deriving
+        # historical ownership from mutable stream configuration is unnecessary.
+        scope = dict(target)
+        collector = {"stream_session_id": scope["session_id"]}
+        coverage_scope = "coverage.session_id=:session_id"
+        if target_kind == "raw_manifest":
+            collector["stream_definition_id"] = scope["definition_id"]
+            coverage_scope += " AND coverage.definition_id=:definition_id"
+        parameters = {"id": target_id, **scope,
+                      "collector": _json(collector),
+                      "l2": _json({"_qt_l2_evidence": scope}),
+                      "bbo": _json({"_qt_bbo_evidence": {"source_position": scope}}),
+                      "depth": _json({"_qt_depth_evidence": {"source_position": scope}})}
+        scoped = session.execute(text(f"""
+            SELECT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
+                WHERE hot.provenance @> CAST(:collector AS jsonb)
+                   OR hot.provenance @> CAST(:l2 AS jsonb)
+                   OR hot.provenance @> CAST(:bbo AS jsonb)
+                   OR hot.provenance @> CAST(:depth AS jsonb))
+                OR EXISTS (
+                    SELECT 1 FROM market.stream_coverage_interval_versions AS coverage
+                    JOIN market.fact_hot_payloads AS hot ON hot.provenance @>
+                        jsonb_build_object('_qt_trade_flow_evidence',
+                            jsonb_build_object('coverage_interval_id', coverage.interval_id))
+                    WHERE {coverage_scope})
+        """), parameters).scalar_one()
+        if scoped or target_kind == "book_checkpoint":
+            return bool(scoped)
+        return bool(session.execute(text("""
+            SELECT EXISTS (SELECT 1 FROM market.raw_archive_record_mappings AS mappings
+                JOIN market.fact_hot_payloads AS hot ON
+                    hot.provenance @> jsonb_build_object('_qt_trade_evidence',
+                        jsonb_build_object('raw_record_id', mappings.raw_record_id))
+                    OR hot.provenance @> jsonb_build_object('_qt_l2_evidence',
+                        jsonb_build_object('raw_record_id', mappings.raw_record_id))
+                WHERE mappings.manifest_id=:id)
+        """), {"id": target_id}).scalar_one())
+
+    @contextmanager
+    def archive_expiration_lock(self, *, target_kind: str, target_id: str):
+        """Exclude new canonical references through the final check/unlink.
+
+        The caller still owns the existing global lifecycle fence. This narrow
+        row lock conflicts with the reference writer's KEY SHARE, not unrelated
+        current collection. Lifecycle-event writes use separate sessions and
+        do not update or lock this immutable manifest row.
+        """
+        table = {"raw_manifest": "market.raw_archive_manifests",
+                 "book_checkpoint": "market.book_checkpoint_manifests"}.get(target_kind)
+        if table is None:
+            raise ValueError(f"market_storage_lifecycle_target_invalid: kind={target_kind}")
+        with db.session() as session:
+            try:
+                row = session.execute(text(f"SELECT id FROM {table} WHERE id=:id FOR UPDATE NOWAIT"),
+                                      {"id": target_id}).scalar_one_or_none()
+            except DBAPIError as exc:
+                if getattr(exc.orig, "pgcode", None) == "55P03":
+                    raise MarketStorageLifecycleBusyError(
+                        f"market_archive_reference_busy: kind={target_kind} id={target_id}; retry later"
+                    ) from exc
+                raise
+            if row is None:
+                raise ValueError(f"market_storage_lifecycle_target_missing: kind={target_kind} id={target_id}")
+            yield
 
     @staticmethod
     def acquire_dataset_pin_lock(session) -> None:
@@ -343,7 +474,12 @@ class PostgresMarketStorageLifecycleRepository:
                            replacements.compacted_at,
                            COALESCE(explicit_pins.pin_count, 0) AS explicit_pin_count,
                            (SELECT count(*) FROM market.dataset_archive_refs AS refs
-                            WHERE refs.raw_archive_manifest_id = manifests.id) AS dataset_pin_count
+                            WHERE refs.raw_archive_manifest_id = manifests.id) AS dataset_pin_count,
+                           (SELECT count(*) FROM market.fact_archive_dependencies AS dependencies
+                            WHERE dependencies.target_kind='raw_manifest'
+                              AND dependencies.target_id=manifests.id) +
+                           (SELECT count(*) FROM market.fact_book_prefix_dependencies AS prefixes
+                            WHERE prefixes.target_id=manifests.id) AS canonical_dependency_count
                     FROM market.raw_archive_manifests AS manifests
                     JOIN market.stream_definitions AS definitions
                       ON definitions.id = manifests.definition_id
@@ -402,7 +538,10 @@ class PostgresMarketStorageLifecycleRepository:
                                NULL::text AS replacement_manifest_id,
                                NULL::timestamptz AS compacted_at,
                                COALESCE(explicit_pins.pin_count, 0) AS explicit_pin_count,
-                               0::bigint AS dataset_pin_count
+                               0::bigint AS dataset_pin_count,
+                               (SELECT count(*) FROM market.fact_archive_dependencies AS dependencies
+                                WHERE dependencies.target_kind='book_checkpoint'
+                                  AND dependencies.target_id=checkpoints.id) AS canonical_dependency_count
                         FROM market.book_checkpoint_manifests AS checkpoints
                         LEFT JOIN explicit_pins
                           ON explicit_pins.target_kind = 'book_checkpoint'
@@ -421,7 +560,14 @@ class PostgresMarketStorageLifecycleRepository:
                     ),
                     {"checkpoint_cutoff": checkpoint_cutoff, "limit": remaining},
                 ).mappings().all()
-        return [dict(row) for row in [*raw_rows, *checkpoint_rows]]
+            results = []
+            for row in [*raw_rows, *checkpoint_rows]:
+                held_count = int(row["canonical_dependency_count"]) or int(self.canonical_book_session_held(
+                    session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"])))
+                results.append({**dict(row), "canonical_dependency_count": held_count,
+                    "canonical_backlog_present": self.canonical_backlog_present(
+                    session, target_kind=str(row["target_kind"]), target_id=str(row["target_id"]))})
+        return results
 
     def archive_target_status(
         self, *, target_kind: str, target_id: str
@@ -485,12 +631,20 @@ class PostgresMarketStorageLifecycleRepository:
                     {"target_kind": kind, "target_id": str(target_id)},
                 ).scalar_one()
             )
+            canonical_dependency_count = self.canonical_dependency_count(
+                session, target_kind=kind, target_id=target_id,
+            )
+            canonical_backlog_present = self.canonical_backlog_present(
+                session, target_kind=kind, target_id=target_id,
+            )
         return {
             **dict(target),
             "target_kind": kind,
             "explicit_pin_count": explicit_pin_count,
             "dataset_pin_count": dataset_pin_count,
-            "pinned": bool(explicit_pin_count or dataset_pin_count),
+            "canonical_dependency_count": canonical_dependency_count,
+            "canonical_backlog_present": canonical_backlog_present,
+            "pinned": bool(explicit_pin_count or dataset_pin_count or canonical_dependency_count or canonical_backlog_present),
             "expired": expired,
         }
 

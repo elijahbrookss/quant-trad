@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -178,7 +179,7 @@ class MarketFactSchemaRecord(Base):
 
 
 class MarketFactVersionRecord(Base):
-    """One immutable revision in the schema-registered canonical Fact store."""
+    """Immutable canonical revision index; bulky JSON evidence lives by storage tier."""
 
     __tablename__ = "fact_versions"
     __table_args__ = (
@@ -228,22 +229,6 @@ class MarketFactVersionRecord(Base):
             name="ck_market_fact_receipt_known_after_acceptance",
         ),
         CheckConstraint(
-            "jsonb_typeof(payload) = 'object'",
-            name="ck_market_fact_payload_object",
-        ),
-        CheckConstraint(
-            "jsonb_typeof(provenance) = 'object'",
-            name="ck_market_fact_provenance_object",
-        ),
-        CheckConstraint(
-            "jsonb_typeof(quality) = 'object'",
-            name="ck_market_fact_quality_object",
-        ),
-        CheckConstraint(
-            "market.validate_fact_payload(payload_schema_id, payload)",
-            name="ck_market_fact_payload_valid",
-        ),
-        CheckConstraint(
             "payload_hash ~ '^[0-9a-f]{64}$'",
             name="ck_market_fact_payload_hash",
         ),
@@ -267,6 +252,10 @@ class MarketFactVersionRecord(Base):
     )
 
     id = Column(String(64), primary_key=True)
+    storage_day = Column(
+        Date, nullable=False,
+        server_default=text("(clock_timestamp() AT TIME ZONE 'UTC')::date"),
+    )
     series_id = Column(
         BigInteger,
         ForeignKey(f"{MARKET_DATA_SCHEMA}.series.id", ondelete="RESTRICT"),
@@ -304,18 +293,11 @@ class MarketFactVersionRecord(Base):
     external_event_group_key = Column(String(512), nullable=True)
     external_event_component_key = Column(String(256), nullable=True)
     state = Column(String(16), nullable=False)
-    payload = Column(JSONB, nullable=False)
     payload_hash = Column(String(64), nullable=False)
     material_hash = Column(String(64), nullable=False)
     provenance_schema_id = Column(String(64), nullable=False)
-    provenance = Column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
     provenance_hash = Column(String(64), nullable=False)
     quality_schema_id = Column(String(64), nullable=False)
-    quality = Column(
-        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
-    )
     quality_hash = Column(String(64), nullable=False)
     row_hash = Column(String(64), nullable=False)
 
@@ -364,47 +346,10 @@ Index(
     MarketFactVersionRecord.external_event_group_key,
 )
 Index(
-    "ix_market_fact_payload_gin",
-    MarketFactVersionRecord.payload,
-    postgresql_using="gin",
-    postgresql_ops={"payload": "jsonb_path_ops"},
-)
-Index(
-    "ix_market_fact_provenance_gin",
-    MarketFactVersionRecord.provenance,
-    postgresql_using="gin",
-    postgresql_ops={"provenance": "jsonb_path_ops"},
-)
-Index(
-    "ix_market_fact_exact_value",
-    MarketFactVersionRecord.series_id,
-    text("((payload->>'value')::numeric)"),
-    MarketFactVersionRecord.observation_time,
-    postgresql_where=MarketFactVersionRecord.payload_schema_id.in_(
-        (
-            "derivatives.open_interest.v2",
-            "market.reference_price.v1",
-            "market.reserve_balance.v1",
-        )
-    ),
-)
-Index(
-    "ix_market_fact_exact_rate",
-    MarketFactVersionRecord.series_id,
-    text("((payload->>'rate')::numeric)"),
-    MarketFactVersionRecord.observation_time,
-    postgresql_where=(
-        MarketFactVersionRecord.payload_schema_id == "derivatives.funding_rate.v2"
-    ),
-)
-Index(
-    "ix_market_fact_funding_time",
-    MarketFactVersionRecord.series_id,
-    text("market.canonical_fact_utc_timestamp(payload->>'funding_time')"),
-    MarketFactVersionRecord.observation_time,
-    postgresql_where=MarketFactVersionRecord.payload_schema_id.in_(
-        ("derivatives.funding_rate.v1", "derivatives.funding_rate.v2")
-    ),
+    "ix_market_fact_storage_page",
+    MarketFactVersionRecord.storage_day,
+    MarketFactVersionRecord.market_commit_seq,
+    MarketFactVersionRecord.id,
 )
 
 

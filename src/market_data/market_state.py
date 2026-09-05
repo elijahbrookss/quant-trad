@@ -34,6 +34,7 @@ RESPONSE_FACT_VERSION = "market.market_response.v1"
 BOOK_FEATURE_INTERVAL_SECONDS = 1
 APPROVED_DEPTH_BANDS_BPS = (5, 10, 25)
 BASIS_MAX_STALENESS = timedelta(seconds=2)
+DERIVATIVE_OI_INTERVAL_SECONDS = 60
 RESPONSE_MAX_STALENESS = timedelta(seconds=2)
 ONE_MILLION = Decimal("1000000")
 TEN_THOUSAND = Decimal("10000")
@@ -711,7 +712,15 @@ class DerivativeStateFeatureFact:
             with localcontext() as context:
                 context.prec = 38
                 expected = oi_value.ln() - previous.ln()
-            if log_change != expected:
+            # The retained v1 canonical decimal serializer normalizes at the
+            # default 28-digit precision, while this calculation uses 38.
+            # Admit that exact historical representation as well as the full
+            # in-memory result; never rewrite it or accept a numeric tolerance.
+            with localcontext() as retained_context:
+                retained_context.prec = 28
+                retained_context.rounding = "ROUND_HALF_EVEN"
+                retained_v1 = expected.normalize()
+            if log_change not in (expected, retained_v1):
                 raise ValueError(
                     "market_derivative_state_invalid: OI log change does not reconcile"
                 )
@@ -1279,6 +1288,34 @@ def _gap_intersects(
     return False
 
 
+def derivative_state_input_fingerprint(
+    *, instrument_id: str, effective_at: datetime,
+    oi_record: Optional[OpenInterestRecord], previous_oi_record: Optional[OpenInterestRecord],
+    funding_record: Optional[FundingRateRecord],
+) -> str:
+    """One owner for the retained v1 derivative input identity.
+
+    Previous OI is identified by commit sequence even when another delivery has
+    identical value. Archive admission and derivation must use this same hash.
+    """
+    return _stable_hash({
+        "schema_version": "market.derivative_state_input.v1",
+        "instrument_id": instrument_id,
+        "effective_at": _canonical_time(effective_at),
+        "oi": ({
+            "series_id": oi_record.series_id,
+            "commit_seq": oi_record.market_commit_seq,
+            "row_hash": oi_record.fact.row_hash,
+            "previous_commit_seq": previous_oi_record.market_commit_seq if previous_oi_record is not None else None,
+        } if oi_record is not None else None),
+        "funding": ({
+            "series_id": funding_record.series_id,
+            "commit_seq": funding_record.market_commit_seq,
+            "row_hash": funding_record.fact.row_hash,
+        } if funding_record is not None else None),
+    })
+
+
 def derive_derivative_state_features(
     *,
     instrument_id: str,
@@ -1353,36 +1390,8 @@ def derive_derivative_state_features(
         )
         if oi_log_change is None and funding_rate is None:
             continue
-        fingerprint = _stable_hash(
-            {
-                "schema_version": "market.derivative_state_input.v1",
-                "instrument_id": instrument_id,
-                "effective_at": _canonical_time(effective),
-                "oi": (
-                    {
-                        "series_id": current_oi.series_id,
-                        "commit_seq": current_oi.market_commit_seq,
-                        "row_hash": current_oi.fact.row_hash,
-                        "previous_commit_seq": (
-                            previous_oi.market_commit_seq
-                            if previous_oi is not None
-                            else None
-                        ),
-                    }
-                    if current_oi is not None
-                    else None
-                ),
-                "funding": (
-                    {
-                        "series_id": current_funding.series_id,
-                        "commit_seq": current_funding.market_commit_seq,
-                        "row_hash": current_funding.fact.row_hash,
-                    }
-                    if current_funding is not None
-                    else None
-                ),
-            }
-        )
+        fingerprint = derivative_state_input_fingerprint(instrument_id=instrument_id, effective_at=effective,
+            oi_record=current_oi, previous_oi_record=previous_oi, funding_record=current_funding)
         known_values = [effective]
         if current_oi is not None:
             known_values.append(current_oi.fact.known_at)
@@ -1643,6 +1652,7 @@ __all__ = [
     "DEPTH_FACT_VERSION",
     "DERIVATIVE_STATE_FACT_TYPE",
     "DERIVATIVE_STATE_FACT_VERSION",
+    "DERIVATIVE_OI_INTERVAL_SECONDS",
     "RESPONSE_FACT_TYPE",
     "RESPONSE_FACT_VERSION",
     "TRADE_FLOW_FEATURE_FACT_TYPE",
@@ -1657,6 +1667,7 @@ __all__ = [
     "derive_basis_features",
     "derive_book_features",
     "derive_derivative_state_features",
+    "derivative_state_input_fingerprint",
     "derive_response_features",
     "derive_trade_flow_feature",
 ]

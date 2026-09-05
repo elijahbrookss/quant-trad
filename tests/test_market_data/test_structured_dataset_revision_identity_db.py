@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 import pytest
 
@@ -482,13 +483,20 @@ def test_structured_dataset_pins_all_causal_revisions_and_excludes_post_freeze_c
     assert market_data_repo.get_dataset(dataset_id).dataset_hash == frozen.dataset_hash
 
 
+@pytest.mark.parametrize("cooled", [False, True])
 def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    cooled: bool,
 ) -> None:
     token = uuid.uuid4().hex
     instrument_id = f"book-lineage-{token[:18]}"
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
+    if cooled:
+        # A private placement day prevents this destructive fixture from
+        # touching any other test's canonical payload partition.
+        from tests.test_market_data.test_fact_storage_tiers_db import _placement, _verified_cold_fixture
+        _placement(monkeypatch, date(1900, 1, 1))
     with db.session() as session:
         session.add(
             InstrumentRecord(
@@ -606,6 +614,18 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
         metadata={"fixture": "book-feature-revision-lineage"},
     )
     series_entries = {int(entry["series_id"]): entry for entry in frozen.series}
+    additional_pin = 0
+    if cooled:
+        _verified_cold_fixture(SimpleNamespace(database=db, today=date(1900, 1, 1)), tmp_path, monkeypatch)
+        refrozen = market_data_repo.freeze_dataset(
+            (DatasetSeriesRequest(bbo_series_id, _RANGE_START, _RANGE_END),
+             DatasetSeriesRequest(depth_series_id, _RANGE_START, _RANGE_END)),
+            name=f"Book revision lineage {token[:8]}", purpose="test", created_by="pytest",
+            metadata={"fixture": "book-feature-revision-lineage"},
+        )
+        assert refrozen.dataset_hash == frozen.dataset_hash
+        additional_pin = int(refrozen.dataset_id != frozen.dataset_id)
+        _placement(monkeypatch, date(1900, 1, 2))
     assert series_entries[bbo_series_id]["row_count"] == 3
     assert series_entries[depth_series_id]["row_count"] == 3
 
@@ -618,6 +638,21 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
             series_id=series_id,
         )
         assert [record.revision for record in revisions] == [1, 2, 3]
+        from portal.backend.service.storage.repos.market_data import _load_lineage_material_rows, _collect_typed_archive_refs
+        material_hashes = [record.fact.provenance[evidence_key]["legacy_material_hash"] for record in revisions]
+        with db.session() as session:
+            witnesses = _load_lineage_material_rows(
+                session, series_id=series_id, fact_type=revisions[0].fact.fact_type,
+                material_hashes=material_hashes, evidence_key=evidence_key,
+            )
+            for record, material_hash in zip(revisions, material_hashes, strict=True):
+                assert witnesses[material_hash]["fact_version_id"] == record.fact_version_id
+                assert witnesses[material_hash]["provenance"] == record.fact.provenance
+            references = _collect_typed_archive_refs(session, records=[
+                SimpleNamespace(series_id=series_id, fact=SimpleNamespace(material_hash=value))
+                for value in material_hashes
+            ])
+            assert set(references) == set(manifest_ids)
         assert [record.fact.state for record in revisions] == [
             FactState.ACTIVE,
             FactState.ACTIVE,
@@ -650,7 +685,7 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
             target_kind="raw_manifest",
             target_id=manifest_id,
         )
-        assert retention["dataset_pin_count"] == 1
+        assert retention["dataset_pin_count"] == 1 + additional_pin
         assert retention["pinned"] is True
 
     reconnect_without_archive_bbo, _reconnect_without_archive_depth = (
@@ -671,16 +706,18 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
     ]["source_position"]
     assert reconnect_position["connection_epoch"] == 1
     assert reconnect_position["receive_ordinal"] == 1
-    missing_outcome = market_data_repo.ingest_facts(
-        series_id=bbo_series_id,
-        source_id=source_id,
-        facts=(reconnect_without_archive_bbo,),
-        request={
-            "fixture": "book-feature-revision-lineage-unarchived-reconnect",
-            "revision": 4,
-        },
-    )
-    assert missing_outcome.corrected_count == 1
+    # New references are now rejected at publication, before they can poison
+    # later freezes. Keep testing the freeze resolver's historical defense too.
+    with pytest.raises(RuntimeError, match="canonical_raw_reference_missing"):
+        market_data_repo.ingest_facts(
+            series_id=bbo_series_id,
+            source_id=source_id,
+            facts=(reconnect_without_archive_bbo,),
+            request={"fixture": "book-feature-revision-lineage-unarchived-reconnect", "revision": 4},
+        )
+    assert [row.revision for row in market_data_repo.read_fact_revisions(
+        series_id=bbo_series_id, start=_RANGE_START, end=_RANGE_END)] == [1, 2, 3]
+    from portal.backend.service.storage.repos.market_data import _resolve_canonical_book_archive_positions
     with pytest.raises(
         RuntimeError,
         match=(
@@ -688,15 +725,7 @@ def test_book_feature_revision_history_pins_every_source_archive_and_fails_loud(
             "has no acknowledged archive"
         ),
     ):
-        market_data_repo.freeze_dataset(
-            (
-                DatasetSeriesRequest(
-                    series_id=bbo_series_id,
-                    start=_RANGE_START,
-                    end=_RANGE_END,
-                ),
-            ),
-            purpose="test",
-            created_by="pytest",
-        )
+        with db.session() as session:
+            _resolve_canonical_book_archive_positions(session, positions=[reconnect_position], series_id=bbo_series_id,
+                fact_type="market.bbo", start=_RANGE_START, end=_RANGE_END, as_of_commit_seq=2**63 - 1)
     market_structure_repository.release(claim)

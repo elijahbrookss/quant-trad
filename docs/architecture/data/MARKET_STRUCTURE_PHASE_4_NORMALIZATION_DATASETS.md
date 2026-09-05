@@ -89,8 +89,9 @@ not yet proven.
 
 ### Materialized normalized facts
 
-`market.normalized_feature_versions` is append-only and shares
-`market.fact_commit_seq`. Each row records effective time, known-at time,
+Normalized features use append-only canonical `market.fact_versions` and share
+`market.fact_commit_seq`; payloads follow the generalized hot/cold storage
+boundary, not a separate normalized version table. Each row records effective time, known-at time,
 status/value, input range/count, input-only watermark, source series, up to
 three bounded witness hashes, the full input fingerprint, provenance, quality,
 and revision.
@@ -110,6 +111,17 @@ Output commits therefore cannot change their own future input identity. Gap
 evidence is causal at its detection/creation time; it invalidates a
 materialization only when it was knowable by the requested decision time.
 
+Source-witness lookup and latest-output checks use verified payloads from either
+tier. Cooling does not weaken the older-watermark/known-at rejection, permit
+contradictory fingerprints at one watermark, or rematerialize identical inputs.
+Alias catalog entries locate candidates but cannot prove a witness without its
+actual payload. Historical unindexed provenance and retired-spec reference
+checks retain their existing meaning through logged, batched cold scans; these
+rare paths are not constant-cost lookups. Normalized retention and all-revision
+freezing use the [generalized input-window admission proof](GENERALIZED_FACT_DATA_PLANE.md#exact-raw-revision-evidence):
+full causal windows, immutable specs and nested source closure, not just three
+diagnostic witnesses. Destructive execution remains disabled by default.
+
 ### Frozen dataset boundary
 
 `market.dataset_normalization_refs` binds a frozen normalized output to its
@@ -124,6 +136,14 @@ object bytes and SHA-256, rather than trusting database metadata alone. Dataset
 identity is a deterministic hash over the resolved typed series, revisions,
 quality, provenance, archive references, normalization references, and request
 metadata. Repeating an identical freeze is idempotent.
+
+The current generalized trade/flow history contract is defined in
+[Generalized Fact Data Plane](GENERALIZED_FACT_DATA_PLANE.md#exact-raw-revision-evidence).
+It preserves canonical corrections, invalidations and historical partial flags
+across hot/cold storage, rather than relabeling older latest-only datasets.
+Validation checks the exact frozen quality document once. Re-appending its
+already-recorded typed quality notes caused false hash disagreements; the
+validator no longer regenerates or duplicates them.
 
 The existing dataset endpoint accepts either a legacy candle selector
 (`instrument_id` plus `timeframe`) or an exact typed `series_id`; mixing both is

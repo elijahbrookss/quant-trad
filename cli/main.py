@@ -1805,24 +1805,21 @@ def _cmd_data_market_structure_lifecycle_plan(args: argparse.Namespace) -> int:
         _client(args).request_json(
             "GET",
             "/api/market-data/market-structure/storage-lifecycle/plan",
+            params={"canonical_after_storage_day": args.canonical_after_storage_day},
         )
     )
     return 0
 
 
 def _cmd_data_market_structure_lifecycle_run(args: argparse.Namespace) -> int:
-    _print_json(
-        _client(args).request_json(
-            "POST",
-            "/api/market-data/market-structure/storage-lifecycle/run",
-            payload={
-                "execute": bool(args.execute),
-                "storage_root": args.storage_root,
-                "owner_id": args.owner_id,
-            },
-        )
+    payload = {"execute": bool(args.execute), "storage_root": args.storage_root, "owner_id": args.owner_id}
+    if args.canonical_after_storage_day is not None:
+        payload["canonical_after_storage_day"] = args.canonical_after_storage_day
+    result = _client(args).request_json(
+        "POST", "/api/market-data/market-structure/storage-lifecycle/run", payload=payload,
     )
-    return 0
+    _print_json(result)
+    return 1 if result.get("status") == "degraded" or result.get("failure_count", 0) else 0
 
 
 def _cmd_data_market_structure_lifecycle_events(args: argparse.Namespace) -> int:
@@ -4194,7 +4191,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_market_structure_lifecycle_plan = data_market_structure_sub.add_parser(
         "lifecycle-plan",
-        help="Plan pin-safe archive and Timescale lifecycle work without mutation.",
+        help="Inspect archive work, canonical hot windows, storage budgets, and blockers without mutation.",
+    )
+    data_market_structure_lifecycle_plan.add_argument(
+        "--canonical-after-storage-day",
+        help="Continue a bounded canonical candidate scan after this UTC storage date (YYYY-MM-DD).",
     )
     data_market_structure_lifecycle_plan.set_defaults(
         func=_cmd_data_market_structure_lifecycle_plan
@@ -4208,6 +4209,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     data_market_structure_lifecycle_run.add_argument("--storage-root")
     data_market_structure_lifecycle_run.add_argument("--owner-id")
+    data_market_structure_lifecycle_run.add_argument("--canonical-after-storage-day",
+        help="Resume a bounded candidate scan after this UTC storage date (YYYY-MM-DD).")
     data_market_structure_lifecycle_run.set_defaults(
         func=_cmd_data_market_structure_lifecycle_run
     )

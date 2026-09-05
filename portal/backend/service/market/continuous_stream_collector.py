@@ -16,7 +16,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
@@ -40,7 +39,7 @@ from market_data.book_archive import (
     BOOK_CHECKPOINT_COMPRESSION,
     BOOK_CHECKPOINT_FORMAT,
     publish_book_checkpoint,
-    read_book_checkpoint_parquet,
+    restore_book_checkpoint_parquet,
 )
 from market_data.market_state import (
     MarketStateValuationContract,
@@ -51,13 +50,9 @@ from market_data.market_state import (
 from market_data.order_book import (
     BOOK_CHECKPOINT_SCHEMA_VERSION,
     BOOK_RECONSTRUCTION_VERSION,
-    BookCheckpointFact,
     BookLifecycle,
     BookQualityEvidence,
-    BookSide,
     BookSourcePosition,
-    BookValidityIntervalVersion,
-    BookValidityStatus,
     L2ProductContract,
     Level2BookReconstructor,
     translate_coinbase_l2_event,
@@ -66,7 +61,6 @@ from market_data.structure import (
     ArchiveStatus,
     CoverageStatus,
     OrderingAssurance,
-    ProviderSizeUnit,
     RawStreamRecord,
     TradeCoverageIntervalVersion,
     UnsupportedMarketTradeSideError,
@@ -1259,28 +1253,6 @@ class ContinuousStreamRuntime:
                 with contextlib.suppress(Exception):
                     self.repository.release(claim)
 
-    @staticmethod
-    def _book_position_from_row(
-        row: Mapping[str, Any],
-        *,
-        prefix: str,
-        definition_id: str,
-        provider_product_id: str,
-    ) -> BookSourcePosition:
-        return BookSourcePosition(
-            definition_id=definition_id,
-            session_id=str(row[f"{prefix}_session_id"]),
-            connection_epoch=int(row[f"{prefix}_connection_epoch"]),
-            provider_product_id=provider_product_id,
-            provider_sequence_num=(
-                int(row[f"{prefix}_sequence_num"])
-                if row.get(f"{prefix}_sequence_num") is not None
-                else None
-            ),
-            receive_ordinal=int(row[f"{prefix}_receive_ordinal"]),
-            event_ordinal=int(row[f"{prefix}_event_ordinal"]),
-        )
-
     def _restore_level2_projection(
         self,
         *,
@@ -1382,103 +1354,11 @@ class ContinuousStreamRuntime:
                 "continuous_l2_recovery_validity_missing: "
                 f"checkpoint_id={checkpoint_row['id']}"
             )
-        opening_position = self._book_position_from_row(
-            opening_row,
-            prefix="opening",
-            definition_id=claim.definition_id,
-            provider_product_id=claim.provider_product_id,
-        )
-        last_position = self._book_position_from_row(
-            opening_row,
-            prefix="last",
-            definition_id=claim.definition_id,
-            provider_product_id=claim.provider_product_id,
-        )
-        validity = BookValidityIntervalVersion(
-            version_id=str(opening_row["id"]),
-            interval_id=str(opening_row["interval_id"]),
-            revision=int(opening_row["revision"]),
-            series_id=int(opening_row["series_id"]),
-            status=BookValidityStatus(str(opening_row["status"])),
-            ordering_assurance=OrderingAssurance(
-                str(opening_row["ordering_assurance"])
-            ),
-            opening_snapshot_id=str(opening_row["opening_snapshot_id"]),
-            opening_position=opening_position,
-            opening_effective_at=opening_row["opening_effective_at"],
-            opening_known_at=opening_row["opening_known_at"],
-            last_valid_position=last_position,
-            last_valid_effective_at=opening_row["last_valid_effective_at"],
-            last_state_hash=str(opening_row["last_state_hash"]),
-            known_at=opening_row["known_at"],
-        )
         checkpoint_path = object_store.local_path(str(checkpoint_row["object_key"]))
         if not checkpoint_path.exists():
             raise RuntimeError(
                 "continuous_l2_recovery_checkpoint_object_missing: "
                 f"checkpoint_id={checkpoint_row['id']}"
-            )
-        checkpoint_digest = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
-        if checkpoint_digest != str(checkpoint_row["object_sha256"]):
-            raise RuntimeError(
-                "continuous_l2_recovery_checkpoint_checksum_mismatch: "
-                f"checkpoint_id={checkpoint_row['id']}"
-            )
-        level_rows = read_book_checkpoint_parquet(checkpoint_path)
-        bids = tuple(
-            (Decimal(str(row["price"])), Decimal(str(row["quantity"])))
-            for row in level_rows
-            if str(row["side"]) == BookSide.BID.value
-        )
-        asks = tuple(
-            (Decimal(str(row["price"])), Decimal(str(row["quantity"])))
-            for row in level_rows
-            if str(row["side"]) == BookSide.ASK.value
-        )
-        checkpoint_position = BookSourcePosition(
-            definition_id=claim.definition_id,
-            session_id=str(checkpoint_row["session_id"]),
-            connection_epoch=int(checkpoint_row["connection_epoch"]),
-            provider_product_id=claim.provider_product_id,
-            provider_sequence_num=(
-                int(checkpoint_row["provider_sequence_num"])
-                if checkpoint_row.get("provider_sequence_num") is not None
-                else None
-            ),
-            receive_ordinal=int(checkpoint_row["receive_ordinal"]),
-            event_ordinal=int(checkpoint_row["event_ordinal"]),
-        )
-        checkpoint = BookCheckpointFact(
-            checkpoint_id=str(checkpoint_row["id"]),
-            series_id=int(checkpoint_row["series_id"]),
-            validity_interval_id=str(checkpoint_row["validity_interval_id"]),
-            source_position=checkpoint_position,
-            product_definition_version_id=str(
-                checkpoint_row["product_definition_version_id"]
-            ),
-            provider_size_unit=ProviderSizeUnit(
-                str(checkpoint_row["provider_size_unit"])
-            ),
-            ordering_assurance=validity.ordering_assurance,
-            effective_at=checkpoint_row["effective_at"],
-            known_at=checkpoint_row["known_at"],
-            state_hash=str(checkpoint_row["state_hash"]),
-            bids=bids,
-            asks=asks,
-            mutation_count_since_prior=int(
-                checkpoint_row["mutation_count_since_prior"]
-            ),
-        )
-        if (
-            checkpoint.content_fingerprint
-            != str(checkpoint_row["content_fingerprint"])
-            or len(level_rows) != int(checkpoint_row["level_count"])
-            or len(bids) != int(checkpoint_row["bid_level_count"])
-            or len(asks) != int(checkpoint_row["ask_level_count"])
-        ):
-            raise RuntimeError(
-                "continuous_l2_recovery_checkpoint_material_mismatch: "
-                f"checkpoint_id={checkpoint.checkpoint_id}"
             )
         config = dict(claim.config or {})
         contract = L2ProductContract(
@@ -1490,11 +1370,10 @@ class ContinuousStreamRuntime:
             price_increment=config.get("price_increment"),
             quantity_increment=config.get("quantity_increment"),
         )
-        reducer = Level2BookReconstructor.from_checkpoint(
-            checkpoint,
-            contract=contract,
-            validity=validity,
-        )
+        checkpoint, reducer = restore_book_checkpoint_parquet(
+            checkpoint_path, expected=checkpoint_row, opening=opening_row,
+            definition_id=claim.definition_id, contract=contract)
+        checkpoint_position = checkpoint.source_position
         replay_manifests = [
             row
             for row in self.repository.list_session_manifests(

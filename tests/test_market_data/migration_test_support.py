@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 import os
 import re
+from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
@@ -108,8 +109,27 @@ def fresh_migration_database(label: str) -> Iterator[str]:
                         ),
                         {"database_name": database_name},
                     ).all()
+                    deadline = monotonic() + 5
+                    while True:
+                        remaining_pids = conn.execute(
+                            text(
+                                "SELECT array_agg(pid ORDER BY pid) "
+                                "FROM pg_stat_activity "
+                                "WHERE datname = :database_name "
+                                "AND pid <> pg_backend_pid()"
+                            ),
+                            {"database_name": database_name},
+                        ).scalar_one()
+                        if not remaining_pids:
+                            break
+                        if monotonic() >= deadline:
+                            raise RuntimeError(
+                                "migration_database_cleanup_timeout: "
+                                f"database={database_name} pids={remaining_pids}"
+                            )
+                        sleep(0.05)
                     conn.exec_driver_sql(
-                        f"DROP DATABASE IF EXISTS {quoted_name}"
+                        f"DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"
                     )
         finally:
             admin_engine.dispose()

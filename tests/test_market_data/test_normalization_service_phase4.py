@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -256,3 +258,23 @@ def test_referenced_legacy_spec_identity_remains_fail_loud() -> None:
 
     with pytest.raises(RuntimeError, match="legacy_identity_referenced"):
         _unreferenced_legacy_spec_from_row(row)
+
+
+@pytest.mark.parametrize("unrelated_id", [["opaque"], {"opaque": "value"}, None, 17])
+def test_cold_legacy_spec_guard_preserves_exact_text_reference_predicate(monkeypatch, unrelated_id):
+    from portal.backend.service.storage.repos import normalization
+    spec = _funding_bps_spec()
+    legacy_id = f"nsp_{spec.spec_hash[:40]}"
+    session = MagicMock()
+    session.execute.return_value.mappings.return_value.all.return_value = [_stored_spec_row(spec, spec_id=legacy_id)]
+    session.execute.return_value.scalar_one_or_none.return_value = None
+    cold_rows = [{"provenance": {"_qt_normalization_evidence": {"spec_id": unrelated_id}}}]
+    @contextmanager
+    def stream(*args, **kwargs):
+        yield iter(cold_rows)
+    monkeypatch.setattr(normalization.canonical_fact_storage_repository, "stream_rows_by_ids", stream)
+    repo = normalization.PostgresNormalizationRepository()
+    assert repo._list_specs_with_session(session) == ()
+    cold_rows.append({"provenance": {"_qt_normalization_evidence": {"spec_id": legacy_id}}})
+    with pytest.raises(RuntimeError, match="legacy_identity_referenced"):
+        repo._list_specs_with_session(session)

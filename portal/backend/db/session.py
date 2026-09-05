@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import timedelta
 from contextlib import contextmanager
 from typing import Dict, Iterator, Optional
 
@@ -32,6 +33,10 @@ from .models import (
     REQUIRED_RESEARCH_ITEM_INDEXES,
     REQUIRED_RESEARCH_AUTHORITY_INDEXES,
     REQUIRED_RESEARCH_LINK_INDEXES,
+)
+from .fact_storage_schema import (
+    FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES, FACT_STORAGE_LAYOUT_VERSION,
+    assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
 )
 
 
@@ -89,6 +94,7 @@ _CLEAN_BOOTSTRAP_ONLY_TABLES = frozenset(
         ("market", "fact_versions"),
         ("market", "fact_acquisition_coverage"),
         ("market", "book_operational_rollups"),
+        *(("market", name) for name in FACT_STORAGE_TABLES),
     }
 )
 _NUMERIC_COVERAGE_REQUIRED_INDEXES = frozenset(
@@ -104,11 +110,6 @@ _CANONICAL_FACT_REQUIRED_INDEXES = frozenset(
         "ix_market_fact_schema_time",
         "ix_market_fact_source_time",
         "ix_market_fact_external_group",
-        "ix_market_fact_payload_gin",
-        "ix_market_fact_provenance_gin",
-        "ix_market_fact_exact_value",
-        "ix_market_fact_exact_rate",
-        "ix_market_fact_funding_time",
     }
 )
 _CANONICAL_FACT_LOOKUP_INDEX_COLUMNS = {
@@ -383,6 +384,53 @@ class Database:
         finally:
             session.close()
 
+    @contextmanager
+    def locked_snapshot_session(self, *, shared_lock_name: str) -> Iterator[Session]:
+        """Take a session fence before the repeatable snapshot, on one connection.
+
+        A blocking advisory-lock SELECT inside REPEATABLE READ establishes its
+        snapshot before the wait ends. Acquire under autocommit first instead.
+        The fence remains held through the snapshot transaction's commit.
+        """
+        if not shared_lock_name:
+            raise ValueError("database_snapshot_lock_name_required")
+        if not self.ensure_schema():
+            raise RuntimeError("Portal database is not available")
+        assert self._engine is not None
+        params = {"name": shared_lock_name}
+        with self._engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            try:
+                connection.execute(text("SELECT pg_advisory_lock_shared(hashtextextended(:name, 0))"), params)
+                connection.commit()
+            except BaseException:
+                connection.invalidate()
+                raise
+            try:
+                connection.execution_options(isolation_level="REPEATABLE READ")
+                with Session(bind=connection, expire_on_commit=False, autoflush=False, future=True) as session:
+                    try:
+                        yield session
+                        session.commit()
+                    except BaseException:
+                        session.rollback()
+                        raise
+            finally:
+                if not connection.invalidated:
+                    try:
+                        if connection.in_transaction():
+                            connection.rollback()
+                        connection.execution_options(isolation_level="AUTOCOMMIT")
+                        released = connection.execute(text(
+                            "SELECT pg_advisory_unlock_shared(hashtextextended(:name, 0))"
+                        ), params).scalar_one()
+                        connection.commit()
+                        if not released:
+                            raise RuntimeError("database_snapshot_unlock_failed")
+                    except BaseException:
+                        # Never return an ambiguously locked connection to the pool.
+                        connection.invalidate()
+                        raise
+
     def _bootstrap_schema_contract(self) -> None:
         """Create missing schema objects and assert existing objects match the ORM contract."""
 
@@ -416,8 +464,17 @@ class Database:
                     include_clean_bootstrap=True,
                 )
                 self._ensure_canonical_fact_insert_trigger(conn)
+                install_fact_storage_functions(conn)
                 self._ensure_book_checkpoint_rollup_trigger(conn)
                 self._ensure_market_data_immutability(conn)
+                storage_day = conn.execute(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date")).scalar_one()
+                ensure_fact_payload_partition(conn, storage_day)
+                ensure_fact_payload_partition(conn, storage_day + timedelta(days=1))
+                conn.execute(text(
+                    "INSERT INTO market.fact_storage_state (layout_version, state, completed_at) "
+                    "VALUES (:version, 'ready', now())"
+                ), {"version": FACT_STORAGE_LAYOUT_VERSION})
+            assert_fact_storage_contract(conn)
             self._assert_fact_acquisition_migration(conn)
             self._assert_canonical_fact_migration(conn)
             self._assert_book_operational_rollup_migration(conn)
@@ -753,15 +810,6 @@ class Database:
                             NEW.fact_type,
                             NEW.payload_schema_id;
                     END IF;
-                    IF NOT market.validate_fact_payload(
-                        NEW.payload_schema_id,
-                        NEW.payload
-                    ) THEN
-                        RAISE EXCEPTION
-                            'canonical_fact_invalid: payload does not satisfy schema_id=% observation_key=%',
-                            NEW.payload_schema_id,
-                            NEW.observation_key;
-                    END IF;
                     RETURN NEW;
                 END;
                 $$
@@ -963,6 +1011,7 @@ class Database:
             "fact_schemas",
             "fact_versions",
             "fact_acquisition_coverage",
+            *FACT_STORAGE_IMMUTABLE_TABLES,
             "gap_evidence",
             "datasets",
             "dataset_series",

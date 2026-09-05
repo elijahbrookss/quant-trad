@@ -7,7 +7,7 @@ import logging
 import socket
 import threading
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -30,7 +30,9 @@ from ..storage.repos.market_structure import (
     PostgresMarketStructureRepository,
     market_structure_repository,
 )
+from ..storage.repos.fact_retention import canonical_fact_retention_repository
 from .market_structure_service import DEFAULT_STORAGE_ROOT
+from .canonical_retention import CanonicalFactRetentionExecutor
 
 
 logger = logging.getLogger(__name__)
@@ -62,17 +64,30 @@ class MarketStorageLifecycleService:
         market_repository: PostgresMarketStructureRepository = (
             market_structure_repository
         ),
+        canonical_repository=canonical_fact_retention_repository,
+        canonical_executor=None,
     ) -> None:
         self.lifecycle_repository = lifecycle_repository
         self.market_repository = market_repository
+        self.canonical_repository = canonical_repository
+        self.canonical_executor = canonical_executor or CanonicalFactRetentionExecutor(repository=canonical_repository)
 
     def plan(
         self,
         *,
         policy: MarketStorageLifecyclePolicy,
         now: Optional[datetime] = None,
+        storage_root: Path = DEFAULT_STORAGE_ROOT,
+        canonical_after_storage_day: date | None = None,
     ) -> dict[str, Any]:
         observed_at = _utc(now or datetime.now(UTC))
+        canonical = self.canonical_repository.plan(
+            policy=policy.canonical_retention, storage_root=storage_root,
+            after_storage_day=canonical_after_storage_day,
+        )
+        return self._assemble_plan(policy=policy, observed_at=observed_at, canonical=canonical)
+
+    def _assemble_plan(self, *, policy, observed_at, canonical):
         compactions = (
             self._plan_compactions(policy=policy, now=observed_at)
             if policy.archive_compaction_enabled
@@ -96,12 +111,15 @@ class MarketStorageLifecycleService:
             "policy": policy.to_dict(),
             "observed_at": observed_at.isoformat(),
             "execution_enabled": policy.execution_enabled,
+            "canonical_retention": canonical,
             "summary": {
                 "action_count": len(actions),
                 "eligible_count": sum(bool(item["eligible"]) for item in actions),
                 "blocked_count": sum(not bool(item["eligible"]) for item in actions),
                 "archive_compaction_count": len(compactions),
                 "archive_expiration_count": len(archive_expirations),
+                "canonical_candidate_count": len(canonical["actions"]),
+                "canonical_execution_available": canonical["execution_available"],
                 "chunk_compression_count": len(chunk_compressions),
                 "chunk_expiration_count": len(chunk_expirations),
                 "estimated_reclaim_bytes": sum(
@@ -124,6 +142,8 @@ class MarketStorageLifecycleService:
         execute: bool = False,
         owner_id: Optional[str] = None,
         now: Optional[datetime] = None,
+        canonical_after_storage_day: date | None = None,
+        cancelled=None,
     ) -> dict[str, Any]:
         requested_execute = bool(execute)
         if requested_execute and not policy.execution_enabled:
@@ -132,7 +152,8 @@ class MarketStorageLifecycleService:
                 "enable the policy only after reviewing a dry-run plan"
             )
         if not requested_execute:
-            plan = self.plan(policy=policy, now=now)
+            plan = self.plan(policy=policy, now=now, storage_root=storage_root,
+                             canonical_after_storage_day=canonical_after_storage_day)
             return {
                 "schema_version": "market.storage_lifecycle_run.v1",
                 "status": "dry_run",
@@ -146,11 +167,19 @@ class MarketStorageLifecycleService:
             or f"market-lifecycle:{socket.gethostname()}:{threading.get_native_id()}"
         )
         outcomes: list[dict[str, Any]] = []
+        # Capacity/family scans are observations, not destructive authority.
+        # Keep them outside the raw-expiry exclusive fence. Raw action planning
+        # retains its previous lock scope; final canonical execution will own
+        # its separate shared-verification/exclusive-handoff phases.
+        canonical = self.canonical_repository.plan(
+            policy=policy.canonical_retention, storage_root=storage_root,
+            after_storage_day=canonical_after_storage_day,
+        )
         with self.lifecycle_repository.lifecycle_lock(owner_id=owner):
-            plan = self.plan(policy=policy, now=now)
-            store = FilesystemRawArchiveObjectStore(
-                Path(storage_root).expanduser().resolve() / "objects"
-            )
+            plan = self._assemble_plan(policy=policy, observed_at=_utc(now or datetime.now(UTC)), canonical=canonical)
+            store = None
+            if any(item["eligible"] for item in [*plan["archive_compactions"], *plan["archive_expirations"]]):
+                store = FilesystemRawArchiveObjectStore(Path(storage_root).expanduser().resolve() / "objects")
             for item in plan["archive_compactions"]:
                 if item["eligible"]:
                     outcomes.append(
@@ -167,6 +196,17 @@ class MarketStorageLifecycleService:
             for item in plan["chunk_expirations"]:
                 if item["eligible"]:
                     outcomes.append(self._execute_chunk_expiration(item=item))
+        # The archive owner takes a SHARED raw-evidence fence and the reclaimer
+        # later tries an EXCLUSIVE handoff. Never invoke either while the raw
+        # lifecycle connection above still owns its exclusive session lock.
+        canonical_run = {"status": "disabled", "outcomes": [], "failure_count": 0}
+        if policy.canonical_retention.execution_enabled:
+            canonical_run = self.canonical_executor.run(
+                policy=policy.canonical_retention, storage_root=storage_root, execute=True,
+                after_storage_day=canonical_after_storage_day,
+                cancelled=cancelled,
+            )
+            outcomes.extend(canonical_run["outcomes"])
         failures = [item for item in outcomes if item.get("status") == "failed"]
         status = "degraded" if failures else "completed"
         logger.log(
@@ -184,6 +224,7 @@ class MarketStorageLifecycleService:
             "plan": plan,
             "outcomes": outcomes,
             "failure_count": len(failures),
+            "canonical_retention": canonical_run,
         }
 
     def _plan_compactions(
@@ -322,6 +363,10 @@ class MarketStorageLifecycleService:
                 blockers.append("explicit_retention_pin")
             if int(row.get("dataset_pin_count") or 0):
                 blockers.append("frozen_dataset_pin")
+            if int(row.get("canonical_dependency_count") or 0):
+                blockers.append("canonical_archive_dependency")
+            if bool(row.get("canonical_backlog_present")):
+                blockers.append("canonical_hot_backlog")
             target_id = str(row["target_id"])
             operation_id = lifecycle_operation_id(
                 action="archive_expire",
@@ -437,6 +482,28 @@ class MarketStorageLifecycleService:
             return self._failure_outcome(item=item, error=exc)
 
     def _execute_archive_expiration(
+        self, *, item: Mapping[str, Any], store: FilesystemRawArchiveObjectStore,
+    ) -> dict[str, Any]:
+        try:
+            with self.lifecycle_repository.archive_expiration_lock(
+                target_kind=str(item["target_kind"]), target_id=str(item["target_id"]),
+            ):
+                return self._execute_locked_archive_expiration(item=item, store=store)
+        except MarketStorageLifecycleBusyError as exc:
+            self.lifecycle_repository.append_event(
+                operation_id=str(item["operation_id"]), action="archive_expire", event_type="skipped",
+                target_kind=str(item["target_kind"]), target_id=str(item["target_id"]),
+                reason=str(exc), evidence={"object_key": item["object_key"]},
+            )
+            logger.info("market_archive_expiration_deferred | target_kind=%s target_id=%s reason=%s",
+                        item["target_kind"], item["target_id"], exc)
+            return {"action": "archive_expire", "operation_id": str(item["operation_id"]),
+                    "status": "skipped", "reason": "canonical_reference_busy"}
+        except Exception as exc:
+            self._record_failure(item=item, error=exc, evidence={"object_key": item["object_key"]})
+            return self._failure_outcome(item=item, error=exc)
+
+    def _execute_locked_archive_expiration(
         self,
         *,
         item: Mapping[str, Any],
@@ -702,6 +769,7 @@ class MarketStorageLifecycleSupervisor:
             storage_root=self.storage_root,
             execute=self.policy.execution_enabled,
             owner_id=self.owner_id,
+            cancelled=self._stop.is_set,
         )
         with self._snapshot_lock:
             self._snapshot = {
@@ -711,6 +779,8 @@ class MarketStorageLifecycleSupervisor:
                     "status": result["status"],
                     "summary": result["plan"]["summary"],
                     "failure_count": result["failure_count"],
+                    "canonical_retention": {name: result.get("canonical_retention", {}).get(name)
+                        for name in ("status", "stop_reason", "next_after_storage_day", "failure_count")},
                     "finished_at": datetime.now(UTC).isoformat(),
                 },
                 "last_error": None,

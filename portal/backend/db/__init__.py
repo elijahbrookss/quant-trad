@@ -69,6 +69,19 @@ from .market_data_models import (
     MarketStreamSessionEventRecord,
     MarketTradeIdentityRecord,
 )
+from .market_storage_models import (
+    MarketFactStorageStateRecord,
+    MarketFactHotPayloadRecord,
+    MarketFactRetentionPartitionRecord,
+    MarketFactArchiveManifestRecord,
+    MarketFactArchiveSeriesRecord,
+    MarketFactArchiveDependencyRecord,
+    MarketFactArchiveCanonicalDependencyRecord,
+    MarketFactArchiveMaterialAliasRecord,
+    MarketFactArchiveVerificationRecord,
+    MarketFactBookPrefixChunkRecord,
+    MarketFactBookPrefixDependencyRecord,
+)
 from .session import Database, db
 
 __all__ = [
@@ -119,6 +132,15 @@ __all__ = [
     "MarketFactAcquisitionCoverageRecord",
     "MarketFactSchemaRecord",
     "MarketFactVersionRecord",
+    "MarketFactHotPayloadRecord",
+    "MarketFactStorageStateRecord",
+    "MarketFactRetentionPartitionRecord",
+    "MarketFactArchiveManifestRecord",
+    "MarketFactArchiveSeriesRecord",
+    "MarketFactArchiveDependencyRecord",
+    "MarketFactArchiveCanonicalDependencyRecord",
+    "MarketFactArchiveMaterialAliasRecord",
+    "MarketFactArchiveVerificationRecord",
     "MarketBookOperationalRollupRecord",
     "MarketCollectorSafetyEventRecord",
     "MarketCollectorSafetyStateRecord",

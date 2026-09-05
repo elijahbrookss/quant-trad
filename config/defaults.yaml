@@ -97,6 +97,27 @@ market_data_lifecycle:
   compaction_target_bytes: 536870912
   max_compaction_groups_per_run: 8
   max_archive_expirations_per_run: 100
+  canonical_retention:
+    # Placement age, not observation age. Review before retention activation.
+    hot_days: 30
+    hot_days_by_fact_type: {}
+    # Unset until the operator chooses capacities; neither is a whole-DB cap.
+    hot_payload_budget_bytes: null
+    archive_filesystem_budget_bytes: null
+    archive_min_free_bytes: 1073741824
+    max_candidate_partitions: 16
+    max_inventory_partitions: 4096
+    plan_statement_timeout_ms: 5000
+    max_plan_seconds: 15
+    execution_enabled: false
+    max_steps_per_run: 4
+    max_run_seconds: 60
+    execution_statement_timeout_ms: 5000
+    max_page_rows: 10000
+    max_page_logical_bytes: 67108864
+    max_verification_bytes: 4294967296
+    max_verification_objects: 10000
+    max_verification_pages: 1000
 
 bot_runtime:
   mode: backtest

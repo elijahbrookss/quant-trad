@@ -23,6 +23,7 @@ code_paths:
   - portal/backend/service/market/market_storage_lifecycle.py
   - portal/backend/service/storage/repos/market_data.py
   - portal/backend/service/storage/repos/market_lifecycle.py
+  - portal/backend/service/storage/repos/fact_references.py
   - portal/backend/workers
   - cli/main.py
   - docker/docker-compose.yml
@@ -227,6 +228,168 @@ physical/cloud resource budget remain production-readiness gates. That proof is
 not a 24-hour process lifetime: admitted production has no duration cap.
 
 ## Consequences
+
+### Canonical Tier Retention Addendum
+
+The generalized canonical tier keeps immutable revision headers in PostgreSQL,
+verified immutable Parquet payloads on the configured archive filesystem, and
+explicit daily hot-payload progress. The current implementation and rollout
+gates are defined in
+[Generalized Fact Data Plane](../data/GENERALIZED_FACT_DATA_PLANE.md#canonical-retention-planning);
+the historical family-table compression script above is not its cutover.
+
+Raw retention windows do not override canonical source lifetime. Hot backlog
+protects source objects until cold publication creates permanent dependency
+holds. Expiration takes an object-specific manifest row lock through final
+admission/unlink/completion; canonical writers take a conflicting shared row
+lock and recheck expiry before committing new references. This closes the
+check-versus-publication race without serializing all ingestion behind a global
+archive fence. New reference writes use READ COMMITTED, and identical existing
+canonical rows remain no-ops. Current stream publication remains archive-first;
+this does not introduce a spool-first publication lane.
+
+This safety choice can retain raw evidence beyond an ordinary age window, and
+the permanent canonical index still grows on NVMe. Budget pressure must report
+that cost rather than expire unarchived evidence or silently disable collection.
+The canonical bounded executor is now wired through the existing lifecycle
+service, outside its raw exclusive fence, with a separate default-off execution
+gate and durable page/verification resume state. Complete dependency closure and
+representative production validation remain activation requirements; the
+existence of backlog protection or orchestration alone does not complete them.
+
+Deep verification receipts are versioned safety evidence, not permanent deletion
+permission. Strengthening raw-lineage checks requires a new receipt version.
+Previously verified hot partitions withdraw their old admission and resume
+bounded current-version verification while retaining all data and old receipts;
+the executor must not silently promote an old receipt to the stronger proof.
+
+Book raw-source admission retains a complete connection prefix, including
+control frames without canonical mutations. A last-frame mapping alone cannot
+prove a reconstructed book's source lifetime. Existing hot session holders
+protect live publication without repeated full-history scans. A committed
+immutable prefix also retains the complete definition/session after its hot
+payloads leave: trailing control frames and later checkpoints are needed by
+session replay even when no earlier page names them. Checkpoint ownership comes
+from its immutable raw-source manifests. This conservative lifetime anchor is
+not a new row's byte/reconstruction proof, but allows cold-only writers to avoid
+rescanning old history. Late imports without either holder must fence and check
+the complete prefix. This may keep an entire long-running book session beyond
+its ordinary age window; pressure reporting must expose the cost rather than
+silently release the hold. Long prefixes now
+advance through immutable, shared interval receipts with permanent raw holds.
+Each bounded transaction extends one interval; interruption rolls back that
+interval, and restarting resumes committed progress. This adds metadata to the
+existing PostgreSQL authority, not a second store or a new source of Fact truth.
+Final admission validates the contiguous receipt chain and current object bytes,
+and exact roots bind to their own certified interval. Later archive aliases
+cannot rewrite that proof. This deliberately trades some retained objects and
+receipt metadata for safe restart and avoids repeatedly decoding an entire
+connection history. It does not remove per-object/final verification budgets or
+establish checkpoint/replay equivalence by itself.
+
+Trade coverage reuses this bounded raw-prefix mechanism, with a distinct verifier
+version whose scope/hash cannot be confused with the L2 verifier. Historical
+book table names and descriptors stay unchanged. Exact opening/closing witnesses
+bind to their own certified chunks; they do not borrow a later archive alias or
+mistake an L2 frame for a trade-channel frame. This reuse avoids a second progress
+store and an unbounded full-session scan. A prefix alone is still not a complete
+trade-flow input proof or authorization to reclaim that family.
+
+Flow archival now combines the exact immutable coverage revision and complete
+raw-prefix proof with all causal canonical trade candidates in the bucket's
+instrument/source window. This conservative closure is necessary because v1
+flow evidence does not name canonical input IDs: bounded captures may aggregate
+a live delivery deduplicated against an older snapshot or another session's
+canonical trade. Requiring a fabricated delivery revision, or reconstructing it
+with a guessed canonical acceptance time, would alter historical evidence.
+Candidate edges therefore preserve all matching revisions and invalidations;
+each retains its own raw source, while the coverage prefix retains redeliveries
+and controls that never produced canonical rows. This can cost additional cold
+storage and metadata, but avoids guessing a minimal input subset. It preserves
+historical completeness/quality flags rather than recertifying them. Uncovered
+roots still need owner-based input reconciliation. The v9 archive receipt binds
+this stronger closure. Trade/flow freezes also bind every canonical revision,
+keeping original partial-quality flags while checking current physical evidence.
+Read-only freeze can reuse existing prefix certificates and verify a bounded
+missing tail without writing retention progress. Physical flow-removal tests
+cover frozen, typed-latest and known-at equivalence, including old-receipt
+reverification; flow now shares the existing default-disabled reclamation gate.
+Flow features extend this closure under the v10 verifier: exact causal aggregate
+hash matches retain every matching revision and its bounded trade/raw evidence.
+Immutable series scope and the original feature derivation owner must reconcile
+the payload and combined input fingerprint. Conservative candidate retention
+preserves deduplicated snapshot/update material without inventing delivery IDs;
+arbitrary correction subsets are not searched. Total derivation input visits
+are bounded as well as source edges. Feature freezes preserve all revisions,
+and v9 receipts require explicit additive reverification before reclamation.
+Normalized admission is described below; production activation still requires
+its reviewed rollout.
+
+The v11 response archive proof first preserves named canonical flow/book/trade
+witnesses and full causal windows. It reuses book position lookup without
+fabricating BBO Facts and retains the broader response-time trade evidence,
+including instrument-bound source candidates where v1 omitted a trade-series ID.
+This intentionally spends additional bounded archive/edge work to preserve
+evidence rather than guess an original source selection. Response
+freezes now preserve all canonical revisions and the same causal raw windows.
+Read-only book/trade prefix reuse validates whole certificates but excludes
+wholly later objects from the returned frozen scope, so certifying a larger
+prefix cannot silently change an earlier Dataset's identity. No certificate
+contents, permanent holds or source clocks are rewritten by this read path.
+
+Response reclamation is admitted on lossless output and complete evidence
+preservation, not recalculation of a historical result. The initial plan to
+require full response-owner recalculation at this storage boundary is superseded:
+v1 does not record its original processing-chunk bounds, so reconstructing an
+assumed subset would invent evidence. Keeping every causal candidate preserves
+research capability without certifying that any historic conclusion was correct.
+Every canonical output revision, original fingerprint, correction/invalidation
+and named source witness survives unchanged; the existing source placement,
+raw/checkpoint, immutable metadata, pin and complete-archive checks still gate
+the DROP. Physical disposable tests compare actual hot versus cold research
+reads and Dataset identity, reject corrupt cold inputs, and prove idempotent
+reclamation and explicit additive upgrade of older compatible proof receipts.
+This does not change ingestion policy, recompute Facts or introduce an alternate
+book engine. Reviewed activation remains separate.
+
+The v12 proof extends lossless preservation to normalized outputs. Up to three
+diagnostic hashes cannot represent a complete normalization window: retain every
+causal canonical revision in the recorded source window, verify the named
+witnesses and full immutable spec, and recursively preserve nested normalized
+inputs plus their derived/raw dependencies. Strictly decreasing commit bounds,
+batched lookups, cumulative edge budgets and byte/deadline limits bound this work.
+Preserve original values, invalidations, statuses and fingerprints without
+guessing unrecorded materialization bounds or rerunning formulas at archival time.
+Specs/catalogs remain durable PostgreSQL evidence, while source payloads can move
+to verified cold pages. All-revision normalized freezes use this same closure and
+still require covering source series in the Dataset; older latest-only freezes
+must be re-frozen. This can retain a larger causal superset and incur repeated
+window hydration, an explicit bounded cost rather than invented source identity.
+
+Book reclamation additionally binds exact canonical source revisions for derived
+BBO/depth facts, checks immutable product/validity scope, and validates checkpoint
+bytes and restored state through the existing reconstruction owner. These edges
+survive source movement between hot and cold storage. The final destructive
+handoff freshly verifies cold source pages and rejects a placement change between
+preflight and commit, without encoding mutable placement in immutable receipts.
+This requires an explicit empty-metadata-table upgrade, not a data backfill or
+implicit startup migration. Futures/spot basis extends these same edges through
+both declared BBO inputs: every causally eligible material revision is retained,
+with immutable role-mapping scope and owner-derived pair validation. A new
+verifier version prevents older receipts from bypassing that stronger closure.
+Derivative state uses these edges for explicit OI/funding commits and the exact
+previous OI commit bound by its existing input fingerprint. It reuses the original
+derivation owner and legacy numeric semantics, not today's latest source values.
+Missing predecessors remain absent when the original gap/window selection omitted
+them. Older pages may gain newly required material aliases and canonical edges
+only through explicit current-version verification without changing historical
+bytes or receipts. Typed v1 reading accepts the serializer's exact retained
+28-digit OI log change as well as the 38-digit in-memory calculation; this repairs
+a reader/serializer mismatch without rehashing or upgrading historical evidence.
+Unknown families remain behind the whole-day admission gate. Admitting current
+families does not authorize deployment or retention activation.
+
+### Operational Consequences
 
 The platform gains deterministic forensic replay and can correct parser or
 feature implementations without pretending the corrected result was known

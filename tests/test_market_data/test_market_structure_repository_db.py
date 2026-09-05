@@ -1246,6 +1246,10 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
         acknowledgement=checkpoint_ack,
         source_manifest_ids=[compacted_archive.manifest_id],
     ) is False
+    checkpoint_retention = market_structure_repository.archive_retention_status(
+        target_kind="book_checkpoint", target_id=checkpoints[0].checkpoint_id,
+    )
+    assert checkpoint_retention["canonical_backlog_present"] is False
 
     ingest_kwargs = {
         "snapshots": snapshots,
@@ -1262,6 +1266,11 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
     }
     first = market_structure_repository.ingest_book_facts(claim, **ingest_kwargs)
     repeated = market_structure_repository.ingest_book_facts(claim, **ingest_kwargs)
+    checkpoint_retention = market_structure_repository.archive_retention_status(
+        target_kind="book_checkpoint", target_id=checkpoints[0].checkpoint_id,
+    )
+    assert checkpoint_retention["canonical_backlog_present"] is True
+    assert checkpoint_retention["pinned"] is True
     assert first.inserted_snapshot_count == first.inserted_batch_count == 1
     assert first.inserted_validity_count == 2
     assert repeated.noop_snapshot_count == repeated.noop_batch_count == 1
@@ -1362,7 +1371,7 @@ def test_book_archive_validity_checkpoint_and_replay_are_atomic(
                 "       payload ->> 'event_type' AS event_type, "
                 "       CAST(payload ->> 'entry_count' AS bigint) AS entry_count, "
                 "       jsonb_array_length(payload -> 'entries') AS stored_entry_count "
-                "FROM market.fact_versions "
+                "FROM market.fact_rows "
                 "WHERE series_id = :series_id "
                 "  AND external_event_component_key = ANY(:component_ids)"
             ),

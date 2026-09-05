@@ -1,0 +1,320 @@
+"""Storage placement and immutable cold-page catalog for canonical Facts.
+
+Fact identity remains in market.fact_versions. These relations describe where
+its large JSON documents live; they never create a new market revision.
+"""
+
+from sqlalchemy import (
+    BigInteger, CheckConstraint, Column, Date, DateTime, ForeignKey, Index,
+    Integer, String, Text, UniqueConstraint, text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+
+from .models import Base
+
+
+class MarketFactStorageStateRecord(Base):
+    """Explicit clean-install/cutover certificate; runtime cannot complete a migration."""
+
+    __tablename__ = "fact_storage_state"
+    __table_args__ = (
+        CheckConstraint("state IN ('copying', 'ready')", name="ck_market_fact_storage_state"),
+        CheckConstraint(
+            "(state = 'copying' AND completed_at IS NULL) OR "
+            "(state = 'ready' AND completed_at IS NOT NULL)",
+            name="ck_market_fact_storage_completion",
+        ),
+        CheckConstraint("jsonb_typeof(evidence) = 'object'", name="ck_market_fact_storage_evidence"),
+        {"schema": "market"},
+    )
+    layout_version = Column(String(64), primary_key=True)
+    state = Column(String(16), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+class MarketFactHotPayloadRecord(Base):
+    __tablename__ = "fact_hot_payloads"
+    __table_args__ = (
+        CheckConstraint("jsonb_typeof(payload) = 'object'", name="ck_market_hot_fact_payload_object"),
+        CheckConstraint("jsonb_typeof(provenance) = 'object'", name="ck_market_hot_fact_provenance_object"),
+        CheckConstraint("jsonb_typeof(quality) = 'object'", name="ck_market_hot_fact_quality_object"),
+        CheckConstraint("market.validate_fact_payload(payload_schema_id, payload)", name="ck_market_hot_fact_payload_valid"),
+        {"schema": "market", "postgresql_partition_by": "RANGE (storage_day)"},
+    )
+
+    storage_day = Column(Date, primary_key=True)
+    id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    series_id = Column(BigInteger, nullable=False)
+    payload_schema_id = Column(String(128), nullable=False)
+    observation_time = Column(DateTime(timezone=True), nullable=False)
+    payload = Column(JSONB, nullable=False)
+    provenance = Column(JSONB, nullable=False)
+    quality = Column(JSONB, nullable=False)
+
+
+Index("ix_market_fact_payload_gin", MarketFactHotPayloadRecord.payload,
+      postgresql_using="gin", postgresql_ops={"payload": "jsonb_path_ops"})
+Index("ix_market_fact_provenance_gin", MarketFactHotPayloadRecord.provenance,
+      postgresql_using="gin", postgresql_ops={"provenance": "jsonb_path_ops"})
+Index(
+    "ix_market_fact_exact_value", MarketFactHotPayloadRecord.series_id,
+    text("((payload->>'value')::numeric)"), MarketFactHotPayloadRecord.observation_time,
+    postgresql_where=MarketFactHotPayloadRecord.payload_schema_id.in_((
+        "derivatives.open_interest.v2", "market.reference_price.v1", "market.reserve_balance.v1",
+    )),
+)
+Index(
+    "ix_market_fact_exact_rate", MarketFactHotPayloadRecord.series_id,
+    text("((payload->>'rate')::numeric)"), MarketFactHotPayloadRecord.observation_time,
+    postgresql_where=MarketFactHotPayloadRecord.payload_schema_id == "derivatives.funding_rate.v2",
+)
+Index(
+    "ix_market_fact_funding_time", MarketFactHotPayloadRecord.series_id,
+    text("market.canonical_fact_utc_timestamp(payload->>'funding_time')"),
+    MarketFactHotPayloadRecord.observation_time,
+    postgresql_where=MarketFactHotPayloadRecord.payload_schema_id.in_((
+        "derivatives.funding_rate.v1", "derivatives.funding_rate.v2",
+    )),
+)
+
+
+class MarketFactRetentionPartitionRecord(Base):
+    """Mutable lifecycle progress for one physical hot-payload partition."""
+
+    __tablename__ = "fact_retention_partitions"
+    __table_args__ = (
+        CheckConstraint("state IN ('open', 'sealed', 'verified', 'reclaimed')", name="ck_market_fact_partition_state"),
+        CheckConstraint("expected_rows IS NULL OR expected_rows >= 0", name="ck_market_fact_partition_rows"),
+        CheckConstraint("source_bytes IS NULL OR source_bytes >= 0", name="ck_market_fact_partition_source_bytes"),
+        CheckConstraint("reclaimed_bytes IS NULL OR reclaimed_bytes >= 0", name="ck_market_fact_partition_reclaimed_bytes"),
+        CheckConstraint(
+            "(state = 'open' AND sealed_at IS NULL AND expected_rows IS NULL) OR "
+            "(state <> 'open' AND sealed_at IS NOT NULL AND expected_rows IS NOT NULL)",
+            name="ck_market_fact_partition_sealed",
+        ),
+        CheckConstraint(
+            "(state IN ('open', 'sealed') AND verified_at IS NULL AND manifest_set_hash IS NULL) OR "
+            "(state IN ('verified', 'reclaimed') AND verified_at IS NOT NULL AND "
+            "manifest_set_hash IS NOT NULL AND manifest_set_hash ~ '^[0-9a-f]{64}$')",
+            name="ck_market_fact_partition_verified",
+        ),
+        CheckConstraint(
+            "(state <> 'reclaimed' AND reclaimed_at IS NULL AND reclaimed_bytes IS NULL) OR "
+            "(state = 'reclaimed' AND reclaimed_at IS NOT NULL AND reclaimed_bytes IS NOT NULL)",
+            name="ck_market_fact_partition_reclaimed",
+        ),
+        {"schema": "market"},
+    )
+
+    storage_day = Column(Date, primary_key=True)
+    state = Column(String(16), nullable=False, server_default="open")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    expected_rows = Column(BigInteger, nullable=True)
+    source_bytes = Column(BigInteger, nullable=True)
+    sealed_at = Column(DateTime(timezone=True), nullable=True)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    manifest_set_hash = Column(String(64), nullable=True)
+    reclaimed_at = Column(DateTime(timezone=True), nullable=True)
+    reclaimed_bytes = Column(BigInteger, nullable=True)
+
+
+class MarketFactArchiveManifestRecord(Base):
+    """One independently verified, ordered page in a sealed partition."""
+
+    __tablename__ = "fact_archive_manifests"
+    __table_args__ = (
+        UniqueConstraint("storage_day", "page_ordinal", name="uq_market_fact_archive_page"),
+        UniqueConstraint("object_key", name="uq_market_fact_archive_object_key"),
+        CheckConstraint("page_ordinal >= 0", name="ck_market_fact_archive_page_ordinal"),
+        CheckConstraint("row_count > 0 AND byte_count > 0", name="ck_market_fact_archive_counts"),
+        CheckConstraint("first_commit_seq > 0 AND last_commit_seq > 0", name="ck_market_fact_archive_commits"),
+        CheckConstraint("(first_commit_seq, first_id) <= (last_commit_seq, last_id)", name="ck_market_fact_archive_cursors"),
+        CheckConstraint("object_sha256 ~ '^[0-9a-f]{64}$' AND manifest_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_hashes"),
+        CheckConstraint("jsonb_typeof(descriptor) = 'object'", name="ck_market_fact_archive_descriptor"),
+        CheckConstraint(
+            "(descriptor->>'schema_version' = 'market.canonical_fact_archive.v1' AND "
+            "descriptor->>'record_selection' = 'all_canonical_revisions.v1' AND "
+            "descriptor->>'object_key' = object_key AND descriptor->>'object_sha256' = object_sha256 AND "
+            "(descriptor->>'row_count')::bigint = row_count AND "
+            "(descriptor->>'byte_count')::bigint = byte_count AND descriptor->>'manifest_id' = id) IS TRUE",
+            name="ck_market_fact_archive_descriptor_binding",
+        ),
+        Index("ix_market_fact_archive_partition_cursor", "storage_day", "last_commit_seq", "last_id"),
+        {"schema": "market"},
+    )
+
+    id = Column(String(128), primary_key=True)
+    storage_day = Column(Date, ForeignKey("market.fact_retention_partitions.storage_day", ondelete="RESTRICT"), nullable=False)
+    page_ordinal = Column(Integer, nullable=False)
+    object_key = Column(Text, nullable=False)
+    object_sha256 = Column(String(64), nullable=False)
+    manifest_hash = Column(String(64), nullable=False)
+    row_count = Column(BigInteger, nullable=False)
+    byte_count = Column(BigInteger, nullable=False)
+    first_commit_seq = Column(BigInteger, nullable=False)
+    first_id = Column(String(64), nullable=False)
+    last_commit_seq = Column(BigInteger, nullable=False)
+    last_id = Column(String(64), nullable=False)
+    descriptor = Column(JSONB, nullable=False)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactArchiveSeriesRecord(Base):
+    """Bounded lookup index derived from, and checked against, each page descriptor."""
+
+    __tablename__ = "fact_archive_series"
+    __table_args__ = (
+        CheckConstraint("row_count > 0", name="ck_market_fact_archive_series_count"),
+        CheckConstraint("first_observation_at <= last_observation_at", name="ck_market_fact_archive_series_observation"),
+        CheckConstraint("first_known_at <= last_known_at", name="ck_market_fact_archive_series_known"),
+        CheckConstraint("first_accepted_at <= last_accepted_at", name="ck_market_fact_archive_series_accepted"),
+        Index("ix_market_fact_archive_series_window", "series_id", "first_observation_at", "last_observation_at"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    series_id = Column(BigInteger, ForeignKey("market.series.id", ondelete="RESTRICT"), primary_key=True)
+    row_count = Column(BigInteger, nullable=False)
+    first_observation_at = Column(DateTime(timezone=True), nullable=False)
+    last_observation_at = Column(DateTime(timezone=True), nullable=False)
+    first_known_at = Column(DateTime(timezone=True), nullable=False)
+    last_known_at = Column(DateTime(timezone=True), nullable=False)
+    first_accepted_at = Column(DateTime(timezone=True), nullable=False)
+    last_accepted_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class MarketFactArchiveDependencyRecord(Base):
+    """Immutable raw/checkpoint holds; explicit pin release cannot remove these edges."""
+
+    __tablename__ = "fact_archive_dependencies"
+    __table_args__ = (
+        CheckConstraint("target_kind IN ('raw_manifest', 'book_checkpoint')", name="ck_market_fact_archive_dependency_kind"),
+        CheckConstraint("object_sha256 ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_dependency_hash"),
+        CheckConstraint("target_id <> '' AND object_key <> ''", name="ck_market_fact_archive_dependency_identity"),
+        Index("ix_market_fact_archive_dependency_target", "target_kind", "target_id"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    target_kind = Column(String(32), primary_key=True)
+    target_id = Column(String(128), primary_key=True)
+    object_key = Column(Text, nullable=False)
+    object_sha256 = Column(String(64), nullable=False)
+
+
+class MarketFactArchiveCanonicalDependencyRecord(Base):
+    """Exact immutable source revisions, independent of their hot/cold placement."""
+
+    __tablename__ = "fact_archive_canonical_dependencies"
+    __table_args__ = (
+        CheckConstraint("row_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_canonical_dependency_hash"),
+        Index("ix_market_fact_canonical_dependency_source", "fact_version_id"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    row_hash = Column(String(64), nullable=False)
+
+
+class MarketFactBookPrefixChunkRecord(Base):
+    """Immutable, shared progress for a dense range of raw source positions.
+
+    Chunks retain their own raw objects even before a canonical page is ready.
+    They certify lineage work, not book reconstruction or deletion permission.
+    The verifier version separates L2 and trade proofs; historical table names
+    and existing book descriptors remain unchanged.
+    """
+
+    __tablename__ = "fact_book_prefix_chunks"
+    __table_args__ = (
+        UniqueConstraint("definition_id", "session_id", "connection_epoch", "provider_product_id",
+                         "verifier_version", "first_receive_ordinal", name="uq_market_book_prefix_start"),
+        CheckConstraint("connection_epoch >= 0 AND first_receive_ordinal >= 1 AND "
+                        "last_receive_ordinal >= first_receive_ordinal", name="ck_market_book_prefix_bounds"),
+        CheckConstraint("(first_receive_ordinal = 1) = (previous_chunk_id IS NULL)",
+                        name="ck_market_book_prefix_predecessor"),
+        CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(descriptor) = 'object'",
+                        name="ck_market_book_prefix_evidence"),
+        Index("ix_market_book_prefix_progress", "definition_id", "session_id", "connection_epoch",
+              "provider_product_id", "verifier_version", "last_receive_ordinal"),
+        {"schema": "market"},
+    )
+
+    id = Column(String(128), primary_key=True)
+    definition_id = Column(String(128), ForeignKey("market.stream_definitions.id", ondelete="RESTRICT"), nullable=False)
+    session_id = Column(String(128), nullable=False)
+    connection_epoch = Column(BigInteger, nullable=False)
+    provider_product_id = Column(String(128), nullable=False)
+    verifier_version = Column(String(64), nullable=False)
+    first_receive_ordinal = Column(BigInteger, nullable=False)
+    last_receive_ordinal = Column(BigInteger, nullable=False)
+    previous_chunk_id = Column(String(128), ForeignKey("market.fact_book_prefix_chunks.id", ondelete="RESTRICT"))
+    evidence_hash = Column(String(64), nullable=False)
+    descriptor = Column(JSONB, nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactBookPrefixDependencyRecord(Base):
+    """Permanent raw lifetime holds for committed verification progress."""
+
+    __tablename__ = "fact_book_prefix_dependencies"
+    __table_args__ = (
+        CheckConstraint("object_sha256 ~ '^[0-9a-f]{64}$'", name="ck_market_book_prefix_dependency_hash"),
+        Index("ix_market_book_prefix_dependency_target", "target_id"),
+        {"schema": "market"},
+    )
+    chunk_id = Column(String(128), ForeignKey("market.fact_book_prefix_chunks.id", ondelete="RESTRICT"), primary_key=True)
+    target_id = Column(String(128), ForeignKey("market.raw_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    object_key = Column(Text, nullable=False)
+    object_sha256 = Column(String(64), nullable=False)
+
+
+class MarketFactArchiveVerificationRecord(Base):
+    """Resumable full-page verification bound to immutable archive catalogs.
+
+    A receipt is not permission to delete. Final admission must verify complete
+    source coverage and recheck current bytes, including every dependency.
+    """
+
+    __tablename__ = "fact_archive_verifications"
+    __table_args__ = (
+        CheckConstraint("verifier_version <> ''", name="ck_market_fact_archive_verifier"),
+        CheckConstraint(
+            "manifest_hash ~ '^[0-9a-f]{64}$' AND catalog_hash ~ '^[0-9a-f]{64}$' AND "
+            "verification_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_verification_hashes",
+        ),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    verifier_version = Column(String(64), primary_key=True)
+    manifest_hash = Column(String(64), nullable=False)
+    catalog_hash = Column(String(64), nullable=False)
+    verification_hash = Column(String(64), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class MarketFactArchiveMaterialAliasRecord(Base):
+    """Indexed legacy material witnesses derived from verified cold-page rows.
+
+    These are lookup hints, never alternative Fact identity. Readers verify the
+    matching payload provenance; admission proves the complete alias set.
+    """
+
+    __tablename__ = "fact_archive_material_aliases"
+    __table_args__ = (
+        UniqueConstraint("fact_version_id", "evidence_key", name="uq_market_fact_archive_material_alias"),
+        CheckConstraint("material_hash ~ '^[0-9a-f]{64}$'", name="ck_market_fact_archive_alias_hash"),
+        CheckConstraint("evidence_key <> ''", name="ck_market_fact_archive_alias_key"),
+        Index("ix_market_fact_archive_alias_lookup", "series_id", "evidence_key", "material_hash"),
+        {"schema": "market"},
+    )
+
+    manifest_id = Column(String(128), ForeignKey("market.fact_archive_manifests.id", ondelete="RESTRICT"), primary_key=True)
+    fact_version_id = Column(String(64), ForeignKey("market.fact_versions.id", ondelete="RESTRICT"), primary_key=True)
+    evidence_key = Column(String(64), primary_key=True)
+    series_id = Column(BigInteger, ForeignKey("market.series.id", ondelete="RESTRICT"), nullable=False)
+    material_hash = Column(String(64), nullable=False)

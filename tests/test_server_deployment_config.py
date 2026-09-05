@@ -99,6 +99,38 @@ def test_server_compose_is_a_portable_single_node_project():
     assert "${QT_COMPOSE_PROJECT_NAME:-quant-trad-single-node}_quanttrad" in compose_text
 
 
+def test_archive_mounts_never_create_fallback_paths_and_expose_only_udev_metadata():
+    services = _server_compose()["services"]
+    for name in ("backend", "initialize", "market-data-collector"):
+        service = services[name]
+        assert service["environment"]["QT_MARKET_DATA_EXPECTED_UUID"] == "${QT_MARKET_DATA_EXPECTED_UUID:-}"
+        assert service["environment"]["QT_STORAGE_UDEV_ROOT"] == "/run/qt-host-udev/data"
+        volumes = {v["target"]: v for v in service["volumes"] if isinstance(v, dict)}
+        assert volumes["/app/logs/market-structure"]["bind"]["create_host_path"] is False
+        assert volumes["/run/qt-host-udev"]["source"] == "/run/udev"
+        assert volumes["/run/qt-host-udev"]["read_only"] is True
+        assert volumes["/run/qt-host-udev"]["bind"]["create_host_path"] is False
+        assert not service.get("privileged", False)
+        assert "devices" not in service
+
+
+def test_archive_writers_admit_storage_before_starting_workers():
+    for source, next_action in (
+        ("portal/backend/run_backend.py", "signal.signal("),
+        ("portal/backend/workers/market_data_collector.py", "signal.signal("),
+        ("portal/backend/workers/single_node_initializer.py", "print("),
+    ):
+        main = (ROOT / source).read_text().split("def main() -> int:", 1)[1]
+        assert main.index("require_configured_archive_mount()") < main.index(next_action)
+
+
+def test_deploy_rechecks_mount_after_build_before_replacing_services():
+    deploy = (ROOT / "scripts/automation/server_deploy.sh").read_text()
+    assert "validate-storage)" in deploy
+    after_build = deploy.split("  build_release_images\n", 1)[1]
+    assert after_build.index("validate_storage_root") < after_build.index("compose up")
+
+
 def test_server_ports_are_private_and_database_is_not_published():
     services = _server_compose()["services"]
 

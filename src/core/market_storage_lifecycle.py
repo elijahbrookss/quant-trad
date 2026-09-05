@@ -2,16 +2,104 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping
+from dataclasses import dataclass, field, fields
+import re
+from types import MappingProxyType
+from typing import Any, Mapping, Sequence
 
 
 MARKET_STORAGE_LIFECYCLE_POLICY_VERSION = "market.storage_lifecycle.v1"
 
-# Canonical facts share one immutable relation. Chunk compression/expiration
-# stays disabled until it can be planned per fact contract without deleting
-# another family's frozen evidence.
+# Retired family-table chunk controls must not operate on the generalized
+# schema. Canonical retention owns complete daily hot-payload partitions.
 DEFAULT_HOT_TABLE_POLICIES: tuple[object, ...] = ()
+
+
+@dataclass(frozen=True)
+class CanonicalFactRetentionPolicy:
+    """Placement-day hot windows and explicit, non-overriding pressure limits.
+
+    Budgets are optional planning targets, not permission to discard evidence.
+    The filesystem budget includes all used bytes on the archive filesystem;
+    the hot-payload budget excludes permanent headers and other PostgreSQL data.
+    """
+
+    hot_days: int = 30
+    hot_days_by_fact_type: Mapping[str, int] = field(default_factory=dict)
+    hot_payload_budget_bytes: int | None = None
+    archive_filesystem_budget_bytes: int | None = None
+    archive_min_free_bytes: int = 1024**3
+    max_candidate_partitions: int = 16
+    max_inventory_partitions: int = 4096
+    plan_statement_timeout_ms: int = 5000
+    max_plan_seconds: int = 15
+    execution_enabled: bool = False
+    max_steps_per_run: int = 4
+    max_run_seconds: int = 60
+    execution_statement_timeout_ms: int = 5000
+    max_page_rows: int = 10_000
+    max_page_logical_bytes: int = 64 * 1024**2
+    max_verification_bytes: int = 4 * 1024**3
+    max_verification_objects: int = 10_000
+    max_verification_pages: int = 1000
+
+    def __post_init__(self) -> None:
+        bounds = {
+            "hot_days": (1, 36500),
+            "archive_min_free_bytes": (0, None),
+            "max_candidate_partitions": (1, 128),
+            "max_inventory_partitions": (1, 10000),
+            "plan_statement_timeout_ms": (1, 60000),
+            "max_plan_seconds": (1, 300),
+            "max_steps_per_run": (1, 128),
+            "max_run_seconds": (1, 3600),
+            "execution_statement_timeout_ms": (1, 60000),
+            "max_page_rows": (1, 100_000),
+            "max_page_logical_bytes": (1, 1024**3),
+            "max_verification_bytes": (1, 1024**4),
+            "max_verification_objects": (1, 100_000),
+            "max_verification_pages": (1, 100_000),
+        }
+        for name, (minimum, maximum) in bounds.items():
+            value = getattr(self, name)
+            if (type(value) is not int or value < minimum
+                    or (maximum is not None and value > maximum)):
+                raise ValueError(f"canonical_retention_policy_invalid: field={name}")
+        if type(self.execution_enabled) is not bool:
+            raise ValueError("canonical_retention_policy_invalid: field=execution_enabled")
+        for name in ("hot_payload_budget_bytes", "archive_filesystem_budget_bytes"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError(f"canonical_retention_policy_invalid: field={name}; use null or a positive integer")
+        if self.max_candidate_partitions > self.max_inventory_partitions:
+            raise ValueError("canonical_retention_policy_invalid: candidate bound exceeds inventory bound")
+        if not isinstance(self.hot_days_by_fact_type, Mapping):
+            raise ValueError("canonical_retention_policy_invalid: hot_days_by_fact_type must be a mapping")
+        overrides = dict(self.hot_days_by_fact_type)
+        for name, days in overrides.items():
+            if (not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", name)
+                    or type(days) is not int or not 1 <= days <= 36500):
+                raise ValueError(f"canonical_retention_policy_invalid: hot_days_by_fact_type={name!r}")
+        object.__setattr__(self, "hot_days_by_fact_type", MappingProxyType(overrides))
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any] | None) -> "CanonicalFactRetentionPolicy":
+        if value is not None and not isinstance(value, Mapping):
+            raise ValueError("canonical_retention_policy_invalid: expected mapping")
+        payload = dict(value or {})
+        unknown = sorted(set(payload) - {item.name for item in fields(cls)})
+        if unknown:
+            raise ValueError("canonical_retention_policy_invalid: unsupported fields=" + ",".join(unknown))
+        return cls(**payload)
+
+    def hot_window_days(self, fact_types: Sequence[str]) -> int:
+        # A mixed day must satisfy the longest window of every family present.
+        return max((self.hot_days_by_fact_type.get(name, self.hot_days) for name in fact_types),
+                   default=self.hot_days)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {item.name: (dict(self.hot_days_by_fact_type) if item.name == "hot_days_by_fact_type"
+                            else getattr(self, item.name)) for item in fields(self)}
 
 
 def _integer(
@@ -69,6 +157,7 @@ class MarketStorageLifecyclePolicy:
     compaction_target_bytes: int = 512 * 1024**2
     max_compaction_groups_per_run: int = 8
     max_archive_expirations_per_run: int = 100
+    canonical_retention: CanonicalFactRetentionPolicy = field(default_factory=CanonicalFactRetentionPolicy)
 
     @classmethod
     def from_mapping(
@@ -90,6 +179,7 @@ class MarketStorageLifecyclePolicy:
             "compaction_target_bytes",
             "max_compaction_groups_per_run",
             "max_archive_expirations_per_run",
+            "canonical_retention",
         }
         unknown = sorted(set(payload) - supported)
         if unknown:
@@ -98,6 +188,7 @@ class MarketStorageLifecyclePolicy:
                 + ",".join(unknown)
             )
         policy = cls(
+            canonical_retention=CanonicalFactRetentionPolicy.from_mapping(payload.get("canonical_retention")),
             enabled=_boolean(payload.get("enabled"), True, field_name="enabled"),
             execution_enabled=_boolean(
                 payload.get("execution_enabled"),
@@ -194,10 +285,12 @@ class MarketStorageLifecyclePolicy:
             "compaction_target_bytes": self.compaction_target_bytes,
             "max_compaction_groups_per_run": self.max_compaction_groups_per_run,
             "max_archive_expirations_per_run": self.max_archive_expirations_per_run,
+            "canonical_retention": self.canonical_retention.to_dict(),
         }
 
 
 __all__ = [
+    "CanonicalFactRetentionPolicy",
     "DEFAULT_HOT_TABLE_POLICIES",
     "MARKET_STORAGE_LIFECYCLE_POLICY_VERSION",
     "MarketStorageLifecyclePolicy",

@@ -445,6 +445,38 @@ Never enable live broker mode as a side effect of an application release.
 
 ## Storage Move And Recovery
 
+For a dedicated HDD, configure both values in the private operator environment:
+
+```dotenv
+QT_MARKET_DATA_ROOT=/mnt/quanttrad-archive/market-structure
+QT_MARKET_DATA_EXPECTED_UUID=<filesystem-uuid-from-findmnt-or-blkid>
+```
+
+The second value is the filesystem UUID, not the drive serial or partition UUID.
+An empty UUID preserves the initial directory-backed mode; it does not provide
+missing-disk protection. Host admission reads `/run/udev/data`; the native Linux
+host must run udev and expose current filesystem metadata there. Containers
+receive a read-only metadata bind and need no block-device privileges. Do not
+use a copied marker file as proof that the HDD is mounted.
+
+Before deployment, run the non-mutating probe:
+
+```bash
+bash scripts/automation/server_deploy.sh validate-storage
+```
+
+It reports filesystem identity and capacity or fails with the exact path and
+reason. `doctor` and `deploy` use the same probe; deploy repeats it after image
+builds. All archive-writing process entrypoints recheck after container restart.
+Compose refuses to create missing host bind directories. Never clear the UUID
+or create a fallback directory just to bypass a failed check.
+
+Mount the filesystem by UUID using the host's normal mount configuration and
+ensure it is mounted before Docker starts these containers after reboot. Disk
+formatting, fstab/systemd changes, and data moves are separate operator actions;
+the deploy helper performs none of them. Do not combine an unverified archive
+move with enabling destructive retention.
+
 Schedule database backups outside application containers and restore-test them.
 Loki retains seven days in its single-host filesystem store. Docker JSON logs
 rotate independently so a failed log pipeline cannot consume the host without
@@ -454,12 +486,76 @@ unmanaged database-log volume.
 
 Moving archives to an HDD is an explicit maintenance event:
 
-1. stop and drain the collector;
-2. verify no active stream lease remains;
-3. copy and checksum the archive tree;
-4. mount the HDD at the configured market-data root;
-5. restart the stack; and
-6. verify archive reads, checksums, worker health, and new writes.
+1. identify the intended disk by model/serial and filesystem UUID, prepare and
+   mount it, and keep PostgreSQL on its existing NVMe-backed named volume;
+2. stop and drain the collector and backend writers, then verify no active
+   stream lease remains;
+3. copy and checksum the archive tree to the already-mounted HDD;
+4. set the host root and expected UUID, then run `validate-storage` and `doctor`;
+5. deploy the reviewed storage-aware release and restart the stack; and
+6. verify existing archive reads/checksums, frozen dataset reads, worker health,
+   new writes on the HDD, and reboot recovery before retiring the old copy.
 
 Do not rewrite stored archive keys or bypass checksum verification during the
 move.
+
+If admission or verification fails, leave writers stopped and retain both
+copies. A rollback to the old path requires checking its UUID and reconciling
+all writes made after the move before restoring configuration; merely pointing
+at an old copy would lose acknowledged objects. A code rollback while dedicated
+storage is configured must retain the filesystem guard. Releases predating it
+are not a safe automatic rollback target. Formatting, deleting either copy,
+or clearing the expected UUID is not a recovery procedure.
+
+### Canonical Retention Rollout Gate
+
+The generalized retention executor is implemented but defaults off. Current
+families, including spec-bound normalized windows, require complete dependency
+proofs; unknown families block the whole physical day. Those proofs are listed in
+the [generalized fact data plane](../architecture/data/GENERALIZED_FACT_DATA_PLANE.md).
+Do not enable unattended retention until representative disposable stress
+checks and the separate operator rollout are complete. Older proof receipts
+require explicit current-version reverification; do not bypass a stale receipt.
+
+After that gate is cleared, use this separate, reviewed rollout order:
+
+1. Finish and validate the HDD move above; retain database backups and a tested
+   restore path. Do not combine disk cutover with deletion activation.
+2. If the deployment still uses inline canonical JSON, stop/drain all writers
+   and run the explicit
+   [canonical storage-tier cutover](../architecture/data/GENERALIZED_FACT_DATA_PLANE.md#explicit-storage-cutover).
+   Runtime startup must not migrate existing columns in place.
+3. Review `market_data_lifecycle.canonical_retention` hot windows, byte targets,
+   page/verification limits and run bounds against measured host capacity.
+   Keep both lifecycle execution flags false while inspecting `qt data
+   market-structure lifecycle-plan` and dry `lifecycle-run` output. Resolve all
+   missing-mount, incomplete-proof, receipt and headroom blockers.
+4. With automatic scheduling disabled for the maintenance window, explicitly
+   enable the outer and canonical execution flags and run one bounded manual
+   `lifecycle-run --execute`. Inspect outcomes, committed page/proof progress,
+   physical bytes, frozen known-at reads, collector lag, and independent NVMe/HDD
+   alerts. A plan or verified page alone is not deletion authority.
+5. Only after repeated bounded runs and a restart/resume check are accepted,
+   enable the recurring lifecycle schedule. Retain the configured filesystem
+   identity and the fail-closed archive/pin checks.
+
+Server Compose reads these operator settings without overriding them with
+hard-coded values: `QT_MARKET_DATA_LIFECYCLE_ENABLED` (schedule, default true),
+`QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED` (outer mutation gate, default false),
+and `QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED` (canonical mutation
+gate, default false). Keeping the schedule off does not prohibit an explicitly
+requested, otherwise enabled manual run. Setting a hot window alone never
+enables mutation.
+
+This release starts honoring outer flag values that the earlier server preset
+hard-coded. Before deploying it, inspect the private operator file and rendered
+Compose configuration and explicitly set **both execution flags false** for the
+cutover. Do not assume an old, previously ignored `true` value is harmless.
+
+Rollback begins by disabling canonical execution and stopping/draining the
+lifecycle worker. Already committed cold movement is not undone by that flag:
+retain every acknowledged archive object, database catalog and dependency hold.
+Keep a release that can read both hot and cold payloads. Do not roll back to an
+inline-only reader after reclaiming a hot partition, drop the cold catalogs, or
+point readers at an older archive copy. Restoration to the old layout requires
+an explicit offline restore/rehydration plan and verification, not a config flip.

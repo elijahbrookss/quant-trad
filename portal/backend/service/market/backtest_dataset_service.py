@@ -1016,7 +1016,12 @@ def validate_frozen_dataset_series(
             "start": iso_utc(records[0].fact.open_time),
             "end_exclusive": iso_utc(records[-1].fact.close_time),
         }
-    elif fact_type in {OPEN_INTEREST_FACT_TYPE, FUNDING_RATE_FACT_TYPE}:
+    elif fact_type in {OPEN_INTEREST_FACT_TYPE, FUNDING_RATE_FACT_TYPE} and not all(
+        isinstance(record, CanonicalFactRecord) for record in records
+    ):
+        # Typed v1 samples are unique per scheduled instant. Canonical history
+        # instead uses observation_time and legitimately includes revisions at
+        # that same instant; validate it through the generic revision path.
         previous_sample: datetime | None = None
         for record in records:
             fact = record.fact
@@ -1071,60 +1076,10 @@ def validate_frozen_dataset_series(
             "last_known_at": iso_utc(records[-1].fact.known_at),
         }
 
-    if fact_type == MARKET_TRADE_FACT_TYPE:
-        quality = [
-            *quality,
-            *[
-                {
-                    "classification": (
-                        "covered_trade"
-                        if record.fact.coverage_interval_id
-                        else "uncovered_snapshot_delivery"
-                    ),
-                    "provider_product_id": record.fact.provider_product_id,
-                    "provider_trade_id": record.fact.provider_trade_id,
-                    "raw_record_id": record.fact.raw_record_id,
-                    "coverage_interval_id": record.fact.coverage_interval_id,
-                }
-                for record in records
-            ],
-        ]
-    elif fact_type == TRADE_FLOW_FACT_TYPE:
-        quality = [
-            *quality,
-            *[
-                {
-                    "classification": (
-                        "complete"
-                        if record.fact.aggregate_complete
-                        else "incomplete_trade_coverage"
-                    ),
-                    "bucket_start": iso_utc(record.fact.bucket_start),
-                    "archive_complete": record.fact.archive_complete,
-                    "canonicalization_complete": record.fact.canonicalization_complete,
-                    "coverage_interval_id": record.fact.coverage_interval_id,
-                    "coverage_revision": record.fact.coverage_revision,
-                }
-                for record in records
-            ],
-        ]
-    elif all(isinstance(record, TypedFeatureRecord) for record in records):
-        quality = [
-            *quality,
-            *[
-                {
-                    "classification": str(
-                        record.quality.get("classification") or "valid"
-                    ),
-                    "fact_time": iso_utc(record_effective_time(record)),
-                    "known_at": iso_utc(record.fact.known_at),
-                    "material_hash": record.fact.material_hash,
-                    "valid": record.quality.get("valid", True),
-                    "reason": record.quality.get("reason"),
-                }
-                for record in records
-            ],
-        ]
+    # Freeze already binds the complete quality document, including typed
+    # trade/flow/feature notes. Re-appending those notes here changes its hash
+    # and wrongly rejects a valid Dataset. Validate the exact pinned document;
+    # canonical revision payloads and provenance are independently hashed below.
 
     series_identity = {
         "identity_key": str(entry["identity_key"]),

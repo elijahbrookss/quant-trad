@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+from market_data.canonical_storage import LEGACY_MATERIAL_EVIDENCE_KEYS
+from market_data.fact_registry import get_fact_payload_schema
 
 from portal.backend.service.storage.repos.market_data import (
     _LINEAGE_QUERY_BATCH_SIZE,
@@ -17,7 +21,21 @@ from portal.backend.service.storage.repos.market_data import (
 
 class _RowsResult:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = rows
+        self._rows = []
+        for raw in rows:
+            row = dict(raw)
+            if "lineage_material_hash" in row:
+                # Model the canonical hot row selected by the real SQL; these
+                # tests exercise traversal batching, not archive file decoding.
+                schema = get_fact_payload_schema(row["fact_type"] + ".v1")
+                row.update(id=row["fact_version_id"], material_hash=row["lineage_material_hash"],
+                           payload_schema_id=schema.schema_id, payload_contract_hash=schema.contract_hash)
+                key = LEGACY_MATERIAL_EVIDENCE_KEYS.get(row["fact_type"])
+                if key is not None:
+                    row["provenance"] = {**row["provenance"], key: {
+                        **row.get("evidence", {}), "legacy_material_hash": row["lineage_material_hash"],
+                    }}
+            self._rows.append(row)
 
     def mappings(self) -> _RowsResult:
         return self
@@ -101,7 +119,17 @@ def test_lineage_error_context_is_deterministic_and_bounded() -> None:
     )
 
 
-def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -> None:
+def _book_records(count, *, series_id=52, fact_type="market.depth_observation"):
+    key = "_qt_depth_evidence" if fact_type == "market.depth_observation" else "_qt_bbo_evidence"
+    return [SimpleNamespace(
+        series_id=series_id, market_commit_seq=99,
+        fact=SimpleNamespace(fact_type=fact_type, observation_time=datetime(2026, 8, 21, tzinfo=UTC),
+            provenance={key: {"source_position": {"definition_id": "definition", "session_id": "session",
+                                                "connection_epoch": 1, "receive_ordinal": ordinal + 1}}}),
+    ) for ordinal in range(count)]
+
+
+def test_canonical_book_archive_lineage_uses_selected_revision_positions() -> None:
     reference = {
         "manifest_id": "manifest-1",
         "object_sha256": "1" * 64,
@@ -112,9 +140,9 @@ def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -
     session = _StaticSession(
         [
             {
-                "fact_count": 4_000_000,
+                "fact_count": 4,
                 "malformed_count": 0,
-                "position_count": 1_000_000,
+                "position_count": 4,
                 "missing_count": 0,
                 "archive_refs": [reference],
             }
@@ -130,7 +158,8 @@ def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -
         start=start,
         end=end,
         as_of_commit_seq=99,
-        expected_record_count=4_000_000,
+        expected_record_count=4,
+        records=_book_records(4),
     )
 
     assert references == {
@@ -145,14 +174,34 @@ def test_canonical_book_archive_lineage_uses_one_set_query_for_all_revisions() -
     assert "left join market.raw_archive_manifests" in sql
     assert "manifests.connection_epoch = positions.connection_epoch" in sql
     assert "jsonb_agg" in sql
-    assert params == {
-        "evidence_key": "_qt_depth_evidence",
-        "series_id": 52,
-        "fact_type": "market.depth_observation",
-        "start": start,
-        "end": end,
-        "as_of_commit_seq": 99,
-    }
+    assert "market.fact_rows" not in sql
+    assert "market.fact_versions" not in sql
+    assert [position["receive_ordinal"] for position in json.loads(params["source_positions"])] == [1, 2, 3, 4]
+
+def test_large_canonical_book_lineage_bounds_queries_and_preserves_every_position():
+    class PositionSession(_StaticSession):
+        def execute(self, statement, params):
+            positions = json.loads(params["source_positions"])
+            self.rows = [{
+                "fact_count": len(positions), "malformed_count": 0,
+                "position_count": len(positions), "missing_count": 0,
+                "archive_refs": [{"manifest_id": "manifest", "object_sha256": "1" * 64,
+                                  "content_fingerprint": "2" * 64, "object_key": "raw/manifest",
+                                  "object_uri": "market-archive://raw/manifest"}],
+            }]
+            return super().execute(statement, params)
+    session = PositionSession([])
+    records = _book_records(10_001)
+    result = _collect_canonical_book_archive_refs(
+        session, series_id=52, fact_type="market.depth_observation",
+        start=datetime(2026, 8, 21, tzinfo=UTC), end=datetime(2026, 9, 1, tzinfo=UTC),
+        as_of_commit_seq=99, expected_record_count=len(records), records=records,
+    )
+    assert set(result) == {"manifest"}
+    assert len(session.calls) == 2
+    batches = [json.loads(params["source_positions"]) for _, params in session.calls]
+    assert [len(batch) for batch in batches] == [10_000, 1]
+    assert [position["receive_ordinal"] for batch in batches for position in batch] == list(range(1, 10_002))
 
 
 @pytest.mark.parametrize(
@@ -205,6 +254,7 @@ def test_canonical_book_archive_lineage_fails_loud(
             end=datetime(2026, 9, 1, tzinfo=UTC),
             as_of_commit_seq=99,
             expected_record_count=3,
+            records=_book_records(3, series_id=51, fact_type="market.bbo"),
         )
 
 
@@ -267,7 +317,38 @@ def test_repeated_legacy_material_preserves_latest_revision_semantics() -> None:
     )
 
     assert loaded[material_hash]["fact_version_id"] == latest["fact_version_id"]
-    assert loaded[material_hash]["evidence"] == {"revision": "latest"}
+    assert loaded[material_hash]["evidence"] == {"revision": "latest", "legacy_material_hash": material_hash}
+
+
+@pytest.mark.parametrize("epoch", [0, 1, None, True])
+def test_typed_book_lineage_never_resolves_a_reused_ordinal_from_another_epoch(epoch):
+    material = "a" * 64
+    class BookSession(_StaticSession):
+        def execute(self, statement, params):
+            sql = " ".join(str(statement).split()).lower()
+            self.calls.append((sql, dict(params)))
+            if "from market.series" in sql:
+                return _RowsResult([{"series_id": 52, "fact_type": "market.bbo"}])
+            if "from market.raw_archive_manifests" in sql:
+                assert "connection_epoch = :connection_epoch" in sql
+                return _RowsResult([{
+                    "manifest_id": "epoch-zero", "object_sha256": "b" * 64,
+                    "content_fingerprint": "c" * 64, "object_key": "raw/zero.parquet",
+                    "object_uri": "market-archive://raw/zero.parquet",
+                }] if params["connection_epoch"] == 0 else [])
+            row = _lineage_row(material, series_id=52, fact_type="market.bbo")
+            row["evidence"] = {"source_position": {
+                "definition_id": "definition", "session_id": "session",
+                "connection_epoch": epoch, "receive_ordinal": 1,
+            }}
+            return _RowsResult([row])
+    session = BookSession([])
+    records = [SimpleNamespace(series_id=52, fact=SimpleNamespace(material_hash=material))]
+    if epoch is not None and type(epoch) is int and epoch == 0:
+        assert set(_collect_typed_archive_refs(session, records=records)) == {"epoch-zero"}
+    else:
+        with pytest.raises(RuntimeError, match="market_dataset_archive_incomplete"):
+            _collect_typed_archive_refs(session, records=records)
 
 
 class _LineageSession:

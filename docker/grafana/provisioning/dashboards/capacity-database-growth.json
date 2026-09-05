@@ -204,12 +204,13 @@
       },
       "targets": [
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, used_bytes, total_bytes, used_percent, path, sample_kind | unwrap available_bytes [$__range])",
-          "queryType": "range",
+          "expr": "max by (resource_id, capacity_authority) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | keep resource_id, capacity_authority, available_bytes | unwrap available_bytes | __error__=\"\" [2m]))",
+          "legendFormat": "{{resource_id}} ({{capacity_authority}})",
+          "queryType": "instant",
           "refId": "A"
         }
       ],
-      "title": "Docker engine filesystem free (authority-aware)",
+      "title": "Storage filesystem free (by resource and authority)",
       "type": "stat"
     },
     {
@@ -745,25 +746,25 @@
       },
       "targets": [
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, available_bytes, total_bytes, used_percent, path, sample_kind | unwrap used_bytes [$__interval])",
-          "legendFormat": "used",
+          "expr": "max by (resource_id) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | keep resource_id, used_bytes | unwrap used_bytes | __error__=\"\" [2m]))",
+          "legendFormat": "{{resource_id}} used",
           "queryType": "range",
           "refId": "A"
         },
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, used_bytes, total_bytes, used_percent, path, sample_kind | unwrap available_bytes [$__interval])",
-          "legendFormat": "available",
+          "expr": "max by (resource_id) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | keep resource_id, available_bytes | unwrap available_bytes | __error__=\"\" [2m]))",
+          "legendFormat": "{{resource_id}} available",
           "queryType": "range",
           "refId": "B"
         },
         {
-          "expr": "last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | drop observed_at, available_bytes, used_bytes, used_percent, path, sample_kind | unwrap total_bytes [$__interval])",
-          "legendFormat": "total",
+          "expr": "max by (resource_id) (last_over_time({compose_service=\"docker-stats\"} | json | sample_kind=\"filesystem\" | keep resource_id, total_bytes | unwrap total_bytes | __error__=\"\" [2m]))",
+          "legendFormat": "{{resource_id}} total",
           "queryType": "range",
           "refId": "C"
         }
       ],
-      "title": "Docker engine storage (guest on Desktop/WSL)",
+      "title": "Storage by resource (guest on Desktop/WSL)",
       "type": "timeseries"
     },
     {

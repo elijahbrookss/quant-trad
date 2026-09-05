@@ -15,6 +15,7 @@ tags:
   - known-at
   - active
 code_paths:
+  - src/core/storage_mounts.py
   - src/market_data/stream_quality.py
   - src/data_providers/streams
   - src/data_providers/providers/coinbase.py
@@ -27,6 +28,8 @@ code_paths:
   - portal/backend/workers
   - cli/main.py
   - docker/docker-compose.yml
+  - docker/docker-compose.server.yml
+  - scripts/automation/server_deploy.sh
   - cli/mcp_server.py
   - config/defaults.yaml
   - scripts/db
@@ -352,6 +355,21 @@ non-expired or dataset-pinned manifest mapping matches its exact SHA-256. A
 mapping appended after upload does not revise the canonical fact. A lost
 unmapped spool record creates `archive_loss` evidence and can never become
 dataset-eligible.
+
+Filesystem publication uses a unique staging file, verifies and fsyncs the
+bytes, then atomically creates the destination with a same-filesystem hard
+link. An existing identical object is reused after syncing its parent directory
+so a competing publisher's not-yet-synced link cannot yield an early durable
+acknowledgement; conflicting bytes fail loud.
+There is no replacing-rename fallback. This also applies to canonical archives
+using the same object-store boundary.
+
+Publication-race RCA: a check-before-copy followed by `os.replace` could
+overwrite a competing writer's immutable object, and PID-only staging names
+collided between threads. The create-only publication and unique staging fix
+both causes. `test_archive_publication_concurrency.py` reproduces a competing
+publication during copy and exercises simultaneous identical/conflicting
+writers. This is a reproduced local defect, not evidence of production loss.
 
 ### Product And Relationship Tables
 
@@ -804,6 +822,40 @@ uses `clamp(depth_replenishment,0,1)` and preserves the unclipped source feature
 
 ## Bounded Storage And Retention Architecture
 
+### Dedicated Local Archive Filesystem Admission
+
+The native single-node preset keeps PostgreSQL in its NVMe-backed named volume
+and may place the existing filesystem object-store adapter on a dedicated HDD.
+`QT_MARKET_DATA_ROOT` chooses the host directory; `QT_MARKET_DATA_EXPECTED_UUID`
+opts into fail-closed dedicated-filesystem admission. An empty UUID retains
+directory-backed development/initial-install behavior, not a claim of HDD
+identity protection. Container archive paths and manifest object keys do not
+change when the host root moves. `MARKET_STRUCTURE_STORAGE_ROOT` selects the
+same root for collection, lifecycle, and frozen-object verification.
+
+`core.storage_mounts` checks the kernel device number of the actual archive
+path against the host udev filesystem UUID and checks writability. It never
+creates directories to make admission pass and does not trust marker files.
+Deployment checks before builds and again before service replacement. Backend,
+collector, and initializer check at process startup, including automatic Docker
+restarts. Spool creation/rotation, archive reads/writes/deletion, and encoding
+staging recheck their configured storage boundary. Paths escaping the root via
+symlinks or crossing a nested filesystem are rejected. Existing open WAL file
+descriptors remain attached to their filesystem; the guard is not a per-frame
+metadata scan or a substitute for handling actual I/O failures.
+
+Containers receive only a read-only `/run/udev` metadata bind, not host block
+devices or extra privileges. Archive and metadata binds disable Docker's
+automatic host-directory creation. Missing UUID metadata, the wrong device,
+read-only storage, or a missing configured root is an explicit failure, never
+permission to write into a fallback NVMe directory. A disk replaced with a new
+filesystem UUID requires an explicit operator config update and verification.
+This is local object-store durability, not off-host backup or replication.
+
+See [single-node storage move and recovery](../../engineering/server-deployment.md#storage-move-and-recovery)
+for the operator-controlled rollout. This admission layer does not enable
+retention, move bytes, or provision filesystems.
+
 ### Storage Roles
 
 | Storage | Allowed use | Forbidden use |
@@ -918,8 +970,14 @@ skipped, and failed work. A manifest remains and reports
 replayable. No frozen dataset result may depend on an object or typed chunk
 eligible for ordinary retention deletion.
 
-Only raw provider evidence and book checkpoints currently use Parquet cold
-storage. Typed derived facts do not yet have a cold Parquet tier; their bounded
+The deployed lifecycle's cold objects are raw provider evidence and book checkpoints.
+The in-development generalized canonical Fact archive adds verified Parquet
+pages and resumable admission, described in
+[Generalized Fact Data Plane](GENERALIZED_FACT_DATA_PLANE.md#exact-raw-revision-evidence).
+Its direct raw proof uses exact immutable mappings and bounded streaming reads;
+manifest ordinal ranges alone are insufficient. Physical canonical reclamation
+and complete transitive dependency admission remain activation gates. Existing
+typed derived lifecycle policies still lack an enabled cold-reclamation path; their bounded
 hot expiry must remain disabled or conservatively sized wherever later
 rehydration is a requirement.
 

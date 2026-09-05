@@ -546,8 +546,9 @@ def test_market_storage_lifecycle_routes_are_dry_run_first(monkeypatch) -> None:
         lambda: SimpleNamespace(market_data_lifecycle=policy),
     )
 
-    def fake_plan(*, policy):
+    def fake_plan(*, policy, canonical_after_storage_day=None):
         observed["plan_policy"] = policy
+        observed["plan_cursor"] = canonical_after_storage_day
         return {
             "schema_version": "market.storage_lifecycle_plan.v1",
             "summary": {"eligible_count": 2},
@@ -593,3 +594,13 @@ def test_market_storage_lifecycle_routes_are_dry_run_first(monkeypatch) -> None:
     assert observed["run"]["execute"] is False
     assert str(observed["run"]["storage_root"]) == "/portable/market-data"
     assert events.json()["events"] == [{"id": "event-a", "limit": 17}]
+    assert observed["plan_cursor"] is None
+    paged = client.get("/api/market-data/market-structure/storage-lifecycle/plan",
+                       params={"canonical_after_storage_day": "2026-08-04"})
+    assert paged.status_code == 200 and observed["plan_cursor"].isoformat() == "2026-08-04"
+    invalid = client.get("/api/market-data/market-structure/storage-lifecycle/plan",
+                         params={"canonical_after_storage_day": "not-a-date"})
+    assert invalid.status_code == 422
+    resumed = client.post("/api/market-data/market-structure/storage-lifecycle/run",
+                          json={"canonical_after_storage_day": "2026-08-04"})
+    assert resumed.status_code == 200 and observed["run"]["canonical_after_storage_day"].isoformat() == "2026-08-04"

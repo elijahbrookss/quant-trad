@@ -17,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from core.storage_mounts import configured_archive_root, require_configured_archive_mount
 from data_providers.providers.factory import get_provider
 from data_providers.streams.coinbase import (
     CoinbaseAdvancedTradeStream,
@@ -57,6 +58,7 @@ from market_data.market_state import (
     DEPTH_FACT_VERSION,
     DERIVATIVE_STATE_FACT_TYPE,
     DERIVATIVE_STATE_FACT_VERSION,
+    DERIVATIVE_OI_INTERVAL_SECONDS,
     RESPONSE_FACT_TYPE,
     RESPONSE_FACT_VERSION,
     TRADE_FLOW_FEATURE_FACT_TYPE,
@@ -132,7 +134,7 @@ AUTHENTICATED_STREAM_PROOF_SHA256 = (
 )
 DEFAULT_SPOOL_BYTES = 8 * 1024**3
 DEFAULT_SEGMENT_BYTES = 128 * 1024**2
-DEFAULT_STORAGE_ROOT = Path("logs/market-structure")
+DEFAULT_STORAGE_ROOT = configured_archive_root()
 MAX_ANALYZER_SEQUENCE_HASHES = 8192
 DEFAULT_TRADE_FLEET_MANIFEST = Path(
     "config/market_data/coinbase_perpetual_trade_fleet.v1.json"
@@ -1068,7 +1070,7 @@ class MarketStructureService:
                 funding_records=funding_records,
                 oi_gaps=oi_gaps,
                 series_id=int(futures["derivative_state_series_id"]),
-                expected_oi_interval_seconds=60,
+                expected_oi_interval_seconds=DERIVATIVE_OI_INTERVAL_SECONDS,
                 computed_at=decision_time,
             )
             if start_at <= fact.effective_at < end_at
@@ -1077,16 +1079,6 @@ class MarketStructureService:
             basis_facts=basis_facts,
             derivative_facts=derivative_facts,
         )
-        execution_trade_records = ()
-        if replay_states and config.get("trade_series_id") is not None:
-            execution_trade_records = tuple(
-                self.repository.read_trades(
-                    series_id=int(config["trade_series_id"]),
-                    start=min(row.effective_at for row in replay_states) - timedelta(seconds=2),
-                    end=max(row.effective_at for row in replay_states) + timedelta(seconds=2),
-                    known_at_lte=max(row.known_at for row in replay_states),
-                )
-            )
         fingerprint = _stable_hash(
             {
                 "schema_version": "market.cross_stream_materialization.v1",
@@ -1200,6 +1192,7 @@ class MarketStructureService:
                 self.repository.release(claim)
             raise ValueError("market_structure_capture_invalid: unsupported provider/venue")
         storage = Path(storage_root).expanduser().resolve()
+        require_configured_archive_mount(storage)
         spool_root = storage / "spool"
         object_store = FilesystemRawArchiveObjectStore(storage / "objects")
         temporary_root = storage / "tmp"
@@ -2658,12 +2651,8 @@ class MarketStructureService:
                     "market_book_replay_invalid: persisted checkpoint was not reproduced"
                 )
             path = store.local_path(str(row["object_key"]))
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != str(row["object_sha256"]):
-                raise RuntimeError(
-                    "market_book_replay_invalid: checkpoint object checksum mismatch"
-                )
-            rows = read_book_checkpoint_parquet(path)
+            rows = read_book_checkpoint_parquet(path, expected=row)
+            digest = str(row["object_sha256"])
             if rows != checkpoint_canonical_rows(checkpoint):
                 raise RuntimeError(
                     "market_book_replay_invalid: checkpoint typed levels differ"
@@ -2768,6 +2757,16 @@ class MarketStructureService:
                     raise RuntimeError(
                         "market_book_replay_invalid: persisted features differ from raw replay"
                     )
+        execution_trade_records = ()
+        if replay_states and config.get("trade_series_id") is not None:
+            execution_trade_records = tuple(
+                self.repository.read_trades(
+                    series_id=int(config["trade_series_id"]),
+                    start=min(row.effective_at for row in replay_states) - timedelta(seconds=2),
+                    end=max(row.effective_at for row in replay_states) + timedelta(seconds=2),
+                    known_at_lte=max(row.known_at for row in replay_states),
+                )
+            )
         fingerprint = _stable_hash(
             {
                 "schema_version": "market.book_session_replay.v1",

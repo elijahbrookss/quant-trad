@@ -17,6 +17,7 @@ from market_data.collector_operations import (
 )
 
 from ....db import db
+from .fact_storage import canonical_fact_storage_repository
 
 
 class CollectorOperationRequestConflict(RuntimeError):
@@ -425,9 +426,8 @@ class PostgresCollectorOperationsRepository:
                                fact_type, payload_schema_id, observation_time,
                                source_published_at, received_at, accepted_at,
                                known_at, transformation_id, external_event_key,
-                               external_event_group_key, state, payload,
-                               provenance_schema_id, provenance,
-                               quality_schema_id, quality
+                               external_event_group_key, state,
+                               provenance_schema_id, quality_schema_id
                         FROM market.fact_versions
                         WHERE series_id = ANY(:series_ids)
                         ORDER BY series_id, observation_key, revision DESC
@@ -445,6 +445,9 @@ class PostgresCollectorOperationsRepository:
                 ),
                 {"series_ids": normalized_ids, "limit": bounded_limit},
             ).mappings().all()
+            payloads = canonical_fact_storage_repository.read_rows_by_ids(session, [row["id"] for row in rows])
+            rows = [{**row, **{name: payloads[row["id"]][name] for name in ("payload", "provenance", "quality")}}
+                    for row in rows]
         return [_public_row(row) for row in rows]
 
     def list_gap_evidence(
