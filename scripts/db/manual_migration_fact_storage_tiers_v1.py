@@ -16,7 +16,7 @@ import os
 
 from sqlalchemy import create_engine, inspect, text
 
-from portal.backend.db import Base, MarketFactVersionRecord
+from portal.backend.db import Base, MarketFactHotPayloadRecord, MarketFactVersionRecord
 from portal.backend.db.fact_storage_schema import (
     FACT_STORAGE_LAYOUT_VERSION, FACT_STORAGE_TABLES, FACT_STORAGE_IMMUTABLE_TABLES,
     FACT_BOOK_PREFIX_TABLES, FACT_CANONICAL_DEPENDENCY_TABLES,
@@ -26,10 +26,15 @@ from portal.backend.db.session import Database
 
 SOURCE_SCHEMA = "qt_fact_storage_cutover_v1"
 SOURCE = SOURCE_SCHEMA + ".fact_versions"
+SOURCE_PAGE_INDEX = "ix_fact_storage_cutover_commit_page_v1"
 LOCK_NAME = "quant-trad:fact-storage-cutover:v1"
 HEADER_COLUMNS = tuple(column.name for column in MarketFactVersionRecord.__table__.columns)
 LEGACY_COLUMNS = tuple(name for name in HEADER_COLUMNS if name != "storage_day") + ("payload", "provenance", "quality")
 PAGE_PREDICATE = "(market_commit_seq, id) > (:after_seq, :after_id) AND (market_commit_seq, id) <= (:until_seq, :until_id)"
+BULK_SECONDARY_INDEXES = tuple(sorted(
+    (*MarketFactVersionRecord.__table__.indexes, *MarketFactHotPayloadRecord.__table__.indexes),
+    key=lambda index: index.name,
+))
 
 
 def _relation(conn, name):
@@ -67,6 +72,22 @@ def _assert_prior_ready_layout(conn, prefix, canonical):
                                  allow_missing_canonical_dependency_tables=bool(canonical))
 
 
+def _ensure_source_page_index(conn):
+    conn.execute(text(
+        f"CREATE INDEX IF NOT EXISTS {SOURCE_PAGE_INDEX} ON {SOURCE} (market_commit_seq, id)"
+    ))
+
+
+def _drop_bulk_secondary_indexes(conn):
+    for index in BULK_SECONDARY_INDEXES:
+        conn.execute(text(f'DROP INDEX IF EXISTS market."{index.name}"'))
+
+
+def _create_bulk_secondary_indexes(conn):
+    for index in BULK_SECONDARY_INDEXES:
+        index.create(conn, checkfirst=True)
+
+
 def inspect_cutover(conn):
     """Read-only catalog/preflight report; does not acquire DDL or mutation locks."""
     state = _state(conn)
@@ -98,6 +119,10 @@ def _prepare(conn):
     if state is not None:
         prefix, canonical = _missing_proof_tables(conn)
         missing = prefix + canonical
+        if state["state"] == "copying":
+            _assert_source(conn, SOURCE)
+            _ensure_source_page_index(conn)
+            _drop_bulk_secondary_indexes(conn)
         if missing:
             if state["state"] != "ready":
                 raise RuntimeError("fact_storage_proof_partial_layout: finish the prior cutover before upgrading")
@@ -141,11 +166,17 @@ def _prepare(conn):
     ))
     conn.execute(text(f"ALTER TABLE {SOURCE} ENABLE ALWAYS TRIGGER trg_storage_cutover_reject_insert"))
     conn.execute(text(f"ALTER TABLE {SOURCE} ENABLE ALWAYS TRIGGER trg_reject_mutation_fact_versions"))
+    # Every bounded page must be an index range scan. Without this source-only
+    # index, the copy repeatedly scans the full retained relation as it grows.
+    _ensure_source_page_index(conn)
     # Clean definitions only. No ALTER-column/backfill path is installed in runtime.
     MarketFactVersionRecord.__table__.create(conn)
     for table in Base.metadata.sorted_tables:
         if table.schema == "market" and table.name in FACT_STORAGE_TABLES:
             table.create(conn)
+    # Primary keys and every integrity constraint stay live. Rebuildable
+    # secondary indexes are created once, after the bulk copy is complete.
+    _drop_bulk_secondary_indexes(conn)
     Database("")._ensure_canonical_fact_insert_trigger(conn)
     install_fact_storage_functions(conn)
     for name in ("fact_versions", *FACT_STORAGE_IMMUTABLE_TABLES):
@@ -184,11 +215,15 @@ def _copy_page(conn, batch_rows):
         "ORDER BY market_commit_seq,id LIMIT :limit"
     ), params).all()
     if not boundary:
+        # Durably flush every asynchronous copy-page commit before runtime can
+        # observe the final layout as ready.
+        conn.execute(text("SET LOCAL synchronous_commit=on"), {})
         target_count = conn.execute(text("SELECT count(*) FROM market.fact_versions")).scalar_one()
         hot_count = conn.execute(text("SELECT count(*) FROM market.fact_hot_payloads")).scalar_one()
         source_count = conn.execute(text(f"SELECT count(*) FROM {SOURCE}")).scalar_one()
         if not (target_count == hot_count == source_count == evidence["copied_rows"] == evidence["source_rows"]):
             raise RuntimeError("fact_storage_cutover_count_mismatch: source retained; runtime remains disabled")
+        _create_bulk_secondary_indexes(conn)
         evidence["verified_rows"] = evidence["copied_rows"]
         conn.execute(text(
             "UPDATE market.fact_storage_state SET state='ready', completed_at=now(), evidence=CAST(:evidence AS jsonb) "
@@ -217,10 +252,20 @@ def _copy_page(conn, batch_rows):
     ), params)
     # Compare all persisted canonical fields, not merely count/hash metadata.
     # storage_day is placement, and is deliberately excluded from market identity.
+    # Bound the source before joining and prohibit plans that rescan the entire
+    # growing destination for every page.
+    conn.execute(text("SET LOCAL enable_hashjoin=off"))
+    conn.execute(text("SET LOCAL enable_mergejoin=off"))
     differs = conn.execute(text(
-        f"SELECT count(*) FROM (SELECT * FROM {SOURCE} WHERE {PAGE_PREDICATE}) old "
-        "LEFT JOIN market.fact_rows new ON new.id=old.id "
-        "WHERE to_jsonb(old) IS DISTINCT FROM (to_jsonb(new) - 'storage_day')"
+        f"SELECT count(*) FROM (SELECT * FROM {SOURCE} WHERE {PAGE_PREDICATE} "
+        "ORDER BY market_commit_seq,id LIMIT :limit OFFSET 0) old "
+        "LEFT JOIN market.fact_versions header ON header.id=old.id "
+        "LEFT JOIN market.fact_hot_payloads hot "
+        "ON hot.storage_day=header.storage_day AND hot.id=header.id "
+        "WHERE to_jsonb(old) IS DISTINCT FROM ("
+        "(to_jsonb(header) - 'storage_day') || "
+        "jsonb_build_object('payload',hot.payload,'provenance',hot.provenance,'quality',hot.quality)"
+        ")"
     ), params).scalar_one()
     if differs:
         raise RuntimeError(f"fact_storage_cutover_row_mismatch: rows={differs}; page rolled back")
@@ -247,6 +292,10 @@ def run_cutover(engine, *, execute=False, writers_stopped=False, batch_rows=2000
         try:
             locked = conn.execute(text("SELECT pg_try_advisory_lock(hashtextextended(:name,0))"),
                                   {"name": LOCK_NAME}).scalar_one()
+            # A crash may discard a suffix of copy pages, but their rows and
+            # checkpoint share one transaction and are safely recopied from the
+            # immutable source. The final ready transaction is synchronous.
+            conn.execute(text("SET synchronous_commit=off"), {})
             conn.commit()
         except BaseException:
             conn.invalidate()
