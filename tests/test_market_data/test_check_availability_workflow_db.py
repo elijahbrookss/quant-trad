@@ -87,7 +87,8 @@ def test_availability_check_freezes_runs_and_replays_without_provider_calls(monk
                        "eligibility": {"min_samples": 0}},
         "inputs": [{"alias": "bbo", "fact_type": "market.bbo",
                     "contract_version": "market.bbo.v1", "timeframe_seconds": 1,
-                    "max_staleness_seconds": 60, "source_policy": {"mode": "current"}}],
+                    "max_staleness_seconds": 60, "source_policy": {"mode": "exact",
+                                      "source_identity_key": source.identity_key}}],
         "gap_policy": "continue_degraded",
         "preparation": {"freeze": True, "name": f"clock-{token}"},
     }
