@@ -101,6 +101,8 @@ or Docker daemon without operator intervention. Keep the shell connected until
 completion; if it disconnects, check the lock, running process, and marker
 before taking another action. `release.env` records the last successful release;
 while a promotion marker exists it is not proof of the currently running state.
+The `release` command displays the unfinished candidate and activation state
+separately from that last successful revision.
 
 ### Disposable Evidence And First Cutover
 

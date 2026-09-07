@@ -550,6 +550,12 @@ show_release() {
     -e 's/^previous_revision=/previous revision: /p' \
     -e 's/^deployed_at=/deployed at: /p' \
     "$state_file"
+  if test -f "$state_root/promotion.env"; then
+    echo "unfinished promotion candidate: $(promotion_value candidate_revision)"
+    echo "recovery revision: $(promotion_value previous_revision)"
+    echo "activation started: $(promotion_value activation_started)"
+    echo "Inspect the running operation or failure before using recover."
+  fi
   if test -f "$alert_preview_state_file"; then
     echo "alert preview: $(preview_state_value status)"
     echo "alert preview revision: $(preview_state_value preview_revision)"

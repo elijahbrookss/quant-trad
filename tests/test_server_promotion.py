@@ -83,3 +83,15 @@ def test_pre_activation_failure_restores_checkout_without_recreating_services(tm
     assert "CHECKOUT_RESTORED" in result.stdout
     assert "INCORRECT_RESTART" not in result.stdout
     assert not (state / "promotion.env").exists()
+
+
+def test_release_reports_unfinished_promotion_separately_from_last_success(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "release.env").write_text(f"current_revision={'a' * 40}\n")
+    (state / "promotion.env").write_text(f"previous_revision={'a' * 40}\ncandidate_revision={'b' * 40}\nactivation_started=true\n")
+    result = shell(tmp_path, "show_release")
+    assert result.returncode == 0, result.stderr
+    assert "current revision: " + "a" * 40 in result.stdout
+    assert "unfinished promotion candidate: " + "b" * 40 in result.stdout
+    assert "activation started: true" in result.stdout
