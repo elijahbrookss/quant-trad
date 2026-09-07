@@ -6,11 +6,11 @@ from datetime import timedelta
 
 import pytest
 
-from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact
+from market_data.contracts import CANDLE_FACT_TYPE, CANDLE_FACT_VERSION, CandleFact, SourceIdentity
 from portal.backend.db import InstrumentRecord, db
 from portal.backend.service.research import service
 from portal.backend.service.storage.repos.market_data import market_data_repo
-from tests.test_portal.test_event_fact_snapshot_check import _BASE, _SOURCE, _bbo_record, _iso
+from tests.test_portal.test_event_fact_snapshot_check import _BASE, _bbo_record, _iso
 
 pytestmark = pytest.mark.db
 
@@ -27,7 +27,8 @@ def test_availability_check_freezes_runs_and_replays_without_provider_calls(monk
             can_short=False, short_requires_borrow=False, has_funding=False,
             extra_metadata={"fixture": "check-availability-workflow"},
         ))
-    source = replace(_SOURCE, adapter_version=f"clock-test.{token}")
+    source = SourceIdentity(provider="TEST", venue="ISOLATED", source_kind="fixture",
+                            adapter_version=f"clock-test.{token}")
     source_id = market_data_repo.register_source(source, lineage={"fixture": token})
     candle_series = market_data_repo.register_series(
         instrument_id=instrument_id, fact_type=CANDLE_FACT_TYPE,
@@ -58,7 +59,10 @@ def test_availability_check_freezes_runs_and_replays_without_provider_calls(monk
         end = _BASE + timedelta(seconds=offset + 1)
         record = _bbo_record(bucket_end=end, known_at=end + timedelta(seconds=7),
                              commit_seq=offset + 61)
-        books.append(replace(record.fact, source=source))
+        # Synthetic canonical observations carry no claim to collector raw archives.
+        books.append(replace(record.fact, source=source,
+                             transformation_id="fixture.bbo.v1",
+                             provenance={"fixture": token}))
     market_data_repo.ingest_facts(
         series_id=book_series, source_id=source_id, facts=books,
         request={"fixture": token},
