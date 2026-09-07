@@ -1,9 +1,6 @@
 # docker/test/Dockerfile
 FROM python:3.12.3
 
-ARG QT_SOURCE_REVISION
-ARG QT_SOURCE_TREE_HASH
-
 ENV PYTHONPATH=/app/src
 WORKDIR /app
 
@@ -25,6 +22,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Copy everything needed for testing
 COPY . .
 COPY scripts/wait-for-db.sh /app/wait-for-db.sh
+
+ARG QT_SOURCE_REVISION
+ARG QT_SOURCE_TREE_HASH
 
 RUN actual_hash="$(python /app/scripts/provenance/source_tree_hash.py --root /app)" \
     && test -n "$QT_SOURCE_REVISION" \
