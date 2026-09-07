@@ -25,6 +25,7 @@ pytestmark = pytest.mark.db
 def test_availability_check_freezes_runs_and_replays_without_provider_calls(monkeypatch, tmp_path):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(tmp_path))
     token = uuid.uuid4().hex
     instrument_id = f"check-clock-{token[:20]}"
     with db.session() as session:
