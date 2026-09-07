@@ -1,6 +1,9 @@
 # docker/test/Dockerfile
 FROM python:3.12.3
 
+ARG QT_SOURCE_REVISION
+ARG QT_SOURCE_TREE_HASH
+
 ENV PYTHONPATH=/app/src
 WORKDIR /app
 
@@ -22,6 +25,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Copy everything needed for testing
 COPY . .
 COPY scripts/wait-for-db.sh /app/wait-for-db.sh
+
+RUN actual_hash="$(python /app/scripts/provenance/source_tree_hash.py --root /app)" \
+    && test -n "$QT_SOURCE_REVISION" \
+    && test -n "$QT_SOURCE_TREE_HASH" \
+    && test "$actual_hash" = "$QT_SOURCE_TREE_HASH" \
+    && printf '{"schema_version":"qt_source_attestation.v1","source_revision":"%s","source_tree_hash":"%s"}\n' \
+       "$QT_SOURCE_REVISION" "$actual_hash" > /app/.qt-source-attestation.json
+
+ENV QT_IMAGE_SOURCE_REVISION="$QT_SOURCE_REVISION" \
+    QT_IMAGE_SOURCE_TREE_HASH="$QT_SOURCE_TREE_HASH"
 
 # Ensure output folders exist
 RUN mkdir -p output/integration_tests

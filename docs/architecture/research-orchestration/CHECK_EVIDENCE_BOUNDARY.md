@@ -298,3 +298,27 @@ experiment-plan operations.
   calculated evidence.
 - Every durable conclusion traces to code revision, operation definition,
   exact inputs/source bindings, gaps/quality, and output/evidence hashes.
+
+
+### Availability timing inspection
+
+The `required_facts_available` result includes a structured `timing` object per
+sample (`research.check_sample_timing.v1`). It records `sample_end`,
+`primary_known_at`, `checked_at`, `required_inputs`, `decision_time`,
+`outcome_price_time`, `evaluation_end_exclusive`, and the sample's existing
+`exclusion_reasons`. These fields project the actual evaluation, not a narrative
+or an inferred explanation of provider gaps.
+
+`required_inputs` describes the last attempted evaluation (the successful one
+when ready). Each selector retains its alias, filter, selected `known_at`, status,
+and existing failure reason. Evaluation stops at its first failed requirement;
+subsequent selectors explicitly remain `not_evaluated`. A null input timestamp
+means no fact was selected at that attempt, not that the provider never produced
+one. A sample with no permitted attempt has null `checked_at` and an empty input
+list. Unresolved samples retain null decision and outcome-price timestamps.
+
+The disposable DB regression in
+`tests/test_market_data/test_check_availability_workflow_db.py` exercises native
+preparation, freezing, Check execution, and replay, including a mutable revision
+after freezing. The test image verifies its source tree using the same provenance
+attestation as the runtime image; the Check's provenance checks remain active.

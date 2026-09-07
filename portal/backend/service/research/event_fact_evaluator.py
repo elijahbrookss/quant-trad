@@ -1359,7 +1359,11 @@ def _required_fact_decisions(
     gap_evidence: Sequence[Mapping[str, Any]],
     evaluation_start: datetime,
     evaluation_end: datetime,
-) -> tuple[dict[datetime, datetime], dict[datetime, list[dict[str, Any]]]]:
+) -> tuple[
+    dict[datetime, datetime],
+    dict[datetime, list[dict[str, Any]]],
+    dict[datetime, dict[str, Any]],
+]:
     """Find first simultaneous availability, without changing any source clock.
 
     Market samples remain fixed. Only source availability transitions can wake
@@ -1462,22 +1466,38 @@ def _required_fact_decisions(
         )
     decisions: dict[datetime, datetime] = {}
     references: dict[datetime, list[dict[str, Any]]] = {}
+    readiness: dict[datetime, dict[str, Any]] = {}
     for opened, requests in requests_by_open.items():
         for decision, sample in requests:
+            details = {
+                "checked_at": _iso(decision),
+                "required_inputs": [
+                    {**selector, "known_at": None, "status": "not_evaluated", "reason": None}
+                    for selector in selectors.values()
+                ],
+            }
+            readiness[opened] = details
             selected_refs: list[dict[str, Any]] = []
-            for key, selector in selectors.items():
+            for index, (key, selector) in enumerate(selectors.items()):
+                detail = details["required_inputs"][index]
+                detail["status"] = "unavailable"
                 alias = selector["alias"]
                 requirement = requirements[alias]
                 exact = requirement.get("alignment") == "exact_interval"
                 record = snapshots[key].get((decision, sample if exact else None))
                 if record is None:
+                    detail["reason"] = f"fact_missing:{alias}"
                     break
                 if isinstance(record, RuntimeError):
                     raise record
+                detail["known_at"] = _iso(_record_known_at(record))
                 freshness = _record_freshness_time(record)
                 if freshness > decision or _record_effective_at(record) > decision:
+                    detail["reason"] = "required_facts_unavailable"
+                    detail["failed_gate"] = "source_time_after_evaluation"
                     break
                 if (decision - freshness).total_seconds() > int(requirement["max_staleness_seconds"]):
+                    detail["reason"] = f"fact_stale:{alias}"
                     break
                 gap_start = (
                     sample - timedelta(seconds=int(requirement.get("timeframe_seconds") or 0))
@@ -1487,13 +1507,15 @@ def _required_fact_decisions(
                     gap_evidence, alias=alias, start=gap_start,
                     end=sample if exact else decision,
                 ):
+                    detail["reason"] = f"fact_gap:{alias}"
                     break
+                detail["status"] = "ready"
                 selected_refs.append({"alias": alias, **_fact_material(record)})
             else:
                 decisions[opened] = decision
                 references[opened] = selected_refs
                 break
-    return decisions, references
+    return decisions, references, readiness
 
 
 def _fact_snapshot_outputs(
@@ -1874,6 +1896,7 @@ class EventFactEvaluator:
         detector_snapshots: dict[
             tuple[datetime, datetime | None], Any | None
         ] = {}
+        trigger_readiness: dict[datetime, dict[str, Any]] = {}
         if detector_type == _INDICATOR_EVENT_DETECTOR:
             direction_by_key = {
                 str(row["key"]): str(row["direction"])
@@ -1897,7 +1920,7 @@ class EventFactEvaluator:
             decision_times = None
             trigger_references = None
             if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE:
-                decision_times, trigger_references = _required_fact_decisions(
+                decision_times, trigger_references, trigger_readiness = _required_fact_decisions(
                     detector=detector, specs=enriched_specs, baseline_specs=baseline_specs, candles=candles,
                     records_by_alias=fact_records, requirements=fact_requirements,
                     gap_evidence=fact_gap_evidence,
@@ -2891,6 +2914,25 @@ class EventFactEvaluator:
                     {**row, "adjusted_p_value": adjusted[index]}
                 for index, row in enumerate(raw_tests)
             ]
+
+        if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE:
+            for row in event_results:
+                opened = _utc(row["event_time"], field="event_time")
+                candle = candle_by_open[opened]
+                row["timing"] = {
+                    "schema_version": "research.check_sample_timing.v1",
+                    "sample_end": _iso(_utc(candle["close_time"], field="candle.close_time")),
+                    "primary_known_at": _iso(_utc(
+                        candle.get("known_at") or candle["close_time"], field="candle.known_at"
+                    )),
+                    **trigger_readiness.get(opened, {
+                        "checked_at": None, "required_inputs": [],
+                    }),
+                    "evaluation_end_exclusive": _iso(evaluation_end),
+                    "decision_time": row["decision_time"],
+                    "outcome_price_time": row.get("entry_sample_time"),
+                    "exclusion_reasons": list(row["exclusion_reasons"]),
+                }
 
         outcome_resolution = {
             str(horizon): {

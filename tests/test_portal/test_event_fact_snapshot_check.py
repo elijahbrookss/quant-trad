@@ -853,3 +853,47 @@ def test_required_availability_does_not_inspect_ambiguity_after_its_decision() -
     result = _evaluate(alias="bbo", fact_type="market.bbo", records=[first, later], event_count=2,
                        alignment="exact_interval", evaluation_trigger="required_facts_available")
     assert datetime.fromisoformat(result["events"][0]["decision_time"]) == closed + timedelta(seconds=7)
+
+
+def test_timing_breakdown_records_clocks_and_missing_requirement_without_guessing() -> None:
+    closed = _BASE + timedelta(minutes=1)
+    available = closed + timedelta(seconds=7)
+    book = _bbo_record(bucket_end=closed, known_at=available, commit_seq=1)
+    result = _evaluate(
+        alias="bbo", fact_type="market.bbo", records=[book], event_count=2,
+        alignment="exact_interval", evaluation_trigger="required_facts_available",
+    )
+    ready, missing = result["events"]
+    timing = ready["timing"]
+    assert datetime.fromisoformat(timing["sample_end"]) == closed
+    assert datetime.fromisoformat(timing["primary_known_at"]) == closed
+    assert datetime.fromisoformat(timing["checked_at"]) == available
+    assert datetime.fromisoformat(timing["required_inputs"][0]["known_at"]) == available
+    assert timing["required_inputs"][0]["status"] == "ready"
+    assert timing["decision_time"] == ready["decision_time"]
+    assert timing["outcome_price_time"] == ready["entry_sample_time"]
+    assert timing["exclusion_reasons"] == []
+    assert missing["timing"]["decision_time"] is None
+    assert missing["timing"]["outcome_price_time"] is None
+    assert missing["timing"]["exclusion_reasons"] == missing["exclusion_reasons"]
+    # This sample reaches the exclusive evaluation boundary without an attempt.
+    assert missing["timing"]["checked_at"] is None
+
+    unavailable = _evaluate(
+        alias="bbo", fact_type="market.bbo", records=[book], event_count=3,
+        alignment="exact_interval", evaluation_trigger="required_facts_available",
+        extra_requirements={"depth": {
+            "fact_type": "market.depth", "alignment": "exact_interval",
+            "timeframe_seconds": 1, "max_staleness_seconds": 600,
+        }},
+    )["events"][0]["timing"]
+    assert unavailable["decision_time"] is None
+    assert unavailable["required_inputs"] == [
+        {"alias": "bbo", "where": {}, "known_at": timing["required_inputs"][0]["known_at"],
+         "status": "ready", "reason": None},
+        {"alias": "depth", "where": {}, "known_at": None,
+         "status": "unavailable", "reason": "fact_missing:depth"},
+    ]
+    old = _evaluate(alias="bbo", fact_type="market.bbo", records=[book],
+                    event_count=2, alignment="exact_interval")
+    assert all("timing" not in row for row in old["events"])

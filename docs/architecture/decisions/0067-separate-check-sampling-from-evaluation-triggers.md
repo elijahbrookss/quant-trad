@@ -15,6 +15,7 @@ code_paths:
   - portal/backend/service/research/planning.py
   - src/engines/bot_runtime/core/domain/candle_factory.py
   - src/engines/bot_runtime/runtime/mixins/setup_prepare.py
+  - tests/test_market_data/test_check_availability_workflow_db.py
   - tests/test_portal/test_event_fact_snapshot_check.py
   - tests/integration/runtime/test_candle_frame_validation.py
 ---
