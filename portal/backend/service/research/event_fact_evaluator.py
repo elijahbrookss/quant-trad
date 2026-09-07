@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ EVENT_FACT_RESULT_VERSION = "event_fact_analysis_result.v3"
 
 _INDICATOR_EVENT_DETECTOR = "indicator_event"
 _FACT_SNAPSHOT_DETECTOR = "fact_snapshot"
+_REQUIRED_FACTS_AVAILABLE = "required_facts_available"
 
 _BASELINE_OPERATORS = frozenset(
     {
@@ -280,6 +282,16 @@ def normalize_event_fact_configuration(
         raise ValueError(
             "event_fact_check_invalid: detector.type must be indicator_event or fact_snapshot"
         )
+
+    trigger = str(detector.get("evaluation_trigger") or "primary_available").strip()
+    if trigger not in {"primary_available", _REQUIRED_FACTS_AVAILABLE}:
+        raise ValueError("event_fact_check_invalid: unsupported evaluation_trigger")
+    if trigger == _REQUIRED_FACTS_AVAILABLE:
+        if detector_type != _FACT_SNAPSHOT_DETECTOR:
+            raise ValueError(
+                "event_fact_check_invalid: required_facts_available requires fact_snapshot"
+            )
+        normalized_detector["evaluation_trigger"] = trigger
 
     normalized_outcomes = dict(outcomes or {})
     raw_horizons = normalized_outcomes.get("horizons") or normalized_outcomes.get(
@@ -788,6 +800,8 @@ def _causal_snapshot_series(
     where: Mapping[str, Any],
     alias: str,
     ordered_revisions: Sequence[Any] | None = None,
+    numeric_selection: bool = False,
+    defer_ambiguity: bool = False,
 ) -> dict[tuple[datetime, datetime | None], Any | None]:
     """Select one latest market-time observation in one known-at sweep."""
 
@@ -795,6 +809,9 @@ def _causal_snapshot_series(
         records,
         key=_snapshot_revision_order_key,
     )
+    def selection_time(record: Any) -> datetime:
+        return _record_known_at(record) if numeric_selection else _record_freshness_time(record)
+
     active: dict[tuple[int, str], Any] = {}
     eligible_by_time: dict[int, dict[tuple[int, str], Any]] = defaultdict(dict)
     time_heap: list[int] = []
@@ -822,13 +839,13 @@ def _causal_snapshot_series(
                 current
             ) and _record_matches_where(current, where):
                 current_time = int(
-                    _record_freshness_time(current).timestamp() * 1_000_000
+                    selection_time(current).timestamp() * 1_000_000
                 )
                 eligible_by_time[current_time].pop(key, None)
             active[key] = record
             if _record_is_active(record) and _record_matches_where(record, where):
                 effective_time = int(
-                    _record_freshness_time(record).timestamp() * 1_000_000
+                    selection_time(record).timestamp() * 1_000_000
                 )
                 eligible_by_time[effective_time][key] = record
                 if effective_time not in times_in_heap:
@@ -849,14 +866,21 @@ def _causal_snapshot_series(
         if not candidates:
             selected[request_key] = None
             continue
+        if numeric_selection:
+            selected[request_key] = max(candidates, key=_latest_record_key)
+            continue
         if len(candidates) != 1:
             keys = sorted(_record_event_key(record) for record in candidates)
-            raise RuntimeError(
+            error = RuntimeError(
                 "event_fact_snapshot_ambiguous: "
                 f"alias={alias} decision_time={_iso(decision_time)} "
                 f"observation_time={_iso(datetime.fromtimestamp(latest_time / 1_000_000, tz=UTC))} "
                 f"candidate_count={len(candidates)} observation_keys={keys[:10]}"
             )
+            if defer_ambiguity:
+                selected[request_key] = error
+                continue
+            raise error
         selected[request_key] = candidates[0]
     return selected
 
@@ -1324,6 +1348,176 @@ def _fact_features_for_event(
     return features, dict(references), exclusions, selected
 
 
+def _required_fact_decisions(
+    *,
+    detector: Mapping[str, Any],
+    specs: Sequence[Mapping[str, Any]],
+    baseline_specs: Sequence[Mapping[str, Any]],
+    candles: Sequence[Mapping[str, Any]],
+    records_by_alias: Mapping[str, Sequence[Any]],
+    requirements: Mapping[str, Mapping[str, Any]],
+    gap_evidence: Sequence[Mapping[str, Any]],
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+) -> tuple[
+    dict[datetime, datetime],
+    dict[datetime, list[dict[str, Any]]],
+    dict[datetime, dict[str, Any]],
+]:
+    """Find first simultaneous availability, without changing any source clock.
+
+    Market samples remain fixed. Only source availability transitions can wake
+    a pending sample. Existing alignment, staleness and revision rules decide
+    whether it is ready; evaluation_end bounds unresolved samples.
+    """
+    selectors: dict[tuple[str, str], dict[str, Any]] = {}
+    used_aliases: set[str] = set()
+    for spec in (detector, *specs):
+        alias = str(spec["input_alias"])
+        where = dict(spec.get("where") or {})
+        selectors[_structured_snapshot_key(alias, where)] = {
+            "alias": alias, "where": where,
+        }
+        used_aliases.add(alias)
+    for alias in sorted(set(requirements) - used_aliases):
+        selectors[_structured_snapshot_key(alias, {})] = {"alias": alias, "where": {}}
+
+    timelines: dict[str, tuple[list[datetime], dict[datetime, list[datetime]]]] = {}
+    for alias in requirements:
+        times: set[datetime] = set()
+        by_sample: dict[datetime, set[datetime]] = defaultdict(set)
+        for record in records_by_alias.get(alias, ()):
+            known_at = _record_known_at(record)
+            if known_at <= evaluation_end:
+                times.add(known_at)
+                by_sample[_record_freshness_time(record)].add(known_at)
+        timelines[alias] = (
+            sorted(times), {key: sorted(values) for key, values in by_sample.items()}
+        )
+    candle_by_open = {
+        _utc(row.get("open_time") or row.get("time"), field="candle.open_time"): row
+        for row in candles
+    }
+    prefix_known: dict[datetime, datetime] = {}
+    watermark = datetime.min.replace(tzinfo=UTC)
+    for opened, candle in sorted(candle_by_open.items()):
+        watermark = max(watermark, _utc(candle.get("known_at") or candle["close_time"], field="candle.known_at"))
+        prefix_known[opened] = watermark
+    requests_by_open: dict[datetime, list[tuple[datetime, datetime]]] = {}
+    total_requests = 0
+    for candle in candles:
+        opened = _utc(candle.get("open_time") or candle.get("time"), field="candle.open_time")
+        sample = _utc(candle.get("close_time"), field="candle.close_time")
+        start = max(sample, _utc(candle.get("known_at") or sample, field="candle.known_at"))
+        for spec in baseline_specs:
+            if spec["operator"] == "atr_fraction":
+                start = max(start, prefix_known[opened])
+            else:
+                for offset in range(1, int(spec.get("lookback_bars") or 0) + 1):
+                    previous = candle_by_open.get(opened - (sample - opened) * offset)
+                    if previous is not None:
+                        start = max(start, _utc(previous.get("known_at") or previous["close_time"], field="candle.known_at"))
+        if not evaluation_start <= opened < evaluation_end or start >= evaluation_end:
+            continue
+        end = evaluation_end
+        for alias, requirement in requirements.items():
+            staleness = int(requirement.get("max_staleness_seconds") or 0)
+            if staleness <= 0:
+                raise ValueError(
+                    f"event_fact_trigger_invalid: explicit max_staleness_seconds required alias={alias}"
+                )
+            if requirement.get("alignment") == "exact_interval":
+                end = min(end, sample + timedelta(seconds=staleness))
+        candidates = {start} if start <= end else set()
+        for alias, requirement in requirements.items():
+            times, by_sample = timelines[alias]
+            if requirement.get("alignment") == "exact_interval":
+                times = by_sample.get(sample, [])
+            last = (
+                bisect_left(times, end)
+                if end == evaluation_end else bisect_right(times, end)
+            )
+            candidates.update(times[bisect_right(times, start):last])
+        total_requests += len(candidates)
+        if total_requests > 100_000:
+            raise ValueError(
+                "event_fact_trigger_budget_exceeded: narrow the evaluation range (100000 candidate times maximum)"
+            )
+        requests_by_open[opened] = [(time, sample) for time in sorted(candidates)]
+
+    snapshots: dict[tuple[str, str], dict[tuple[datetime, datetime | None], Any | None]] = {}
+    for key, selector in selectors.items():
+        alias = selector["alias"]
+        if alias not in requirements:
+            raise ValueError(f"event_fact_input_missing: alias={alias}")
+        exact = requirements[alias].get("alignment") == "exact_interval"
+        snapshots[key] = _causal_snapshot_series(
+            tuple(records_by_alias.get(alias, ())),
+            snapshot_requests=[
+                (decision, sample if exact else None)
+                for requests in requests_by_open.values() for decision, sample in requests
+            ],
+            where=selector["where"], alias=alias, defer_ambiguity=True,
+            numeric_selection=all(
+                hasattr(record.fact, "source_event_key")
+                and not hasattr(record.fact, "observation_key")
+                for record in records_by_alias.get(alias, ())
+            ),
+        )
+    decisions: dict[datetime, datetime] = {}
+    references: dict[datetime, list[dict[str, Any]]] = {}
+    readiness: dict[datetime, dict[str, Any]] = {}
+    for opened, requests in requests_by_open.items():
+        for decision, sample in requests:
+            details = {
+                "checked_at": _iso(decision),
+                "required_inputs": [
+                    {**selector, "known_at": None, "status": "not_evaluated", "reason": None}
+                    for selector in selectors.values()
+                ],
+            }
+            readiness[opened] = details
+            selected_refs: list[dict[str, Any]] = []
+            for index, (key, selector) in enumerate(selectors.items()):
+                detail = details["required_inputs"][index]
+                detail["status"] = "unavailable"
+                alias = selector["alias"]
+                requirement = requirements[alias]
+                exact = requirement.get("alignment") == "exact_interval"
+                record = snapshots[key].get((decision, sample if exact else None))
+                if record is None:
+                    detail["reason"] = f"fact_missing:{alias}"
+                    break
+                if isinstance(record, RuntimeError):
+                    raise record
+                detail["known_at"] = _iso(_record_known_at(record))
+                freshness = _record_freshness_time(record)
+                if freshness > decision or _record_effective_at(record) > decision:
+                    detail["reason"] = "required_facts_unavailable"
+                    detail["failed_gate"] = "source_time_after_evaluation"
+                    break
+                if (decision - freshness).total_seconds() > int(requirement["max_staleness_seconds"]):
+                    detail["reason"] = f"fact_stale:{alias}"
+                    break
+                gap_start = (
+                    sample - timedelta(seconds=int(requirement.get("timeframe_seconds") or 0))
+                    if exact else freshness
+                )
+                if _fact_gap_intersects(
+                    gap_evidence, alias=alias, start=gap_start,
+                    end=sample if exact else decision,
+                ):
+                    detail["reason"] = f"fact_gap:{alias}"
+                    break
+                detail["status"] = "ready"
+                selected_refs.append({"alias": alias, **_fact_material(record)})
+            else:
+                decisions[opened] = decision
+                references[opened] = selected_refs
+                break
+    return decisions, references, readiness
+
+
 def _fact_snapshot_outputs(
     *,
     detector: Mapping[str, Any],
@@ -1334,6 +1528,8 @@ def _fact_snapshot_outputs(
     evaluation_start: datetime,
     evaluation_end: datetime,
     ordered_revisions_by_alias: Mapping[str, Sequence[Any]],
+    decision_times: Mapping[datetime, datetime] | None = None,
+    trigger_references: Mapping[datetime, list[dict[str, Any]]] | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     dict[tuple[datetime, datetime | None], Any | None],
@@ -1369,6 +1565,8 @@ def _fact_snapshot_outputs(
             field="candle.known_at",
         )
         sample_time = _utc(candle.get("close_time"), field="candle.close_time")
+        if decision_times is not None:
+            decision_time = decision_times.get(event_time, decision_time)
         if not (
             evaluation_start <= event_time < evaluation_end
             and decision_time <= evaluation_end
@@ -1420,6 +1618,9 @@ def _fact_snapshot_outputs(
             end=decision_time,
         ):
             reason = f"detector_fact_gap:{alias}"
+        if decision_times is not None and event_time not in decision_times:
+            selected = None
+            reason = "required_facts_unavailable"
         material = _fact_material(selected) if selected is not None else None
         outputs.append(
             {
@@ -1433,6 +1634,11 @@ def _fact_snapshot_outputs(
                     "known_at": _iso(decision_time),
                     "direction": "neutral",
                     "metadata": {
+                        **({
+                            "evaluation_trigger": _REQUIRED_FACTS_AVAILABLE,
+                            "trigger_status": "ready" if event_time in decision_times else "unavailable",
+                            "required_fact_references": (trigger_references or {}).get(event_time, []),
+                        } if decision_times is not None else {}),
                         "input_alias": alias,
                         "sampling": "primary_bar_close",
                         "sample_time": _iso(sample_time),
@@ -1458,6 +1664,16 @@ class EventFactEvaluator:
     version: str = EVENT_FACT_EVALUATOR_VERSION
     result_schema_version: str = EVENT_FACT_RESULT_VERSION
     fact_snapshot_enabled: bool = True
+    availability_trigger_enabled: bool = False
+
+    def _validate_trigger(self, detector: Mapping[str, Any]) -> None:
+        if (
+            detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE
+            and not self.availability_trigger_enabled
+        ):
+            raise ValueError(
+                "event_fact_check_invalid: required_facts_available requires definition version 5"
+            )
 
     def declare_requirements(
         self,
@@ -1468,6 +1684,7 @@ class EventFactEvaluator:
         del definition
         statistics = dict(request.parameters.get("statistics") or {})
         detector = dict(request.parameters.get("detector") or {})
+        self._validate_trigger(detector)
         detector_type = str(detector.get("type") or "").strip()
         if detector_type == _FACT_SNAPSHOT_DETECTOR and not self.fact_snapshot_enabled:
             raise ValueError(
@@ -1509,6 +1726,11 @@ class EventFactEvaluator:
         outcomes = dict(request.parameters.get("outcomes") or {})
         invalidation = dict(outcomes.get("invalidation") or {})
         return {
+            **(
+                {"decision_price_tail_bars": 1}
+                if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE
+                else {}
+            ),
             "input_kind": "market_data",
             "indicator_ids": indicator_ids,
             "warmup_floor_bars": 0,
@@ -1538,6 +1760,7 @@ class EventFactEvaluator:
         inputs: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         detector = dict(inputs.get("detector") or {})
+        self._validate_trigger(detector)
         detector_type = str(detector.get("type") or "").strip()
         if detector_type == _FACT_SNAPSHOT_DETECTOR and not self.fact_snapshot_enabled:
             raise ValueError(
@@ -1673,6 +1896,7 @@ class EventFactEvaluator:
         detector_snapshots: dict[
             tuple[datetime, datetime | None], Any | None
         ] = {}
+        trigger_readiness: dict[datetime, dict[str, Any]] = {}
         if detector_type == _INDICATOR_EVENT_DETECTOR:
             direction_by_key = {
                 str(row["key"]): str(row["direction"])
@@ -1693,6 +1917,15 @@ class EventFactEvaluator:
                     "event_fact_event_ownership_invalid: configured Indicator event is not a signal output"
                 )
         elif detector_type == _FACT_SNAPSHOT_DETECTOR:
+            decision_times = None
+            trigger_references = None
+            if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE:
+                decision_times, trigger_references, trigger_readiness = _required_fact_decisions(
+                    detector=detector, specs=enriched_specs, baseline_specs=baseline_specs, candles=candles,
+                    records_by_alias=fact_records, requirements=fact_requirements,
+                    gap_evidence=fact_gap_evidence,
+                    evaluation_start=evaluation_start, evaluation_end=evaluation_end,
+                )
             event_rows, detector_snapshots = _fact_snapshot_outputs(
                 detector=detector,
                 candles=candles,
@@ -1702,6 +1935,8 @@ class EventFactEvaluator:
                 evaluation_start=evaluation_start,
                 evaluation_end=evaluation_end,
                 ordered_revisions_by_alias=ordered_revisions_by_alias,
+                decision_times=decision_times,
+                trigger_references=trigger_references,
             )
         else:
             raise ValueError(
@@ -1733,6 +1968,15 @@ class EventFactEvaluator:
         invalidation_resolution: Counter[str] = Counter()
         entry_lag = int(outcomes.get("entry_lag_bars") or 0)
         step = timedelta(seconds=interval_seconds)
+        available_price_candles = sorted(
+            (
+                (_utc(row["close_time"], field="candle.close_time"), opened)
+                for opened, row in candle_by_open.items()
+                if _utc(row.get("known_at") or row["close_time"], field="candle.known_at")
+                <= _utc(row["close_time"], field="candle.close_time")
+            ),
+        ) if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE else []
+        available_price_times = [row[0] for row in available_price_candles]
         for output in event_rows:
             event_time = _utc(output.get("time"), field="event.time")
             event_payload = dict(output.get("event") or {})
@@ -1767,6 +2011,13 @@ class EventFactEvaluator:
                     )
                 direction = 1.0
             entry_time = event_time + step * entry_lag
+            if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE:
+                earliest_price = max(event_decision_time, entry_time + step)
+                price_index = bisect_left(available_price_times, earliest_price)
+                entry_time = (
+                    available_price_candles[price_index][1]
+                    if price_index < len(available_price_candles) else None
+                )
             event_candle = candle_by_open.get(event_time)
             entry = candle_by_open.get(entry_time)
             row: dict[str, Any] = {
@@ -1811,9 +2062,26 @@ class EventFactEvaluator:
                     ] = detector_material
                 else:
                     row["detector_fact_reference"] = None
+            if output.get("detector_exclusion_reason") == "required_facts_unavailable":
+                row["decision_time"] = None
+                row["population_eligible"] = False
+                row["analysis_eligible"] = False
+                row["fact_references"] = {}
+                for horizon in outcomes["horizons"]:
+                    row["outcomes"][str(horizon)] = {
+                        "status": "unresolved", "reason": "required_facts_unavailable",
+                        "horizon_kind": outcomes["horizon_kind"],
+                    }
+                    horizon_resolution[int(horizon)]["unresolved:required_facts_unavailable"] += 1
+                event_results.append(row)
+                continue
+            effective_entry_lag = (
+                int((entry_time - event_time) / step)
+                if entry_time is not None else entry_lag
+            )
             entry_path_missing = [
                 event_time + step * offset
-                for offset in range(0, entry_lag + 1)
+                for offset in range(0, effective_entry_lag + 1)
                 if event_time + step * offset not in candle_by_open
             ]
             if event_candle is None or entry is None or entry_path_missing:
@@ -1847,6 +2115,13 @@ class EventFactEvaluator:
             )
             row["entry_time"] = _iso(entry_time)
             row["entry_known_at"] = _iso(entry_known_at)
+            if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE:
+                row["entry_sample_time"] = _iso(entry_close_time)
+                row["entry_price_rule"] = "first_available_candle_close_at_or_after_decision.v1"
+                for reference in event_payload.get("metadata", {}).get("required_fact_references", []):
+                    selected_fact_material[(reference["alias"], -1, "trigger", semantic_hash(reference), 0, 0)] = {
+                        **reference, "role": "trigger",
+                    }
             entry_close = float(entry["close"])
             event_close = float(event_candle["close"])
             row["entry_price"] = entry_close
@@ -2639,6 +2914,25 @@ class EventFactEvaluator:
                     {**row, "adjusted_p_value": adjusted[index]}
                 for index, row in enumerate(raw_tests)
             ]
+
+        if detector.get("evaluation_trigger") == _REQUIRED_FACTS_AVAILABLE:
+            for row in event_results:
+                opened = _utc(row["event_time"], field="event_time")
+                candle = candle_by_open[opened]
+                row["timing"] = {
+                    "schema_version": "research.check_sample_timing.v1",
+                    "sample_end": _iso(_utc(candle["close_time"], field="candle.close_time")),
+                    "primary_known_at": _iso(_utc(
+                        candle.get("known_at") or candle["close_time"], field="candle.known_at"
+                    )),
+                    **trigger_readiness.get(opened, {
+                        "checked_at": None, "required_inputs": [],
+                    }),
+                    "evaluation_end_exclusive": _iso(evaluation_end),
+                    "decision_time": row["decision_time"],
+                    "outcome_price_time": row.get("entry_sample_time"),
+                    "exclusion_reasons": list(row["exclusion_reasons"]),
+                }
 
         outcome_resolution = {
             str(horizon): {

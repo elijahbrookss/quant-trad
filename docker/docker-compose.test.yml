@@ -4,6 +4,9 @@ services:
     build:
       context: ..
       dockerfile: docker/test/Dockerfile
+      args:
+        QT_SOURCE_REVISION: ${SOURCE_REVISION:?required}
+        QT_SOURCE_TREE_HASH: ${SOURCE_TREE_HASH:?required}
     working_dir: /app
     environment:
       POSTGRES_USER: ${QT_TEST_POSTGRES_USER:?required}

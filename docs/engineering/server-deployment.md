@@ -40,6 +40,101 @@ The collector gets a five-minute stop window to close its provider connections,
 seal and finalize its WAL segments, and release fenced leases. Any real provider
 downtime remains gap evidence.
 
+## Rehearsed, Operator-Triggered Promotion
+
+For routine updates, use the existing server helper's `promote` action. This is
+an operator-triggered workflow, not a merge-triggered deployment service:
+
+```bash
+bash scripts/automation/server_deploy.sh release
+bash scripts/automation/server_deploy.sh promote <candidate-full-sha> --compatible-with <current-full-sha>
+```
+
+The second SHA is an explicit review decision: the candidate's database writes,
+archive format, configuration, and runtime effects remain readable by the
+currently deployed release. It must match both the recorded release and clean
+checkout. Do not supply it for an unreviewed schema/storage cutover. The helper
+does not infer compatibility from filenames, a green test, or a grace period.
+Initial installation and incompatible operator cutovers still use `deploy`
+under their reviewed runbook.
+
+Promotion fetches `origin`, requires the candidate to belong to `origin/develop`,
+and checks the latest exact-commit **push** run of `.github/workflows/test.yaml`.
+The non-database, frontend, deployment-contract, clean-database-bootstrap, and
+deployment-rehearsal jobs must all succeed in the same run attempt. A PR merge
+preview, skipped job, older successful run followed by a pending rerun, missing
+run, or unavailable GitHub response cannot qualify a release. The host needs
+`gh` with read access to the repository's Actions data. No GitHub-to-host SSH
+secret, self-hosted runner, paid staging server, or scheduled promotion is added.
+Repository branch rules should also require these checks before merge; the
+promotion command independently enforces them before it touches services.
+
+All helper mutations share a nonblocking host lock under the configured state
+root. Promotion first verifies the current application image identities, then
+saves a private rendered Compose snapshot and tags the currently running images
+for retention. Only after that does it build and start the candidate. The
+existing health, initializer, image identity, and collector fleet checks remain
+the success boundary. Build or admission failure before activation restores only
+the checkout, leaving running collectors untouched. A failed candidate exits
+nonzero even when restoration
+succeeds; logs distinguish the failed update from successful restoration.
+
+Recovery uses those retained local images and configuration with no image
+build, image pull, or Git fetch. It never restores or rewrites the database.
+Recovery can therefore only be enabled by the explicit compatibility decision.
+Its snapshot contains resolved private environment values: keep the state
+folder private, do not upload its files as CI artifacts, and do not prune
+`quanttrad-recovery:*` image tags while their snapshot is needed. Old tags may be
+removed deliberately after checking that no retained recovery snapshot needs
+them; routine Docker image pruning is not part of promotion.
+
+A failed recovery or interrupted promotion keeps `promotion.env` and
+`recovery.compose.json`. Another deployment is refused until the operator
+investigates and runs:
+
+```bash
+bash scripts/automation/server_deploy.sh recover
+```
+
+This is resumable recovery, not a promise to survive loss of the host, its disk,
+or Docker daemon without operator intervention. Keep the shell connected until
+completion; if it disconnects, check the lock, running process, and marker
+before taking another action. `release.env` records the last successful release;
+while a promotion marker exists it is not proof of the currently running state.
+The `release` command displays the unfinished candidate and activation state
+separately from that last successful revision.
+
+### Disposable Evidence And First Cutover
+
+Two repeatable rehearsals use unique Docker projects and disposable volumes:
+
+- `python3 scripts/ci/test_server_promotion.py` runs the actual deployment helper,
+  Git, Docker Compose, health checks, image retention, and volume lifecycle with
+  small synthetic services and a local GitHub response fixture. It rejects
+  failed CI, promotes a compatible revision, injects an unhealthy next revision,
+  restores the previous pinned images, and checks synthetic worker drain/restart
+  plus persisted evidence. It is not a provider or application-schema test.
+- `python3 scripts/ci/test_server_core_recreation.py` uses the production images
+  already built for the current revision. It starts the actual TimescaleDB,
+  backend, initializer, collector, and frontends; verifies clean worker exit and
+  restart, a new worker start time and live heartbeat, image revisions, and retained database
+  data across recreation. Provider enrollment and lifecycle execution are
+  disabled, runtime egress is blocked by an internal network, and host ports and
+  Docker socket mounts are removed. Observability, broker transport, active
+  provider-stream drain, and host disk UUID admission remain outside this smoke.
+
+CI runs both rehearsals. Existing collector contract tests separately exercise
+lease release, finalization, and restart recovery. Neither rehearsal proves
+that an arbitrary future schema transition or real provider reconnect will be
+safe. Those require release-specific review and bounded post-cutover checks.
+
+For the first host cutover, merge the reviewed implementation, wait for its
+exact develop commit's CI, verify the host's actual schema/storage compatibility,
+and deploy that commit through the existing operator procedure. The new command
+is available once that release is installed. Verify collector heartbeats and
+actual acquisition progress after cutover. Subsequent compatible updates can use
+`promote`; asking an agent to deploy remains a supported way to initiate it.
+
 ## Full Service Surface
 
 | Service | Purpose | Host access |

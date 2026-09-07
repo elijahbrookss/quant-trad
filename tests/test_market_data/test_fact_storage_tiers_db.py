@@ -511,7 +511,9 @@ def test_prefix_metadata_cutover_is_explicit_atomic_and_preserves_ready_facts(st
 
 
 def test_offline_cutover_dry_run_and_resume_preserve_every_field(storage):
-    from scripts.db.manual_migration_fact_storage_tiers_v1 import SOURCE, run_cutover
+    from scripts.db.manual_migration_fact_storage_tiers_v1 import (
+        BULK_SECONDARY_INDEXES, SOURCE, SOURCE_PAGE_INDEX, run_cutover,
+    )
     _ingest(storage)
     corrected = replace(storage.fact, payload={**storage.fact.payload, "rate": "0.2", "raw_rate": "0.2"},
                         accepted_at=BASE + timedelta(seconds=1), known_at=BASE + timedelta(seconds=1))
@@ -531,10 +533,18 @@ def test_offline_cutover_dry_run_and_resume_preserve_every_field(storage):
     first = run_cutover(engine, execute=True, writers_stopped=True, batch_rows=1, max_pages=1)
     assert first["status"] == "copying"
     assert first["evidence"]["copied_rows"] == 1
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT to_regclass(:name)"
+        ), {"name": f"qt_fact_storage_cutover_v1.{SOURCE_PAGE_INDEX}"}).scalar_one() is not None
+        for index in BULK_SECONDARY_INDEXES:
+            assert conn.execute(text(
+                "SELECT to_regclass(:name)"
+            ), {"name": f"market.{index.name}"}).scalar_one() is None
     interrupted = Database(storage.dsn)
     try:
         assert interrupted.ensure_schema() is False
-        assert "cutover is not ready" in str(interrupted.last_error)
+        assert "manual_migration_fact_storage_tiers_v1.py" in str(interrupted.last_error)
     finally:
         interrupted._reset_engine()
     with pytest.raises(DBAPIError, match="immutable"):
@@ -548,6 +558,10 @@ def test_offline_cutover_dry_run_and_resume_preserve_every_field(storage):
     assert final["evidence"]["verified_rows"] == 2
     assert run_cutover(engine, execute=True, writers_stopped=True) == final
     with engine.connect() as conn:
+        for index in BULK_SECONDARY_INDEXES:
+            assert conn.execute(text(
+                "SELECT to_regclass(:name)"
+            ), {"name": f"market.{index.name}"}).scalar_one() is not None
         target_after = conn.execute(text(
             "SELECT to_jsonb(facts)-'storage_day' FROM market.fact_rows facts ORDER BY revision"
         )).scalars().all()

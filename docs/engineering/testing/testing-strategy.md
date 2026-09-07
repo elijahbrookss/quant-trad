@@ -47,7 +47,7 @@ Normal validation is split by the boundary a test actually needs:
 | Ordinary Python | `make backend-check` | Non-database contracts, domain behavior, services, CLI, runtime, reporting, and configuration |
 | PostgreSQL / TimescaleDB | `./scripts/ci/run_test_suite.sh db` | Tests marked `db`, using only the repository's disposable test stack |
 | Frontend | `make frontend-check` | Node-native and JSX tests plus the production Vite build |
-| Deployment configuration | the `deployment-contract` commands in [`ci-test-topology.md`](ci-test-topology.md) | Shell, Compose, source binding, and image construction without deployment |
+| Deployment configuration | the `deployment-contract` commands in [`ci-test-topology.md`](ci-test-topology.md) | Shell, Compose, source binding, image construction, and isolated QT core recreation |
 
 `make check` combines repository hygiene, documentation validation, and the
 ordinary Python boundary. `make check-all` adds the supported frontend tests and

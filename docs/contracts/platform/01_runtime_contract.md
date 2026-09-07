@@ -14,6 +14,14 @@ All derived outputs should follow one timeline:
 8. publish canonical decision artifacts from the same bar result
 9. build downstream read models and downstream rejection artifacts from the same bar result
 
+The shared candle conversion preserves canonical `known_at` independently of
+its market interval. Non-candle context reads for the bar runtime use candle
+availability (or the interval end when historical input supplies no availability
+field), not the interval start. The existing close-price bot execution model
+rejects candles whose availability is later than their close: it cannot claim a
+retroactive close fill. Delayed analytical Check evaluation is a separate
+registered capability; it does not add an asynchronous bot execution model.
+
 ## Instrument Source vs Execution Semantics
 
 `instrument_type` is canonical source metadata from the instrument record.

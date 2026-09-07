@@ -498,6 +498,8 @@ def plan_research_check(
         outcome_tail_seconds,
         invalidation_max_bars * timeframe_seconds,
     )
+    decision_price_tail_bars = int(declaration.get("decision_price_tail_bars") or 0)
+    outcome_tail_seconds += decision_price_tail_bars * timeframe_seconds
     configured_warmup = int(scope.get("warmup_bars") or 0)
     feature_lookback = int(declaration.get("feature_lookback_bars") or 0)
     warmup_bars = max(
@@ -728,6 +730,7 @@ def plan_research_check(
             ),
             "bars": (
                 entry_lag_bars
+                + decision_price_tail_bars
                 + max(max(horizons, default=0), invalidation_max_bars)
                 if horizon_kind == "bars"
                 else None
