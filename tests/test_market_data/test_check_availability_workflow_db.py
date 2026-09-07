@@ -75,28 +75,44 @@ def test_availability_check_freezes_runs_and_replays_without_provider_calls(monk
     claim = market_structure_repository.claim_stream(
         definition_id=definition_id, owner_id=token, lease_seconds=600, bounded=True,
     )
-    # One unchanged book snapshot supports the following fixed-cadence samples.
-    snapshot_time = _BASE - timedelta(seconds=61)
     spool = DurableRawSpoolSegment(
         root=tmp_path / "spool", definition_id=definition_id,
         session_id=claim.session_id, connection_epoch=0, segment_ordinal=0,
     )
-    message = ProviderRawMessage.build(
-        provider=source.provider, venue=source.venue, stream_session_id=claim.session_id,
-        connection_epoch=0, receive_ordinal=1, received_at=_iso(snapshot_time),
-        raw_frame=json.dumps({
-            "channel": "l2_data", "timestamp": _iso(snapshot_time), "sequence_num": 1,
-            "events": [{"type": "snapshot", "product_id": "BTC-USD", "updates": [
-                {"side": "bid", "price_level": "99", "new_quantity": "2", "event_time": _iso(snapshot_time)},
-                {"side": "offer", "price_level": "101", "new_quantity": "3", "event_time": _iso(snapshot_time)},
-            ]}],
-        }),
-    )
-    raw = RawStreamRecord.from_provider_message(
-        message, definition_id=definition_id, spool_segment_id=spool.spool_segment_id,
-        provider_product_id="BTC-USD", requested_channel="level2", observed_channel="level2",
-    )
-    spool.append(raw)
+    books = []
+    # Continuous one-second book observations cover the sixty-second lookback.
+    for offset in range(-60, 180):
+        ordinal = offset + 61
+        end = _BASE + timedelta(seconds=offset + 1)
+        source_time = end - timedelta(milliseconds=500)
+        message = ProviderRawMessage.build(
+            provider=source.provider, venue=source.venue, stream_session_id=claim.session_id,
+            connection_epoch=0, receive_ordinal=ordinal, received_at=_iso(source_time),
+            raw_frame=json.dumps({
+                "channel": "l2_data", "timestamp": _iso(source_time), "sequence_num": ordinal,
+                "events": [{"type": "snapshot" if ordinal == 1 else "update",
+                            "product_id": "BTC-USD", "updates": [
+                    {"side": "bid", "price_level": "99", "new_quantity": "2", "event_time": _iso(source_time)},
+                    {"side": "offer", "price_level": "101", "new_quantity": "3", "event_time": _iso(source_time)},
+                ]}],
+            }),
+        )
+        raw = RawStreamRecord.from_provider_message(
+            message, definition_id=definition_id, spool_segment_id=spool.spool_segment_id,
+            provider_product_id="BTC-USD", requested_channel="level2", observed_channel="level2",
+        )
+        spool.append(raw)
+        position = BookSourcePosition(
+            definition_id=definition_id, session_id=claim.session_id, connection_epoch=0,
+            provider_product_id="BTC-USD", provider_sequence_num=ordinal, receive_ordinal=ordinal,
+            event_ordinal=0,
+        )
+        record = _bbo_record(bucket_end=end, known_at=end + timedelta(seconds=7), commit_seq=ordinal)
+        feature = replace(
+            decode_bbo_feature_record(record).fact,
+            series_id=book_series, source_l2_series_id=l2_series, source_position=position,
+        )
+        books.append(canonicalize_bbo_feature(feature, source=source))
     spool.seal()
     encoded, acknowledgement, archived_records = publish_spool_archive(
         spool, object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
@@ -105,22 +121,6 @@ def test_availability_check_freezes_runs_and_replays_without_provider_calls(monk
     manifest = market_structure_repository.commit_archive(
         claim, encoded=encoded, acknowledgement=acknowledgement, records=archived_records,
     )
-    position = BookSourcePosition(
-        definition_id=definition_id, session_id=claim.session_id, connection_epoch=0,
-        provider_product_id="BTC-USD", provider_sequence_num=1, receive_ordinal=1,
-        event_ordinal=0,
-    )
-    books = []
-    # Continuous one-second coverage includes the declared sixty-second lookback.
-    for offset in range(-60, 180):
-        end = _BASE + timedelta(seconds=offset + 1)
-        record = _bbo_record(bucket_end=end, known_at=end + timedelta(seconds=7), commit_seq=1)
-        feature = replace(
-            decode_bbo_feature_record(record).fact,
-            series_id=book_series, source_l2_series_id=l2_series,
-            source_position=position, source_effective_at=snapshot_time,
-        )
-        books.append(canonicalize_bbo_feature(feature, source=source))
     market_data_repo.ingest_facts(
         series_id=book_series, source_id=source_id, facts=books,
         request={"fixture": token},
@@ -152,6 +152,10 @@ def test_availability_check_freezes_runs_and_replays_without_provider_calls(monk
     }
     prepared = service.prepare_research_check_evidence(payload)
     assert prepared["status"] == "frozen", prepared
+    frozen = market_data_repo.get_dataset(prepared["preparation"]["dataset"]["dataset_id"])
+    assert {ref["raw_archive_manifest_id"] for ref in frozen.metadata["archive_refs"]} == {
+        manifest.manifest_id,
+    }
     run = service.run_research_check(prepared["next_request"])
     assert run["replayable"] is True
     assert run["evidence"]["input_binding"]["provider_access"] == "disabled"

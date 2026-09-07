@@ -319,6 +319,6 @@ list. Unresolved samples retain null decision and outcome-price timestamps.
 
 The disposable DB regression in
 `tests/test_market_data/test_check_availability_workflow_db.py` exercises native
-preparation, freezing, Check execution, and replay, including a mutable revision
+preparation, archived book lineage, freezing, Check execution, and replay, including a mutable revision
 after freezing. The test image verifies its source tree using the same provenance
 attestation as the runtime image; the Check's provenance checks remain active.
