@@ -2,6 +2,7 @@
 """Run built QT core images on isolated storage with provider egress disabled."""
 from __future__ import annotations
 import argparse
+from datetime import datetime
 import json
 import re
 import os
@@ -81,18 +82,24 @@ def main():
             return run(compose + ['ps', '--all', '--quiet', service], env=env).stdout.strip()
         def database(sql):
             return run(compose + ['exec', '-T', 'tsdb', 'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'quanttrad', '-d', 'quanttrad', '-Atc', sql], env=env).stdout.strip()
+        def worker_state():
+            probe = "from portal.backend.workers.market_data_collector_health import live_worker_for_host; import json; row = live_worker_for_host(); print(json.dumps({key: row[key].isoformat() for key in ('started_at', 'heartbeat_at')}))"
+            payload = run(compose + ['exec', '-T', 'market-data-collector', 'python', '-c', probe], env=env).stdout.strip().splitlines()[-1]
+            return {key: datetime.fromisoformat(value) for key, value in json.loads(payload).items()}
         try:
             run(compose + ['up', '--detach', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '360'], env=env)
             database('CREATE TABLE public.qt_deployment_rehearsal (value text PRIMARY KEY); INSERT INTO public.qt_deployment_rehearsal VALUES (\'retained\')')
-            first_health = run(compose + ['exec', '-T', 'market-data-collector', 'python', '-m', 'portal.backend.workers.market_data_collector_health'], env=env).stdout.strip()
+            first_health = worker_state()
             run(compose + ['stop', 'market-data-collector'], env=env)
             old = cid('market-data-collector')
             assert run(['docker', 'inspect', '--format', '{{.State.ExitCode}}', old], env=env).stdout.strip() == '0'
             logs = run(['docker', 'logs', '--tail', '200', old], env=env)
             assert 'market_data_collector_stopped' in logs.stdout + logs.stderr
             run(compose + ['up', '--detach', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '360'], env=env)
-            second_health = run(compose + ['exec', '-T', 'market-data-collector', 'python', '-m', 'portal.backend.workers.market_data_collector_health'], env=env).stdout.strip()
-            assert first_health != second_health, 'expected a fresh worker identity after recreation'
+            second_health = worker_state()
+            assert cid('market-data-collector') != old, 'expected a recreated collector container'
+            assert second_health['started_at'] > first_health['started_at']
+            assert second_health['heartbeat_at'] >= second_health['started_at']
             assert database('SELECT value FROM public.qt_deployment_rehearsal') == 'retained'
             assert run(['docker', 'inspect', '--format', '{{.State.ExitCode}}', cid('initialize')], env=env).stdout.strip() == '0'
             for service in ('backend', 'market-data-collector', 'frontend', 'frontend-v2'):

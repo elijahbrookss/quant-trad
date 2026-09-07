@@ -88,7 +88,7 @@ CMD ["python", "/app/fixture.py"]
         for service in SERVICES:
             item = dict(image=f'{project}-{service}:${{QT_RELEASE_REVISION}}', build=dict(context='..', args=dict(QT_SOURCE_REVISION='${QT_RELEASE_REVISION}', QT_SOURCE_TREE_HASH='${QT_SOURCE_TREE_HASH}')), environment={'FIXTURE_SERVICE': service}, volumes=['proof:/proof'], stop_grace_period='10s', init=True)
             if service != 'initialize':
-                item['healthcheck'] = dict(test=['CMD', 'test', '-f', '/tmp/ready'], interval='1s', timeout='1s', retries=2)
+                item['healthcheck'] = dict(test=['CMD', 'test', '-f', '/tmp/ready'], interval='1s', timeout='2s', start_period='30s', retries=10)
             services[service] = item
         for service in ('initialize', 'market-data-collector', 'docker-stats'):
             services[service]['image'] = services['backend']['image']

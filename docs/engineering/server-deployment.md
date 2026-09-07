@@ -115,7 +115,7 @@ Two repeatable rehearsals use unique Docker projects and disposable volumes:
 - `python3 scripts/ci/test_server_core_recreation.py` uses the production images
   already built for the current revision. It starts the actual TimescaleDB,
   backend, initializer, collector, and frontends; verifies clean worker exit and
-  restart, a new live worker identity, image revisions, and retained database
+  restart, a new worker start time and live heartbeat, image revisions, and retained database
   data across recreation. Provider enrollment and lifecycle execution are
   disabled, runtime egress is blocked by an internal network, and host ports and
   Docker socket mounts are removed. Observability, broker transport, active
