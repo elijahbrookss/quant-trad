@@ -111,3 +111,40 @@ def test_runtime_and_preview_paths_share_strict_builder() -> None:
             match="field=close reason=not_numeric",
         ):
             builder(frame)
+
+
+def test_candle_conversion_preserves_historical_availability_independent_of_import() -> None:
+    opened = pd.Timestamp("2026-04-01T12:00:00Z")
+    available = pd.Timestamp("2026-04-01T12:01:07Z")
+    frame = pd.DataFrame([{
+        "open": 100, "high": 102, "low": 99, "close": 101,
+        "known_at": available, "accepted_at": pd.Timestamp("2026-09-01T00:00:00Z"),
+    }], index=[opened])
+    candle = build_candles_from_dataframe(frame, timeframe="1m")[0]
+    assert candle.time == opened.to_pydatetime()
+    assert candle.known_at == available.to_pydatetime()
+    assert candle.end == (opened + pd.Timedelta(minutes=1)).to_pydatetime()
+    frame["accepted_at"] = pd.Timestamp("2026-10-01T00:00:00Z")
+    assert build_candles_from_dataframe(frame, timeframe="1m")[0] == candle
+
+
+@pytest.mark.parametrize("known_at", ["bad-timestamp", "2025-01-01T00:00:30Z"])
+def test_candle_conversion_rejects_invalid_availability(known_at) -> None:
+    frame = _frame([{"open": 1, "high": 2, "low": 0, "close": 1, "known_at": known_at}])
+    with pytest.raises(CandleFrameValidationError, match="field=known_at"):
+        build_candles_from_dataframe(frame, timeframe="1m")
+
+
+def test_runtime_context_uses_close_and_rejects_unsupported_late_execution() -> None:
+    from types import SimpleNamespace
+    from engines.bot_runtime.runtime.mixins.setup_prepare import RuntimeSetupPrepareMixin
+
+    calls = []
+    runtime = SimpleNamespace(_market_data_inputs_for_decision=lambda state, time: calls.append(time) or {})
+    candle = build_candles_from_dataframe(_frame([{"open": 1, "high": 2, "low": 0, "close": 1}]), timeframe="1m")[0]
+    RuntimeSetupPrepareMixin._market_data_inputs_for_candle(runtime, object(), candle)
+    assert calls == [candle.end]
+    candle.known_at = candle.end + pd.Timedelta(seconds=7)
+    with pytest.raises(RuntimeError, match="runtime_delayed_candle_unsupported"):
+        RuntimeSetupPrepareMixin._market_data_inputs_for_candle(runtime, object(), candle)
+    assert len(calls) == 1
