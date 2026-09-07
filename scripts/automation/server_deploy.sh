@@ -61,6 +61,8 @@ Usage:
   scripts/automation/server_deploy.sh apply-alerts
   scripts/automation/server_deploy.sh preview-alerts
   scripts/automation/server_deploy.sh restore-alerts
+  scripts/automation/server_deploy.sh promote <full-commit> --compatible-with <current-full-commit>
+  scripts/automation/server_deploy.sh recover
   scripts/automation/server_deploy.sh deploy [git-ref]
   scripts/automation/server_deploy.sh rollback [git-ref]
   scripts/automation/server_deploy.sh config
@@ -72,6 +74,9 @@ Usage:
   scripts/automation/server_deploy.sh logs [service]
   scripts/automation/server_deploy.sh stop
 
+Promote requires successful develop push CI and explicit rollback compatibility.
+It restores pinned local images on failure; recover resumes an interrupted recovery.
+Deploy is the operator escape hatch for initial installs and reviewed cutovers.
 Deploy promotes one exact commit. Rollback without an argument promotes the
 previously recorded commit. The default stack is the complete single-node
 application and observability surface. Set QT_SINGLE_NODE_PROFILES=broker to
@@ -342,7 +347,8 @@ select_release() {
   local requested_ref="${1:-}"
   require_clean_checkout
   if test -n "$requested_ref"; then
-    if git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
+    if test "${reuse_release_images:-false}" != "true" \
+      && git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
       git -C "$repo_root" fetch --prune origin
     fi
     local release_commit
@@ -731,15 +737,23 @@ restore_alerting_preview() {
 deploy_release() {
   local requested_ref="${1:-}"
   require_no_alert_preview
+  if test -f "$state_root/promotion.env" && test "${promotion_in_progress:-false}" != "true"; then
+    die "an unfinished promotion is recorded; run recover before another deployment"
+  fi
   require_runtime
   select_release "$requested_ref"
   echo "Deploying Quant-Trad revision $QT_RELEASE_REVISION"
   echo "Source tree hash $QT_SOURCE_TREE_HASH"
   compose config --quiet
-  build_release_images
+  if test "${reuse_release_images:-false}" != "true"; then
+    build_release_images
+  fi
   # Building can take minutes. Recheck before replacing any running services.
   validate_storage_root
-  compose up --detach --remove-orphans --wait \
+  if test "${promotion_in_progress:-false}" = "true" && test "${reuse_release_images:-false}" != "true"; then
+    printf 'activation_started=true\n' >>"$state_root/promotion.env"
+  fi
+  compose up --detach --remove-orphans --wait --no-build --pull never \
     --wait-timeout "${QT_DEPLOY_WAIT_SECONDS:-600}"
   verify_initializer
   verify_release_image backend
@@ -748,15 +762,132 @@ deploy_release() {
   verify_release_image frontend
   verify_release_image frontend-v2
   compose exec -T backend /app/scripts/qt data collectors fleet >/dev/null
-  record_release
   compose ps
+  record_release
   show_release
+}
+
+
+# All server mutations share one host lock, including operator escape hatches.
+# The descriptor remains open in child processes throughout promotion/recovery.
+acquire_deployment_lock() {
+  require_command flock
+  [[ "$state_root" = /* && "$state_root" != / ]] || die "invalid deployment state directory"
+  mkdir -p "$state_root"
+  exec 9>"$state_root/deployment.lock"
+  flock --exclusive --nonblock 9 || die "another server operation holds the deployment lock"
+}
+
+promotion_value() {
+  sed -n "s/^$1=//p" "$state_root/promotion.env" | tail -n 1
+}
+
+prepare_recovery() {
+  local temporary
+  temporary="$(mktemp "$state_root/recovery.XXXXXX")"
+  chmod 0600 "$temporary"
+  compose config --format json >"$temporary"
+  python3 "$repo_root/scripts/automation/pin_deploy_recovery.py" "$temporary"
+  mv "$temporary" "$state_root/recovery.compose.json"
+}
+
+recover_promotion() {
+  test -f "$state_root/promotion.env" || die "no unfinished promotion is recorded"
+  local previous candidate activation
+  previous="$(promotion_value previous_revision)"
+  candidate="$(promotion_value candidate_revision)"
+  activation="$(promotion_value activation_started)"
+  [[ "$activation" = true || "$activation" = false ]] || die "invalid promotion activation state"
+  [[ "$previous" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]] \
+    || die "invalid promotion recovery state"
+  test -f "$state_root/recovery.compose.json" || die "recovery Compose snapshot is missing"
+  echo "event=promotion_recovery_started candidate=$candidate previous=$previous" >&2
+  # Run outside a shell conditional: Bash otherwise disables errexit inside
+  # called functions and can record a failed deployment as successful.
+  (
+    set -e
+    promotion_in_progress=true
+    reuse_release_images=true
+    compose_file="$state_root/recovery.compose.json"
+    alerts_enabled=false
+    # Select locally before consulting source-owned runtime admission helpers.
+    select_release "$previous"
+    if test "$activation" = "true"; then
+      deploy_release "$previous"
+    fi
+    # Pre-activation failure restores only the checkout, without collector gaps.
+  ) &
+  local child=$!
+  if wait "$child"; then
+    rm -f -- "$state_root/promotion.env"
+    echo "event=promotion_recovered candidate=$candidate restored=$previous" >&2
+  else
+    die "recovery failed; evidence retained in $state_root; repair the cause and run recover"
+  fi
+}
+
+promote_release() {
+  local candidate="${1:-}" flag="${2:-}" previous="${3:-}"
+  [[ "$candidate" =~ ^[0-9a-f]{40}$ && "$previous" =~ ^[0-9a-f]{40}$ ]] \
+    && test "$flag" = --compatible-with && test "$#" = 3 \
+    || die "promote requires <full-commit> --compatible-with <current-full-commit>"
+  test ! -f "$state_root/promotion.env" || die "unfinished promotion; run recover first"
+  require_no_alert_preview
+  require_runtime
+  compute_release_material
+  test "$(state_value current_revision)" = "$previous" \
+    && test "$QT_RELEASE_REVISION" = "$previous" \
+    || die "compatibility approval must match both the recorded release and clean checkout"
+  test "$candidate" != "$previous" || die "candidate is already deployed"
+  require_command gh
+  git -C "$repo_root" fetch --prune origin
+  git -C "$repo_root" merge-base --is-ancestor "$candidate" origin/develop \
+    || die "candidate must be a commit on origin/develop"
+  python3 "$repo_root/scripts/automation/check_release_ci.py" "$candidate"
+  # Capture the currently running images before any pull can move a tag.
+  verify_initializer
+  for service in backend market-data-collector docker-stats frontend frontend-v2; do
+    verify_release_image "$service"
+  done
+  prepare_recovery
+  local temporary
+  temporary="$(mktemp "$state_root/promotion.XXXXXX")"
+  chmod 0600 "$temporary"
+  printf 'previous_revision=%s\ncandidate_revision=%s\nactivation_started=false\n' "$previous" "$candidate" >"$temporary"
+  mv "$temporary" "$state_root/promotion.env"
+  echo "event=promotion_started candidate=$candidate previous=$previous"
+  (
+    set -e
+    promotion_in_progress=true
+    deploy_release "$candidate"
+  ) &
+  local child=$!
+  if wait "$child"; then
+    rm -f -- "$state_root/promotion.env"
+    echo "event=promotion_succeeded revision=$candidate"
+  else
+    echo "event=promotion_failed candidate=$candidate previous=$previous" >&2
+    recover_promotion
+    die "candidate failed; previous release restored"
+  fi
 }
 
 action="${1:-}"
 shift || true
 
 case "$action" in
+  deploy|rollback|promote|recover|apply-alerts|preview-alerts|restore-alerts|stop|qt|credentials-coinbase)
+    acquire_deployment_lock
+    ;;
+esac
+
+case "$action" in
+  promote)
+    promote_release "$@"
+    ;;
+  recover)
+    recover_promotion
+    ;;
   init-env)
     initialize_operator_environment
     ;;

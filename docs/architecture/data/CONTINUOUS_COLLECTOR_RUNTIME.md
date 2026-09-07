@@ -413,3 +413,12 @@ Safety state is a database projection derived from append-only warning, halt,
 and acknowledgement events. The applicable `global:*`, fleet, and stream scopes
 are checked on every supervisor pass, so process/container restart cannot clear
 a halt. A distinct operator acknowledgement is required to release a scope.
+
+## Server Promotion Evidence
+
+Compatible server updates may use the explicitly triggered, CI-gated promotion
+helper described in [ADR 0068](../decisions/0068-rehearse-explicit-server-promotion.md).
+The actual-core disposable rehearsal verifies clean collector stop and renewed
+heartbeat with enrollment disabled. It does not certify active provider-stream
+continuity; collector leases, finalizers, gap evidence, and release-specific
+post-cutover acquisition checks retain their existing authority.
