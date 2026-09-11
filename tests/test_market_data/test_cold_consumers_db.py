@@ -41,9 +41,17 @@ def test_collector_recent_facts_rank_latest_active_revisions_across_series(stora
     _ingest(storage, dropped)
     _ingest(storage, replace(dropped, state="invalidated",
                             accepted_at=BASE + timedelta(seconds=50), known_at=BASE + timedelta(seconds=50)))
+    from portal.backend.db import InstrumentRecord
+
+    with storage.database.session() as session:
+        session.add(InstrumentRecord(
+            id="storage-fixture-other", datasource="TEST", exchange="ISOLATED",
+            symbol="ETH-TEST", instrument_type="spot", can_short=False,
+            short_requires_borrow=False, has_funding=False, extra_metadata={},
+        ))
     other = storage.repo.register_series(
-        instrument_id="storage-fixture", fact_type=storage.fact.fact_type,
-        timeframe_seconds=60, contract_version="derivatives.funding_rate.v2",
+        instrument_id="storage-fixture-other", fact_type=storage.fact.fact_type,
+        timeframe_seconds=None, contract_version="derivatives.funding_rate.v2",
     )
     for seconds in (10, 20):
         storage.repo.ingest_facts(
