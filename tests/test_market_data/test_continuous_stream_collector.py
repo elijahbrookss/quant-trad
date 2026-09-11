@@ -489,8 +489,9 @@ class _TradeFinalizationRepository(_RecoveryRepository):
         return f"coverage-{len(self.coverages)}"
 
 
+@pytest.mark.parametrize("terminal", [False, True])
 def test_continuous_trade_finalizer_quarantines_one_batch_and_invalidates_coverage(
-    tmp_path: Path,
+    tmp_path: Path, terminal: bool,
 ) -> None:
     repository = _TradeFinalizationRepository()
     collector = ContinuousMarketStructureCollector(repository=repository)
@@ -621,9 +622,9 @@ def test_continuous_trade_finalizer_quarantines_one_batch_and_invalidates_covera
         checkpoint=_SegmentCheckpoint(
             segment=segment,
             analysis=analyzer.finalize(),
-            terminal=True,
+            terminal=terminal,
             terminal_reason="test_stop",
-            closing_session_event_id="stop-event",
+            closing_session_event_id="stop-event" if terminal else None,
         ),
         object_store=FilesystemRawArchiveObjectStore(tmp_path / "objects"),
         temporary_root=tmp_path / "tmp",
@@ -645,7 +646,13 @@ def test_continuous_trade_finalizer_quarantines_one_batch_and_invalidates_covera
     assert repository.coverages[-1].gap_quality_event_ids == ("quality-1",)
     assert counters["trade_rejected"] == 2
     assert counters["trade_inserted"] == 2
-    assert states == {}
+    assert repository.coverages[-1].closing_effective_at == (
+        repository.coverages[-1].last_effective_at
+    )
+    assert repository.coverages[-1].closing_evidence["reason"] == (
+        "test_stop" if terminal else "projection_invalidated"
+    )
+    assert (states == {}) is terminal
     assert not segment.sealed_path.exists()
 
 

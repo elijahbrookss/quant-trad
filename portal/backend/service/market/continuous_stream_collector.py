@@ -2467,7 +2467,10 @@ class ContinuousStreamRuntime:
                     else CoverageStatus.OPEN_VALID
                 )
             )
-            closing = checkpoint.terminal
+            # Invalid coverage is closed at the last mapped raw evidence even
+            # when transport remains open. Projection rejection must not force
+            # a stream restart or invent a transport-disconnect event.
+            closing = checkpoint.terminal or status is CoverageStatus.INVALID
             coverage = TradeCoverageIntervalVersion(
                 interval_id=coverage_interval_id,
                 revision=state.coverage_revision,
@@ -2505,7 +2508,11 @@ class ContinuousStreamRuntime:
                 },
                 closing_evidence=(
                     {
-                        "reason": checkpoint.terminal_reason,
+                        "reason": (
+                            checkpoint.terminal_reason
+                            if checkpoint.terminal
+                            else "projection_invalidated"
+                        ),
                         "all_raw_records_mapped": True,
                     }
                     if closing

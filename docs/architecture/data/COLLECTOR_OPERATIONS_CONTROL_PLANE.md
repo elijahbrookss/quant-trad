@@ -162,6 +162,12 @@ The common recent-activity contract maps evidence to stable event kinds such as
 `gap_opened`, `gap_recovered`, `ownership_acquired`, `restart`, `pause`, and
 `resume`. Each normalized event retains its authoritative evidence reference.
 
+The event and gap catalogs resolve the requested operational definition directly
+and query only its bounded evidence sources. They do not build fleet/detail
+projections or hydrate recent Facts before returning history. Unknown or
+unregistered definitions still fail with the same collector-not-found contract;
+source normalization, ordering, and output limits are unchanged.
+
 Operation results are separate immutable audit records. They never replace
 runtime attempts, session events, gaps, or Facts.
 
