@@ -1268,6 +1268,29 @@ and retry/backoff measurements before enabling unattended retention. Expensive
 file reads stay outside the exclusive phase; no freshness checks are removed to
 make the benchmark pass.
 
+### Retention family discovery
+
+Retention discovers the Fact families present on a storage day with successive
+indexed seeks on `market.fact_versions(storage_day, fact_type)`. It performs one
+seek per distinct family rather than aggregating every Fact in the day. The
+257th family remains an explicit overflow witness for the 256-family budget;
+families are read from the current database snapshot, never a cached registry.
+The planner and the execution-time hot-window guard use the same discovery
+query. Existing statement and total planning budgets remain in force.
+
+Clean schemas include `ix_market_fact_storage_family`. Existing deployments
+must apply `scripts/db/manual_add_fact_storage_family_index_v1.sql` outside a
+transaction before starting this application version. Startup verifies the
+index is valid, ready, nonpartial, and has the expected B-tree keys; it does not
+create or repair an index on an existing store. The operator script uses
+concurrent creation so writers can continue, but disk/WAL headroom and build
+load still require an operator check. An interrupted or incompatible same-name
+index fails verification and requires explicit investigation.
+
+This bounds family discovery only. Archive staging, dependency verification,
+reclamation, and permanent-header growth still need independent capacity and
+throughput measurements before enabling execution.
+
 ### Explicit Storage Cutover
 
 `scripts/db/manual_migration_fact_storage_tiers_v1.py` is an offline operator

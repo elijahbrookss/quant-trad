@@ -69,3 +69,61 @@ def test_real_retention_inventory_is_read_only_bounded_and_resumes_after_cursor(
     assert final["metadata_eligible_reclaim_bytes"] > 0
     assert final["execution_available"] is True and final["execution_enabled"] is False
     assert _state(storage)[0]["state"] == "verified"  # Not reclaimed by planning.
+
+
+def test_family_inventory_seeks_past_duplicate_facts_and_bounds_overflow(storage):
+    from portal.backend.service.storage.repos.fact_retention import FACT_STORAGE_FAMILIES_SQL
+
+    # Exercise the production query against a large disposable relation with the
+    # same search keys. A million duplicate rows must not turn family discovery
+    # into a million-row scan.
+    query = FACT_STORAGE_FAMILIES_SQL.replace("market.fact_versions", "family_inventory_fixture")
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE TEMP TABLE family_inventory_fixture (
+                storage_day date NOT NULL, fact_type varchar(64) NOT NULL
+            ) ON COMMIT DROP
+        """))
+        session.execute(text("""
+            INSERT INTO family_inventory_fixture
+            SELECT :day, 'market.trade' FROM generate_series(1, 1000000)
+        """), {"day": storage.today})
+        session.execute(text("""
+            INSERT INTO family_inventory_fixture VALUES
+                (:day, 'market.l2_book'), (:day, 'derivatives.funding_rate')
+        """), {"day": storage.today})
+        session.execute(text("""
+            CREATE INDEX family_inventory_fixture_keys
+            ON family_inventory_fixture(storage_day, fact_type)
+        """))
+        session.execute(text("ANALYZE family_inventory_fixture"))
+        result = session.execute(text(query), {"day": storage.today}).scalars().all()
+        assert result == ["derivatives.funding_rate", "market.l2_book", "market.trade"]
+        assert session.execute(
+            text(query), {"day": storage.today - timedelta(days=1)}
+        ).scalars().all() == []
+        plan = session.execute(
+            text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query),
+            {"day": storage.today},
+        ).scalar_one()
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        scans = [node for node in nodes(plan[0]["Plan"])
+                 if node.get("Relation Name") == "family_inventory_fixture"]
+        assert scans and all("Index" in node["Node Type"] for node in scans)
+        assert sum(node["Actual Rows"] * node["Actual Loops"] for node in scans) < 20
+
+        # New families are visible in the next read, including an explicit
+        # overflow witness. No cached catalog can omit a later family.
+        session.execute(text("""
+            INSERT INTO family_inventory_fixture
+            SELECT :day, 'fixture.type' || lpad(n::text, 3, '0')
+            FROM generate_series(1, 300) n
+        """), {"day": storage.today})
+        result = session.execute(text(query), {"day": storage.today}).scalars().all()
+        assert len(result) == 257
+        assert result == sorted(set(result))
