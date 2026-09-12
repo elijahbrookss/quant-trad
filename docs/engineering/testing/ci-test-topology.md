@@ -16,7 +16,7 @@ either branch.
 
 ## Current Workflow Topology
 
-The workflow defines exactly four jobs. None declares `needs`, so GitHub may run
+The workflow defines exactly five jobs. None declares `needs`, so GitHub may run
 them concurrently. The numbering below is for documentation only.
 
 | # | Job ID | Primary boundary |
@@ -25,6 +25,7 @@ them concurrently. The numbering below is for documentation only.
 | 2 | `frontend` | Current frontend test command plus production asset build |
 | 3 | `deployment-contract` | Server shell/Compose validation and attested production-image builds |
 | 4 | `clean-database-bootstrap` | Clean-schema bootstrap followed by PostgreSQL-marked contract tests |
+| 5 | `deployment-rehearsal` | Real deployment controller with synthetic Docker services and injected rollout failure |
 
 ### 1. `pr-suite`
 
@@ -81,9 +82,14 @@ The workflow steps are:
    revision/tree hash and building `tsdb`, `backend`, `frontend`, and
    `frontend-v2` from `docker/docker-compose.server.yml`.
 
-This job validates configuration and image construction. It does not start the
-composed platform, deploy to a server, exercise health checks, or perform a
-rollback.
+The job also proves Grafana email delivery and physical storage alert queries,
+then runs `python3 scripts/ci/test_server_core_recreation.py` after building.
+That smoke starts actual QT core images with disposable PostgreSQL/archive
+storage, checks initialization and health, cleanly stops the collector, and
+recreates services while verifying retained data and a fresh worker heartbeat.
+Enrollment is disabled and the runtime network is internal. It does not contact
+providers, deploy a host, mount the Docker socket into the backend, or validate
+an arbitrary historical schema upgrade.
 
 ### 4. `clean-database-bootstrap`
 
@@ -261,3 +267,14 @@ clean-bootstrap invocation.
 - Update this document whenever workflow jobs or their step boundaries change.
 
 Do not infer full runtime, deployment, or production coverage from a job name. Read the commands and environment of the exact workflow step.
+
+### 5. `deployment-rehearsal`
+
+Runner: `ubuntu-latest`, with a 15-minute timeout. After checkout it runs
+`python3 scripts/ci/test_server_promotion.py`. The production deployment helper
+uses real Git, Docker Compose, images, health gates, locks, and isolated volumes
+with tiny synthetic services and local GitHub API responses. It verifies CI
+rejection, compatible promotion, failed rollout recovery, synthetic worker
+drain/restart, and volume continuity. It does not replace the real-QT core smoke
+or the PostgreSQL and collector contract suites. Reproduce it with the same
+command on a Docker-enabled local machine; no provider credentials are needed.

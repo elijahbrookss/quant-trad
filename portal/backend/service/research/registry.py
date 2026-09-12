@@ -266,6 +266,28 @@ def _register_event_fact_family() -> None:
     evaluator = EventFactEvaluator()
     CHECK_REGISTRY.register_evaluator(legacy_evaluator)
     CHECK_REGISTRY.register_evaluator(evaluator)
+    availability_evaluator = EventFactEvaluator(
+        version="4",
+        result_schema_version="event_fact_analysis_result.v4",
+        availability_trigger_enabled=True,
+    )
+    CHECK_REGISTRY.register_evaluator(availability_evaluator)
+    CHECK_REGISTRY.register_definition(
+        CheckDefinition(
+            schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+            definition_id=EVENT_FACT_ANALYSIS,
+            definition_version="5",
+            evaluator_id=availability_evaluator.evaluator_id,
+            evaluator_version=availability_evaluator.version,
+            request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+            result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            material_rules={
+                "family": EVENT_FACT_ANALYSIS,
+                "event_ownership": "indicator_or_check",
+                "operator_model": "registered_event_fact_operators.v4",
+            },
+        )
+    )
     CHECK_REGISTRY.register_definition(
         CheckDefinition(
             schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
@@ -622,6 +644,10 @@ def _validate_event_fact_bindings(
             )
         normalized_enriched.append(feature)
 
+    if normalized_detector.get("evaluation_trigger") == "required_facts_available":
+        for alias, raw_input in aliases.items():
+            _explicit_staleness(raw_input, consumer=f"evaluation_trigger.{alias}")
+
     normalized_features["enriched"] = normalized_enriched
     normalized_statistics["features"] = normalized_features
     return normalized_detector, normalized_statistics, inputs
@@ -634,9 +660,18 @@ def materialize_check_definition(
     base_version: str | None = None,
 ) -> CheckDefinition:
     family = str(payload.get("check_family") or checks.SUPPORTED_CHECK_FAMILY).strip()
-    resolved_base_version = str(
-        base_version or ("4" if family == EVENT_FACT_ANALYSIS else "2")
+    availability_trigger = (
+        _mapping(payload.get("detector"), field="detector").get("evaluation_trigger")
+        == "required_facts_available"
     )
+    default_version = "5" if availability_trigger else "4"
+    resolved_base_version = str(
+        base_version or (default_version if family == EVENT_FACT_ANALYSIS else "2")
+    )
+    if availability_trigger and resolved_base_version != "5":
+        raise ValueError(
+            "event_fact_check_invalid: required_facts_available requires definition version 5"
+        )
     base = CHECK_REGISTRY.resolve_definition(family, resolved_base_version)
     detector = _mapping(payload.get("detector"), field="detector")
     outcomes = _mapping(payload.get("outcomes"), field="outcomes")

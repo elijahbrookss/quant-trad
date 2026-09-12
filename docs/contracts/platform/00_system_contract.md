@@ -12,6 +12,24 @@ Define non-negotiable platform behavior shared by QuantLab, Strategy preview, Bo
 4. Determinism: fixed inputs/params/versions produce stable outputs.
 5. Explainability: artifacts and decisions must be auditable.
 
+## Market Time And Evaluation Time
+
+Market observation time identifies an event or interval. Historical availability
+and QT import/acceptance time answer different questions: importing an April
+observation in September does not replace a provider-established April
+availability timestamp. Inferred availability remains explicitly labeled.
+Consumers preserve these clocks rather than substituting observation or import
+time for `known_at`.
+
+A Check definition owns its evaluation trigger independently of its market
+sampling rule. A registered trigger may evaluate when all declared required
+inputs become causally available. It must retain the observation identity,
+select revisions visible at that decision, and emit at most one decision per
+sample under that rule. Later corrections cannot revise an earlier decision.
+A missing input is unresolved evidence, not an invented timestamp or value.
+Outcome price observations must be at or after the decision; they cannot imply
+an earlier execution. Historical definition versions retain their pinned rules.
+
 ## Layer Ownership
 
 - QuantLab: research and indicator exploration.

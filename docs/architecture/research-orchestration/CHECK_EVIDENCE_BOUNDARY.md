@@ -169,6 +169,44 @@ not admit facts learned after the decision. Events outside the evaluation
 range, or not known by its end, are excluded. Forward outcomes preserve, for
 every horizon, resolved/unresolved counts, horizon kind, and reason.
 
+## Availability-Triggered Fact Samples
+
+Definition v5 (`event_fact_analysis`, evaluator v4) adds
+`detector.evaluation_trigger: required_facts_available` to Check-owned
+`fact_snapshot` analysis. The existing `primary_bar_close` sampling rule still
+identifies the market interval being studied. The trigger is a separate rule:
+evaluate at the first time the primary candle, required baseline candle history,
+and every declared fact input are simultaneously usable. Predicates on the
+detector and enriched features remain part of input selection. Exact interval
+matching, active revisions, source selection, gaps, and explicit staleness
+limits still apply. Arrival transitions are provider-neutral `known_at` values;
+no grace duration or source timestamp rewrite is involved.
+
+The evaluator sweeps causal revisions for bounded candidate availability times.
+It emits one observation per primary sample, so later updates do not retrigger
+or rewrite an already emitted decision. The evaluation end is exclusive for the
+new trigger. If readiness is never reached, the sample has
+`required_facts_unavailable`, no decision time, and no entry price. Requests
+exceeding 100,000 candidate times fail with an instruction to narrow the range.
+
+Outcomes use the first supported candle close at or after the decision and the
+configured entry lag. A close whose own availability is later than that close
+is not a contemporaneous price proxy. `entry_sample_time` records the selected
+close; `entry_price_rule` identifies the rule. Subsequent returns and excursions
+start after that price sample. This is an analytical candle-price proxy, not a
+fill or second-resolution execution claim. Planning includes one extra candle
+in the outcome tail. Missing price/path evidence remains unresolved.
+
+For example, a sample at 12:01 whose book input becomes available at 12:01:07
+has decision time 12:01:07. With one-minute candles, its outcome price starts at
+12:02, never at the earlier 12:01 close. The actual source known-at remains
+unchanged, including any collection batching delay.
+
+Definitions v3/v4 and their evaluator identities remain registered unchanged.
+Requests without the new trigger retain v4 behavior. The new trigger selects
+v5 and is rejected under older definitions. Frozen evidence, replay and
+Check-to-Observation admission use the same existing workflow.
+
 ## Gap Ownership
 
 Dataset freeze records known reality, including gaps. It does not certify that
@@ -260,3 +298,27 @@ experiment-plan operations.
   calculated evidence.
 - Every durable conclusion traces to code revision, operation definition,
   exact inputs/source bindings, gaps/quality, and output/evidence hashes.
+
+
+### Availability timing inspection
+
+The `required_facts_available` result includes a structured `timing` object per
+sample (`research.check_sample_timing.v1`). It records `sample_end`,
+`primary_known_at`, `checked_at`, `required_inputs`, `decision_time`,
+`outcome_price_time`, `evaluation_end_exclusive`, and the sample's existing
+`exclusion_reasons`. These fields project the actual evaluation, not a narrative
+or an inferred explanation of provider gaps.
+
+`required_inputs` describes the last attempted evaluation (the successful one
+when ready). Each selector retains its alias, filter, selected `known_at`, status,
+and existing failure reason. Evaluation stops at its first failed requirement;
+subsequent selectors explicitly remain `not_evaluated`. A null input timestamp
+means no fact was selected at that attempt, not that the provider never produced
+one. A sample with no permitted attempt has null `checked_at` and an empty input
+list. Unresolved samples retain null decision and outcome-price timestamps.
+
+The disposable DB regression in
+`tests/test_market_data/test_check_availability_workflow_db.py` exercises native
+preparation, archived book lineage, freezing, Check execution, and replay, including a mutable revision
+after freezing. The test image verifies its source tree using the same provenance
+attestation as the runtime image; the Check's provenance checks remain active.

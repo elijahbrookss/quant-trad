@@ -934,8 +934,8 @@ class RuntimeSetupPrepareMixin:
                     "include_overlays": False,
                     "include_details": False,
                 }
-                market_data_inputs = self._market_data_inputs_for_decision(
-                    state, warmup_candle.time
+                market_data_inputs = self._market_data_inputs_for_candle(
+                    state, warmup_candle
                 )
                 if market_data_inputs:
                     step_kwargs["market_data_inputs"] = market_data_inputs
@@ -956,6 +956,18 @@ class RuntimeSetupPrepareMixin:
                 ),
             )
         )
+
+    def _market_data_inputs_for_candle(
+        self, state: SeriesExecutionState, candle: Candle,
+    ) -> Dict[str, Dict[str, Any]]:
+        decision_time = candle.known_at or candle.end_time
+        if decision_time > candle.end_time:
+            raise RuntimeError(
+                "runtime_delayed_candle_unsupported: the bar execution model cannot "
+                "use a prior close after candle availability; "
+                f"bar_time={candle.time.isoformat()} known_at={decision_time.isoformat()}"
+            )
+        return self._market_data_inputs_for_decision(state, decision_time)
 
     def _market_data_inputs_for_decision(
         self,

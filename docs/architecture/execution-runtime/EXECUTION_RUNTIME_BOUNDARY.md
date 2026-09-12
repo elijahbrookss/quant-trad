@@ -38,6 +38,16 @@ Related diagrams:
 - [runtime-hot-path.mmd](diagrams/runtime-hot-path.mmd)
 - [runtime-lifecycle-state.mmd](diagrams/runtime-lifecycle-state.mmd)
 
+## Candle Availability At The Runtime Boundary
+
+The shared dataframe converter carries `known_at` into runtime candles and
+rejects invalid or pre-close availability. The bar runtime reads contextual
+facts at candle availability, falling back to the interval end only when that
+field is absent. Its existing close-price execution model fails explicitly on a
+candle received/available after its close; preserving a timestamp must not enable
+a fill at a price from before the decision. The availability-triggered research
+Check uses later price samples within its analytical scope instead.
+
 ## Boundary Contract
 
 Runtime owns execution truth. BotLens, reports, observability, and frontend state are projections over runtime facts.

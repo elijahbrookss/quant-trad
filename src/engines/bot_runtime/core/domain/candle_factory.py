@@ -127,6 +127,7 @@ def build_candles_from_dataframe(
     atr_col = _optional_column_name(frame, ("ATR_Wilder", "atr", "atr_wilder"))
     volume_col = _optional_column_name(frame, ("volume", "Volume"))
     normalized_rows = []
+    duration = timeframe_duration(timeframe)
     for position, (timestamp, row) in enumerate(frame.iterrows()):
         prices = {
             field: _required_number(
@@ -186,9 +187,32 @@ def build_candles_from_dataframe(
             if volume_col
             else None
         )
+        known_at = None
+        raw_known_at = row.get("known_at")
+        if raw_known_at is not None and not pd.isna(raw_known_at):
+            try:
+                known_at = pd.to_datetime(raw_known_at, utc=True, errors="raise")
+                if pd.isna(known_at):
+                    raise ValueError("missing timestamp")
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise _row_error(
+                    position=position,
+                    timestamp=timestamp,
+                    field="known_at",
+                    reason="invalid_timestamp",
+                ) from exc
+            earliest = timestamp + duration if duration else timestamp
+            if known_at < earliest:
+                raise _row_error(
+                    position=position,
+                    timestamp=timestamp,
+                    field="known_at",
+                    reason="precedes_candle_close",
+                )
         normalized_rows.append(
             {
                 "timestamp": timestamp,
+                "known_at": known_at,
                 **prices,
                 "atr": atr,
                 "volume": volume,
@@ -205,7 +229,6 @@ def build_candles_from_dataframe(
             normalized["volume"].rolling(window=15).mean().shift(1)
         )
 
-    duration = timeframe_duration(timeframe)
     candles: List[Candle] = []
     for timestamp, row in normalized.iterrows():
         candles.append(
@@ -216,6 +239,10 @@ def build_candles_from_dataframe(
                 low=float(row["low"]),
                 close=float(row["close"]),
                 end=timestamp.to_pydatetime() + duration if duration else None,
+                known_at=(
+                    row["known_at"].to_pydatetime()
+                    if pd.notna(row["known_at"]) else None
+                ),
                 atr=float(row["atr"]) if atr_col and not pd.isna(row["atr"]) else None,
                 volume=(
                     float(row["volume"])

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from portal.backend.service.research.planning import plan_research_check
 from portal.backend.service.research.planning import _coverage_for_requirement
 from portal.backend.service.research.registry import normalize_check_request
@@ -356,7 +358,8 @@ def test_requirement_planning_enforces_exact_series_identity() -> None:
     ]
 
 
-def test_l2_fact_snapshot_plans_no_indicator_and_stops_facts_at_last_decision() -> None:
+@pytest.mark.parametrize("trigger", [None, "required_facts_available"])
+def test_l2_fact_snapshot_plans_no_indicator_and_stops_facts_at_last_decision(trigger) -> None:
     definition, request = normalize_check_request(
         {
             "mode": "preview",
@@ -367,7 +370,7 @@ def test_l2_fact_snapshot_plans_no_indicator_and_stops_facts_at_last_decision() 
                 "start": "2026-01-01T00:00:00Z",
                 "end": "2026-01-02T00:00:00Z",
             },
-            "detector": {"type": "fact_snapshot", "input_alias": "bbo"},
+            "detector": {"type": "fact_snapshot", "input_alias": "bbo", **({"evaluation_trigger": trigger} if trigger else {})},
             "outcomes": {"horizons": [6]},
             "inputs": [
                 {
@@ -419,4 +422,6 @@ def test_l2_fact_snapshot_plans_no_indicator_and_stops_facts_at_last_decision() 
     assert plan.execution["fact_history_required"] is True
     assert bbo["alignment"] == "exact_interval"
     assert bbo["required_end"] == "2026-01-02T00:00:00.000000Z"
-    assert primary["required_end"] == "2026-01-02T03:00:00.000000Z"
+    assert primary["required_end"] == (
+        "2026-01-02T03:30:00.000000Z" if trigger else "2026-01-02T03:00:00.000000Z"
+    )

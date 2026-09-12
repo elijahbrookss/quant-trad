@@ -221,9 +221,13 @@ def _evaluate(
     gap_policy: str = "continue_degraded",
     recorded_gaps: Sequence[Mapping[str, Any]] = (),
     candles: Any | None = None,
+    evaluation_trigger: str | None = None,
+    extra_records: Mapping[str, Sequence[Any]] | None = None,
+    extra_requirements: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     detector, outcomes, statistics = normalize_event_fact_configuration(
         detector={
+            **({"evaluation_trigger": evaluation_trigger} if evaluation_trigger else {}),
             "type": "fact_snapshot",
             "input_alias": alias,
             "sampling": "primary_bar_close",
@@ -238,7 +242,11 @@ def _evaluate(
             "eligibility": {"min_samples": 0},
         },
     )
-    return EventFactEvaluator().evaluate(
+    return EventFactEvaluator(
+        version="4" if evaluation_trigger else "3",
+        result_schema_version="event_fact_analysis_result.v4" if evaluation_trigger else "event_fact_analysis_result.v3",
+        availability_trigger_enabled=bool(evaluation_trigger),
+    ).evaluate(
         plan=_plan(event_count=event_count, gap_policy=gap_policy),
         inputs={
             "detector": detector,
@@ -247,8 +255,9 @@ def _evaluate(
             "candles": (
                 candles if candles is not None else _candles(event_count)
             ),
-            "fact_records_by_alias": {alias: list(records)},
+            "fact_records_by_alias": {alias: list(records), **dict(extra_records or {})},
             "fact_requirements_by_alias": {
+                **dict(extra_requirements or {}),
                 alias: {
                     "fact_type": fact_type,
                     "alignment": alignment,
@@ -730,3 +739,161 @@ def test_snapshot_sweep_record_visits_are_linear(
     assert calls["known_at"] <= 2 * record_count + len(decision_times)
     assert calls["freshness"] <= 2 * record_count
     assert calls["matches"] <= 2 * record_count
+
+
+@pytest.mark.parametrize("delay", [timedelta(microseconds=1), timedelta(seconds=7)])
+def test_required_availability_evaluates_late_once_and_uses_later_price(delay) -> None:
+    closed = _BASE + timedelta(minutes=1)
+    book = _bbo_record(bucket_end=closed, known_at=closed + delay, commit_seq=1)
+    kwargs = dict(alias="bbo", fact_type="market.bbo", records=[book], event_count=2, alignment="exact_interval")
+    old = _evaluate(**kwargs)
+    assert old["events"][0]["exclusion_reasons"] == ["detector_fact_missing:bbo"]
+    result = _evaluate(**kwargs, evaluation_trigger="required_facts_available")
+    row = result["events"][0]
+    assert datetime.fromisoformat(row["decision_time"]) == closed + delay
+    assert datetime.fromisoformat(row["entry_sample_time"]) == _BASE + timedelta(minutes=2)
+    assert row["entry_price"] == 101.0
+    assert row["eligible"] is True
+    assert row["detector_fact_reference"]["fact_version_id"] == book.fact_version_id
+    correction = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=20), commit_seq=2, revision=2, mid_price="120")
+    revised = _evaluate(**{**kwargs, "records": [book, correction]}, evaluation_trigger="required_facts_available")
+    assert revised["events"][0] == row
+    assert len([event for event in revised["events"] if datetime.fromisoformat(event["event_time"]) == _BASE]) == 1
+
+
+def test_required_availability_waits_for_all_inputs_and_respects_invalidations() -> None:
+    closed = _BASE + timedelta(minutes=1)
+    book = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=7), commit_seq=1)
+    invalid = _tombstone(book, known_at=closed + timedelta(seconds=8), commit_seq=2)
+    restored = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=12), commit_seq=4, revision=3)
+    depth = _depth_record(bucket_end=closed, known_at=closed + timedelta(seconds=9), commit_seq=3, band_bps="5", bid_quantity="2", ask_quantity="3")
+    result = _evaluate(
+        alias="bbo", fact_type="market.bbo", records=[book, invalid, restored], event_count=2,
+        alignment="exact_interval", evaluation_trigger="required_facts_available",
+        extra_records={"depth": [depth]},
+        extra_requirements={"depth": {"fact_type": "market.depth_band", "alignment": "exact_interval", "timeframe_seconds": 1, "max_staleness_seconds": 60}},
+    )
+    row = result["events"][0]
+    assert datetime.fromisoformat(row["decision_time"]) == closed + timedelta(seconds=12)
+    refs = row["event"]["metadata"]["required_fact_references"]
+    assert {ref["alias"] for ref in refs} == {"bbo", "depth"}
+    assert row["detector_fact_reference"]["fact_version_id"] == restored.fact_version_id
+
+
+def test_required_availability_leaves_unavailable_inputs_excluded() -> None:
+    closed = _BASE + timedelta(minutes=1)
+    book = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=7), commit_seq=1)
+    result = _evaluate(
+        alias="bbo", fact_type="market.bbo", records=[book], event_count=2,
+        alignment="exact_interval", evaluation_trigger="required_facts_available",
+        extra_records={"depth": []},
+        extra_requirements={"depth": {"fact_type": "market.depth_band", "alignment": "exact_interval", "timeframe_seconds": 1, "max_staleness_seconds": 60}},
+    )
+    row = result["events"][0]
+    assert row["eligible"] is False
+    assert "required_facts_unavailable" in row["exclusion_reasons"]
+    assert row["event"]["metadata"]["trigger_status"] == "unavailable"
+
+
+def test_required_availability_is_not_enabled_for_previous_evaluator() -> None:
+    with pytest.raises(ValueError, match="requires definition version 5"):
+        EventFactEvaluator().evaluate(
+            plan=_plan(event_count=1, gap_policy="continue_degraded"),
+            inputs={"detector": {"type": "fact_snapshot", "evaluation_trigger": "required_facts_available"}},
+        )
+
+
+def test_required_availability_supports_provider_neutral_numeric_context() -> None:
+    from market_data.contracts import NumericFact, NumericFactRecord
+
+    closed = _BASE + timedelta(minutes=1)
+    book = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=7), commit_seq=1)
+    other_source = SourceIdentity(provider="OTHER_PROVIDER", venue="OTHER_VENUE", source_kind="historical_api", adapter_version="test.v1")
+    reference = NumericFactRecord(
+        series_id=52, revision=1, market_commit_seq=2, ingestion_run_id="import-in-september",
+        source_identity_key=other_source.identity_key, source=other_source, provenance={},
+        fact=NumericFact(
+            fact_type="market.reference_price", contract_version="market.reference_price.v1",
+            value=Decimal("101"), raw_value="101", unit="USD", dimensions={"quote_currency": "USD"},
+            effective_at=closed, effective_at_method="source_timestamp",
+            accepted_at=_BASE + timedelta(days=240), known_at=closed + timedelta(seconds=9),
+            known_at_method="source_confirmation", source_event_key="reference-1",
+        ),
+    )
+    result = _evaluate(
+        alias="bbo", fact_type="market.bbo", records=[book], event_count=2,
+        alignment="exact_interval", evaluation_trigger="required_facts_available",
+        extra_records={"reference": [reference]},
+        extra_requirements={"reference": {"fact_type": "market.reference_price", "alignment": "latest_known", "max_staleness_seconds": 60}},
+        enriched_features=[{"name": "reference", "operator": "latest_value", "input_alias": "reference"}],
+    )
+    row = result["events"][0]
+    assert datetime.fromisoformat(row["decision_time"]) == closed + timedelta(seconds=9)
+    assert row["features"]["reference"] == 101.0
+    assert row["eligible"] is True
+
+
+@pytest.mark.parametrize("delay_seconds,events", [(60, 2), (601, 12)])
+def test_required_availability_excludes_end_boundary_and_stale_samples(delay_seconds, events) -> None:
+    closed = _BASE + timedelta(minutes=1)
+    book = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=delay_seconds), commit_seq=1)
+    result = _evaluate(alias="bbo", fact_type="market.bbo", records=[book], event_count=events,
+                       alignment="exact_interval", evaluation_trigger="required_facts_available")
+    row = result["events"][0]
+    assert row["decision_time"] is None
+    assert row["eligible"] is False
+    assert row["entry_time"] is None
+
+
+def test_required_availability_does_not_inspect_ambiguity_after_its_decision() -> None:
+    closed = _BASE + timedelta(minutes=1)
+    first = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=7), commit_seq=1)
+    later = _bbo_record(bucket_end=closed, known_at=closed + timedelta(seconds=20), commit_seq=2)
+    later = replace(later, fact=replace(later.fact, observation_key="another-observation"))
+    result = _evaluate(alias="bbo", fact_type="market.bbo", records=[first, later], event_count=2,
+                       alignment="exact_interval", evaluation_trigger="required_facts_available")
+    assert datetime.fromisoformat(result["events"][0]["decision_time"]) == closed + timedelta(seconds=7)
+
+
+def test_timing_breakdown_records_clocks_and_missing_requirement_without_guessing() -> None:
+    closed = _BASE + timedelta(minutes=1)
+    available = closed + timedelta(seconds=7)
+    book = _bbo_record(bucket_end=closed, known_at=available, commit_seq=1)
+    result = _evaluate(
+        alias="bbo", fact_type="market.bbo", records=[book], event_count=2,
+        alignment="exact_interval", evaluation_trigger="required_facts_available",
+    )
+    ready, missing = result["events"]
+    timing = ready["timing"]
+    assert datetime.fromisoformat(timing["sample_end"]) == closed
+    assert datetime.fromisoformat(timing["primary_known_at"]) == closed
+    assert datetime.fromisoformat(timing["checked_at"]) == available
+    assert datetime.fromisoformat(timing["required_inputs"][0]["known_at"]) == available
+    assert timing["required_inputs"][0]["status"] == "ready"
+    assert timing["decision_time"] == ready["decision_time"]
+    assert timing["outcome_price_time"] == ready["entry_sample_time"]
+    assert timing["exclusion_reasons"] == []
+    assert missing["timing"]["decision_time"] is None
+    assert missing["timing"]["outcome_price_time"] is None
+    assert missing["timing"]["exclusion_reasons"] == missing["exclusion_reasons"]
+    # This sample reaches the exclusive evaluation boundary without an attempt.
+    assert missing["timing"]["checked_at"] is None
+
+    unavailable = _evaluate(
+        alias="bbo", fact_type="market.bbo", records=[book], event_count=3,
+        alignment="exact_interval", evaluation_trigger="required_facts_available",
+        extra_requirements={"depth": {
+            "fact_type": "market.depth", "alignment": "exact_interval",
+            "timeframe_seconds": 1, "max_staleness_seconds": 600,
+        }},
+    )["events"][0]["timing"]
+    assert unavailable["decision_time"] is None
+    assert unavailable["required_inputs"] == [
+        {"alias": "bbo", "where": {}, "known_at": timing["required_inputs"][0]["known_at"],
+         "status": "ready", "reason": None},
+        {"alias": "depth", "where": {}, "known_at": None,
+         "status": "unavailable", "reason": "fact_missing:depth"},
+    ]
+    old = _evaluate(alias="bbo", fact_type="market.bbo", records=[book],
+                    event_count=2, alignment="exact_interval")
+    assert all("timing" not in row for row in old["events"])

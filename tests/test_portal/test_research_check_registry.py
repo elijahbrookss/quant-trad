@@ -299,3 +299,19 @@ def test_l2_fact_snapshot_rejects_unsafe_admission(mutate, message: str) -> None
 
     with pytest.raises(ValueError, match=message):
         normalize_check_request(payload, mode="evidence")
+
+
+def test_availability_trigger_is_versioned_and_survives_request_normalization() -> None:
+    payload = _l2_payload()
+    original = materialize_check_definition(payload, mode="evidence")
+    payload["detector"]["evaluation_trigger"] = "required_facts_available"
+    definition, request = normalize_check_request(payload, mode="evidence")
+    assert definition.definition_version.startswith("5+")
+    assert definition.evaluator_version == "4"
+    assert request.parameters["detector"]["evaluation_trigger"] == "required_facts_available"
+    assert original.definition_version.startswith("4+")
+    _, evaluator = CHECK_REGISTRY.resolve(EVENT_FACT_ANALYSIS, "5")
+    declaration = evaluator.declare_requirements(definition=definition, request=request)
+    assert declaration["decision_price_tail_bars"] == 1
+    with pytest.raises(ValueError, match="requires definition version 5"):
+        materialize_check_definition(payload, mode="evidence", base_version="4")

@@ -44,8 +44,9 @@ permission to fetch missing history.
 
 ## Trade-flow receipt replay
 
-`research.trade_flow_replay.v1` is one specialized transform in the generic
-registry. It supports 60-second trade-flow facts and pins:
+`research.trade_flow_replay.v1` is an implemented pure derivation helper for
+60-second trade-flow facts. The generic registry supports availability resolvers,
+but this helper is not currently wired into runnable Check execution. It pins:
 
 - frozen receipt time as the delivery clock;
 - `market.trade_flow.receipt_replay.v1` as the transform;
@@ -79,6 +80,14 @@ facts cannot change prior frames.
 The same contracts support a price-and-volume study with no raw trade, OI, or
 funding dependency. New availability sources require new registered transform
 versions and cannot silently change existing run evidence.
+
+## Runnable Check Timing
+
+The [Check evidence boundary](CHECK_EVIDENCE_BOUNDARY.md#availability-triggered-fact-samples)
+defines the v5 required-fact availability trigger. It uses canonical historical
+availability directly and does not apply the receipt-replay counterfactual
+above. A Check can evaluate later without changing when its source facts became
+known. These are separate capabilities.
 
 ## Historical record
 

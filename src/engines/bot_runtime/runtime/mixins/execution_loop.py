@@ -1498,8 +1498,8 @@ class RuntimeExecutionLoopMixin:
             "include_overlays": False,
             "include_details": False,
         }
-        market_data_inputs = self._market_data_inputs_for_decision(
-            state, candle.time
+        market_data_inputs = self._market_data_inputs_for_candle(
+            state, candle
         )
         if market_data_inputs:
             step_kwargs["market_data_inputs"] = market_data_inputs

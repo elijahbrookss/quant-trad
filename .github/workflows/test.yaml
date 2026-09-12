@@ -101,6 +101,18 @@ jobs:
             --file docker/docker-compose.server.yml \
             build tsdb backend frontend frontend-v2
 
+      - name: Recreate actual QT core on disposable storage without provider egress
+        run: python3 scripts/ci/test_server_core_recreation.py
+
+  deployment-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Rehearse promotion and failed rollout recovery
+        run: python3 scripts/ci/test_server_promotion.py
+
   clean-database-bootstrap:
     runs-on: ubuntu-latest
 
