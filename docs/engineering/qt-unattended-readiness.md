@@ -8,6 +8,19 @@ No new providers or product features are included. The operator explicitly
 removed a seven-day elapsed-time gate: completion depends on evidence from
 targeted tests, not waiting for a week.
 
+On September 12 the operator deferred independent/off-server backup and S3.
+The current recovery goal is routine automatic local recovery points plus a
+successful restore test. Off-server storage is future work and does not gate
+the present rollout. Local recovery copies do not protect against loss of the
+server or all of its local storage. This changes the agreed scope, not the
+failure protection provided by local copies.
+
+The planned cadence is daily and before deployments or storage cutovers, with a
+bounded rotating set sized from measured backup bytes and free-space headroom.
+Recovery-point retention is separate from the two-year research-history policy;
+rotating backup copies must not shorten research history. The schedule is not
+yet enabled, and no new recovery copy has been created by this readiness work.
+
 This is a rollout worksheet, not evidence that production is already ready.
 The September 11, 2026 review found execution disabled and archives still on
 NVMe. Do not infer deployment or retention activation from merged application
@@ -41,7 +54,8 @@ snapshots, and backup copies must be measured separately. The attached disk
 offers about 14.55 TiB before filesystem overhead, not 16 TiB.
 
 The one-time source preservation copy is not recurring growth. Keep it until a
-verified independent recovery copy and an explicit retirement decision exist.
+verified local recovery copy and an explicit retirement decision exist.
+Deferring S3 does not authorize deleting that preserved source copy.
 
 ## Application fixes and prerequisite
 
@@ -63,13 +77,19 @@ so application rollback does not require dropping it.
 
 ## Rollout sequence
 
-1. **Choose and prove an independent recovery destination.** Use another
-   machine, NAS, or cloud storage. Confirm available capacity, access, encryption,
-   retention, and recovery time. A second disk inside this server is an archive
-   tier, not an independent backup. Preserve the database and every referenced
-   raw/canonical archive object; a database dump alone cannot restore cold Facts.
+1. **Create and prove routine local recovery points.** Use a database-aware
+   backup method and preserve every raw/canonical archive object referenced by
+   that recovery point. Include protected application configuration and required
+   recovery keys without printing secrets or adding them to Git. A live copy of
+   PostgreSQL's data directory is not a valid snapshot; a database dump alone
+   cannot restore cold Facts. The method must coordinate database consistency
+   with archive publication and expiry before any cleanup is enabled.
    Run a restore in isolation with collectors and external orders disabled, and
    verify hot and cold reads, frozen dataset identities, and archive checksums.
+   Measure copy size, duration, and temporary overlap before setting rotation
+   and space limits. Publish only complete verified recovery points, preserve
+   the last successful copy on failure, and alert on failure or overdue success.
+   Off-server replication to S3 is deferred and is not a completion gate.
 2. **Provision the archive disk with operator access.** Record disk serial,
    existing signatures, and the selected filesystem before any destructive
    action. Mount persistently by UUID; configure the application archive root
@@ -94,8 +114,8 @@ so application rollback does not require dropping it.
    budgets from the benchmark. Demonstrate sustained catch-up capacity with
    workload headroom and successful resume after interruption. Retain all mount,
    dependency, checksum, and frozen-evidence guards.
-6. **Prove unattended operation.** Schedule daily independent backups; verify
-   an actual restore. Test collector reconnect and retained-spool recovery,
+6. **Prove unattended operation.** Schedule daily local recovery copies and
+   pre-change recovery points; verify an actual restore. Test collector reconnect and retained-spool recovery,
    archive interruption/retry, safe deployment rollback, disk-mount failure,
    capacity alerts, and backup-failure alerts. Confirm a test alert reaches the
    operator and subsequently clears. Record results and remaining limitations;
@@ -103,7 +123,8 @@ so application rollback does not require dropping it.
 
 ## Decisions still required
 
-- Independent backup destination and access; nothing has been copied there.
+- Local recovery-copy placement and a measured retention/space budget. The HDD
+  is not mounted yet. Off-server/S3 destination and access are explicitly deferred.
 - Two-year history policy: all raw evidence, or research-ready history with an
   explicitly agreed raw retention period. Do not silently shorten retention.
 - Administrative access for disk provisioning/mounting. Noninteractive sudo
