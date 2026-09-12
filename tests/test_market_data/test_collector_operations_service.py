@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from market_data.collector_operations import (
     CollectorAction,
     CollectorActualState,
@@ -575,3 +577,92 @@ def test_disabled_registration_errors_remain_visible_without_false_attention():
     assert collector["needs_attention"] is False
     assert collector["attention_reason"] is None
     assert collector["registration_errors"] == ["adapter_not_registered"]
+
+
+@pytest.mark.parametrize("kind,collector_id", [
+    (CollectorKind.SCHEDULED_FACT, "coinbase-oi"),
+    (CollectorKind.CONTINUOUS_STREAM, "coinbase-trades"),
+])
+def test_history_catalogs_do_not_depend_on_fact_or_fleet_availability(
+    monkeypatch, kind, collector_id,
+):
+    service = _service()
+    scheduled = service.collection_repository.list_definitions()
+    continuous = service.stream_repository.list_stream_definitions()
+    monkeypatch.setattr(
+        service.collection_repository, "list_definitions",
+        lambda *, definition_id: [row for row in scheduled if row["id"] == definition_id],
+    )
+    monkeypatch.setattr(
+        service.stream_repository, "list_stream_definitions",
+        lambda *, definition_id: [row for row in continuous if row["id"] == definition_id],
+    )
+
+    def unavailable(*args, **kwargs):
+        raise AssertionError("History must not load fleet, recent facts, or full detail")
+
+    monkeypatch.setattr(service, "fleet_snapshot", unavailable)
+    monkeypatch.setattr(service, "detail", unavailable)
+    monkeypatch.setattr(service.operations_repository, "recent_facts", unavailable, raising=False)
+    runtime = {"occurred_at": NOW.isoformat(), "event_type": "connected"}
+    quality = {"detected_at": (NOW - timedelta(seconds=1)).isoformat(),
+               "classification": "disconnect"}
+    operation = {"requested_at": (NOW - timedelta(seconds=2)).isoformat(),
+                 "action": "restart", "status": "succeeded"}
+    gap = {"classification": "collection_schedule_missed"}
+
+    def scoped(rows):
+        def read(*, definition_id, limit):
+            assert definition_id == collector_id
+            assert limit == 2
+            return rows
+        return read
+
+    def operations(*, collector_id: str, collector_kind, limit):
+        assert collector_kind == kind
+        assert collector_id == ("coinbase-oi" if kind == CollectorKind.SCHEDULED_FACT else "coinbase-trades")
+        assert limit == 2
+        return [operation]
+
+    monkeypatch.setattr(service.operations_repository, "list_operations", operations, raising=False)
+    monkeypatch.setattr(
+        service.collection_repository, "list_attempts", scoped([runtime]), raising=False,
+    )
+    monkeypatch.setattr(
+        service.operations_repository, "list_stream_events", scoped([runtime]), raising=False,
+    )
+    monkeypatch.setattr(
+        service.operations_repository, "list_stream_quality_events", scoped([quality]), raising=False,
+    )
+
+    def gaps(*, series_ids, limit):
+        assert series_ids == ([11] if kind == CollectorKind.SCHEDULED_FACT else [21, 22, 23, 24, 25])
+        assert limit == 2
+        return [gap]
+
+    monkeypatch.setattr(service.operations_repository, "list_gap_evidence", gaps, raising=False)
+    events = service.event_catalog(collector_kind=kind, collector_id=collector_id, limit=2)
+    assert events["collector_kind"] == kind.value
+    assert [row["event_type"] for row in events["events"]] == (
+        ["connected", "operation.restart"] if kind == CollectorKind.SCHEDULED_FACT
+        else ["connected", "quality.disconnect"]
+    )
+    result = service.gap_catalog(collector_kind=kind, collector_id=collector_id, limit=2)
+    assert result["gaps"] == [gap]
+    assert result["quality_events"] == ([] if kind == CollectorKind.SCHEDULED_FACT else [quality])
+    for method in (service.event_catalog, service.gap_catalog):
+        with pytest.raises(ValueError, match="collector_unknown"):
+            method(collector_kind=kind, collector_id="missing", limit=2)
+
+
+def test_history_catalog_rejects_unregistered_definition(monkeypatch):
+    service = _service()
+    row = {**service.stream_repository.list_stream_definitions()[0], "provider": "UNREGISTERED"}
+    monkeypatch.setattr(
+        service.stream_repository, "list_stream_definitions",
+        lambda **kwargs: [row],
+    )
+    for method in (service.event_catalog, service.gap_catalog):
+        with pytest.raises(ValueError, match="collector_unknown"):
+            method(collector_kind=CollectorKind.CONTINUOUS_STREAM,
+                   collector_id=row["id"])

@@ -162,6 +162,26 @@ The common recent-activity contract maps evidence to stable event kinds such as
 `gap_opened`, `gap_recovered`, `ownership_acquired`, `restart`, `pause`, and
 `resume`. Each normalized event retains its authoritative evidence reference.
 
+The event and gap catalogs resolve the requested operational definition directly
+and query only its bounded evidence sources. They do not build fleet/detail
+projections or hydrate recent Facts before returning history. Unknown or
+unregistered definitions still fail with the same collector-not-found contract;
+source normalization, ordering, and output limits are unchanged.
+
+Recent Facts use an acceptance-time index and a per-series limited query, then
+merge those candidates for the global limit. A candidate is admitted only when
+no newer revision exists, including invalidated revisions. Selecting a limit
+before that check would incorrectly resurrect invalidated observations.
+Superseded/invalidated-heavy histories may require scanning beyond the displayed
+count; this is not a hard bound on all visited rows. Only the selected Facts are
+hydrated through the existing hot/cold reader.
+
+Clean schemas include `ix_market_fact_series_accepted` on
+`(series_id, accepted_at, market_commit_seq)`. Existing stores must apply
+`scripts/db/manual_add_fact_series_accepted_index_v1.sql` outside a transaction
+before deployment. Startup rejects a missing, invalid, partial, or differently
+ordered index instead of repairing it at runtime.
+
 Operation results are separate immutable audit records. They never replace
 runtime attempts, session events, gaps, or Facts.
 

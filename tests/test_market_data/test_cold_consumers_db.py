@@ -28,6 +28,88 @@ def test_collector_recent_facts_survive_physical_reclamation(storage, tmp_path, 
     assert operations.recent_facts(series_ids=[storage.series_id], limit=1) == before
 
 
+
+def test_collector_recent_facts_rank_latest_active_revisions_across_series(storage, monkeypatch):
+    monkeypatch.setattr(collector_operations, "db", storage.database)
+    operations = collector_operations.PostgresCollectorOperationsRepository()
+    _ingest(storage)
+    revised = replace(storage.fact, payload={**storage.fact.payload, "rate": "0.2", "raw_rate": "0.2"},
+                      accepted_at=BASE + timedelta(seconds=30), known_at=BASE + timedelta(seconds=30))
+    _ingest(storage, revised)
+    dropped = replace(storage.fact, observation_key="removed",
+                      accepted_at=BASE + timedelta(seconds=40), known_at=BASE + timedelta(seconds=40))
+    _ingest(storage, dropped)
+    _ingest(storage, replace(dropped, state="invalidated",
+                            accepted_at=BASE + timedelta(seconds=50), known_at=BASE + timedelta(seconds=50)))
+    from portal.backend.db import InstrumentRecord
+
+    with storage.database.session() as session:
+        session.add(InstrumentRecord(
+            id="storage-fixture-other", datasource="TEST", exchange="ISOLATED",
+            symbol="ETH-TEST", instrument_type="spot", can_short=False,
+            short_requires_borrow=False, has_funding=False, extra_metadata={},
+        ))
+    other = storage.repo.register_series(
+        instrument_id="storage-fixture-other", fact_type=storage.fact.fact_type,
+        timeframe_seconds=None, contract_version="derivatives.funding_rate.v2",
+    )
+    for seconds in (10, 20):
+        storage.repo.ingest_facts(
+            series_id=other, source_id=storage.source_id,
+            facts=[replace(storage.fact, observation_key=f"other-{seconds}",
+                           accepted_at=BASE + timedelta(seconds=seconds),
+                           known_at=BASE + timedelta(seconds=seconds))],
+        )
+    rows = operations.recent_facts(series_ids=[other, storage.series_id, other], limit=2)
+    assert [row["observation_key"] for row in rows] == ["funding-fixture", "other-20"]
+    assert rows[0]["revision"] == 2
+    assert rows[0]["payload"]["rate"] == "0.2"
+    assert [row["observation_key"] for row in operations.recent_facts(
+        series_ids=[storage.series_id, other], limit=500,
+    )] == ["funding-fixture", "other-20", "other-10"]
+    assert operations.recent_facts(series_ids=[]) == []
+
+
+def test_collector_recent_fact_plan_seeks_short_suffix(storage):
+    # The exact production header query runs against a disposable large relation.
+    # Hydration is separately covered by the hot/cold reclamation regression.
+    _ingest(storage)
+    query = collector_operations.RECENT_FACTS_SQL.replace(
+        "market.fact_versions", "recent_facts_fixture"
+    )
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE TEMP TABLE recent_facts_fixture ON COMMIT DROP AS
+            SELECT versions.* FROM market.fact_versions versions CROSS JOIN generate_series(1, 100000)
+        """))
+        session.execute(text("""
+            UPDATE recent_facts_fixture SET observation_key=ctid::text
+        """))
+        session.execute(text("""
+            CREATE INDEX recent_facts_fixture_accepted
+            ON recent_facts_fixture(series_id, accepted_at, market_commit_seq)
+        """))
+        session.execute(text("""
+            CREATE INDEX recent_facts_fixture_revision
+            ON recent_facts_fixture(series_id, observation_key, revision)
+        """))
+        session.execute(text("ANALYZE recent_facts_fixture"))
+        params = {"series_ids": [storage.series_id], "limit": 10}
+        assert len(session.execute(text(query), params).all()) == 10
+        plan = session.execute(
+            text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query), params,
+        ).scalar_one()
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        scans = [node for node in nodes(plan[0]["Plan"])
+                 if node.get("Relation Name") == "recent_facts_fixture"]
+        assert scans and all("Index" in node["Node Type"] for node in scans)
+        assert sum(node["Actual Rows"] * node["Actual Loops"] for node in scans) < 100
+
 def _normalization_spec():
     return NormalizationSpec(
         feature_name="cold_funding", semantic_version="1.0.0",

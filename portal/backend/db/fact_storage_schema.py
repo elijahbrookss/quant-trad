@@ -204,6 +204,37 @@ def assert_fact_storage_contract(
     header_indexes = {item["name"] for item in inspector.get_indexes("fact_versions", schema="market")}
     if "ix_market_fact_storage_page" not in header_indexes:
         raise RuntimeError(f"Canonical storage page index is missing. Run {FACT_STORAGE_CUTOVER}")
+    for index_name, keys, operator_script in (
+        ("ix_market_fact_storage_family", ["storage_day", "fact_type"],
+         "scripts/db/manual_add_fact_storage_family_index_v1.sql"),
+        ("ix_market_fact_series_accepted", ["series_id", "accepted_at", "market_commit_seq"],
+         "scripts/db/manual_add_fact_series_accepted_index_v1.sql"),
+    ):
+        compatible = conn.execute(text("""
+            SELECT i.indisvalid AND i.indisready AND NOT i.indisunique
+                   AND i.indpred IS NULL AND i.indexprs IS NULL
+                   AND i.indnkeyatts = :key_count
+                   AND i.indoption::text = :options
+                   AND ARRAY(
+                       SELECT pg_get_indexdef(i.indexrelid, position, true)
+                       FROM generate_series(1, i.indnkeyatts) AS position
+                       ORDER BY position
+                   ) = CAST(:keys AS text[])
+                   AND am.amname = 'btree'
+            FROM pg_index i
+            JOIN pg_class idx ON idx.oid = i.indexrelid
+            JOIN pg_am am ON am.oid = idx.relam
+            WHERE i.indexrelid = to_regclass(:relation)
+              AND i.indrelid = 'market.fact_versions'::regclass
+        """), {
+            "relation": "market." + index_name, "keys": keys, "key_count": len(keys),
+            "options": " ".join("0" for _ in keys),
+        }).scalar_one_or_none()
+        if compatible is not True:
+            raise RuntimeError(
+                f"Canonical operational index {index_name} is missing, invalid, or "
+                f"incompatible. Run {operator_script} outside a transaction."
+            )
     for name in FACT_STORAGE_TABLES:
         if conn.execute(text("SELECT to_regclass(:relation)"), {"relation": "market." + name}).scalar_one_or_none() is None:
             # Only the explicit offline metadata cutover may inspect the older

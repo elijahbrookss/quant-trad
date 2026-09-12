@@ -167,7 +167,11 @@ invalidates the affected flow-coverage interval, and acknowledges the segment.
 It never guesses a side, drops the raw record, or terminates the generic stream
 runtime on that known provider sentinel. Retained-spool recovery applies the
 same rule idempotently, so one semantically unusable trade cannot become a
-permanent restart loop.
+permanent restart loop. A projection-invalidated coverage revision is closed at
+the last mapped receive ordinal and effective time even when the spool segment
+is nonterminal. Its closing evidence records `projection_invalidated`; it does
+not invent a transport-disconnect event. The epoch state stays until its terminal
+segment, so a later valid batch cannot erase the earlier invalidation.
 
 After a terminal segment is archived, mapped, canonicalized, and its terminal
 coverage revision is committed, the finalizer retires that connection epoch's

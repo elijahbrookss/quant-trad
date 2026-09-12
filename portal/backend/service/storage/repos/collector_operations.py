@@ -20,6 +20,44 @@ from ....db import db
 from .fact_storage import canonical_fact_storage_repository
 
 
+RECENT_FACTS_SQL = """
+WITH latest AS (
+    SELECT candidate.*
+    FROM unnest(CAST(:series_ids AS bigint[])) AS requested(series_id)
+    CROSS JOIN LATERAL (
+        SELECT id, series_id, observation_key, revision,
+               market_commit_seq, source_id, ingestion_run_id,
+               fact_type, payload_schema_id, observation_time,
+               source_published_at, received_at, accepted_at,
+               known_at, transformation_id, external_event_key,
+               external_event_group_key, state,
+               provenance_schema_id, quality_schema_id
+        FROM market.fact_versions AS versions
+        WHERE versions.series_id = requested.series_id
+          AND versions.state = 'active'
+          AND NOT EXISTS (
+              SELECT 1 FROM market.fact_versions AS newer
+              WHERE newer.series_id = versions.series_id
+                AND newer.observation_key = versions.observation_key
+                AND newer.revision > versions.revision
+          )
+        ORDER BY accepted_at DESC, market_commit_seq DESC
+        LIMIT :limit
+    ) AS candidate
+    ORDER BY candidate.accepted_at DESC,
+             candidate.market_commit_seq DESC
+    LIMIT :limit
+)
+SELECT latest.*, sources.provider, sources.venue,
+       sources.source_kind, sources.adapter_version,
+       series.instrument_id
+FROM latest
+JOIN market.sources AS sources ON sources.id = latest.source_id
+JOIN market.series AS series ON series.id = latest.series_id
+ORDER BY latest.accepted_at DESC, latest.market_commit_seq DESC
+"""
+
+
 class CollectorOperationRequestConflict(RuntimeError):
     """Raised when an idempotency key is reused for different intent."""
 
@@ -417,32 +455,7 @@ class PostgresCollectorOperationsRepository:
         bounded_limit = max(1, min(int(limit), 500))
         with db.session() as session:
             rows = session.execute(
-                text(
-                    """
-                    WITH latest AS (
-                        SELECT DISTINCT ON (series_id, observation_key)
-                               id, series_id, observation_key, revision,
-                               market_commit_seq, source_id, ingestion_run_id,
-                               fact_type, payload_schema_id, observation_time,
-                               source_published_at, received_at, accepted_at,
-                               known_at, transformation_id, external_event_key,
-                               external_event_group_key, state,
-                               provenance_schema_id, quality_schema_id
-                        FROM market.fact_versions
-                        WHERE series_id = ANY(:series_ids)
-                        ORDER BY series_id, observation_key, revision DESC
-                    )
-                    SELECT latest.*, sources.provider, sources.venue,
-                           sources.source_kind, sources.adapter_version,
-                           series.instrument_id
-                    FROM latest
-                    JOIN market.sources AS sources ON sources.id = latest.source_id
-                    JOIN market.series AS series ON series.id = latest.series_id
-                    WHERE latest.state = 'active'
-                    ORDER BY latest.accepted_at DESC, latest.market_commit_seq DESC
-                    LIMIT :limit
-                    """
-                ),
+                text(RECENT_FACTS_SQL),
                 {"series_ids": normalized_ids, "limit": bounded_limit},
             ).mappings().all()
             payloads = canonical_fact_storage_repository.read_rows_by_ids(session, [row["id"] for row in rows])
