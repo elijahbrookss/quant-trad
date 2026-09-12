@@ -559,3 +559,69 @@ def test_offline_cutover_dry_run_and_resume_preserve_every_field(storage):
         restarted._reset_engine()
     assert _read(storage, known_at_lte=BASE) == original
     assert _ingest(storage, corrected).noop_count == 1
+
+
+@pytest.mark.parametrize("replacement", [
+    None,
+    "CREATE INDEX ix_market_fact_storage_family ON market.fact_versions(fact_type, storage_day)",
+    "CREATE INDEX ix_market_fact_storage_family ON market.fact_versions(storage_day, fact_type) WHERE state='active'",
+])
+def test_family_index_contract_refuses_missing_or_incompatible_index(storage, replacement):
+    with storage.database.session() as session:
+        session.execute(text("DROP INDEX market.ix_market_fact_storage_family"))
+        if replacement:
+            session.execute(text(replacement))
+    with storage.database.session() as session:
+        with pytest.raises(RuntimeError, match="ix_market_fact_storage_family"):
+            assert_fact_storage_contract(session.connection())
+    # Runtime checks report the operator cutover; they must not repair indexes.
+    with storage.database.session() as session:
+        definition = session.execute(text("""
+            SELECT indexdef FROM pg_indexes
+            WHERE schemaname='market' AND indexname='ix_market_fact_storage_family'
+        """)).scalar_one_or_none()
+        assert (definition is None) is (replacement is None)
+
+
+@pytest.mark.parametrize("index_name,script_name,error_code,wrong_columns", [
+    ("ix_market_fact_storage_family", "manual_add_fact_storage_family_index_v1.sql",
+     "canonical_storage_family_index_invalid", "fact_type, storage_day"),
+    ("ix_market_fact_series_accepted", "manual_add_fact_series_accepted_index_v1.sql",
+     "canonical_series_accepted_index_invalid", "series_id, market_commit_seq, accepted_at"),
+])
+def test_operator_header_index_cutover_is_idempotent_and_refuses_wrong_shape(
+    storage, index_name, script_name, error_code, wrong_columns,
+):
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[2] / "scripts/db" / script_name).read_text()
+    creation, verification = script.split("DO $qt$", 1)
+    with storage.database._engine.connect().execution_options(
+        isolation_level="AUTOCOMMIT"
+    ) as connection:
+        connection.exec_driver_sql(f"DROP INDEX market.{index_name}")
+        for _ in range(2):
+            connection.exec_driver_sql(creation)
+            connection.exec_driver_sql("DO $qt$" + verification)
+        assert_fact_storage_contract(connection)
+        connection.exec_driver_sql(f"DROP INDEX market.{index_name}")
+        connection.exec_driver_sql(
+            f"CREATE INDEX {index_name} ON market.fact_versions({wrong_columns})"
+        )
+        connection.exec_driver_sql(creation)
+        with pytest.raises(DBAPIError, match=error_code):
+            connection.exec_driver_sql("DO $qt$" + verification)
+
+
+@pytest.mark.parametrize("replacement", [
+    None,
+    "CREATE INDEX ix_market_fact_series_accepted ON market.fact_versions(series_id, accepted_at DESC, market_commit_seq)",
+])
+def test_recent_fact_index_contract_refuses_missing_or_mixed_order(storage, replacement):
+    with storage.database.session() as session:
+        session.execute(text("DROP INDEX market.ix_market_fact_series_accepted"))
+        if replacement:
+            session.execute(text(replacement))
+    with storage.database.session() as session:
+        with pytest.raises(RuntimeError, match="ix_market_fact_series_accepted"):
+            assert_fact_storage_contract(session.connection())

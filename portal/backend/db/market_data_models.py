@@ -310,6 +310,12 @@ Index(
     MarketFactVersionRecord.revision.desc(),
 )
 Index(
+    "ix_market_fact_series_accepted",
+    MarketFactVersionRecord.series_id,
+    MarketFactVersionRecord.accepted_at,
+    MarketFactVersionRecord.market_commit_seq,
+)
+Index(
     "ix_market_fact_series_commit",
     MarketFactVersionRecord.series_id,
     MarketFactVersionRecord.market_commit_seq,
@@ -344,6 +350,11 @@ Index(
     "ix_market_fact_external_group",
     MarketFactVersionRecord.series_id,
     MarketFactVersionRecord.external_event_group_key,
+)
+Index(
+    "ix_market_fact_storage_family",
+    MarketFactVersionRecord.storage_day,
+    MarketFactVersionRecord.fact_type,
 )
 Index(
     "ix_market_fact_storage_page",

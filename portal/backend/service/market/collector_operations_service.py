@@ -1444,6 +1444,27 @@ class CollectorOperationsService:
             "collector": resulting_collector,
         }
 
+    def _catalog_definition(
+        self, *, collector_kind: CollectorKind | str, collector_id: str,
+    ) -> tuple[CollectorKind, dict[str, Any]]:
+        """Resolve registered identity without reading fleet or Fact history."""
+        kind = CollectorKind(collector_kind)
+        rows = (
+            self.collection_repository.list_definitions(definition_id=collector_id)
+            if kind == CollectorKind.SCHEDULED_FACT
+            else self.stream_repository.list_stream_definitions(definition_id=collector_id)
+        )
+        matches = [
+            row for row in rows
+            if str(row["id"]) == str(collector_id)
+            and self._is_operationally_registered(row, kind)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"collector_unknown: collector_kind={kind.value} collector_id={collector_id}"
+            )
+        return kind, dict(matches[0])
+
     def event_catalog(
         self,
         *,
@@ -1451,13 +1472,27 @@ class CollectorOperationsService:
         collector_id: str,
         limit: int = 100,
     ) -> dict[str, Any]:
-        detail = self.detail(
-            collector_kind=collector_kind,
-            collector_id=collector_id,
-            limit=limit,
+        kind, _definition = self._catalog_definition(
+            collector_kind=collector_kind, collector_id=collector_id,
         )
+        bounded_limit = max(1, min(int(limit), 500))
+        operations = self.operations_repository.list_operations(
+            collector_id=collector_id, collector_kind=kind, limit=bounded_limit,
+        )
+        if kind == CollectorKind.SCHEDULED_FACT:
+            runtime_events = self.collection_repository.list_attempts(
+                definition_id=collector_id, limit=bounded_limit,
+            )
+            quality_events = []
+        else:
+            runtime_events = self.operations_repository.list_stream_events(
+                definition_id=collector_id, limit=bounded_limit,
+            )
+            quality_events = self.operations_repository.list_stream_quality_events(
+                definition_id=collector_id, limit=bounded_limit,
+            )
         timeline: list[dict[str, Any]] = []
-        for operation in detail["operations"]:
+        for operation in operations:
             timeline.append(
                 {
                     "occurred_at": operation["requested_at"],
@@ -1466,7 +1501,7 @@ class CollectorOperationsService:
                     "evidence": operation,
                 }
             )
-        for event in detail["runtime_events"]:
+        for event in runtime_events:
             timeline.append(
                 {
                     "occurred_at": _iso(
@@ -1482,7 +1517,7 @@ class CollectorOperationsService:
                     "evidence": event,
                 }
             )
-        for event in detail["quality_events"]:
+        for event in quality_events:
             timeline.append(
                 {
                     "occurred_at": _iso(event.get("detected_at")),
@@ -1509,17 +1544,25 @@ class CollectorOperationsService:
         collector_id: str,
         limit: int = 100,
     ) -> dict[str, Any]:
-        detail = self.detail(
-            collector_kind=collector_kind,
-            collector_id=collector_id,
-            limit=limit,
+        kind, definition = self._catalog_definition(
+            collector_kind=collector_kind, collector_id=collector_id,
+        )
+        bounded_limit = max(1, min(int(limit), 500))
+        gaps = self.operations_repository.list_gap_evidence(
+            series_ids=_series_ids(definition, kind), limit=bounded_limit,
+        )
+        quality_events = (
+            self.operations_repository.list_stream_quality_events(
+                definition_id=collector_id, limit=bounded_limit,
+            )
+            if kind == CollectorKind.CONTINUOUS_STREAM else []
         )
         return {
             "schema_version": COLLECTOR_GAP_CATALOG_VERSION,
             "collector_id": collector_id,
-            "collector_kind": CollectorKind(collector_kind).value,
-            "gaps": detail["gaps"],
-            "quality_events": detail["quality_events"],
+            "collector_kind": kind.value,
+            "gaps": gaps,
+            "quality_events": quality_events,
         }
 
     def data_plane_snapshot(self) -> dict[str, Any]:
