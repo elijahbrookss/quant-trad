@@ -5,6 +5,7 @@ activation belongs to the worker after its physical operations are verified.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,9 @@ from core.storage_mounts import StorageMountError
 from core.storage_targets import STORAGE_ROLES, StoragePolicy, StorageTarget
 from portal.backend.db import db
 from portal.backend.db.storage_target_models import StoragePlanRecord, StoragePolicyRecord, StorageTargetRecord
+
+
+logger = logging.getLogger(__name__)
 
 
 class StorageConflict(ValueError):
@@ -115,6 +119,7 @@ class StorageManagementService:
                 id=candidate.target_id, label=candidate.label, filesystem_uuid=candidate.filesystem_uuid,
                 root=candidate.root, medium=candidate.medium, roles=list(candidate.roles), state="active",
             ))
+        logger.info("storage_target_enrolled | target_id=%s filesystem_uuid=%s", target_id, candidate.filesystem_uuid)
         return {"target_id": target_id, "registered": True, "reused": False}
 
     def plan(self, *, policy: dict[str, Any], base_revision: int, request_id: str) -> dict[str, Any]:
@@ -170,7 +175,10 @@ class StorageManagementService:
                 state="planned", impact=impact, progress={}, created_at=now, updated_at=now)
             session.add(record)
             session.flush()
-            return _plan(record)
+            result = _plan(record)
+        logger.info("storage_plan_created | plan_id=%s base_revision=%s policy_hash=%s",
+                    result["id"], base_revision, desired.fingerprint)
+        return result
 
     def get_plan(self, plan_id: str) -> dict[str, Any]:
         with self.database.session() as session:
