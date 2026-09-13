@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.settings import get_settings
-from .controller import bots, candles, indicators as ind_controller, instruments, market_data, providers, reports, research, strategies
+from .controller import bots, candles, indicators as ind_controller, instruments, market_data, providers, reports, research, strategies, storage_management
 from .service.bots import bot_service
 from .service.bots.bot_watchdog import get_watchdog
 from .service.bots.telemetry_stream import telemetry_hub
@@ -115,6 +115,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(storage_management.router, prefix="/api/storage")
 app.include_router(candles.router, prefix="/api/candles")
 app.include_router(market_data.router, prefix="/api/market-data")
 app.include_router(ind_controller.router, prefix="/api/indicators")

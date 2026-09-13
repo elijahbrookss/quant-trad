@@ -49,6 +49,11 @@ mutate research or strategies, operate collectors, or write lifecycle state. A
 displayed command remains copy-only unless an independently owned operator
 surface explicitly executes it.
 
+The separately owned V2 Settings > Storage surface may enroll prepared drives
+and review storage policy through the backend storage-management contract.
+Role selection is a request, not evidence of physical placement or completed
+migration. Overview and Operations remain read-only.
+
 Frontend code must render lifecycle, health, readiness, coverage, and diagnostic
 states emitted by their owning backend contracts. It must not infer those states
 from cache presence, enabled flags, recent timestamps, database-shaped payloads,

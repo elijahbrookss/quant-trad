@@ -3261,6 +3261,27 @@ def _add_global_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-audit-log", action="store_true", help="Disable the per-command CLI audit JSON log.")
 
 
+def _cmd_storage(args: argparse.Namespace) -> int:
+    client = _client(args)
+    if args.storage_command == "status":
+        result = client.request_json("GET", "/api/storage")
+    elif args.storage_command == "enroll":
+        result = client.request_json("POST", "/api/storage/targets",
+                                     payload={"target_id": args.target_id})
+    elif args.storage_command == "review":
+        result = client.request_json("POST", "/api/storage/plans", payload={
+            "policy": _read_json_object(args.policy_file),
+            "base_revision": args.base_revision, "request_id": args.request_id,
+        })
+    elif args.storage_command == "plan":
+        result = client.request_json("GET", f"/api/storage/plans/{quote(args.plan_id, safe='')}")
+    else:
+        result = client.request_json("POST", f"/api/storage/plans/{quote(args.plan_id, safe='')}/apply",
+                                     payload={"policy_hash": args.policy_hash})
+    _print_json(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Quant-Trad API-backed research CLI.")
     _add_global_args(parser)
@@ -4838,6 +4859,26 @@ def build_parser() -> argparse.ArgumentParser:
     run_bot.add_argument("--no-golden", action="store_true")
     run_bot.add_argument("--require-golden", action="store_true")
     run_bot.set_defaults(func=_cmd_experiments_run_bot)
+
+    storage = subparsers.add_parser("storage", help="Inspect drives and review server-owned storage policy.")
+    storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    storage_status = storage_sub.add_parser("status")
+    storage_status.set_defaults(func=_cmd_storage)
+    storage_enroll = storage_sub.add_parser("enroll", help="Enroll a host-prepared target by ID.")
+    storage_enroll.add_argument("target_id")
+    storage_enroll.set_defaults(func=_cmd_storage)
+    storage_review = storage_sub.add_parser("review", help="Create a durable plan without activating it.")
+    storage_review.add_argument("--policy-file", required=True)
+    storage_review.add_argument("--base-revision", required=True, type=int)
+    storage_review.add_argument("--request-id", required=True)
+    storage_review.set_defaults(func=_cmd_storage)
+    storage_plan = storage_sub.add_parser("plan")
+    storage_plan.add_argument("plan_id")
+    storage_plan.set_defaults(func=_cmd_storage)
+    storage_apply = storage_sub.add_parser("apply", help="Apply a reviewed plan when execution is available.")
+    storage_apply.add_argument("plan_id")
+    storage_apply.add_argument("--policy-hash", required=True)
+    storage_apply.set_defaults(func=_cmd_storage)
 
     mcp = subparsers.add_parser("mcp", help="MCP server entrypoint for agent/tool hosts.")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)

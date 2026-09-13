@@ -82,6 +82,9 @@ from .market_storage_models import (
     MarketFactBookPrefixChunkRecord,
     MarketFactBookPrefixDependencyRecord,
 )
+from .storage_target_models import (
+    StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord, StorageObjectLocationRecord,
+)
 from .session import Database, db
 
 __all__ = [

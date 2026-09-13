@@ -28,6 +28,7 @@ _DEFAULTS_FILE = _CONFIG_DIR / "defaults.yaml"
 _ENV_LOADED = False
 _SETTINGS_CACHE: "AppSettings | None" = None
 _ENV_BINDINGS: list[tuple[str, tuple[str, ...]]] = [
+    ("QT_STORAGE_INVENTORY_PATH", ("storage", "inventory_path")),
     ("QT_LOGGING_LEVEL", ("logging", "level")),
     ("QT_LOGGING_DEBUG", ("logging", "debug")),
     ("QT_LOGGING_ENV_NAME", ("logging", "env_name")),
@@ -755,6 +756,11 @@ class ReportSettings:
 
 
 @dataclass(frozen=True)
+class StorageSettings:
+    inventory_path: str = "/run/quanttrad/storage-inventory.json"
+
+
+@dataclass(frozen=True)
 class AppSettings:
     profile: str
     logging: LoggingSettings
@@ -764,6 +770,7 @@ class AppSettings:
     async_jobs: AsyncJobSettings
     workers: WorkersSettings
     market_data_lifecycle: MarketStorageLifecyclePolicy
+    storage: StorageSettings
     bot_runtime: BotRuntimeSettings
     providers: ProviderSettings
     security: SecuritySettings
@@ -951,6 +958,7 @@ def _build_settings(payload: Mapping[str, Any]) -> AppSettings:
                 ),
             ),
         ),
+        storage=StorageSettings(inventory_path=_coerce_str(_coerce_mapping(payload.get("storage")).get("inventory_path"), "/run/quanttrad/storage-inventory.json")),
         market_data_lifecycle=MarketStorageLifecyclePolicy.from_mapping(
             market_data_lifecycle_payload
         ),
