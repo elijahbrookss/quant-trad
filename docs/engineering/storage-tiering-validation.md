@@ -71,3 +71,26 @@ of that HDD; off-server/S3 copies are deferred by the user.
 No seven-day waiting gate applies. Completion requires the concrete correctness,
 performance, recovery and migration evidence above, actual deployment, physical
 placement verification, and updated capacity evidence.
+
+## Prepared HDD initialization
+
+The host helper scripts/automation/storage_host_prepare.py consumes a reviewed
+JSON plan with device (stable by-id path), expected_serial, expected_size_bytes,
+filesystem_uuid, mountpoint and owner. The exact device must pass the existing
+read-only audit and a SMART health check. It refuses partitions, foreign mount
+points, existing signatures and conflicting fstab entries.
+
+Initial execution requires explicit --initialize-empty-device authorization. It
+creates whole-disk ext4 with the plan UUID, a 64 KiB inode ratio and zero
+filesystem reserved percentage; QT's own capacity reserve remains separate.
+Inode and journal initialization finish before benchmarking. An interrupted run
+can reuse only ext4 with that exact planned UUID. No force-format flag is used.
+
+The helper mounts the drive below /srv/quanttrad/storage, creates a private
+benchmark directory for the named owner, and preserves an original fstab copy
+before atomically adding a UUID mount. The nofail boot option lets the host
+boot if this auxiliary drive is absent; eventual storage consumers must still
+require UUID admission and the database service's mount dependencies. This
+preparation does not activate app policy, change running containers, move the
+database, or enable retention. A signature-free disk is not proof that it has
+no valuable raw data; the operator must approve initialization of that device.

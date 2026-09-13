@@ -19,6 +19,7 @@ code_paths:
   - portal/frontend/src/v2/rooms/StorageRoom.jsx
   - portal/frontend/src/v2/rooms/storage.css
   - scripts/automation/storage_device_audit.py
+  - scripts/automation/storage_host_prepare.py
 ---
 # Storage Management
 
