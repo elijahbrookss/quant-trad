@@ -89,3 +89,16 @@ def test_policy_roundtrip_preserves_fingerprint_and_rejects_unknown_settings():
 def test_policy_rejects_coercions_and_unbounded_values(change):
     with pytest.raises(ValueError):
         policy(**change)
+
+
+def test_target_identity_uses_deployment_host_metadata_mount(monkeypatch):
+    from pathlib import Path
+    from unittest.mock import Mock
+    import core.storage_targets as module
+    inspect = Mock()
+    monkeypatch.setattr(module, "inspect_filesystem", inspect)
+    monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", "/run/qt-host-udev/data")
+    target = StorageTarget("hdd", "History", "uuid-hdd", "/qt/hdd", "hdd")
+    target.inspect(require_writable=True)
+    assert inspect.call_args.kwargs["udev_root"] == Path("/run/qt-host-udev/data")
+    assert inspect.call_args.kwargs["expected_uuid"] == "uuid-hdd"

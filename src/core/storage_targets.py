@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -57,10 +58,11 @@ class StorageTarget:
         if not isinstance(self.state, str) or self.state not in {"active", "draining", "disabled"}:
             raise ValueError("storage_target_invalid: invalid state")
 
-    def inspect(self, *, require_writable: bool = False, udev_root: Path = Path("/run/udev/data")) -> FilesystemEvidence:
+    def inspect(self, *, require_writable: bool = False, udev_root: Path | None = None) -> FilesystemEvidence:
         return inspect_filesystem(
             Path(self.root), expected_uuid=self.filesystem_uuid,
-            require_writable=require_writable, udev_root=udev_root,
+            require_writable=require_writable,
+            udev_root=udev_root if udev_root is not None else Path(os.environ.get("QT_STORAGE_UDEV_ROOT", "/run/udev/data")),
         )
 
 
@@ -148,7 +150,7 @@ class StorageLocation:
             raise ValueError("storage_location_invalid: relative object key required")
 
     def resolve(self, target: StorageTarget, *, require_writable: bool = False,
-                udev_root: Path = Path("/run/udev/data")) -> Path:
+                udev_root: Path | None = None) -> Path:
         if self.target_id != target.target_id:
             raise StorageMountError("storage_location_target_mismatch")
         evidence = target.inspect(require_writable=require_writable, udev_root=udev_root)
