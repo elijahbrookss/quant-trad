@@ -19,6 +19,7 @@ code_paths:
   - portal/backend/db/market_storage_models.py
   - portal/backend/db/fact_storage_schema.py
   - portal/backend/db/fact_identity_schema.py
+  - portal/backend/db/fact_series_day_schema.py
   - scripts/db/inspect_fact_header_cutover_v2.py
   - portal/backend/db/session.py
   - portal/backend/service/market/numeric_fact_acquisition.py
@@ -477,3 +478,10 @@ bounded read-only transaction. It uses PG_DSN directly without loading runtime
 settings and always reports migration readiness as false. Its catalog
 fingerprint is comparison evidence, not a substitute for writer fencing or
 verification. The operator cutover executor remains unimplemented.
+
+The series/day directory candidate under fact_series_day_schema.py is an
+explicit installation primitive under qualification, not a bootstrap-owned
+table yet.
+Its guarded expanding ranges and stable-reader snapshot contract are described
+in the dated-header layout notes. Runtime does not provision or use it until
+the remaining qualification and integration are reviewed.

@@ -43,6 +43,45 @@ and distinguish sequential throughput from random indexed reads.
 - Restore a completed, rotated recovery copy into an isolated database and
   verify referenced archive objects and representative frozen dataset results.
 
+## Two-year partition-horizon check
+
+Run the selection experiment with the isolated database runner:
+
+```bash
+./scripts/ci/run_test_suite.sh db tests/test_market_data/test_fact_header_horizon_db.py -s
+```
+
+It runs 32-day smoke and 730-day full-horizon cases with one synthetic row per
+day plus a late correction, and exercises the actual canonical range selector. An observation on the first day receives a
+correction stored on the last day. Latest selection must return that correction;
+commit-frozen and known-at-frozen reads must retain the original. Payload
+hydration is replaced only in this selection fixture and remains covered by the
+separate storage integration tests.
+
+The report includes executed header partitions and PostgreSQL planning/execution
+time. It also compares array, lateral and stable-function directory queries
+against a fixture-built series/day observation range directory. That directory is not a
+runtime table or a qualified maintenance implementation. Any adopted directory
+must expand atomically with insertion, preserve late observations, reject
+missing/incompatible state, and use the same database snapshot as selection.
+A separate directory read followed by a READ COMMITTED fact query is not a
+demonstration of that snapshot guarantee. PostgreSQL's
+[STABLE function snapshot semantics](https://www.postgresql.org/docs/15/xfunc-volatility.html)
+provide one candidate for keeping the directory lookup and dynamically planned
+header read on the calling statement's snapshot. A dedicated concurrency test
+must exercise a new-day commit between those internal reads.
+
+The selection/guard fixtures omit extension installation in their disposable
+databases because they exercise native PostgreSQL behavior. Existing migration
+fixtures retain their TimescaleDB and pgcrypto setup. A function scan hides its
+nested execution plan, so its executed-partition metric is unavailable rather
+than zero; report total execution time, including internal planning.
+
+These small, warmed local results reveal partition fan-out and selection errors.
+They do not establish cold HDD latency, concurrent ingestion performance, full
+payload hydration, realistic index size, or two-year capacity. Do not turn the
+reported wall-clock times into machine-independent test thresholds.
+
 ## Time the migration before promising the cutover
 
 Measure copy, index construction, catch-up, verification, required lock windows

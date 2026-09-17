@@ -58,8 +58,12 @@ def _isolated_parent_dsn() -> str:
 
 
 @contextmanager
-def fresh_migration_database(label: str) -> Iterator[str]:
-    """Yield an empty, uniquely named database and always remove it afterward."""
+def fresh_migration_database(label: str, *, install_extensions: bool = True) -> Iterator[str]:
+    """Yield an isolated database and remove it afterward.
+
+    Catalog/query-only fixtures may omit extension installation; existing
+    migration fixtures retain the TimescaleDB/pgcrypto default.
+    """
 
     safe_label = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:16]
     if not safe_label:
@@ -86,12 +90,13 @@ def fresh_migration_database(label: str) -> Iterator[str]:
             )
         database_created = True
 
-        target_engine = create_engine(target_url, future=True)
-        with target_engine.begin() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
-        target_engine.dispose()
-        target_engine = None
+        if install_extensions:
+            target_engine = create_engine(target_url, future=True)
+            with target_engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb"))
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
+            target_engine.dispose()
+            target_engine = None
 
         yield target_url.render_as_string(hide_password=False)
     finally:

@@ -115,3 +115,48 @@ source-contract admission, capacity, capture, copy verification, physical
 placement, performance and rollback remain separate required gates. This tool
 makes those future operator decisions concrete; it is not the missing migration
 executor.
+
+## Range-directory candidate under qualification
+
+The local two-year baseline on 730 partitions and 731 synthetic rows preserved
+late corrections and frozen cutoffs, but executed all 730 header partitions.
+Its measured planning time was 448.941 ms and execution time 17.626 ms. Those
+warmed, small-row local measurements are evidence of fan-out, not HDD timings.
+
+fact_series_day_schema.py contains an explicit candidate installer for a
+per-series, per-storage-day observation range directory and a stable range
+reader. It is not wired into clean bootstrap, application range selection or
+the existing-server migration. The application still uses its original range
+query until candidate qualification and integration are complete.
+
+The candidate insertion trigger expands bounds in the same transaction as the
+header insert, including direct child-partition inserts. Bounds cannot narrow,
+change identity, be deleted or truncated. Admission checks function/trigger
+definitions, stable reader snapshot semantics and child trigger coverage.
+Concurrent inserts, rollback and a new-day commit between internal reads must
+be tested before adopting it. The directory is not a substitute for global
+Fact identity, known-at filtering, latest-revision selection or payload checks.
+
+The [horizon experiment](storage-tiering-validation.md#two-year-partition-horizon-check)
+compares alternative query shapes. Its stable-reader function quotes only
+server-produced typed dates into the narrowed query; request values remain
+bound parameters. Snapshot behavior follows PostgreSQL's
+[STABLE function contract](https://www.postgresql.org/docs/15/xfunc-volatility.html).
+A missing directory requires explicit repair or migration, never an automatic
+empty replacement. Directory population/verification and bytes must be included
+in the eventual migration and SSD budget.
+
+The row-trigger directory update adds write work. Its ingestion overhead,
+representative historical payload hydration, large result sets, cold cache
+behavior and full two-year query timings remain qualification gates. Passing a
+small fixture does not establish acceptable production latency or throughput.
+
+The final 32-partition smoke run passed eight selection and directory-guard
+checks, including a new-day commit while an existing read was blocked. The
+unpruned query planned in 2.326 ms and executed in 0.469 ms. The stable reader
+planned in 0.211 ms and executed in 0.602 ms, including its internal planning;
+its nested partition count is not exposed by the outer EXPLAIN. The array
+candidate still executed 32 partitions; the lateral candidate executed two
+but retained more planning work. These are single warmed observations, not
+percentiles or production acceptance. The full 730-day candidate comparison
+must still complete before selecting and integrating the runtime path.
