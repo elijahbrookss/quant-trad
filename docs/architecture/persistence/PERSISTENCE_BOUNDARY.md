@@ -19,6 +19,7 @@ code_paths:
   - portal/backend/db/market_storage_models.py
   - portal/backend/db/fact_storage_schema.py
   - portal/backend/db/fact_identity_schema.py
+  - scripts/db/inspect_fact_header_cutover_v2.py
   - portal/backend/db/session.py
   - portal/backend/service/market/numeric_fact_acquisition.py
   - portal/backend/service/provenance.py
@@ -470,3 +471,9 @@ This is schema support, not completed physical tiering. Existing installations
 require a separate operator cutover; runtime rejects v1 without modifying it.
 The [layout notes](../../engineering/fact-header-layout-v2.md) describe the
 deployment blocker and remaining migration work.
+
+The v2 operator preflight inventories source structure and dependencies in a
+bounded read-only transaction. It uses PG_DSN directly without loading runtime
+settings and always reports migration readiness as false. Its catalog
+fingerprint is comparison evidence, not a substitute for writer fencing or
+verification. The operator cutover executor remains unimplemented.

@@ -85,3 +85,33 @@ horizon, including planning time and cold cache behavior. If they probe too many
 historical indexes, add a transactionally maintained, conservative series/day
 range directory and verify late arrivals before enabling physical tiering.
 Never prune merely by assuming observation day equals storage day.
+
+## Inspect an existing v1 source without changing it
+
+The operator command is:
+
+```bash
+python -m scripts.db.inspect_fact_header_cutover_v2
+```
+
+It uses only an explicitly supplied PG_DSN and never loads dotenv or application
+settings. Inspection runs in a read-only repeatable-read transaction, with a
+two-second lock timeout and a per-statement timeout of 15 seconds by default
+(configurable from 1 to 60 seconds). Catalog inventories stop at 4,096 entries.
+It does not scan all Fact rows, acquire a writer fence, install capture, copy
+data, or create a migration certificate.
+
+The JSON report lists the source columns, constraints, indexes, guard signatures,
+incoming foreign keys and dependent views. It identifies the expected payload
+and archive consumers, flags unknown dependencies, and checks that the source
+has the index needed for bounded copy pages. It reports any existing v2 identity
+objects and retained legacy source. Row counts are planner estimates; relation
+file sizes exclude partition children and are not a free-space or duration
+guarantee. The catalog fingerprint helps compare inspections but does not
+authorize execution or replace verification under the eventual writer fence.
+
+Every report is explicitly inspection_only with migration_ready=false. Exact
+source-contract admission, capacity, capture, copy verification, physical
+placement, performance and rollback remain separate required gates. This tool
+makes those future operator decisions concrete; it is not the missing migration
+executor.
