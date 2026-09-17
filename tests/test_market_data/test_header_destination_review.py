@@ -106,3 +106,13 @@ def test_no_moves_does_not_require_an_unused_destination(review):
     result = review_header_moves(**review)
     assert result["planning_complete"] and result["moves"] == []
     assert result["destination_evidence"] == {}
+
+
+def test_partial_group_observation_never_authorizes_global_reservations(review):
+    observed = review["verified"]
+    review["verified"] = replace(observed, snapshot=replace(observed.snapshot, inventory_complete=False))
+    result = review_header_moves(**review)
+    assert not result["planning_complete"]
+    assert result["moves"] == []
+    assert result["additional_copy_reservations"] == {}
+    assert {item["code"] for item in result["blockers"]} == {"header_inventory_incomplete"}

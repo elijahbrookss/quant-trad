@@ -428,3 +428,33 @@ def test_worker_path_alias_cannot_substitute_a_different_server_catalog_path(fil
     wrong.write_bytes(b"database uses this other file")
     with pytest.raises(StorageMountError, match="different storage files"):
         verify(files)
+
+
+def test_explicit_single_group_can_bind_files_without_becoming_complete_inventory(files):
+    partial = replace(files.inventory,
+        snapshot=replace(files.inventory.snapshot, inventory_complete=False),
+        group_storage_day=files.inventory.snapshot.partitions[0].storage_day)
+    verified = verify(files, partial)
+    assert not verified.snapshot.inventory_complete
+    assert verified.snapshot.partitions[0].heap.target_id == files.target.target_id
+    assert len(verified.bindings) == 2
+
+
+@pytest.mark.parametrize("mode", ["unmarked", "complete", "wrong_day", "no_group", "invalid_day"])
+def test_partial_group_scope_cannot_be_disguised_as_complete_inventory(files, mode):
+    partial = replace(files.inventory,
+        snapshot=replace(files.inventory.snapshot, inventory_complete=False),
+        group_storage_day=files.inventory.snapshot.partitions[0].storage_day)
+    if mode == "unmarked":
+        partial = replace(partial, group_storage_day=None)
+    elif mode == "complete":
+        partial = replace(partial, snapshot=replace(partial.snapshot, inventory_complete=True))
+    elif mode == "wrong_day":
+        partial = replace(partial, group_storage_day=date(2026, 8, 1))
+    elif mode == "no_group":
+        partial = replace(partial, snapshot=replace(partial.snapshot, partitions=()), physical_locations=())
+    else:
+        partial = replace(partial, group_storage_day="2026-09-01")
+    with pytest.raises(ValueError, match="header_filesystem_invalid"):
+        verify(files, partial)
+    assert not files.calls

@@ -34,7 +34,7 @@ from portal.backend.db.storage_target_models import (
 )
 from portal.backend.service.storage.header_destinations import register_header_tablespaces, review_header_moves
 from portal.backend.service.storage.header_journal import reserve_header_batch, cancel_unstarted_header_batch
-from portal.backend.service.storage.header_catalog import read_header_catalog
+from portal.backend.service.storage.header_catalog import read_header_catalog, read_locked_header_group
 from portal.backend.service.storage.header_filesystem import verify_header_filesystem
 
 pytestmark = pytest.mark.db
@@ -164,9 +164,23 @@ def _worker(root, history):
         for phase in ("table", "whole_group"):
             try:
                 with engine.begin() as conn:
+                    locked_before = read_locked_header_group(conn, storage_day=storage_day,
+                        heap_oid=inventory.snapshot.partitions[0].heap.oid,
+                        destination_tablespace_oids=(destination_oid,))
+                    bound_before = verify(locked_before, {"history": destination_oid})
                     conn.execute(text(f'ALTER TABLE market."{partition_name}" SET TABLESPACE qt_fixture_history'))
                     if phase == "whole_group":
                         move_indexes(conn)
+                        locked_after = read_locked_header_group(conn, storage_day=storage_day,
+                            heap_oid=inventory.snapshot.partitions[0].heap.oid,
+                            destination_tablespace_oids=(destination_oid,))
+                        bound_after = verify(locked_after, {"history": destination_oid})
+                        report["same_transaction_group_verified"] = (
+                            all(item.target_id == "fixture" for item in bound_before.snapshot.partitions[0].relations)
+                            and all(item.target_id == "history" for item in bound_after.snapshot.partitions[0].relations)
+                            and not bound_before.snapshot.inventory_complete
+                            and not bound_after.snapshot.inventory_complete
+                        )
                     raise InjectedRollback()
             except InjectedRollback:
                 pass
@@ -389,6 +403,10 @@ def test_real_catalog_and_filesystem_proof_feed_registration_and_reservation(nam
 def test_real_unstarted_cancellation_preserves_source_and_releases_its_reservation(namespace_report):
     assert namespace_report["real_pipeline_cancelled"]
     assert namespace_report["real_pipeline_source_unmoved"]
+
+
+def test_locked_group_files_verify_before_and_after_uncommitted_copy_on_same_connection(namespace_report):
+    assert namespace_report["same_transaction_group_verified"]
 
 
 def test_both_private_filesystem_roots_are_cleaned_after_postmaster_stops(namespace_report):

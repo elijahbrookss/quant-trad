@@ -266,3 +266,20 @@ This does not exercise a movement worker: no worker exists yet. The ten-case
 extended fixture has been collected but still awaits a fresh disposable run.
 Neither the synthetic HDD label on tmpfs nor successful DDL establishes physical
 HDD performance, power-loss durability or full application query correctness.
+
+
+### Single-group transaction qualification
+
+The catalog suite adds cases for an exact selected heap/registry binding,
+retained exclusive locks, caller rollback and timeout preservation, refusal of
+a stale isolation snapshot, current index membership after caller DDL, invalid
+indexes, and independence from an unrelated child's exclusive lock. A shorter
+caller timeout must also bound the operation. The namespace fixture adds file
+verification before and after uncommitted table/index moves on the same
+connection, followed by the existing whole-group rollback checks.
+
+Pure file/review tests require explicit single-group scope and preserve
+inventory_complete=false; such observations must not authorize global planning
+or reservations. The focused run passed 108 cases. The new database cases need
+a fresh disposable run and are not qualified by an older image or CI commit.
+This remains executor preparation, not proof of an automatic movement worker.

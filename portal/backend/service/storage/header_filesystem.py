@@ -11,7 +11,7 @@ import stat
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from time import monotonic
 
@@ -196,8 +196,16 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
     relation_count = sum(len(group.relations) for group in inventory.snapshot.partitions)
     if relation_count != len(relations) or len(inventory.physical_locations) != relation_count:
         raise ValueError("header_filesystem_invalid: relation inventory")
-    if not inventory.snapshot.inventory_complete or inventory.filesystem_bindings_verified:
-        raise ValueError("header_filesystem_invalid: unbound complete catalog required")
+    if inventory.filesystem_bindings_verified:
+        raise ValueError("header_filesystem_invalid: unbound catalog required")
+    if inventory.group_storage_day is None:
+        if not inventory.snapshot.inventory_complete:
+            raise ValueError("header_filesystem_invalid: unbound complete catalog required")
+    elif (type(inventory.group_storage_day) is not date
+            or inventory.snapshot.inventory_complete
+            or len(inventory.snapshot.partitions) != 1
+            or inventory.snapshot.partitions[0].storage_day != inventory.group_storage_day):
+        raise ValueError("header_filesystem_invalid: explicit partial group required")
     if len({item.target_id for item in targets}) != len(targets) or len({item.filesystem_uuid for item in targets}) != len(targets):
         raise ValueError("header_filesystem_invalid: duplicate target identity")
     binary = Path(pg_controldata)

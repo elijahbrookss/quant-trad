@@ -352,3 +352,32 @@ override a changed registration. Registration/review only record intent and
 capacity ownership; the physical executor, runtime wiring, crash recovery and
 policy activation remain absent. These canonical model additions require the
 later explicit deployment cutover, with no runtime backfill of old intentions.
+
+
+## Locked single-group observations
+
+The internal read_locked_header_group boundary observes one registered daily
+heap and its complete ordinary-index group on the caller's existing READ COMMITTED
+connection. It takes an ACCESS EXCLUSIVE lock on that exact date-derived child,
+checks the expected heap OID and attachment/bounds, and holds a key-share lock
+on its registry row. It never opens a second connection or commits the caller's
+transaction. Unrelated children are neither inventoried nor locked by this
+boundary. The caller must roll back on any error.
+
+It shares catalog validation and file/TOAST accounting with the complete reader.
+The operation uses a declining statement budget, honors a shorter caller
+statement timeout, and restores that setting after success. A subsequent call
+on the same transaction sees the caller's table/index DDL. This avoids checking
+a moved group on a second connection that would block on the worker's own lock.
+
+Its inventory explicitly identifies the selected storage day and remains
+inventory_complete=false. The filesystem adapter can verify that one group's
+files and prepared destinations while retaining this partial status. Global
+placement/review refuses partial inventories and cannot create reservations
+from them. A partial observation is not a capacity reservation or proof of
+policy eligibility, storage-management ownership, successful commit or recovery.
+
+The future executor still owns policy/intent locking, current source-versus-intent
+comparison, full copy/WAL/temp/growth budgets, physical DDL, transactional
+completion/release and crash reconciliation. This helper alone enables none of
+those actions, changes no rows and does not enable Apply.

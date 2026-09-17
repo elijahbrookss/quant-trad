@@ -1,11 +1,13 @@
 """Catalog admission uses isolated databases; no live settings or disk probing."""
 from dataclasses import asdict
+from datetime import date
+from time import monotonic
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
-from portal.backend.service.storage.header_catalog import read_header_catalog
+from portal.backend.service.storage.header_catalog import read_header_catalog, read_locked_header_group
 from tests.test_market_data.migration_test_support import fresh_migration_database
 
 pytestmark = pytest.mark.db
@@ -175,3 +177,123 @@ def test_requested_destination_catalog_records_oid_name_privilege_and_catalog_ve
 def test_missing_requested_destination_refuses_complete_catalog(catalog_engine):
     with pytest.raises(RuntimeError, match="tablespace_changed"):
         read_header_catalog(catalog_engine, destination_tablespace_oids=(4294967295,))
+
+
+def _group_oid(engine):
+    with engine.connect() as conn:
+        return conn.scalar(text("SELECT 'market.fact_versions_20260901'::regclass::oid::bigint"))
+
+
+def test_locked_group_keeps_caller_transaction_and_timeout_and_does_not_commit(catalog_engine):
+    oid = _group_oid(catalog_engine)
+    with catalog_engine.connect() as conn:
+        transaction = conn.begin()
+        try:
+            conn.execute(text("SET LOCAL statement_timeout='7s'"))
+            conn.execute(text("""
+                INSERT INTO market.fact_versions VALUES ('uncommitted-probe', '2026-09-01', 'value')
+            """))
+            pid = conn.scalar(text("SELECT pg_backend_pid()"))
+            report = read_locked_header_group(conn, storage_day=date(2026, 9, 1), heap_oid=oid)
+            assert not report.snapshot.inventory_complete
+            assert report.group_storage_day == date(2026, 9, 1)
+            assert len(report.snapshot.partitions) == 1
+            assert report.snapshot.partitions[0].heap.oid == oid
+            assert conn.get_transaction() is transaction and transaction.is_active
+            assert conn.scalar(text("SHOW statement_timeout")) == "7s"
+            with catalog_engine.connect() as witness:
+                assert witness.scalar(text("""
+                    SELECT count(*) FROM pg_locks
+                    WHERE pid=:pid AND relation=:oid AND mode='AccessExclusiveLock' AND granted
+                """), {"pid": pid, "oid": oid}) == 1
+        finally:
+            transaction.rollback()
+    with catalog_engine.begin() as conn:
+        conn.execute(text("SET LOCAL statement_timeout='1s'"))
+        assert conn.scalar(text("SELECT count(*) FROM market.fact_versions WHERE id='uncommitted-probe'")) == 0
+
+
+def test_locked_group_ignores_an_unrelated_exclusively_locked_day(catalog_engine):
+    oid = _group_oid(catalog_engine)
+    with catalog_engine.begin() as blocker:
+        blocker.execute(text("LOCK TABLE market.fact_versions_20260902 IN ACCESS EXCLUSIVE MODE"))
+        with catalog_engine.begin() as conn:
+            report = read_locked_header_group(conn, storage_day=date(2026, 9, 1),
+                                               heap_oid=oid, timeout_seconds=1)
+            assert [g.storage_day for g in report.snapshot.partitions] == [date(2026, 9, 1)]
+            assert len(report.physical_locations) == len(report.snapshot.partitions[0].relations)
+
+
+def test_locked_group_cannot_skip_its_selected_day_lock(catalog_engine):
+    oid = _group_oid(catalog_engine)
+    with catalog_engine.begin() as blocker:
+        blocker.execute(text("LOCK TABLE market.fact_versions_20260901 IN ACCESS EXCLUSIVE MODE"))
+        with pytest.raises(DBAPIError, match="statement timeout"):
+            with catalog_engine.begin() as conn:
+                read_locked_header_group(conn, storage_day=date(2026, 9, 1),
+                                         heap_oid=oid, timeout_seconds=1)
+
+
+@pytest.mark.parametrize("alteration,expected", [
+    ("DELETE FROM market.fact_header_partitions WHERE storage_day='2026-09-01'", "group_not_registered"),
+    ("ALTER TABLE market.fact_versions DETACH PARTITION market.fact_versions_20260901", "registry_attachment_mismatch"),
+    (None, "registry_attachment_mismatch"),
+])
+def test_locked_group_requires_exact_registered_attached_heap(catalog_engine, alteration, expected):
+    oid = _group_oid(catalog_engine)
+    if alteration:
+        with catalog_engine.begin() as conn:
+            conn.execute(text(alteration))
+    else:
+        oid = 4294967295
+    with pytest.raises(RuntimeError, match=expected):
+        with catalog_engine.begin() as conn:
+            read_locked_header_group(conn, storage_day=date(2026, 9, 1), heap_oid=oid)
+
+
+def test_locked_group_uses_current_catalog_after_caller_index_changes(catalog_engine):
+    oid = _group_oid(catalog_engine)
+    with catalog_engine.begin() as conn:
+        before = read_locked_header_group(conn, storage_day=date(2026, 9, 1), heap_oid=oid)
+        conn.execute(text("CREATE INDEX newly_attached ON market.fact_versions_20260901(md5(payload))"))
+        after = read_locked_header_group(conn, storage_day=date(2026, 9, 1), heap_oid=oid)
+        assert len(after.snapshot.partitions[0].indexes) == len(before.snapshot.partitions[0].indexes) + 1
+        assert "newly_attached" in {i.name for i in after.snapshot.partitions[0].indexes}
+
+
+def test_locked_group_rejects_invalid_ordinary_index(catalog_engine):
+    oid = _group_oid(catalog_engine)
+    with catalog_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        with pytest.raises(DBAPIError):
+            conn.execute(text("CREATE UNIQUE INDEX CONCURRENTLY invalid_group_index ON market.fact_versions_20260901(id)"))
+    with pytest.raises(RuntimeError, match="index_unproven"):
+        with catalog_engine.begin() as conn:
+            read_locked_header_group(conn, storage_day=date(2026, 9, 1), heap_oid=oid)
+
+
+@pytest.mark.parametrize("isolation", [None, "REPEATABLE READ"])
+def test_locked_group_refuses_absent_or_stale_snapshot_transaction(catalog_engine, isolation):
+    oid = _group_oid(catalog_engine)
+    with catalog_engine.connect() as conn:
+        if isolation:
+            conn = conn.execution_options(isolation_level=isolation)
+            conn.begin()
+        with pytest.raises(RuntimeError, match="requires_read_committed_transaction"):
+            read_locked_header_group(conn, storage_day=date(2026, 9, 1), heap_oid=oid)
+
+
+def test_locked_group_respects_a_shorter_caller_statement_budget(catalog_engine):
+    oid = _group_oid(catalog_engine)
+    with catalog_engine.begin() as blocker:
+        blocker.execute(text("LOCK TABLE market.fact_versions_20260901 IN ACCESS EXCLUSIVE MODE"))
+        with catalog_engine.connect() as conn:
+            transaction = conn.begin()
+            conn.execute(text("SET LOCAL statement_timeout='100ms'"))
+            started = monotonic()
+            try:
+                with pytest.raises((DBAPIError, RuntimeError), match="statement timeout|time_budget_exceeded"):
+                    read_locked_header_group(conn, storage_day=date(2026, 9, 1),
+                                             heap_oid=oid, timeout_seconds=5)
+                assert monotonic() - started < 2
+            finally:
+                transaction.rollback()  # Deliberately generous above 100ms; must not wait 5s.
