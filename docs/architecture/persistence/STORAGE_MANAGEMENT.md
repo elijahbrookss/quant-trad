@@ -18,6 +18,7 @@ code_paths:
   - portal/backend/service/storage/header_journal.py
   - portal/backend/service/storage/header_inspection.py
   - portal/backend/service/storage/header_movement.py
+  - portal/backend/service/storage/header_resources.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -508,3 +509,43 @@ does not inspect WAL/temp paths, prove or enforce the limits, reserve auxiliary
 capacity, supervise a worker or enable Apply. Those runtime responsibilities
 remain required before composing it with the atomic movement primitive. No new
 portal controls are introduced by this internal calculation.
+
+
+## PostgreSQL resource-path observations
+
+observe_header_resources observes PGDATA, WAL and the caller session's new
+temporary-file and temporary-relation locations on its active READ COMMITTED
+connection. It shares binary/process/cluster identity checks with header-file
+verification, honors a tighter caller statement timeout, restores that setting
+on success and requires caller rollback on failure. It creates no files,
+tablespaces, directories or additional database connections.
+
+The observed database default tablespace is always included as a temporary-file
+fallback. Quoted temporary tablespace identifiers (including embedded quotes and
+commas) are split within a bounded list and normalized by PostgreSQL parse_ident.
+Missing or inaccessible named spaces refuse observation rather than silently
+assuming a fallback. This is conservative relative to PostgreSQL's own fallback
+behavior. Catalog, process identity, directories and filesystem bindings are
+rechecked before returning evidence.
+
+Every resource directory must be writable by the database OS owner and belong
+to one registered filesystem UUID/device. Directory identity must match through
+the postmaster's process root. A relocated pg_wal link must agree in worker and
+server namespaces; its target is verified against registration. Tablespace
+links must likewise agree with catalog locations. Unexpected directory links,
+unregistered paths and namespace disagreement refuse observation.
+
+For a not-yet-created pgsql_tmp or per-database temporary-relation directory,
+the observer proves the existing immediate parent and absence in both
+namespaces. It records that distinction and never creates a placeholder.
+Existing children are checked directly, including ownership and writability.
+
+This evidence covers the caller's allocation settings, not every producer's
+existing temporary objects or allocations on other sessions. It does not
+qualify peak rates, enforce resource limits, reserve capacity or enable Apply.
+The worker must recheck these observations under movement ownership and account
+for other producers before composing them with the resource-envelope calculation.
+
+The PostgreSQL 15 behavior is defined by
+[temporary tablespace selection](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/commands/tablespace.c)
+and [temporary file paths and fallback](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/storage/file/fd.c).

@@ -24,6 +24,15 @@ _PROC_ROOT = Path("/proc")
 
 
 @dataclass(frozen=True)
+class PostgresProcessObservation:
+    database_identity: str
+    captured_at: datetime
+    server_data_directory: str
+    postmaster_started_at: datetime
+    server_postmaster_identity: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class VerifiedTablespaceDestination:
     database_identity: str
     target_id: str
@@ -129,6 +138,17 @@ def _same_process_file(pid, actual, local_info, *, require_writable=False):
         os.close(handle)
 
 
+
+def _check_control_binary(binary, deadline):
+    version = subprocess.run(
+        [str(binary), "--version"], check=True, capture_output=True, text=True,
+        timeout=max(0.001, deadline - monotonic()),
+        env={"PATH": os.defpath, "LC_ALL": "C", "LANG": "C", "PG_COLOR": "never"},
+    )
+    if version.stderr.strip() or not re.fullmatch(r"pg_controldata \(PostgreSQL\) 15\.[^\n]+\s*", version.stdout):
+        _failure("pg_controldata major version is not 15")
+
+
 def _cluster_identity(inventory, binary, deadline):
     root = Path(inventory.server_data_directory)
     if not root.is_absolute() or root == Path("/") or ".." in root.parts:
@@ -150,7 +170,7 @@ def _cluster_identity(inventory, binary, deadline):
     if tuple(fields[:3]) != inventory.server_postmaster_identity:
         _failure("postmaster SQL/file identity mismatch")
     started = inventory.postmaster_started_at
-    captured = inventory.snapshot.captured_at
+    captured = inventory.captured_at
     if (started.tzinfo is None or started.utcoffset() is None
             or captured.tzinfo is None or captured.utcoffset() is None
             or started.timestamp() < int(fields[2]) or started > captured):
@@ -178,7 +198,7 @@ def _cluster_identity(inventory, binary, deadline):
     if result.stderr.strip():
         _failure("pg_controldata reported diagnostics")
     identities = re.findall(r"^Database system identifier:\s*([0-9]+)\s*$", result.stdout, re.MULTILINE)
-    if identities != [inventory.snapshot.database_identity.split("/")[0]]:
+    if identities != [inventory.database_identity.split("/")[0]]:
         _failure("database cluster identity mismatch")
     return root, pid, int(fields[2])
 
@@ -241,15 +261,11 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
     deadline = monotonic() + timeout_seconds
     try:
         binary = binary.resolve(strict=True)
-        # Reject an incompatible binary before interpreting cluster control bytes.
-        version = subprocess.run(
-            [str(binary), "--version"], check=True, capture_output=True, text=True,
-            timeout=max(0.001, deadline - monotonic()),
-            env={"PATH": os.defpath, "LC_ALL": "C", "LANG": "C", "PG_COLOR": "never"},
-        )
-        if version.stderr.strip() or not re.fullmatch(r"pg_controldata \(PostgreSQL\) 15\.[^\n]+\s*", version.stdout):
-            _failure("pg_controldata major version is not 15")
-        cluster = _cluster_identity(inventory, binary, deadline)
+        _check_control_binary(binary, deadline)
+        process = PostgresProcessObservation(inventory.snapshot.database_identity,
+            inventory.snapshot.captured_at, inventory.server_data_directory,
+            inventory.postmaster_started_at, inventory.server_postmaster_identity)
+        cluster = _cluster_identity(process, binary, deadline)
         root = cluster[0]
         capacity, roots, devices = {}, {}, set()
         for target in targets:
@@ -356,7 +372,7 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
                 destination.location, str(actual), str(server_directory), info.st_ino, inventory.catalog_version, target.root,
             ))
         # Refuse a changed mount, process or file instead of returning mixed evidence.
-        if _cluster_identity(inventory, binary, deadline) != cluster:
+        if _cluster_identity(process, binary, deadline) != cluster:
             _failure("database process changed during verification")
         for target in targets:
             current = target.inspect(require_writable=True)

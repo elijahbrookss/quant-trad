@@ -346,3 +346,22 @@ free-space boundaries. These
 exercise conditional accounting only. They do not establish real producer
 rates, enforce peak limits or certify PostgreSQL WAL and temporary-file roots.
 The calculation remains disconnected from automatic execution.
+
+
+### Resource-path qualification
+
+Disposable file tests cover normal and relocated WAL, absolute and relative WAL
+links, server/worker disagreement, unregistered paths, absent children, custom
+temporary locations plus the database fallback, unwritable directories and
+quoted identifier tokenization. They share the existing filesystem regressions.
+
+The private PostgreSQL fixture adds real caller transaction/timeout preservation,
+a custom temporary table allocation, stale configuration after tablespace rename,
+quoted/comma-containing names and WAL relocation while the owned server is
+stopped, followed by fresh observation after restart. All 113 selected database
+cases passed in 474.28 seconds: 29 namespace, 24 catalog, 47 journal and 13
+inspection cases. The runner removed its owned stack. The combined resource/
+filesystem unit suite passed 85 cases, including directory and settings changes
+during observation; the full backend passed 3,085 cases with 33 existing warnings.
+These prove path observation, not peak resource enforcement or production
+throughput.

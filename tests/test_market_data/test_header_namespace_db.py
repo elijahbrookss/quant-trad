@@ -145,6 +145,8 @@ def _worker(root, history):
         except StorageMountError:
             report["changed_destination_refused"] = True
 
+        from tests.test_market_data.header_resource_fixture import prove_resource_paths
+        report.update(prove_resource_paths(engine, targets, destination_oid, BIN / "pg_controldata"))
         report.update(_prove_registered_pipeline(engine, targets, destination_oid))
 
         def move_indexes(conn):
@@ -231,6 +233,18 @@ def _worker(root, history):
         from tests.test_market_data.header_atomic_fixture import prove_atomic_moves
         report.update(prove_atomic_moves(engine, root, targets, destination_oid,
                                          storage_day, partition_name, BIN / "pg_controldata"))
+        # Relocate WAL only inside this owned disposable root, with its server stopped.
+        engine.dispose()
+        control("stop")
+        relocated = root / "relocated-wal"
+        (data / "pg_wal").rename(relocated)
+        (data / "pg_wal").symlink_to(Path("../relocated-wal"), target_is_directory=True)
+        control("start")
+        from portal.backend.service.storage.header_resources import observe_header_resources
+        with engine.begin() as conn:
+            resources = observe_header_resources(conn, targets, pg_controldata=BIN / "pg_controldata")
+        wal = next(item for item in resources.bindings if item["role"] == "wal")
+        report["resources_relocated_wal"] = wal["directory"] == str(relocated) and wal["target_id"] == "fixture"
         return report
     finally:
         if engine is not None:
@@ -467,6 +481,15 @@ def test_atomic_index_only_move_preserves_destination_heap_and_refuses_stale_com
 
 def test_blocked_completion_bookkeeping_times_out_and_rolls_back_copy(namespace_report):
     assert namespace_report["atomic_bookkeeping_timeout"]
+
+
+@pytest.mark.parametrize("case", [
+    "default_bound", "preserve_transaction", "custom_and_fallback",
+    "real_temp_allocation", "existing_temp_directory", "stale_temp_name_refused",
+    "quoted_temp_name", "relocated_wal",
+])
+def test_real_resource_roots_and_caller_settings_are_verified(namespace_report, case):
+    assert namespace_report["resources_" + case]
 
 
 if __name__ == "__main__":
