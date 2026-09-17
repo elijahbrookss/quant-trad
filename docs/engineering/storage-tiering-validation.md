@@ -134,3 +134,43 @@ require UUID admission and the database service's mount dependencies. This
 preparation does not activate app policy, change running containers, move the
 database, or enable retention. A signature-free disk is not proof that it has
 no valuable raw data; the operator must approve initialization of that device.
+
+
+## Disposable catalog and filesystem qualification
+
+The catalog and namespace verifier changes are pending database qualification.
+After any currently running isolated database suite finishes, run these cases
+through the supported disposable runner:
+
+```bash
+./scripts/ci/run_test_suite.sh db tests/test_market_data/test_header_catalog_db.py tests/test_market_data/test_header_namespace_db.py tests/test_market_data/test_header_history_move_lock_db.py -x -s
+```
+
+The test image includes PostgreSQL 15 server tools with distribution-managed
+cluster creation disabled. The namespace fixture creates its own private
+cluster as a non-root OS user, disables TCP listening and host authentication,
+and uses a temporary Unix socket. Its subprocess receives no inherited DSN or
+password environment. It stops and removes only its generated cluster.
+The normal test database remains under the existing isolated runner.
+
+The fixture uses real PostgreSQL control/process/file observations and a
+synthetic udev UUID entry on the disposable filesystem. It is evidence for
+catalog and namespace correctness, not actual SSD/HDD performance, backup
+durability, migration throughput or deployment readiness. Do not replace its
+temporary directory or socket with a server path.
+
+
+The historical-lock probe holds an exclusive lock on an old header partition,
+proves that the lock blocks a direct historical read, then requires the actual
+series/day reader and a recent insert to finish within a one-second statement
+budget. This is a minimum responsiveness gate before choosing a physical
+mover. If it fails, investigate query routing or a different copy/cutover
+strategy before enabling movement. A pass still requires actual concurrent
+table/index movement, exact-ID paths and hot-join workload qualification.
+
+
+The namespace fixture also injects transaction failures after the table move
+and after the table-plus-index moves. It requires the original file paths,
+physical file identifiers and row hashes after rollback. This checks the
+PostgreSQL primitive only; a durable worker still needs tests for process loss,
+ambiguous COMMIT results, retry idempotency and reservation reconciliation.

@@ -12,6 +12,8 @@ code_paths:
   - cli/main.py
   - src/core/storage_targets.py
   - src/core/storage_header_placement.py
+  - portal/backend/service/storage/header_catalog.py
+  - portal/backend/service/storage/header_filesystem.py
   - src/core/storage_inventory.py
   - portal/backend/db/storage_target_models.py
   - portal/backend/controller/storage_management.py
@@ -110,6 +112,90 @@ acceptance remain explicitly uncovered. Before any future execution, a worker
 must recheck the catalog, policy revision, mount identities and capacity, then
 reserve space under the shared lock. This preview cannot authorize a cutover
 or establish a whole-system storage forecast.
+
+### Catalog adapter under qualification
+
+`portal.backend.service.storage.header_catalog.read_header_catalog` now
+implements the read-only PostgreSQL half of the inventory boundary. It is
+under disposable-database qualification and is not called by the Storage API.
+It accepts the existing PG_DSN-backed engine, opens a read-only repeatable-read
+transaction, and applies a decreasing statement-time budget. Access-share
+locks protect admitted tables against destructive rewrites while permitting
+ordinary collection. Partition and index counts are bounded before accepting
+a complete result. Concurrent file growth and index maintenance still require
+fresh checks before execution.
+
+The reader checks the registered daily partitions against their attached
+relations, schema, persistence and exact daily bounds. It observes table,
+ordinary-index and TOAST sizes/placement, rejects invalid ordinary indexes,
+and reports whether TOAST and its internal indexes are colocated. PostgreSQL's
+effective database-default tablespace is resolved when a relation stores
+tablespace OID zero.
+
+Its result contains an unbound `HeaderPlacementSnapshot` plus PostgreSQL
+tablespace OIDs, locations and relative file paths. Every relation target ID
+remains null and `filesystem_bindings_verified` remains false. Paths describe
+the database server's namespace, not necessarily the API container's
+filesystem. An empty built-in tablespace location does not mean HDD storage.
+A host-side UUID/device verification and explicit path binding are still
+required before these observations can produce a usable placement plan.
+The reader requires access to the header catalog and PostgreSQL cluster
+identity; it does not load application settings, create a second DSN, bootstrap
+schema, or perform disk operations.
+
+### Filesystem binding under qualification
+
+`header_filesystem.verify_header_filesystem` connects the unbound catalog
+snapshot to registered targets through read-only file probes. The future worker
+must share the database server's PID namespace and database storage paths; running it
+against similar-looking paths in the API container is insufficient. Its
+absolute `pg_controldata` executable is trusted worker configuration, not a
+portal setting. The executable runs with a small explicit environment and
+without a shell or inherited database credentials.
+
+The verifier compares the PostgreSQL 15 control-data cluster identifier with
+the SQL inventory. It also checks the observed postmaster start time, PID file
+directory and running process executable. It compares the device and inode of
+`global/pg_control` in the worker's mounted data directory with that file
+accessed through the postmaster's `/proc/PID/root`. The latter uses a
+kernel filesystem lookup, not a userspace resolution of the proc root link.
+This permits different worker/server binary locations without accepting a
+different mounted copy of the database. The configured utility must still be
+PostgreSQL 15. A backup copy's cluster identifier
+alone cannot establish that it is active database storage. The catalog reader
+now includes the server data directory and postmaster start time for this
+purpose.
+
+Each reported ordinary table/index file must match its database OID, physical
+file identifier and expected PostgreSQL default/tablespace path. Tablespace
+directory links are resolved and compared with the server's declared location.
+Individual relation-file symlinks, missing files and paths outside a unique
+registered root are refused. Target roots must pass UUID, device and writable
+filesystem checks. TOAST placement remains the catalog reader's tablespace
+colocation observation, not a separate file-by-file TOAST audit.
+
+Process identity, mount identity and relation-file inode/device evidence are
+checked again before returning bound target IDs and fresh capacity observations.
+The function has a bounded inventory and elapsed-time checks between probes;
+this is not a hard interrupt for a kernel filesystem call that hangs. The
+future worker needs an outer operation timeout as well as retry/recovery
+controls. None of these checks reserve capacity or prevent later file growth,
+so a movement worker must obtain fresh evidence before executing.
+
+Temporary-file tests cover default and linked tablespaces, stale identities,
+wrong UUIDs/devices, malformed paths, missing files and mid-check file/mount
+changes. The PostgreSQL utility is mocked in those tests. A real
+PostgreSQL/worker-namespace fixture is now prepared in
+`tests/test_market_data/test_header_namespace_db.py` but has not yet run.
+It starts PostgreSQL 15 as a non-root OS user, with TCP disabled and a private
+Unix socket. It probes real control data, process identity and relation files;
+the udev UUID entry is synthetic. It exercises a table-only tablespace change,
+the subsequent index move, transaction rollback after table-only and whole-group
+movement, preserved row hashes, and rejection of copied
+identity, stale start time and a wrong UUID. Cleanup is restricted to its
+generated temporary cluster. This fixture does not qualify physical HDD
+performance or a production migration. Runtime wiring and movement remain
+pending; these helpers do not enable Apply.
 
 ## Database records and cutover work
 

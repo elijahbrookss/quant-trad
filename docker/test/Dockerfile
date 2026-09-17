@@ -8,8 +8,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.17 /uv /uvx /bin/
 
 # The supported DB test runner gates pytest on pg_isready. Keep that probe in
 # the image so a healthy disposable database cannot be misreported as absent.
+# PostgreSQL 15 server tools support private Unix-socket-only storage verifier
+# fixtures. Do not create or start a distribution-managed database cluster.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y postgresql-client \
+    && apt-get install --no-install-recommends -y postgresql-client postgresql-common \
+    && printf 'create_main_cluster = false\n' > /etc/postgresql-common/createcluster.conf \
+    && apt-get install --no-install-recommends -y postgresql-15 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install deps with uv's pip-compatible installer. The cache mount keeps local

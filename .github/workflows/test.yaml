@@ -169,6 +169,9 @@ jobs:
           QT_LOGGING_DEBUG: 'false'
         run: python -m pytest -q tests/test_portal/test_clean_database_bootstrap_db.py
 
+      - name: Verify PostgreSQL filesystem namespace
+        run: ./scripts/ci/run_test_suite.sh db tests/test_market_data/test_header_namespace_db.py
+
       - name: Run PostgreSQL-backed contract tests
         env:
           PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_contracts
@@ -179,3 +182,4 @@ jobs:
         run: >-
           python -m pytest -q -m db
           --ignore=tests/test_portal/test_clean_database_bootstrap_db.py
+          --ignore=tests/test_market_data/test_header_namespace_db.py

@@ -24,7 +24,7 @@ them concurrently. The numbering below is for documentation only.
 | 1 | `pr-suite` | Complete ordinary non-database backend pytest screen on the runner host |
 | 2 | `frontend` | Current frontend test command plus production asset build |
 | 3 | `deployment-contract` | Server shell/Compose validation and attested production-image builds |
-| 4 | `clean-database-bootstrap` | Clean-schema bootstrap followed by PostgreSQL-marked contract tests |
+| 4 | `clean-database-bootstrap` | Clean-schema bootstrap, private namespace verification, then PostgreSQL-marked contract tests |
 | 5 | `deployment-rehearsal` | Real deployment controller with synthetic Docker services and injected rollout failure |
 
 ### 1. `pr-suite`
@@ -105,14 +105,19 @@ The workflow steps are:
 3. `Install dependencies` from `requirements.lock` and run `pip check`;
 4. `Prepare isolated database contracts` by creating `quanttrad_contracts` and
    installing `timescaledb` and `pgcrypto` in both databases;
-5. `Prove clean current-schema bootstrap` against `quanttrad_bootstrap`; and
-6. `Run PostgreSQL-backed contract tests` against `quanttrad_contracts`, with
-   the clean-bootstrap test excluded from this second invocation.
+5. `Prove clean current-schema bootstrap` against `quanttrad_bootstrap`;
+6. `Verify PostgreSQL filesystem namespace` through the Docker DB runner; and
+7. `Run PostgreSQL-backed contract tests` against `quanttrad_contracts`, with
+   the clean-bootstrap and namespace fixture files excluded from this invocation.
 
-Clean bootstrap and PostgreSQL-marked verification are two sequential steps in
-this fourth job. They are not separate workflow jobs. Both set
-`RUN_DB_TESTS=1`, `QT_DB_TEST_ISOLATED=1`, disable Loki delivery, and use an
-explicit disposable DSN.
+Clean bootstrap, namespace verification and PostgreSQL-marked contracts are
+three sequential steps in this fourth job. They are not separate workflow jobs.
+The two host invocations set `RUN_DB_TESTS=1`, `QT_DB_TEST_ISOLATED=1`, disable
+Loki delivery, and use an explicit disposable DSN. The namespace step uses the
+repository's isolated Docker runner because its fixture needs PostgreSQL 15
+server utilities and a private process/filesystem environment. The fixture
+starts a temporary Unix-socket-only cluster with no inherited database
+credentials and a synthetic udev UUID entry; it does not exercise live disks.
 
 The clean-bootstrap database begins from the service image's empty application
 schema. Most DB-marked tests share `quanttrad_contracts` within the job.
@@ -212,14 +217,14 @@ the checkout remains unchanged between commands.
 
 ### Reproduce `clean-database-bootstrap`
 
-There is no single local wrapper that exactly reproduces both CI database
+There is no single local wrapper that exactly reproduces all three CI database
 steps. For exact topology, provision a fresh disposable
 `timescale/timescaledb:2.14.2-pg15` service with user `quanttrad`, database
 `quanttrad_bootstrap`, trust authentication, and localhost port 5432. Create a
 second database named `quanttrad_contracts`, then install `timescaledb` and
 `pgcrypto` in both databases.
 
-After installing the Python dependencies as in `pr-suite`, run the two CI test
+After installing the Python dependencies as in `pr-suite`, run the three CI test
 steps separately:
 
 ```bash
@@ -234,13 +239,16 @@ QT_LOGGING_LOKI_URL='' \
 QT_LOGGING_DEBUG='false' \
 python -m pytest -q tests/test_portal/test_clean_database_bootstrap_db.py
 
+./scripts/ci/run_test_suite.sh db tests/test_market_data/test_header_namespace_db.py
+
 PG_DSN="$QT_CI_CONTRACT_DSN" \
 RUN_DB_TESTS=1 \
 QT_DB_TEST_ISOLATED=1 \
 QT_LOGGING_LOKI_URL='' \
 QT_LOGGING_DEBUG='false' \
 python -m pytest -q -m db \
-  --ignore=tests/test_portal/test_clean_database_bootstrap_db.py
+  --ignore=tests/test_portal/test_clean_database_bootstrap_db.py \
+  --ignore=tests/test_market_data/test_header_namespace_db.py
 ```
 
 `./scripts/ci/run_test_suite.sh db` remains the convenient repository-owned
