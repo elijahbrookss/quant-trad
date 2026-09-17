@@ -88,3 +88,9 @@ qt storage review --policy-file FILE --base-revision N --request-id ID,
 qt storage plan ID, and qt storage apply ID --policy-hash HASH. Apply preserves
 the server execution blocker. CLI success from review means a plan was saved,
 not that data moved. The existing CLI audit records these requests.
+
+The clean-schema dated-header foundation is now described in
+[ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md).
+It preserves global identity while allowing detail partitions to move later.
+It does not enable Apply or prove physical tiering, and cannot yet be deployed
+over an existing v1 layout.

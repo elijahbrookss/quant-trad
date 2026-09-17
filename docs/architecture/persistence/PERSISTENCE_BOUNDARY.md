@@ -16,6 +16,9 @@ tags:
 code_paths:
   - portal/backend/db/models.py
   - portal/backend/db/market_data_models.py
+  - portal/backend/db/market_storage_models.py
+  - portal/backend/db/fact_storage_schema.py
+  - portal/backend/db/fact_identity_schema.py
   - portal/backend/db/session.py
   - portal/backend/service/market/numeric_fact_acquisition.py
   - portal/backend/service/provenance.py
@@ -452,3 +455,18 @@ fact without `wallet_commit_seq` is malformed and must block certification.
 - [ADR 0016: Treat runtime event ledger order as operational evidence](../decisions/0016-treat-runtime-event-ledger-order-as-operational-evidence.md)
 - [ADR 0042: Runtime event ledger as lifecycle truth](../decisions/0042-use-runtime-event-ledger-as-lifecycle-truth.md)
 - [ADR 0043: Canonical accounting reconciliation](../decisions/0043-reconcile-accounting-from-canonical-fills-and-wallet-ledger.md)
+
+## Dated canonical headers
+
+Clean v2 databases separate global Fact identity from detailed dated headers.
+The identity registry enforces ID and observation/revision uniqueness across
+all dates; headers bind to the registry's immutable storage day. Deferred
+checks preserve the identity/header/payload transaction boundary. The partition
+catalogue prevents startup or ingestion from silently recreating missing
+history. Ingestion resolves latest revisions through identity before fetching
+dated headers.
+
+This is schema support, not completed physical tiering. Existing installations
+require a separate operator cutover; runtime rejects v1 without modifying it.
+The [layout notes](../../engineering/fact-header-layout-v2.md) describe the
+deployment blocker and remaining migration work.

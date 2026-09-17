@@ -443,17 +443,31 @@ def _rewind_disposable_storage_to_old_layout(storage):
         conn.execute(text("CREATE TEMP TABLE fact_copy_fixture ON COMMIT DROP AS SELECT * FROM market.fact_rows"))
         conn.execute(text("DROP VIEW market.fact_rows"))
         conn.execute(text("DROP TRIGGER trg_require_fact_hot_payload ON market.fact_versions"))
+        from portal.backend.db.fact_identity_schema import IDENTITY_TABLES
+        from portal.backend.db import MarketFactVersionRecord
         for table in reversed(Base.metadata.sorted_tables):
-            if table.schema == "market" and table.name in FACT_STORAGE_TABLES:
+            if table.schema == "market" and table.name in FACT_STORAGE_TABLES and table.name not in IDENTITY_TABLES:
                 table.drop(conn)
-        conn.execute(text("ALTER TABLE market.fact_versions DISABLE TRIGGER trg_reject_mutation_fact_versions"))
-        conn.execute(text("ALTER TABLE market.fact_versions ADD COLUMN payload jsonb, ADD COLUMN provenance jsonb, ADD COLUMN quality jsonb"))
+        conn.execute(text("DROP TABLE market.fact_versions"))
+        for name in reversed(IDENTITY_TABLES):
+            Base.metadata.tables["market." + name].drop(conn)
+        columns = [column.name for column in MarketFactVersionRecord.__table__.columns
+                   if column.name != "storage_day"] + ["payload", "provenance", "quality"]
+        conn.execute(text("CREATE TABLE market.fact_versions AS SELECT " + ", ".join(columns) +
+                          " FROM fact_copy_fixture"))
+        conn.execute(text("ALTER TABLE market.fact_versions ADD PRIMARY KEY(id)"))
         conn.execute(text(
-            "UPDATE market.fact_versions target SET payload=source.payload, provenance=source.provenance, quality=source.quality "
-            "FROM fact_copy_fixture source WHERE source.id=target.id"
+            "ALTER TABLE market.fact_versions ADD CONSTRAINT uq_market_fact_observation_revision "
+            "UNIQUE(series_id, observation_key, revision)"
         ))
-        conn.execute(text("ALTER TABLE market.fact_versions ENABLE TRIGGER trg_reject_mutation_fact_versions"))
-        conn.execute(text("ALTER TABLE market.fact_versions DROP COLUMN storage_day"))
+        # Reconstruct the pre-storage indexes required by legacy source admission.
+        for index in MarketFactVersionRecord.__table__.indexes:
+            if "storage_day" not in index.columns.keys():
+                index.create(conn)
+        conn.execute(text(
+            "CREATE TRIGGER trg_reject_mutation_fact_versions BEFORE UPDATE OR DELETE "
+            "ON market.fact_versions FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()"
+        ))
     return storage.database._engine
 
 
@@ -603,22 +617,26 @@ def test_family_index_contract_refuses_missing_or_incompatible_index(storage, re
     ("ix_market_fact_series_accepted", "manual_add_fact_series_accepted_index_v1.sql",
      "canonical_series_accepted_index_invalid", "series_id, market_commit_seq, accepted_at"),
 ])
-def test_operator_header_index_cutover_is_idempotent_and_refuses_wrong_shape(
+def test_legacy_operator_header_index_cutover_is_idempotent_and_refuses_wrong_shape(
     storage, index_name, script_name, error_code, wrong_columns,
 ):
     from pathlib import Path
 
+    # These retained v1 helpers repair the unpartitioned v1 header table.
+    # PostgreSQL does not permit concurrent CREATE INDEX on a partitioned parent.
+    engine = _rewind_disposable_storage_to_old_layout(storage)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("ALTER TABLE market.fact_versions ADD COLUMN storage_day date")
     script = (Path(__file__).resolve().parents[2] / "scripts/db" / script_name).read_text()
     creation, verification = script.split("DO $qt$", 1)
-    with storage.database._engine.connect().execution_options(
+    with engine.connect().execution_options(
         isolation_level="AUTOCOMMIT"
     ) as connection:
-        connection.exec_driver_sql(f"DROP INDEX market.{index_name}")
+        connection.exec_driver_sql(f"DROP INDEX IF EXISTS market.{index_name}")
         for _ in range(2):
             connection.exec_driver_sql(creation)
             connection.exec_driver_sql("DO $qt$" + verification)
-        assert_fact_storage_contract(connection)
-        connection.exec_driver_sql(f"DROP INDEX market.{index_name}")
+        connection.exec_driver_sql(f"DROP INDEX IF EXISTS market.{index_name}")
         connection.exec_driver_sql(
             f"CREATE INDEX {index_name} ON market.fact_versions({wrong_columns})"
         )

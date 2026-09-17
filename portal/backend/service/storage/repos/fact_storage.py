@@ -257,10 +257,19 @@ class PostgresCanonicalFactStorageRepository:
         result = {}
         for offset in range(0, len(identities), 1000):
             batch = identities[offset:offset + 1000]
+            locations = session.execute(text(
+                "SELECT id,storage_day FROM market.fact_identities WHERE id = ANY(:fact_ids)"
+            ), {"fact_ids": batch}).mappings().all()
+            if len(locations) != len(batch) or {row["id"] for row in locations} != set(batch):
+                raise RuntimeError("canonical_selected_identity_coverage_invalid")
+            # Resolve dates before issuing the header query. An ARRAY subquery
+            # became an InitPlan on PG15 and did not prune unrelated partitions.
             rows = session.execute(text(f"""
                 SELECT {CANONICAL_ROW_COLUMNS} {CANONICAL_ROW_FROM}
                 WHERE versions.id = ANY(:fact_ids)
-            """), {"fact_ids": batch}).mappings().all()
+                  AND versions.storage_day = ANY(:storage_days)
+            """), {"fact_ids": batch,
+                   "storage_days": sorted({row["storage_day"] for row in locations})}).mappings().all()
             found = {row["id"] for row in rows}
             if found != set(batch) or len(rows) != len(found):
                 raise RuntimeError("canonical_selected_identity_coverage_invalid")
@@ -313,8 +322,11 @@ class PostgresCanonicalFactStorageRepository:
                  AND (manifests.last_commit_seq, manifests.last_id)
                      >= (requested.market_commit_seq, requested.id)
                 WHERE requested.id = ANY(:fact_ids)
+                  AND requested.storage_day = ANY(:storage_days)
                 ORDER BY requested.id, manifests.page_ordinal
-            """), {"fact_ids": ids[offset:offset + 1000]}).mappings().all()
+            """), {"fact_ids": ids[offset:offset + 1000],
+                   "storage_days": sorted({cold[identity]["storage_day"]
+                                           for identity in ids[offset:offset + 1000]})}).mappings().all()
             for item in matches:
                 identity = str(item["requested_id"])
                 if identity not in cold:

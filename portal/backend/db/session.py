@@ -1496,7 +1496,10 @@ class Database:
                 or int(row["indnkeyatts"]) != len(expected_columns)
                 or int(row["indnatts"]) != len(expected_columns)
                 or actual_columns != expected_columns
-                or str(row["definition"]) != expected_definition
+                or str(row["definition"]) not in (
+                    {expected_definition, expected_definition.replace(" ON market.fact_versions ", " ON ONLY market.fact_versions ")}
+                    if table_name == "fact_versions" else {expected_definition}
+                )
             ):
                 definition = str(row["definition"]) if row else "<missing>"
                 mismatches.append(
@@ -1659,10 +1662,10 @@ class Database:
 
         inspector = inspect(conn)
         primary_key = inspector.get_pk_constraint("fact_versions", schema="market")
-        if tuple(primary_key.get("constrained_columns") or ()) != ("id",):
+        if tuple(primary_key.get("constrained_columns") or ()) != ("id", "storage_day"):
             raise RuntimeError(
-                "Table 'market.fact_versions' must use canonical primary key (id). "
-                "Run scripts/db/manual_migration_canonical_fact_store_v1.sql."
+                "Table 'market.fact_versions' requires primary key (id, storage_day). "
+                "See docs/engineering/fact-header-layout-v2.md; explicit cutover required."
             )
         indexes = {
             str(item.get("name") or "")
