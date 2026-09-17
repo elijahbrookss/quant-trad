@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,9 +18,24 @@ from time import monotonic
 from core.storage_header_placement import HeaderPlacementSnapshot
 from core.storage_mounts import FilesystemEvidence, StorageMountError
 from core.storage_targets import StorageTarget
-from .header_catalog import HeaderCatalogInventory
+from .header_catalog import HeaderCatalogInventory, HeaderTablespaceObservation
 
 _PROC_ROOT = Path("/proc")
+
+
+@dataclass(frozen=True)
+class VerifiedTablespaceDestination:
+    database_identity: str
+    target_id: str
+    filesystem_uuid: str
+    device_id: str
+    tablespace_oid: int
+    tablespace_name: str
+    tablespace_location: str
+    directory: str
+    server_directory: str
+    directory_inode: int
+    catalog_version: int
 
 
 @dataclass(frozen=True)
@@ -28,6 +44,7 @@ class VerifiedHeaderPlacement:
     capacity: dict[str, FilesystemEvidence]
     bindings: tuple[dict, ...]
     verified_at: datetime
+    destinations: tuple[VerifiedTablespaceDestination, ...] = ()
 
 
 def _failure(reason):
@@ -44,6 +61,71 @@ def _read_small(path, maximum):
     if len(value) > maximum:
         _failure("identity file exceeds budget")
     return value.decode("utf-8")
+
+
+def _process_path_fd(pid, path):
+    """Walk an absolute server path from the postmaster root without links.
+
+    Following an absolute symlink after /proc/PID/root can escape back into the
+    caller's root. Directory-relative O_NOFOLLOW opens prevent that false proof.
+    The initial proc magic link is intentional; all subsequent components must
+    be real directories/files. O_PATH avoids reading database file contents.
+    """
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts or len(path.parts) > 256:
+        _failure("invalid process namespace path")
+    handle = os.open(_PROC_ROOT / str(pid) / "root", os.O_PATH | os.O_DIRECTORY)
+    try:
+        parts = path.parts[1:]
+        for index, part in enumerate(parts):
+            flags = os.O_PATH | os.O_NOFOLLOW
+            if index < len(parts) - 1:
+                flags |= os.O_DIRECTORY
+            next_handle = os.open(part, flags, dir_fd=handle)
+            os.close(handle)
+            handle = next_handle
+        if stat.S_ISLNK(os.fstat(handle).st_mode):
+            _failure("process namespace path contains a symlink")
+        result, handle = handle, None
+        return result
+    finally:
+        if handle is not None:
+            os.close(handle)
+
+
+def _process_stat(pid, path):
+    handle = _process_path_fd(pid, path)
+    try:
+        return os.fstat(handle)
+    finally:
+        os.close(handle)
+
+
+def _process_readlink(pid, path):
+    path = Path(path)
+    handle = _process_path_fd(pid, path.parent)
+    try:
+        return os.readlink(path.name, dir_fd=handle)
+    finally:
+        os.close(handle)
+
+
+def _same_process_file(pid, actual, local_info, *, require_writable=False):
+    handle = _process_path_fd(pid, actual)
+    try:
+        server_info = os.fstat(handle)
+        if (server_info.st_dev, server_info.st_ino) != (local_info.st_dev, local_info.st_ino):
+            _failure("worker and database see different storage files")
+        if require_writable:
+            server_user = (_PROC_ROOT / str(pid)).stat().st_uid
+            if (not stat.S_ISDIR(server_info.st_mode) or server_info.st_uid != server_user
+                    or server_info.st_mode & 0o700 != 0o700
+                    or server_info.st_mode & 0o022
+                    or os.fstatvfs(handle).f_flag & os.ST_RDONLY):
+                _failure("destination directory is not privately writable by database owner")
+        return server_info
+    finally:
+        os.close(handle)
 
 
 def _cluster_identity(inventory, binary, deadline):
@@ -67,10 +149,9 @@ def _cluster_identity(inventory, binary, deadline):
     executable = (_PROC_ROOT / str(pid) / "exe").readlink()
     if not executable.is_absolute() or executable.name != "postgres":
         _failure("postmaster executable mismatch")
-    # Use a kernel stat through proc's magic root link, not Path.resolve:
+    # Walk from the proc magic root without following later symlinks:
     # a sidecar can share data/PID namespaces without sharing binary paths.
-    server_control = (_PROC_ROOT / str(pid) / "root" / server_directory.relative_to("/")
-                      / "global" / "pg_control").stat()
+    server_control = _process_stat(pid, server_directory / "global" / "pg_control")
     local_control = (root / "global" / "pg_control").stat()
     if (server_control.st_dev, server_control.st_ino) != (local_control.st_dev, local_control.st_ino):
         _failure("process namespace points to different database files")
@@ -92,7 +173,8 @@ def _cluster_identity(inventory, binary, deadline):
     return root, pid, int(fields[2])
 
 
-def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeout_seconds=30):
+def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeout_seconds=30,
+                             destination_assignments=None):
     """Bind all observed header/index files to verified registered roots.
 
     pg_controldata is a trusted, absolute worker configuration path, never a UI
@@ -120,6 +202,24 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
     binary = Path(pg_controldata)
     if not binary.is_absolute():
         raise ValueError("header_filesystem_invalid: absolute pg_controldata path required")
+    if destination_assignments is not None and (
+            not isinstance(destination_assignments, Mapping) or len(destination_assignments) > 32):
+        raise ValueError("header_filesystem_invalid: destination assignments")
+    assignments = dict(destination_assignments or {})
+    if (len(assignments) > 32 or set(assignments) - {target.target_id for target in targets}
+            or any(type(oid) is not int or not 1 <= oid <= 2**32 - 1 or oid == 1664
+                   for oid in assignments.values())
+            or len(set(assignments.values())) != len(assignments)):
+        raise ValueError("header_filesystem_invalid: destination assignments")
+    destinations = inventory.destination_tablespaces
+    if (not isinstance(destinations, tuple) or len(destinations) > 32
+            or any(not isinstance(item, HeaderTablespaceObservation) for item in destinations)
+            or len({item.oid for item in destinations}) != len(destinations)
+            or {item.oid for item in destinations} != set(assignments.values())):
+        raise ValueError("header_filesystem_invalid: destination catalog mismatch")
+    if destinations and (type(inventory.catalog_version) is not int
+                         or not 1 <= inventory.catalog_version <= 2**31 - 1):
+        raise ValueError("header_filesystem_invalid: catalog version")
     deadline = monotonic() + timeout_seconds
     try:
         binary = binary.resolve(strict=True)
@@ -163,6 +263,7 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
                 expected = f"base/{database_oid}/{relation.relfilenode}"
                 if location["tablespace_location"] != "" or relative != expected:
                     _failure("database default path mismatch")
+                server_candidate = root / relative
             else:
                 pattern = rf"pg_tblspc/{tablespace}/PG_15_[0-9]+/{database_oid}/{relation.relfilenode}"
                 if not re.fullmatch(pattern, relative):
@@ -170,6 +271,10 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
                 declared = Path(location["tablespace_location"])
                 if not declared.is_absolute() or declared.resolve(strict=True) != (root / "pg_tblspc" / str(tablespace)).resolve(strict=True):
                     _failure("tablespace directory mismatch")
+                if _process_readlink(cluster[1], root / "pg_tblspc" / str(tablespace)) != str(declared):
+                    _failure("server tablespace link changed")
+                _same_process_file(cluster[1], declared, declared.stat())
+                server_candidate = declared.joinpath(*Path(relative).parts[2:])
             candidate = root / relative
             if candidate.is_symlink():
                 _failure("individual relation file cannot be a symlink")
@@ -177,15 +282,60 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
             info = actual.stat()
             if not stat.S_ISREG(info.st_mode):
                 _failure("relation file is not regular")
+            _same_process_file(cluster[1], server_candidate, info)
             matching = [key for key, directory in roots.items()
                         if actual.is_relative_to(directory) and _device_id(info.st_dev) == capacity[key].device_id]
             if len(matching) != 1:
                 _failure("relation is outside a unique registered filesystem")
             target_id = matching[0]
-            observed[oid] = (candidate, actual, info.st_dev, info.st_ino, target_id)
+            observed[oid] = (candidate, actual, info.st_dev, info.st_ino, target_id, server_candidate)
             bindings.append({"relation_oid": oid, "target_id": target_id,
                              "filesystem_uuid": capacity[target_id].filesystem_uuid,
-                             "device_id": capacity[target_id].device_id, "path": str(actual)})
+                             "device_id": capacity[target_id].device_id, "path": str(actual),
+                             "server_path": str(server_candidate)})
+        destination_results, destination_paths = [], []
+        targets_by_id = {target.target_id: target for target in targets}
+        assigned = {oid: target_id for target_id, oid in assignments.items()}
+        for destination in destinations:
+            if monotonic() >= deadline:
+                _failure("time budget exceeded")
+            target_id = assigned[destination.oid]
+            target = targets_by_id[target_id]
+            if target.state != "active" or "history" not in target.roles or not destination.can_create:
+                _failure("destination lacks history role or database CREATE privilege")
+            if destination.oid == 1663:
+                if destination.location != "" or destination.name != "pg_default":
+                    _failure("default destination identity mismatch")
+                directory = root / "base" / str(database_oid)
+                server_directory = directory
+                link = None
+            else:
+                declared = Path(destination.location)
+                if not declared.is_absolute() or ".." in declared.parts:
+                    _failure("absolute destination directory required")
+                link = root / "pg_tblspc" / str(destination.oid)
+                if (not link.is_symlink() or link.readlink() != declared
+                        or _process_readlink(cluster[1], link) != str(declared)):
+                    _failure("destination tablespace link mismatch")
+                _same_process_file(cluster[1], declared, declared.stat())
+                directory = link / f"PG_15_{inventory.catalog_version}"
+                server_directory = declared / f"PG_15_{inventory.catalog_version}"
+            if directory.is_symlink():
+                _failure("destination version directory cannot be a symlink")
+            actual = directory.resolve(strict=True)
+            info = actual.stat()
+            if (not stat.S_ISDIR(info.st_mode)
+                    or not actual.is_relative_to(roots[target_id])
+                    or _device_id(info.st_dev) != capacity[target_id].device_id):
+                _failure("destination is outside its registered filesystem")
+            _same_process_file(cluster[1], server_directory, info, require_writable=True)
+            destination_paths.append((directory, actual, info.st_dev, info.st_ino, link,
+                                      destination.location, server_directory))
+            destination_results.append(VerifiedTablespaceDestination(
+                inventory.snapshot.database_identity, target_id, target.filesystem_uuid,
+                capacity[target_id].device_id, destination.oid, destination.name,
+                destination.location, str(actual), str(server_directory), info.st_ino, inventory.catalog_version,
+            ))
         # Refuse a changed mount, process or file instead of returning mixed evidence.
         if _cluster_identity(inventory, binary, deadline) != cluster:
             _failure("database process changed during verification")
@@ -197,10 +347,20 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
                     or Path(target.root).resolve(strict=True) != roots[target.target_id]):
                 _failure("target changed during verification")
             capacity[target.target_id] = current
-        for candidate, actual, device, inode, _ in observed.values():
+        for candidate, actual, device, inode, _, server_candidate in observed.values():
             info = candidate.stat()
             if candidate.is_symlink() or candidate.resolve(strict=True) != actual or (info.st_dev, info.st_ino) != (device, inode):
                 _failure("relation changed during verification")
+            _same_process_file(cluster[1], server_candidate, info)
+        for directory, actual, device, inode, link, location, server_directory in destination_paths:
+            info = directory.stat()
+            if (directory.is_symlink() or directory.resolve(strict=True) != actual
+                    or (info.st_dev, info.st_ino) != (device, inode)):
+                _failure("destination changed during verification")
+            _same_process_file(cluster[1], server_directory, info, require_writable=True)
+            if link is not None and (str(link.readlink()) != location
+                                    or _process_readlink(cluster[1], link) != location):
+                _failure("destination tablespace link changed")
         if monotonic() >= deadline:
             _failure("time budget exceeded")
         def bind(relation):
@@ -209,6 +369,7 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
                        for group in inventory.snapshot.partitions)
         return VerifiedHeaderPlacement(replace(inventory.snapshot, partitions=groups),
                                        capacity, tuple(sorted(bindings, key=lambda item: item["relation_oid"])),
-                                       datetime.now(UTC))
+                                       datetime.now(UTC),
+                                       tuple(sorted(destination_results, key=lambda item: item.target_id)))
     except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
         raise StorageMountError("header_filesystem_unavailable: " + type(exc).__name__) from exc

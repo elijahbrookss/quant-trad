@@ -76,8 +76,9 @@ def _worker(root):
         metadata.write_text("E:ID_FS_UUID=uuid-disposable-namespace\n")
         os.environ["QT_STORAGE_UDEV_ROOT"] = str(udev)
         target = StorageTarget("fixture", "Disposable filesystem", "uuid-disposable-namespace", str(root), "ssd")
-        def verify(inventory):
-            return verify_header_filesystem(inventory, [target], pg_controldata=BIN / "pg_controldata")
+        def verify(inventory, assignments=None):
+            return verify_header_filesystem(inventory, [target], pg_controldata=BIN / "pg_controldata",
+                                            destination_assignments=assignments)
         inventory = read_header_catalog(engine)
         baseline = verify(inventory)
         report = {
@@ -92,6 +93,29 @@ def _worker(root):
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             with conn.connection.driver_connection.cursor() as cursor:
                 cursor.execute(sql.SQL("CREATE TABLESPACE qt_fixture_history LOCATION {}").format(sql.Literal(str(history))))
+        with engine.connect() as conn:
+            destination_oid = conn.scalar(text(
+                "SELECT oid::bigint FROM pg_tablespace WHERE spcname='qt_fixture_history'"))
+        destination_inventory = read_header_catalog(engine, destination_tablespace_oids=(destination_oid,))
+        destination, = verify(destination_inventory, {"fixture": destination_oid}).destinations
+        database_oid = destination_inventory.snapshot.database_identity.split("/")[1]
+        report["empty_destination_verified"] = (
+            destination.tablespace_name == "qt_fixture_history"
+            and Path(destination.directory).is_relative_to(history)
+            and not (Path(destination.directory) / database_oid).exists()
+        )
+        default_inventory = read_header_catalog(engine, destination_tablespace_oids=(1663,))
+        default, = verify(default_inventory, {"fixture": 1663}).destinations
+        report["default_destination_verified"] = Path(default.directory) == data / "base" / database_oid
+        wrong_observation = replace(destination_inventory.destination_tablespaces[0],
+                                    location=str(root / "wrong-destination"))
+        try:
+            verify(replace(destination_inventory, destination_tablespaces=(wrong_observation,)),
+                   {"fixture": destination_oid})
+            report["changed_destination_refused"] = False
+        except StorageMountError:
+            report["changed_destination_refused"] = True
+
         def move_indexes(conn):
             names = conn.execute(text("""
                 SELECT n.nspname,c.relname FROM pg_index i
@@ -230,6 +254,15 @@ def test_real_table_and_index_movement_rolls_back_as_a_group(namespace_report):
 def test_real_cluster_copies_stale_process_evidence_and_wrong_uuid_are_refused(namespace_report):
     for key in ("stale_start_refused", "wrong_uuid_refused", "copied_identity_refused"):
         assert namespace_report[key], key
+
+
+def test_real_empty_and_default_tablespace_destinations_are_verified_before_copy(namespace_report):
+    assert namespace_report["empty_destination_verified"]
+    assert namespace_report["default_destination_verified"]
+
+
+def test_real_tablespace_destination_cannot_be_repointed_by_observation(namespace_report):
+    assert namespace_report["changed_destination_refused"]
 
 
 if __name__ == "__main__":

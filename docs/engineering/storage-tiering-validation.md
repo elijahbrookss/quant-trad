@@ -208,3 +208,23 @@ cases (34 total). The normal backend suite passed 2,931 cases and documentation
 validation passed 10. These tests do not execute physical moves or certify mounts;
 the full current-tree database regression remains a separate check. Running/blocked movement
 reconciliation and ambiguous physical-DDL commits remain separate worker tests.
+
+
+### Prepared tablespace and cross-namespace checks
+
+The filesystem suite adds prepared default/empty custom destinations, CREATE
+privilege and role checks, missing/redirected/version-mismatched directories,
+changed permissions, and different source/destination mounts despite a shared
+control file. It also exercises refusal of a server path that redirects through
+an absolute symlink and a server-only read-only mount. These use temporary
+fixtures and synthetic catalog/UUID observations. The final focused filesystem
+and planner run passed 80 cases, including a worker-only alias that must not
+substitute for PostgreSQL's actual catalog path.
+
+The disposable catalog suite adds requested destination metadata and missing-OID
+cases. The real private-cluster namespace fixture adds verification of empty
+custom and existing default destinations before copying, and refusal of a
+repointed destination observation. These new database cases require a new
+qualification run; the earlier journal full-suite run cannot certify source
+changes made after its image snapshot. Do not start overlapping local DB stacks
+to obtain that result.

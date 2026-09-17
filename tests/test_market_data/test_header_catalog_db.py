@@ -161,3 +161,17 @@ def test_index_budget_refuses_an_oversized_group(catalog_engine):
             conn.execute(text(f"CREATE INDEX extra_{number} ON market.fact_versions_20260901(id)"))
     with pytest.raises(RuntimeError, match="index_budget_exceeded"):
         read_header_catalog(catalog_engine)
+
+
+def test_requested_destination_catalog_records_oid_name_privilege_and_catalog_version(catalog_engine):
+    report = read_header_catalog(catalog_engine, destination_tablespace_oids=(1663,))
+    destination, = report.destination_tablespaces
+    assert (destination.oid, destination.name, destination.location, destination.can_create) == (
+        1663, "pg_default", "", True)
+    assert report.catalog_version > 0
+    assert not report.filesystem_bindings_verified
+
+
+def test_missing_requested_destination_refuses_complete_catalog(catalog_engine):
+    with pytest.raises(RuntimeError, match="tablespace_changed"):
+        read_header_catalog(catalog_engine, destination_tablespace_oids=(4294967295,))

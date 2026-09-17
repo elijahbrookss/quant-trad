@@ -274,3 +274,44 @@ checks, physical table/index DDL, crash reconciliation, execution logging and
 full capacity coverage still belong to the future worker. No reservation
 activates policy or moves bytes. Existing installations will require explicit,
 reviewed schema preparation as part of the later operator cutover.
+
+
+## Prepared PostgreSQL destination evidence
+
+The catalog reader can observe at most 32 explicitly requested destination
+tablespace OIDs in the same read-only inventory. It records the current name,
+location and CREATE privilege, plus PostgreSQL's catalog version. Missing,
+duplicate, malformed or global-tablespace requests are refused. This reads
+already prepared tablespaces; it never creates directories or tablespaces.
+
+The filesystem verifier optionally accepts a target-to-tablespace assignment.
+Its requested OIDs must exactly match those catalog observations. It verifies
+the existing PG15 catalog-version directory for a custom tablespace, or the
+database directory under pg_default. An empty custom tablespace is admissible
+before PostgreSQL has created a per-database subdirectory. No probe file or
+database directory is created. The destination must belong to the exact
+registered UUID/device/root, permit the history role, and have CREATE privilege.
+The directory must belong to the postmaster's OS user, allow that owner full
+access, prohibit group/other writes, and be on a writable mount in the server's
+own filesystem view. Identity and permissions are rechecked before returning.
+
+Sharing pg_control does not by itself prove that other mounted files are shared.
+Source relations and destinations are now checked through file descriptors
+opened from /proc/PID/root. Every later path component uses O_NOFOLLOW; an
+absolute symlink cannot escape into the worker's root and falsely prove a match.
+Custom tablespace links are read from both process views. Verification follows
+the server's catalog path, not an unrelated path obtained by resolving a
+worker-only alias. Device/inode equality
+must hold for the actual source files and destination directories, and
+server-side mount flags are read from the destination descriptor. This requires
+Linux O_PATH support, visibility of the postmaster's PID namespace, and suitable
+permissions; a permission or namespace mismatch is a refusal.
+
+Returned destination evidence includes database identity, target UUID/device,
+tablespace OID/name/location, worker and server directory paths, the verified
+directory inode and catalog version.
+It remains a transient observation, not a durable tablespace registration.
+The journal does not yet persist these new destination bindings. The future
+worker must bind them to its reviewed operation and repeat the checks while
+holding execution locks before moving any table or index. Neither these
+observations nor an existing reservation enables Apply.

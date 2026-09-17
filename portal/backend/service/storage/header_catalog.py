@@ -18,6 +18,23 @@ from portal.backend.db.fact_identity_schema import fact_header_partition_name
 
 
 @dataclass(frozen=True)
+class HeaderTablespaceObservation:
+    oid: int
+    name: str
+    location: str
+    can_create: bool
+
+    def __post_init__(self):
+        if (type(self.oid) is not int or not 1 <= self.oid <= 2**32 - 1
+                or not isinstance(self.name, str) or not self.name or "\x00" in self.name
+                or len(self.name.encode("utf-8")) > 63
+                or not isinstance(self.location, str) or "\x00" in self.location
+                or len(self.location.encode("utf-8")) > 4096
+                or type(self.can_create) is not bool):
+            raise ValueError("header_catalog_invalid: tablespace observation")
+
+
+@dataclass(frozen=True)
 class HeaderCatalogInventory:
     snapshot: HeaderPlacementSnapshot
     # Paths are in the PostgreSQL server's namespace, never the API host's.
@@ -25,9 +42,12 @@ class HeaderCatalogInventory:
     server_data_directory: str
     postmaster_started_at: datetime
     filesystem_bindings_verified: bool = False
+    catalog_version: int | None = None
+    destination_tablespaces: tuple[HeaderTablespaceObservation, ...] = ()
 
 
-def read_header_catalog(engine, *, max_partitions=4096, timeout_seconds=30):
+def read_header_catalog(engine, *, max_partitions=4096, timeout_seconds=30,
+                        destination_tablespace_oids=()):
     """Observe bounded catalog metadata using the caller's PG_DSN engine.
 
     Access-share locks prevent destructive rewrites while allowing collection.
@@ -39,6 +59,11 @@ def read_header_catalog(engine, *, max_partitions=4096, timeout_seconds=30):
         raise ValueError("header_catalog_invalid: partition budget")
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
         raise ValueError("header_catalog_invalid: time budget")
+    if (not isinstance(destination_tablespace_oids, tuple) or len(destination_tablespace_oids) > 32
+            or any(type(oid) is not int or not 1 <= oid <= 2**32 - 1 or oid == 1664
+                   for oid in destination_tablespace_oids)
+            or len(set(destination_tablespace_oids)) != len(destination_tablespace_oids)):
+        raise ValueError("header_catalog_invalid: destination tablespace inventory")
     deadline = monotonic() + timeout_seconds
     with engine.connect().execution_options(isolation_level="REPEATABLE READ") as conn:
         with conn.begin():
@@ -61,6 +86,7 @@ def read_header_catalog(engine, *, max_partitions=4096, timeout_seconds=30):
                        current_setting('server_version_num')::integer AS version,
                        current_setting('transaction_read_only') AS read_only,
                        c.system_identifier::text || '/' || d.oid::text AS database_identity,
+                       c.catalog_version_no::integer AS catalog_version,
                        d.oid::bigint AS database_oid, d.dattablespace::bigint AS default_tablespace
                 FROM pg_control_system() c
                 CROSS JOIN pg_database d WHERE d.datname=current_database()
@@ -160,10 +186,12 @@ def read_header_catalog(engine, *, max_partitions=4096, timeout_seconds=30):
                 raise RuntimeError("header_catalog_index_budget_exceeded")
             if any(not row["admitted"] for row in indexes):
                 raise RuntimeError("header_catalog_index_unproven")
-            tablespace_ids = sorted({row["tablespace_oid"] for row in [*relations, *indexes]})
+            tablespace_ids = sorted({row["tablespace_oid"] for row in [*relations, *indexes]}
+                                   | set(destination_tablespace_oids))
             tablespaces = {row["oid"]: dict(row) for row in query("""
-                SELECT oid::bigint AS oid, spcname AS name, pg_tablespace_location(oid) AS location
-                FROM pg_tablespace WHERE oid=ANY(:oids) ORDER BY oid
+                SELECT oid::bigint AS oid, spcname AS name, pg_tablespace_location(oid) AS location,
+                       has_tablespace_privilege(oid, 'CREATE') AS can_create
+                FROM pg_tablespace WHERE oid::bigint=ANY(:oids) ORDER BY oid
             """, {"oids": tablespace_ids}).mappings()}
             if set(tablespaces) != set(tablespace_ids):
                 raise RuntimeError("header_catalog_tablespace_changed")
@@ -192,4 +220,8 @@ def read_header_catalog(engine, *, max_partitions=4096, timeout_seconds=30):
                 "relative_path": row["relative_path"],
             } for row in [*relations, *indexes])
             return HeaderCatalogInventory(snapshot, locations, context["data_directory"],
-                                          context["postmaster_started_at"])
+                                          context["postmaster_started_at"],
+                                          catalog_version=context["catalog_version"],
+                                          destination_tablespaces=tuple(
+                                              HeaderTablespaceObservation(**tablespaces[oid])
+                                              for oid in sorted(destination_tablespace_oids)))

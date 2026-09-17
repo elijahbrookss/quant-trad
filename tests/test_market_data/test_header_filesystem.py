@@ -229,3 +229,201 @@ def test_matching_cluster_ids_do_not_substitute_a_different_namespace_volume(fil
     process_root.symlink_to(server_root, target_is_directory=True)
     with pytest.raises(StorageMountError, match="different database files"):
         verify(files)
+
+
+def _destination(files, *, oid=9000, can_create=True):
+    from portal.backend.service.storage.header_catalog import HeaderTablespaceObservation
+    if oid == 1663:
+        name, location = "pg_default", ""
+        directory = files.pgdata / "base" / "42"
+    else:
+        name = "prepared_history"
+        location = str(Path(files.target.root) / "prepared")
+        directory = Path(location) / "PG_15_202209061"
+        directory.mkdir(parents=True)
+        (files.pgdata / "pg_tblspc").mkdir(exist_ok=True)
+        (files.pgdata / "pg_tblspc" / str(oid)).symlink_to(location, target_is_directory=True)
+    inventory = replace(files.inventory, catalog_version=202209061,
+        destination_tablespaces=(HeaderTablespaceObservation(oid, name, location, can_create),))
+    return inventory, directory
+
+
+def _verify_destination(files, inventory):
+    return module.verify_header_filesystem(inventory, [files.target],
+        pg_controldata=files.binary,
+        destination_assignments={"hdd": inventory.destination_tablespaces[0].oid})
+
+
+@pytest.mark.parametrize("oid", [1663, 9000])
+def test_prepared_default_and_empty_custom_destination_are_verified_without_creating_data(files, oid):
+    inventory, directory = _destination(files, oid=oid)
+    before = sorted(directory.iterdir())
+    result = _verify_destination(files, inventory)
+    destination, = result.destinations
+    assert destination.target_id == "hdd"
+    assert destination.tablespace_oid == oid
+    assert destination.filesystem_uuid == files.target.filesystem_uuid
+    assert destination.directory_inode == directory.stat().st_ino
+    assert destination.directory == str(directory.resolve())
+    assert sorted(directory.iterdir()) == before
+    if oid != 1663:
+        assert not (directory / "42").exists()
+
+
+@pytest.mark.parametrize("change", ["privilege", "role", "inactive", "readonly_directory",
+                                    "missing_version", "symlink_version", "wrong_location"])
+def test_destination_admission_refuses_unusable_or_changed_directory(files, change):
+    inventory, directory = _destination(files)
+    if change == "privilege":
+        inventory = replace(inventory, destination_tablespaces=(
+            replace(inventory.destination_tablespaces[0], can_create=False),))
+    elif change == "role":
+        files.target = replace(files.target, roles=("archives",))
+    elif change == "inactive":
+        files.target = replace(files.target, state="draining")
+    elif change == "readonly_directory":
+        directory.chmod(0o500)
+    elif change == "missing_version":
+        directory.rmdir()
+    elif change == "symlink_version":
+        directory.rmdir()
+        directory.symlink_to(files.pgdata / "base" / "42", target_is_directory=True)
+    else:
+        inventory = replace(inventory, destination_tablespaces=(
+            replace(inventory.destination_tablespaces[0], location=str(directory.parent / "elsewhere")),))
+    with pytest.raises(StorageMountError):
+        _verify_destination(files, inventory)
+
+
+@pytest.mark.parametrize("change", ["missing_assignment", "missing_observation", "global", "catalog_version"])
+def test_destination_assignment_requires_matching_bounded_catalog(files, change):
+    inventory, _ = _destination(files)
+    assignments = {"hdd": 9000}
+    if change == "missing_assignment":
+        assignments = {}
+    elif change == "missing_observation":
+        inventory = replace(inventory, destination_tablespaces=())
+    elif change == "global":
+        assignments = {"hdd": 1664}
+    else:
+        inventory = replace(inventory, catalog_version=None)
+    with pytest.raises(ValueError, match="header_filesystem_invalid"):
+        module.verify_header_filesystem(inventory, [files.target],
+            pg_controldata=files.binary, destination_assignments=assignments)
+
+
+def _server_copy(files, root):
+    # Hard-linked control/data files prove those exact inodes can be shared while
+    # a different subdirectory or mount is visible to the two processes.
+    server_data = root / files.pgdata.relative_to("/")
+    for path in (files.pgdata / "global" / "pg_control",
+                 files.pgdata / "base" / "42" / "101",
+                 files.pgdata / "base" / "42" / "102"):
+        target = root / path.relative_to("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        module.os.link(path, target)
+    process_root = files.proc / "77" / "root"
+    process_root.unlink()
+    process_root.symlink_to(root, target_is_directory=True)
+    return server_data
+
+
+def test_shared_control_file_does_not_prove_shared_relation_mount(files, tmp_path):
+    server = _server_copy(files, tmp_path / "server")
+    different = server / "base" / "42" / "101"
+    different.unlink()
+    different.write_bytes(b"different database mount")
+    with pytest.raises(StorageMountError, match="different storage files"):
+        verify(files)
+
+
+def test_absolute_symlink_cannot_escape_process_root_to_fake_file_agreement(files, tmp_path):
+    server = _server_copy(files, tmp_path / "server")
+    base = server / "base"
+    (base / "42" / "101").unlink()
+    (base / "42" / "102").unlink()
+    (base / "42").rmdir()
+    base.rmdir()
+    base.symlink_to(files.pgdata / "base", target_is_directory=True)
+    with pytest.raises(StorageMountError):
+        verify(files)
+
+
+def test_shared_pgdata_does_not_prove_shared_destination_mount(files, tmp_path):
+    inventory, directory = _destination(files)
+    root = tmp_path / "server"
+    server = _server_copy(files, root)
+    (server / "pg_tblspc").mkdir()
+    (server / "pg_tblspc" / "9000").symlink_to(directory.parent, target_is_directory=True)
+    # A separate inode at the same absolute path in the postmaster namespace.
+    (root / directory.relative_to("/")).mkdir(parents=True)
+    with pytest.raises(StorageMountError, match="different storage files"):
+        _verify_destination(files, inventory)
+
+
+def test_destination_replaced_during_verification_is_refused(files, monkeypatch):
+    inventory, directory = _destination(files)
+    calls = 0
+    def run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            directory.rename(directory.with_name("retained-original"))
+            directory.mkdir()
+        return files.run(args, **kwargs)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    with pytest.raises(StorageMountError, match="destination changed"):
+        _verify_destination(files, inventory)
+
+
+@pytest.mark.parametrize("oids", [(1664,), (True,), (0,), (2**32,), (1663, 1663), tuple(range(2000, 2033))])
+def test_invalid_destination_catalog_request_refuses_before_connecting(oids):
+    from portal.backend.service.storage.header_catalog import read_header_catalog
+    with pytest.raises(ValueError, match="destination tablespace inventory"):
+        read_header_catalog(object(), destination_tablespace_oids=oids)
+
+
+def test_readonly_server_mount_is_refused_even_when_worker_capacity_is_writable(files, monkeypatch):
+    inventory, directory = _destination(files)
+    original = module.os.fstatvfs
+    def statvfs(handle):
+        if module.os.fstat(handle).st_ino == directory.stat().st_ino:
+            return SimpleNamespace(f_flag=module.os.ST_RDONLY)
+        return original(handle)
+    monkeypatch.setattr(module.os, "fstatvfs", statvfs)
+    with pytest.raises(StorageMountError, match="privately writable"):
+        _verify_destination(files, inventory)
+
+
+def test_destination_permissions_are_rechecked_before_return(files, monkeypatch):
+    inventory, directory = _destination(files)
+    calls = 0
+    def run(args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            directory.chmod(0o500)
+        return files.run(args, **kwargs)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    with pytest.raises(StorageMountError, match="privately writable"):
+        _verify_destination(files, inventory)
+
+
+def test_worker_path_alias_cannot_substitute_a_different_server_catalog_path(files, tmp_path):
+    base = files.pgdata / "base"
+    alias = Path(files.target.root) / "worker-alias"
+    base.rename(alias)
+    base.symlink_to(alias, target_is_directory=True)
+    server_root = tmp_path / "server"
+    server = _server_copy(files, server_root)
+    for node in ("101", "102"):
+        shared_alias = server_root / alias.relative_to("/") / "42" / node
+        shared_alias.parent.mkdir(parents=True, exist_ok=True)
+        module.os.link(alias / "42" / node, shared_alias)
+    # Both processes can see the worker's resolved file, but PostgreSQL actually
+    # opens a different file through the relative path reported by its catalog.
+    wrong = server / "base" / "42" / "101"
+    wrong.unlink()
+    wrong.write_bytes(b"database uses this other file")
+    with pytest.raises(StorageMountError, match="different storage files"):
+        verify(files)
