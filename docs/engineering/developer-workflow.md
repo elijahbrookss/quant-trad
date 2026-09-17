@@ -169,6 +169,15 @@ watchdog readiness issues. It is bounded by `REPORT_API_TEST_TIMEOUT`.
 contracts, and ordinary non-database backend tests. `make check-all` adds the
 supported frontend tests and production build.
 
+The database suite (`./scripts/ci/run_test_suite.sh db`) creates a disposable
+Docker project with generated credentials and an internal network. Its
+TimescaleDB service disables extension telemetry: the isolated network cannot
+deliver those reports, and a surviving Telemetry Reporter was observed blocking
+fixture cleanup. Ordinary database workers remain enabled. Migration fixtures
+fence new connections to their own generated database, then use PostgreSQL's
+forced drop; failures report remaining session types and waits without query
+text or credentials. These settings apply only to the test stack.
+
 
 For architecture-affecting changes, follow `AGENTS.md`: inspect
 `docs/architecture/ARCHITECTURE_COMPONENT_INDEX.md`, update targeted component

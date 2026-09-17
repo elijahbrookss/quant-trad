@@ -4,12 +4,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 import os
 import re
-from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 
 from portal.backend.db import (
     InstrumentRecord,
@@ -105,37 +105,25 @@ def fresh_migration_database(label: str, *, install_extensions: bool = True) -> 
         try:
             if database_created:
                 with admin_engine.connect() as conn:
-                    conn.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) "
-                            "FROM pg_stat_activity "
-                            "WHERE datname = :database_name "
-                            "AND pid <> pg_backend_pid()"
-                        ),
-                        {"database_name": database_name},
-                    ).all()
-                    deadline = monotonic() + 5
-                    while True:
-                        remaining_pids = conn.execute(
-                            text(
-                                "SELECT array_agg(pid ORDER BY pid) "
-                                "FROM pg_stat_activity "
-                                "WHERE datname = :database_name "
-                                "AND pid <> pg_backend_pid()"
-                            ),
-                            {"database_name": database_name},
-                        ).scalar_one()
-                        if not remaining_pids:
-                            break
-                        if monotonic() >= deadline:
-                            raise RuntimeError(
-                                "migration_database_cleanup_timeout: "
-                                f"database={database_name} pids={remaining_pids}"
-                            )
-                        sleep(0.05)
+                    # Fence new user connections before PostgreSQL owns the
+                    # termination/drop sequence. Waiting for a manually sampled
+                    # zero-session window can race extension worker restarts.
+                    conn.exec_driver_sql("SET statement_timeout = '15s'")
                     conn.exec_driver_sql(
-                        f"DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"
+                        f"ALTER DATABASE {quoted_name} ALLOW_CONNECTIONS false"
                     )
+                    try:
+                        conn.exec_driver_sql(
+                            f"DROP DATABASE IF EXISTS {quoted_name} WITH (FORCE)"
+                        )
+                    except DBAPIError as exc:
+                        remaining = [dict(row) for row in conn.execute(text(
+                            "SELECT pid,backend_type,state,wait_event_type,wait_event "
+                            "FROM pg_stat_activity WHERE datname=:name ORDER BY pid"
+                        ), {"name": database_name}).mappings()]
+                        raise RuntimeError(
+                            f"migration_database_cleanup_failed: database={database_name} sessions={remaining}"
+                        ) from exc
         finally:
             admin_engine.dispose()
 
