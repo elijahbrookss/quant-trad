@@ -1,8 +1,10 @@
 """Real PostgreSQL/file verification in a private Unix-socket-only cluster.
 
 The fixture runs as the database OS user in the same filesystem/PID namespaces.
-Its udev UUID entry is synthetic; process identity, pg_controldata, paths and
-statvfs/device/inode probes are real. This is not HDD performance qualification.
+Its two udev UUID entries are synthetic; process identity, pg_controldata,
+paths, distinct devices and statvfs/inode probes are real. History uses an
+already-mounted private /dev/shm directory. No device is mounted or formatted.
+This is correctness qualification, not HDD performance qualification.
 """
 from __future__ import annotations
 
@@ -19,11 +21,19 @@ from pathlib import Path
 from time import monotonic
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.orm import Session
 from sqlalchemy.engine import URL
 
 from core.storage_mounts import StorageMountError
-from core.storage_targets import StorageTarget
+from core.storage_targets import StoragePolicy, StorageTarget
+from portal.backend.db.fact_identity_schema import fact_header_partition_name
+from portal.backend.db.storage_target_models import (
+    StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord, StorageHeaderTablespaceRecord,
+    StorageHeaderBatchRecord, StorageHeaderMoveRecord,
+)
+from portal.backend.service.storage.header_destinations import register_header_tablespaces, review_header_moves
+from portal.backend.service.storage.header_journal import reserve_header_batch, cancel_unstarted_header_batch
 from portal.backend.service.storage.header_catalog import read_header_catalog
 from portal.backend.service.storage.header_filesystem import verify_header_filesystem
 
@@ -31,13 +41,20 @@ pytestmark = pytest.mark.db
 BIN = Path("/usr/lib/postgresql/15/bin")
 
 
-def _worker(root):
-    root = root.resolve(strict=True)
-    if root.parent != Path("/tmp") or not root.name.startswith("qt-header-ns-") or os.geteuid() == 0:
-        raise RuntimeError("namespace_fixture_requires_private_root_and_nonroot_worker")
-    data, socket, history = root / "pgdata", root / "socket", root / "history"
+def _worker(root, history):
+    root, history = root.resolve(strict=True), history.resolve(strict=True)
+    if (root.parent != Path("/tmp") or not root.name.startswith("qt-header-ns-")
+            or history.parent != Path("/dev/shm") or not history.name.startswith("qt-header-history-")
+            or os.geteuid() == 0
+            or any(path.stat().st_uid != os.geteuid() or path.stat().st_mode & 0o077
+                   for path in (root, history))):
+        raise RuntimeError("namespace_fixture_requires_private_roots_and_nonroot_worker")
+    if root.stat().st_dev == history.stat().st_dev:
+        raise RuntimeError("namespace_fixture_requires_distinct_filesystems")
+    if shutil.disk_usage(history).free < 4 * 1024**2:
+        raise RuntimeError("namespace_fixture_requires_four_megabytes_of_disposable_history_space")
+    data, socket = root / "pgdata", root / "socket"
     socket.mkdir()
-    history.mkdir()
     initializing = monotonic()
     subprocess.run([str(BIN / "initdb"), "-D", str(data), "--no-locale", "--encoding=UTF8",
                     "--auth-local=trust", "--auth-host=reject"], check=True, capture_output=True, text=True, timeout=120)
@@ -52,20 +69,25 @@ def _worker(root):
         control("start")
         engine = create_engine(URL.create("postgresql+psycopg2", username=pwd.getpwuid(os.geteuid()).pw_name,
                                           database="postgres", query={"host": str(socket)}))
+        from psycopg2 import sql
         with engine.begin() as conn:
-            conn.execute(text("""
-                CREATE SCHEMA market;
-                CREATE TABLE market.fact_header_partitions(storage_day date PRIMARY KEY);
-                INSERT INTO market.fact_header_partitions VALUES ('2026-09-01');
-                CREATE TABLE market.fact_versions (id text,storage_day date NOT NULL,payload text)
-                    PARTITION BY RANGE(storage_day);
-                CREATE TABLE market.fact_versions_20260901 PARTITION OF market.fact_versions
-                    FOR VALUES FROM ('2026-09-01') TO ('2026-09-02');
-                CREATE INDEX header_id ON market.fact_versions(id);
-                INSERT INTO market.fact_versions
-                    SELECT 'one','2026-09-01'::date,string_agg(md5(n::text),'')
-                    FROM generate_series(1,2000) n;
-            """))
+            storage_day = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date")) - timedelta(days=45)
+            partition_name = fact_header_partition_name(storage_day)
+            with conn.connection.driver_connection.cursor() as cursor:
+                cursor.execute(sql.SQL("""
+                    CREATE SCHEMA market;
+                    CREATE TABLE market.fact_header_partitions(storage_day date PRIMARY KEY);
+                    INSERT INTO market.fact_header_partitions VALUES ({day});
+                    CREATE TABLE market.fact_versions (id text,storage_day date NOT NULL,payload text)
+                        PARTITION BY RANGE(storage_day);
+                    CREATE TABLE market.{partition} PARTITION OF market.fact_versions
+                        FOR VALUES FROM ({day}) TO ({next_day});
+                    CREATE INDEX header_id ON market.fact_versions(id);
+                    INSERT INTO market.fact_versions
+                        SELECT 'one',{day},string_agg(md5(n::text),'')
+                        FROM generate_series(1,2000) n;
+                """).format(partition=sql.Identifier(partition_name), day=sql.Literal(storage_day),
+                            next_day=sql.Literal(storage_day + timedelta(days=1))))
         before = None
         with engine.connect() as conn:
             before = conn.execute(text("SELECT id,md5(payload) FROM market.fact_versions")).all()
@@ -74,22 +96,27 @@ def _worker(root):
         device = root.stat().st_dev
         metadata = udev / f"b{os.major(device)}:{os.minor(device)}"
         metadata.write_text("E:ID_FS_UUID=uuid-disposable-namespace\n")
+        history_device = history.stat().st_dev
+        history_metadata = udev / f"b{os.major(history_device)}:{os.minor(history_device)}"
+        history_metadata.write_text("E:ID_FS_UUID=uuid-disposable-history\n")
         os.environ["QT_STORAGE_UDEV_ROOT"] = str(udev)
-        target = StorageTarget("fixture", "Disposable filesystem", "uuid-disposable-namespace", str(root), "ssd")
+        target = StorageTarget("fixture", "Disposable source", "uuid-disposable-namespace", str(root), "ssd")
+        history_target = StorageTarget("history", "Disposable history", "uuid-disposable-history", str(history), "hdd")
+        targets = (target, history_target)
         def verify(inventory, assignments=None):
-            return verify_header_filesystem(inventory, [target], pg_controldata=BIN / "pg_controldata",
+            return verify_header_filesystem(inventory, targets, pg_controldata=BIN / "pg_controldata",
                                             destination_assignments=assignments)
         inventory = read_header_catalog(engine)
         baseline = verify(inventory)
         report = {
             "initialization_seconds": round(initialization_seconds, 3),
             "baseline_bound": all(item.target_id == "fixture" for item in baseline.snapshot.partitions[0].relations),
+            "distinct_filesystems": baseline.capacity["fixture"].device_id != baseline.capacity["history"].device_id,
             "real_control_binary": str(BIN / "pg_controldata"),
             "real_process_and_files": True,
             "synthetic_uuid": True,
         }
         # Observe the ordinary index left in pg_default when only the table moves.
-        from psycopg2 import sql
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             with conn.connection.driver_connection.cursor() as cursor:
                 cursor.execute(sql.SQL("CREATE TABLESPACE qt_fixture_history LOCATION {}").format(sql.Literal(str(history))))
@@ -97,7 +124,7 @@ def _worker(root):
             destination_oid = conn.scalar(text(
                 "SELECT oid::bigint FROM pg_tablespace WHERE spcname='qt_fixture_history'"))
         destination_inventory = read_header_catalog(engine, destination_tablespace_oids=(destination_oid,))
-        destination, = verify(destination_inventory, {"fixture": destination_oid}).destinations
+        destination, = verify(destination_inventory, {"history": destination_oid}).destinations
         database_oid = destination_inventory.snapshot.database_identity.split("/")[1]
         report["empty_destination_verified"] = (
             destination.tablespace_name == "qt_fixture_history"
@@ -111,17 +138,19 @@ def _worker(root):
                                     location=str(root / "wrong-destination"))
         try:
             verify(replace(destination_inventory, destination_tablespaces=(wrong_observation,)),
-                   {"fixture": destination_oid})
+                   {"history": destination_oid})
             report["changed_destination_refused"] = False
         except StorageMountError:
             report["changed_destination_refused"] = True
+
+        report.update(_prove_registered_pipeline(engine, targets, destination_oid))
 
         def move_indexes(conn):
             names = conn.execute(text("""
                 SELECT n.nspname,c.relname FROM pg_index i
                 JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace
-                WHERE i.indrelid='market.fact_versions_20260901'::regclass
-            """)).all()
+                WHERE i.indrelid=CAST(:header AS regclass)
+            """), {"header": "market." + partition_name}).all()
             with conn.connection.driver_connection.cursor() as cursor:
                 for schema, name in names:
                     cursor.execute(sql.SQL("ALTER INDEX {}.{} SET TABLESPACE qt_fixture_history").format(
@@ -135,7 +164,7 @@ def _worker(root):
         for phase in ("table", "whole_group"):
             try:
                 with engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE market.fact_versions_20260901 SET TABLESPACE qt_fixture_history"))
+                    conn.execute(text(f'ALTER TABLE market."{partition_name}" SET TABLESPACE qt_fixture_history'))
                     if phase == "whole_group":
                         move_indexes(conn)
                     raise InjectedRollback()
@@ -152,7 +181,7 @@ def _worker(root):
             )
 
         with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE market.fact_versions_20260901 SET TABLESPACE qt_fixture_history"))
+            conn.execute(text(f'ALTER TABLE market."{partition_name}" SET TABLESPACE qt_fixture_history'))
         split = read_header_catalog(engine)
         verify(split)
         report["table_only_move_has_split_tablespaces"] = len({item["tablespace_oid"] for item in split.physical_locations}) == 2
@@ -162,6 +191,7 @@ def _worker(root):
         verified = verify(moved)
         report["complete_group_tablespace"] = len({item["tablespace_oid"] for item in moved.physical_locations}) == 1
         report["tablespace_paths_verified"] = all(Path(item["path"]).is_relative_to(history) for item in verified.bindings)
+        report["complete_group_target"] = all(item.target_id == "history" for item in verified.snapshot.partitions[0].relations)
         report["toast_colocated"] = moved.snapshot.partitions[0].toast_colocated
         with engine.connect() as conn:
             report["rows_preserved"] = conn.execute(text("SELECT id,md5(payload) FROM market.fact_versions")).all() == before
@@ -189,6 +219,68 @@ def _worker(root):
             control("stop")
 
 
+def _prove_registered_pipeline(engine, targets, destination_oid):
+    """Exercise real adapters and transactions before any physical movement."""
+    for model in (StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord,
+                  StorageHeaderTablespaceRecord, StorageHeaderBatchRecord, StorageHeaderMoveRecord):
+        model.__table__.create(engine)
+    policy = StoragePolicy(recent=("fixture",), history=("history",),
+        archives=("history",), backups=("history",), movement_enabled=True)
+    with Session(engine) as session, session.begin():
+        for target in targets:
+            session.add(StorageTargetRecord(id=target.target_id, label=target.label,
+                filesystem_uuid=target.filesystem_uuid, root=target.root, medium=target.medium,
+                roles=list(target.roles), reserved_bytes=0))
+        session.add(StoragePolicyRecord(id=1, revision=0, policy=policy.to_dict()))
+        session.add(StoragePlanRecord(id="namespace-pipeline", request_id="namespace-pipeline",
+            base_revision=0, policy=policy.to_dict(), policy_hash=policy.fingerprint,
+            state="queued", impact={}, progress={}))
+    observed = read_header_catalog(engine, destination_tablespace_oids=(destination_oid,))
+    verified = verify_header_filesystem(observed, targets, pg_controldata=BIN / "pg_controldata",
+                                        destination_assignments={"history": destination_oid})
+    expected_bytes = sum(item.byte_count for item in verified.snapshot.partitions[0].relations)
+    if not 0 < expected_bytes <= 4 * 1024**2:
+        raise RuntimeError("namespace_pipeline_copy_budget_exceeded")
+    with Session(engine) as session, session.begin():
+        registration = register_header_tablespaces(session, verified=verified)
+    review = review_header_moves(verified=verified, policy=policy, targets=targets,
+                                 reserved_bytes={"fixture": 0, "history": 0})
+    if not review["planning_complete"] or len(review["moves"]) != 1:
+        raise RuntimeError("namespace_pipeline_requires_one_real_cross_target_move")
+    with Session(engine) as session, session.begin():
+        first = reserve_header_batch(session, plan_id="namespace-pipeline",
+                                     review_hash=review["plan_hash"], verified=verified)
+    with Session(engine) as session, session.begin():
+        retry = reserve_header_batch(session, plan_id="namespace-pipeline",
+                                     review_hash=review["plan_hash"], verified=verified)
+        row = session.scalar(select(StorageHeaderMoveRecord))
+        reserved = session.get(StorageTargetRecord, "history").reserved_bytes
+        destination = row.destination_binding
+        exact_binding = (
+            destination["tablespace_oid"] == destination_oid
+            and destination["target_root"] == targets[1].root
+            and destination["filesystem_uuid"] == targets[1].filesystem_uuid
+            and destination["directory_inode"] == verified.destinations[0].directory_inode
+            and row.heap_oid == verified.snapshot.partitions[0].heap.oid
+        )
+    with Session(engine) as session, session.begin():
+        cancelled = cancel_unstarted_header_batch(session, plan_id="namespace-pipeline",
+                                                  review_hash=review["plan_hash"])
+    after = read_header_catalog(engine)
+    with Session(engine) as session:
+        released = session.get(StorageTargetRecord, "history").reserved_bytes == 0
+    return {
+        "real_pipeline_registered": registration == [
+            {"target_id": "history", "tablespace_oid": destination_oid, "reused": False}],
+        "real_pipeline_reserved_bytes": reserved,
+        "real_pipeline_expected_bytes": expected_bytes,
+        "real_pipeline_exact_binding": exact_binding,
+        "real_pipeline_idempotent": retry["reused"] and retry["moves"] == first["moves"],
+        "real_pipeline_cancelled": cancelled["cancelled"] and released,
+        "real_pipeline_source_unmoved": observed.physical_locations == after.physical_locations,
+    }
+
+
 @pytest.fixture(scope="module")
 def namespace_report():
     if os.environ.get("QT_DB_TEST_ISOLATED") != "1":
@@ -204,9 +296,20 @@ def namespace_report():
             raise RuntimeError("namespace_fixture_requires_runuser")
         command_prefix = [runuser, "-u", "postgres", "--"]
     root = Path(tempfile.mkdtemp(prefix="qt-header-ns-", dir="/tmp"))
-    if account is not None:
-        os.chown(root, account.pw_uid, account.pw_gid)
-    command = [*command_prefix, sys.executable, "-m", "tests.test_market_data.test_header_namespace_db", str(root)]
+    history = None
+    # Always retain ownership of both allocated paths, including setup failures.
+    try:
+        history = Path(tempfile.mkdtemp(prefix="qt-header-history-", dir="/dev/shm"))
+        if account is not None:
+            for directory in (root, history):
+                os.chown(directory, account.pw_uid, account.pw_gid)
+    except BaseException:
+        for directory in (history, root):
+            if directory is not None:
+                directory.rmdir()  # freshly allocated and still empty
+        raise
+    command = [*command_prefix, sys.executable, "-m", "tests.test_market_data.test_header_namespace_db",
+               str(root), str(history)]
     # No inherited DSN, passwords or dotenv: only the private socket is used.
     source_root = Path(__file__).resolve().parents[2]
     environment = {"PATH": os.environ["PATH"], "PYTHONPATH": f"{source_root / 'src'}:{source_root}",
@@ -215,8 +318,6 @@ def namespace_report():
         result = subprocess.run(command, check=True, capture_output=True, text=True,
                                 timeout=300, cwd=source_root, env=environment)
         report = json.loads(result.stdout.strip().splitlines()[-1])
-        print("namespace_fixture_report=" + json.dumps(report, sort_keys=True))
-        return report
     except subprocess.CalledProcessError as exc:
         log = root / "postgres.log"
         server_tail = log.read_text(errors="replace")[-4000:] if log.exists() else ""
@@ -225,13 +326,21 @@ def namespace_report():
     finally:
         # This directory was created above; never clean an externally supplied PGDATA.
         resolved = root.resolve(strict=True)
-        if resolved.parent != Path("/tmp") or not resolved.name.startswith("qt-header-ns-"):
+        if resolved != root or resolved.parent != Path("/tmp") or not resolved.name.startswith("qt-header-ns-"):
             raise RuntimeError("namespace_fixture_cleanup_path_mismatch")
         if (resolved / "pgdata" / "postmaster.pid").exists():
             subprocess.run([*command_prefix, str(BIN / "pg_ctl"), "-D", str(resolved / "pgdata"),
                             "-w", "-t", "45", "-m", "fast", "stop"],
                            check=True, capture_output=True, text=True, timeout=60, env=environment)
+        resolved_history = history.resolve(strict=True)
+        if (resolved_history != history or resolved_history.parent != Path("/dev/shm")
+                or not resolved_history.name.startswith("qt-header-history-")):
+            raise RuntimeError("namespace_history_cleanup_path_mismatch")
+        shutil.rmtree(resolved_history)
         shutil.rmtree(resolved)
+    report["disposable_roots_removed"] = not root.exists() and not history.exists()
+    print("namespace_fixture_report=" + json.dumps(report, sort_keys=True))
+    return report
 
 
 def test_real_cluster_identity_and_files_bind_without_inherited_credentials(namespace_report):
@@ -265,9 +374,30 @@ def test_real_tablespace_destination_cannot_be_repointed_by_observation(namespac
     assert namespace_report["changed_destination_refused"]
 
 
+def test_real_history_group_crosses_distinct_filesystems(namespace_report):
+    assert namespace_report["distinct_filesystems"]
+    assert namespace_report["complete_group_target"]
+
+
+def test_real_catalog_and_filesystem_proof_feed_registration_and_reservation(namespace_report):
+    assert namespace_report["real_pipeline_registered"]
+    assert namespace_report["real_pipeline_exact_binding"]
+    assert 0 < namespace_report["real_pipeline_reserved_bytes"] == namespace_report["real_pipeline_expected_bytes"]
+    assert namespace_report["real_pipeline_idempotent"]
+
+
+def test_real_unstarted_cancellation_preserves_source_and_releases_its_reservation(namespace_report):
+    assert namespace_report["real_pipeline_cancelled"]
+    assert namespace_report["real_pipeline_source_unmoved"]
+
+
+def test_both_private_filesystem_roots_are_cleaned_after_postmaster_stops(namespace_report):
+    assert namespace_report["disposable_roots_removed"]
+
+
 if __name__ == "__main__":
     try:
-        print(json.dumps(_worker(Path(sys.argv[1])), sort_keys=True))
+        print(json.dumps(_worker(Path(sys.argv[1]), Path(sys.argv[2])), sort_keys=True))
     except subprocess.TimeoutExpired as exc:
         for label, value in (("stdout", exc.stdout), ("stderr", exc.stderr)):
             if value:

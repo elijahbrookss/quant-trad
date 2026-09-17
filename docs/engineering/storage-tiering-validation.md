@@ -153,8 +153,11 @@ and uses a temporary Unix socket. Its subprocess receives no inherited DSN or
 password environment. It stops and removes only its generated cluster.
 The normal test database remains under the existing isolated runner.
 
-The fixture uses real PostgreSQL control/process/file observations and a
-synthetic udev UUID entry on the disposable filesystem. It is evidence for
+The fixture uses real PostgreSQL control/process/file observations and two
+synthetic udev UUID entries. Private PGDATA lives under /tmp and the history
+tablespace under an already-mounted /dev/shm directory; their device IDs must
+differ. Both generated roots are removed after the private postmaster stops.
+No mount or format operation occurs. It is evidence for
 catalog and namespace correctness, not actual SSD/HDD performance, backup
 durability, migration throughput or deployment readiness. Do not replace its
 temporary directory or socket with a server path.
@@ -224,10 +227,10 @@ substitute for PostgreSQL's actual catalog path.
 The disposable catalog suite adds requested destination metadata and missing-OID
 cases. The real private-cluster namespace fixture adds verification of empty
 custom and existing default destinations before copying, and refusal of a
-repointed destination observation. These new database cases require a new
-qualification run; the earlier journal full-suite run cannot certify source
-changes made after its image snapshot. Do not start overlapping local DB stacks
-to obtain that result.
+repointed destination observation. CI run 35205685682 at 1ca27269 passed all six namespace cases and
+207 host database contracts, including destination and journal registration
+checks. The earlier local full-suite image cannot certify later source changes.
+Do not start overlapping local DB stacks to obtain a newer result.
 
 
 ### Registered destination and bound-review qualification
@@ -243,6 +246,23 @@ destination and reviews that binding before reserving. Added transaction
 cases cover immutable registration, reused identity with fresh inode/device
 observations, duplicate tablespace ownership, rollback, missing registration,
 changed destination reviews, persisted per-move evidence, registration foreign
-keys and freshness admission. These new database cases remain pending a fresh
-disposable qualification run; the older running full-suite image cannot test
-them. Apply remains disabled.
+keys and freshness admission. All 40 journal cases passed as part of the
+207 host database contracts in CI run 35205685682. Apply remains disabled.
+
+
+### Integrated registration across two filesystems
+
+The private namespace fixture now feeds actual catalog and filesystem
+observations into registration, a destination-bound review, committed
+reservation, retry and unstarted cancellation. The fixture requires one
+historical group, a copy budget no larger than 4 MiB and distinct source/history
+devices. It checks the persisted tablespace OID, configured root, UUID and
+directory inode, verifies retries do not double-reserve, and checks cancellation
+releases capacity without changing source files.
+
+After cancellation, the existing transactional DDL tests move the real table,
+TOAST and ordinary index across those filesystems, including injected rollbacks.
+This does not exercise a movement worker: no worker exists yet. The ten-case
+extended fixture has been collected but still awaits a fresh disposable run.
+Neither the synthetic HDD label on tmpfs nor successful DDL establishes physical
+HDD performance, power-loss durability or full application query correctness.
