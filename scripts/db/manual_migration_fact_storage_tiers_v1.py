@@ -26,6 +26,7 @@ from portal.backend.db.fact_storage_schema import (
 )
 from portal.backend.db.session import Database
 from portal.backend.db.fact_identity_schema import IDENTITY_TABLES
+from portal.backend.db.fact_series_day_schema import assert_fact_series_day_contract
 
 SOURCE_SCHEMA = "qt_fact_storage_cutover_v1"
 SOURCE = SOURCE_SCHEMA + ".fact_versions"
@@ -124,6 +125,9 @@ def _prepare(conn):
         prefix, canonical = _missing_proof_tables(conn)
         missing = prefix + canonical
         if state["state"] == "copying":
+            # A copy begun by code without transactional directory capture
+            # cannot be resumed by silently constructing an empty directory.
+            assert_fact_series_day_contract(conn)
             _assert_source(conn, SOURCE)
             _ensure_source_page_index(conn)
             _drop_bulk_secondary_indexes(conn)

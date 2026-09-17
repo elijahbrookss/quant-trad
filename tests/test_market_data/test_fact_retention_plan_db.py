@@ -48,6 +48,7 @@ def test_real_retention_inventory_is_read_only_bounded_and_resumes_after_cursor(
     assert header_sizes["tables"] > 0 and header_sizes["indexes"] > 0
     assert first["inventory"]["canonical_header_bytes"] == header_sizes["tables"] + header_sizes["indexes"]
     assert first["inventory"]["global_identity_bytes"] == identity_bytes > 0
+    assert first["inventory"]["series_day_directory_bytes"] > 0
     assert first["inventory"]["raw_mapping_bytes"] > 0
     assert first["actions"][0]["storage_day"] == days[0].isoformat()
     assert first["actions"][0]["eligible"] is True

@@ -73,7 +73,10 @@ from ....db import db
 from ....db.fact_storage_schema import current_fact_storage_day
 
 from .market_lifecycle import market_storage_lifecycle_repository
-from .fact_storage import CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, canonical_fact_storage_repository
+from .fact_storage import (
+    CANONICAL_ROW_COLUMNS, CANONICAL_ROW_FROM, CANONICAL_RANGE_ROW_FROM,
+    canonical_fact_storage_repository,
+)
 
 
 _SERIES_IDENTITY_VERSION = "market_series.v1"
@@ -2845,7 +2848,7 @@ class PostgresMarketDataRepository:
                 WITH visible AS (
                     {select_prefix}
                            {CANONICAL_ROW_COLUMNS}
-                    {CANONICAL_ROW_FROM}
+                    {CANONICAL_RANGE_ROW_FROM}
                     WHERE {' AND '.join(predicates)}
                     ORDER BY {revision_order}
                 )

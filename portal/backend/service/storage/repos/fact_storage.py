@@ -30,16 +30,20 @@ CANONICAL_ENVELOPE_COLUMNS = """
     sources.source_kind, sources.adapter_version AS source_adapter_version,
     series.dimensions AS series_dimensions
 """
-CANONICAL_ENVELOPE_FROM = """
-    FROM market.fact_versions AS versions
+_CANONICAL_ENVELOPE_JOINS = """
     JOIN market.sources AS sources ON sources.id = versions.source_id
     JOIN market.series AS series ON series.id = versions.series_id
 """
+CANONICAL_ENVELOPE_FROM = "\n    FROM market.fact_versions AS versions" + _CANONICAL_ENVELOPE_JOINS
 CANONICAL_ROW_COLUMNS = CANONICAL_ENVELOPE_COLUMNS + ", hot.payload, hot.provenance, hot.quality"
-CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + """
+_CANONICAL_HOT_JOIN = """
     LEFT JOIN market.fact_hot_payloads AS hot
       ON hot.storage_day = versions.storage_day AND hot.id = versions.id
 """
+CANONICAL_ROW_FROM = CANONICAL_ENVELOPE_FROM + _CANONICAL_HOT_JOIN
+CANONICAL_RANGE_ROW_FROM = """
+    FROM market.read_fact_headers_in_range(:series_id, :start, :end) AS versions
+""" + _CANONICAL_ENVELOPE_JOINS + _CANONICAL_HOT_JOIN
 _DOCUMENTS = frozenset(("payload", "provenance", "quality"))
 logger = logging.getLogger(__name__)
 

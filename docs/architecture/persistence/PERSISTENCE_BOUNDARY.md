@@ -479,9 +479,12 @@ settings and always reports migration readiness as false. Its catalog
 fingerprint is comparison evidence, not a substitute for writer fencing or
 verification. The operator cutover executor remains unimplemented.
 
-The series/day directory candidate under fact_series_day_schema.py is an
-explicit installation primitive under qualification, not a bootstrap-owned
-table yet.
-Its guarded expanding ranges and stable-reader snapshot contract are described
-in the dated-header layout notes. Runtime does not provision or use it until
-the remaining qualification and integration are reviewed.
+The series/day directory under fact_series_day_schema.py is owned by clean
+bootstrap and the explicit legacy full-row cutover. Normal canonical range
+selection uses its stable reader; source, revision, known-at, invalidation and
+payload rules remain outside that placement lookup. Missing or incompatible
+directories and filtered/disabled capture fail admission. Runtime never
+backfills bounds over existing headers. See
+[ADR 0071](../decisions/0071-route-range-reads-through-series-day-directory.md)
+for the snapshot and write-cost tradeoff. Physical placement and the existing
+tiered-v1 shadow migration remain separate, unfinished work.

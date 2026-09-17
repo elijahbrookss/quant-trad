@@ -207,6 +207,21 @@ class MarketFactHeaderPartitionRecord(Base):
                         server_default=text("clock_timestamp()"))
 
 
+class MarketFactHeaderSeriesDayRecord(Base):
+    """Conservative observation bounds for each series and physical header day."""
+
+    __tablename__ = "fact_header_series_days"
+    __table_args__ = (
+        CheckConstraint("min_observation_time <= max_observation_time",
+                        name="ck_market_fact_series_day_bounds"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+    series_id = Column(BigInteger, primary_key=True)
+    storage_day = Column(Date, primary_key=True)
+    min_observation_time = Column(DateTime(timezone=True), nullable=False)
+    max_observation_time = Column(DateTime(timezone=True), nullable=False)
+
+
 class MarketFactVersionRecord(Base):
     """Immutable dated headers; fact_identities owns global uniqueness."""
 

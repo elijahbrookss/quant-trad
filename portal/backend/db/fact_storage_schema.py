@@ -16,6 +16,9 @@ from .fact_identity_schema import (
     IDENTITY_TABLES, assert_fact_identity_contract, assert_fact_identity_references, ensure_fact_header_partition,
     install_fact_identity_functions,
 )
+from .fact_series_day_schema import (
+    SERIES_DAY_TABLES, assert_fact_series_day_contract, install_fact_series_day_functions,
+)
 from .market_storage_models import MarketFactHotPayloadRecord
 from .market_data_models import MarketFactVersionRecord
 
@@ -25,7 +28,7 @@ FACT_STORAGE_LAYOUT_VERSION = "market.fact_storage_tiers.v2"
 FACT_BOOK_PREFIX_TABLES = ("fact_book_prefix_chunks", "fact_book_prefix_dependencies")
 FACT_CANONICAL_DEPENDENCY_TABLES = ("fact_archive_canonical_dependencies",)
 FACT_STORAGE_TABLES = (
-    *IDENTITY_TABLES,
+    *IDENTITY_TABLES, *SERIES_DAY_TABLES,
     "fact_hot_payloads", "fact_retention_partitions", "fact_archive_manifests",
     "fact_archive_series", "fact_archive_dependencies", "fact_archive_material_aliases",
     "fact_archive_verifications", "fact_storage_state",
@@ -113,6 +116,7 @@ def _view_signature(sql: str) -> str:
 def install_fact_storage_functions(conn) -> None:
     """Install clean-layout enforcement. Called by clean bootstrap or explicit cutover only."""
     install_fact_identity_functions(conn)
+    install_fact_series_day_functions(conn)
     conn.execute(text(
         "CREATE OR REPLACE FUNCTION market.assert_fact_hot_payload_valid() RETURNS trigger "
         "LANGUAGE plpgsql AS $qt$" + HOT_PAYLOAD_VALIDATION_BODY + "$qt$"
@@ -254,6 +258,7 @@ def assert_fact_storage_contract(
             if allow_missing_canonical_dependency_tables and name in FACT_CANONICAL_DEPENDENCY_TABLES:
                 continue
             raise RuntimeError(f"Canonical Fact storage is missing market.{name}. Run {FACT_STORAGE_CUTOVER}")
+    assert_fact_series_day_contract(conn)
     assert_fact_identity_references(
         conn, allow_missing_canonical_dependencies=allow_missing_canonical_dependency_tables,
     )

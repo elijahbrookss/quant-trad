@@ -85,6 +85,7 @@ class PostgresCanonicalFactRetentionRepository:
                 SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date AS database_day,
                        pg_database_size(current_database()) AS database_bytes,
                        pg_total_relation_size('market.fact_identities') AS global_identity_bytes,
+                       pg_total_relation_size('market.fact_header_series_days') AS series_day_directory_bytes,
                        pg_total_relation_size('market.raw_archive_record_mappings') AS raw_mapping_bytes
             """)).mappings().one())
             # A partitioned parent has no heap or index storage of its own.
@@ -233,7 +234,7 @@ class PostgresCanonicalFactRetentionRepository:
             "execution_enabled": policy.execution_enabled,
             "execution_blockers": [] if policy.execution_enabled else ["canonical_retention_execution_disabled"],
             "inventory": {name: inventory[name] for name in (
-                "database_bytes", "canonical_header_bytes", "global_identity_bytes", "raw_mapping_bytes", "hot_payload_bytes", "hot_partition_count")},
+                "database_bytes", "canonical_header_bytes", "global_identity_bytes", "series_day_directory_bytes", "raw_mapping_bytes", "hot_payload_bytes", "hot_partition_count")},
             "archive_filesystem": filesystem,
             "pressure": {"hot_payload_excess_bytes": hot_excess,
                          "hot_payload_budget_reached": hot_pressure,

@@ -10,22 +10,24 @@ import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
+from portal.backend.db import MarketFactHeaderSeriesDayRecord
 from portal.backend.db.fact_series_day_schema import (
     assert_fact_series_day_contract, install_fact_series_day_functions,
 )
 from portal.backend.service.storage.repos import market_data as repository
+from portal.backend.service.storage.repos.fact_storage import CANONICAL_RANGE_ROW_FROM
 from tests.test_market_data.migration_test_support import fresh_migration_database
 
 pytestmark = pytest.mark.db
 FIRST = date(2024, 1, 1)
 
 
-def _executed_headers(node):
+def _executed_partitions(node, prefix):
     names = set()
-    if node.get("Actual Loops", 0) and node.get("Relation Name", "").startswith("fact_versions_"):
+    if node.get("Actual Loops", 0) and node.get("Relation Name", "").startswith(prefix):
         names.add(node["Relation Name"])
     for child in node.get("Plans", []):
-        names.update(_executed_headers(child))
+        names.update(_executed_partitions(child, prefix))
     return names
 
 
@@ -58,14 +60,23 @@ def test_range_selection_preserves_late_corrections(monkeypatch, record_property
                     CREATE TABLE market.fact_hot_payloads (
                         id text,storage_day date,payload jsonb,provenance jsonb,quality jsonb,
                         PRIMARY KEY(id,storage_day)
-                    );
+                    ) PARTITION BY RANGE(storage_day);
                 """))
+                MarketFactHeaderSeriesDayRecord.__table__.create(conn)
+                install_fact_series_day_functions(conn)
                 for offset in range(days):
                     day = FIRST + timedelta(days=offset)
                     until = day + timedelta(days=1)
                     conn.exec_driver_sql(
                         f"CREATE TABLE market.fact_versions_{day:%Y%m%d} "
                         f"PARTITION OF market.fact_versions FOR VALUES FROM ('{day}') TO ('{until}')"
+                    )
+                for offset in range(max(0, days - 32), days):
+                    day = FIRST + timedelta(days=offset)
+                    until = day + timedelta(days=1)
+                    conn.exec_driver_sql(
+                        f"CREATE TABLE market.fact_hot_payloads_{day:%Y%m%d} "
+                        f"PARTITION OF market.fact_hot_payloads FOR VALUES FROM ('{day}') TO ('{until}')"
                     )
                 conn.execute(text("""
                     INSERT INTO market.fact_versions
@@ -83,9 +94,22 @@ def test_range_selection_preserves_late_corrections(monkeypatch, record_property
                 """), {"day": FIRST + timedelta(days=days - 1),
                        "observation": datetime.combine(FIRST, datetime.min.time(), UTC),
                        "known": datetime.combine(FIRST + timedelta(days=days - 1), datetime.min.time(), UTC)})
+                conn.execute(text("""
+                    INSERT INTO market.fact_hot_payloads
+                    SELECT 'base-'||d,CAST(:first AS date)+d,
+                           jsonb_build_object('fixture',d),'{}','{}'
+                    FROM generate_series(:hot_first,:last) d
+                """), {"first": FIRST, "hot_first": max(0, days - 32), "last": days - 1})
+                conn.execute(text("""
+                    INSERT INTO market.fact_hot_payloads
+                    VALUES ('late-correction',:day,'{"fixture":"correction"}','{}','{}')
+                """), {"day": FIRST + timedelta(days=days - 1)})
+                conn.execute(text("ANALYZE market.fact_hot_payloads"))
                 conn.execute(text("ANALYZE market.fact_versions"))
                 conn.execute(text("ANALYZE market.sources"))
                 conn.execute(text("ANALYZE market.series"))
+                conn.execute(text("ANALYZE market.fact_header_series_days"))
+                assert_fact_series_day_contract(conn)
             # Isolate selection from independently covered payload decoding.
             monkeypatch.setattr(repository.canonical_fact_storage_repository, "hydrate_rows",
                                 lambda session, rows: [dict(row) for row in rows])
@@ -107,99 +131,54 @@ def test_range_selection_preserves_late_corrections(monkeypatch, record_property
                     assert [row["id"] for row in latest] == ["late-correction"]
                     assert [row["id"] for row in original] == ["base-0"]
                     assert [row["id"] for row in causal] == ["base-0"]
+                    assert latest[0]["payload"] == {"fixture": "correction"}
+                    assert original[0]["payload"] == (None if days > 32 else {"fixture": 0})
             finally:
                 event.remove(engine, "before_cursor_execute", observe)
             statement, parameters = captured[0]
+            assert "market.read_fact_headers_in_range" in statement
             with engine.connect() as conn:
                 plan = conn.exec_driver_sql("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + statement,
                                            parameters).scalar_one()[0]
             metrics = {
                 "fixture_days": days, "fixture_rows": days + 1,
-                "executed_header_partitions": len(_executed_headers(plan["Plan"])),
+                "executed_header_partitions": None,  # FunctionScan hides its nested plan.
                 "planning_ms": plan["Planning Time"], "execution_ms": plan["Execution Time"],
-                "scope": "local_small_row_selection_only",
+                "hot_fixture_partitions": min(days, 32),
+                "executed_hot_partitions": len(_executed_partitions(plan["Plan"], "fact_hot_payloads_")),
+                "scope": "runtime_directory_and_partitioned_hot_join_small_rows",
             }
             record_property("header_horizon", json.dumps(metrics, sort_keys=True))
             print("HEADER_HORIZON " + json.dumps(metrics, sort_keys=True))
 
-            # Candidate experiment only: a directory seeded from this fixture,
-            # not a runtime schema or an accepted transactional maintenance path.
-            with engine.begin() as conn:
-                conn.execute(text("""
-                    CREATE TABLE market.fixture_day_ranges AS
-                    SELECT series_id,storage_day,min(observation_time) AS minimum,
-                           max(observation_time) AS maximum
-                    FROM market.fact_versions GROUP BY series_id,storage_day;
-                    CREATE UNIQUE INDEX ON market.fixture_day_ranges(series_id,storage_day);
-                    ANALYZE market.fixture_day_ranges;
-                    CREATE TABLE market.fact_header_series_days (
-                        series_id bigint NOT NULL,storage_day date NOT NULL,
-                        min_observation_time timestamptz NOT NULL,max_observation_time timestamptz NOT NULL,
-                        PRIMARY KEY(series_id,storage_day),
-                        CONSTRAINT ck_market_fact_series_day_bounds
-                            CHECK(min_observation_time <= max_observation_time)
-                    );
-                    INSERT INTO market.fact_header_series_days SELECT * FROM market.fixture_day_ranges;
-                    ANALYZE market.fact_header_series_days;
-                """))
-                install_fact_series_day_functions(conn)
-                assert_fact_series_day_contract(conn)
-            replacements = {
-                "stable_directory": """
-                    FROM market.read_fact_headers_in_range(
-                        %(series_id)s,%(start)s,%(end)s
-                    ) AS versions
-                """,
-                "array_directory": """FROM market.fact_versions AS versions""",
-                "lateral_directory": """
-                    FROM market.fixture_day_ranges AS days
-                    CROSS JOIN LATERAL (
-                        SELECT headers.* FROM market.fact_versions AS headers
-                        WHERE headers.storage_day=days.storage_day
-                          AND headers.series_id=%(series_id)s
-                          AND headers.observation_time >= %(start)s
-                          AND headers.observation_time < %(end)s
-                        OFFSET 0
-                    ) AS versions
-                """,
+            # Compare the same production selector and filters with its old
+            # unpruned source. The directory above is maintained by real insert
+            # triggers; no fixture seed substitutes for capture.
+            runtime_source = str(text(CANONICAL_RANGE_ROW_FROM).compile(dialect=engine.dialect))
+            runtime_header = runtime_source.split("JOIN market.sources", 1)[0].strip()
+            baseline_plan = None
+            with engine.connect() as conn:
+                for index, (original_sql, original_params) in enumerate(captured):
+                    assert runtime_header in original_sql
+                    baseline_sql = original_sql.replace(
+                        runtime_header, "FROM market.fact_versions AS versions", 1)
+                    result = conn.exec_driver_sql(baseline_sql, original_params).mappings().all()
+                    assert [row["id"] for row in result] == [
+                        "late-correction" if index == 0 else "base-0"
+                    ]
+                    if index == 0:
+                        baseline_plan = conn.exec_driver_sql(
+                            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + baseline_sql,
+                            original_params).scalar_one()[0]
+            baseline = {
+                "candidate": "unpruned_reference",
+                "executed_header_partitions": len(_executed_partitions(baseline_plan["Plan"], "fact_versions_")),
+                "planning_ms": baseline_plan["Planning Time"],
+                "execution_ms": baseline_plan["Execution Time"],
+                "scope": "runtime_selector_reference_small_rows",
             }
-            for label, replacement in replacements.items():
-                plans = []
-                with engine.connect() as conn:
-                    for index, (original_sql, original_params) in enumerate(captured):
-                        candidate_sql = original_sql.replace(
-                            "FROM market.fact_versions AS versions", replacement)
-                        if label == "array_directory":
-                            candidate_sql = candidate_sql.replace(
-                                "versions.series_id =", """versions.storage_day = ANY(ARRAY(
-                                    SELECT storage_day FROM market.fixture_day_ranges
-                                    WHERE series_id=%(series_id)s AND minimum < %(end)s
-                                      AND maximum >= %(start)s
-                                )) AND versions.series_id =""")
-                        elif label == "lateral_directory":
-                            candidate_sql = candidate_sql.replace(
-                                "versions.series_id =", """days.series_id=%(series_id)s
-                                AND days.minimum < %(end)s AND days.maximum >= %(start)s
-                                AND versions.series_id =""")
-                        result = conn.exec_driver_sql(candidate_sql, original_params).mappings().all()
-                        assert [row["id"] for row in result] == [
-                            "late-correction" if index == 0 else "base-0"
-                        ]
-                        if index == 0:
-                            plans.append(conn.exec_driver_sql(
-                                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + candidate_sql,
-                                original_params).scalar_one()[0])
-                candidate = {
-                    "candidate": label,
-                    # EXPLAIN does not expose the STABLE function's nested plan.
-                    "executed_header_partitions": (
-                        None if label == "stable_directory" else len(_executed_headers(plans[0]["Plan"]))
-                    ),
-                    "planning_ms": plans[0]["Planning Time"],
-                    "execution_ms": plans[0]["Execution Time"],
-                    "scope": "fixture_directory_only_not_runtime",
-                }
-                record_property(label, json.dumps(candidate, sort_keys=True))
-                print("HEADER_HORIZON_CANDIDATE " + json.dumps(candidate, sort_keys=True))
+            assert baseline["executed_header_partitions"] == days
+            record_property("unpruned_reference", json.dumps(baseline, sort_keys=True))
+            print("HEADER_HORIZON_REFERENCE " + json.dumps(baseline, sort_keys=True))
         finally:
             engine.dispose()

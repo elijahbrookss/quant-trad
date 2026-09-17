@@ -370,7 +370,8 @@ bytes. Header inventory uses the same partition-count budget independently of
 the hot inventory and fails rather than reporting a partial total. These
 relation totals are components of `database_bytes`, not additional bytes to
 add to the whole database size. They do not replace filesystem or backup
-capacity accounting.
+capacity accounting. The series/day lookup directory is separately reported as
+`series_day_directory_bytes` and grows with series/day combinations.
 
 `market_data_lifecycle.canonical_retention` is the typed policy for generalized
 hot payloads. The default hot window is 30 complete UTC placement days, with

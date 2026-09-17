@@ -56,20 +56,21 @@ day plus a late correction, and exercises the actual canonical range selector. A
 correction stored on the last day. Latest selection must return that correction;
 commit-frozen and known-at-frozen reads must retain the original. Payload
 hydration is replaced only in this selection fixture and remains covered by the
-separate storage integration tests.
+separate storage integration tests. The fixture uses a partitioned hot table
+covering its most recent 32 days and reports executed hot partitions as well.
+A latest correction must join its hot payload; an older frozen row outside that
+window must remain selected for cold hydration.
 
-The report includes executed header partitions and PostgreSQL planning/execution
-time. It also compares array, lateral and stable-function directory queries
-against a fixture-built series/day observation range directory. That directory is not a
-runtime table or a qualified maintenance implementation. Any adopted directory
-must expand atomically with insertion, preserve late observations, reject
-missing/incompatible state, and use the same database snapshot as selection.
-A separate directory read followed by a READ COMMITTED fact query is not a
-demonstration of that snapshot guarantee. PostgreSQL's
+The report includes PostgreSQL planning/execution time for the production
+directory reader and an unpruned reference using the same selector and filters.
+Directory rows come from the actual ORM table and insertion trigger, not a
+fixture backfill. Late/direct writes, rollback, concurrent range expansion,
+missing/incompatible capture and a new-day commit between internal reads are
+covered by the directory guard tests. PostgreSQL's
 [STABLE function snapshot semantics](https://www.postgresql.org/docs/15/xfunc-volatility.html)
-provide one candidate for keeping the directory lookup and dynamically planned
-header read on the calling statement's snapshot. A dedicated concurrency test
-must exercise a new-day commit between those internal reads.
+keep directory resolution and the dynamically planned header read on the calling
+statement's snapshot. Separate READ COMMITTED statements do not provide that
+guarantee.
 
 The selection/guard fixtures omit extension installation in their disposable
 databases because they exercise native PostgreSQL behavior. Existing migration

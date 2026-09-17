@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
+from portal.backend.db import MarketFactHeaderSeriesDayRecord
 from portal.backend.db.fact_series_day_schema import (
     assert_fact_series_day_contract, install_fact_series_day_functions,
 )
@@ -34,15 +35,8 @@ def directory_engine():
                         FOR VALUES FROM ('2026-09-01') TO ('2026-09-02');
                     CREATE TABLE market.fact_versions_next_day PARTITION OF market.fact_versions
                         FOR VALUES FROM ('2026-09-02') TO ('2026-09-03');
-                    CREATE TABLE market.fact_header_series_days (
-                        series_id bigint NOT NULL, storage_day date NOT NULL,
-                        min_observation_time timestamptz NOT NULL,
-                        max_observation_time timestamptz NOT NULL,
-                        PRIMARY KEY(series_id,storage_day),
-                        CONSTRAINT ck_market_fact_series_day_bounds
-                            CHECK(min_observation_time <= max_observation_time)
-                    );
                 """))
+                MarketFactHeaderSeriesDayRecord.__table__.create(conn)
                 install_fact_series_day_functions(conn)
                 assert_fact_series_day_contract(conn)
             yield engine
@@ -198,4 +192,24 @@ def test_disabled_child_capture_fails_admission(directory_engine):
             "ALTER TABLE market.fact_versions_day DISABLE TRIGGER trg_extend_fact_header_series_day"
         ))
         with pytest.raises(RuntimeError, match="canonical_series_day_child_capture_incompatible"):
+            assert_fact_series_day_contract(conn)
+
+
+@pytest.mark.parametrize("drift", ["capture_filter", "function_volatility"])
+def test_directory_admission_rejects_filtered_capture_or_changed_function_semantics(directory_engine, drift):
+    with directory_engine.begin() as conn:
+        if drift == "capture_filter":
+            conn.execute(text("DROP TRIGGER trg_extend_fact_header_series_day ON market.fact_versions"))
+            conn.execute(text("""
+                CREATE TRIGGER trg_extend_fact_header_series_day
+                AFTER INSERT ON market.fact_versions FOR EACH ROW
+                WHEN (NEW.series_id > 1)
+                EXECUTE FUNCTION market.extend_fact_header_series_day()
+            """))
+            conn.execute(text(
+                "ALTER TABLE market.fact_versions ENABLE ALWAYS TRIGGER trg_extend_fact_header_series_day"
+            ))
+        else:
+            conn.execute(text("ALTER FUNCTION market.extend_fact_header_series_day() STABLE"))
+        with pytest.raises(RuntimeError, match="canonical_series_day_(trigger|function)_incompatible"):
             assert_fact_series_day_contract(conn)

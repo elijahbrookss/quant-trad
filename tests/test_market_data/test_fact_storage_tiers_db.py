@@ -442,6 +442,9 @@ def _rewind_disposable_storage_to_old_layout(storage):
         conn = session.connection()
         conn.execute(text("CREATE TEMP TABLE fact_copy_fixture ON COMMIT DROP AS SELECT * FROM market.fact_rows"))
         conn.execute(text("DROP VIEW market.fact_rows"))
+        conn.execute(text(
+            "DROP FUNCTION market.read_fact_headers_in_range(bigint,timestamptz,timestamptz)"
+        ))
         conn.execute(text("DROP TRIGGER trg_require_fact_hot_payload ON market.fact_versions"))
         from portal.backend.db.fact_identity_schema import IDENTITY_TABLES
         from portal.backend.db import MarketFactVersionRecord
@@ -547,6 +550,13 @@ def test_offline_cutover_dry_run_and_resume_preserve_every_field(storage):
     first = run_cutover(engine, execute=True, writers_stopped=True, batch_rows=1, max_pages=1)
     assert first["status"] == "copying"
     assert first["evidence"]["copied_rows"] == 1
+    # An interrupted copy cannot silently resume with an empty/missing
+    # directory. This rejected transaction rolls the test-only DROP back.
+    from scripts.db.manual_migration_fact_storage_tiers_v1 import _prepare
+    with pytest.raises(RuntimeError, match="canonical_series_day_directory_missing"):
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE market.fact_header_series_days"))
+            _prepare(conn)
     with engine.connect() as conn:
         assert conn.execute(text(
             "SELECT to_regclass(:name)"
@@ -657,3 +667,48 @@ def test_recent_fact_index_contract_refuses_missing_or_mixed_order(storage, repl
     with storage.database.session() as session:
         with pytest.raises(RuntimeError, match="ix_market_fact_series_accepted"):
             assert_fact_storage_contract(session.connection())
+
+
+def test_directory_routes_late_headers_and_missing_directory_is_not_recreated(storage, monkeypatch):
+    from sqlalchemy import event
+    from portal.backend.db.fact_series_day_schema import assert_fact_series_day_contract
+
+    older = storage.today - timedelta(days=33)
+    _placement(monkeypatch, older)
+    _ingest(storage)
+    first = _read(storage)[0]
+    _placement(monkeypatch, storage.today)
+    correction = replace(
+        storage.fact, known_at=BASE + timedelta(seconds=1), accepted_at=BASE + timedelta(seconds=1),
+        payload={**storage.fact.payload, "rate": "0.25", "raw_rate": "0.25"},
+    )
+    _ingest(storage, correction)
+    statements = []
+    def capture(_conn, _cursor, statement, *_args):
+        if "WITH visible AS" in statement:
+            statements.append(statement)
+    event.listen(storage.database._engine, "before_cursor_execute", capture)
+    try:
+        assert _read(storage)[0].fact.payload == correction.payload
+        assert _read(storage, known_at_lte=BASE)[0].fact_version_id == first.fact_version_id
+    finally:
+        event.remove(storage.database._engine, "before_cursor_execute", capture)
+    assert statements and all("market.read_fact_headers_in_range" in sql for sql in statements)
+    with storage.database.session() as session:
+        assert_fact_series_day_contract(session.connection())
+        days = session.execute(text(
+            "SELECT storage_day FROM market.fact_header_series_days WHERE series_id=:series ORDER BY storage_day"
+        ), {"series": storage.series_id}).scalars().all()
+        assert days == [older, storage.today]
+        session.execute(text("DROP TABLE market.fact_header_series_days"))
+    restarted = Database(storage.dsn)
+    try:
+        assert restarted.ensure_schema() is False
+        assert "fact_header_series_days" in str(restarted.last_error)
+        with storage.database._engine.connect() as conn:
+            assert conn.execute(text(
+                "SELECT to_regclass('market.fact_header_series_days')"
+            )).scalar_one() is None
+            assert conn.execute(text("SELECT count(*) FROM market.fact_versions")).scalar_one() == 2
+    finally:
+        restarted._reset_engine()

@@ -85,13 +85,11 @@ execute for that path. The initial single-query ARRAY subquery returned correct
 rows but did not prune those partitions; the implementation therefore uses two
 bounded statements.
 
-This proof does not cover broad series/time queries. Observation time cannot
-stand in for storage_day: a late import or correction can belong to a newer
-storage partition. Test those queries against the full intended partition
-horizon, including planning time and cold cache behavior. If they probe too many
-historical indexes, add a transactionally maintained, conservative series/day
-range directory and verify late arrivals before enabling physical tiering.
-Never prune merely by assuming observation day equals storage day.
+The exact-ID proof does not cover broad series/time queries. Those use the
+series/day directory described below and need separate full-horizon, planning,
+cold-cache and workload qualification before physical tiering. Observation time
+cannot stand in for storage_day: a late import or correction can belong to a
+newer storage partition.
 
 ## Inspect an existing v1 source without changing it
 
@@ -123,47 +121,44 @@ placement, performance and rollback remain separate required gates. This tool
 makes those future operator decisions concrete; it is not the missing migration
 executor.
 
-## Range-directory candidate under qualification
+## Snapshot-consistent range directory
 
-The local two-year baseline on 730 partitions and 731 synthetic rows preserved
-late corrections and frozen cutoffs, but executed all 730 header partitions.
-Its measured planning time was 448.941 ms and execution time 17.626 ms. Those
-warmed, small-row local measurements are evidence of fan-out, not HDD timings.
+Clean bootstrap now creates market.fact_header_series_days from its ORM model
+and installs capture and admission guards. Normal series/time reads use the
+stable read_fact_headers_in_range function before their existing source,
+revision, known-at, state and payload rules. The legacy full-row offline helper
+captures bounds while copying; resuming a copy without that directory is
+rejected. This does not implement the existing tiered-v1 server upgrade.
 
-fact_series_day_schema.py contains an explicit candidate installer for a
-per-series, per-storage-day observation range directory and a stable range
-reader. It is not wired into clean bootstrap, application range selection or
-the existing-server migration. The application still uses its original range
-query until candidate qualification and integration are complete.
+Each header insert expands the series/day observation bounds in the same
+transaction, including direct child-partition inserts. Bounds cannot narrow,
+change identity, be deleted or truncated. Admission checks function semantics,
+unfiltered triggers and child capture. A missing directory is a migration
+failure, never permission to create an empty replacement over existing rows.
 
-The candidate insertion trigger expands bounds in the same transaction as the
-header insert, including direct child-partition inserts. Bounds cannot narrow,
-change identity, be deleted or truncated. Admission checks function/trigger
-definitions, stable reader snapshot semantics and child trigger coverage.
-Concurrent inserts, rollback and a new-day commit between internal reads must
-be tested before adopting it. The directory is not a substitute for global
-Fact identity, known-at filtering, latest-revision selection or payload checks.
+The function quotes server-produced typed storage dates into its internal query;
+caller values remain bound parameters. PostgreSQL's
+[STABLE function contract](https://www.postgresql.org/docs/15/xfunc-volatility.html)
+keeps its directory and header reads on the calling statement's snapshot.
+Observation day cannot substitute for storage day: a correction of an old
+observation can live in today's partition.
 
-The [horizon experiment](storage-tiering-validation.md#two-year-partition-horizon-check)
-compares alternative query shapes. Its stable-reader function quotes only
-server-produced typed dates into the narrowed query; request values remain
-bound parameters. Snapshot behavior follows PostgreSQL's
-[STABLE function contract](https://www.postgresql.org/docs/15/xfunc-volatility.html).
-A missing directory requires explicit repair or migration, never an automatic
-empty replacement. Directory population/verification and bytes must be included
-in the eventual migration and SSD budget.
+The earlier 730-partition candidate comparison preserved latest, commit-frozen
+and known-at-frozen results. With only 731 synthetic rows, the unpruned query
+spent 329.118 ms planning and 18.918 ms executing; the stable reader spent
+0.246 ms in outer planning and 1.123 ms executing, including internal planning.
+Those single warmed observations justified integrating the query shape. They
+do not prove HDD, full-volume, payload-hydration or concurrent-write performance.
 
-The row-trigger directory update adds write work. Its ingestion overhead,
-representative historical payload hydration, large result sets, cold cache
-behavior and full two-year query timings remain qualification gates. Passing a
-small fixture does not establish acceptable production latency or throughput.
+The [horizon test](storage-tiering-validation.md#two-year-partition-horizon-check)
+now uses the real directory model, capture triggers and runtime selector, then
+compares the same filters against an unpruned reference. A partitioned recent
+payload window exercises the outer hot join too. Its FunctionScan hides
+the nested partition count, which must remain unavailable rather than zero.
 
-The final 32-partition smoke run passed eight selection and directory-guard
-checks, including a new-day commit while an existing read was blocked. The
-unpruned query planned in 2.326 ms and executed in 0.469 ms. The stable reader
-planned in 0.211 ms and executed in 0.602 ms, including its internal planning;
-its nested partition count is not exposed by the outer EXPLAIN. The array
-candidate still executed 32 partitions; the lateral candidate executed two
-but retained more planning work. These are single warmed observations, not
-percentiles or production acceptance. The full 730-day candidate comparison
-must still complete before selecting and integrating the runtime path.
+Directory updates add write work and serialize modifications to each series/day
+row. Large result materialization, cold reads, hydration and representative
+concurrent ingestion still require measurement. The directory grows with
+series/day combinations; series_day_directory_bytes is separately visible in
+retention inventory. Its size belongs in the SSD budget and migration forecast.
+No physical placement or hard SSD budget is established by this query change.

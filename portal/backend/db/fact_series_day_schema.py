@@ -159,19 +159,23 @@ def assert_fact_series_day_contract(conn) -> None:
         raise RuntimeError("canonical_series_day_reader_incompatible: explicit repair required")
     for name, body in _FUNCTIONS:
         actual = conn.execute(text(
-            "SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "SELECT p.prosrc,p.provolatile,p.prosecdef,p.proretset,p.pronargs,"
+            "p.prorettype='trigger'::regtype,p.proconfig,l.lanname "
+            "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "JOIN pg_language l ON l.oid=p.prolang "
             "WHERE n.nspname='market' AND p.proname=:name"
-        ), {"name": name}).scalars().all()
-        if actual != [body]:
+        ), {"name": name}).all()
+        if [tuple(row) for row in actual] != [(body, "v", False, False, 0, True, None, "plpgsql")]:
             raise RuntimeError(f"canonical_series_day_function_incompatible: function={name}")
     for table, trigger, function, _, _, kind in _TRIGGERS:
         actual = conn.execute(text(
-            "SELECT t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,n.nspname,p.proname "
+            "SELECT t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,n.nspname,p.proname, "
+            "t.tgqual IS NULL,t.tgnargs "
             "FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid "
             "JOIN pg_namespace n ON n.oid=p.pronamespace "
             "WHERE t.tgrelid=to_regclass(:relation) AND t.tgname=:trigger"
         ), {"relation": "market." + table, "trigger": trigger}).one_or_none()
-        if actual is None or tuple(actual) != (kind, "A", False, False, "market", function):
+        if actual is None or tuple(actual) != (kind, "A", False, False, "market", function, True, 0):
             raise RuntimeError(f"canonical_series_day_trigger_incompatible: trigger={trigger}")
 
     incompatible_children = conn.execute(text("""
@@ -184,7 +188,8 @@ def assert_fact_series_day_contract(conn) -> None:
         WHERE i.inhparent='market.fact_versions'::regclass
           AND (clone.oid IS NULL OR clone.tgparentid<>parent.oid
                OR clone.tgtype<>5 OR clone.tgenabled<>'A'
-               OR clone.tgfoid<>parent.tgfoid OR clone.tgdeferrable OR clone.tginitdeferred)
+               OR clone.tgfoid<>parent.tgfoid OR clone.tgdeferrable OR clone.tginitdeferred
+               OR clone.tgqual IS NOT NULL OR clone.tgnargs<>0)
         ORDER BY child.relname LIMIT 1
     """)).scalar_one_or_none()
     if incompatible_children is not None:
