@@ -13,6 +13,9 @@ code_paths:
   - src/core/storage_inventory.py
   - portal/backend/db/storage_target_models.py
   - portal/backend/service/storage_management.py
+  - portal/backend/service/storage/header_destinations.py
+  - portal/backend/service/storage/header_filesystem.py
+  - portal/backend/service/storage/header_journal.py
 ---
 # ADR 0069: Bind Storage Objects to Registered Targets
 
@@ -60,3 +63,33 @@ implemented by this ADR.
 
 See [storage management](../persistence/STORAGE_MANAGEMENT.md) and
 [PostgreSQL partitioning limitations](https://www.postgresql.org/docs/15/ddl-partitioning.html#DDL-PARTITIONING-DECLARATIVE-LIMITATIONS).
+
+
+## Prepared PostgreSQL destination refinement — 2026-09-17
+
+The dated-header direction in [ADR 0070](0070-separate-global-fact-identity-from-dated-headers.md)
+uses the same recorded-target rule. Register a prepared tablespace by database
+identity, target ID, filesystem UUID, OID, name, location and verified directory
+paths. Registration is immutable and accepts fresh server-namespace evidence;
+each current move review binds that registration to its copy plan. An existing
+target root must exactly match the root observed during verification.
+
+Device numbers and directory inodes are current observations. Include them in
+each move's review and durable intent, while retaining stable registration
+across a newly verified remount or physical restore. This requires a fresh
+review when physical evidence changes and does not resolve running or
+uncertain operations automatically. A changed database identity or stable
+binding needs an explicit recovery/cutover decision.
+
+Consequences: a path or tablespace name alone cannot redirect a reserved move.
+A pure placement hash is insufficient for reservation, and missing destination
+proof blocks the entire batch. Registrations referenced by movement records
+cannot be deleted. Terminal-ledger retention must respect that dependency.
+The internal repository now implements these admission rules; public wiring,
+physical execution and crash reconciliation remain incomplete.
+
+Pure review tests cover the identity/hash boundary. Expanded disposable journal
+tests cover registration and reservation transactions, but qualification of this
+refinement is still pending. Namespace verification was separately qualified in
+CI using a private PostgreSQL cluster. Neither evidence set certifies deployment,
+an end-to-end move, or a restore workflow.

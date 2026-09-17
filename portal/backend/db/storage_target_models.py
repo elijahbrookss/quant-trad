@@ -3,7 +3,7 @@
 Policy revisions select destinations for future work. Existing locations remain
 explicitly bound to their registered target until a verified movement commits.
 """
-from sqlalchemy import BigInteger, CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, Column, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from .models import Base
@@ -79,6 +79,23 @@ class StorageObjectLocationRecord(Base):
     verified_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class StorageHeaderTablespaceRecord(Base):
+    """Stable prepared destination identity; volatile inode/device proof is per move."""
+    __tablename__ = "portal_storage_header_tablespaces"
+    __table_args__ = (
+        UniqueConstraint("database_identity", "tablespace_oid", name="uq_storage_header_tablespace_oid"),
+        CheckConstraint("tablespace_oid BETWEEN 1 AND 4294967295 AND tablespace_oid <> 1664",
+                        name="ck_storage_header_tablespace_oid"),
+        CheckConstraint("jsonb_typeof(binding) = 'object' AND octet_length(binding::text) <= 16384",
+                        name="ck_storage_header_tablespace_binding"),
+    )
+    database_identity = Column(String(128), primary_key=True)
+    target_id = Column(String(48), ForeignKey("portal_storage_targets.id", ondelete="RESTRICT"), primary_key=True)
+    tablespace_oid = Column(BigInteger, nullable=False)
+    binding = Column(JSONB, nullable=False)
+    registered_at = Column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))
+
+
 class StorageHeaderBatchRecord(Base):
     """One immutable, bounded header proposal per reviewed storage plan."""
     __tablename__ = "portal_storage_header_batches"
@@ -103,6 +120,13 @@ class StorageHeaderMoveRecord(Base):
     __tablename__ = "portal_storage_header_moves"
     __table_args__ = (
         UniqueConstraint("plan_id", "storage_day", name="uq_storage_header_move_day"),
+        ForeignKeyConstraint(["database_identity", "target_id"],
+                             ["portal_storage_header_tablespaces.database_identity",
+                              "portal_storage_header_tablespaces.target_id"],
+                             ondelete="RESTRICT", name="fk_storage_header_move_tablespace"),
+        CheckConstraint("jsonb_typeof(destination_binding) = 'object' AND "
+                        "octet_length(destination_binding::text) <= 16384",
+                        name="ck_storage_header_move_destination"),
         CheckConstraint("heap_oid BETWEEN 1 AND 4294967295", name="ck_storage_header_move_oid"),
         CheckConstraint("reserved_bytes > 0", name="ck_storage_header_move_reservation"),
         CheckConstraint("state IN ('reserved','running','blocked','completed','cancelled')",
@@ -123,6 +147,7 @@ class StorageHeaderMoveRecord(Base):
     target_id = Column(String(48), ForeignKey("portal_storage_targets.id", ondelete="RESTRICT"), nullable=False)
     filesystem_uuid = Column(String(128), nullable=False)
     source_group = Column(JSONB, nullable=False)
+    destination_binding = Column(JSONB, nullable=False)
     reserved_bytes = Column(BigInteger, nullable=False)
     state = Column(String(16), nullable=False, server_default="reserved")
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))

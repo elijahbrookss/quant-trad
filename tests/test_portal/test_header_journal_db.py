@@ -12,15 +12,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from core.storage_header_placement import (
-    HeaderPartitionPlacement, HeaderPlacementSnapshot, RelationPlacement, plan_header_placement,
+    HeaderPartitionPlacement, HeaderPlacementSnapshot, RelationPlacement,
 )
 from core.storage_mounts import FilesystemEvidence
 from core.storage_targets import StoragePolicy, StorageTarget
 from portal.backend.db.storage_target_models import (
     StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord,
-    StorageHeaderBatchRecord, StorageHeaderMoveRecord,
+    StorageHeaderBatchRecord, StorageHeaderMoveRecord, StorageHeaderTablespaceRecord,
 )
-from portal.backend.service.storage.header_filesystem import VerifiedHeaderPlacement
+from portal.backend.service.storage.header_filesystem import VerifiedHeaderPlacement, VerifiedTablespaceDestination
+from portal.backend.service.storage.header_destinations import register_header_tablespaces, review_header_moves
 from portal.backend.service.storage.header_journal import (
     reserve_header_batch, cancel_unstarted_header_batch,
 )
@@ -36,7 +37,7 @@ def journal():
         engine = create_engine(dsn)
         try:
             for model in (StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord,
-                          StorageHeaderBatchRecord, StorageHeaderMoveRecord):
+                          StorageHeaderTablespaceRecord, StorageHeaderBatchRecord, StorageHeaderMoveRecord):
                 model.__table__.create(engine)
             targets = (
                 StorageTarget("ssd", "SSD", "uuid-ssd", "/qt/ssd", "ssd"),
@@ -71,7 +72,13 @@ def journal():
             capacity = {t.target_id: FilesystemEvidence(path=t.root, filesystem_uuid=t.filesystem_uuid,
                 device_id=f"8:{i}", used_bytes=0, total_bytes=100000,
                 available_bytes=100000, read_only=False) for i, t in enumerate(targets)}
-            verified = VerifiedHeaderPlacement(snapshot, capacity, (), now)
+            destination = VerifiedTablespaceDestination(identity, "hdd", "uuid-hdd", "8:1",
+                9000, "qt_history", "/qt/hdd/tablespace",
+                "/qt/hdd/tablespace/PG_15_202209061", "/qt/hdd/tablespace/PG_15_202209061",
+                10001, 202209061, "/qt/hdd")
+            verified = VerifiedHeaderPlacement(snapshot, capacity, (), now, (destination,))
+            with Session(engine) as session, session.begin():
+                register_header_tablespaces(session, verified=verified)
             yield engine, targets, policy, verified
         finally:
             engine.dispose()
@@ -79,8 +86,8 @@ def journal():
 
 def proposal(journal, verified=None, reservations=None):
     _, targets, policy, original = journal
-    return plan_header_placement(snapshot=(verified or original).snapshot,
-        policy=policy, targets=targets, capacity=(verified or original).capacity,
+    return review_header_moves(verified=verified or original,
+        policy=policy, targets=targets,
         reserved_bytes=reservations or {"ssd": 0, "hdd": 0})
 
 
@@ -113,6 +120,8 @@ def test_committed_reservation_records_complete_group_and_replay_never_double_re
         assert group.source_group["heap"]["target_id"] == "ssd"
         assert len(group.source_group["indexes"]) == 1
         assert group.source_group["source_space_credited_bytes"] == 0
+        assert group.destination_binding["tablespace_oid"] == 9000
+        assert group.destination_binding["directory_inode"] == 10001
 
 
 def test_failure_before_commit_rolls_back_journal_and_reservations_together(journal):
@@ -147,7 +156,7 @@ def test_changed_reservation_invalidates_review_without_partial_writes(journal):
     ("clock_order", "clock_mismatch"),
     ("database", "database_mismatch"),
     ("capacity", "placement_blocked"),
-    ("mount", "placement_blocked"),
+    ("mount", "review_invalid"),
 ])
 def test_invalid_evidence_never_acquires_capacity(journal, change, expected):
     verified = journal[3]
@@ -337,3 +346,116 @@ def test_journal_uses_same_lock_as_storage_policy_management(journal):
     assert state(journal) == (0, 0, 0)
     reserve(journal)
     assert state(journal) == (2400, 1, 2)
+
+
+def test_registration_reuses_stable_identity_but_new_inode_and_device_change_review(journal):
+    engine, _, _, original = journal
+    destination = replace(original.destinations[0], device_id="8:9", directory_inode=20002)
+    capacity = {**original.capacity, "hdd": replace(original.capacity["hdd"], device_id="8:9")}
+    observed = replace(original, destinations=(destination,), capacity=capacity)
+    with Session(engine) as session, session.begin():
+        assert register_header_tablespaces(session, verified=observed) == [
+            {"target_id": "hdd", "tablespace_oid": 9000, "reused": True}]
+        binding = session.get(StorageHeaderTablespaceRecord,
+                              (original.snapshot.database_identity, "hdd")).binding
+        assert "device_id" not in binding and "directory_inode" not in binding
+    assert proposal(journal, observed)["plan_hash"] != proposal(journal)["plan_hash"]
+
+
+@pytest.mark.parametrize("change", ["oid", "name", "location"])
+def test_registered_destination_cannot_be_repointed(journal, change):
+    original = journal[3]
+    destination = original.destinations[0]
+    if change == "oid":
+        destination = replace(destination, tablespace_oid=9001)
+    elif change == "name":
+        destination = replace(destination, tablespace_name="renamed")
+    else:
+        destination = replace(destination, tablespace_location="/qt/hdd/other",
+            directory="/qt/hdd/other/PG_15_202209061", server_directory="/qt/hdd/other/PG_15_202209061")
+    with pytest.raises(StorageConflict, match="identity_changed"):
+        with Session(journal[0]) as session, session.begin():
+            register_header_tablespaces(session, verified=replace(original, destinations=(destination,)))
+    assert state(journal) == (0, 0, 0)
+
+
+def test_one_tablespace_cannot_be_registered_to_two_targets(journal):
+    original = journal[3]
+    destination = replace(original.destinations[0], target_id="ssd", filesystem_uuid="uuid-ssd",
+        device_id="8:0", target_root="/qt/ssd", tablespace_location="/qt/ssd/tablespace",
+        directory="/qt/ssd/tablespace/PG_15_202209061", server_directory="/qt/ssd/tablespace/PG_15_202209061")
+    with pytest.raises(StorageConflict, match="already_registered"):
+        with Session(journal[0]) as session, session.begin():
+            register_header_tablespaces(session, verified=replace(original, destinations=(destination,)))
+
+
+def test_registration_rollback_leaves_no_destination_or_reservation(journal):
+    key = (journal[3].snapshot.database_identity, "hdd")
+    with Session(journal[0]) as session, session.begin():
+        session.delete(session.get(StorageHeaderTablespaceRecord, key))
+    with pytest.raises(RuntimeError, match="rollback"):
+        with Session(journal[0]) as session, session.begin():
+            register_header_tablespaces(session, verified=journal[3])
+            raise RuntimeError("rollback")
+    with Session(journal[0]) as session:
+        assert session.get(StorageHeaderTablespaceRecord, key) is None
+    with pytest.raises(StorageConflict, match="destination_not_registered"):
+        reserve(journal)
+    assert state(journal) == (0, 0, 0)
+
+
+def test_missing_verified_destination_blocks_the_entire_batch(journal):
+    observed = replace(journal[3], destinations=())
+    with pytest.raises(StorageConflict, match="placement_blocked"):
+        reserve(journal, verified=observed)
+    assert state(journal) == (0, 0, 0)
+
+
+def test_changed_destination_inode_requires_new_review_before_reserving(journal):
+    original = journal[3]
+    observed = replace(original, destinations=(replace(original.destinations[0], directory_inode=22222),))
+    with pytest.raises(StorageConflict, match="review_changed"):
+        reserve(journal, verified=observed, review_hash=proposal(journal)["plan_hash"])
+    assert state(journal) == (0, 0, 0)
+    reserve(journal, verified=observed)
+    with Session(journal[0]) as session:
+        assert session.scalar(select(StorageHeaderMoveRecord)).destination_binding["directory_inode"] == 22222
+
+
+def test_new_review_cannot_override_immutable_registration(journal):
+    original = journal[3]
+    observed = replace(original, destinations=(replace(original.destinations[0], tablespace_name="changed"),))
+    with pytest.raises(StorageConflict, match="destination_not_registered"):
+        reserve(journal, verified=observed)
+    assert state(journal) == (0, 0, 0)
+
+
+def test_reserved_moves_keep_their_registered_tablespace_from_deletion(journal):
+    reserve(journal)
+    with pytest.raises(IntegrityError):
+        with Session(journal[0]) as session, session.begin():
+            session.delete(session.get(StorageHeaderTablespaceRecord,
+                                       (journal[3].snapshot.database_identity, "hdd")))
+    assert state(journal) == (2400, 1, 2)
+
+
+def test_registration_rechecks_database_and_observation_age(journal):
+    original = journal[3]
+    for observed, expected in [
+        (replace(original, verified_at=original.verified_at-timedelta(minutes=2)), "evidence_expired"),
+        (replace(original, snapshot=replace(original.snapshot, database_identity="other/42")), "database_mismatch"),
+    ]:
+        with pytest.raises(StorageConflict, match=expected):
+            with Session(journal[0]) as session, session.begin():
+                register_header_tablespaces(session, verified=observed)
+
+
+def test_changed_registered_root_cannot_reuse_old_verified_observation(journal):
+    with Session(journal[0]) as session, session.begin():
+        session.get(StorageTargetRecord, "hdd").root = "/qt/repointed"
+    with pytest.raises(ValueError, match="identity_mismatch"):
+        with Session(journal[0]) as session, session.begin():
+            register_header_tablespaces(session, verified=journal[3])
+    with pytest.raises(StorageConflict, match="review_invalid"):
+        reserve(journal)
+    assert state(journal) == (0, 0, 0)

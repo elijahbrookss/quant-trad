@@ -2,8 +2,8 @@
 
 Internal repository boundary, not an API or executor. The caller owns the
 transaction: returned receipts are provisional until it commits. A reservation
-never authorizes DDL. Registered tablespace identity and fresh locked physical
-checks are still required by the future worker.
+never authorizes DDL. Prepared tablespace identity is bound into the review; fresh locked physical
+checks and execution still belong to the future worker.
 """
 from __future__ import annotations
 
@@ -15,28 +15,18 @@ from uuid import uuid4
 
 from sqlalchemy import select, text
 
-from core.storage_header_placement import plan_header_placement
 from core.storage_targets import StoragePolicy
 from portal.backend.db.storage_target_models import (
-    StorageHeaderBatchRecord, StorageHeaderMoveRecord,
+    StorageHeaderBatchRecord, StorageHeaderMoveRecord, StorageHeaderTablespaceRecord,
     StoragePlanRecord, StoragePolicyRecord, StorageTargetRecord,
 )
 from portal.backend.service.storage_management import StorageConflict, _target
 from .header_filesystem import VerifiedHeaderPlacement
+from .header_admission import lock_header_storage as _lock, fresh_header_database, registered_header_targets
+from .header_destinations import review_header_moves, stable_header_destination
 
 logger = logging.getLogger(__name__)
 _ACTIVE = ("reserved", "running", "blocked")
-
-
-def _lock(session):
-    if session.connection().get_isolation_level() != "READ COMMITTED":
-        raise StorageConflict("storage_journal_requires_read_committed")
-    # Same key as enrollment/policy changes. A busy worker must retry rather
-    # than wait indefinitely while holding a stale filesystem observation.
-    if not session.scalar(text(
-        "SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1', 0))"
-    )):
-        raise StorageConflict("storage_journal_busy")
 
 
 def _rows(session, batch):
@@ -93,35 +83,26 @@ def reserve_header_batch(session, *, plan_id, review_hash, verified):
     if plan.policy_hash != policy.fingerprint or not policy.movement_enabled:
         raise StorageConflict("storage_journal_policy_not_admitted")
 
-    # Database time prevents a caller from choosing its own freshness clock.
-    now = session.scalar(text("SELECT clock_timestamp()"))
-    for stamp in (verified.snapshot.captured_at, verified.verified_at):
-        if (stamp.tzinfo is None or stamp.utcoffset() is None
-                or not 0 <= (now - stamp).total_seconds() <= 60):
-            raise StorageConflict("storage_journal_evidence_expired")
-    if verified.verified_at < verified.snapshot.captured_at:
-        raise StorageConflict("storage_journal_evidence_clock_mismatch")
-    identity = session.scalar(text("""
-        SELECT c.system_identifier::text || '/' || d.oid::text
-        FROM pg_control_system() c CROSS JOIN pg_database d
-        WHERE d.datname=current_database()
-    """))
-    if identity != verified.snapshot.database_identity:
-        raise StorageConflict("storage_journal_database_mismatch")
-
-    targets = list(session.scalars(select(StorageTargetRecord).order_by(
-        StorageTargetRecord.id).limit(33).execution_options(populate_existing=True)))
-    if len(targets) > 32:
-        raise StorageConflict("storage_journal_target_budget")
-    proposal = plan_header_placement(
-        snapshot=verified.snapshot, policy=policy,
-        targets=[_target(row) for row in targets], capacity=verified.capacity,
-        reserved_bytes={row.id: row.reserved_bytes for row in targets},
-    )
+    identity = fresh_header_database(session, verified)
+    targets = registered_header_targets(session)
+    target_values = [_target(row) for row in targets]
+    try:
+        proposal = review_header_moves(
+            verified=verified, policy=policy, targets=target_values,
+            reserved_bytes={row.id: row.reserved_bytes for row in targets},
+        )
+    except ValueError as exc:
+        raise StorageConflict("storage_journal_review_invalid: " + str(exc)) from exc
     if not proposal["planning_complete"]:
         raise StorageConflict("storage_journal_placement_blocked")
     if proposal["plan_hash"] != review_hash:
         raise StorageConflict("storage_journal_review_changed")
+    target_by_id = {target.target_id: target for target in target_values}
+    for target_id, destination in proposal["destination_evidence"].items():
+        registration = session.get(StorageHeaderTablespaceRecord, (identity, target_id), populate_existing=True)
+        if (registration is None or registration.tablespace_oid != destination["tablespace_oid"]
+                or registration.binding != stable_header_destination(destination, target_by_id[target_id])):
+            raise StorageConflict("storage_journal_destination_not_registered")
     oids = [move["heap"]["oid"] for move in proposal["moves"]]
     if oids and session.scalar(select(StorageHeaderMoveRecord.id).where(
         StorageHeaderMoveRecord.database_identity == identity,
@@ -153,6 +134,7 @@ def reserve_header_batch(session, *, plan_id, review_hash, verified):
             database_identity=identity, storage_day=date.fromisoformat(move["storage_day"]),
             heap_oid=move["heap"]["oid"], target_id=move["destination_target_id"],
             filesystem_uuid=move["destination_filesystem_uuid"], source_group=move,
+            destination_binding=dict(proposal["destination_evidence"][move["destination_target_id"]]),
             reserved_bytes=move["reserve_copy_bytes"], state="reserved",
         )
         session.add(row)

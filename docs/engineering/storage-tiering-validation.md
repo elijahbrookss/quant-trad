@@ -228,3 +228,21 @@ repointed destination observation. These new database cases require a new
 qualification run; the earlier journal full-suite run cannot certify source
 changes made after its image snapshot. Do not start overlapping local DB stacks
 to obtain that result.
+
+
+### Registered destination and bound-review qualification
+
+The pure destination-review suite uses synthetic observations to check
+deterministic binding, missing destinations, changed OIDs/names/inodes,
+invalid paths/identities, duplicate observations and stable versus volatile
+registration fields. It and the existing filesystem/planner suites passed
+101 focused cases. These checks perform no disk or database operations.
+
+The journal database fixture now explicitly registers its synthetic prepared
+destination and reviews that binding before reserving. Added transaction
+cases cover immutable registration, reused identity with fresh inode/device
+observations, duplicate tablespace ownership, rollback, missing registration,
+changed destination reviews, persisted per-move evidence, registration foreign
+keys and freshness admission. These new database cases remain pending a fresh
+disposable qualification run; the older running full-suite image cannot test
+them. Apply remains disabled.

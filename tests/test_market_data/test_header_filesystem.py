@@ -261,6 +261,7 @@ def test_prepared_default_and_empty_custom_destination_are_verified_without_crea
     result = _verify_destination(files, inventory)
     destination, = result.destinations
     assert destination.target_id == "hdd"
+    assert destination.target_root == files.target.root
     assert destination.tablespace_oid == oid
     assert destination.filesystem_uuid == files.target.filesystem_uuid
     assert destination.directory_inode == directory.stat().st_ino

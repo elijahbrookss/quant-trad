@@ -36,6 +36,7 @@ class VerifiedTablespaceDestination:
     server_directory: str
     directory_inode: int
     catalog_version: int
+    target_root: str
 
 
 @dataclass(frozen=True)
@@ -334,7 +335,7 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
             destination_results.append(VerifiedTablespaceDestination(
                 inventory.snapshot.database_identity, target_id, target.filesystem_uuid,
                 capacity[target_id].device_id, destination.oid, destination.name,
-                destination.location, str(actual), str(server_directory), info.st_ino, inventory.catalog_version,
+                destination.location, str(actual), str(server_directory), info.st_ino, inventory.catalog_version, target.root,
             ))
         # Refuse a changed mount, process or file instead of returning mixed evidence.
         if _cluster_identity(inventory, binary, deadline) != cluster:

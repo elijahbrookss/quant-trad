@@ -15,6 +15,8 @@ code_paths:
   - portal/backend/service/storage/header_catalog.py
   - portal/backend/service/storage/header_filesystem.py
   - portal/backend/service/storage/header_journal.py
+  - portal/backend/service/storage/header_admission.py
+  - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
   - portal/backend/db/storage_target_models.py
   - portal/backend/controller/storage_management.py
@@ -269,7 +271,7 @@ transition exposed by this repository yet.
 
 These are canonical clean-schema models, with no runtime backfill or live
 migration. The journal remains internal and unconnected to the public queue
-endpoint. Registered destination tablespace identity, locked pre-execution
+endpoint. Destination enrollment/worker wiring, locked pre-execution
 checks, physical table/index DDL, crash reconciliation, execution logging and
 full capacity coverage still belong to the future worker. No reservation
 activates policy or moves bytes. Existing installations will require explicit,
@@ -307,11 +309,46 @@ server-side mount flags are read from the destination descriptor. This requires
 Linux O_PATH support, visibility of the postmaster's PID namespace, and suitable
 permissions; a permission or namespace mismatch is a refusal.
 
-Returned destination evidence includes database identity, target UUID/device,
+Returned destination evidence includes database identity, the observed configured target root, target UUID/device,
 tablespace OID/name/location, worker and server directory paths, the verified
 directory inode and catalog version.
-It remains a transient observation, not a durable tablespace registration.
-The journal does not yet persist these new destination bindings. The future
-worker must bind them to its reviewed operation and repeat the checks while
+It remains an observation until the internal registration and reservation
+boundaries below accept it. The future worker must repeat the checks while
 holding execution locks before moving any table or index. Neither these
 observations nor an existing reservation enables Apply.
+
+
+## Registered destinations and bound movement reviews
+
+The internal registration boundary saves one prepared tablespace per database
+identity and target under the shared storage-management lock. It accepts only
+fresh verified observations for the current database and enrolled active history
+targets. The configured root recorded by the verifier must match current
+enrollment, preventing reuse of an observation from an old target root. Existing registrations are immutable: changing the OID, name, location,
+directory paths, catalog version, target root or filesystem UUID is refused.
+A tablespace cannot belong to two targets in the same database. Registration is
+idempotent and transactional; it creates no PostgreSQL tablespace or directory
+and is not yet connected to a public API or operator command.
+
+Stable registration excludes the current device number and directory inode.
+A remount or physical restore can change those observations without changing
+the registered identity. This is not automatic restore approval: the filesystem
+verifier must supply fresh matching evidence, every move review binds the
+current observations, and running/uncertain work still requires reconciliation.
+Changed database identity or stable destination details require an explicit,
+reviewed recovery/cutover; they are never silently repointed.
+
+The destination-bound review wraps the pure placement plan with the exact
+verified destinations used by its moves. Its hash includes both the placement
+evidence and destination OID/name/location, target UUID, current device and
+directory inode. Missing destination proof blocks the entire move batch and
+clears all additional copy reservations. The pure placement hash alone is no
+longer an admissible journal review.
+
+Before reserving, the journal recomputes this review and checks each destination
+against immutable registration. Each durable move stores its destination
+evidence and has a foreign key to its registration. A new hash does not
+override a changed registration. Registration/review only record intent and
+capacity ownership; the physical executor, runtime wiring, crash recovery and
+policy activation remain absent. These canonical model additions require the
+later explicit deployment cutover, with no runtime backfill of old intentions.
