@@ -543,9 +543,38 @@ Existing children are checked directly, including ownership and writability.
 This evidence covers the caller's allocation settings, not every producer's
 existing temporary objects or allocations on other sessions. It does not
 qualify peak rates, enforce resource limits, reserve capacity or enable Apply.
-The worker must recheck these observations under movement ownership and account
-for other producers before composing them with the resource-envelope calculation.
+The reserved-move resource inspection now repeats these observations under
+movement ownership and composes them with the resource-envelope calculation.
+Accounting for other producers remains required before execution.
 
 The PostgreSQL 15 behavior is defined by
 [temporary tablespace selection](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/commands/tablespace.c)
 and [temporary file paths and fallback](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/storage/file/fd.c).
+
+
+## Reserved-move resource inspection
+
+The inspect_reserved_header_move_resources boundary combines the saved move,
+current physical group, PostgreSQL resource paths and declared headroom on one
+caller transaction and connection. It retains storage ownership and the selected
+daily table lock, derives the WAL and temporary targets from verified bindings,
+and requires both observations to identify the same enrolled filesystems.
+Database identity, backend PID, observation ordering, freshness, policy revision
+and saved review must still agree. Caller maps are copied before probes begin.
+
+The budget uses fresh available capacity and current aggregate copy reservations.
+The selected copy replaces its own claim once; it does not reserve new capacity,
+move files, update the journal, commit or activate policy. Shortages report the
+affected drive, including a source drive whose growth or WAL would exhaust it.
+
+Inspection phases share a declining deadline, clamped to a tighter caller
+statement timeout. A late result is refused, and the original timeout is restored
+on success. Caller rollback remains required on failure. This bounds SQL and
+rejects stale completion; cancellation of a stalled filesystem call still needs
+worker supervision.
+
+Even a sufficient result has execution disabled. Declared limits are estimates,
+not enforced ceilings. Other producers and existing temporary objects, durable
+auxiliary reservations, resource-limit qualification and worker supervision
+remain uncovered. This internal preview adds no portal control or execution
+entrypoint.

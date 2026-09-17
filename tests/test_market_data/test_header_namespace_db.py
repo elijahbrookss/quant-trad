@@ -34,7 +34,7 @@ from portal.backend.db.storage_target_models import (
 )
 from portal.backend.service.storage.header_destinations import register_header_tablespaces, review_header_moves
 from portal.backend.service.storage.header_journal import reserve_header_batch, cancel_unstarted_header_batch
-from portal.backend.service.storage.header_inspection import inspect_reserved_header_move
+from portal.backend.service.storage.header_inspection import inspect_reserved_header_move_resources
 from portal.backend.service.storage_management import StorageConflict
 from portal.backend.service.storage.header_catalog import read_header_catalog, read_locked_header_group
 from portal.backend.service.storage.header_filesystem import verify_header_filesystem
@@ -298,8 +298,20 @@ def _prove_registered_pipeline(engine, targets, destination_oid):
             and row.heap_oid == verified.snapshot.partitions[0].heap.oid
         )
     with Session(engine) as session, session.begin():
-        inspection = inspect_reserved_header_move(session, move_id=first["moves"][0]["id"],
-            review_hash=review["plan_hash"], pg_controldata=BIN / "pg_controldata")
+        session.execute(text("SET LOCAL statement_timeout='10s'"))
+        combined = inspect_reserved_header_move_resources(
+            session, move_id=first["moves"][0]["id"], review_hash=review["plan_hash"],
+            pg_controldata=BIN / "pg_controldata", wal_bytes=1024**2,
+            temporary_bytes={"fixture": 1024**2, "history": 1024**2},
+            growth_bytes_per_second={"fixture": 0, "history": 0},
+            maintenance_bytes={"fixture": 0, "history": 0},
+            movement_timeout_seconds=10, cancellation_grace_seconds=2)
+        inspection = combined.move
+        resource_rows = {item["target_id"]: item for item in combined.budget["filesystems"]}
+        resource_timeout_preserved = session.scalar(text("SHOW statement_timeout")) == "10s"
+        resource_reservation_preserved = (
+            session.get(StorageTargetRecord, "history").reserved_bytes == reserved
+            and session.get(StorageHeaderMoveRecord, first["moves"][0]["id"]).state == "reserved")
         try:
             with Session(engine) as competing, competing.begin():
                 cancel_unstarted_header_batch(competing, plan_id="namespace-pipeline",
@@ -325,6 +337,17 @@ def _prove_registered_pipeline(engine, targets, destination_oid):
         "real_inspection_copy_bytes": inspection.copy_bytes,
         "real_inspection_blocks_cancellation": cancellation_busy,
         "real_inspection_execution_disabled": not inspection.execution_available,
+        "real_resource_targets_derived": (
+            combined.temporary_target_ids == ("fixture",)
+            and resource_rows["fixture"]["additional_wal_bytes"] == 1024**2
+            and resource_rows["history"]["additional_wal_bytes"] == 0),
+        "real_resource_budget_composed": (
+            combined.budget["capacity_sufficient_for_declared_limits"]
+            and resource_rows["history"]["copy_bytes"] == expected_bytes
+            and resource_rows["history"]["other_reserved_copy_bytes"] == 0),
+        "real_resource_preview_preserved": (
+            resource_timeout_preserved and resource_reservation_preserved
+            and not combined.execution_available and not combined.budget["execution_available"]),
     }
 
 
@@ -442,6 +465,15 @@ def test_real_reserved_move_inspection_holds_ownership_without_executing(namespa
     assert namespace_report["real_inspection_copy_bytes"] == namespace_report["real_pipeline_expected_bytes"]
     assert namespace_report["real_inspection_blocks_cancellation"]
     assert namespace_report["real_inspection_execution_disabled"]
+    assert namespace_report["real_pipeline_source_unmoved"]
+
+
+@pytest.mark.parametrize("proof", [
+    "real_resource_targets_derived", "real_resource_budget_composed",
+    "real_resource_preview_preserved",
+])
+def test_real_resource_composition_uses_verified_paths_without_mutation(namespace_report, proof):
+    assert namespace_report[proof]
     assert namespace_report["real_pipeline_source_unmoved"]
 
 

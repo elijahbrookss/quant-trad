@@ -365,3 +365,24 @@ filesystem unit suite passed 85 cases, including directory and settings changes
 during observation; the full backend passed 3,085 cases with 33 existing warnings.
 These prove path observation, not peak resource enforcement or production
 throughput.
+
+
+### Reserved-move resource composition
+
+The combined inspection is tested against the real private PostgreSQL namespace
+and both disposable filesystems. It derives WAL and temporary targets, replaces
+the existing copy claim exactly once, preserves the caller timeout and leaves
+the reservation and physical source unchanged. Competing cancellation must
+still refuse while inspection owns storage.
+
+Disposable database cases with synthetic filesystem adapters cover stale,
+future and mismatched resource identity, a full source drive, mutation of
+caller allowance maps, a declining deadline, tighter caller SQL timeout,
+invalid review and transaction ownership. Results remain conditional and
+non-executable. These checks do not qualify peak limits, other-session temporary
+objects, worker supervision or production performance.
+
+The local combined run passed 57 database cases in 166.30 seconds: 32 real
+namespace cases, 12 resource-composition cases and 13 existing inspection
+regressions. The non-database backend passed 3,101 cases with 33 existing
+warnings; documentation checks passed ten. These remain disposable-data results.
