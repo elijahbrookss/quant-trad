@@ -334,3 +334,15 @@ The final private namespace run passed all 21 cases in 71.49 seconds, including
 this contention probe; its owned stack was removed. These tests qualify the
 internal PostgreSQL primitive, not an activated worker, physical HDD durability,
 full frozen/current application queries or WAL/temp/growth resource admission.
+
+
+### Resource-envelope qualification
+
+Synthetic per-filesystem tests cover shared WAL/history placement, a source
+drive that cannot accommodate continued growth, missing and unknown resource
+maps, stale/future capacity, invalid identities, integer overflow, cancellation
+grace and elapsed observation age, copy-reservation replacement and exact
+free-space boundaries. These
+exercise conditional accounting only. They do not establish real producer
+rates, enforce peak limits or certify PostgreSQL WAL and temporary-file roots.
+The calculation remains disconnected from automatic execution.

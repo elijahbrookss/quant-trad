@@ -112,3 +112,18 @@ The implementation remains an internal primitive with no runtime entrypoint.
 Whole-system resource admission and performance/recovery qualification must
 precede automatic execution. This choice does not promise low historical-query
 latency during an exclusive daily-table lock; that must be measured separately.
+
+
+## Per-filesystem resource envelope refinement — 2026-09-17
+
+Before runtime movement, combine demands by physical filesystem rather than by
+logical drive role. Preserve competing copy claims, count the current move
+once, reserve policy headroom and explicitly budget additional WAL, temporary
+work, maintenance and other growth over movement plus cancellation time.
+Never credit future source frees. Missing allowances are unknown, not zero.
+
+The implemented pure calculation only checks declared inputs. Sufficient
+arithmetic is not runtime authorization: resource paths must be verified,
+limits qualified and enforced, auxiliary reservations held durably and a worker
+must supervise deadlines and reconcile uncertain commits. Keep Apply disabled
+until those responsibilities and the existing-data cutover are qualified.

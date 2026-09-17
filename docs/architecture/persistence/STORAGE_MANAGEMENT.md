@@ -12,6 +12,7 @@ code_paths:
   - cli/main.py
   - src/core/storage_targets.py
   - src/core/storage_header_placement.py
+  - src/core/storage_move_budget.py
   - portal/backend/service/storage/header_catalog.py
   - portal/backend/service/storage/header_filesystem.py
   - portal/backend/service/storage/header_journal.py
@@ -474,3 +475,36 @@ and relation/destination identity checks still apply and are repeated at the
 end of verification. See PostgreSQL 15
 [process startup](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/postmaster/postmaster.c)
 and [PID-file creation](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/utils/init/miscinit.c).
+
+
+## Movement resource envelope
+
+The pure assess_header_move_resources boundary evaluates declared headroom for
+a single historical move across every supplied registered filesystem. It
+requires fresh, timezone-aware capacity observations (at most thirty seconds
+old), complete per-target copy claims, temporary and maintenance allowances,
+and non-WAL/non-temporary growth rates. The move timeout is bounded to one hour;
+an explicit one-to-sixty-second cancellation grace also counts toward growth.
+Elapsed observation age is rounded up and added to that growth window, so space
+consumed since the free-space reading is not assumed available.
+WAL allowance is explicit and includes all expected additional retained WAL
+from observation through that window; max_wal_size alone does not establish it.
+
+Each filesystem is counted once by target UUID and current device identity.
+Roles sharing a drive add their copy, WAL, temporary, maintenance and growth
+requirements before comparison with available bytes and the policy reserve.
+The selected move's own copy claim is removed from the aggregate exactly once
+and replaced with its current copy requirement; competing claims remain.
+Copies exceeding their reservation refuse assessment. Already occupied space
+is reflected in free capacity, and no future source deletion is credited.
+
+Incomplete maps, unknown targets, stale/future capacity, invalid or duplicate
+filesystem identity and numeric overflow refuse assessment. Read-only storage
+and insufficient headroom produce explicit blockers. Zero allowances must be
+specified rather than inferred from missing values.
+
+A sufficient result is conditional on the declared limits. This calculation
+does not inspect WAL/temp paths, prove or enforce the limits, reserve auxiliary
+capacity, supervise a worker or enable Apply. Those runtime responsibilities
+remain required before composing it with the atomic movement primitive. No new
+portal controls are introduced by this internal calculation.
