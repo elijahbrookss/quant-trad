@@ -103,8 +103,9 @@ The workflow steps are:
 1. `Checkout repository`;
 2. `Set up Python` 3.12;
 3. `Install dependencies` from `requirements.lock` and run `pip check`;
-4. `Prepare isolated database contracts` by creating `quanttrad_contracts` and
-   installing `timescaledb` and `pgcrypto` in both databases;
+4. `Prepare isolated database contracts` by disabling telemetry in the
+   disposable service, creating `quanttrad_contracts`, and installing
+   `timescaledb` and `pgcrypto` in both databases;
 5. `Prove clean current-schema bootstrap` against `quanttrad_bootstrap`;
 6. `Verify PostgreSQL filesystem namespace` through the Docker DB runner; and
 7. `Run PostgreSQL-backed contract tests` against `quanttrad_contracts`, with
@@ -118,6 +119,10 @@ repository's isolated Docker runner because its fixture needs PostgreSQL 15
 server utilities and a private process/filesystem environment. The fixture
 starts a temporary Unix-socket-only cluster with no inherited database
 credentials and a synthetic udev UUID entry; it does not exercise live disks.
+
+The disposable CI service disables extension telemetry and reloads its
+configuration before database setup, matching the local isolated stack.
+Telemetry jobs must not affect the database-cleanup qualification.
 
 The clean-bootstrap database begins from the service image's empty application
 schema. Most DB-marked tests share `quanttrad_contracts` within the job.
@@ -222,7 +227,10 @@ steps. For exact topology, provision a fresh disposable
 `timescale/timescaledb:2.14.2-pg15` service with user `quanttrad`, database
 `quanttrad_bootstrap`, trust authentication, and localhost port 5432. Create a
 second database named `quanttrad_contracts`, then install `timescaledb` and
-`pgcrypto` in both databases.
+`pgcrypto` in both databases. Before this setup, disable
+`timescaledb.telemetry_level` in that disposable service and reload its
+configuration, as the CI preparation step does. Do not apply these fixture
+settings to a live database.
 
 After installing the Python dependencies as in `pr-suite`, run the three CI test
 steps separately:

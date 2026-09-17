@@ -113,11 +113,11 @@ must recheck the catalog, policy revision, mount identities and capacity, then
 reserve space under the shared lock. This preview cannot authorize a cutover
 or establish a whole-system storage forecast.
 
-### Catalog adapter under qualification
+### Catalog adapter
 
 `portal.backend.service.storage.header_catalog.read_header_catalog` now
-implements the read-only PostgreSQL half of the inventory boundary. It is
-under disposable-database qualification and is not called by the Storage API.
+implements the read-only PostgreSQL half of the inventory boundary. It has
+disposable-database coverage and is not called by the Storage API.
 It accepts the existing PG_DSN-backed engine, opens a read-only repeatable-read
 transaction, and applies a decreasing statement-time budget. Access-share
 locks protect admitted tables against destructive rewrites while permitting
@@ -143,7 +143,7 @@ The reader requires access to the header catalog and PostgreSQL cluster
 identity; it does not load application settings, create a second DSN, bootstrap
 schema, or perform disk operations.
 
-### Filesystem binding under qualification
+### Filesystem binding
 
 `header_filesystem.verify_header_filesystem` connects the unbound catalog
 snapshot to registered targets through read-only file probes. The future worker
@@ -185,8 +185,8 @@ so a movement worker must obtain fresh evidence before executing.
 Temporary-file tests cover default and linked tablespaces, stale identities,
 wrong UUIDs/devices, malformed paths, missing files and mid-check file/mount
 changes. The PostgreSQL utility is mocked in those tests. A real
-PostgreSQL/worker-namespace fixture is now prepared in
-`tests/test_market_data/test_header_namespace_db.py` but has not yet run.
+PostgreSQL/worker-namespace fixture in
+`tests/test_market_data/test_header_namespace_db.py` has passed locally and in CI.
 It starts PostgreSQL 15 as a non-root OS user, with TCP disabled and a private
 Unix socket. It probes real control data, process identity and relation files;
 the udev UUID entry is synthetic. It exercises a table-only tablespace change,

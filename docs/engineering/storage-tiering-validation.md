@@ -138,7 +138,7 @@ no valuable raw data; the operator must approve initialization of that device.
 
 ## Disposable catalog and filesystem qualification
 
-The catalog and namespace verifier changes are pending database qualification.
+The catalog and namespace verifier have passed focused disposable-database qualification.
 After any currently running isolated database suite finishes, run these cases
 through the supported disposable runner:
 
@@ -174,3 +174,22 @@ and after the table-plus-index moves. It requires the original file paths,
 physical file identifiers and row hashes after rollback. This checks the
 PostgreSQL primitive only; a durable worker still needs tests for process loss,
 ambiguous COMMIT results, retry idempotency and reservation reconciliation.
+
+
+Private-cluster setup has a separate budget: initdb may take up to 120 seconds
+on a cold local Docker filesystem, pg_ctl has a 45-second server wait, and the
+worker is bounded to 300 seconds. Initialization duration is reported. These
+setup budgets do not change the catalog/verifier operation budgets or the
+one-second recent-work lock probe.
+
+
+Qualification on 2026-09-17: all 11 catalog cases passed. The first local
+namespace setup exceeded its original 20-second initdb budget; with a separate
+bounded setup allowance, initialization took 42.88 seconds and all four
+namespace/rollback cases plus both historical-lock cases passed in 66.89
+seconds. All 17 cases also passed in CI for the implementation commit.
+That CI run had a separate cleanup-fixture failure because telemetry was still
+enabled in the CI service; the workflow now sets the same telemetry-off
+configuration as the local test stack. The follow-up CI run must confirm that
+environment correction. These results do not qualify a movement worker,
+production namespace wiring, full-volume performance or server migration.

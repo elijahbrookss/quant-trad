@@ -151,6 +151,10 @@ jobs:
       - name: Prepare isolated database contracts
         run: |
           docker exec "${{ job.services.timescaledb.id }}" \
+            psql -v ON_ERROR_STOP=1 -U quanttrad -d quanttrad_bootstrap \
+            -c "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" \
+            -c "SELECT pg_reload_conf()"
+          docker exec "${{ job.services.timescaledb.id }}" \
             createdb -U quanttrad quanttrad_contracts
           for database in quanttrad_bootstrap quanttrad_contracts; do
             docker exec "${{ job.services.timescaledb.id }}" \

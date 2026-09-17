@@ -16,6 +16,7 @@ import tempfile
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from time import monotonic
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -37,13 +38,15 @@ def _worker(root):
     data, socket, history = root / "pgdata", root / "socket", root / "history"
     socket.mkdir()
     history.mkdir()
+    initializing = monotonic()
     subprocess.run([str(BIN / "initdb"), "-D", str(data), "--no-locale", "--encoding=UTF8",
-                    "--auth-local=trust", "--auth-host=reject"], check=True, capture_output=True, text=True, timeout=20)
+                    "--auth-local=trust", "--auth-host=reject"], check=True, capture_output=True, text=True, timeout=120)
+    initialization_seconds = monotonic() - initializing
     options = f"-c listen_addresses= -c unix_socket_directories={socket} -c shared_buffers=16MB -c max_connections=10"
     def control(action):
-        args = [str(BIN / "pg_ctl"), "-D", str(data), "-w", "-t", "15"]
+        args = [str(BIN / "pg_ctl"), "-D", str(data), "-w", "-t", "45"]
         args += ["-l", str(root / "postgres.log"), "-o", options, "start"] if action == "start" else ["-m", "fast", "stop"]
-        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=20)
+        return subprocess.run(args, check=True, capture_output=True, text=True, timeout=60)
     engine = None
     try:
         control("start")
@@ -78,6 +81,7 @@ def _worker(root):
         inventory = read_header_catalog(engine)
         baseline = verify(inventory)
         report = {
+            "initialization_seconds": round(initialization_seconds, 3),
             "baseline_bound": all(item.target_id == "fixture" for item in baseline.snapshot.partitions[0].relations),
             "real_control_binary": str(BIN / "pg_controldata"),
             "real_process_and_files": True,
@@ -185,8 +189,10 @@ def namespace_report():
                    "QT_DISABLE_DOTENV": "1", "PYTHONUTF8": "1"}
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True,
-                                timeout=100, cwd=source_root, env=environment)
-        return json.loads(result.stdout.strip().splitlines()[-1])
+                                timeout=300, cwd=source_root, env=environment)
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+        print("namespace_fixture_report=" + json.dumps(report, sort_keys=True))
+        return report
     except subprocess.CalledProcessError as exc:
         log = root / "postgres.log"
         server_tail = log.read_text(errors="replace")[-4000:] if log.exists() else ""
@@ -199,8 +205,8 @@ def namespace_report():
             raise RuntimeError("namespace_fixture_cleanup_path_mismatch")
         if (resolved / "pgdata" / "postmaster.pid").exists():
             subprocess.run([*command_prefix, str(BIN / "pg_ctl"), "-D", str(resolved / "pgdata"),
-                            "-w", "-t", "15", "-m", "fast", "stop"],
-                           check=True, capture_output=True, text=True, timeout=20, env=environment)
+                            "-w", "-t", "45", "-m", "fast", "stop"],
+                           check=True, capture_output=True, text=True, timeout=60, env=environment)
         shutil.rmtree(resolved)
 
 
@@ -227,4 +233,11 @@ def test_real_cluster_copies_stale_process_evidence_and_wrong_uuid_are_refused(n
 
 
 if __name__ == "__main__":
-    print(json.dumps(_worker(Path(sys.argv[1])), sort_keys=True))
+    try:
+        print(json.dumps(_worker(Path(sys.argv[1])), sort_keys=True))
+    except subprocess.TimeoutExpired as exc:
+        for label, value in (("stdout", exc.stdout), ("stderr", exc.stderr)):
+            if value:
+                value = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+                print("namespace_timeout_" + label + "=" + value[-4000:], file=sys.stderr)
+        raise
