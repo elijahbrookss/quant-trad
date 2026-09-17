@@ -39,6 +39,13 @@ v1 implementation. Use the matching installed release to finish an earlier
 copy before considering a separate v2 cutover. Never change a certificate to
 bypass admission.
 
+Retention inventory counts the complete header partition tree, including
+physical indexes and TOAST, instead of sizing the empty parent. It reports
+global_identity_bytes separately. Header inventory is bounded independently
+of remaining hot payload partitions; reclaiming a payload cannot make retained
+header history disappear from the total. These are database-wide component
+sizes, not yet a per-drive forecast.
+
 ## What must precede an existing-server upgrade
 
 The remaining operator procedure must create a shadow dated header layout,

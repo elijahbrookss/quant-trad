@@ -362,6 +362,16 @@ PostgreSQL bytes.
 
 ### Canonical Retention Planning
 
+Storage totals include all dated header relations and their indexes/TOAST,
+including headers whose hot payloads have already been reclaimed. The global
+identity registry and its indexes are reported separately as
+`global_identity_bytes`; they are neither hot payloads nor reclaimable header
+bytes. Header inventory uses the same partition-count budget independently of
+the hot inventory and fails rather than reporting a partial total. These
+relation totals are components of `database_bytes`, not additional bytes to
+add to the whole database size. They do not replace filesystem or backup
+capacity accounting.
+
 `market_data_lifecycle.canonical_retention` is the typed policy for generalized
 hot payloads. The default hot window is 30 complete UTC placement days, with
 exact `hot_days_by_fact_type` overrides. A daily partition waits for the longest
