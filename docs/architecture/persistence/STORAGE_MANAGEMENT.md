@@ -15,6 +15,7 @@ code_paths:
   - portal/backend/service/storage/header_catalog.py
   - portal/backend/service/storage/header_filesystem.py
   - portal/backend/service/storage/header_journal.py
+  - portal/backend/service/storage/header_inspection.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -381,3 +382,36 @@ The future executor still owns policy/intent locking, current source-versus-inte
 comparison, full copy/WAL/temp/growth budgets, physical DDL, transactional
 completion/release and crash reconciliation. This helper alone enables none of
 those actions, changes no rows and does not enable Apply.
+
+
+## Inspecting a reserved move
+
+inspect_reserved_header_move retains the storage-management advisory lock and
+uses the same caller transaction for a fresh locked-group catalog observation
+and filesystem verification. It accepts a move ID and its saved review hash;
+it does not accept a caller-provided physical certificate. The plan must remain
+queued/running at the admitted policy revision, the batch must be complete and
+uncancelled, and the selected move must still be reserved. Running, blocked and
+terminal moves require the future reconciliation path.
+
+The inspection compares database identity, historical eligibility, immutable
+tablespace registration and the exact destination evidence saved in the review,
+including device/inode observations. The source heap and ordinary-index membership
+must retain their original OIDs, file identifiers, schema/names and target IDs.
+Current bytes may shrink or grow within the original reservation; an overgrown
+copy requires a new reviewed reservation. Malformed or internally inconsistent
+stored intent is refused.
+
+The returned moving-members list excludes relations already on the selected
+target, preserving their existing tablespaces and avoiding unreserved extra
+copies. Capacity must still cover the current copy, other aggregate claims and
+the policy reserve, subtracting this move's own reservation exactly once. Known
+active claims within its bounded batch cannot exceed aggregate reservations.
+This does not certify lifetime ledger accounting across every batch.
+
+Inspection changes no journal state, capacity reservation or physical location.
+A competing cancellation receives the same busy-owner response until the
+transaction ends. Logs identify inspection and its copy-only capacity scope.
+The result explicitly reports execution unavailable: WAL, temporary files,
+ingest growth, physical execution/reconciliation and recovery/performance
+qualification remain uncovered. Apply stays disabled.

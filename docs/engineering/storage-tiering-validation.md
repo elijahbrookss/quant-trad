@@ -283,3 +283,23 @@ inventory_complete=false; such observations must not authorize global planning
 or reservations. The focused run passed 108 cases. The new database cases need
 a fresh disposable run and are not qualified by an older image or CI commit.
 This remains executor preparation, not proof of an automatic movement worker.
+
+
+### Reserved-move inspection qualification
+
+Pure comparisons cover changed physical identity, added/missing indexes,
+overgrown copies, malformed stored intent, incomplete TOAST proof and retaining
+members already on the destination. The combined inspection/file/review/planner
+run passed 128 cases. Transactional inspection tests use synthetic physical
+adapters with disposable PostgreSQL to cover plan/review/state admission,
+revision drift, aggregate claims, changed observations and current capacity.
+
+The private namespace fixture additionally composes the real locked catalog and
+filesystem adapters with a saved reservation, confirms copy bytes, and witnesses
+that cancellation is refused while inspection owns the storage-management lock.
+It then cancels normally and checks the source remains unchanged. These new
+inspection cases passed in the local disposable run: 40 journal, 24 catalog,
+12 namespace and 13 inspection tests (89 total) in 376.94 seconds. The real
+fixture's copy was 139,264 bytes and its private initialization took 45.453
+seconds. The runner cleaned its owned stack. These tests do not exercise a
+physical worker or establish WAL/temp/growth headroom.

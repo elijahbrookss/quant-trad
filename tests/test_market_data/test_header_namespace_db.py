@@ -34,6 +34,8 @@ from portal.backend.db.storage_target_models import (
 )
 from portal.backend.service.storage.header_destinations import register_header_tablespaces, review_header_moves
 from portal.backend.service.storage.header_journal import reserve_header_batch, cancel_unstarted_header_batch
+from portal.backend.service.storage.header_inspection import inspect_reserved_header_move
+from portal.backend.service.storage_management import StorageConflict
 from portal.backend.service.storage.header_catalog import read_header_catalog, read_locked_header_group
 from portal.backend.service.storage.header_filesystem import verify_header_filesystem
 
@@ -278,6 +280,16 @@ def _prove_registered_pipeline(engine, targets, destination_oid):
             and row.heap_oid == verified.snapshot.partitions[0].heap.oid
         )
     with Session(engine) as session, session.begin():
+        inspection = inspect_reserved_header_move(session, move_id=first["moves"][0]["id"],
+            review_hash=review["plan_hash"], pg_controldata=BIN / "pg_controldata")
+        try:
+            with Session(engine) as competing, competing.begin():
+                cancel_unstarted_header_batch(competing, plan_id="namespace-pipeline",
+                                               review_hash=review["plan_hash"])
+            cancellation_busy = False
+        except StorageConflict as exc:
+            cancellation_busy = str(exc) == "storage_journal_busy"
+    with Session(engine) as session, session.begin():
         cancelled = cancel_unstarted_header_batch(session, plan_id="namespace-pipeline",
                                                   review_hash=review["plan_hash"])
     after = read_header_catalog(engine)
@@ -292,6 +304,9 @@ def _prove_registered_pipeline(engine, targets, destination_oid):
         "real_pipeline_idempotent": retry["reused"] and retry["moves"] == first["moves"],
         "real_pipeline_cancelled": cancelled["cancelled"] and released,
         "real_pipeline_source_unmoved": observed.physical_locations == after.physical_locations,
+        "real_inspection_copy_bytes": inspection.copy_bytes,
+        "real_inspection_blocks_cancellation": cancellation_busy,
+        "real_inspection_execution_disabled": not inspection.execution_available,
     }
 
 
@@ -402,6 +417,13 @@ def test_real_catalog_and_filesystem_proof_feed_registration_and_reservation(nam
 
 def test_real_unstarted_cancellation_preserves_source_and_releases_its_reservation(namespace_report):
     assert namespace_report["real_pipeline_cancelled"]
+    assert namespace_report["real_pipeline_source_unmoved"]
+
+
+def test_real_reserved_move_inspection_holds_ownership_without_executing(namespace_report):
+    assert namespace_report["real_inspection_copy_bytes"] == namespace_report["real_pipeline_expected_bytes"]
+    assert namespace_report["real_inspection_blocks_cancellation"]
+    assert namespace_report["real_inspection_execution_disabled"]
     assert namespace_report["real_pipeline_source_unmoved"]
 
 
