@@ -1,0 +1,203 @@
+"""Transactional intent and capacity ownership for historical header movement.
+
+Internal repository boundary, not an API or executor. The caller owns the
+transaction: returned receipts are provisional until it commits. A reservation
+never authorizes DDL. Registered tablespace identity and fresh locked physical
+checks are still required by the future worker.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from datetime import date
+from uuid import uuid4
+
+from sqlalchemy import select, text
+
+from core.storage_header_placement import plan_header_placement
+from core.storage_targets import StoragePolicy
+from portal.backend.db.storage_target_models import (
+    StorageHeaderBatchRecord, StorageHeaderMoveRecord,
+    StoragePlanRecord, StoragePolicyRecord, StorageTargetRecord,
+)
+from portal.backend.service.storage_management import StorageConflict, _target
+from .header_filesystem import VerifiedHeaderPlacement
+
+logger = logging.getLogger(__name__)
+_ACTIVE = ("reserved", "running", "blocked")
+
+
+def _lock(session):
+    if session.connection().get_isolation_level() != "READ COMMITTED":
+        raise StorageConflict("storage_journal_requires_read_committed")
+    # Same key as enrollment/policy changes. A busy worker must retry rather
+    # than wait indefinitely while holding a stale filesystem observation.
+    if not session.scalar(text(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1', 0))"
+    )):
+        raise StorageConflict("storage_journal_busy")
+
+
+def _rows(session, batch):
+    rows = list(session.scalars(select(StorageHeaderMoveRecord).where(
+        StorageHeaderMoveRecord.plan_id == batch.plan_id
+    ).order_by(StorageHeaderMoveRecord.storage_day).limit(4097).execution_options(populate_existing=True)))
+    if len(rows) != batch.group_count or len(rows) > 4096:
+        raise StorageConflict("storage_journal_incomplete")
+    if batch.cancelled_at is not None and any(row.state != "cancelled" for row in rows):
+        raise StorageConflict("storage_journal_incomplete")
+    return rows
+
+
+def _receipt(batch, rows, *, reused):
+    return {
+        "plan_id": batch.plan_id, "review_hash": batch.review_hash,
+        "reused": reused, "group_count": batch.group_count,
+        "cancelled": batch.cancelled_at is not None,
+        "moves": [{"id": row.id, "storage_day": row.storage_day.isoformat(),
+                   "target_id": row.target_id, "state": row.state,
+                   "reserved_bytes": row.reserved_bytes if row.state in _ACTIVE else 0}
+                  for row in rows],
+        "execution_available": False, "activation_ready": False,
+    }
+
+
+def reserve_header_batch(session, *, plan_id, review_hash, verified):
+    """Save a reviewed proposal and all copy reservations atomically.
+
+    Only a worker with an already queued/running plan can call this boundary.
+    The current public queue endpoint remains disabled. The verified argument
+    is internal filesystem-adapter evidence, never deserialized user input.
+    Replays return the durable receipt, even after its evidence expires; they
+    do not reserve again or imply the old physical evidence is still current.
+    """
+    if not isinstance(review_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", review_hash):
+        raise ValueError("storage_journal_invalid_review_hash")
+    if not isinstance(verified, VerifiedHeaderPlacement):
+        raise ValueError("storage_journal_verified_inventory_required")
+    _lock(session)
+    batch = session.get(StorageHeaderBatchRecord, plan_id, populate_existing=True)
+    if batch is not None:
+        if batch.review_hash != review_hash:
+            raise StorageConflict("storage_journal_review_conflict")
+        return _receipt(batch, _rows(session, batch), reused=True)
+
+    plan = session.get(StoragePlanRecord, plan_id, populate_existing=True)
+    if plan is None or plan.state not in ("queued", "running"):
+        raise StorageConflict("storage_journal_plan_not_queued")
+    config = session.get(StoragePolicyRecord, 1, populate_existing=True)
+    if config is None or config.revision != plan.base_revision:
+        raise StorageConflict("storage_policy_changed")
+    policy = StoragePolicy.from_dict(plan.policy)
+    if plan.policy_hash != policy.fingerprint or not policy.movement_enabled:
+        raise StorageConflict("storage_journal_policy_not_admitted")
+
+    # Database time prevents a caller from choosing its own freshness clock.
+    now = session.scalar(text("SELECT clock_timestamp()"))
+    for stamp in (verified.snapshot.captured_at, verified.verified_at):
+        if (stamp.tzinfo is None or stamp.utcoffset() is None
+                or not 0 <= (now - stamp).total_seconds() <= 60):
+            raise StorageConflict("storage_journal_evidence_expired")
+    if verified.verified_at < verified.snapshot.captured_at:
+        raise StorageConflict("storage_journal_evidence_clock_mismatch")
+    identity = session.scalar(text("""
+        SELECT c.system_identifier::text || '/' || d.oid::text
+        FROM pg_control_system() c CROSS JOIN pg_database d
+        WHERE d.datname=current_database()
+    """))
+    if identity != verified.snapshot.database_identity:
+        raise StorageConflict("storage_journal_database_mismatch")
+
+    targets = list(session.scalars(select(StorageTargetRecord).order_by(
+        StorageTargetRecord.id).limit(33).execution_options(populate_existing=True)))
+    if len(targets) > 32:
+        raise StorageConflict("storage_journal_target_budget")
+    proposal = plan_header_placement(
+        snapshot=verified.snapshot, policy=policy,
+        targets=[_target(row) for row in targets], capacity=verified.capacity,
+        reserved_bytes={row.id: row.reserved_bytes for row in targets},
+    )
+    if not proposal["planning_complete"]:
+        raise StorageConflict("storage_journal_placement_blocked")
+    if proposal["plan_hash"] != review_hash:
+        raise StorageConflict("storage_journal_review_changed")
+    oids = [move["heap"]["oid"] for move in proposal["moves"]]
+    if oids and session.scalar(select(StorageHeaderMoveRecord.id).where(
+        StorageHeaderMoveRecord.database_identity == identity,
+        StorageHeaderMoveRecord.heap_oid.in_(oids),
+        StorageHeaderMoveRecord.state.in_(_ACTIVE),
+    ).limit(1)):
+        raise StorageConflict("storage_journal_group_already_owned")
+
+    # Validate the entire bounded batch before mutating tracked ORM objects.
+    for move in proposal["moves"]:
+        if len(json.dumps(move, ensure_ascii=False).encode()) > 65536:
+            raise StorageConflict("storage_journal_group_evidence_budget")
+    additions = proposal["additional_copy_reservations"]
+    for target in targets:
+        if target.reserved_bytes + additions.get(target.id, 0) > 2**63 - 1:
+            raise StorageConflict("storage_journal_reservation_overflow")
+    batch = StorageHeaderBatchRecord(
+        plan_id=plan_id, review_hash=review_hash, policy_hash=policy.fingerprint,
+        base_revision=plan.base_revision, database_identity=identity,
+        group_count=len(oids), captured_at=verified.snapshot.captured_at,
+        verified_at=verified.verified_at,
+    )
+    session.add(batch)
+    session.flush()
+    rows = []
+    for move in proposal["moves"]:
+        row = StorageHeaderMoveRecord(
+            id="header_" + uuid4().hex, plan_id=plan_id,
+            database_identity=identity, storage_day=date.fromisoformat(move["storage_day"]),
+            heap_oid=move["heap"]["oid"], target_id=move["destination_target_id"],
+            filesystem_uuid=move["destination_filesystem_uuid"], source_group=move,
+            reserved_bytes=move["reserve_copy_bytes"], state="reserved",
+        )
+        session.add(row)
+        rows.append(row)
+    for target in targets:
+        target.reserved_bytes += additions.get(target.id, 0)
+    session.flush()
+    logger.info("storage_header_reservation_staged | plan_id=%s review_hash=%s groups=%s copy_bytes=%s",
+                plan_id, review_hash, len(rows), sum(additions.values()))
+    return _receipt(batch, rows, reused=False)
+
+
+def cancel_unstarted_header_batch(session, *, plan_id, review_hash):
+    """Release only a wholly unstarted reservation, in the caller transaction.
+
+    No timeout handler calls this automatically. Running, blocked, completed or
+    mixed batches require worker reconciliation, which is not implemented here.
+    """
+    _lock(session)
+    batch = session.get(StorageHeaderBatchRecord, plan_id, populate_existing=True)
+    if batch is None or batch.review_hash != review_hash:
+        raise StorageConflict("storage_journal_review_conflict")
+    rows = _rows(session, batch)
+    if batch.cancelled_at is not None:
+        if any(row.state != "cancelled" for row in rows):
+            raise StorageConflict("storage_journal_incomplete")
+        return _receipt(batch, rows, reused=True)
+    if any(row.state != "reserved" for row in rows):
+        raise StorageConflict("storage_journal_reconciliation_required")
+    release = {}
+    for row in rows:
+        release[row.target_id] = release.get(row.target_id, 0) + row.reserved_bytes
+    targets = {}
+    for target_id, amount in release.items():
+        target = session.get(StorageTargetRecord, target_id, populate_existing=True)
+        if target is None or target.reserved_bytes < amount:
+            raise StorageConflict("storage_journal_reservation_inconsistent")
+        targets[target_id] = target
+    now = session.scalar(text("SELECT clock_timestamp()"))
+    batch.cancelled_at = now
+    for row in rows:
+        row.state, row.updated_at = "cancelled", now
+    for target_id, amount in release.items():
+        targets[target_id].reserved_bytes -= amount
+    session.flush()
+    logger.info("storage_header_cancellation_staged | plan_id=%s review_hash=%s groups=%s release_bytes=%s",
+                plan_id, review_hash, len(rows), sum(release.values()))
+    return _receipt(batch, rows, reused=False)

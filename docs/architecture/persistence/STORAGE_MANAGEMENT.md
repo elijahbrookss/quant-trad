@@ -14,6 +14,7 @@ code_paths:
   - src/core/storage_header_placement.py
   - portal/backend/service/storage/header_catalog.py
   - portal/backend/service/storage/header_filesystem.py
+  - portal/backend/service/storage/header_journal.py
   - src/core/storage_inventory.py
   - portal/backend/db/storage_target_models.py
   - portal/backend/controller/storage_management.py
@@ -71,7 +72,7 @@ explicit target and safe relative key, checking mount identity and containment.
 boundary for dated header partitions. It accepts a typed catalog snapshot and
 observed filesystem capacity; it does not inspect disks, run SQL, save
 reservations, or connect to the Storage API yet. The snapshot must come from a
-future catalog adapter that proves parent attachment, daily bounds, complete
+catalog and filesystem adapters that prove parent attachment, daily bounds, complete
 ordinary-index ownership, TOAST colocation, and physical relation-to-target
 bindings. Caller-provided flags are not a substitute for that adapter.
 
@@ -229,3 +230,47 @@ The clean-schema dated-header foundation is now described in
 It preserves global identity while allowing detail partitions to move later.
 It does not enable Apply or prove physical tiering, and cannot yet be deployed
 over an existing v1 layout.
+
+## Durable header intent and reservations
+
+The internal header journal saves one immutable batch per reviewed storage plan,
+with at most 4,096 daily groups and 64 ordinary indexes per group. Each group
+retains its original OIDs, file identifiers, source target IDs, destination
+target UUID and copy-byte requirement. A batch binds these to the database
+identity, policy revision, proposal hash and observation timestamps. Evidence
+per group is limited to 64 KiB; the journal does not grow a per-file array in
+the plan's UI progress JSON. These limits bound each batch, not lifetime
+journal retention; terminal-ledger retention and its SSD budget must be included
+in whole-system capacity accounting before activation.
+
+Reservation requires an already queued/running plan with movement enabled,
+the current policy revision, and filesystem-adapter observations no more than
+60 seconds old according to database time. The repository recomputes the pure
+proposal from registered targets and current aggregate reservations. Changed
+capacity, placement evidence or reservations require a fresh review. It uses
+the same storage advisory-lock key as policy management, refuses contention
+immediately, and requires READ COMMITTED transactions. The database identity
+must match the observed PostgreSQL cluster and database.
+
+Saving the entire batch and adding its copy reservations happens in the
+caller's transaction. Structured lifecycle logs identify these writes as staged;
+a returned receipt or staged log does not claim that the caller committed. A partial unique index prevents two active intents from
+owning the same database heap. An identical retry returns its durable receipt
+without reserving again, even if the original observation has since expired.
+That receipt is not fresh physical evidence and cannot authorize execution.
+A changed review hash for an existing batch is rejected.
+
+Cancellation releases capacity only when every group remains reserved and
+unstarted. It is atomic, preserves reservations belonging to other work and
+cannot reactivate a cancelled batch on retry. Running, blocked, completed,
+mixed or incomplete groups require reconciliation; a client-side timeout must
+never automatically release their space. There is no completion or running
+transition exposed by this repository yet.
+
+These are canonical clean-schema models, with no runtime backfill or live
+migration. The journal remains internal and unconnected to the public queue
+endpoint. Registered destination tablespace identity, locked pre-execution
+checks, physical table/index DDL, crash reconciliation, execution logging and
+full capacity coverage still belong to the future worker. No reservation
+activates policy or moves bytes. Existing installations will require explicit,
+reviewed schema preparation as part of the later operator cutover.

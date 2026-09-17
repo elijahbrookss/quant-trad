@@ -87,6 +87,7 @@ from .market_storage_models import (
 )
 from .storage_target_models import (
     StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord, StorageObjectLocationRecord,
+    StorageHeaderBatchRecord, StorageHeaderMoveRecord,
 )
 from .session import Database, db
 

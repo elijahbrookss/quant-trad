@@ -3,7 +3,7 @@
 Policy revisions select destinations for future work. Existing locations remain
 explicitly bound to their registered target until a verified movement commits.
 """
-from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy import BigInteger, CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 
 from .models import Base
@@ -77,3 +77,52 @@ class StorageObjectLocationRecord(Base):
     byte_count = Column(BigInteger, nullable=False)
     generation = Column(BigInteger, nullable=False, server_default="1")
     verified_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class StorageHeaderBatchRecord(Base):
+    """One immutable, bounded header proposal per reviewed storage plan."""
+    __tablename__ = "portal_storage_header_batches"
+    __table_args__ = (
+        CheckConstraint("base_revision >= 0", name="ck_storage_header_batch_revision"),
+        CheckConstraint("group_count BETWEEN 0 AND 4096", name="ck_storage_header_batch_count"),
+    )
+    plan_id = Column(String(48), ForeignKey("portal_storage_plans.id", ondelete="RESTRICT"), primary_key=True)
+    review_hash = Column(String(64), nullable=False)
+    policy_hash = Column(String(64), nullable=False)
+    base_revision = Column(BigInteger, nullable=False)
+    database_identity = Column(String(128), nullable=False)
+    group_count = Column(Integer, nullable=False)
+    captured_at = Column(DateTime(timezone=True), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=False)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))
+
+
+class StorageHeaderMoveRecord(Base):
+    """Intent and capacity ownership, not proof that physical movement happened."""
+    __tablename__ = "portal_storage_header_moves"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "storage_day", name="uq_storage_header_move_day"),
+        CheckConstraint("heap_oid BETWEEN 1 AND 4294967295", name="ck_storage_header_move_oid"),
+        CheckConstraint("reserved_bytes > 0", name="ck_storage_header_move_reservation"),
+        CheckConstraint("state IN ('reserved','running','blocked','completed','cancelled')",
+                        name="ck_storage_header_move_state"),
+        CheckConstraint("jsonb_typeof(source_group) = 'object' AND source_group ? 'indexes' AND "
+                        "jsonb_typeof(source_group->'indexes') = 'array' AND "
+                        "jsonb_array_length(source_group->'indexes') <= 64 AND "
+                        "octet_length(source_group::text) <= 65536",
+                        name="ck_storage_header_move_evidence"),
+        Index("uq_storage_header_move_active_heap", "database_identity", "heap_oid", unique=True,
+              postgresql_where=text("state IN ('reserved','running','blocked')")),
+    )
+    id = Column(String(48), primary_key=True)
+    plan_id = Column(String(48), ForeignKey("portal_storage_header_batches.plan_id", ondelete="RESTRICT"), nullable=False)
+    database_identity = Column(String(128), nullable=False)
+    storage_day = Column(Date, nullable=False)
+    heap_oid = Column(BigInteger, nullable=False)
+    target_id = Column(String(48), ForeignKey("portal_storage_targets.id", ondelete="RESTRICT"), nullable=False)
+    filesystem_uuid = Column(String(128), nullable=False)
+    source_group = Column(JSONB, nullable=False)
+    reserved_bytes = Column(BigInteger, nullable=False)
+    state = Column(String(16), nullable=False, server_default="reserved")
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))

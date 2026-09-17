@@ -193,3 +193,18 @@ enabled in the CI service; the workflow now sets the same telemetry-off
 configuration as the local test stack. The follow-up CI run must confirm that
 environment correction. These results do not qualify a movement worker,
 production namespace wiring, full-volume performance or server migration.
+
+
+### Header journal qualification
+
+The isolated database suite is
+`tests/test_portal/test_header_journal_db.py`. It uses disposable PostgreSQL
+with synthetic verified filesystem observations to exercise intent and capacity
+transactions. It covers duplicate retries, rollback, advisory-lock contention,
+policy/database/freshness admission, capacity changes, overlapping heap claims,
+cancellation, incomplete accounting, bounded evidence and database uniqueness.
+The focused run passed all 28 journal cases plus six existing storage-management
+cases (34 total). The normal backend suite passed 2,931 cases and documentation
+validation passed 10. These tests do not execute physical moves or certify mounts;
+the full current-tree database regression remains a separate check. Running/blocked movement
+reconciliation and ambiguous physical-DDL commits remain separate worker tests.
