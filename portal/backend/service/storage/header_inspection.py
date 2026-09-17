@@ -145,21 +145,11 @@ def inspect_reserved_header_move(session, *, move_id, review_hash, pg_controldat
         (move.database_identity, move.target_id), populate_existing=True)
     if registration is None or move.database_identity != batch.database_identity:
         raise StorageConflict("storage_move_registration_missing")
-    catalog = read_locked_header_group(session.connection(), storage_day=move.storage_day,
-        heap_oid=move.heap_oid, timeout_seconds=timeout_seconds,
-        destination_tablespace_oids=(registration.tablespace_oid,))
-    verified = verify_header_filesystem(catalog, targets, pg_controldata=pg_controldata,
-        timeout_seconds=timeout_seconds,
-        destination_assignments={move.target_id: registration.tablespace_oid})
-    if fresh_header_database(session, verified) != move.database_identity:
-        raise StorageConflict("storage_move_database_changed")
+    verified = _verified_move_group(session, move, targets, registration,
+                                    pg_controldata, timeout_seconds)
     if move.storage_day >= verified.snapshot.database_day - timedelta(days=policy.recent_days):
         raise StorageConflict("storage_move_no_longer_historical")
-    destination = checked_header_destinations(verified, targets).get(move.target_id)
-    if (destination is None or destination != move.destination_binding
-            or stable_header_destination(destination, by_id[move.target_id]) != registration.binding
-            or destination["filesystem_uuid"] != move.filesystem_uuid):
-        raise StorageConflict("storage_move_destination_changed")
+    destination = checked_header_destinations(verified, targets)[move.target_id]
     moving, copying = _compare_reserved_group(move, verified)
     # Existing aggregate includes this move. Subtract its own reservation once,
     # then require actual free space for its current copy plus every other claim.
@@ -175,3 +165,21 @@ def inspect_reserved_header_move(session, *, move_id, review_hash, pg_controldat
     return HeaderMoveInspection(move.id, move.plan_id, move.target_id,
         destination["tablespace_oid"], destination["tablespace_name"], moving,
         copying, move.reserved_bytes, verified)
+
+
+def _verified_move_group(session, move, targets, registration, pg_controldata, timeout_seconds):
+    """Shared current registered-file observation; caller already owns storage."""
+    catalog = read_locked_header_group(session.connection(), storage_day=move.storage_day,
+        heap_oid=move.heap_oid, timeout_seconds=timeout_seconds,
+        destination_tablespace_oids=(registration.tablespace_oid,))
+    verified = verify_header_filesystem(catalog, targets, pg_controldata=pg_controldata,
+        timeout_seconds=timeout_seconds,
+        destination_assignments={move.target_id: registration.tablespace_oid})
+    if fresh_header_database(session, verified) != move.database_identity:
+        raise StorageConflict("storage_move_database_changed")
+    destination = checked_header_destinations(verified, targets).get(move.target_id)
+    if (destination is None or destination != move.destination_binding
+            or stable_header_destination(destination, next(target for target in targets if target.target_id == move.target_id)) != registration.binding
+            or destination["filesystem_uuid"] != move.filesystem_uuid):
+        raise StorageConflict("storage_move_destination_changed")
+    return verified

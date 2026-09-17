@@ -303,3 +303,34 @@ inspection cases passed in the local disposable run: 40 journal, 24 catalog,
 fixture's copy was 139,264 bytes and its private initialization took 45.453
 seconds. The runner cleaned its owned stack. These tests do not exercise a
 physical worker or establish WAL/temp/growth headroom.
+
+
+### Atomic movement qualification
+
+The internal movement primitive adds a completion identity and couples native
+DDL, post-verification, state and reservation release in one caller transaction.
+Pure checks cover logical membership, actual destination, retained files,
+path identity and legitimate byte growth.
+
+The private two-filesystem fixture now includes Python failures after table and
+index moves, outer rollback after completion staging, actual backend termination
+after table/index copy and before COMMIT, and a private Unix-socket protocol
+proxy that withholds PostgreSQL's successful COMMIT response. A reconnect must
+verify completion without DDL or a second release. Another case moves only the
+remaining index of a split group, proves the existing HDD heap is untouched and
+refuses an obsolete earlier completion identity.
+
+The proxy connects only inside the fixture's owned /tmp root, uses no TCP or
+ambient credentials, does not log protocol payloads, and bounds frame size and
+waits. The first atomic run passed all 104 namespace, journal, inspection and
+catalog cases in 420.64 seconds. The owned stack was removed. All 20 namespace
+cases passed, including the real lost-COMMIT-response proof. Backend checks
+passed 3,018 cases and documentation checks passed ten.
+
+An added contention probe blocks the final capacity-row update after the files
+move. It requires statement timeout, rollback of DDL and journal state,
+preservation of prior caller work and restoration of the caller's timeout.
+The final private namespace run passed all 21 cases in 71.49 seconds, including
+this contention probe; its owned stack was removed. These tests qualify the
+internal PostgreSQL primitive, not an activated worker, physical HDD durability,
+full frozen/current application queries or WAL/temp/growth resource admission.

@@ -93,3 +93,22 @@ tests cover registration and reservation transactions, but qualification of this
 refinement is still pending. Namespace verification was separately qualified in
 CI using a private PostgreSQL cluster. Neither evidence set certifies deployment,
 an end-to-end move, or a restore workflow.
+
+
+## Atomic historical group refinement — 2026-09-17
+
+Use one PostgreSQL transaction for a historical heap and its moving ordinary
+indexes, post-copy verification, durable completion identity and capacity release.
+Use a savepoint around the primitive so a Python failure after successful DDL
+also rolls the move back without forcing unrelated caller work to commit or
+disappear. Completion receipts are staged until the caller commits.
+
+A lost COMMIT reply is resolved from current registered files and durable
+completion evidence under the same ownership lock, never by assuming rollback
+and retrying DDL. Retained members already on the destination are not copied to
+another tablespace merely for coalescing. Their identity must remain unchanged.
+
+The implementation remains an internal primitive with no runtime entrypoint.
+Whole-system resource admission and performance/recovery qualification must
+precede automatic execution. This choice does not promise low historical-query
+latency during an exclusive daily-table lock; that must be measured separately.

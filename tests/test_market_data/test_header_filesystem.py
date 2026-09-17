@@ -1,6 +1,6 @@
 """Use temporary fake PostgreSQL files; never invoke a server or real pg_controldata."""
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,7 +58,8 @@ def files(tmp_path, monkeypatch):
                            tablespace_name="pg_default", tablespace_location="",
                            database_oid=42, database_default=True,
                            relative_path=f"base/42/{filenode}") for oid, filenode in [(10, 101), (11, 102)])
-    inventory = HeaderCatalogInventory(snapshot, locations, str(pgdata), started)
+    inventory = HeaderCatalogInventory(snapshot, locations, str(pgdata), started,
+        server_postmaster_identity=tuple((pgdata / "postmaster.pid").read_text().splitlines()[:3]))
     return SimpleNamespace(inventory=inventory, target=target, capacity=capacity,
                            binary=binary, pgdata=pgdata, relation=relation, proc=proc, run=run, calls=calls)
 
@@ -205,6 +206,7 @@ def test_postmaster_pid_one_is_valid_in_its_container_namespace(files):
     (files.proc / "77").rename(files.proc / "1")
     pidfile = files.pgdata / "postmaster.pid"
     pidfile.write_text(pidfile.read_text().replace("77\n", "1\n", 1))
+    files.inventory = replace(files.inventory, server_postmaster_identity=tuple(pidfile.read_text().splitlines()[:3]))
     assert verify(files).snapshot.partitions[0].heap.target_id == "hdd"
 
 
@@ -458,3 +460,22 @@ def test_partial_group_scope_cannot_be_disguised_as_complete_inventory(files, mo
     with pytest.raises(ValueError, match="header_filesystem_invalid"):
         verify(files, partial)
     assert not files.calls
+
+
+def test_separate_postgresql_startup_clocks_can_cross_seconds(files):
+    started = files.inventory.postmaster_started_at + timedelta(seconds=3, microseconds=900000)
+    inventory = replace(files.inventory, postmaster_started_at=started,
+                        snapshot=replace(files.inventory.snapshot, captured_at=started + timedelta(seconds=1)))
+    assert verify(files, inventory).snapshot.partitions[0].heap.target_id == "hdd"
+
+
+@pytest.mark.parametrize("identity", [(), ("78", "wrong", "1"), ("77", "wrong", "1")])
+def test_sql_process_identity_must_match_local_pidfile(files, identity):
+    with pytest.raises(StorageMountError, match="SQL/file identity"):
+        verify(files, replace(files.inventory, server_postmaster_identity=identity))
+
+
+def test_future_sql_start_time_is_rejected(files):
+    with pytest.raises(StorageMountError, match="start time"):
+        verify(files, replace(files.inventory,
+                             postmaster_started_at=files.inventory.snapshot.captured_at + timedelta(seconds=1)))

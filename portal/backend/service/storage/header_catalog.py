@@ -46,6 +46,8 @@ class HeaderCatalogInventory:
     destination_tablespaces: tuple[HeaderTablespaceObservation, ...] = ()
     # A locked execution observation covers one group, never a global inventory.
     group_storage_day: date | None = None
+    # Read by PostgreSQL itself; bind the SQL observation to the local PID file.
+    server_postmaster_identity: tuple[str, ...] = ()
 
 
 def _validate_request(max_partitions, timeout_seconds, destination_tablespace_oids):
@@ -135,6 +137,7 @@ def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oid
         SELECT clock_timestamp() AS captured_at,
                current_setting('data_directory') AS data_directory,
                pg_postmaster_start_time() AS postmaster_started_at,
+               pg_read_file('postmaster.pid', 0, 4096) AS postmaster_pidfile,
                current_setting('server_version_num')::integer AS version,
                current_setting('transaction_read_only') AS read_only,
                c.system_identifier::text || '/' || d.oid::text AS database_identity,
@@ -290,4 +293,5 @@ def _read_catalog(query, *, max_partitions, deadline, destination_tablespace_oid
                                   destination_tablespaces=tuple(
                                       HeaderTablespaceObservation(**tablespaces[oid])
                                       for oid in sorted(destination_tablespace_oids)),
-                                  group_storage_day=storage_day)
+                                  group_storage_day=storage_day,
+                                  server_postmaster_identity=tuple(context["postmaster_pidfile"].splitlines()[:3]))

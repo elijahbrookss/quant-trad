@@ -59,7 +59,11 @@ def test_current_reserved_move_inspection_preserves_state_and_capacity(inspectio
 def test_started_or_terminal_moves_require_reconciliation(inspection, move_state):
     journal, move_id, _, _ = inspection
     with Session(journal[0]) as session, session.begin():
-        session.get(StorageHeaderMoveRecord, move_id).state = move_state
+        row = session.get(StorageHeaderMoveRecord, move_id)
+        row.state = move_state
+        if move_state == "completed":
+            # Synthetic completion used only to test reserved-only admission.
+            row.completion_evidence = {"schema_version": "qt.header_move_completion.v1", "physical": {}}
     with pytest.raises(StorageConflict, match="reconciliation_required"):
         inspect(inspection)
 

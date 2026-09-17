@@ -143,8 +143,17 @@ def _cluster_identity(inventory, binary, deadline):
     pid = int(fields[0])
     if pid < 1 or not Path(fields[1]).is_absolute() or Path(fields[1]).resolve(strict=True) != root:
         _failure("postmaster directory mismatch")
+    # PostgreSQL 15 writes MyStartTime to postmaster.pid, but records
+    # PgStartTime later in startup. They need not fall in the same second.
+    # Compare the identity read by SQL with the local file instead of assuming
+    # equality between those independently sampled clocks.
+    if tuple(fields[:3]) != inventory.server_postmaster_identity:
+        _failure("postmaster SQL/file identity mismatch")
     started = inventory.postmaster_started_at
-    if started.tzinfo is None or started.utcoffset() is None or int(started.timestamp()) != int(fields[2]):
+    captured = inventory.snapshot.captured_at
+    if (started.tzinfo is None or started.utcoffset() is None
+            or captured.tzinfo is None or captured.utcoffset() is None
+            or started.timestamp() < int(fields[2]) or started > captured):
         _failure("postmaster start time mismatch")
     # A backup's copied PID file and system ID do not establish active storage.
     executable = (_PROC_ROOT / str(pid) / "exe").readlink()
@@ -300,7 +309,8 @@ def verify_header_filesystem(inventory, targets, *, pg_controldata: Path, timeou
             observed[oid] = (candidate, actual, info.st_dev, info.st_ino, target_id, server_candidate)
             bindings.append({"relation_oid": oid, "target_id": target_id,
                              "filesystem_uuid": capacity[target_id].filesystem_uuid,
-                             "device_id": capacity[target_id].device_id, "path": str(actual),
+                             "device_id": capacity[target_id].device_id, "inode": info.st_ino,
+                             "tablespace_oid": tablespace, "path": str(actual),
                              "server_path": str(server_candidate)})
         destination_results, destination_paths = [], []
         targets_by_id = {target.target_id: target for target in targets}

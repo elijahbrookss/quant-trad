@@ -16,6 +16,7 @@ code_paths:
   - portal/backend/service/storage/header_filesystem.py
   - portal/backend/service/storage/header_journal.py
   - portal/backend/service/storage/header_inspection.py
+  - portal/backend/service/storage/header_movement.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -378,10 +379,10 @@ placement/review refuses partial inventories and cannot create reservations
 from them. A partial observation is not a capacity reservation or proof of
 policy eligibility, storage-management ownership, successful commit or recovery.
 
-The future executor still owns policy/intent locking, current source-versus-intent
-comparison, full copy/WAL/temp/growth budgets, physical DDL, transactional
-completion/release and crash reconciliation. This helper alone enables none of
-those actions, changes no rows and does not enable Apply.
+This observer alone does not acquire policy/intent ownership, authorize DDL,
+change rows or enable Apply. The inspection and atomic movement boundaries below
+compose those responsibilities. Runtime execution still requires whole-system
+copy/WAL/temp/growth admission and supervision.
 
 
 ## Inspecting a reserved move
@@ -392,7 +393,8 @@ and filesystem verification. It accepts a move ID and its saved review hash;
 it does not accept a caller-provided physical certificate. The plan must remain
 queued/running at the admitted policy revision, the batch must be complete and
 uncancelled, and the selected move must still be reserved. Running, blocked and
-terminal moves require the future reconciliation path.
+terminal moves are refused by inspection. The atomic primitive below separately
+reconciles completed moves against their durable physical evidence.
 
 The inspection compares database identity, historical eligibility, immutable
 tablespace registration and the exact destination evidence saved in the review,
@@ -415,3 +417,60 @@ transaction ends. Logs identify inspection and its copy-only capacity scope.
 The result explicitly reports execution unavailable: WAL, temporary files,
 ingest growth, physical execution/reconciliation and recovery/performance
 qualification remain uncovered. Apply stays disabled.
+
+
+## Internal atomic movement primitive
+
+stage_header_move is an internal primitive for disposable qualification and a
+future budgeted worker; no API, CLI or scheduler calls it. It uses the caller's
+READ COMMITTED transaction and wraps its own operations in a savepoint. This
+rolls back native DDL and journal changes on Python failures as well as SQL
+errors, while preserving work the caller performed before the savepoint.
+The outer caller remains responsible for commit/rollback.
+
+After reserved-move inspection, it moves only the listed heap and ordinary
+indexes to the verified tablespace, with dialect-quoted catalog identifiers and
+a declining statement timeout. The heap carries its TOAST data. Post-copy
+catalog/filesystem verification uses the same connection and retained locks.
+Logical membership and names must remain unchanged, copied members must be in
+the intended tablespace, and retained members must keep their exact physical
+identity. Byte growth alone is not part of completion identity.
+
+Completion evidence and the completed state, together with release of this
+move's reservation, are staged in the same transaction as the DDL. The bounded
+64 KiB evidence records database/day/heap identity and each member's OID, file
+identifier, target UUID, device, inode, tablespace and server-path hash.
+State/evidence constraints reject completed records without a bounded v1 proof
+and reject proofs attached to other states. This is a canonical model addition;
+existing installations containing older draft tables require an explicit
+reviewed schema cutover, never an implicit startup alteration.
+
+A retry of a completed move re-observes registered files under ownership and
+group locks, compares the saved completion identity, and performs no DDL or
+second release. Changed files, a changed destination, or incomplete proof
+requires reconciliation. If a prior backend is still running, ownership is busy;
+a client timeout is not evidence that its transaction rolled back.
+Lifecycle logs and returned receipts remain provisional until caller commit.
+
+This does not make automatic execution ready. Verified WAL/temp/ingest-growth
+headroom, outer worker supervision, full current/frozen query qualification,
+historical read latency during actual copies, and data-preserving deployment
+migration remain required before runtime wiring or Apply activation.
+
+### PostgreSQL process identity during movement
+
+The PostgreSQL 15 catalog observer reads the first 4096 bytes of the fixed
+`postmaster.pid` file through `pg_read_file`. Its first three lines (PID, data
+directory, process start time) must exactly match the local file before physical
+placement can be verified. The observer therefore requires permission to read
+that server file; missing permission fails closed. This internal worker
+requirement does not grant file access to the portal or to a UI-selected path.
+
+PostgreSQL records `MyStartTime` in that file and samples `PgStartTime` later;
+`pg_postmaster_start_time()` is not required to equal the file timestamp.
+The SQL timestamp must fall between the process start and the observation.
+Cluster ID, process executable, shared control-file identity, filesystem UUIDs,
+and relation/destination identity checks still apply and are repeated at the
+end of verification. See PostgreSQL 15
+[process startup](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/postmaster/postmaster.c)
+and [PID-file creation](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/utils/init/miscinit.c).

@@ -136,6 +136,16 @@ class StorageHeaderMoveRecord(Base):
                         "jsonb_array_length(source_group->'indexes') <= 64 AND "
                         "octet_length(source_group::text) <= 65536",
                         name="ck_storage_header_move_evidence"),
+        CheckConstraint(
+            "(state = 'completed' AND completion_evidence IS NOT NULL) OR "
+            "(state <> 'completed' AND completion_evidence IS NULL)",
+            name="ck_storage_header_move_completion_state"),
+        CheckConstraint(
+            "completion_evidence IS NULL OR COALESCE(jsonb_typeof(completion_evidence) = 'object' "
+            "AND completion_evidence ? 'schema_version' AND completion_evidence ? 'physical' AND completion_evidence->>'schema_version' = 'qt.header_move_completion.v1' "
+            "AND jsonb_typeof(completion_evidence->'physical') = 'object' "
+            "AND octet_length(completion_evidence::text) <= 65536, false)",
+            name="ck_storage_header_move_completion_evidence"),
         Index("uq_storage_header_move_active_heap", "database_identity", "heap_oid", unique=True,
               postgresql_where=text("state IN ('reserved','running','blocked')")),
     )
@@ -148,6 +158,7 @@ class StorageHeaderMoveRecord(Base):
     filesystem_uuid = Column(String(128), nullable=False)
     source_group = Column(JSONB, nullable=False)
     destination_binding = Column(JSONB, nullable=False)
+    completion_evidence = Column(JSONB(none_as_null=True), nullable=True)
     reserved_bytes = Column(BigInteger, nullable=False)
     state = Column(String(16), nullable=False, server_default="reserved")
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))

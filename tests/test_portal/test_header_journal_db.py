@@ -238,7 +238,11 @@ def test_cancellation_preserves_other_capacity_and_replay_cannot_reactivate(jour
 def test_started_or_uncertain_movement_cannot_release_reservation(journal, state_name):
     reserve(journal)
     with Session(journal[0]) as session, session.begin():
-        session.scalar(select(StorageHeaderMoveRecord)).state = state_name
+        row = session.scalar(select(StorageHeaderMoveRecord))
+        row.state = state_name
+        if state_name == "completed":
+            # Synthetic completion used only to test cancellation refusal.
+            row.completion_evidence = {"schema_version": "qt.header_move_completion.v1", "physical": {}}
     with pytest.raises(StorageConflict, match="reconciliation_required"):
         with Session(journal[0]) as session, session.begin():
             cancel_unstarted_header_batch(session, plan_id="plan-a",
@@ -459,3 +463,22 @@ def test_changed_registered_root_cannot_reuse_old_verified_observation(journal):
     with pytest.raises(StorageConflict, match="review_invalid"):
         reserve(journal)
     assert state(journal) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("move_state,completion", [
+    ("completed", None),
+    ("reserved", {"schema_version": "qt.header_move_completion.v1", "physical": {}}),
+    ("completed", {}),
+    ("completed", {"schema_version": None, "physical": {}}),
+    ("completed", {"schema_version": "wrong", "physical": {}}),
+    ("completed", {"schema_version": "qt.header_move_completion.v1", "physical": None}),
+    ("completed", {"schema_version": "qt.header_move_completion.v1", "physical": {"oversized": "x" * 65536}}),
+])
+def test_completion_state_requires_bounded_nonnull_v1_evidence(journal, move_state, completion):
+    reserve(journal)
+    with pytest.raises(IntegrityError, match="ck_storage_header_move_completion"):
+        with Session(journal[0]) as session, session.begin():
+            row = session.scalar(select(StorageHeaderMoveRecord))
+            row.state = move_state
+            row.completion_evidence = completion
+    assert state(journal) == (2400, 1, 2)

@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 
@@ -218,7 +218,8 @@ def _worker(root, history):
             except StorageMountError:
                 return True
             return False
-        report["stale_start_refused"] = refused(replace(moved, postmaster_started_at=moved.postmaster_started_at - timedelta(seconds=1)))
+        report["stale_start_refused"] = refused(replace(moved, postmaster_started_at=datetime.fromtimestamp(int(moved.server_postmaster_identity[2]), UTC) - timedelta(seconds=1)))
+        report["stale_start_refused"] = report["stale_start_refused"] and refused(replace(moved, server_postmaster_identity=()))
         metadata.write_text("E:ID_FS_UUID=uuid-wrong-device\n")
         report["wrong_uuid_refused"] = refused(moved)
         metadata.write_text("E:ID_FS_UUID=uuid-disposable-namespace\n")
@@ -227,6 +228,9 @@ def _worker(root, history):
         for relative in ("PG_VERSION", "postmaster.pid", "global/pg_control"):
             shutil.copyfile(data / relative, clone / relative)
         report["copied_identity_refused"] = refused(replace(moved, server_data_directory=str(clone)))
+        from tests.test_market_data.header_atomic_fixture import prove_atomic_moves
+        report.update(prove_atomic_moves(engine, root, targets, destination_oid,
+                                         storage_day, partition_name, BIN / "pg_controldata"))
         return report
     finally:
         if engine is not None:
@@ -433,6 +437,36 @@ def test_locked_group_files_verify_before_and_after_uncommitted_copy_on_same_con
 
 def test_both_private_filesystem_roots_are_cleaned_after_postmaster_stops(namespace_report):
     assert namespace_report["disposable_roots_removed"]
+
+
+@pytest.mark.parametrize("phase", ["table", "index"])
+def test_atomic_move_python_failure_rolls_back_its_savepoint_without_losing_caller_work(namespace_report, phase):
+    assert namespace_report["atomic_savepoint_" + phase]
+
+
+def test_atomic_move_completion_and_capacity_release_roll_back_with_outer_transaction(namespace_report):
+    assert namespace_report["atomic_completion_is_provisional"]
+    assert namespace_report["atomic_outer_rollback"]
+
+
+@pytest.mark.parametrize("phase", ["table", "index", "before_commit"])
+def test_atomic_move_backend_termination_preserves_source_intent_and_reservation(namespace_report, phase):
+    assert namespace_report["atomic_backend_loss_" + phase]
+
+
+def test_real_lost_commit_response_reconciles_without_copying_or_releasing_twice(namespace_report):
+    assert namespace_report["atomic_lost_commit_is_committed"]
+    assert namespace_report["atomic_retry_no_copy_or_release"]
+    assert namespace_report["atomic_rows_preserved"]
+
+
+def test_atomic_index_only_move_preserves_destination_heap_and_refuses_stale_completion(namespace_report):
+    assert namespace_report["atomic_retains_destination_heap"]
+    assert namespace_report["atomic_changed_completion_refused"]
+
+
+def test_blocked_completion_bookkeeping_times_out_and_rolls_back_copy(namespace_report):
+    assert namespace_report["atomic_bookkeeping_timeout"]
 
 
 if __name__ == "__main__":
