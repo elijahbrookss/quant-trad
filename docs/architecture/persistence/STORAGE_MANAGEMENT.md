@@ -11,6 +11,7 @@ tags:
 code_paths:
   - cli/main.py
   - src/core/storage_targets.py
+  - src/core/storage_header_placement.py
   - src/core/storage_inventory.py
   - portal/backend/db/storage_target_models.py
   - portal/backend/controller/storage_management.py
@@ -61,6 +62,54 @@ then chooses the eligible filesystem with the most headroom. Its caller must
 serialize allocation and persist a reservation atomically. It never finds old
 objects by applying today's allocation policy. StorageLocation resolves an
 explicit target and safe relative key, checking mount identity and containment.
+
+## Historical header placement preview
+
+`core.storage_header_placement.plan_header_placement` is a pure planning
+boundary for dated header partitions. It accepts a typed catalog snapshot and
+observed filesystem capacity; it does not inspect disks, run SQL, save
+reservations, or connect to the Storage API yet. The snapshot must come from a
+future catalog adapter that proves parent attachment, daily bounds, complete
+ordinary-index ownership, TOAST colocation, and physical relation-to-target
+bindings. Caller-provided flags are not a substitute for that adapter.
+
+Each proposed group contains its table and every ordinary index. Heap bytes
+include TOAST and its internal indexes; ordinary indexes are counted
+separately. PostgreSQL table tablespace changes do not move ordinary indexes,
+so a future executor must move and verify the complete group transactionally.
+The plan records OIDs, physical file identifiers, target UUIDs, sizes and a
+deterministic evidence hash. Relation names are descriptive labels, not SQL.
+
+The planner handles at most 4,096 daily groups and 32 registered targets;
+a smaller caller budget is rejected before sorting or planning if exceeded.
+Incomplete inventory, unverified source filesystems, or insufficient
+destination capacity blocks the whole proposal. No partial move list or
+additional reservation is returned on a blocked plan. Read-only evidence is
+not admitted for this movement preview; this does not prohibit historical
+reads from a read-only filesystem.
+
+Days strictly before the database UTC day minus `recent_days` are historical.
+Recent groups must already be on the selected recent target; moving active
+groups requires a separate cutover. Historical groups keep an eligible existing
+heap location if the rest of the group fits. Otherwise, allocation selects the
+eligible target with most remaining headroom, with target ID breaking ties.
+Adding an HDD therefore does not redistribute already valid history.
+
+Copy reservations accumulate across the proposed batch, subtract existing
+reservations and the policy reserve, and never credit space expected to be
+freed by another move. They cover only measured files that change target.
+The minimum reservation for an empty moving group is one byte; it is not a
+filesystem-allocation or WAL estimate. WAL, temporary files, concurrent growth,
+recovery copies and operational margin still require separate budgeting.
+
+`planning_complete` means only that this limited preview has no blockers.
+`execution_available` and `activation_ready` remain false, including when
+the proposed policy enables movement. Global identity and raw-mapping growth,
+payload/archive placement, the physical executor, recovery and performance
+acceptance remain explicitly uncovered. Before any future execution, a worker
+must recheck the catalog, policy revision, mount identities and capacity, then
+reserve space under the shared lock. This preview cannot authorize a cutover
+or establish a whole-system storage forecast.
 
 ## Database records and cutover work
 
