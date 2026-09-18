@@ -229,3 +229,24 @@ verification restored the pending ID, removed partial target changes and left
 the source intact. Retrying copied the record successfully. The private copy
 does not expose a separate acknowledgement path that could discard an
 unverified pending record.
+
+## Disposable schema-handoff rehearsal
+
+A tiny owned-database fixture now rehearses the dependency handoff after the
+preserving copy. It retains the original header table and v1 certificate,
+rewires payload/archive references to global identity, installs the normal v2
+guards and view, preserves the existing commit sequence, and closes the
+retained source against further inserts.
+
+The application then accepts the schema on a fresh startup, returns identical
+recent/historical and frozen results, and continues collection and corrections.
+Correcting an archived observation leaves the pre-migration frozen result
+unchanged. Terminating the PostgreSQL backend during the schema switch restores
+the original active source, certificate and references; retry succeeds.
+
+This switch is deliberately test-only and refuses anything except an owned
+disposable database with at most 1,024 headers. It is not a production migration
+command. It takes fixture locks and validates populated foreign keys directly;
+that does not establish a short cutover at production scale. Full source
+admission, bounded final verification, measured lock/capacity limits, physical
+placement and rollback after resumed production writes remain release blockers.

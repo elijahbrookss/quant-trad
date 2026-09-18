@@ -14,7 +14,7 @@ from scripts.db.fact_header_v2_capture import QUEUE, SCHEMA
 from tests.test_market_data.test_fact_storage_tiers_db import (
     storage, _placement, _verified_cold_fixture, BASE,
 )
-from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture
+from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture, stage_shadow_handoff_fixture
 
 pytestmark = pytest.mark.db
 
@@ -35,6 +35,12 @@ def source(storage, monkeypatch, tmp_path):
     _placement(monkeypatch,storage.open_day)
     recent = replace(storage.fact,observation_key="preserved-recent",observation_time=BASE+timedelta(days=2))
     storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,facts=[recent])
+    storage.original_facts=facts
+    storage.frozen_result=frozen_before
+    storage.frozen_dataset_id=frozen.dataset_id
+    storage.dataset_request=request
+    storage.query_before=storage.repo.read_facts(
+        series_id=storage.series_id,start=request.start,end=BASE+timedelta(days=3))
     engine = storage.database._engine
     with engine.connect() as conn:
         storage.source_before = _headers(conn,copy.SOURCE)
@@ -220,3 +226,85 @@ def test_incompatible_retry_refuses_without_retiring_pending_rows(source,change)
             copy.copy_page(conn)
         assert conn.scalar(text(f"SELECT count(*) FROM {QUEUE} WHERE id=:id"),{"id":row["id"]})==1
         assert conn.scalar(text(f"SELECT row_hash FROM {copy.SOURCE} WHERE id=:id"),{"id":row["id"]})==row["row_hash"]
+
+
+def _assert_application_after_handoff(source):
+    from portal.backend.db.session import Database
+    restarted=Database(source.dsn)
+    try:
+        assert restarted.ensure_schema(),str(restarted.last_error)
+    finally:
+        restarted._reset_engine()
+    assert source.repo.read_facts(series_id=source.series_id,start=source.dataset_request.start,
+                                  end=BASE+timedelta(days=3))==source.query_before
+    assert source.repo.read_dataset_fact_revisions(dataset_id=source.frozen_dataset_id,
+                                                   series_id=source.series_id)==source.frozen_result
+
+
+def test_copied_v1_handoff_preserves_reads_freezes_and_new_collection(source):
+    engine=source.database._engine
+    with engine.begin() as conn:
+        original_sequence=conn.scalar(text("SELECT 'market.fact_commit_seq'::regclass::oid::bigint"))
+        copy.prepare_copy(conn)
+    _finish(engine)
+    with engine.begin() as conn:
+        assert stage_shadow_handoff_fixture(conn,source)["source_rows_retained"]==7
+    _assert_application_after_handoff(source)
+    new=replace(source.fact,observation_key="after-handoff",observation_time=BASE+timedelta(days=2))
+    result=source.repo.ingest_facts(series_id=source.series_id,source_id=source.source_id,facts=[new])
+    assert result.inserted_count==1
+    corrected=replace(source.original_facts[0],
+        known_at=BASE+timedelta(days=2),accepted_at=BASE+timedelta(days=2),
+        payload={**source.fact.payload,"rate":"0.2","raw_rate":"0.2"})
+    assert source.repo.ingest_facts(series_id=source.series_id,source_id=source.source_id,
+                                   facts=[corrected]).corrected_count==1
+    history=source.repo.read_facts(series_id=source.series_id,start=source.dataset_request.start,
+                                  end=source.dataset_request.end)
+    assert next(row for row in history if row.fact.observation_key=="preserved-0").row_hash==corrected.row_hash
+    assert source.repo.read_dataset_fact_revisions(dataset_id=source.frozen_dataset_id,
+                                                   series_id=source.series_id)==source.frozen_result
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT 'market.fact_commit_seq'::regclass::oid::bigint"))==original_sequence
+        assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_versions"))==7
+        assert conn.scalar(text("SELECT count(*) FROM market.fact_versions"))==9
+        assert conn.scalar(text("SELECT count(*) FROM market.fact_identities"))==9
+        assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_storage_state"))==1
+        assert not conn.scalar(text("SELECT EXISTS(SELECT 1 FROM market.fact_storage_state WHERE layout_version='market.fact_storage_tiers.v1')"))
+    with pytest.raises(DBAPIError,match="immutable"),engine.begin() as conn:
+        conn.exec_driver_sql("""
+            INSERT INTO qt_fact_header_retained_v1.fact_versions
+            SELECT * FROM market.fact_versions LIMIT 1
+        """)
+    assert source.archive_path.read_bytes()==source.archive_bytes
+
+
+def test_interrupted_handoff_restores_original_layout_before_retry(source):
+    engine=source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+    _finish(engine)
+    killed=[False]
+    def terminate(conn,cursor,statement,parameters,context,executemany):
+        if not killed[0] and statement==f"ALTER TABLE {SCHEMA}.fact_versions SET SCHEMA market":
+            killed[0]=True
+            pid=conn.connection.driver_connection.get_backend_pid()
+            with engine.begin() as killer:
+                assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),{"pid":pid})
+            conn.exec_driver_sql("SELECT 1")
+    event.listen(engine,"after_cursor_execute",terminate)
+    try:
+        with pytest.raises(DBAPIError),engine.begin() as conn:
+            stage_shadow_handoff_fixture(conn,source)
+    finally:
+        event.remove(engine,"after_cursor_execute",terminate)
+    assert killed[0]
+    with engine.connect() as conn:
+        assert _headers(conn,copy.SOURCE)==source.source_before
+        assert _frozen_records(conn)==source.frozen_before
+        assert conn.scalar(text("SELECT state FROM market.fact_storage_state WHERE layout_version='market.fact_storage_tiers.v1'"))=="ready"
+        assert conn.scalar(text("SELECT to_regnamespace('qt_fact_header_retained_v1')")) is None
+        assert conn.scalar(text("SELECT to_regclass('market.fact_identities')")) is None
+        assert conn.scalar(text("SELECT count(*) FROM pg_constraint WHERE contype='f' AND confrelid='market.fact_versions'::regclass AND conparentid=0"))==3
+    with engine.begin() as conn:
+        stage_shadow_handoff_fixture(conn,source)
+    _assert_application_after_handoff(source)
