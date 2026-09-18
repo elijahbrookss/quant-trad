@@ -75,3 +75,39 @@ def test_file_identity_hash_binds_path_without_storing_unbounded_path_arrays(tra
     changed = replace(after, bindings=({**after.bindings[0], "server_path": "/other/path"}, after.bindings[1]))
     assert _physical_identity(changed) != _physical_identity(after)
     assert "server_path" not in _physical_identity(after)["members"][0]
+
+
+def test_stalled_watcher_invalidates_backend_before_it_can_return_to_pool():
+    import threading
+    from time import monotonic
+    from types import SimpleNamespace
+    from portal.backend.service.storage.header_movement import _MoveWatch
+    entered,release=threading.Event(),threading.Event()
+    evidence=SimpleNamespace(filesystem_uuid="same",device_id="1:2",path="/owned",available_bytes=100)
+    class Target:
+        target_id="hdd"
+        def inspect(self,**kwargs):
+            if threading.current_thread().name=="qt-history-move-watch":
+                entered.set()
+                assert release.wait(5)
+            return evidence
+    class Driver:
+        def cancel(self):
+            raise AssertionError("no cancellation requested")
+    class Connection:
+        invalidated=False
+        def invalidate(self):
+            self.invalidated=True
+    connection=Connection()
+    watch=_MoveWatch(driver=Driver(),targets=(Target(),),capacity={"hdd":evidence},
+        floors={"hdd":50},deadline=monotonic()+10,cancelled=None,grace=.01)
+    try:
+        watch.start()
+        assert entered.wait(2)
+        with pytest.raises(RuntimeError,match="watcher_did_not_stop"):
+            watch.stop(connection)
+        assert connection.invalidated
+    finally:
+        release.set()
+        watch._thread.join(2)
+        assert not watch._thread.is_alive()

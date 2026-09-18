@@ -689,3 +689,25 @@ performance and the complete migration within 24 hours remain release blockers.
 The shared raw lookup accepts new entries on HDD too; its ingestion cost belongs
 in the full-workload measurement. No server data, policy, merge or deployment
 was changed.
+
+
+### Supervised movement cancellation and retry
+
+The real two-filesystem rehearsal held an already copied historical relation
+inside its PostgreSQL transaction, then injected shutdown, an expired deadline,
+a low-space observation and changed drive identity separately. The watcher
+cancelled the active backend statement. Each attempt rolled back placement and
+completion, retained the existing capacity claims for retry, and left frozen
+data readable on the source drive.
+
+The later successful execution committed the move and released its reservations.
+A completed retry verified the physical result without another ALTER or release.
+A separate stalled-watcher check confirmed the backend is invalidated before it
+can return to the pool and receive unrelated work. No watcher remained after
+the real fault/retry sequence. Backend and documentation checks passed.
+
+This validates one supervised reserved move; it does not enable a recurring
+policy or public Apply. Space supervision uses sampled filesystem availability,
+not per-backend WAL/temp attribution or an instantaneous allocation cap. Actual
+producer rates, cancellation margin and HDD performance still need qualification.
+The owned disposable stack was removed. No live data, merge or deployment changed.

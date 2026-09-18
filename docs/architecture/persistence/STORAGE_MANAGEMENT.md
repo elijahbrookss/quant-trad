@@ -462,6 +462,34 @@ headroom, outer worker supervision, full current/frozen query qualification,
 historical read latency during actual copies, and data-preserving deployment
 migration remain required before runtime wiring or Apply activation.
 
+### Supervised execution of an existing reservation
+
+The internal execute_reserved_header_move boundary owns one transaction and
+commits the existing atomic primitive. It creates no plan, new reservation,
+schedule or policy activation. An unfinished move must already hold a valid
+resource claim. Fresh admission verifies its resource paths, both drive
+identities, current policy/intent and sufficient copy/WAL/temp/growth headroom.
+
+While the statement runs, a watcher checks shutdown, the admitted time budget
+and current filesystem availability. It protects the policy reserve and other
+jobs' claims, and refuses net consumption beyond this move's saved copy and
+auxiliary allowance. Cancellation targets only the current psycopg2 backend.
+The outer connection stays checked out through commit/rollback and watcher
+shutdown; if the watcher cannot stop within its grace period, that connection
+is invalidated before it can return to the pool.
+
+Completion and reservation release remain in the DDL transaction. Cancellation
+before commit rolls them back together. A failure around commit has an uncertain
+client outcome; retry uses the existing completion reconciliation instead of
+assuming rollback or repeating the copy. A completed retry verifies the saved
+physical result without moving files or releasing space twice.
+
+This is a sampled net-space guard, not per-backend WAL/temp attribution or an
+instantaneous limit on every filesystem allocation. Qualified headroom and the
+cancellation margin must cover concurrent producers and observation delay.
+The actual HDD workload, automatic policy wiring and preserving deployment
+remain unqualified; public Apply stays blocked.
+
 ### PostgreSQL process identity during movement
 
 The PostgreSQL 15 catalog observer reads the first 4096 bytes of the fixed
@@ -608,8 +636,9 @@ claim as bounded audit evidence. No new public executor is enabled.
 
 These are clean-model columns, not a runtime migration. Existing installations
 require an explicit reviewed schema cutover. The claimed allowances remain
-declared estimates; producer-limit enforcement, supervisor cancellation,
-application performance and the existing-data migration remain required.
+declared estimates. The supervised execution boundary above checks net space
+and cancellation; qualified producer rates, application performance and the
+existing-data migration remain required.
 
 
 ## Bounded local recovery generations
