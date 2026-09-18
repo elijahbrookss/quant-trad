@@ -6,10 +6,17 @@ must preserve the same identities, revisions, ordering, known-at cutoffs, gaps,
 and frozen dataset results. Adding a drive should enroll capacity for new work;
 it should not require rewriting all existing objects.
 
+The first release is frozen to the existing SSD and HDD, one automatic history
+policy, correct recent/history/frozen queries, minimal Storage settings, rotated
+local recovery copies with a restore test, and a measured whole-system forecast.
+Existing enrollment keeps adding another HDD a configuration operation. Advanced
+placement controls, automatic rebalancing and hypothetical arrangements are
+deferred; they are not release gates.
+
 Current implementation covers drive identity, allocation rules, database-backed
-enrollment and review, and the compact V2 settings page. It is not an executed
-storage migration. Policy application is deliberately blocked until the
-physical executor exists and its prerequisites are verified.
+enrollment/review, the compact V2 page and an internal atomic movement primitive.
+It is not an executed production migration. Policy application remains blocked
+until automatic execution and its operational prerequisites are qualified.
 
 ## Prove the physical design
 
@@ -37,9 +44,10 @@ and distinguish sequential throughput from random indexed reads.
 - Interrupt copying, verification, location commit and source retirement
   separately. Retry after process restart and lease expiry. Verify no lost,
   duplicated, replaced or unreadable object and no stale worker can commit.
-- Remove or make a test target read-only, exhaust its reserve and add a second
-  HDD target. Expect explicit blocked work; new work can use eligible capacity
-  while existing reads remain bound to recorded locations.
+- Remove or make a test target read-only, exhaust its reserve. Expect explicit
+  blocked work while existing reads remain bound to recorded locations.
+  Existing additional-drive enrollment coverage is preserved; expanding storage
+  arrangements is deferred from this release.
 - Restore a completed, rotated recovery copy into an isolated database and
   verify referenced archive objects and representative frozen dataset results.
 
@@ -95,10 +103,11 @@ wipe. Preserve the existing data and recovery material by default.
 
 ## Finish the operational boundary
 
-Implement the physical layout, schema admission, durable fenced movement jobs,
-multi-target archive publication/read/delete, and automatic recovery-copy
-scheduling before enabling Apply. CLI and UI must call the same backend-owned
-actions. Add drive enrollment must include administrator-prepared filesystem
+Finish the fixed SSD/HDD layout, schema admission, recoverable automatic history
+movement, archive resolution on the assigned HDD, and automatic recovery-copy
+scheduling before enabling Apply. Reuse existing mechanisms; a drive-pool or
+rebalancing framework is not required for this release. CLI and UI must call the
+same backend-owned actions. Add drive enrollment must include administrator-prepared filesystem
 identity and stable container mounts; it must not accept shell text from a UI.
 
 Capacity forecasts must sum database heaps, indexes, retained raw/canonical
@@ -400,8 +409,99 @@ caller rollback, competing ownership, insufficient source headroom, invalid
 saved allocation/UUID/hash, aggregate underflow and idempotent cancellation.
 These checks exercise ownership of declared space, not hard resource ceilings.
 
-The affected disposable run passed 109 database cases in 507.52 seconds,
+The affected disposable pytest run passed 109 database cases in 507.52 seconds,
 including real backend termination and lost-COMMIT recovery with auxiliary
 ownership. The backend run passed 3,105 cases; its only failure was the generated
 architecture index, corrected by refreshing the index and passing all ten
 documentation checks. Focused budget/inspection checks passed 85 cases.
+
+The outer shell wrapper for that run later exited with a syntax error after
+cleaning its stack: the runner source had been edited while its shell was still
+executing. Its database assertions passed, but that wrapper exit was not a
+successful run. Do not edit an executing runner; subsequent storage-demo runs
+exercise the updated runner and cleanup path.
+
+### First-release end-to-end demonstration
+
+Run bash scripts/ci/run_test_suite.sh storage-demo. This explicit mode adds
+only a disposable topology for the existing test runner: a full TimescaleDB
+database, shared source/history volumes and the database process namespace.
+The test uses PostgreSQL's UID without privileged mode. The history volume is
+tmpfs to establish a second real filesystem locally, not to simulate HDD speed.
+Generated test credentials, database and volumes belong to the run and are
+removed by its existing cleanup trap.
+
+The demonstration feeds synthetic observations through the real canonical
+ingestion repository, freezes results, accepts a later correction, runs the
+existing payload archive/reclaim executor, and moves the eligible detailed
+headers and their indexes through real catalog/filesystem verification.
+It terminates a backend during movement, checks unchanged data and retained
+reservations, retries, and measures collection plus recent/history/frozen and combined cross-drive reads
+concurrently with the successful move. The structured report records latency
+and requires samples to overlap the actual copy through commit, not just the
+preflight. Baseline and movement use the same concurrent application callers. A small fast copy cannot prove
+full-volume HDD throughput or the one-day migration bound.
+
+This is the next first-release milestone, not a deployment claim. The first
+release is the existing SSD and HDD with one automatic policy, minimal settings,
+correct cross-drive/frozen reads, rotated local recovery copies plus restore,
+and a complete measured capacity forecast. Growing global identity/raw mapping
+storage, one automatic execution path and the preserving migration remain
+required if the demonstration shows they are not resolved. Advanced placement,
+automatic rebalancing and hypothetical storage arrangements are deferred.
+
+### Demonstrated outcomes, 2026-09-18
+
+The final disposable application run completed successfully and removed its
+owned database, history/source volumes and image. It archived and reclaimed
+eligible payloads, physically moved the historical header table and every index,
+and left the recent table/indexes on the source filesystem. Historical, recent
+and combined reads returned the expected content and ordering. A later
+correction appeared in current reads while previously frozen results stayed
+unchanged. Terminating the moving PostgreSQL backend rolled back the partial
+move; retry completed and released the reserved space.
+
+All application workloads overlapped the actual copy through commit. The
+fixture had 256 historical records, 56 final recent records and 647,168 bytes of
+historical headers/indexes. The successful move took 0.936 seconds, of which
+0.8753 seconds ran from the first copy statement through commit.
+
+| Application operation | Largest baseline latency | Largest latency with movement |
+| --- | --- | --- |
+| Collection write | 613 ms | 1,134 ms |
+| Recent query | 175 ms | 35 ms |
+| Historical query | 1,590 ms | 2,197 ms |
+| Frozen query | 1,743 ms | 2,240 ms |
+| Combined recent/history query | 1,772 ms | 2,722 ms |
+
+These are short, local concurrency measurements, not production percentiles.
+The lower recent-query number does not establish a speedup. Growing latency
+for collection and historical reads prevents calling performance qualified;
+this small, cached tmpfs fixture does not identify the physical HDD's limit or
+prove sustained collection throughput. Use a representative final-layout
+workload before accepting performance; do not redesign based on this sample.
+
+The report identifies base revision 3ab3a97a81f697116f2fb651e0738e59f12c5919 and
+working source-tree hash
+adf759010c4793b9866a7beae18a190295dbc7d47983c80926b8aeb528793edc.
+Its structured evidence is emitted as QT_STORAGE_DEMO_REPORT by the supported
+runner. This is local implementation/test evidence, not merge or deployment
+evidence.
+
+First-release blockers after this milestone:
+
+- Growing shared identity and raw-archive lookup rows/indexes still need HDD
+  placement; otherwise the SSD is still not bounded.
+- Connect and qualify one automatic history policy with visible failures;
+  the demonstrated primitive is not yet unattended operation.
+- Complete routine rotated local recovery copies and restore referenced
+  archives plus frozen results; successful movement is not recovery evidence.
+- Qualify full-layout collection/query performance and rehearse the preserving
+  migration within 24 hours; this fixture cannot establish either.
+- Include database/index growth, archives, recovery copies, scratch and reserve
+  in the measured capacity forecast; partial archive sizing is not HDD runway.
+
+The compact settings implementation is preserved. Advanced placement controls,
+automatic rebalancing and hypothetical arrangements remain deferred. There is
+no seven-day waiting gate and no authorization to erase existing data implied
+by this disposable demonstration.

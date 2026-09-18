@@ -3,12 +3,12 @@ set -euo pipefail
 
 SUITE="${1:-}"
 if [[ -z "$SUITE" ]]; then
-  echo "usage: $0 <pr|contracts|runtime-reporting|backend|full|db|core|provider|runtime|botlens|web|cli|reports|docs|integration>" >&2
+  echo "usage: $0 <pr|contracts|runtime-reporting|backend|full|db|storage-demo|core|provider|runtime|botlens|web|cli|reports|docs|integration>" >&2
   exit 2
 fi
 
 USE_DOCKER="${CI_USE_DOCKER:-0}"
-if [[ "$SUITE" == "db" ]]; then
+if [[ "$SUITE" == "db" || "$SUITE" == "storage-demo" ]]; then
   USE_DOCKER=1
 fi
 COMPOSE_FILE="docker/docker-compose.test.yml"
@@ -40,6 +40,9 @@ run_pytest_docker() (
   export QT_TEST_POSTGRES_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(24))')"
   export QT_TEST_POSTGRES_DB="qt_test_${test_token}"
   compose=(docker compose --project-name "$test_project" -f "$COMPOSE_FILE")
+  if [[ "$SUITE" == "storage-demo" ]]; then
+    compose+=(-f docker/test/storage-demo.compose.yml)
+  fi
 
   cleanup_test_stack() {
     original_status=$?
@@ -102,12 +105,17 @@ case "$SUITE" in
   full)
     run_suite "pytest -q"
     ;;
-  db)
+  db|storage-demo)
     # Optional pytest arguments narrow a disposable DB iteration without
     # weakening isolation or relying on a developer's ambient PG_DSN.
     shift
     printf -v db_pytest_args '%q ' "$@"
-    if [[ "$#" -eq 0 ]]; then db_pytest_args=""; fi
+    if [[ "$#" -eq 0 ]]; then
+      db_pytest_args=""
+      if [[ "$SUITE" == "storage-demo" ]]; then
+        db_pytest_args="tests/test_market_data/test_storage_end_to_end_db.py -s -o cache_dir=/tmp/qt-storage-demo-pytest-cache"
+      fi
+    fi
     run_suite "QT_DB_TEST_ISOLATED=1 RUN_DB_TESTS=1 pytest -q -m db ${db_pytest_args}"
     ;;
   core)
