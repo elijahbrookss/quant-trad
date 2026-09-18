@@ -21,6 +21,7 @@ code_paths:
   - scripts/db/fact_header_v2_placement.py
   - scripts/db/raw_mapping_v2_copy.py
   - scripts/db/archive_reference_v2_placement.py
+  - scripts/db/archive_root_v2_copy.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -264,3 +265,30 @@ sizes, exclusive-lock duration and complete migration time still need rehearsal.
 This step is not the final schema switch, archive-file migration or complete
 production operator. Reusing the retained v1 source after new v2 writes resume
 is still not a valid rollback strategy.
+
+## Preserving archive-file copy — 2026-09-18
+
+The fixed upgrade can copy bounded pages from the existing raw archive,
+checkpoint and canonical archive catalogs onto the bound history HDD. Portable
+object keys and checksums remain unchanged. The existing immutable writer
+publishes each file without replacing a conflicting key, verifies its bytes and
+durability, and reuses verified completed objects on retry. Optional budget
+checks now run between checksum and copy chunks; default publication is unchanged.
+
+Each page owns the existing migration/storage locks and shared archive-expiry
+fence, binds both roots to the admitted SSD/HDD filesystems, and uses the original
+one-day attempt clock and existing resource watcher. Policy reserve, existing
+claims and declared WAL/temp/growth/maintenance allowances remain protected.
+A wrong root, symlink, corrupt object, changed root, insufficient headroom,
+cancellation or elapsed budget refuses work. Source records and files remain
+untouched. Ordinary source collection is allowed during copying.
+
+A failed page can leave valid durable destination objects; rolling back its SQL
+transaction does not erase those files. Retry the unacknowledged page and let
+immutable publication verify/reuse them. A cursor is only page progress: concurrent
+publication can add IDs before it. It is never a completeness or activation
+certificate. The final operator still needs fenced inventory reconciliation,
+archive-root cutover and the full preserving migration/recovery procedure.
+No runtime configuration, manifest location, new scheduler or generic placement
+API is changed by this internal step. Filesystem watching bounds observed
+consumption, not instantaneous allocation or per-producer IO attribution.

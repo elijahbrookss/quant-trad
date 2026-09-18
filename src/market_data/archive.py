@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from core.storage_mounts import (
     require_configured_archive_mount, require_configured_working_mount,
@@ -137,10 +137,15 @@ def raw_archive_content_fingerprint(*, raw_record_ids: Iterable[str], raw_frame_
     return digest.hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: Path, *, check_budget: Callable[[], None] | None = None) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        while True:
+            if check_budget is not None:
+                check_budget()
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -763,19 +768,24 @@ class FilesystemRawArchiveObjectStore:
         return target
 
     def put_verified(
-        self, *, object_key: str, source_path: Path, expected_sha256: str
+        self, *, object_key: str, source_path: Path, expected_sha256: str,
+        check_budget: Callable[[], None] | None = None
     ) -> ArchiveObjectAcknowledgement:
         if not self.writable:
             raise PermissionError("market_archive_read_only: publication is disabled")
+        if check_budget is not None and not callable(check_budget):
+            raise ValueError("market_archive_budget_check_invalid")
+        check = check_budget or (lambda: None)
+        check()
         source = Path(source_path)
         expected = str(expected_sha256 or "").strip().lower()
-        if _sha256_file(source) != expected:
+        if _sha256_file(source, check_budget=check_budget) != expected:
             raise ValueError("market_archive_upload_invalid: source checksum mismatch")
         destination = self.local_path(object_key)
         require_configured_archive_mount(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
-            existing_hash = _sha256_file(destination)
+            existing_hash = _sha256_file(destination, check_budget=check_budget)
             if existing_hash != expected:
                 raise RuntimeError(
                     "market_archive_object_conflict: immutable key has different bytes"
@@ -783,6 +793,7 @@ class FilesystemRawArchiveObjectStore:
             # A competing publisher may have linked the object but not yet
             # synced the directory. Reuse must itself establish a durable ack.
             _fsync_directory(destination.parent)
+            check()
             return ArchiveObjectAcknowledgement(
                 object_key=str(object_key),
                 object_uri=f"market-archive://{object_key}",
@@ -791,6 +802,7 @@ class FilesystemRawArchiveObjectStore:
                 acknowledged_at=datetime.now(UTC),
                 reused_existing=True,
             )
+        check()
         descriptor, temporary_path = tempfile.mkstemp(
             prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
         )
@@ -798,17 +810,26 @@ class FilesystemRawArchiveObjectStore:
         reused_existing = False
         try:
             with os.fdopen(descriptor, "wb") as target, source.open("rb") as source_handle:
-                shutil.copyfileobj(source_handle, target, length=1024 * 1024)
+                if check_budget is None:
+                    shutil.copyfileobj(source_handle, target, length=1024 * 1024)
+                else:
+                    while True:
+                        check()
+                        data = source_handle.read(1024 * 1024)
+                        if not data:
+                            break
+                        target.write(data)
                 target.flush()
                 os.fsync(target.fileno())
-            if _sha256_file(temporary) != expected:
+            if _sha256_file(temporary, check_budget=check_budget) != expected:
                 raise RuntimeError("market_archive_upload_invalid: copied checksum mismatch")
             # Linking is atomic create-if-absent on this same filesystem. A
             # check followed by replace could overwrite a concurrent publisher.
+            check()
             try:
                 os.link(temporary, destination)
             except FileExistsError:
-                if _sha256_file(destination) != expected:
+                if _sha256_file(destination, check_budget=check_budget) != expected:
                     raise RuntimeError(
                         "market_archive_object_conflict: immutable key has different bytes"
                     ) from None
@@ -817,8 +838,9 @@ class FilesystemRawArchiveObjectStore:
         finally:
             if temporary.exists():
                 temporary.unlink()
-        if _sha256_file(destination) != expected:
+        if _sha256_file(destination, check_budget=check_budget) != expected:
             raise RuntimeError("market_archive_upload_invalid: acknowledgement checksum mismatch")
+        check()
         return ArchiveObjectAcknowledgement(
             object_key=str(object_key),
             object_uri=f"market-archive://{object_key}",

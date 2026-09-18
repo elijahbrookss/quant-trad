@@ -843,3 +843,26 @@ session on the same series; it also checks missing current state, clean and
 invalidated endings and incorrect evidence. The independent-series restore proof
 alone must not be counted as this rollover proof. No new state store or replay
 engine is added. Full hardware/migration qualification remains separate.
+
+### Preserving archive-root copy
+
+The disposable archive-copy rehearsal uses the existing fixed migration binding
+and its real SSD/HDD filesystems. It must refuse a wrong source filesystem, a busy
+expiry fence, an oversized page, insufficient declared capacity and corrupt
+source bytes. It interrupts after durable publication, collects a new source
+record during that operation, and retries without replacing the completed file.
+
+After copying all catalog families and performing the existing tiny guarded
+database handoff, the rehearsal makes the original archive root unavailable.
+Recent/history/frozen reads and book replay must use the HDD copy, and fresh
+collection must still work. Original bytes remain retained and unchanged.
+Publication checks separately interrupt inside an actual file copy and during
+checksum reuse, preserving sources and cleaning the private partial.
+
+This is page-copy and consumer evidence, not final concurrent-inventory admission
+or a production root switch. Cursor progress can miss subsequently committed
+lower IDs, so the eventual operator must reconcile the complete inventory under
+its final publication fence. Full-volume duration, interruption cleanup after
+process death, resource allowances and physical HDD performance remain separate
+qualification work. A partial process-death file is never published or treated
+as completed history; automatic retirement of abandoned partials is not added.
