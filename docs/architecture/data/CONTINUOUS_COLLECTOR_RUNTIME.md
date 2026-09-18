@@ -457,3 +457,11 @@ provides PostgreSQL 15 utilities, but the ordinary server collector mounts and
 permissions are not yet qualified for this layout and cannot substitute
 similar-looking filesystem paths. This is local implementation and disposable
 validation, not activation of backups or storage policy on a server.
+
+With explicit storage-maintenance limits, the same lifecycle service binds
+canonical payload archival to the saved Storage recent-days window and movement
+switch. Legacy canonical per-type hot windows do not override that saved window.
+The existing deployment execution gates still apply. Archive/reclaim transactions
+recheck the policy under the storage-management lock, so a pause or revision
+change after planning prevents mutation under stale authority. This connection
+does not change raw-object expiry rules or add a timer.

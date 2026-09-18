@@ -7,6 +7,7 @@ import logging
 import socket
 import threading
 from collections import defaultdict
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -33,6 +34,7 @@ from ..storage.repos.market_structure import (
 from ..storage.repos.fact_retention import canonical_fact_retention_repository
 from .market_structure_service import DEFAULT_STORAGE_ROOT
 from .canonical_retention import CanonicalFactRetentionExecutor
+from ..storage.history_policy import saved_canonical_policy
 
 
 logger = logging.getLogger(__name__)
@@ -66,11 +68,21 @@ class MarketStorageLifecycleService:
         ),
         canonical_repository=canonical_fact_retention_repository,
         canonical_executor=None,
+        use_saved_history_policy=False,
     ) -> None:
         self.lifecycle_repository = lifecycle_repository
         self.market_repository = market_repository
         self.canonical_repository = canonical_repository
-        self.canonical_executor = canonical_executor or CanonicalFactRetentionExecutor(repository=canonical_repository)
+        self.use_saved_history_policy = use_saved_history_policy
+        self.canonical_executor = canonical_executor or CanonicalFactRetentionExecutor(
+            repository=canonical_repository, use_saved_history_policy=use_saved_history_policy)
+
+    def _canonical_policy(self, policy, storage_root):
+        if not self.use_saved_history_policy:
+            return policy
+        canonical, _ = saved_canonical_policy(self.canonical_repository.database,
+            policy=policy.canonical_retention, storage_root=storage_root)
+        return replace(policy, canonical_retention=canonical)
 
     def plan(
         self,
@@ -80,6 +92,7 @@ class MarketStorageLifecycleService:
         storage_root: Path = DEFAULT_STORAGE_ROOT,
         canonical_after_storage_day: date | None = None,
     ) -> dict[str, Any]:
+        policy = self._canonical_policy(policy, storage_root)
         observed_at = _utc(now or datetime.now(UTC))
         canonical = self.canonical_repository.plan(
             policy=policy.canonical_retention, storage_root=storage_root,
@@ -145,6 +158,7 @@ class MarketStorageLifecycleService:
         canonical_after_storage_day: date | None = None,
         cancelled=None,
     ) -> dict[str, Any]:
+        policy = self._canonical_policy(policy, storage_root)
         requested_execute = bool(execute)
         if requested_execute and not policy.execution_enabled:
             raise ValueError(

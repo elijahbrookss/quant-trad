@@ -25,6 +25,7 @@ code_paths:
   - portal/backend/service/storage/history_maintenance.py
   - portal/backend/service/storage/maintenance_status.py
   - portal/backend/service/storage/maintenance_runtime.py
+  - portal/backend/service/storage/history_policy.py
   - portal/backend/Dockerfile
   - docker/test/storage-demo.compose.yml
   - portal/backend/service/storage/header_admission.py
@@ -812,9 +813,29 @@ configured object root. A verified root relocation need not rewrite those keys.
 Preservation still requires copying/verifying every referenced object and
 handling retained acquisition spool paths explicitly during the cutover.
 
-The process fixture disables legacy payload retention to isolate the new
-maintenance connection. Payload retention still reads the lifecycle hot-window
-configuration, while header movement reads the saved Storage policy. First-release
-activation must make both follow the same saved recent-days setting and honor
-movement being disabled; matching defaults are not proof of a single policy.
-This fixture does not qualify that remaining integration.
+### One saved recent-data window
+
+When explicit maintenance limits configure the existing worker, its canonical
+payload retention service reads the same saved Storage policy as header movement.
+The saved recent-days setting replaces the legacy canonical hot window and
+per-Fact-type overrides. Missing policy or disabled movement prevents canonical
+archival execution; saving a policy never enables disabled deployment execution
+gates. Unconfigured deployments and their manual lifecycle behavior remain
+unchanged. Existing raw-object compaction and expiration settings are unchanged.
+
+Planning checks the assigned HDD archive root and its filesystem UUID. The
+first release retains one archive root; adding configured history targets does
+not force that existing archive root to move or initiate rebalancing. The
+effective free-space floor includes the saved reserve percentage, existing
+reservations and any stricter canonical operating limit. Each archive/reclaim
+transaction takes the existing management lock and rechecks the saved policy
+revision/hash, movement enablement and destination. A changed policy rejects the
+old plan; it does not authorize a step under stale settings. The reclaimer repeats
+this guard at its final exclusive handoff. Committed archive pages remain the
+existing resume authority.
+
+The disposable real-process scenario changes the saved recent window, pauses
+movement, resumes payload archival and header movement, and reads the same frozen
+results. A separate injected pause after planning must prevent sealing. These
+checks qualify the policy connection only on the disposable layout, not actual
+HDD performance, existing-server permissions or the full preserving migration.

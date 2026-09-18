@@ -1504,3 +1504,14 @@ See [ADR 0063](../decisions/0063-use-schema-registered-canonical-facts.md),
 [Chainlink Structured Facts](CHAINLINK_STRUCTURED_FACTS.md),
 [Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
 and [Canonical Fact Migration Backup](../../engineering/canonical-fact-migration-backup.md).
+
+### Saved Storage policy and canonical archival
+
+In a worker configured with explicit storage-maintenance limits, canonical
+payload archival and historical-header movement use the same saved recent-days
+window. Paused or missing saved policy cannot execute canonical archival, and
+the saved policy cannot override disabled deployment execution gates. The archive
+transaction and final reclamation handoff fence and recheck the policy revision,
+movement switch and assigned archive filesystem. Policy changes require replanning;
+they do not change Fact identity, causal selection or frozen Dataset binding.
+Unconfigured/manual canonical retention retains its existing explicit policy.

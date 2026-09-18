@@ -46,7 +46,14 @@ def storage_maintenance_runners(database, *, storage_root, limits_path=None):
     }:
         raise ValueError("storage_maintenance_recovery_fields_invalid")
     validate_recovery_maintenance_limits(**recovery)
+    # The existing lifecycle service owns payload archival; bind it to the
+    # same saved policy as header movement without adding a second scheduler.
+    from ..market.market_storage_lifecycle import MarketStorageLifecycleService
+    from .repos.fact_retention import PostgresCanonicalFactRetentionRepository
     return {
+        "service": MarketStorageLifecycleService(
+            canonical_repository=PostgresCanonicalFactRetentionRepository(database=database),
+            use_saved_history_policy=True),
         "history_runner": partial(run_history_maintenance, database,
             pg_controldata=_PG15/"pg_controldata", resource_limits=history),
         "recovery_runner": partial(run_due_local_recovery, database,

@@ -14,6 +14,13 @@ import pytest
 from sqlalchemy import select, text
 
 from core.storage_targets import StoragePolicy
+from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
+from market_data.archive import FilesystemRawArchiveObjectStore
+from portal.backend.service.market.canonical_retention import CanonicalFactRetentionExecutor
+from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
+from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+from portal.backend.service.storage.repos import market_data as repository_module
+from portal.backend.service.storage.header_admission import lock_header_storage
 from market_data.contracts import DatasetSeriesRequest
 from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
 from portal.backend.db.storage_target_models import StoragePolicyRecord, StorageTargetRecord
@@ -48,7 +55,7 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
     before = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id)
     targets = (storage.copy_plan.recent, storage.copy_plan.history)
     policy = StoragePolicy(recent=("ssd",), history=("hdd",), archives=("hdd",), backups=("hdd",),
-                           recent_days=30, movement_enabled=True, backup_enabled=True)
+                           recent_days=60, movement_enabled=True, backup_enabled=True)
     with storage.database.session() as session:
         assert session.scalar(text("SELECT count(*) FROM market.collection_definitions")) == 0
         for target in targets:
@@ -71,7 +78,16 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
     env.update(
         PG_DSN=storage.database._engine.url.render_as_string(hide_password=False),
         QT_DISABLE_DOTENV="1", QT_LOGGING_DEBUG="false", QT_LOGGING_LOKI_URL="",
-        QT_MARKET_DATA_LIFECYCLE_ENABLED="false", QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED="false",
+        QT_MARKET_DATA_LIFECYCLE_ENABLED="true", QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED="true",
+        QT_MARKET_DATA_LIFECYCLE_ARCHIVE_COMPACTION_ENABLED="false",
+        QT_MARKET_DATA_LIFECYCLE_ARCHIVE_EXPIRATION_ENABLED="false",
+        QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED="true",
+        QT_MARKET_DATA_LIFECYCLE_CANONICAL_HOT_DAYS="90",
+        QT_MARKET_DATA_LIFECYCLE_CANONICAL_HOT_DAYS_BY_FACT_TYPE=json.dumps({"derivatives.funding_rate": 120}),
+        QT_MARKET_DATA_LIFECYCLE_CANONICAL_ARCHIVE_MIN_FREE_BYTES="0",
+        QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_PAGE_LOGICAL_BYTES=str(1024**2),
+        QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_STEPS_PER_RUN="16",
+        QT_MARKET_DATA_LIFECYCLE_CANONICAL_MAX_RUN_SECONDS="120",
         QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS="3600",
         QT_STORAGE_MAINTENANCE_LIMITS_PATH=str(limits_path),
         MARKET_STRUCTURE_STORAGE_ROOT=str(archive), QT_MARKET_DATA_EXPECTED_UUID="uuid-copy-hdd",
@@ -116,16 +132,76 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         with storage.database.session() as session:
             assert session.get(MarketCollectorWorkerStateRecord, seen[-1]).state == "stopped"
 
-    run_process("completed", "completed")
+    def change_policy(**changes):
+        nonlocal policy
+        policy = replace(policy, **changes)
+        with storage.database.session() as session:
+            lock_header_storage(session)
+            row = session.get(StoragePolicyRecord, 1)
+            row.policy = policy.to_dict()
+            row.revision += 1
+
+    # A path outside the assigned HDD cannot become the archival destination.
+    from portal.backend.service.storage.history_policy import saved_canonical_policy
+    with pytest.raises(ValueError, match="history_archive_root_outside_saved_target"):
+        saved_canonical_policy(storage.database,
+            policy=CanonicalFactRetentionPolicy(execution_enabled=True),
+            storage_root=tmp_path)
+
+    # A pause after planning must stop even the first sealing transaction.
+    change_policy(recent_days=7)
+    executor = CanonicalFactRetentionExecutor(
+        repository=PostgresCanonicalFactRetentionRepository(database=storage.database),
+        use_saved_history_policy=True)
+    step = executor._execute_step
+    def pause_after_plan(**kwargs):
+        change_policy(movement_enabled=False)
+        return step(**kwargs)
+    with monkeypatch.context() as fault:
+        fault.setattr(executor, "_execute_step", pause_after_plan)
+        stopped = executor.run(policy=CanonicalFactRetentionPolicy(execution_enabled=True,
+            hot_days=90, hot_days_by_fact_type={"derivatives.funding_rate": 120},
+            archive_min_free_bytes=0, max_page_logical_bytes=1024**2, max_steps_per_run=1),
+            storage_root=archive, execute=True)
+    assert stopped["failure_count"] == 1
+    assert "history_policy_changed" in stopped["outcomes"][0]["error"]
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT state FROM market.fact_retention_partitions WHERE storage_day=:day"),
+                              {"day": old_day}) == "open"
+        assert session.scalar(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
+                              {"day": old_day}) == 4
+
+    # The saved long window protects history; legacy windows are not authority.
+    change_policy(recent_days=60, movement_enabled=True)
+    run_process("idle", "completed")
     first_copies = sorted(path.name for path in copies.glob("copy_*"))
     assert len(first_copies) == 1
     assert (copies/first_copies[0]/"database.dump").is_file()
+    change_policy(recent_days=7, movement_enabled=False)
+    run_process("disabled", "not_due")
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
+                              {"day": old_day}) == 4
+        _assert_disk(session.connection(), "market.fact_versions_"+old_day.strftime("%Y%m%d"),
+                     Path("/qt-source/pgdata"))
+
+    change_policy(movement_enabled=True)
+    run_process("completed", "not_due")
     run_process("idle", "not_due")
-    assert seen[0] != seen[1]
+    assert len(set(seen)) == len(seen)
     assert sorted(path.name for path in copies.glob("copy_*")) == first_copies
     with storage.database.session() as session:
         _assert_disk(session.connection(), "market.fact_versions_"+old_day.strftime("%Y%m%d"), Path("/qt-history"))
         _assert_disk(session.connection(), "market.fact_versions_"+storage.today.strftime("%Y%m%d"), Path("/qt-source/pgdata"))
+        assert session.scalar(text("SELECT state FROM market.fact_retention_partitions WHERE storage_day=:day"),
+                              {"day": old_day}) == "reclaimed"
+        assert session.scalar(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
+                              {"day": old_day}) == 0
+        assert session.scalar(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
+                              {"day": storage.today}) == 4
         assert all(row.reserved_bytes == row.auxiliary_reserved_bytes == 0
                    for row in session.scalars(select(StorageTargetRecord)))
+    reader = FilesystemRawArchiveObjectStore(archive/"objects", writable=False)
+    monkeypatch.setattr(repository_module, "canonical_fact_storage_repository",
+                        PostgresCanonicalFactStorageRepository(object_store_factory=lambda: reader))
     assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
