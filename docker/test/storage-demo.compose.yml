@@ -1,6 +1,8 @@
 # Disposable end-to-end storage fixture. No host paths, ports or credentials.
 services:
   timescaledb:
+    # Match the server's database extension preload, retaining isolated telemetry.
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements"]
     environment:
       PGDATA: /qt-source/pgdata
     volumes:

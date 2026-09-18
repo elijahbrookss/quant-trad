@@ -687,12 +687,14 @@ last, allowing interrupted retirement to resume. Unowned trees, symlinks, foreig
 filesystems and special files are refused. Local copies share the HDD failure
 domain with history; they are not off-server protection.
 
-This operation is not scheduled or exposed through Apply. The caller still must
-acquire the snapshot fence, own capacity against competing storage jobs, provide
-the trusted PostgreSQL utility and connection, and record operational health.
-The filesystem limits are local guards, not a shared capacity reservation.
-Automatic scheduling and capacity ownership remain release blockers until those
-connections are implemented and tested. No new placement controls are added.
+This low-level copy operation does not itself schedule work or handle Apply.
+The due-copy service and configured worker described below acquire its snapshot
+fence, exclude competing storage jobs, supply the PostgreSQL utility/connection
+and report operational health. Those connections are implemented and locally
+tested. The remaining activation blockers are the complete server filesystem
+and ownership rehearsal, measured operating limits and preserving cutover.
+The copy's own filesystem limits remain local guards. No new placement controls
+are added.
 
 ### Due-copy maintenance admission
 
@@ -803,10 +805,19 @@ UID 70 and a shared PostgreSQL PID namespace; it introduces no live host mounts.
 
 This closes the test-image dependency difference when the demonstration passes.
 It does not qualify current server file ownership, change server Compose mounts,
-or authorize activation. A collector-process rehearsal uses the unmodified
-entrypoint with no enrolled acquisition definitions and an internal-only network,
-so its maintenance/heartbeat/shutdown observations must not be described as live
-provider, full acquisition-load or existing-spool permission qualification.
+or authorize activation. The real-process rehearsal runs the backend supervisor
+and its indicator/research workers alongside collector maintenance as UID 70.
+The initializer installs code-owned instruments with all provider enrollment
+disabled. The Storage API must read both drive identities, and a fresh process
+using the production repository must return the same frozen record identities
+and hashes before and after history movement. The fixture retains an internal-only
+network and matches the server's PostgreSQL extension preload.
+
+These checks target common file-owner compatibility. They do not grant the
+backend a real Docker socket, convert root-owned retained files, exercise full
+provider load, or qualify the final server Compose mount arrangement. Those
+remain explicit prerequisites for the preserving deployment, regardless of
+whether the local process rehearsal passes.
 
 Archive object manifests use logical market-archive keys resolved beneath the
 configured object root. A verified root relocation need not rewrite those keys.

@@ -29,6 +29,7 @@ from portal.backend.service.storage.header_destinations import register_header_t
 from portal.backend.service.storage.header_filesystem import verify_header_filesystem
 from portal.backend.service.storage.recovery_copies import _identity
 from tests.test_storage_maintenance_runtime import configuration
+from tests.test_market_data.storage_server_process_fixture import server_peers
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
 from tests.test_market_data.test_fact_header_copy_placement_db import _configure_placement, _assert_disk
 
@@ -40,7 +41,7 @@ pytestmark = [
 CONTROL = Path("/usr/lib/postgresql/15/bin/pg_controldata")
 
 
-def test_real_collector_process_maintains_storage_and_restarts_without_duplicate_copy(storage, tmp_path, monkeypatch):
+def test_real_collector_process_maintains_storage_and_restarts_without_duplicate_copy(storage, tmp_path, monkeypatch, server_peers):
     storage.open_day = storage.today
     _configure_placement(storage, tmp_path, monkeypatch)
     old_day = storage.today-timedelta(days=45)
@@ -79,6 +80,7 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
     env = os.environ.copy()
     env.update(
         PG_DSN=storage.database._engine.url.render_as_string(hide_password=False),
+        QT_CONFIG_PROFILE="prod",
         QT_DISABLE_DOTENV="1", QT_LOGGING_DEBUG="false", QT_LOGGING_LOKI_URL="",
         QT_MARKET_DATA_LIFECYCLE_ENABLED="true", QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED="true",
         QT_MARKET_DATA_LIFECYCLE_ARCHIVE_COMPACTION_ENABLED="false",
@@ -96,6 +98,10 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         MARKET_STRUCTURE_WORKING_ROOT=str(working), QT_MARKET_DATA_WORKING_EXPECTED_UUID="uuid-copy-ssd",
         QT_WORKERS_COLLECTORS_SHUTDOWN_DRAIN_TIMEOUT_SECONDS="10",
     )
+    read_status, peer_frozen_rows = server_peers(env)
+    frozen_identity = [[r.fact_version_id, r.row_hash, r.market_commit_seq,
+                        r.revision, r.fact.known_at.isoformat()] for r in before]
+    assert peer_frozen_rows(frozen.dataset_id, storage.series_id) == frozen_identity
     copies = Path("/qt-history")/"recovery"/namespace
     seen = []
 
@@ -208,3 +214,18 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
     monkeypatch.setattr(repository_module, "canonical_fact_storage_repository",
                         PostgresCanonicalFactStorageRepository(object_store_factory=lambda: reader))
     assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id, series_id=storage.series_id) == before
+    assert peer_frozen_rows(frozen.dataset_id, storage.series_id) == frozen_identity
+    status = read_status()
+    assert all(row["status"] == "available" for row in status["targets"])
+    assert status["policy"]["recent_days"] == 7
+    with storage.database.session() as session:
+        assert session.scalar(text("SELECT count(*) FROM market.collection_definitions")) == 0
+    print("QT_SHARED_OWNER_REPORT="+json.dumps({
+        "configuration_profile": "prod",
+        "real_backend_supervisor_and_worker_pools_started": True,
+        "initializer_installed_local_instruments_without_provider_definitions": True,
+        "storage_api_reads_both_drive_identities": True,
+        "fresh_process_frozen_reads_before_and_after_movement_agree": True,
+        "collector_history_recovery_and_restart_with_api_running": True,
+        "limitation": "shared UID/process namespace fixture, not complete server Compose, Docker socket access or retained ownership migration",
+    }, sort_keys=True))
