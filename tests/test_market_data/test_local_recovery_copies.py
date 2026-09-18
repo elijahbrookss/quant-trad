@@ -124,3 +124,20 @@ def test_corrupt_source_cannot_complete_a_generation(manager,tmp_path):
     with pytest.raises(RuntimeError,match="changed_or_corrupt"):
         manager._object(objects,{"object_key":"sample","object_sha256":"a"*64,"byte_count":5},generation)
     assert not (generation/"complete.json").exists()
+
+
+def test_cancellation_and_resource_loss_stop_before_more_bytes(manager):
+    output=io.BytesIO()
+    digest=hashlib.sha256()
+    manager._write(output,b"saved",digest)
+    manager.cancelled=lambda:True
+    with pytest.raises(RuntimeError,match="recovery_cancelled"):
+        manager._write(output,b"not written",digest)
+    assert output.getvalue()==b"saved"
+    manager.cancelled=None
+    def lost():
+        raise RuntimeError("storage ownership lost")
+    manager.check_resources=lost
+    with pytest.raises(RuntimeError,match="ownership lost"):
+        manager._write(output,b"not written",digest)
+    assert output.getvalue()==b"saved"

@@ -726,7 +726,12 @@ class MarketStorageLifecycleSupervisor:
         service: Optional[MarketStorageLifecycleService] = None,
         storage_root: Path = DEFAULT_STORAGE_ROOT,
         owner_id: Optional[str] = None,
+        recovery_runner=None,
     ) -> None:
+        if recovery_runner is not None and not callable(recovery_runner):
+            raise ValueError("market_storage_recovery_runner_invalid")
+        self.recovery_runner = recovery_runner
+        self._enabled = policy.enabled or recovery_runner is not None
         self.policy = policy
         self.service = service or MarketStorageLifecycleService()
         self.storage_root = Path(storage_root)
@@ -734,7 +739,7 @@ class MarketStorageLifecycleSupervisor:
         self._stop = threading.Event()
         self._snapshot_lock = threading.Lock()
         self._snapshot: dict[str, Any] = {
-            "state": "disabled" if not policy.enabled else "starting",
+            "state": "disabled" if not self._enabled else "starting",
             "policy": policy.to_dict(),
             "last_run": None,
             "last_error": None,
@@ -746,11 +751,11 @@ class MarketStorageLifecycleSupervisor:
         )
 
     def start(self) -> None:
-        if self.policy.enabled:
+        if self._enabled:
             self._thread.start()
 
     def stop(self, *, timeout_seconds: float = 30.0) -> None:
-        if not self.policy.enabled:
+        if not self._enabled:
             return
         self._stop.set()
         self._thread.join(timeout=max(1.0, timeout_seconds))
@@ -764,16 +769,62 @@ class MarketStorageLifecycleSupervisor:
             return dict(self._snapshot)
 
     def run_once(self) -> dict[str, Any]:
-        result = self.service.run(
-            policy=self.policy,
-            storage_root=self.storage_root,
-            execute=self.policy.execution_enabled,
-            owner_id=self.owner_id,
-            cancelled=self._stop.is_set,
-        )
+        recovery = None
+        failure = None
+        try:
+            if self.recovery_runner is not None and not self.policy.enabled:
+                result = {"schema_version": "market.storage_lifecycle_run.v1",
+                          "status": "disabled", "plan": {"summary": {}},
+                          "outcomes": [], "failure_count": 0}
+            else:
+                result = self.service.run(
+                    policy=self.policy,
+                    storage_root=self.storage_root,
+                    execute=self.policy.execution_enabled,
+                    owner_id=self.owner_id,
+                    cancelled=self._stop.is_set,
+                )
+        except MarketStorageLifecycleBusyError:
+            if self.recovery_runner is None:
+                raise
+            result = {"schema_version": "market.storage_lifecycle_run.v1",
+                      "status": "busy", "plan": {"summary": {}},
+                      "outcomes": [], "failure_count": 0}
+        except Exception as exc:
+            if self.recovery_runner is None:
+                raise
+            # Recovery remains useful when retention fails; its runner acquires
+            # independent admission after the failed retention context unwinds.
+            logger.exception("market_storage_lifecycle_phase_failed | owner_id=%s", self.owner_id)
+            failure = f"{type(exc).__name__}: {exc}"
+            result = {"schema_version": "market.storage_lifecycle_run.v1",
+                      "status": "degraded", "plan": {"summary": {}},
+                      "outcomes": [], "failure_count": 1, "error": failure}
+        if self.recovery_runner is not None:
+            if self._stop.is_set():
+                recovery = {"state": "cancelled"}
+            else:
+                try:
+                    recovery = self.recovery_runner(cancelled=self._stop.is_set)
+                    if not isinstance(recovery, dict) or recovery.get("state") not in {
+                        "disabled", "unconfigured", "busy", "not_due", "blocked", "completed",
+                    }:
+                        raise RuntimeError("market_storage_recovery_result_invalid")
+                except Exception as exc:
+                    if self._stop.is_set() and str(exc) == "recovery_cancelled":
+                        recovery = {"state": "cancelled"}
+                    else:
+                        logger.exception("market_storage_recovery_phase_failed | owner_id=%s", self.owner_id)
+                        recovery = {"state": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                if recovery["state"] in {"blocked", "failed"}:
+                    result["status"] = "degraded"
+                    result["failure_count"] += 1
+                    detail = recovery.get("error") or recovery.get("reason") or recovery["state"]
+                    failure = f"{failure}; recovery: {detail}" if failure else f"recovery: {detail}"
+            result["local_recovery"] = recovery
         with self._snapshot_lock:
             self._snapshot = {
-                "state": "running",
+                "state": "degraded" if failure else "running",
                 "policy": self.policy.to_dict(),
                 "last_run": {
                     "status": result["status"],
@@ -782,8 +833,9 @@ class MarketStorageLifecycleSupervisor:
                     "canonical_retention": {name: result.get("canonical_retention", {}).get(name)
                         for name in ("status", "stop_reason", "next_after_storage_day", "failure_count")},
                     "finished_at": datetime.now(UTC).isoformat(),
+                    **({"local_recovery": recovery} if recovery is not None else {}),
                 },
-                "last_error": None,
+                "last_error": failure,
             }
         return result
 

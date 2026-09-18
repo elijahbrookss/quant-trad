@@ -492,3 +492,9 @@ backfills bounds over existing headers. See
 [ADR 0071](../decisions/0071-route-range-reads-through-series-day-directory.md)
 for the snapshot and write-cost tradeoff. Physical placement and the existing
 tiered-v1 shadow migration remain separate, unfinished work.
+
+
+The existing locked snapshot session also supports nonwaiting admission for
+bounded maintenance. It acquires the same shared session fence before establishing
+repeatable visibility; if busy, it yields no snapshot and returns no ambiguously
+locked connection to the pool. Ordinary dataset callers retain waiting admission.

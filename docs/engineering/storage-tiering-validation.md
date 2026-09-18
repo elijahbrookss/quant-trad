@@ -631,3 +631,30 @@ The byte limit covers streamed dump/archive/inventory contents; filesystem
 allocation overhead, concurrent growth and other jobs still belong in the
 capacity budget. Recovery generations on the same HDD do not protect against
 losing that drive. No new UI controls, server changes, merge or deployment occurred.
+
+### Due recovery and existing maintenance loop
+
+The saved backup interval/count now drive an internal due-copy service. Disposable
+validation confirmed disabled policy creates no copy, competing management or
+archive-expiry work is skipped, insufficient creation capacity is refused, and
+a successful copy suppresses another before its next due time. Cancellation and
+low source-drive headroom preserve the completed copy. Ownership is released on
+every checked refusal so later maintenance can proceed.
+
+The existing lifecycle supervisor executed the real due-copy service and reported
+its result separately. Focused loop checks confirmed recovery still runs after
+retention fails or is busy, a failed/blocked recovery result remains visible, and
+a recovery-only loop never executes disabled retention. Shutdown cancellation
+ended an active recovery attempt without leaving the recurring thread running.
+The ordinary supervisor's behavior without a recovery runner remains covered.
+
+The full populated generation/restore proof also passed with the maintenance
+admission changes. The final loop integration only changes the caller and busy
+outcome; it does not change the verified dump, archive-copy or restore sequence.
+Backend and documentation validation completed, and all owned test stacks were
+removed.
+
+This is local capability and validation. Production composition still must supply
+the verified PostgreSQL namespace, trusted utilities and measured growth/copy
+budgets. The current production collector entrypoint does not supply that runner.
+No policy activation, live backup, server change, merge or deployment occurred.

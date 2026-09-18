@@ -103,7 +103,7 @@ class LocalRecoveryCopies:
 
     def __init__(self, *, target: StorageTarget, database_identity: str,
                  max_bytes: int, reserve_bytes: int, timeout_seconds: int,
-                 max_objects: int = 1000000):
+                 max_objects: int = 1000000, cancelled=None, check_resources=None):
         if (target.medium != "hdd" or target.state != "active" or "backups" not in target.roles
                 or not re.fullmatch(r"[0-9]+/[0-9]+", database_identity)):
             raise ValueError("recovery_target_or_database_invalid")
@@ -113,6 +113,9 @@ class LocalRecoveryCopies:
         ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError("recovery_budget_invalid")
+        if any(value is not None and not callable(value) for value in (cancelled, check_resources)):
+            raise ValueError("recovery_control_callback_invalid")
+        self.cancelled, self.check_resources = cancelled, check_resources
         observed = target.inspect(require_writable=True)
         self.target, self.identity = target, database_identity
         self.device = Path(observed.path).stat().st_dev
@@ -129,8 +132,12 @@ class LocalRecoveryCopies:
         _sync(self.target_root)
 
     def check(self, additional=0):
+        if self.cancelled is not None and self.cancelled():
+            raise RuntimeError("recovery_cancelled")
         if monotonic() >= self.deadline:
             raise RuntimeError("recovery_time_budget_exceeded")
+        if self.check_resources is not None:
+            self.check_resources()
         evidence = self.target.inspect(require_writable=True)
         if (Path(evidence.path) != self.target_root
                 or self.target_root.stat().st_dev != self.device

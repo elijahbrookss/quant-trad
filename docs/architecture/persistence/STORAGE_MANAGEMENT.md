@@ -21,6 +21,7 @@ code_paths:
   - portal/backend/service/storage/header_resources.py
   - portal/backend/service/storage/header_resource_claims.py
   - portal/backend/service/storage/recovery_copies.py
+  - portal/backend/service/storage/recovery_maintenance.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -638,3 +639,28 @@ the trusted PostgreSQL utility and connection, and record operational health.
 The filesystem limits are local guards, not a shared capacity reservation.
 Automatic scheduling and capacity ownership remain release blockers until those
 connections are implemented and tested. No new placement controls are added.
+
+### Due-copy maintenance admission
+
+The internal run_due_local_recovery service reads the existing saved interval and
+copy count. It uses the existing storage-management transaction lock to exclude
+movement and new reservations while making a recovery copy; current reservations
+remain unavailable. A busy owner skips this attempt. It verifies PGDATA, WAL and
+temporary allocation roots with the existing PostgreSQL namespace observer.
+The configured recent SSD must actually serve PGDATA, default database files and
+WAL. The archive root must belong to a registered archive target.
+
+Before starting, it admits the explicit copy byte budget plus the policy reserve,
+existing reservations and caller-declared growth/allocation headroom. During work
+it rechecks both drives, capacity and the still-held database ownership. The
+primitive checks shutdown cancellation between chunks and while polling pg_dump,
+then kills and reaps that child if cancelled. The archive-expiry snapshot uses
+nonwaiting fence admission so an ongoing expiry cannot make shutdown wait for
+an unbounded lock.
+
+This service supplies a due decision and copy execution, not a second scheduler.
+Its budgets must come from the measured deployment plan. The existing lifecycle supervisor now has an optional recovery runner after
+retention releases its transaction, with independent outcomes and cancellation.
+The production entrypoint does not supply the verified namespace and measured
+budgets yet, and Storage Apply remains blocked. Deployment composition, portal
+status and final measured limits remain necessary.

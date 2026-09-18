@@ -300,6 +300,10 @@ def _redact_dsn_for_log(dsn: Optional[str]) -> str:
     return url.render_as_string(hide_password=True)
 
 
+class DatabaseSnapshotBusyError(RuntimeError):
+    """A nonwaiting reader did not acquire the shared snapshot fence."""
+
+
 class Database:
     """Lightweight wrapper around SQLAlchemy engine/session handling."""
 
@@ -391,7 +395,8 @@ class Database:
             session.close()
 
     @contextmanager
-    def locked_snapshot_session(self, *, shared_lock_name: str) -> Iterator[Session]:
+    def locked_snapshot_session(self, *, shared_lock_name: str,
+                                wait_for_lock: bool = True) -> Iterator[Session]:
         """Take a session fence before the repeatable snapshot, on one connection.
 
         A blocking advisory-lock SELECT inside REPEATABLE READ establishes its
@@ -400,13 +405,20 @@ class Database:
         """
         if not shared_lock_name:
             raise ValueError("database_snapshot_lock_name_required")
+        if type(wait_for_lock) is not bool:
+            raise ValueError("database_snapshot_wait_flag_invalid")
         if not self.ensure_schema():
             raise RuntimeError("Portal database is not available")
         assert self._engine is not None
         params = {"name": shared_lock_name}
         with self._engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
             try:
-                connection.execute(text("SELECT pg_advisory_lock_shared(hashtextextended(:name, 0))"), params)
+                if wait_for_lock:
+                    connection.execute(text("SELECT pg_advisory_lock_shared(hashtextextended(:name, 0))"), params)
+                elif not connection.execute(text(
+                    "SELECT pg_try_advisory_lock_shared(hashtextextended(:name, 0))"
+                ), params).scalar_one():
+                    raise DatabaseSnapshotBusyError("database_snapshot_busy")
                 connection.commit()
             except BaseException:
                 connection.invalidate()
