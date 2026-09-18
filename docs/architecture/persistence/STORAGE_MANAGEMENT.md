@@ -20,6 +20,7 @@ code_paths:
   - portal/backend/service/storage/header_movement.py
   - portal/backend/service/storage/header_resources.py
   - portal/backend/service/storage/header_resource_claims.py
+  - portal/backend/service/storage/recovery_copies.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -608,3 +609,32 @@ These are clean-model columns, not a runtime migration. Existing installations
 require an explicit reviewed schema cutover. The claimed allowances remain
 declared estimates; producer-limit enforcement, supervisor cancellation,
 application performance and the existing-data migration remain required.
+
+
+## Bounded local recovery generations
+
+The internal recovery_copies operation writes one PostgreSQL custom dump and
+the snapshot's referenced archive objects to a private directory on the existing
+HDD. It admits only a repeatable snapshot holding the actual shared archive-expiry
+fence. Raw/checkpoint objects already recorded expired are excluded; canonical
+archive pages remain required. Collection may continue outside the snapshot.
+
+The configured drive UUID is rechecked during work. Byte, object, elapsed-time
+and free-space limits stop the attempt without publishing a completed copy.
+Object lengths and SHA-256 are checked; the dump subprocess is terminated and
+reaped on failure. Completion is published only after files and directories are
+synced. A failed attempt retains earlier completed copies. Retry removes only
+marked private partial copies belonging to this database and drive.
+
+Rotation starts only after a new copy is durable. Old generations are renamed
+out of the completed set before retirement; their ownership marker is removed
+last, allowing interrupted retirement to resume. Unowned trees, symlinks, foreign
+filesystems and special files are refused. Local copies share the HDD failure
+domain with history; they are not off-server protection.
+
+This operation is not scheduled or exposed through Apply. The caller still must
+acquire the snapshot fence, own capacity against competing storage jobs, provide
+the trusted PostgreSQL utility and connection, and record operational health.
+The filesystem limits are local guards, not a shared capacity reservation.
+Automatic scheduling and capacity ownership remain release blockers until those
+connections are implemented and tested. No new placement controls are added.

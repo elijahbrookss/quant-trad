@@ -609,3 +609,25 @@ rotation, full-volume restore duration/space, the preserving migration within
 blockers. The corrected restore sequence is exercised by the fixture; it is not
 yet a deployed operator or unattended recovery service. No merge, deployment,
 production data movement or seven-day waiting gate occurred.
+
+### Bounded recovery creation and rotation, 2026-09-18
+
+The recovery rehearsal now uses the implemented local generation operation,
+rather than test-only dump/copy orchestration. It publishes a verified database
+dump plus the snapshot's required archive objects, retains two completed copies,
+and restores the newest copy. A forced byte-budget failure preserved the earlier
+completed copy. Retry removed the marked partial, and a third successful copy
+retired only the oldest completed generation.
+
+Full startup, recent/history/frozen queries, book replay and the physical
+metadata/index locations remained correct after restoration. Separate filesystem
+failure checks preserved unrelated files, refused corrupt archives and changed
+drive identity, excluded a second writer, and resumed interrupted retirement.
+The test stack was removed after completion.
+
+This is implemented and tested locally. Runtime scheduling, shared capacity
+admission and shutdown cancellation remain required before activating it.
+The byte limit covers streamed dump/archive/inventory contents; filesystem
+allocation overhead, concurrent growth and other jobs still belong in the
+capacity budget. Recovery generations on the same HDD do not protect against
+losing that drive. No new UI controls, server changes, merge or deployment occurred.

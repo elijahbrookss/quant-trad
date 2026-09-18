@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine,text
@@ -16,6 +15,8 @@ from sqlalchemy.engine import make_url
 
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.db.session import Database
+from core.storage_targets import StorageTarget
+from portal.backend.service.storage.recovery_copies import LocalRecoveryCopies
 from portal.backend.service.market.market_structure_service import MarketStructureService
 from portal.backend.service.storage.repos import market_data,market_structure,market_lifecycle
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
@@ -94,13 +95,23 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
     replay=MarketStructureService(repository=market_structure.PostgresMarketStructureRepository())
     replays={tuple(pair):replay.replay_book_session(definition_id=pair[0],session_id=pair[1],
                                                    storage_root=source_root) for pair in sessions}
-    archives=_files(source_root)
-    original_inodes={str(p.relative_to(source_root)):p.stat().st_ino for p in source_root.rglob("*") if p.is_file()}
-    recovery=history_root/("qt_restore_proof_"+uuid4().hex)
-    recovery.mkdir()
-    dump=recovery/"database.dump"
+    archives=_files(source_root/"objects")
+    original_inodes={str(p.relative_to(source_root/"objects")):p.stat().st_ino
+                     for p in (source_root/"objects").rglob("*") if p.is_file()}
+    udev=tmp_path/"recovery-udev"
+    udev.mkdir()
+    device=history_root.stat().st_dev
+    (udev/f"b{os.major(device)}:{os.minor(device)}").write_text("E:ID_FS_UUID=uuid-recovery-history\\n".replace("\\n","\n"))
+    monkeypatch.setenv("QT_STORAGE_UDEV_ROOT",str(udev))
+    target=StorageTarget("hdd","History","uuid-recovery-history",str(history_root),"hdd")
+    def copies(identity,*,max_bytes=16*1024**2):
+        return LocalRecoveryCopies(target=target,database_identity=identity,max_bytes=max_bytes,
+                                   reserve_bytes=1024**2,timeout_seconds=120,max_objects=1000)
     with PostgresMarketStorageLifecycleRepository.dataset_snapshot_session(database=storage.database) as snapshot:
-        exported=snapshot.execute(text("SELECT pg_export_snapshot()")).scalar_one()
+        identity=snapshot.scalar(text("""
+            SELECT c.system_identifier::text||'/'||d.oid::text
+            FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()
+        """))
         snapshot_rows=snapshot.execute(text("SELECT count(*) FROM market.fact_versions")).scalar_one()
         with engine.connect() as contender:
             assert not contender.scalar(text("SELECT pg_try_advisory_lock(hashtextextended(:name,0))"),
@@ -108,10 +119,29 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
         # This commit must remain on the source but outside the recovery snapshot.
         after=replace(recent,observation_key="recovery-after-snapshot")
         assert storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,facts=[after]).inserted_count==1
-        _client("pg_dump",storage.dsn,"--format=custom","--no-owner","--no-privileges",
-                "--snapshot="+exported,"--file="+str(dump))
-        shutil.copytree(source_root,recovery/"archives")
-        assert _files(recovery/"archives")==archives
+        objects=FilesystemRawArchiveObjectStore(source_root/"objects",writable=False)
+        options={"objects":objects,"pg_dump":Path("/usr/lib/postgresql/15/bin/pg_dump"),"keep_copies":2}
+        first_manager=copies(identity)
+        first=first_manager.create(snapshot,**options)
+        first_path=first_manager.root/first["name"]
+        # A failed new copy cannot retire the known completed generation.
+        with pytest.raises(RuntimeError,match="recovery_byte_budget_exceeded"):
+            copies(identity,max_bytes=1).create(snapshot,**options)
+        assert first_path.is_dir()
+        second=copies(identity).create(snapshot,**options)
+        second_path=first_manager.root/second["name"]
+        assert first_path.is_dir() and second_path.is_dir()
+        third=copies(identity).create(snapshot,**options)
+        recovery=first_manager.root/third["name"]
+        dump=recovery/"database.dump"
+        assert not first_path.exists() and second_path.is_dir() and recovery.is_dir()
+        assert not list(first_manager.root.glob(".copy_*"))
+        inventory=[json.loads(line) for line in (recovery/"objects.jsonl").read_text().splitlines()]
+        copied=_files(recovery/"objects")
+        assert copied=={item["object_key"]:item["sha256"] for item in inventory}
+        assert copied=={key:archives[key] for key in copied}
+        assert third["archive_objects"]==len(copied)
+        assert third["database"]["sha256"]==hashlib.sha256(dump.read_bytes()).hexdigest()
     assert dump.stat().st_size>0
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT count(*) FROM market.fact_versions"))==snapshot_rows+1
@@ -123,10 +153,11 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
     # out of the reader path. No hardlinks or fallback to source files qualify.
     retained=tmp_path/"retained-source-archives"
     source_root.rename(retained)
-    shutil.copytree(recovery/"archives",source_root)
-    assert _files(source_root)==archives
-    assert all(p.stat().st_ino!=original_inodes[str(p.relative_to(source_root))]
-               for p in source_root.rglob("*") if p.is_file())
+    source_root.mkdir()
+    shutil.copytree(recovery/"objects",source_root/"objects")
+    assert _files(source_root/"objects")==copied
+    assert all(p.stat().st_ino!=original_inodes[str(p.relative_to(source_root/"objects"))]
+               for p in (source_root/"objects").rglob("*") if p.is_file())
     with fresh_migration_database("storage_restore") as restored_dsn:
         restore_engine=create_engine(restored_dsn)
         try:
@@ -187,7 +218,9 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
         "startup_recent_history_frozen_and_book_replay_preserved":True,
         "shared_metadata_and_indexes_restored_on_history":True,
         "database_dump_bytes":dump.stat().st_size,
-        "archive_copy_bytes":sum(p.stat().st_size for p in (recovery/"archives").rglob("*") if p.is_file()),
-        "routine_rotation_implemented":False,
+        "archive_copy_bytes":sum(p.stat().st_size for p in (recovery/"objects").rglob("*") if p.is_file()),
+        "local_generation_rotation_implemented":True,
+        "failed_copy_preserves_completed_and_retry_cleans_partial":True,
+        "routine_scheduling_implemented":False,
         "limits":["tiny disposable data","not production capacity or restore-duration qualification"],
     },sort_keys=True))
