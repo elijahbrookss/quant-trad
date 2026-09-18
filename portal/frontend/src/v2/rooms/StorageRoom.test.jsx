@@ -28,6 +28,16 @@ describe('Storage settings', () => {
     expect(await screen.findByText(/Movement: unknown/)).toHaveTextContent('Backup: unknown')
     expect(screen.getByText('Advanced').closest('details')).not.toHaveAttribute('open')
   })
+  it('keeps a current backup failure visible alongside an older copy date', async () => {
+    api.readStorage.mockResolvedValue({ ...snapshot, health: 'needs_attention',
+      movement: { state: 'stale' },
+      backup: { state: 'failed', last_completed_at: '2026-09-17T12:00:00Z' } })
+    render(<StorageRoom />)
+    const health = await screen.findByText(/Movement: stale/)
+    expect(health).toHaveTextContent('Backup: failed')
+    expect(health).toHaveTextContent('Last copy:')
+    expect(screen.getByText('Advanced').closest('details')).not.toHaveAttribute('open')
+  })
   it('shows missing capacity instead of an empty healthy usage bar', async () => {
     api.readStorage.mockResolvedValue({ ...snapshot, targets: [{ ...target('hdd', 'hdd'), status: 'unavailable', capacity: null }] })
     render(<StorageRoom />)

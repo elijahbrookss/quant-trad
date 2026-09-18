@@ -54,6 +54,7 @@ def _finish(session,plan,batch,move):
                    "finished_at":move.updated_at.isoformat()}
     session.flush()
     return {"state":"completed","plan_id":plan.id,"move_id":move.id,
+            "policy_revision":plan.base_revision,"policy_hash":plan.policy_hash,
             "storage_day":move.storage_day.isoformat(),"finished_at":move.updated_at.isoformat()}
 
 
@@ -133,7 +134,8 @@ def _prepare(database,*,pg_controldata,limits,cancelled):
             return {"state":"blocked","reason":"history_placement_not_admitted",
                     "blockers":review["blockers"]}
         if not review["moves"]:
-            return {"state":"idle"}
+            return {"state":"idle","policy_revision":config.revision,
+                    "policy_hash":policy.fingerprint}
         _cancelled(cancelled)
         now=session.scalar(text("SELECT clock_timestamp()"))
         identity="history_auto_"+uuid4().hex

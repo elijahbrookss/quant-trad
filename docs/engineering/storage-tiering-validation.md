@@ -741,3 +741,22 @@ production runners or public Apply, establish actual HDD performance, complete
 the preserving operator migration, or measure whole-system runway. Those remain
 release blockers. The local topology uses separate disposable filesystems; it is
 not the server's SSD/HDD pair and supplies no hardware acceptance claim.
+
+### Minimal Storage health from existing worker evidence, 2026-09-18
+
+The real saved-policy movement and recovery scenarios now persist their lifecycle
+snapshots in the existing collector worker-state table and read them through the
+Storage service. Successful history appears only for the observed policy; a new
+revision makes the previous success unconfirmed, and an expired heartbeat makes
+it stale. The real completed recovery copy is visible as not due. An injected
+subsequent recovery failure replaces that success with failed/needs_attention.
+
+Focused checks also prevent a fresh heartbeat from refreshing an old maintenance
+result, prevent one worker's freshness from validating another worker's success,
+and keep in-progress work separate from completion. The existing compact page
+shows backup state independently of any last-copy timestamp, so an older copy
+cannot conceal a newer failure. No new controls, tables or scheduler were added.
+
+This is local implementation and disposable validation of the status connection.
+It does not configure production runners, enable Apply, qualify actual HDD
+performance, or complete the preserving migration and capacity forecast.

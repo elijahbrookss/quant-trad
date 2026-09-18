@@ -746,6 +746,11 @@ class MarketStorageLifecycleSupervisor:
             "policy": policy.to_dict(),
             "last_run": None,
             "last_error": None,
+            "maintenance": {
+                key: {"configured": runner is not None, "state": "starting"}
+                for key, runner in (("history_movement", history_runner),
+                                    ("local_recovery", recovery_runner))
+            },
         }
         self._thread = threading.Thread(
             target=self._run,
@@ -772,6 +777,9 @@ class MarketStorageLifecycleSupervisor:
             return dict(self._snapshot)
 
     def run_once(self) -> dict[str, Any]:
+        with self._snapshot_lock:
+            if self._snapshot["state"] in {"starting", "disabled"}:
+                self._snapshot["state"] = "running"
         phase_results = {}
         failure = None
         followups = self.history_runner is not None or self.recovery_runner is not None
@@ -817,6 +825,12 @@ class MarketStorageLifecycleSupervisor:
             if self._stop.is_set():
                 outcome = {"state": "cancelled"}
             else:
+                with self._snapshot_lock:
+                    self._snapshot["maintenance"] = {
+                        **self._snapshot["maintenance"],
+                        key: {"configured": True, "state": "running",
+                              "started_at": datetime.now(UTC).isoformat()},
+                    }
                 try:
                     outcome = runner(cancelled=self._stop.is_set)
                     if not isinstance(outcome, dict) or outcome.get("state") not in states:
@@ -834,6 +848,13 @@ class MarketStorageLifecycleSupervisor:
                     failure = f"{failure}; {name}: {detail}" if failure else f"{name}: {detail}"
             phase_results[key] = outcome
             result[key] = outcome
+            with self._snapshot_lock:
+                self._snapshot["maintenance"] = {
+                    **self._snapshot["maintenance"],
+                    key: {"configured": True, "state": outcome["state"],
+                          "checked_at": datetime.now(UTC).isoformat(),
+                          "outcome": dict(outcome)},
+                }
         with self._snapshot_lock:
             self._snapshot = {
                 "state": "degraded" if failure or result["failure_count"] else "running",
@@ -848,6 +869,7 @@ class MarketStorageLifecycleSupervisor:
                     **phase_results,
                 },
                 "last_error": failure,
+                "maintenance": self._snapshot["maintenance"],
             }
         return result
 

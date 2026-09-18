@@ -117,7 +117,8 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                 raise RuntimeError("recovery_completion_clock_ahead")
             next_due=last+timedelta(hours=policy.backup_interval_hours)
             if now<next_due:
-                return {"state":"not_due","last_completed_at":last.isoformat(),
+                return {"state":"not_due","policy_revision":config.revision,
+                        "policy_hash":policy.fingerprint,"last_completed_at":last.isoformat(),
                         "next_due_at":next_due.isoformat(),"completed_copies":len(completed)}
         resources()
         if history.inspect(require_writable=True).available_bytes<floors[history.target_id]+max_bytes:
@@ -147,5 +148,6 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                     receipt["name"],config.revision)
         return {"state":"completed","last_completed_at":receipt["completed_at"],
                 "generation":receipt["name"],"policy_revision":config.revision,
+                "policy_hash":policy.fingerprint,
                 "next_due_at":(datetime.fromisoformat(receipt["completed_at"])
                                +timedelta(hours=policy.backup_interval_hours)).isoformat()}

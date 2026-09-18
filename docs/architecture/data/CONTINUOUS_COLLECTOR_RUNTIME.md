@@ -434,8 +434,12 @@ the same recurring thread, in that order; no second timer is introduced. History
 handles at most one eligible day per pass so recovery has a turn between moves.
 An exception or busy retention phase does not suppress these attempts, and a
 history failure does not suppress recovery. Each phase has a separate outcome in
-the worker's lifecycle snapshot. Failures returned by retention remain degraded
-even if the following phases succeed. Shutdown cancellation reaches active work
+the worker's lifecycle snapshot. Configured phases publish in-progress state before
+calling their runner and timestamp their returned outcome afterward. The
+existing collector heartbeat persists these observations for Storage settings;
+an active heartbeat alone is not evidence of a successful maintenance pass.
+Failures returned by retention remain degraded even if the following phases
+succeed. Shutdown cancellation reaches active work
 and skips later phases. A maintenance-only configuration never executes disabled
 retention.
 

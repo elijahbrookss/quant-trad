@@ -23,6 +23,7 @@ code_paths:
   - portal/backend/service/storage/recovery_copies.py
   - portal/backend/service/storage/recovery_maintenance.py
   - portal/backend/service/storage/history_maintenance.py
+  - portal/backend/service/storage/maintenance_status.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -60,8 +61,27 @@ target ID or registering the same filesystem twice is rejected.
 
 GET /api/storage reports enrollment, observed filesystem capacity, policy
 revision, recent plans and prepared candidates. Filesystem availability alone
-does not prove that movement or backups are working. Their status is explicitly
-unknown or unconfigured until authoritative execution evidence exists.
+does not prove that movement or backups are working. The existing collector
+worker heartbeat carries each configured maintenance phase's in-progress state
+and latest outcome. Storage reads that persisted evidence; it neither runs
+maintenance nor reads private files to manufacture success.
+
+For an enabled phase, the status requires exactly one live configured worker.
+Expired/stopped workers, missing configuration, ambiguous ownership, malformed
+timestamps and an observation older than one maintenance interval plus its
+heartbeat TTL cannot appear successful. A fresh process heartbeat does not
+refresh an old maintenance result. Successful history and backup outcomes must
+match both the saved policy revision and its content hash. A changed policy
+therefore remains unconfirmed until a corresponding maintenance observation.
+Backup due times are exposed separately from the last completed copy.
+
+Blocked plans, stale/failed maintenance and degraded lifecycle reports make the
+overall status needs_attention even when both filesystems are mounted. Running
+work is reported separately from completion. Disabled policy phases remain
+explicitly disabled. The compact page always shows the current backup state;
+a last-copy timestamp cannot replace and hide a newer failure. This is observed
+worker execution evidence, not a new scheduler, readiness certificate or
+substitute for a restore test.
 
 POST /api/storage/plans validates a complete policy against its base revision.
 The durable request ID prevents retries from creating different plans.
@@ -694,8 +714,9 @@ supervisor accepts optional history and recovery runners after retention release
 its transaction. Each phase has an independent outcome and shutdown cancellation;
 a failed history phase does not suppress the recovery attempt.
 The production entrypoint does not supply the verified namespace and measured
-budgets yet, and Storage Apply remains blocked. Deployment composition, portal
-status and final measured limits remain necessary.
+budgets yet, and Storage Apply remains blocked. Deployment composition and final
+measured limits remain necessary; portal status consumes worker evidence only
+when those runners are actually configured.
 
 ### Saved-policy historical maintenance
 
@@ -724,5 +745,5 @@ ownership before recovery is considered on the existing lifecycle thread.
 
 This is an internal execution seam, not public activation. The production
 entrypoint still needs the verified PostgreSQL filesystem namespace, qualified
-limits and authoritative portal health. Storage Apply remains unavailable until
+limits. Portal health now projects its persisted phase evidence. Storage Apply remains unavailable until
 those release prerequisites are met.

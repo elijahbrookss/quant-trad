@@ -1,6 +1,6 @@
 """Saved policy advances one real day, recovers, and leaves existing HDD work alone."""
 from dataclasses import replace
-from datetime import timedelta
+from datetime import timedelta, datetime, UTC
 import os
 from pathlib import Path
 
@@ -10,6 +10,8 @@ from sqlalchemy import event, select, text
 from core.market_storage_lifecycle import MarketStorageLifecyclePolicy
 from core.storage_targets import StoragePolicy
 from market_data.contracts import DatasetSeriesRequest
+from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
+from portal.backend.service.storage_management import StorageManagementService
 from portal.backend.db.storage_target_models import (
     StorageHeaderMoveRecord,StoragePlanRecord,StoragePolicyRecord,StorageTargetRecord,
 )
@@ -163,3 +165,27 @@ def test_saved_history_policy_recovers_and_advances_without_duplicate_moves(stor
         assert len(list(session.scalars(select(StoragePlanRecord))))==3
     assert storage.repo.read_dataset_fact_revisions(
         dataset_id=frozen.dataset_id,series_id=storage.series_id)==before
+
+
+    # The portal consumes the persisted worker snapshot, not filesystem availability.
+    now = datetime.now(UTC)
+    with storage.database.session() as session:
+        session.add(MarketCollectorWorkerStateRecord(
+            worker_id="history-status", worker_role="scheduled_market_fact_collector",
+            worker_version="disposable", state="idle", started_at=now,
+            heartbeat_at=now, expires_at=now+timedelta(seconds=30),
+            capabilities={}, context={"storage_lifecycle": supervisor.snapshot()}))
+    status_service = StorageManagementService(storage.database, inventory_path=tmp_path/"no-inventory.json")
+    snapshot = status_service.snapshot()
+    assert snapshot["movement"]["state"] == "idle"
+    assert snapshot["backup"]["state"] == "disabled"
+    assert snapshot["health"] == "available"
+    with storage.database.session() as session:
+        session.get(StoragePolicyRecord, 1).revision += 1
+    snapshot = status_service.snapshot()
+    assert snapshot["movement"]["state"] == "unknown"
+    assert snapshot["movement"]["reason"] == "maintenance_policy_changed"
+    assert snapshot["health"] == "needs_attention"
+    with storage.database.session() as session:
+        session.get(MarketCollectorWorkerStateRecord, "history-status").expires_at = now-timedelta(seconds=1)
+    assert status_service.snapshot()["movement"]["state"] == "stale"

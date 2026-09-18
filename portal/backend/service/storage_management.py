@@ -20,6 +20,8 @@ from core.storage_inventory import read_storage_inventory
 from core.storage_mounts import StorageMountError
 from core.storage_targets import STORAGE_ROLES, StoragePolicy, StorageTarget
 from portal.backend.db import db
+from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
+from portal.backend.service.storage.maintenance_status import maintenance_status
 from portal.backend.db.storage_target_models import StoragePlanRecord, StoragePolicyRecord, StorageTargetRecord
 
 
@@ -81,22 +83,35 @@ class StorageManagementService:
                           for target in inventory if target.target_id not in registered_ids]
             active_plan = session.scalar(select(StoragePlanRecord).where(
                 StoragePlanRecord.state.in_(("queued", "running", "blocked"))).limit(1))
+            workers = []
+            if policy and (policy.get("movement_enabled") or policy.get("backup_enabled")):
+                model = MarketCollectorWorkerStateRecord
+                workers = session.execute(select(
+                    model.worker_id, model.state, model.heartbeat_at, model.expires_at, model.context
+                ).where(model.worker_role == "scheduled_market_fact_collector",
+                         model.expires_at > text("now() - interval '24 hours'"))
+                  .order_by(model.expires_at.desc()).limit(101)).mappings().all()
+            observed_at = session.scalar(text("SELECT clock_timestamp()"))
+            maintenance = maintenance_status(workers, policy=policy,
+                revision=config.revision if config else 0, now=observed_at)
+            attention = {"unknown", "unavailable", "stale", "failed", "blocked", "cancelled", "overdue"}
             if not registered or policy is None:
                 health = "unconfigured"
-            elif any(row["status"] != "available" for row in rows):
+            elif (any(row["status"] != "available" for row in rows)
+                  or (active_plan is not None and active_plan.state == "blocked")
+                  or any(value["state"] in attention or value.get("lifecycle_state") == "degraded"
+                         for value in maintenance.values())):
                 health = "needs_attention"
-            elif active_plan:
+            elif active_plan or any(value["state"] in {"running", "busy", "due"} for value in maintenance.values()):
                 health = "changing"
             else:
                 health = "available"
             return {
-                "schema_version": "qt.storage_status.v1", "observed_at": datetime.now(UTC).isoformat(),
+                "schema_version": "qt.storage_status.v1", "observed_at": observed_at.isoformat(),
                 "revision": config.revision if config else 0, "policy": policy,
                 "targets": rows, "candidates": candidates, "plans": [_plan(record) for record in plans],
                 "health": health, "active_plan": _plan(active_plan) if active_plan else None,
-                # Filesystem availability cannot assert lifecycle or backup success.
-                "movement": {"state": "unconfigured" if policy is None else "unknown", "last_completed_at": None},
-                "backup": {"state": "unconfigured" if policy is None else "unknown", "last_completed_at": None},
+                **maintenance,
             }
 
     def register(self, target_id: str) -> dict[str, Any]:

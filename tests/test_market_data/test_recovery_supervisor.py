@@ -145,3 +145,27 @@ def test_reported_retention_failures_remain_degraded_after_successful_maintenanc
     worker.run_once()
     assert worker.snapshot()["state"]=="degraded"
     assert worker.snapshot()["last_run"]["failure_count"]==1
+
+
+def test_in_progress_phase_is_visible_before_it_finishes():
+    entered, release = Event(), Event()
+    def history(*, cancelled):
+        entered.set()
+        assert release.wait(2)
+        return {"state": "idle", "policy_revision": 4, "policy_hash": "saved"}
+    worker = MarketStorageLifecycleSupervisor(
+        policy=MarketStorageLifecyclePolicy(enabled=False), history_runner=history)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        during = worker.snapshot()
+        assert during["maintenance"]["history_movement"]["state"] == "running"
+        assert during["maintenance"]["history_movement"]["started_at"]
+        assert not during["maintenance"]["local_recovery"]["configured"]
+    finally:
+        release.set()
+        worker.stop(timeout_seconds=2)
+    final = worker.snapshot()["maintenance"]["history_movement"]
+    assert final["state"] == "idle" and final["checked_at"]
+    assert final["outcome"]["policy_revision"] == 4
+    assert during["maintenance"]["history_movement"]["state"] == "running"

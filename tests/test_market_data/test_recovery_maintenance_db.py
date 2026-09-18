@@ -1,5 +1,6 @@
 """Due-copy policy, namespace and capacity ownership on disposable filesystems."""
 import os
+from datetime import datetime, UTC, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +11,8 @@ from core.storage_targets import StoragePolicy,StorageTarget
 from core.market_storage_lifecycle import MarketStorageLifecyclePolicy
 from portal.backend.service.market.market_storage_lifecycle import MarketStorageLifecycleSupervisor
 from portal.backend.db.storage_target_models import StorageTargetRecord,StoragePolicyRecord
+from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
+from portal.backend.service.storage_management import StorageManagementService
 from portal.backend.service.storage.recovery_maintenance import run_due_local_recovery
 from portal.backend.service.storage.recovery_copies import _identity
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
@@ -89,3 +92,32 @@ def test_due_recovery_owns_capacity_skips_busy_and_preserves_completed_copy(stor
         assert retry.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))"))
         assert retry.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
                             {"name":_LIFECYCLE_LOCK_NAME})
+
+
+    now = datetime.now(UTC)
+    with storage.database.session() as session:
+        session.add(MarketCollectorWorkerStateRecord(
+            worker_id="recovery-status", worker_role="scheduled_market_fact_collector",
+            worker_version="disposable", state="idle", started_at=now,
+            heartbeat_at=now, expires_at=now+timedelta(seconds=30),
+            capabilities={}, context={"storage_lifecycle": worker.snapshot()}))
+    status_service = StorageManagementService(storage.database, inventory_path=tmp_path/"no-inventory.json")
+    snapshot = status_service.snapshot()
+    assert snapshot["backup"]["state"] == "not_due"
+    assert snapshot["backup"]["last_completed_at"] == result["last_completed_at"]
+    assert snapshot["movement"]["state"] == "disabled"
+    assert snapshot["health"] == "available"
+    # A later phase failure must replace the earlier completed-copy observation.
+    original_runner = worker.recovery_runner
+    def failed(**kwargs):
+        raise RuntimeError("injected recovery failure")
+    worker.recovery_runner = failed
+    worker.run_once()
+    worker.recovery_runner = original_runner
+    with storage.database.session() as session:
+        session.get(MarketCollectorWorkerStateRecord, "recovery-status").context = {
+            "storage_lifecycle": worker.snapshot()}
+    snapshot = status_service.snapshot()
+    assert snapshot["backup"]["state"] == "failed"
+    assert snapshot["backup"]["last_completed_at"] is None
+    assert snapshot["health"] == "needs_attention"

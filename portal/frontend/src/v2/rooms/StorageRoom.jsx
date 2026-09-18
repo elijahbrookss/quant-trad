@@ -126,8 +126,8 @@ export function StorageRoom() {
         </div>}
 
         <p className="qt2-storage-health" role="status">
-          Storage: {words(snapshot.health)} · Movement: {words(snapshot.movement?.state)} · Backup: {snapshot.backup?.last_completed_at
-            ? new Date(snapshot.backup.last_completed_at).toLocaleString() : words(snapshot.backup?.state)}
+          Storage: {words(snapshot.health)} · Movement: {words(snapshot.movement?.state)} · Backup: {words(snapshot.backup?.state)}
+          {snapshot.backup?.last_completed_at && <> · Last copy: {new Date(snapshot.backup.last_completed_at).toLocaleString()}</>}
         </p>
         {active && <p role="status">Change {words(active.state)}{active.progress?.detail ? `: ${active.progress.detail}` : ''}</p>}
 
