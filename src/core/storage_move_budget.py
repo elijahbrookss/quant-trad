@@ -34,7 +34,9 @@ def assess_header_move_resources(
     *, targets: Sequence[StorageTarget], capacity: Mapping[str, FilesystemEvidence],
     policy: StoragePolicy, observed_at: datetime, now: datetime,
     copy_target_id: str, copy_bytes: int, own_reserved_bytes: int,
-    reserved_bytes: Mapping[str, int], wal_target_id: str, wal_bytes: int,
+    reserved_bytes: Mapping[str, int],
+    auxiliary_reserved_bytes: Mapping[str, int], own_auxiliary_reserved_bytes: Mapping[str, int],
+    wal_target_id: str, wal_bytes: int,
     temporary_bytes: Mapping[str, int], growth_bytes_per_second: Mapping[str, int],
     maintenance_bytes: Mapping[str, int], timeout_seconds: int,
     cancellation_grace_seconds: int,
@@ -43,6 +45,8 @@ def assess_header_move_resources(
 
     reserved_bytes includes this move's existing COPY reservation. Replace that
     one claim with its current copy requirement; retain all competing claims.
+    Auxiliary aggregates likewise include the current move's immutable claim;
+    remove only that proven ownership before adding fresh declared demands.
     WAL/temp/maintenance are additional bytes from observation through movement
     and cancellation. Growth also covers elapsed observation age and other
     writers, including archives and recovery-copy creation where applicable,
@@ -84,6 +88,10 @@ def assess_header_move_resources(
     if own_reserved_bytes < max(1, copy_bytes):
         raise ValueError("storage_move_budget_invalid: copy outgrew reservation")
     reservations = _complete_map(reserved_bytes, ids, "copy reservations")
+    auxiliary = _complete_map(auxiliary_reserved_bytes, ids, "auxiliary reservations")
+    own_auxiliary = _complete_map(own_auxiliary_reserved_bytes, ids, "own auxiliary reservations")
+    if any(auxiliary[key] < own_auxiliary[key] for key in ids):
+        raise ValueError("storage_move_budget_invalid: aggregate below own auxiliary reservation")
     temporary = _complete_map(temporary_bytes, ids, "temporary allowances")
     growth = _complete_map(growth_bytes_per_second, ids, "growth rates")
     maintenance = _complete_map(maintenance_bytes, ids, "maintenance allowances")
@@ -112,6 +120,7 @@ def assess_header_move_resources(
         demands = {
             "copy_bytes": max(1, copy_bytes) if target_id == copy_target_id else 0,
             "other_reserved_copy_bytes": claims,
+            "other_reserved_auxiliary_bytes": auxiliary[target_id] - own_auxiliary[target_id],
             "additional_wal_bytes": wal_bytes if target_id == wal_target_id else 0,
             "temporary_bytes": temporary[target_id],
             "ingestion_and_other_growth_bytes": growth[target_id] * window,

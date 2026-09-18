@@ -28,6 +28,7 @@ from .header_catalog import read_locked_header_group
 from .header_destinations import checked_header_destinations, stable_header_destination
 from .header_filesystem import VerifiedHeaderPlacement, verify_header_filesystem
 from .header_journal import _rows
+from .header_resource_claims import claim_allocations
 from .header_resources import VerifiedHeaderResources, observe_header_resources
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,8 @@ def inspect_reserved_header_move(session, *, move_id, review_hash, pg_controldat
     moving, copying = _compare_reserved_group(move, verified)
     # Existing aggregate includes this move. Subtract its own reservation once,
     # then require actual free space for its current copy plus every other claim.
-    other = {**reserved, move.target_id: reserved[move.target_id] - move.reserved_bytes}
+    other = {row.id: reserved[row.id] + row.auxiliary_reserved_bytes for row in target_rows}
+    other[move.target_id] -= move.reserved_bytes
     selected = allocate_target(policy=policy, role="history", targets=targets,
         capacity={move.target_id: verified.capacity[move.target_id]},
         required_bytes=max(1, copying), reserved_bytes=other)
@@ -325,6 +327,9 @@ def inspect_reserved_header_move_resources(
         copy_target_id=inspection.target_id, copy_bytes=inspection.copy_bytes,
         own_reserved_bytes=inspection.reserved_copy_bytes,
         reserved_bytes={row.id: row.reserved_bytes for row in target_rows},
+        auxiliary_reserved_bytes={row.id: row.auxiliary_reserved_bytes for row in target_rows},
+        own_auxiliary_reserved_bytes=claim_allocations(
+            session.get(StorageHeaderMoveRecord, move_id, populate_existing=True), target_rows),
         wal_target_id=wal_target, wal_bytes=wal_bytes, temporary_bytes=temporary_bytes,
         growth_bytes_per_second=growth_bytes_per_second, maintenance_bytes=maintenance_bytes,
         timeout_seconds=movement_timeout_seconds, cancellation_grace_seconds=cancellation_grace_seconds)

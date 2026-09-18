@@ -25,6 +25,7 @@ from portal.backend.service.storage_management import StorageConflict, _target
 from .header_admission import lock_header_storage, registered_header_targets
 from .header_inspection import inspect_reserved_header_move, _verified_move_group
 from .header_journal import _rows
+from .header_resource_claims import _release_resource_claims
 
 logger = logging.getLogger(__name__)
 _SCHEMA = "qt.header_move_completion.v1"
@@ -181,6 +182,7 @@ def stage_header_move(session, *, move_id, review_hash, pg_controldata, timeout_
         conn.execute(text("SELECT set_config('statement_timeout', :timeout, true)"),
                      {"timeout": str(remaining())})
         updated_at = conn.scalar(text("SELECT clock_timestamp()"))
+        _release_resource_claims(session, [move])
         move.state = "completed"
         move.completion_evidence = completion
         move.updated_at = updated_at

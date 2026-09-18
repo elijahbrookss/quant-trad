@@ -21,6 +21,8 @@ def request_data():
         policy=StoragePolicy(("ssd",), ("hdd",), ("hdd",), ("hdd",)),
         observed_at=now, now=now, copy_target_id="hdd", copy_bytes=1000,
         own_reserved_bytes=1200, reserved_bytes={"ssd": 100, "hdd": 1500},
+        auxiliary_reserved_bytes={"ssd": 0, "hdd": 0},
+        own_auxiliary_reserved_bytes={"ssd": 0, "hdd": 0},
         wal_target_id="ssd", wal_bytes=400,
         temporary_bytes={"ssd": 200, "hdd": 50},
         growth_bytes_per_second={"ssd": 10, "hdd": 20},
@@ -61,7 +63,8 @@ def test_source_drive_can_block_move_even_with_plenty_of_destination_space(reque
 
 
 @pytest.mark.parametrize("name", ["capacity", "reserved_bytes", "temporary_bytes",
-                                  "growth_bytes_per_second", "maintenance_bytes"])
+                                  "growth_bytes_per_second", "maintenance_bytes",
+                                  "auxiliary_reserved_bytes", "own_auxiliary_reserved_bytes"])
 @pytest.mark.parametrize("mutation", ["missing", "unknown"])
 def test_incomplete_or_unknown_resource_accounting_refuses_instead_of_assuming_zero(request_data, name, mutation):
     if mutation == "missing":
@@ -147,3 +150,15 @@ def test_observation_age_is_rounded_up_and_reserved_as_additional_growth(request
     assert result["growth_window_seconds"] == 12 + rounded
     assert after["ssd"]["required_bytes"] - before["ssd"]["required_bytes"] == 10 * rounded
     assert after["hdd"]["required_bytes"] - before["hdd"]["required_bytes"] == 20 * rounded
+
+
+def test_competing_auxiliary_claims_count_once_and_own_claim_is_replaced(request_data):
+    before = rows(assess_header_move_resources(**request_data))
+    request_data["auxiliary_reserved_bytes"] = {"ssd": 800, "hdd": 400}
+    request_data["own_auxiliary_reserved_bytes"] = {"ssd": 500, "hdd": 200}
+    after = rows(assess_header_move_resources(**request_data))
+    assert after["ssd"]["required_bytes"] == before["ssd"]["required_bytes"] + 300
+    assert after["hdd"]["required_bytes"] == before["hdd"]["required_bytes"] + 200
+    request_data["own_auxiliary_reserved_bytes"]["ssd"] = 801
+    with pytest.raises(ValueError, match="below own auxiliary"):
+        assess_header_move_resources(**request_data)

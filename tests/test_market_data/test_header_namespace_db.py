@@ -533,3 +533,8 @@ if __name__ == "__main__":
                 value = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
                 print("namespace_timeout_" + label + "=" + value[-4000:], file=sys.stderr)
         raise
+
+
+def test_auxiliary_claims_survive_real_rollback_and_release_with_verified_commit(namespace_report):
+    assert namespace_report["atomic_auxiliary_release_committed"]
+    assert namespace_report["atomic_retry_no_copy_or_release"]

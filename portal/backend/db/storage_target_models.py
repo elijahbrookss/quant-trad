@@ -16,6 +16,9 @@ class StorageTargetRecord(Base):
         CheckConstraint("medium IN ('ssd','hdd')", name="ck_storage_target_medium"),
         CheckConstraint("state IN ('active','draining','disabled')", name="ck_storage_target_state"),
         CheckConstraint("reserved_bytes >= 0", name="ck_storage_target_reserved_bytes"),
+        CheckConstraint("auxiliary_reserved_bytes >= 0 AND "
+                        "reserved_bytes <= 9223372036854775807 - auxiliary_reserved_bytes",
+                        name="ck_storage_target_auxiliary_bytes"),
     )
     id = Column(String(48), primary_key=True)
     label = Column(String(80), nullable=False)
@@ -25,6 +28,7 @@ class StorageTargetRecord(Base):
     roles = Column(JSONB, nullable=False)
     state = Column(String(16), nullable=False, server_default="active")
     reserved_bytes = Column(BigInteger, nullable=False, server_default="0")
+    auxiliary_reserved_bytes = Column(BigInteger, nullable=False, server_default="0")
     registered_at = Column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))
 
 
@@ -146,6 +150,13 @@ class StorageHeaderMoveRecord(Base):
             "AND jsonb_typeof(completion_evidence->'physical') = 'object' "
             "AND octet_length(completion_evidence::text) <= 65536, false)",
             name="ck_storage_header_move_completion_evidence"),
+        CheckConstraint(
+            "resource_claim IS NULL OR COALESCE(jsonb_typeof(resource_claim) = 'object' "
+            "AND resource_claim->>'schema_version' = 'qt.header_resource_claim.v1' "
+            "AND jsonb_typeof(resource_claim->'allocations') = 'object' "
+            "AND jsonb_typeof(resource_claim->'limits') = 'object' "
+            "AND octet_length(resource_claim::text) <= 32768, false)",
+            name="ck_storage_header_resource_claim"),
         Index("uq_storage_header_move_active_heap", "database_identity", "heap_oid", unique=True,
               postgresql_where=text("state IN ('reserved','running','blocked')")),
     )
@@ -159,6 +170,7 @@ class StorageHeaderMoveRecord(Base):
     source_group = Column(JSONB, nullable=False)
     destination_binding = Column(JSONB, nullable=False)
     completion_evidence = Column(JSONB(none_as_null=True), nullable=True)
+    resource_claim = Column(JSONB(none_as_null=True), nullable=True)
     reserved_bytes = Column(BigInteger, nullable=False)
     state = Column(String(16), nullable=False, server_default="reserved")
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("clock_timestamp()"))

@@ -19,6 +19,7 @@ code_paths:
   - portal/backend/service/storage/header_inspection.py
   - portal/backend/service/storage/header_movement.py
   - portal/backend/service/storage/header_resources.py
+  - portal/backend/service/storage/header_resource_claims.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -578,3 +579,32 @@ not enforced ceilings. Other producers and existing temporary objects, durable
 auxiliary reservations, resource-limit qualification and worker supervision
 remain uncovered. This internal preview adds no portal control or execution
 entrypoint.
+
+
+## Durable auxiliary reservations
+
+A reserved move may now hold an immutable resource claim alongside its copy
+intent. The claim records reviewed limits, their hash, the verified WAL target,
+observation growth window and amounts bound to registered filesystem UUIDs.
+Each target keeps separate aggregate copy and auxiliary counters; status reports
+their combined reserved capacity. New copy admission counts both. Combined
+resource inspection replaces this move's own auxiliary claim once while retaining
+other claims, so retrying a preview neither double-counts nor forgets demand.
+
+Acquisition uses current real resource inspection under storage ownership and
+a caller-owned savepoint. A duplicate request acknowledges the original durable
+claim; changed limits refuse reuse. The receipt is not fresh path evidence or
+execution permission. Numeric, UUID and hash consistency are checked when the
+claim is reused or released, and missing aggregate ownership refuses release.
+Claims do not expire or disappear merely because a client times out.
+
+Verified atomic completion releases auxiliary and copy capacity with file
+movement and completion evidence in the same transaction. Unstarted whole-batch
+cancellation releases both under the same ownership lock. Rollback preserves
+both claims; completed retries do not release again. Terminal records retain the
+claim as bounded audit evidence. No new public executor is enabled.
+
+These are clean-model columns, not a runtime migration. Existing installations
+require an explicit reviewed schema cutover. The claimed allowances remain
+declared estimates; producer-limit enforcement, supervisor cancellation,
+application performance and the existing-data migration remain required.

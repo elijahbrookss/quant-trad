@@ -22,6 +22,7 @@ from portal.backend.db.storage_target_models import (
 )
 from portal.backend.service.storage_management import StorageConflict, _target
 from .header_filesystem import VerifiedHeaderPlacement
+from .header_resource_claims import _release_resource_claims
 from .header_admission import lock_header_storage as _lock, fresh_header_database, registered_header_targets
 from .header_destinations import review_header_moves, stable_header_destination
 
@@ -89,7 +90,7 @@ def reserve_header_batch(session, *, plan_id, review_hash, verified):
     try:
         proposal = review_header_moves(
             verified=verified, policy=policy, targets=target_values,
-            reserved_bytes={row.id: row.reserved_bytes for row in targets},
+            reserved_bytes={row.id: row.reserved_bytes + row.auxiliary_reserved_bytes for row in targets},
         )
     except ValueError as exc:
         raise StorageConflict("storage_journal_review_invalid: " + str(exc)) from exc
@@ -117,7 +118,7 @@ def reserve_header_batch(session, *, plan_id, review_hash, verified):
             raise StorageConflict("storage_journal_group_evidence_budget")
     additions = proposal["additional_copy_reservations"]
     for target in targets:
-        if target.reserved_bytes + additions.get(target.id, 0) > 2**63 - 1:
+        if target.reserved_bytes + target.auxiliary_reserved_bytes + additions.get(target.id, 0) > 2**63 - 1:
             raise StorageConflict("storage_journal_reservation_overflow")
     batch = StorageHeaderBatchRecord(
         plan_id=plan_id, review_hash=review_hash, policy_hash=policy.fingerprint,
@@ -174,6 +175,7 @@ def cancel_unstarted_header_batch(session, *, plan_id, review_hash):
             raise StorageConflict("storage_journal_reservation_inconsistent")
         targets[target_id] = target
     now = session.scalar(text("SELECT clock_timestamp()"))
+    _release_resource_claims(session, rows)
     batch.cancelled_at = now
     for row in rows:
         row.state, row.updated_at = "cancelled", now

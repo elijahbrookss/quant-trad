@@ -16,6 +16,7 @@ code_paths:
   - portal/backend/service/storage/header_destinations.py
   - portal/backend/service/storage/header_filesystem.py
   - portal/backend/service/storage/header_journal.py
+  - portal/backend/service/storage/header_resource_claims.py
 ---
 # ADR 0069: Bind Storage Objects to Registered Targets
 
@@ -127,3 +128,18 @@ arithmetic is not runtime authorization: resource paths must be verified,
 limits qualified and enforced, auxiliary reservations held durably and a worker
 must supervise deadlines and reconcile uncertain commits. Keep Apply disabled
 until those responsibilities and the existing-data cutover are qualified.
+
+
+## Durable auxiliary claim refinement — 2026-09-18
+
+Keep copy and auxiliary reservations as separate target aggregates. Store one
+bounded immutable auxiliary claim on each move, including declared limits and
+filesystem UUIDs, so recovery can attribute capacity without reconstructing it
+from process memory. Other allocation reviews count their combined demand.
+
+Release both kinds of capacity in the same transaction as verified completion,
+or under ownership for wholly unstarted cancellation. A client timeout is not
+release authority. Savepoint/transaction rollback preserves ownership and
+completed retries cannot release twice. Terminal claims remain audit evidence;
+their lifetime must be included in journal retention. This implements durable
+ownership only, not proof or enforcement of the producer limits.

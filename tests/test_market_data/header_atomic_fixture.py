@@ -16,6 +16,7 @@ from portal.backend.service.storage.header_filesystem import verify_header_files
 from portal.backend.service.storage.header_destinations import register_header_tablespaces, review_header_moves
 from portal.backend.service.storage.header_journal import reserve_header_batch
 from portal.backend.service.storage.header_movement import stage_header_move
+from portal.backend.service.storage.header_resource_claims import reserve_header_resources
 from portal.backend.service.storage_management import StorageConflict
 from tests.test_market_data.postgres_commit_proxy import drop_commit_ack
 
@@ -64,6 +65,13 @@ def prove_atomic_moves(engine, root, targets, destination_oid, storage_day, part
                                             review_hash=review["plan_hash"], verified=verified)
         if len(receipt["moves"]) != 1:
             raise RuntimeError("atomic_fixture_requires_one_move")
+        with Session(engine) as session, session.begin():
+            reserve_header_resources(session, move_id=receipt["moves"][0]["id"],
+                review_hash=review["plan_hash"], pg_controldata=binary,
+                wal_bytes=1024**2, temporary_bytes={"fixture": 131072, "history": 131072},
+                growth_bytes_per_second={"fixture": 0, "history": 0},
+                maintenance_bytes={"fixture": 0, "history": 0},
+                movement_timeout_seconds=60, cancellation_grace_seconds=5)
         return receipt["moves"][0]["id"], review["plan_hash"], verified
 
     move_id, review_hash, baseline = prepare()
@@ -82,12 +90,20 @@ def prove_atomic_moves(engine, root, targets, destination_oid, storage_day, part
             move = session.get(StorageHeaderMoveRecord, identifier)
             return move.state, move.completion_evidence, session.get(StorageTargetRecord, "history").reserved_bytes
 
+    def auxiliary():
+        with Session(engine) as session:
+            return {row.id: row.auxiliary_reserved_bytes
+                    for row in session.scalars(select(StorageTargetRecord))}
+    original_auxiliary = auxiliary()
+
     def assert_original():
         inventory = read_header_catalog(engine)
         verified = verify_header_filesystem(inventory, targets, pg_controldata=binary)
         group = verified.snapshot.partitions[0]
         if [(item.oid, item.relfilenode, item.target_id) for item in group.relations] != original_nodes:
             raise RuntimeError("atomic_fixture_source_not_rolled_back")
+        if auxiliary() != original_auxiliary:
+            raise RuntimeError("atomic_fixture_auxiliary_claim_not_rolled_back")
         if state() != ("reserved", None, expected_reserved):
             raise RuntimeError("atomic_fixture_journal_not_rolled_back")
         with engine.connect() as conn:
@@ -227,6 +243,9 @@ def prove_atomic_moves(engine, root, targets, destination_oid, storage_day, part
             proxied.dispose()
     completed_state, completion, reserved = state()
     report["atomic_lost_commit_is_committed"] = completed_state == "completed" and reserved == 0
+    report["atomic_auxiliary_release_committed"] = (
+        original_auxiliary["fixture"] > 0 and original_auxiliary["history"] > 0
+        and all(amount == 0 for amount in auxiliary().values()))
     changed = []
     def record_ddl(conn, cursor, statement, parameters, context, executemany):
         if statement.startswith(("ALTER TABLE", "ALTER INDEX")):
@@ -237,7 +256,9 @@ def prove_atomic_moves(engine, root, targets, destination_oid, storage_day, part
             retry = call(session)
     finally:
         event.remove(engine, "after_cursor_execute", record_ddl)
-    report["atomic_retry_no_copy_or_release"] = retry["reused"] and not changed and state()[2] == 0
+    report["atomic_retry_no_copy_or_release"] = (
+        retry["reused"] and not changed and state()[2] == 0
+        and all(amount == 0 for amount in auxiliary().values()))
     with engine.connect() as conn:
         report["atomic_rows_preserved"] = conn.execute(
             text("SELECT id,md5(payload) FROM market.fact_versions ORDER BY id")).all() == original_rows

@@ -75,7 +75,7 @@ class StorageManagementService:
             for record in registered:
                 target = _target(record)
                 observed = self._inspect(target)
-                rows.append({**asdict(target), **observed, "reserved_bytes": record.reserved_bytes})
+                rows.append({**asdict(target), **observed, "reserved_bytes": record.reserved_bytes + record.auxiliary_reserved_bytes})
             registered_ids = {record.id for record in registered}
             candidates = [{**asdict(target), **self._inspect(target)}
                           for target in inventory if target.target_id not in registered_ids]

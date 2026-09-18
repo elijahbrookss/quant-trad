@@ -386,3 +386,22 @@ The local combined run passed 57 database cases in 166.30 seconds: 32 real
 namespace cases, 12 resource-composition cases and 13 existing inspection
 regressions. The non-database backend passed 3,101 cases with 33 existing
 warnings; documentation checks passed ten. These remain disposable-data results.
+
+
+### Durable auxiliary ownership
+
+The private atomic fixture now acquires real resource reservations before its
+existing failure, backend-termination, outer-rollback and lost-COMMIT tests.
+Each rollback must preserve the original auxiliary counters; verified durable
+completion must release them, and reconciliation must not subtract them again.
+
+Additional disposable database cases cover claim replay, changed limits,
+caller rollback, competing ownership, insufficient source headroom, invalid
+saved allocation/UUID/hash, aggregate underflow and idempotent cancellation.
+These checks exercise ownership of declared space, not hard resource ceilings.
+
+The affected disposable run passed 109 database cases in 507.52 seconds,
+including real backend termination and lost-COMMIT recovery with auxiliary
+ownership. The backend run passed 3,105 cases; its only failure was the generated
+architecture index, corrected by refreshing the index and passing all ten
+documentation checks. Focused budget/inspection checks passed 85 cases.
