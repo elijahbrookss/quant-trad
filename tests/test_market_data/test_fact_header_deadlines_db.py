@@ -1,6 +1,8 @@
 """Native PostgreSQL timing and rollback for the fixed migration attempt."""
+from contextlib import ExitStack
+
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 
 from scripts.db.fact_header_v2_capture import (
@@ -124,3 +126,41 @@ def test_disconnect_during_timeout_setup_invalidates_connection_and_preserves_so
             "committed-before-disconnect", "existing"]
         assert conn.execute(text(f"SELECT id FROM {QUEUE} ORDER BY id")).scalars().all() == [
             "committed-before-disconnect"]
+
+
+def test_deep_verification_does_not_amplify_timeout_sql(capture_source):
+    with capture_source.begin() as conn:
+        install_capture(conn)
+        observed = []
+        def record(connection, cursor, statement, parameters, context, executemany):
+            observed.append(statement)
+        event.listen(conn, "after_cursor_execute", record)
+        try:
+            with ExitStack() as steps:
+                for _ in range(6):
+                    steps.enter_context(migration_step(conn, timeout_seconds=30))
+                observed.clear()
+                assert conn.scalar(text("SELECT 42")) == 42
+                # Nested verification must not turn a single read into hundreds
+                # of timeout queries. Allow implementation-independent linear
+                # overhead rather than depending on a particular listener count.
+                assert len(observed) <= 12
+            assert conn.scalar(text("SHOW statement_timeout")) == "0"
+            assert conn.scalar(text("SELECT 1")) == 1
+        finally:
+            event.remove(conn, "after_cursor_execute", record)
+
+
+def test_expired_child_releases_its_deadline_without_poisoning_parent(capture_source):
+    with capture_source.begin() as conn:
+        install_capture(conn)
+        with migration_step(conn, timeout_seconds=10):
+            insert(conn, "outer-survives-child")
+            with pytest.raises((DBAPIError, RuntimeError), match="statement timeout|step_timeout"):
+                with migration_step(conn, timeout_seconds=1):
+                    insert(conn, "child-must-rollback")
+                    conn.exec_driver_sql("SELECT pg_sleep(1.2)")
+            assert conn.scalar(text("SELECT 1")) == 1
+            assert conn.execute(text(f"SELECT id FROM {SOURCE} ORDER BY id")).scalars().all() == [
+                "existing", "outer-survives-child"]
+        assert conn.scalar(text("SHOW statement_timeout")) == "0"

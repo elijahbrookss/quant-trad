@@ -875,9 +875,29 @@ must refuse admission. Ordinary readers must continue under the final fence,
 new writers must be blocked, and a failed verification must release its locks
 while preserving unrelated caller work.
 
-The existing tiny database handoff runs inside the successful final inventory
-context, then the original root is made unavailable for the existing HDD-only
-consumer checks. This proves the committed catalog snapshot and copied bytes;
+The fixed database handoff owns the successful final inventory context,
+then the original root is made unavailable for the existing HDD-only consumer
+checks. This proves the committed catalog snapshot and copied bytes;
 it does not prove publisher process drain, active-root configuration changes,
 supervision through outer commit, process-death partial retirement or acceptable
 full-size hash-scan downtime.
+
+
+The fixed database-commit rehearsal now kills the actual PostgreSQL backend
+after the first source-table rename. The old schema, source identities and
+writer availability must survive rollback. A retry then commits before its
+reply is deliberately lost. A separate read-only observer immediately before
+COMMIT must report the outcome as pending, then inspection after commit must
+identify the new layout without replaying the switch; inspection must still work after the
+attempt clock expires and must reject a changed recorded relation identity.
+The original archive-root removal and recent/history/frozen/book replay checks
+run afterward. These are disposable correctness outcomes, not publisher-drain,
+deployment recovery, full-volume duration or physical-HDD performance evidence.
+
+
+The first composed commit run hit the migration step deadline inside recursively
+nested timeout setup, before its injected backend termination. The correction
+shares one active-deadline listener per connection. Native regressions exercise
+deep nesting without amplified SQL, an expired child with a surviving parent,
+shorter caller limits, the durable attempt clock, and disconnect cleanup.
+The failed iteration is not counted as a successful commit rehearsal.

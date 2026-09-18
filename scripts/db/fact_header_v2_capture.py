@@ -35,6 +35,9 @@ def migration_step(conn, timeout_seconds=30):
     if conn.get_isolation_level() != "READ COMMITTED":
         raise ValueError("fact_header_copy_read_committed_required")
     deadline = monotonic() + timeout_seconds
+    # Keep this metadata reference through disconnect cleanup; accessing conn.info
+    # after invalidation could otherwise attempt to reconnect inside rollback.
+    metadata = conn.info
     with conn.begin_nested():
         settings = {row["name"]: dict(row) for row in conn.execute(text("""
             SELECT name,current_setting(name) AS original,setting::bigint AS milliseconds
@@ -50,18 +53,22 @@ def migration_step(conn, timeout_seconds=30):
                 raise RuntimeError("fact_header_migration_step_timeout")
             return milliseconds
 
-        configuring_timeout = False
+        guard_key = "qt.fact_header_migration_deadlines.v2"
+        guard = metadata.get(guard_key)
+        owns_guard = guard is None
+        if owns_guard:
+            guard = {"remaining": [], "configuring": False}
+            metadata[guard_key] = guard
 
         def bound_statement(connection, cursor, statement, parameters, context, executemany):
-            nonlocal configuring_timeout
-            if configuring_timeout or statement.lstrip().upper().startswith("ROLLBACK TO SAVEPOINT "):
+            if guard["configuring"] or statement.lstrip().upper().startswith("ROLLBACK TO SAVEPOINT "):
                 return  # An expired outer step must still let a nested step unwind.
-            milliseconds = remaining()
-            configuring_timeout = True
+            milliseconds = min(check() for check in guard["remaining"])
+            guard["configuring"] = True
             try:
-                # Use the normal connection path so disconnects invalidate the
-                # pool entry. The flag prevents this listener calling itself;
-                # LEAST retains a shorter enclosing step's allowance.
+                # One listener for this connection: nested steps add deadlines,
+                # not listeners that recursively trigger each other's SQL.
+                # Keep the normal connection path for disconnect invalidation.
                 connection.exec_driver_sql("""
                     SELECT set_config('statement_timeout',
                         LEAST(%s, CASE WHEN setting::bigint=0 THEN %s
@@ -69,9 +76,11 @@ def migration_step(conn, timeout_seconds=30):
                     FROM pg_settings WHERE name='statement_timeout'
                 """, (milliseconds, milliseconds)).close()
             finally:
-                configuring_timeout = False
+                guard["configuring"] = False
 
-        event.listen(conn, "before_cursor_execute", bound_statement)
+        guard["remaining"].append(remaining)
+        if owns_guard:
+            event.listen(conn, "before_cursor_execute", bound_statement)
         try:
             original_lock = settings["lock_timeout"]["milliseconds"]
             conn.execute(text("SELECT set_config('lock_timeout',:value,true)"),
@@ -95,7 +104,10 @@ def migration_step(conn, timeout_seconds=30):
         finally:
             # Remove before savepoint rollback or returning this connection;
             # an expired guard must never prevent recovery or leak to other work.
-            event.remove(conn, "before_cursor_execute", bound_statement)
+            guard["remaining"].remove(remaining)
+            if owns_guard:
+                event.remove(conn, "before_cursor_execute", bound_statement)
+                del metadata[guard_key]
         for name, item in settings.items():
             conn.execute(text("SELECT set_config(:name,:value,true)"),
                          {"name": name, "value": item["original"]})

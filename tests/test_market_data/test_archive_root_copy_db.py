@@ -8,7 +8,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
 from market_data.archive import FilesystemRawArchiveObjectStore
@@ -17,6 +18,8 @@ from portal.backend.service.storage.repos import market_data, market_structure
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from scripts.db import archive_root_v2_copy as archives
+from scripts.db import fact_header_v2_handoff as handoff
+from scripts.db.fact_header_v2_capture import SCHEMA
 from scripts.db import archive_reference_v2_placement as references
 from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as raw
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
@@ -27,7 +30,7 @@ from tests.test_market_data.test_raw_mapping_copy_db import _finish as finish_ra
 from tests.test_market_data.test_fact_header_references_db import _stage_all
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_archive_reference_placement_db import _options
-from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture, stage_shadow_handoff_fixture
+from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture
 
 pytestmark = [
     pytest.mark.db,
@@ -224,8 +227,8 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     finally:
         damaged.write_bytes(valid_bytes)
 
-    # Reuse the guarded tiny database handoff; this does not turn a page copy
-    # into a production migration or an archive-root activation certificate.
+    # The fixed commit boundary owns complete verification and its transaction.
+    # Publisher drain/root activation and full-volume qualification stay separate.
     finish_headers(engine)
     finish_raw(engine)
     with engine.begin() as conn:
@@ -233,11 +236,88 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     _stage_all(engine)
     for relation in references.RELATIONS:
         references.move_reference_catalog(engine, relation=relation, **_options(storage))
+    inspect_options = dict(policy=options["policy"], source_root=source_objects,
+                           destination_root=objects)
+    with engine.connect() as conn:
+        original_oids = [handoff._oid(conn, relation) for relation in (headers.SOURCE, raw.SOURCE)]
+
+    # Kill the actual PG backend after the first source rename. All schema and
+    # certificate changes must roll back; completed archive files stay reusable.
+    killed = [False]
+    def kill_mid_switch(conn, cursor, statement, parameters, context, executemany):
+        if not killed[0] and statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
+            killed[0] = True
+            with engine.begin() as killer:
+                assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),
+                    {"pid": conn.connection.driver_connection.get_backend_pid()})
+            conn.exec_driver_sql("SELECT 1")
+    event.listen(engine, "after_cursor_execute", kill_mid_switch)
+    try:
+        with pytest.raises(DBAPIError):
+            handoff.commit_handoff(engine, **verification)
+    finally:
+        event.remove(engine, "after_cursor_execute", kill_mid_switch)
+    assert killed[0]
     with engine.begin() as conn:
-        with archives.verified_archive_inventory(conn, **verification) as final_inventory:
-            assert final_inventory["verified_catalog_objects"] > baseline_inventory["verified_catalog_objects"]
-            assert final_inventory["inventory_sha256"] != baseline_inventory["inventory_sha256"]
-            stage_shadow_handoff_fixture(conn, storage, prevalidated=True, raw_mapping=True)
+        conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
+        assert not handoff.inspect_handoff(conn, **inspect_options)["database_handoff_committed"]
+        assert [handoff._oid(conn, relation) for relation in (headers.SOURCE, raw.SOURCE)] == original_oids
+        conn.exec_driver_sql("LOCK TABLE market.fact_versions IN ROW EXCLUSIVE MODE NOWAIT")
+
+    # A real commit followed by a lost response must be resolved by inspection,
+    # never by replaying DDL or restarting the old version.
+    original_commit = Connection._commit_impl
+    lost = [False]
+    pending = [False]
+    def committed_then_lost(conn):
+        if not lost[0]:
+            # The switch is fully staged but not yet committed. A second
+            # connection cannot interpret its invisible certificate as rollback.
+            # Roll back this observer explicitly to avoid recursively committing
+            # through the fault hook itself.
+            with engine.connect() as observer:
+                transaction = observer.begin()
+                try:
+                    observer.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    observer.exec_driver_sql("SET LOCAL statement_timeout='5s'")
+                    with pytest.raises(RuntimeError, match="handoff_outcome_pending"):
+                        handoff.inspect_handoff(observer, **inspect_options)
+                    pending[0] = True
+                finally:
+                    transaction.rollback()
+        original_commit(conn)
+        if not lost[0]:
+            lost[0] = True
+            raise RuntimeError("injected_handoff_commit_reply_lost")
+    with monkeypatch.context() as fault:
+        fault.setattr(Connection, "_commit_impl", committed_then_lost)
+        with pytest.raises(RuntimeError, match="injected_handoff_commit_reply_lost"):
+            handoff.commit_handoff(engine, **verification)
+    assert lost[0] and pending[0]
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
+        committed = handoff.inspect_handoff(conn, **inspect_options)
+        assert committed["database_handoff_committed"] and not committed["collection_resume_authorized"]
+        receipt = committed["receipt"]
+        assert receipt["verified_archive_objects"] > baseline_inventory["verified_catalog_objects"]
+        assert receipt["archive_inventory_sha256"] != baseline_inventory["inventory_sha256"]
+    # Inspection remains possible after the attempt clock expires.
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"UPDATE {SCHEMA}.capture SET prepared_at=clock_timestamp()-interval '25 hours'")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
+        assert handoff.inspect_handoff(conn, **inspect_options)["receipt"] == receipt
+    with engine.connect() as conn, conn.begin() as transaction:
+        conn.exec_driver_sql("""
+            UPDATE market.fact_storage_state SET evidence=jsonb_set(evidence,
+                '{handoff,active_relation_oids,fact_versions}', '0'::jsonb)
+            WHERE layout_version='market.fact_storage_tiers.v2'
+        """)
+        with pytest.raises(RuntimeError, match="relation_identity_changed"):
+            handoff.inspect_handoff(conn, **inspect_options)
+        transaction.rollback()
 
     retained = source.with_name(source.name+"-retained")
     source.rename(retained)
@@ -265,8 +345,11 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         "wrong_filesystem_expiry_lock_byte_budget_low_capacity_and_corruption_refused": True,
         "late_publication_missing_and_corrupt_destination_refused": True,
         "final_catalog_fence_allows_reads_blocks_writes_and_releases_on_failure": True,
-        "final_inventory_verified_objects": final_inventory["verified_catalog_objects"],
-        "final_inventory_verification_seconds": final_inventory["verification_seconds"],
+        "final_inventory_verified_objects": receipt["verified_archive_objects"],
+        "mid_switch_backend_death_preserved_source": killed[0],
+        "lost_commit_inspected_without_repeating_switch": lost[0],
+        "inflight_commit_reports_pending": pending[0],
+        "inspection_after_deadline_and_wrong_relation_refusal": True,
         "copied_objects": len(copied), "copied_bytes": sum((objects/key).stat().st_size for key in copied),
         "limits": ["tiny disposable data", "page progress is not final inventory readiness; publisher drain/root activation remain separate",
                    "no production root switch, migration-duration or hardware qualification"]

@@ -22,6 +22,7 @@ code_paths:
   - scripts/db/raw_mapping_v2_copy.py
   - scripts/db/archive_reference_v2_placement.py
   - scripts/db/archive_root_v2_copy.py
+  - scripts/db/fact_header_v2_handoff.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -314,3 +315,39 @@ The complete file hash scan currently occurs while catalog writers are fenced.
 Its duration must be measured alongside the final header/lookup scans before
 claiming a short pause or a complete migration within one day. The bounded
 implementation is not evidence that a full-size verification fits that budget.
+
+
+The fixed internal database handoff now owns the complete header, global identity,
+raw lookup and archive-inventory verification contexts and requires the two
+archive reference catalogs and indexes already on HDD. It shares only the
+admitted schema-switch DDL with the existing tiny fixture; that fixture retains
+its isolation and size guards. The internal handoff adds an outer resource and
+original-attempt deadline watcher through actual commit/rollback. Source tables
+remain closed to inserts in the retained schema.
+
+The existing v2 layout certificate records the exact source/target relation
+identities, physical binding, archive roots, policy and verified inventory in
+the same transaction as the switch. A lost commit reply is resolved by bounded
+read-only inspection of that evidence and the actual layout, never by blindly
+repeating the switch or starting the old image. Inspection first acquires the
+existing migration ownership fence without waiting. If another attempt still
+holds it, the outcome is pending: an invisible uncommitted certificate cannot
+be mistaken for a completed rollback. Inspection works after the
+original migration deadline, and does not rehash archives or claim ongoing
+integrity. A mismatched relation, root or retained-source guard refuses the
+reported committed outcome.
+
+This remains a database boundary, not a complete deployment operator: the
+caller must drain publishers and hold them stopped, activate the matching
+runtime/root, and coordinate recovery for subsequent writes. No service,
+configuration, device, collection state or storage policy is changed here.
+A committed database result explicitly does not authorize collection resumption.
+Full-volume scan/commit duration and hardware workload qualification remain open.
+
+
+Composing the verification contexts exposed recursive timeout-listener SQL: each
+nested listener triggered the others while setting its own timeout and exhausted
+the step budget. Migration contexts now share one connection-local listener and
+apply the earliest active deadline. Nested rollback removes only its deadline;
+the outermost exit removes the listener and its metadata, including disconnect
+paths. This preserves cumulative/attempt/caller limits without query amplification.
