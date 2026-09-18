@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.service.market.market_structure_service import MarketStructureService
@@ -24,6 +25,7 @@ from tests.test_market_data.test_fact_header_copy_placement_db import _configure
 from tests.test_market_data.test_fact_header_copy_db import _finish as finish_headers, _insert
 from tests.test_market_data.test_raw_mapping_copy_db import _finish as finish_raw
 from tests.test_market_data.test_fact_header_references_db import _stage_all
+from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_archive_reference_placement_db import _options
 from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture, stage_shadow_handoff_fixture
 
@@ -154,6 +156,74 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     assert copied and copied == {key: before[key] for key in copied}
     assert _hashes(source_objects) == before
 
+    verification = {key: value for key, value in options.items() if key != "max_page_bytes"}
+    verification.update(max_objects=100, max_bytes=32*1024**2, page_rows=2)
+    with engine.begin() as conn:
+        with archives.verified_archive_inventory(conn, **verification) as baseline_inventory:
+            assert baseline_inventory["verified_catalog_objects"] >= len(copied)
+            assert not baseline_inventory["root_activation_authorized"]
+            # Ordinary readers remain usable. A new catalog publisher cannot
+            # pass the final transaction fence.
+            with engine.connect() as reader:
+                assert reader.scalar(text("SELECT count(*) FROM market.raw_archive_manifests")) > 0
+            with pytest.raises(DBAPIError) as busy, engine.begin() as writer:
+                writer.exec_driver_sql("LOCK TABLE market.raw_archive_manifests IN ROW EXCLUSIVE MODE NOWAIT")
+            assert getattr(busy.value.orig, "pgcode", None) == "55P03"
+
+    # Genuine raw publication after the baseline page pass. The final verifier
+    # must rescan the entire catalog, regardless of the earlier copy cursors.
+    with monkeypatch.context() as publisher:
+        publisher.setenv("MARKET_STRUCTURE_STORAGE_ROOT", str(source))
+        publisher.setenv("QT_MARKET_DATA_EXPECTED_UUID", storage.copy_plan.recent.filesystem_uuid)
+        late = _raw_book_fixture(storage, source, publisher, definition_id="archive-copy-late",
+                                 provider_product_id="BTC-USD-LATE",
+                                 event_start=BASE+timedelta(hours=1))
+    with engine.connect() as conn:
+        late_keys = conn.execute(text("""
+            SELECT object_key FROM market.raw_archive_manifests WHERE id=ANY(:ids)
+        """), {"ids": late.manifests}).scalars().all()
+    assert late_keys and all(not (objects/key).exists() for key in late_keys)
+    with engine.begin() as conn:
+        # A failed verification cannot poison unrelated caller work or keep
+        # this context's publisher fence held until the outer transaction ends.
+        conn.exec_driver_sql("CREATE TEMP TABLE archive_inventory_probe(value integer)")
+        conn.exec_driver_sql("INSERT INTO archive_inventory_probe VALUES (1)")
+        with pytest.raises(RuntimeError, match="archive_inventory_object_missing"):
+            with archives.verified_archive_inventory(conn, **verification):
+                pytest.fail("incomplete archive inventory admitted")
+        assert conn.scalar(text("SELECT value FROM archive_inventory_probe")) == 1
+        with engine.begin() as writer:
+            writer.exec_driver_sql("LOCK TABLE market.raw_archive_manifests IN ROW EXCLUSIVE MODE NOWAIT")
+    recopy = archives.copy_archive_page(engine, family="raw_archive_manifests", **options)
+    assert recopy["copied_objects"] == len(late_keys)
+    after_late = _hashes(source_objects)
+    assert {key: after_late[key] for key in before} == before
+    before = after_late
+    copied = _hashes(objects)
+
+    # A live catalog writer refuses final admission without waiting. No fence
+    # survives the failed savepoint; retry after that writer ends is possible.
+    with engine.begin() as writer:
+        writer.exec_driver_sql("LOCK TABLE market.raw_archive_manifests IN ROW EXCLUSIVE MODE")
+        with pytest.raises(DBAPIError) as busy, engine.begin() as conn:
+            with archives.verified_archive_inventory(conn, **verification):
+                pytest.fail("busy publisher admitted")
+        assert getattr(busy.value.orig, "pgcode", None) == "55P03"
+    with engine.begin() as conn:
+        with pytest.raises(RuntimeError, match="verification_budget_exceeded"):
+            with archives.verified_archive_inventory(conn, **(verification | {"max_objects": 1})):
+                pytest.fail("inventory budget ignored")
+    damaged = objects/late_keys[0]
+    valid_bytes = damaged.read_bytes()
+    damaged.write_bytes(bytes([valid_bytes[0] ^ 1])+valid_bytes[1:])
+    try:
+        with engine.begin() as conn:
+            with pytest.raises(RuntimeError, match="archive_inventory_object_mismatch"):
+                with archives.verified_archive_inventory(conn, **verification):
+                    pytest.fail("corrupt destination admitted")
+    finally:
+        damaged.write_bytes(valid_bytes)
+
     # Reuse the guarded tiny database handoff; this does not turn a page copy
     # into a production migration or an archive-root activation certificate.
     finish_headers(engine)
@@ -164,7 +234,10 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     for relation in references.RELATIONS:
         references.move_reference_catalog(engine, relation=relation, **_options(storage))
     with engine.begin() as conn:
-        stage_shadow_handoff_fixture(conn, storage, prevalidated=True, raw_mapping=True)
+        with archives.verified_archive_inventory(conn, **verification) as final_inventory:
+            assert final_inventory["verified_catalog_objects"] > baseline_inventory["verified_catalog_objects"]
+            assert final_inventory["inventory_sha256"] != baseline_inventory["inventory_sha256"]
+            stage_shadow_handoff_fixture(conn, storage, prevalidated=True, raw_mapping=True)
 
     retained = source.with_name(source.name+"-retained")
     source.rename(retained)
@@ -190,7 +263,11 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         "collection_during_copy_and_after_handoff": True,
         "recent_history_frozen_and_book_replay_with_original_root_unavailable": True,
         "wrong_filesystem_expiry_lock_byte_budget_low_capacity_and_corruption_refused": True,
+        "late_publication_missing_and_corrupt_destination_refused": True,
+        "final_catalog_fence_allows_reads_blocks_writes_and_releases_on_failure": True,
+        "final_inventory_verified_objects": final_inventory["verified_catalog_objects"],
+        "final_inventory_verification_seconds": final_inventory["verification_seconds"],
         "copied_objects": len(copied), "copied_bytes": sum((objects/key).stat().st_size for key in copied),
-        "limits": ["tiny disposable data", "page progress is not final inventory readiness",
+        "limits": ["tiny disposable data", "page progress is not final inventory readiness; publisher drain/root activation remain separate",
                    "no production root switch, migration-duration or hardware qualification"]
     }, sort_keys=True))

@@ -866,3 +866,18 @@ its final publication fence. Full-volume duration, interruption cleanup after
 process death, resource allowances and physical HDD performance remain separate
 qualification work. A partial process-death file is never published or treated
 as completed history; automatic retirement of abandoned partials is not added.
+
+The final inventory rehearsal adds a genuine raw publication after baseline
+copying. Verification must detect its missing HDD object without trusting the
+earlier cursors. Copying again then admits the expanded inventory. Corrupt
+destination bytes, a busy manifest writer and an exceeded verification budget
+must refuse admission. Ordinary readers must continue under the final fence,
+new writers must be blocked, and a failed verification must release its locks
+while preserving unrelated caller work.
+
+The existing tiny database handoff runs inside the successful final inventory
+context, then the original root is made unavailable for the existing HDD-only
+consumer checks. This proves the committed catalog snapshot and copied bytes;
+it does not prove publisher process drain, active-root configuration changes,
+supervision through outer commit, process-death partial retirement or acceptable
+full-size hash-scan downtime.

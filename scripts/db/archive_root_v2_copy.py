@@ -6,6 +6,9 @@ concurrent publication requires a final fenced reconciliation before cutover.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -16,7 +19,7 @@ from time import monotonic
 from sqlalchemy import text
 
 from core.storage_targets import StorageLocation
-from market_data.archive import FilesystemRawArchiveObjectStore
+from market_data.archive import FilesystemRawArchiveObjectStore, _sha256_file
 from portal.backend.service.storage.header_movement import _MoveWatch
 from portal.backend.service.storage.header_resource_claims import _limits
 from portal.backend.service.storage.header_resources import observe_header_resources
@@ -59,6 +62,26 @@ def _path(root, key, device, *, missing=False):
         if info.st_dev != device or not kind(info.st_mode):
             raise RuntimeError("archive_copy_path_not_regular_or_wrong_filesystem")
     return path
+
+
+def _catalog_page(conn, family, after_id, page_rows):
+    kind = FAMILIES[family]
+    predicate = "" if kind is None else """
+        AND NOT EXISTS (
+            SELECT 1 FROM market.storage_lifecycle_events e
+            WHERE e.action='archive_expire' AND e.event_type='completed'
+              AND e.target_kind=:kind AND e.target_id=m.id)
+    """
+    rows = conn.execute(text(f"""
+        SELECT m.id,m.object_key,m.object_sha256,m.byte_count
+        FROM market.{family} m WHERE m.id>:after {predicate}
+        ORDER BY m.id LIMIT :limit
+    """), {"after": after_id, "kind": kind, "limit": page_rows}).mappings().all()
+    for row in rows:
+        if (not re.fullmatch(r"[0-9a-f]{64}", row["object_sha256"])
+                or type(row["byte_count"]) is not int or row["byte_count"] <= 0):
+            raise RuntimeError("archive_copy_descriptor_invalid")
+    return rows
 
 
 def copy_archive_page(engine, *, family, source_root, destination_root, after_id="",
@@ -118,22 +141,7 @@ def copy_archive_page(engine, *, family, source_root, destination_root, after_id
                         FROM {SCHEMA}.capture WHERE id=1
                     """))
                     deadline = min(deadline, monotonic()+float(seconds))
-                    kind = FAMILIES[family]
-                    predicate = "" if kind is None else """
-                        AND NOT EXISTS (
-                            SELECT 1 FROM market.storage_lifecycle_events e
-                            WHERE e.action='archive_expire' AND e.event_type='completed'
-                              AND e.target_kind=:kind AND e.target_id=m.id)
-                    """
-                    rows = conn.execute(text(f"""
-                        SELECT m.id,m.object_key,m.object_sha256,m.byte_count
-                        FROM market.{family} m WHERE m.id>:after {predicate}
-                        ORDER BY m.id LIMIT :limit
-                    """), {"after": after_id, "kind": kind, "limit": page_rows}).mappings().all()
-                    for row in rows:
-                        if (not re.fullmatch(r"[0-9a-f]{64}", row["object_sha256"])
-                                or type(row["byte_count"]) is not int or row["byte_count"] <= 0):
-                            raise RuntimeError("archive_copy_descriptor_invalid")
+                    rows = _catalog_page(conn, family, after_id, page_rows)
                     byte_count = sum(row["byte_count"] for row in rows)
                     if byte_count > max_page_bytes:
                         raise RuntimeError("archive_copy_page_byte_budget_exceeded")
@@ -190,6 +198,127 @@ def copy_archive_page(engine, *, family, source_root, destination_root, after_id
             if watch is not None and watch.failure is not None:
                 raise RuntimeError(watch.failure) from exc
             raise
+        finally:
+            if watch is not None:
+                watch.stop(conn)
+
+@contextmanager
+def verified_archive_inventory(conn, *, source_root, destination_root, max_objects,
+                               max_bytes, policy, resource_limits, page_rows=128,
+                               cancelled=None):
+    """Verify the complete committed catalog while its publication is fenced.
+
+    The caller owns the transaction and must drain in-flight file publishers
+    before a root switch. Uncatalogued uploads are not visible to a DB fence.
+    Ordinary catalog reads remain allowed; success retains transaction locks
+    until caller commit/rollback. Failure unwinds only this savepoint.
+    This is not root activation, reusable readiness or commit supervision.
+    """
+    if type(page_rows) is not int or not 1 <= page_rows <= 256:
+        raise ValueError("archive_copy_page_rows_invalid")
+    if type(max_objects) is not int or max_objects <= 0:
+        raise ValueError("archive_inventory_object_budget_invalid")
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("archive_inventory_byte_budget_invalid")
+    if cancelled is not None and not callable(cancelled):
+        raise ValueError("archive_copy_cancellation_callback_invalid")
+    limits = _limits(resource_limits)
+    started = monotonic()
+    deadline = started + limits["movement_timeout_seconds"]
+    watch = None
+    with migration_step(conn, limits["movement_timeout_seconds"]):
+        try:
+            previous = conn.scalar(text(
+                "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
+            if previous:
+                deadline = min(deadline, monotonic()+previous/1000)
+            if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
+                                    "hashtextextended('qt.storage.management.v1',0))")):
+                raise RuntimeError("archive_copy_storage_busy")
+            if not conn.scalar(text("SELECT pg_try_advisory_xact_lock_shared("
+                                    "hashtextextended(:name,0))"),
+                               {"name": _LIFECYCLE_LOCK_NAME}):
+                raise RuntimeError("archive_copy_expiry_busy")
+            # Freeze all known manifest families before the first inventory
+            # query. A row-exclusive publisher refuses this nonwaiting fence.
+            conn.exec_driver_sql("LOCK TABLE "+",".join("market."+name for name in FAMILIES)
+                                 +" IN SHARE ROW EXCLUSIVE MODE NOWAIT")
+            conn.exec_driver_sql(f"LOCK TABLE {headers.SOURCE} IN ACCESS SHARE MODE NOWAIT")
+            state = headers._inspect_progress(conn)
+            saved = state["placement"]
+            if saved is None:
+                raise RuntimeError("archive_copy_fixed_placement_required")
+            plan = physical._restore(saved["plan"])
+            targets = (plan.recent, plan.history)
+            reference_move._fixed_inputs(policy, limits, targets)
+            if policy.archives != (plan.history.target_id,):
+                raise ValueError("archive_copy_history_archive_policy_required")
+            source, source_identity = _root(source_root, saved["recent_device"])
+            destination, destination_identity = _root(destination_root, saved["history_device"])
+            if not destination.is_relative_to(Path(plan.history.root)):
+                raise RuntimeError("archive_copy_destination_outside_history_target")
+            seconds = conn.scalar(text(f"""
+                SELECT EXTRACT(EPOCH FROM prepared_at+interval '24 hours'-clock_timestamp())
+                FROM {SCHEMA}.capture WHERE id=1
+            """))
+            deadline = min(deadline, monotonic()+float(seconds))
+            resources = observe_header_resources(conn, targets, pg_controldata=plan.pg_controldata,
+                timeout_seconds=min(30, limits["movement_timeout_seconds"]))
+            budget, floors = reference_move._budget(conn,
+                observed={"bytes": 0, "_binding": saved}, policy=policy,
+                limits=limits, targets=targets, resources=resources)
+            watch = _MoveWatch(driver=conn.connection.driver_connection, targets=targets,
+                capacity=resources.capacity, floors=floors, deadline=deadline,
+                cancelled=cancelled, grace=limits["cancellation_grace_seconds"])
+            watch.start()
+            count = byte_count = 0
+            digest = hashlib.sha256()
+            for family in FAMILIES:
+                after_id = ""
+                while True:
+                    watch.check()
+                    rows = _catalog_page(conn, family, after_id, page_rows)
+                    if not rows:
+                        break
+                    for row in rows:
+                        key, expected, size = row["object_key"], row["object_sha256"], row["byte_count"]
+                        count += 1
+                        byte_count += size
+                        if count > max_objects or byte_count > max_bytes:
+                            raise RuntimeError("archive_inventory_verification_budget_exceeded")
+
+                        def check():
+                            watch.check()
+                            if (_root(source, saved["recent_device"])[1] != source_identity
+                                    or _root(destination, saved["history_device"])[1] != destination_identity):
+                                raise RuntimeError("archive_copy_root_changed")
+                            try:
+                                _path(destination, key, destination_identity[0])
+                            except FileNotFoundError as exc:
+                                raise RuntimeError("archive_inventory_object_missing: key="+key) from exc
+
+                        check()
+                        path = _path(destination, key, destination_identity[0])
+                        before = path.stat()
+                        actual = _sha256_file(path, check_budget=check)
+                        after = path.stat()
+                        stable = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                                                value.st_mtime_ns, value.st_ctime_ns)
+                        if before.st_size != size or actual != expected or stable(before) != stable(after):
+                            raise RuntimeError("archive_inventory_object_mismatch: key="+key)
+                        digest.update((json.dumps({"family": family, **dict(row)}, sort_keys=True,
+                                                  separators=(",", ":"))+"\n").encode())
+                    after_id = rows[-1]["id"]
+            watch.check()
+            report = {"verified_catalog_objects": count, "verified_catalog_bytes": byte_count,
+                "inventory_sha256": digest.hexdigest(), "destination_root": str(destination),
+                "verification_seconds": monotonic()-started, "resource_budget": budget,
+                "migration_ready": False, "root_activation_authorized": False,
+                "publisher_drain_and_caller_commit_supervision_required": True}
+            logger.info("archive_migration_inventory_verified | objects=%s bytes=%s duration_seconds=%s",
+                        count, byte_count, report["verification_seconds"])
+            yield report
+            watch.check()
         finally:
             if watch is not None:
                 watch.stop(conn)

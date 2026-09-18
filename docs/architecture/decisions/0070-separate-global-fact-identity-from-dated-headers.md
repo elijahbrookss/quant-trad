@@ -292,3 +292,25 @@ archive-root cutover and the full preserving migration/recovery procedure.
 No runtime configuration, manifest location, new scheduler or generic placement
 API is changed by this internal step. Filesystem watching bounds observed
 consumption, not instantaneous allocation or per-producer IO attribution.
+
+The internal final inventory context takes nonwaiting write fences on all three
+manifest catalogs and the shared expiry fence before scanning from their starts.
+It verifies every required destination object's size, complete checksum and stable
+file identity, with bounded pages, object/byte limits and the same migration clock,
+physical binding, declared resource budget and cancellation watcher. Copy cursors
+cannot substitute for this complete inventory. Missing or changed destination
+bytes, a busy publisher or an exceeded bound refuse admission; the verification
+savepoint releases its own locks without losing earlier caller work.
+
+Ordinary catalog reads continue while manifest writes are fenced. The caller can
+perform its admitted database handoff inside the verification context. Successful
+transaction locks remain until caller commit or rollback. This is still an
+internal prerequisite: the caller owns commit supervision and must stop/drain
+in-flight file publishers before changing the active root. Files uploaded but
+not yet cataloged cannot be certified by a database fence. No root activation or
+durable/reusable readiness token is issued.
+
+The complete file hash scan currently occurs while catalog writers are fenced.
+Its duration must be measured alongside the final header/lookup scans before
+claiming a short pause or a complete migration within one day. The bounded
+implementation is not evidence that a full-size verification fits that budget.
