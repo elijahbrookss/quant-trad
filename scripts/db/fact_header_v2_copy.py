@@ -1,7 +1,7 @@
 """Bounded, resumable shadow copy for the fixed tiered-v1 header upgrade.
 
 Internal operator primitive; no CLI, cutover, readiness certificate or runtime
-wiring. The source remains authoritative. Full source admission, verified disk
+wiring. The source remains authoritative. Final source re-admission, verified disk
 placement, capacity limits and the final dependency handoff remain prerequisites
 for a production orchestrator. This stage never deletes source records.
 """
@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from portal.backend.db import Base, MarketFactVersionRecord
 from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE, QUEUE, LOCK, install_capture, inspect_capture
+from scripts.db.fact_header_v2_admission import assert_v1_source_admission
 
 STATE = SCHEMA + ".copy_progress"
 TABLE_NAMES = ("fact_identities", "fact_header_partitions", "fact_header_series_days", "fact_versions")
@@ -107,12 +108,14 @@ def prepare_copy(conn):
         _source_columns(conn)
         if conn.scalar(text("SELECT to_regclass(:name)"), {"name":STATE}) is not None:
             state = _inspect_progress(conn)
+            assert_v1_source_admission(conn)
             return _report(conn, state, verified=0, reused=True)
         tables = _tables()
         for name in TABLE_NAMES:
             if conn.scalar(text("SELECT to_regclass(:name)"), {"name":SCHEMA+"."+name}) is not None:
                 raise RuntimeError("fact_header_copy_unregistered_shadow")
             tables[name].create(conn)
+        assert_v1_source_admission(conn)
         conn.exec_driver_sql(f"""
             CREATE TABLE {STATE}(
                 id integer PRIMARY KEY CHECK(id=1),

@@ -172,9 +172,9 @@ late commits even when their sequence would fall behind a backfill cursor.
 Installation is caller-transactional and uses a savepoint so a caught setup
 failure cannot commit half-installed capture.
 
-It adds no operator command, startup action or cutover permission. The source
-must still receive full v1 contract admission by the preserving migration
-orchestrator. An intact retry reuses the queue; changed identity, replaced
+It adds no operator command, startup action or cutover permission. The preserving-copy preparation now applies the known-v1 source-contract
+admission described below. The final operator must repeat that admission
+under its writer fence. An intact retry reuses the queue; changed identity, replaced
 queue, altered function or disabled trigger blocks resumption. The capture helper itself does not copy headers or drain its queue. The
 separate internal shadow-copy stage below owns that work. Neither helper rewires
 active dependencies or issues a ready certificate.
@@ -205,8 +205,9 @@ already copied; a sequence watermark is not treated as a complete commit set.
 
 Retry refuses changed source columns, a missing copy index, changed target
 definitions, replaced capture, incompatible recorded partitions and conflicting
-target content. Full source schema/guard admission and a complete final
-verification pass still belong to the future operator orchestrator.
+target content. Known-source schema/guard admission runs before preparation commits and on
+preparation retry. A complete final verification pass and source re-admission
+under the final writer fence still belong to the operator orchestrator.
 
 There is no CLI, active-table rename, ready certificate, placement assignment or
 startup wiring. The caught-up report covers only the currently visible queue;
@@ -250,3 +251,33 @@ command. It takes fixture locks and validates populated foreign keys directly;
 that does not establish a short cutover at production scale. Full source
 admission, bounded final verification, measured lock/capacity limits, physical
 placement and rollback after resumed production writes remain release blockers.
+
+
+## Known-source admission before preparation
+
+The internal fact_header_v2_admission helper admits the installed tiered-v1
+header contract against the trusted shadow schema. It uses frozen source guard
+bodies from the installed code revision, rather than treating any existing
+trigger or view name as sufficient. It checks payload validation/immutability
+on the parent and attached children as well as the source-header guards.
+
+Only the known payload/archive references and hot projection are accepted.
+Unexpected direct or projection-dependent views/functions, changed foreign
+keys, conflicting active v2 objects, changed defaults/indexes and incompatible
+ownership or row policies refuse preparation. They require inspection, not
+automatic deletion or rewriting. The source commit sequence must remain
+standalone. Every check is a catalog read; no source repair is performed.
+
+The check runs inside the preparation savepoint after constructing the empty
+trusted target, so refusal cannot commit partial capture or shadow state. An
+intact retry re-admits the current source. Source admission does not prove data
+copy completion, free space, physical placement, performance, migration
+duration or safe final cutover. The final operator must repeat admission while
+holding the reviewed writer/dependency fence.
+
+The combined disposable rehearsal passed with admission enabled: known v1
+preparation and retry, resumable copying, recent/historical/frozen reads after
+the fixture switch, and interruption recovery. Altered guards or dependencies
+were refused without changing source rows or leaving partial preparation.
+The normal backend and documentation checks passed. This evidence remains
+local and does not qualify production cutover duration or physical placement.

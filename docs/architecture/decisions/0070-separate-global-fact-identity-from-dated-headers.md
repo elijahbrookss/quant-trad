@@ -16,6 +16,7 @@ code_paths:
   - portal/backend/db/fact_storage_schema.py
   - scripts/db/fact_header_v2_capture.py
   - scripts/db/fact_header_v2_copy.py
+  - scripts/db/fact_header_v2_admission.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -94,3 +95,17 @@ runtime layout. No v2 ready certificate is written. Source admission, physical
 placement, complete final verification and dependency handoff are separate
 release requirements; the private target is never selected by application
 queries. This primitive adds no alternate DSN, runtime writer or placement UI.
+
+
+Before preparation commits, the known-v1 source admission compares persisted
+columns/defaults/collations, checks, references and secondary indexes with the
+trusted empty shadow model. It separately requires the original global ID and
+revision keys, frozen v1 guard bodies, the source and payload-partition triggers,
+the existing hot projection, known incoming references and the standalone commit
+sequence. Unexpected active v2 objects or dependents are refused, including
+views/functions attached through the hot projection.
+
+Admission performs no repair. A refused preparation rolls back both capture and
+shadow DDL, while a retry rechecks the current source. This is source-contract
+admission only; the eventual operator must repeat it under the final writer
+fence and still qualify physical placement, capacity, timing and rollback.
