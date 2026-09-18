@@ -313,7 +313,9 @@ def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_
     assert before[0]["complete_bucket_count"] == 0
     assert before[0]["incomplete_bucket_count"] == 1
     replay_args = dict(definition_id=position["definition_id"], session_id=position["session_id"],
-                       snapshot_ids=[snapshot.snapshot_id], batch_ids=[], final_state_hash=None)
+                       snapshot_ids=[snapshot.snapshot_id], batch_ids=[], final_state_hash=snapshot.state_hash)
+    with pytest.raises(RuntimeError, match="market_book_replay_reconciliation_failed"):
+        repo.reconcile_book_replay(**{**replay_args, "final_state_hash": None})
     replay_before = repo.reconcile_book_replay(**replay_args)
     _verified_cold_fixture(storage, tmp_path, monkeypatch)
     monkeypatch.setattr(market_structure, "canonical_fact_storage_repository", market_data.canonical_fact_storage_repository)

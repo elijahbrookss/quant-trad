@@ -1515,3 +1515,27 @@ transaction and final reclamation handoff fence and recheck the policy revision,
 movement switch and assigned archive filesystem. Policy changes require replanning;
 they do not change Fact identity, causal selection or frozen Dataset binding.
 Unconfigured/manual canonical retention retains its existing explicit policy.
+
+### Historical book replay and disposable current state
+
+Book replay reconciliation reads retained canonical snapshot/update identities
+through the same hot/cold reader and lifecycle snapshot. Its terminal hash comes
+from the last accepted canonical event in source-position order. The latest
+immutable validity revision for that event's interval distinguishes a clean
+close from invalidation: a matching clean close retains the last accepted replay
+hash, while a matching invalidated close requires no valid terminal state.
+Closure scope, last position/hash and closing position must agree with retained
+canonical evidence. Incorrect hashes, missing event identities or inconsistent
+terminal evidence fail reconciliation.
+
+The mutable book_reconstruction_state row remains a current per-series
+projection. A later collector session replaces it, and clean shutdown may clear
+its live hash. Neither event changes the authority or readability of an older
+session's immutable history. Replay no longer uses this disposable projection
+as the historical terminal reference. No new history table, alternate reducer,
+schema migration, hash rule or weakened archive verification is introduced.
+
+Disposable coverage includes actual lease release and same-series session
+rollover with later event times; preserved cold history and frozen results;
+loss of the current projection; clean and invalidated terminal intervals; and
+rejection of incorrect hashes, missing events and mismatched terminal evidence.

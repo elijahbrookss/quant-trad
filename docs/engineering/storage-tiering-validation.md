@@ -832,9 +832,14 @@ snapshot, not writes committed after that snapshot or an automatic rollback.
 
 A separate existing replay limitation was exposed while constructing the
 fixture: current book state is keyed by series and is replaced when another
-definition/session takes over that series. replay_book_session still expects
+definition/session takes over that series. replay_book_session previously expected
 the older definition/session's current state during reconciliation. The
 diagnostic found the original canonical headers intact but that operational
-row absent. This is not evidence of storage loss. Replay of a superseded session
-remains an open release qualification item; do not silently waive it or count
-the independent-series proof as covering it. No replay contract was changed.
+row absent. This is not evidence of storage loss. The bounded correction now
+uses retained canonical event hashes and matching immutable terminal validity,
+through the existing hot/cold reader, rather than the disposable current row.
+The focused rollover rehearsal releases the old lease and collects a later
+session on the same series; it also checks missing current state, clean and
+invalidated endings and incorrect evidence. The independent-series restore proof
+alone must not be counted as this rollover proof. No new state store or replay
+engine is added. Full hardware/migration qualification remains separate.
