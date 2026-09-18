@@ -564,3 +564,48 @@ another product execution path. It does not simulate a full local-copy restore.
 The normal backend validation completed successfully. The new fixture helpers
 are test-only and explicitly restricted to the disposable topology; no API,
 startup migration, production table move or automatic policy was enabled.
+
+
+### Local recovery rehearsal and restore ordering
+
+The disposable recovery scenario now takes a PostgreSQL exported snapshot while
+holding QT's existing shared archive-expiry fence. A concurrent collection commit
+stays on the source but outside the snapshot. It copies the archive bytes, then
+replaces the reader path with those copied bytes; the original files remain
+separately retained and cannot satisfy restored reads.
+
+A plain serial restore exposed a real ordering dependency: hot payload CHECKs
+call market.validate_fact_payload, which looks up market.fact_schemas. PostgreSQL
+does not infer that table-data ordering from the function. Restore pre-data first,
+then data with the dump's unique fact_schemas TABLE DATA entry first in the TOC
+list, then post-data. Keep all CHECKs enabled. Use TimescaleDB's pre_restore and
+post_restore hooks; reset restore mode even when an attempted restore fails.
+The earlier historical backup runbook certified its recorded schema only.
+
+The ordered restore reached QT startup and exposed a second blocker: PostgreSQL
+15 rewrites an array-wide text cast in the inflight async-job index predicate as
+per-element casts. A minimal isolated dump/restore reproduced the equivalent
+expressions. The startup guard now accepts only that exact additional spelling;
+changed status literals (including case), null handling, columns and uniqueness
+still fail. No index or constraint is disabled or rewritten by startup.
+
+This is a recovery-proof fixture, not the routine backup scheduler or rotation
+executor. A successful fixture is necessary but cannot qualify full-volume
+restore time, backup creation space or a whole-system capacity forecast.
+
+The corrected full recovery rehearsal passed on disposable PostgreSQL 15 with
+two owned filesystems. QT started against the restored database; recent,
+historical and frozen reads and book replay matched the captured results.
+All four populated shared metadata tables retained their contents, and every
+heap/index/TOAST file was verified on history storage. The later collection
+commit remained on the source and was absent from the recovery snapshot.
+Copied archive checksums matched and readers used copied files with distinct
+inodes. The expiry fence excluded concurrent archive deletion while collection
+continued. The owned test stack and temporary filesystems were removed.
+
+This closes the small-data recovery correctness proof. Routine scheduling and
+rotation, full-volume restore duration/space, the preserving migration within
+24 hours, final hardware performance and complete capacity remain release
+blockers. The corrected restore sequence is exercised by the fixture; it is not
+yet a deployed operator or unattended recovery service. No merge, deployment,
+production data movement or seven-day waiting gate occurred.

@@ -249,6 +249,12 @@ _ASYNC_JOB_INDEX_DEFINITIONS = {
                 "(((status)=any((array['queued','running','retry'])[]))"
                 "and(request_fingerprintisnotnull))"
             ),
+            # pg_dump/pg_restore moves the array-wide text cast onto each
+            # varchar element. Admit only this observed equivalent spelling.
+            (
+                "(((status)=any(array[('queued'),('running'),('retry')]))"
+                "and(request_fingerprintisnotnull))"
+            ),
         },
     },
 }

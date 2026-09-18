@@ -236,6 +236,10 @@ Active schema surfaces are justified by role:
   expose heartbeat and generation but never claim tokens or token hashes.
   Bootstrap validates the definitions of fencing-critical constraints and
   indexes; a matching object name alone is not accepted as schema conformance.
+  PostgreSQL 15 dump/restore can move the inflight-job predicate's array-wide
+  text cast onto its individual varchar elements. Bootstrap accepts that exact
+  equivalent rendering, while still rejecting different status values, null
+  handling, key columns or uniqueness. Recovery does not disable these guards.
 - Removed from active contract:
   `observability_metrics.botlens_backend_metric_samples_v1`; raw samples are not
   a durable database surface.

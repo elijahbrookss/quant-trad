@@ -916,6 +916,43 @@ def test_bootstrap_rejects_async_index_predicate_semantic_drift(
         database._bootstrap_schema_contract()
 
 
+@pytest.mark.parametrize(
+    "status_values,not_null,accepted",
+    [
+        ("'queued','running','retry'", True, True),
+        ("'queued','RUNNING','retry'", True, False),
+        ("'queued','running'", True, False),
+        ("'queued','running','retry','failed'", True, False),
+        ("'queued','running','retry'", False, False),
+    ],
+)
+def test_async_index_restored_casts_preserve_exact_predicate(
+    monkeypatch, status_values, not_null, accepted,
+):
+    # This is the exact PostgreSQL 15 rendering after a dump/restore.
+    elements=",".join(f"({value}::character varying)::text" for value in status_values.split(","))
+    predicate=(
+        f"(((status)::text = ANY (ARRAY[{elements}])) "
+        f"AND (request_fingerprint IS {'NOT ' if not_null else ''}NULL))"
+    )
+    inspector = _Inspector(
+        schemas={"public", "observability_events", "observability_metrics"},
+        tables=[_table_key(table) for table in Base.metadata.sorted_tables],
+        indexes={(None, "portal_async_jobs"): {
+            str(index.name) for index in Base.metadata.tables["portal_async_jobs"].indexes if index.name
+        }},
+        index_overrides={"uq_portal_async_jobs_inflight_request": {
+            "dialect_options": {"postgresql_where": predicate},
+        }},
+    )
+    database, _ = _database_with_fake_engine(monkeypatch, inspector)
+    if accepted:
+        database._assert_async_job_index_definitions(inspector)
+    else:
+        with pytest.raises(RuntimeError, match="mismatched index definitions.*inflight_request"):
+            database._assert_async_job_index_definitions(inspector)
+
+
 @pytest.mark.parametrize("valid", [True, False])
 def test_book_status_partitioned_index_still_requires_validity(monkeypatch, valid):
     index_name = "ix_market_fact_series_commit"
