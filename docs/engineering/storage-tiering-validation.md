@@ -768,3 +768,20 @@ cannot conceal a newer failure. No new controls, tables or scheduler were added.
 This is local implementation and disposable validation of the status connection.
 It does not configure production runners, enable Apply, qualify actual HDD
 performance, or complete the preserving migration and capacity forecast.
+
+
+### Exact final-copy verification rehearsal
+
+The fixed preserving copy now compares bounded ordered pages of every header,
+global identity and raw archive lookup field while source and shadow writes are
+fenced but ordinary recent/history queries continue. The rename phase requires
+its separate nonwaiting exclusive fence. Its tiny handoff fixture retains the 1,024-row safety limit. Dedicated
+disposable scenarios cover same-count content damage, missing/extra records,
+incomplete routing, pending capture and an active writer. An interrupted check
+must release its own fence while preserving outer work, source collection and
+frozen archive bytes. Existing switch interruption and post-switch collection
+scenarios exercise this same verification path.
+
+This is an internal prerequisite, not the finished migration command. The final
+scan still fences writers for its measured duration; there is no production
+downtime claim, completed one-day rehearsal or post-resume rollback qualification.

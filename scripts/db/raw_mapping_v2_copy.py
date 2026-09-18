@@ -6,7 +6,9 @@ remains authoritative; a later admitted cutover must close its writer boundary.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+from time import monotonic
 import logging
 
 from sqlalchemy import MetaData, text, tuple_
@@ -286,3 +288,36 @@ def _report(conn,state,*,verified,reused):
             "capture_pending":pending,
             "caught_up_at_observation":state["baseline_complete"] and not pending,
             "source_authoritative":True,"migration_ready":False,"reused":reused}
+
+
+@contextmanager
+def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
+    """Exact bounded lookup comparison under a nonwaiting writer fence.
+
+    Must be nested inside the header verified_copy context during final handoff.
+    No ready certificate, schema switch or commit is performed here.
+    """
+    if type(page_rows) is not int or not 1 <= page_rows <= 4096:
+        raise ValueError("raw_mapping_copy_page_rows_out_of_bounds")
+    started = monotonic()
+    with _step(conn, timeout_seconds):
+        # Require the actual header fence on this connection, not a saved report.
+        if not conn.scalar(text("""
+            SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid()
+                AND relation=to_regclass(:source)
+                AND mode IN ('ShareRowExclusiveLock','AccessExclusiveLock') AND granted)
+        """), {"source": headers.SOURCE}):
+            raise RuntimeError("raw_mapping_handoff_header_fence_required")
+        conn.exec_driver_sql(f"LOCK TABLE {SOURCE},{TARGET},{QUEUE},{STATE} IN SHARE ROW EXCLUSIVE MODE NOWAIT")
+        state = _inspect(conn)
+        if (not state["baseline_complete"]
+                or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))):
+            raise RuntimeError("raw_mapping_handoff_copy_incomplete")
+        verified = sum(len(rows) for rows in headers._verified_pages(
+            conn, source=SOURCE, target=TARGET, columns=COLUMNS, keys=KEYS,
+            page_rows=page_rows, label="raw_lookup"))
+        report = {"verified_lookup_rows": verified, "verification_seconds": monotonic()-started,
+                  "migration_ready": False, "source_authoritative": True}
+        logger.info("raw_mapping_v2_handoff_copy_verified | rows=%s duration_seconds=%s",
+                    verified, report["verification_seconds"])
+        yield report

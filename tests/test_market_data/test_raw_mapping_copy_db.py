@@ -185,6 +185,8 @@ def test_cold_book_and_frozen_results_survive_raw_mapping_handoff(storage,tmp_pa
     finish_headers(engine)
     _finish(engine)
     with engine.begin() as conn:
+        headers.enable_identity_capture(conn)
+    with engine.begin() as conn:
         # This switch is still a tiny guarded fixture, never an operator command.
         with pytest.raises(RuntimeError,match="injected switch interruption"),conn.begin_nested():
             stage_shadow_handoff_fixture(conn,storage,raw_mapping=True)
@@ -213,3 +215,38 @@ def test_cold_book_and_frozen_results_survive_raw_mapping_handoff(storage,tmp_pa
         assert len(_rows(conn))>len(before)
         assert _rows(conn,"qt_fact_header_retained_v1."+copy.NAME)==before
         _assert_disk(conn,copy.SOURCE,Path("/qt-history"))
+
+
+
+def test_lookup_final_verification_refuses_content_drift_and_unfenced_use(placed,tmp_path,monkeypatch):
+    engine=placed.database._engine
+    _raw_trade_fixture(placed,tmp_path,monkeypatch)
+    with engine.begin() as conn:
+        headers.prepare_copy(conn,placement=placed.copy_plan)
+        copy.prepare_copy(conn)
+    finish_headers(engine)
+    _finish(engine)
+    with engine.begin() as conn:
+        headers.enable_identity_capture(conn)
+    with engine.begin() as conn:
+        with pytest.raises(RuntimeError,match="header_fence_required"):
+            with copy.verified_copy(conn):
+                pytest.fail("unfenced raw verification admitted")
+        with headers.verified_copy(conn,page_rows=2,timeout_seconds=60):
+            original=_rows(conn)
+            with copy.verified_copy(conn,page_rows=1) as report:
+                assert report["verified_lookup_rows"]==len(original)==2
+                with engine.begin() as reader:
+                    reader.exec_driver_sql("SET LOCAL lock_timeout='250ms'")
+                    assert _rows(reader)==original==_rows(reader,copy.TARGET)
+                assert not report["migration_ready"]
+            with conn.begin_nested() as damage:
+                conn.exec_driver_sql(f"UPDATE {copy.TARGET} SET raw_frame_sha256=repeat('e',64)")
+                with pytest.raises(RuntimeError,match="raw_lookup"):
+                    with copy.verified_copy(conn,page_rows=1):
+                        pytest.fail("same-count changed lookup admitted")
+                assert _rows(conn)==original
+                damage.rollback()
+            with copy.verified_copy(conn,page_rows=1) as report:
+                assert report["verified_lookup_rows"]==2
+    assert placed.archive_path.read_bytes()==placed.archive_bytes

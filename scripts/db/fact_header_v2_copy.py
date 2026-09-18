@@ -7,12 +7,13 @@ for a production orchestrator. This stage never deletes source records.
 """
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import date, timedelta
 import json
 import logging
+from time import monotonic
 
-from sqlalchemy import MetaData, inspect, text
+from sqlalchemy import MetaData, bindparam, inspect, text
 from sqlalchemy.dialects.postgresql import insert
 
 from portal.backend.db import Base, MarketFactVersionRecord
@@ -314,3 +315,100 @@ def _report(conn, state, *, verified, reused):
             "caught_up_at_observation":state["baseline_complete"] and not pending,
             "migration_ready":False,"source_authoritative":True,"reused":reused,
             "physical_placement_configured":state["placement"] is not None}
+
+
+def _verified_pages(conn, *, source, target, columns, keys, page_rows, label):
+    """Compare two fixed internal relations exactly, with bounded client memory.
+
+    Callers own both relation locks and the cumulative migration deadline.
+    Names come only from this module/the fixed raw-lookup module, never UI input.
+    Equality is field-by-field; counts or hashes alone cannot certify a copy.
+    """
+    after = None
+    while True:
+        params = {"limit": page_rows}
+        predicate = ""
+        if after is not None:
+            params.update({f"after_{i}": value for i, value in enumerate(after)})
+            predicate = f"WHERE ({','.join(keys)}) > ({','.join(':after_'+str(i) for i in range(len(keys)))})"
+        pages = [conn.execute(text(
+            f"SELECT {','.join(columns)} FROM {relation} {predicate} "
+            f"ORDER BY {','.join(keys)} LIMIT :limit"), params).mappings().all()
+            for relation in (source, target)]
+        if pages[0] != pages[1]:
+            raise RuntimeError("fact_header_handoff_content_mismatch: " + label)
+        if not pages[0]:
+            return
+        yield pages[0]
+        after = tuple(pages[0][-1][key] for key in keys)
+
+
+def _verify_routing(conn, rows):
+    pairs = sorted({(row["series_id"], row["storage_day"]) for row in rows})
+    bounds = {(row["series_id"], row["storage_day"]): row for row in conn.execute(
+        text(f"SELECT * FROM {SCHEMA}.fact_header_series_days "
+             "WHERE (series_id,storage_day) IN :pairs").bindparams(bindparam("pairs", expanding=True)),
+        {"pairs": pairs}).mappings()}
+    for row in rows:
+        bound = bounds.get((row["series_id"], row["storage_day"]))
+        if (bound is None or not
+                bound["min_observation_time"] <= row["observation_time"] <= bound["max_observation_time"]):
+            raise RuntimeError("fact_header_handoff_routing_incomplete")
+
+
+@contextmanager
+def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
+    """Fence and verify the fixed header copy in the caller's transaction.
+
+    Yield only after full header/identity equality, conservative routing coverage
+    and partition/placement checks. The caller may perform its admitted handoff
+    inside this context, under the same cumulative deadline. Ordinary reads
+    remain allowed; the actual rename needs a separate exclusive fence. Success retains
+    locks until caller commit/rollback; failure releases this savepoint's locks.
+    This is NOT an operator command, durable readiness or commit supervision.
+    """
+    if type(page_rows) is not int or not 1 <= page_rows <= 4096:
+        raise ValueError("fact_header_copy_page_rows_out_of_bounds")
+    started = monotonic()
+    with migration_step(conn, timeout_seconds):
+        # Close source writers before inspecting progress or taking a snapshot.
+        # Lock all copied data and routing tables too: the shadow is not yet
+        # protected by the runtime immutable guards.
+        owners = ("market.fact_hot_payloads", "market.fact_archive_material_aliases",
+                  "market.fact_archive_canonical_dependencies")
+        relations = (SOURCE, *owners, *(SCHEMA+"."+name for name in TABLE_NAMES),
+                     STATE, QUEUE, SCHEMA+".capture")
+        conn.exec_driver_sql("LOCK TABLE "+",".join(relations)+" IN SHARE ROW EXCLUSIVE MODE NOWAIT")
+        state = _inspect_progress(conn)
+        if (not state["baseline_complete"] or not state["identity_capture"]
+                or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))):
+            raise RuntimeError("fact_header_handoff_copy_incomplete")
+        assert_v1_source_admission(conn, identity_capture=True)
+        days = conn.execute(text(f"SELECT storage_day FROM {SCHEMA}.fact_header_partitions "
+                                 "ORDER BY storage_day LIMIT 4097")).scalars().all()
+        children = conn.execute(text("""
+            SELECT n.nspname,c.relname FROM pg_inherits i
+            JOIN pg_class c ON c.oid=i.inhrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE i.inhparent=to_regclass(:parent) ORDER BY c.relname LIMIT 4097
+        """), {"parent": SCHEMA+".fact_versions"}).all()
+        expected = {(SCHEMA, "fact_versions_"+day.strftime("%Y%m%d")) for day in days}
+        if len(days)>4096 or len(children)>4096 or set(children)!=expected:
+            raise RuntimeError("fact_header_handoff_partition_catalog_mismatch")
+        for day in days:
+            _partition(conn, day, placement=state["placement"], pid=state["_placement_pid"])
+        header_rows = 0
+        for rows in _verified_pages(conn, source=SOURCE, target=SCHEMA+".fact_versions",
+                                    columns=HEADER_COLUMNS, keys=("storage_day","market_commit_seq","id"),
+                                    page_rows=page_rows, label="headers"):
+            _verify_routing(conn, rows)
+            header_rows += len(rows)
+        identity_rows = sum(len(rows) for rows in _verified_pages(
+            conn, source=SOURCE, target=SCHEMA+".fact_identities",
+            columns=IDENTITY_COLUMNS, keys=("id",), page_rows=page_rows, label="identities"))
+        report = {"verified_header_rows": header_rows, "verified_identity_rows": identity_rows,
+                  "verification_seconds": monotonic()-started, "migration_ready": False,
+                  "source_authoritative": True,
+                  "physical_placement_configured": state["placement"] is not None}
+        logger.info("fact_header_v2_handoff_copy_verified | rows=%s duration_seconds=%s",
+                    header_rows, report["verification_seconds"])
+        yield report

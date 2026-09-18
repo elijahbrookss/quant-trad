@@ -200,3 +200,31 @@ the same deadline through its commit boundary and qualify physical capacity,
 copy/catch-up throughput, final verification and recovery. These guards enforce
 admission and per-step SQL time; they do not prove completion within one day.
 No runtime startup migration or live cutover is introduced.
+
+
+## Final copy verification boundary — 2026-09-18
+
+The fixed migration's existing header and raw-lookup modules now expose an
+internal verification context for the eventual final handoff. It takes nonwaiting
+writer fences on the admitted source, reference owners and private target
+relations while permitting ordinary queries. The subsequent rename phase must
+acquire its own exclusive fence without waiting. Verification then repeats copy/source/placement admission before comparing bounded
+ordered pages. Header fields, global identity fields and raw lookup fields must
+match exactly in both directions. Equal counts alone do not qualify. Every
+header must be covered by conservative series/day routing bounds, and registered
+partitions must match their attached relations and physical destinations.
+
+Verification and the caller's handoff share the existing cumulative step budget
+and original one-day clock. A failure rolls back the verification savepoint and
+its newly acquired locks, preserving outer work and allowing source collection.
+Successful verification keeps transaction locks until caller commit or rollback;
+its report is not a reusable readiness token. The raw-lookup context requires
+the header fence on the same database connection.
+
+The tiny disposable handoff now exercises these checks instead of whole-table
+EXCEPT comparisons. It retains its 1,024-row limit. No operator command, ready
+certificate, data deletion, new storage policy or generic mover is introduced.
+Full exact verification still reads every source and target record while writers
+are fenced (ordinary readers continue); its duration must be measured. Bounded memory and timeout do not
+establish acceptable downtime, commit supervision, post-resume recovery or the
+complete migration's one-day qualification.
