@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/service/storage/header_resource_claims.py
   - portal/backend/service/storage/recovery_copies.py
   - portal/backend/service/storage/recovery_maintenance.py
+  - portal/backend/service/storage/history_maintenance.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -688,8 +689,40 @@ nonwaiting fence admission so an ongoing expiry cannot make shutdown wait for
 an unbounded lock.
 
 This service supplies a due decision and copy execution, not a second scheduler.
-Its budgets must come from the measured deployment plan. The existing lifecycle supervisor now has an optional recovery runner after
-retention releases its transaction, with independent outcomes and cancellation.
+Its budgets must come from the measured deployment plan. The existing lifecycle
+supervisor accepts optional history and recovery runners after retention releases
+its transaction. Each phase has an independent outcome and shutdown cancellation;
+a failed history phase does not suppress the recovery attempt.
 The production entrypoint does not supply the verified namespace and measured
 budgets yet, and Storage Apply remains blocked. Deployment composition, portal
 status and final measured limits remain necessary.
+
+### Saved-policy historical maintenance
+
+The internal run_history_maintenance service moves at most one eligible day per
+pass using the saved policy, complete catalog, registered destinations and the
+existing plan, move and resource-reservation journal. The bounded planner still
+validates the entire catalog. Later eligible days are explicitly deferred and
+receive no reservation in this pass. Already placed history remains on its
+allowed HDD; adding a target does not trigger rebalancing. The existing unlimited
+review and its hash remain unchanged.
+
+The service requires recent SSD and historical HDD assignments, prepared
+registered tablespaces, verified physical paths and explicit measured resource
+limits. It creates neither tablespaces nor a new scheduler. A new intent and all
+capacity claims commit together; failed admission leaves neither behind.
+Another storage owner causes a busy result. A reserved intent is retried before
+new work is planned. A lost completion response is reconciled against the durable
+move and re-observed physical files before the plan is marked complete, without
+moving the day or releasing capacity twice.
+
+A changed/disabled policy or changed resource configuration cancels only a
+wholly unstarted one-group intent and releases its claims. Committed placement
+is preserved. Execution failures remain visible as blocked plans; they do not
+turn into successful or silently skipped work. A complete pass releases its
+ownership before recovery is considered on the existing lifecycle thread.
+
+This is an internal execution seam, not public activation. The production
+entrypoint still needs the verified PostgreSQL filesystem namespace, qualified
+limits and authoritative portal health. Storage Apply remains unavailable until
+those release prerequisites are met.

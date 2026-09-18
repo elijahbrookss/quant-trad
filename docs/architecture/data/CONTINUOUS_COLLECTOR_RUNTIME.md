@@ -428,16 +428,19 @@ continuity; collector leases, finalizers, gap evidence, and release-specific
 post-cutover acquisition checks retain their existing authority.
 
 
-The existing storage-lifecycle supervisor accepts an optional local recovery
-runner after the retention phase has released its transaction/fence. It uses the
-same recurring thread; no second timer is introduced. An exception or busy
-retention phase does not suppress a configured recovery attempt. Copy success,
-not-due, busy, blocked and failure outcomes are separately included in the
-worker's lifecycle snapshot. Shutdown cancellation is passed into the copy.
-A recovery-only configuration never executes disabled retention.
+The existing storage-lifecycle supervisor accepts optional history-movement and
+local-recovery runners after retention releases its transaction/fence. They use
+the same recurring thread, in that order; no second timer is introduced. History
+handles at most one eligible day per pass so recovery has a turn between moves.
+An exception or busy retention phase does not suppress these attempts, and a
+history failure does not suppress recovery. Each phase has a separate outcome in
+the worker's lifecycle snapshot. Failures returned by retention remain degraded
+even if the following phases succeed. Shutdown cancellation reaches active work
+and skips later phases. A maintenance-only configuration never executes disabled
+retention.
 
-The production collector entrypoint does not yet supply this runner. It must be
-composed in the verified PostgreSQL storage namespace with measured copy/growth
+The production collector entrypoint does not yet supply these runners. They must
+be composed in the verified PostgreSQL storage namespace with measured resource
 limits and the applied Storage policy; the ordinary collector container cannot
 substitute similar-looking filesystem paths. This is local implementation and
 disposable validation, not activation of backups or storage policy on a server.

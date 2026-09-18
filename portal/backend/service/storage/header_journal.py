@@ -54,7 +54,7 @@ def _receipt(batch, rows, *, reused):
     }
 
 
-def reserve_header_batch(session, *, plan_id, review_hash, verified):
+def reserve_header_batch(session, *, plan_id, review_hash, verified, max_moves=None):
     """Save a reviewed proposal and all copy reservations atomically.
 
     Only a worker with an already queued/running plan can call this boundary.
@@ -91,6 +91,7 @@ def reserve_header_batch(session, *, plan_id, review_hash, verified):
         proposal = review_header_moves(
             verified=verified, policy=policy, targets=target_values,
             reserved_bytes={row.id: row.reserved_bytes + row.auxiliary_reserved_bytes for row in targets},
+            max_moves=max_moves,
         )
     except ValueError as exc:
         raise StorageConflict("storage_journal_review_invalid: " + str(exc)) from exc

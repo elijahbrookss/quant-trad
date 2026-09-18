@@ -244,3 +244,42 @@ def test_invalid_capacity_is_rejected(change):
 def test_snapshot_clock_must_match_utc_database_day():
     with pytest.raises(ValueError, match="database clock"):
         replace(snapshot(), captured_at=datetime(2026, 9, 16, 23, tzinfo=UTC))
+
+
+
+def test_bounded_pass_reserves_one_day_without_rebalancing_or_hiding_backlog():
+    first=partition(day=CUTOFF-timedelta(days=3),oid=10,heap_bytes=300,index_bytes=100)
+    second=partition(day=CUTOFF-timedelta(days=2),oid=20,heap_bytes=300,index_bytes=100)
+    retained=partition(day=CUTOFF-timedelta(days=1),oid=30,location="hdd_one")
+    args=inputs(first,second,retained)
+    args["policy"]=replace(args["policy"],history=("hdd_one",))
+    args["capacity"]["hdd_one"]=evidence(target("hdd_one"),available=700)
+    assert not plan_header_placement(**args)["planning_complete"]
+    bounded=plan_header_placement(**args,max_moves=1)
+    assert bounded["planning_complete"]
+    assert bounded["review_evidence"]["inventory_complete"]
+    assert [move["storage_day"] for move in bounded["moves"]]==[first.storage_day.isoformat()]
+    assert bounded["deferred_storage_days"]==[second.storage_day.isoformat()]
+    assert bounded["additional_copy_reservations"]=={"hdd_one":400}
+    assert bounded["retained"]==[{"storage_day":retained.storage_day.isoformat(),
+                                 "target_id":"hdd_one","role":"history"}]
+    assert len(bounded["review_evidence"]["partitions"])==3
+
+
+def test_bounded_pass_still_refuses_invalid_inventory_outside_selected_day():
+    first=partition(day=CUTOFF-timedelta(days=2),oid=10)
+    second=replace(partition(day=CUTOFF-timedelta(days=1),oid=20),index_inventory_complete=False)
+    result=plan_header_placement(**inputs(first,second),max_moves=1)
+    assert not result["planning_complete"] and not result["moves"]
+    assert not result["additional_copy_reservations"]
+
+
+def test_default_review_hash_unchanged_by_explicit_unlimited_pass():
+    args=inputs(partition())
+    original=plan_header_placement(**args)
+    # Captured from committed planner 5a0b6147, not recomputed by this code.
+    assert original["plan_hash"]=="325638705d28ce8f444e14e9bf381b832f0e64a4469d8b0f62a376abbc5ce690"
+    assert plan_header_placement(**args,max_moves=None)==original
+    assert "max_moves" not in original and "deferred_storage_days" not in original
+    bounded=plan_header_placement(**args,max_moves=1)
+    assert bounded["plan_hash"]!=original["plan_hash"]

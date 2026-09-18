@@ -118,6 +118,7 @@ def plan_header_placement(
     *, snapshot: HeaderPlacementSnapshot, policy: StoragePolicy,
     targets: Sequence[StorageTarget], capacity: Mapping[str, FilesystemEvidence],
     reserved_bytes: Mapping[str, int] | None = None, max_partitions: int = 4096,
+    max_moves: int | None = None,
 ) -> dict:
     """Plan historical header groups without crediting uncommitted source frees.
 
@@ -126,6 +127,8 @@ def plan_header_placement(
     The executor must repeat those checks and reserve capacity transactionally.
     """
     _integer(max_partitions, "partition budget", minimum=1, maximum=4096)
+    if max_moves is not None:
+        _integer(max_moves, "move budget", minimum=1, maximum=4096)
     if not isinstance(snapshot, HeaderPlacementSnapshot) or not isinstance(policy, StoragePolicy):
         raise ValueError("header_placement_invalid: typed snapshot and policy required")
     if len(snapshot.partitions) > max_partitions:
@@ -152,7 +155,7 @@ def plan_header_placement(
                 raise ValueError("header_placement_invalid: duplicate physical relation")
             relation_ids.add(relation.oid)
     cutoff = snapshot.database_day - timedelta(days=policy.recent_days)
-    blockers, retained, moves = [], [], []
+    blockers, retained, moves, deferred = [], [], [], []
     if not snapshot.inventory_complete:
         blockers.append({"code": "header_inventory_incomplete"})
     else:
@@ -173,6 +176,12 @@ def plan_header_placement(
                 else:
                     blockers.append({"code": "recent_header_placement_requires_separate_cutover",
                                      "storage_day": day})
+                continue
+
+            already_placed = (partition.heap.target_id in policy.history
+                and all(item.target_id == partition.heap.target_id for item in partition.relations))
+            if max_moves is not None and len(moves) >= max_moves and not already_placed:
+                deferred.append(day)
                 continue
 
             candidates = []
@@ -255,6 +264,11 @@ def plan_header_placement(
             ],
         },
     }
+    if max_moves is not None:
+        # The inventory remains complete. Work outside this pass is explicit;
+        # it is neither described as retained nor reserved prematurely.
+        payload["max_moves"] = max_moves
+        payload["deferred_storage_days"] = deferred
     payload["plan_hash"] = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()

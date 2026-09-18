@@ -90,3 +90,58 @@ def test_unconfigured_loop_retains_original_exception_behavior():
         service=SimpleNamespace(run=retention))
     with pytest.raises(RuntimeError,match="original failure"):
         worker.run_once()
+
+
+
+def test_history_runs_after_retention_and_failure_does_not_suppress_recovery():
+    events=[]
+    def retention(**kwargs):
+        events.extend(["retention","released"])
+        return _result()
+    def history(**kwargs):
+        assert events==["retention","released"]
+        events.append("history")
+        raise RuntimeError("history failed")
+    def recovery(**kwargs):
+        assert events==["retention","released","history"]
+        events.append("recovery")
+        return {"state":"completed"}
+    worker=MarketStorageLifecycleSupervisor(policy=MarketStorageLifecyclePolicy(),
+        service=SimpleNamespace(run=retention),history_runner=history,recovery_runner=recovery)
+    result=worker.run_once()
+    assert events==["retention","released","history","recovery"]
+    assert result["history_movement"]["state"]=="failed"
+    assert result["local_recovery"]["state"]=="completed"
+    assert worker.snapshot()["state"]=="degraded"
+    assert "history:" in worker.snapshot()["last_error"]
+
+
+def test_history_only_loop_cancels_and_does_not_run_disabled_retention():
+    entered=Event()
+    def history(*,cancelled):
+        entered.set()
+        while not cancelled():
+            Event().wait(.01)
+        raise RuntimeError("storage_move_cancelled")
+    worker=MarketStorageLifecycleSupervisor(
+        policy=MarketStorageLifecyclePolicy(enabled=False,execution_enabled=True,interval_seconds=3600),
+        service=SimpleNamespace(run=lambda **kwargs:pytest.fail("disabled retention")),
+        history_runner=history)
+    worker.start()
+    try:
+        assert entered.wait(2)
+    finally:
+        worker.stop(timeout_seconds=2)
+    assert worker.snapshot()["state"]=="stopped"
+    assert worker.snapshot()["last_error"] is None
+    assert worker.snapshot()["last_run"]["history_movement"]=={"state":"cancelled"}
+
+
+def test_reported_retention_failures_remain_degraded_after_successful_maintenance():
+    worker=MarketStorageLifecycleSupervisor(policy=MarketStorageLifecyclePolicy(),
+        service=SimpleNamespace(run=lambda **kwargs:{**_result(),"failure_count":1}),
+        history_runner=lambda **kwargs:{"state":"idle"},
+        recovery_runner=lambda **kwargs:{"state":"not_due"})
+    worker.run_once()
+    assert worker.snapshot()["state"]=="degraded"
+    assert worker.snapshot()["last_run"]["failure_count"]==1

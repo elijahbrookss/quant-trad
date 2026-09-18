@@ -711,3 +711,33 @@ policy or public Apply. Space supervision uses sampled filesystem availability,
 not per-backend WAL/temp attribution or an instantaneous allocation cap. Actual
 producer rates, cancellation margin and HDD performance still need qualification.
 The owned disposable stack was removed. No live data, merge or deployment changed.
+
+### Saved-policy history passes, 2026-09-18
+
+The disposable two-filesystem scenario now drives historical movement from a
+saved Storage policy through the existing lifecycle supervisor. It collects
+records on two historical days and one recent day, freezes their results, and
+moves one historical day per pass. Existing HDD placement remains unchanged and
+the recent day stays on the source filesystem. Full inventory validation remains
+in force despite the bounded work selection.
+
+A real PostgreSQL backend termination after the first physical move statement
+rolled back placement; the pending intent, its capacity claims and frozen reads
+remained intact. A subsequent real committed move with an injected lost response
+was reconciled by the next pass without a duplicate move or second release.
+Disabling the policy between reservation and execution cancelled that unstarted
+intent, released its claims, and left completed placement intact. Re-enabling
+advanced the remaining day, then an idle pass created no new work.
+
+Missing prepared destinations and insufficient auxiliary capacity prevented
+execution; failed admission left no orphan plan or reservation. A competing
+storage owner returned busy. The supervisor reported history failures and still
+considered recovery afterward. Focused loop checks also preserved retention's
+reported failure state when later maintenance succeeded, and cancellation stopped
+a history-only loop without running disabled retention.
+
+This closes the local saved-policy execution and retry seam. It does not activate
+production runners or public Apply, establish actual HDD performance, complete
+the preserving operator migration, or measure whole-system runway. Those remain
+release blockers. The local topology uses separate disposable filesystems; it is
+not the server's SSD/HDD pair and supplies no hardware acceptance claim.

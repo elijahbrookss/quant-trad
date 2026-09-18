@@ -89,11 +89,11 @@ def stable_header_destination(destination, target):
                if key not in ("device_id", "directory_inode")}, "target_root": target.root}
 
 
-def review_header_moves(*, verified, policy, targets, reserved_bytes=None):
+def review_header_moves(*, verified, policy, targets, reserved_bytes=None, max_moves=None):
     """Bind the pure placement proposal to its observed PostgreSQL destinations."""
     destinations = checked_header_destinations(verified, targets)
     proposal = plan_header_placement(snapshot=verified.snapshot, policy=policy, targets=targets,
-        capacity=verified.capacity, reserved_bytes=reserved_bytes)
+        capacity=verified.capacity, reserved_bytes=reserved_bytes, max_moves=max_moves)
     payload = {**proposal, "schema_version": "qt.header_move_review.v1",
                "placement_plan_hash": proposal["plan_hash"]}
     payload.pop("plan_hash")
