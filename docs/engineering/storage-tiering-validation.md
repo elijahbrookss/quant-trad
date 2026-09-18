@@ -803,3 +803,38 @@ prevalidated references and must retain frozen results, earlier records and
 records collected during movement. The limits are explicit synthetic allowances;
 passing does not qualify real HDD rates, operational budgets, full source sizes,
 a complete under-one-day migration or production deployment.
+
+### Recovery after preserving handoff
+
+The disposable local-copy rehearsal also starts from a populated tiered-v1
+fixture, copies dated headers/global identities and raw lookups to their fixed
+destinations, relocates archive-reference catalogs and indexes, and performs the
+existing tiny verified handoff. It then commits a new observation, a correction
+and new raw archive mappings before creating rotated recovery generations.
+
+Restore uses a fresh database and independent copied archive bytes. The checks
+compare recent/history/frozen reads, order-book replay and all shared metadata;
+verify historical/recent partition placement; and require a new observation on a
+new recent day after restore. Retained v1 rows remain unchanged, demonstrating
+why they alone cannot recover writes committed after switching.
+
+This remains a tiny fixture with its existing row guard, not a production
+operator or representative migration/restore-duration qualification. It does not
+qualify resuming an unfinished migration after logical restore: captured OIDs,
+database identity and physical bindings would need separate explicit admission.
+
+The post-handoff rehearsal passed locally with retained v1 rows, new v2
+observations/corrections, an independent collected book session and its derived
+features. Its recovery snapshot restored matching recent/history/frozen results,
+both book replays, shared HDD metadata/indexes and dated header placement; fresh
+collection on a new recent day succeeded after restore. This is recovery of the
+snapshot, not writes committed after that snapshot or an automatic rollback.
+
+A separate existing replay limitation was exposed while constructing the
+fixture: current book state is keyed by series and is replaced when another
+definition/session takes over that series. replay_book_session still expects
+the older definition/session's current state during reconciliation. The
+diagnostic found the original canonical headers intact but that operational
+row absent. This is not evidence of storage loss. Replay of a superseded session
+remains an open release qualification item; do not silently waive it or count
+the independent-series proof as covering it. No replay contract was changed.

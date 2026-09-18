@@ -714,6 +714,14 @@ and ownership rehearsal, measured operating limits and preserving cutover.
 The copy's own filesystem limits remain local guards. No new placement controls
 are added.
 
+The restore rehearsal covers a preserving v1 handoff followed by new v2
+observations, corrections and raw archive publication. Recovery must restore the
+active snapshot and its archive objects, admit the active layout and accept new
+collection. Retained v1 tables are historical evidence; they cannot substitute
+for that snapshot after new writes resume. Migration progress copied by a logical
+dump is not permission to resume an incomplete migration in a different database.
+The fixed migration's database/OID/physical admission remains required.
+
 ### Due-copy maintenance admission
 
 The internal run_due_local_recovery service reads the existing saved interval and

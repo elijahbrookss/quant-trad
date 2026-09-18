@@ -6,6 +6,7 @@ import json
 import os
 import re
 from pathlib import Path
+from time import monotonic
 import shutil
 import subprocess
 
@@ -14,7 +15,9 @@ from sqlalchemy import create_engine,text
 from sqlalchemy.engine import make_url
 
 from market_data.archive import FilesystemRawArchiveObjectStore
+from market_data.market_state import derive_book_features,MarketStateValuationContract
 from portal.backend.db.session import Database
+from portal.backend.db import InstrumentRecord
 from core.storage_targets import StorageTarget
 from portal.backend.service.storage.recovery_copies import LocalRecoveryCopies
 from portal.backend.service.market.market_structure_service import MarketStructureService
@@ -27,6 +30,15 @@ from tests.test_market_data.test_fact_book_retention_db import (
     test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay as _cold_book,
 )
 from tests.test_market_data.storage_metadata_fixture import prepare_metadata_candidate,observe_metadata
+from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture,stage_shadow_handoff_fixture
+from tests.test_market_data.test_fact_header_copy_placement_db import _configure_placement,_assert_disk
+from tests.test_market_data.test_fact_header_copy_db import _finish as finish_headers
+from tests.test_market_data.test_raw_mapping_copy_db import _finish as finish_raw
+from tests.test_market_data.test_fact_header_references_db import _stage_all
+from tests.test_market_data.test_archive_reference_placement_db import _options as reference_options
+from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture,_publish_book_result
+from scripts.db import fact_header_v2_copy as headers,raw_mapping_v2_copy as raw
+from scripts.db import archive_reference_v2_placement as references
 
 pytestmark=[
     pytest.mark.db,
@@ -57,22 +69,94 @@ def _files(root):
     return {str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
 
 
-def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_results(storage,tmp_path,monkeypatch):
+def _preserving_handoff(storage,tmp_path,monkeypatch):
+    """Existing tiny migration fixture; never a production operator."""
+    engine=storage.database._engine
+    started=monotonic()
+    restore_tiered_v1_fixture(storage)
+    _configure_placement(storage,tmp_path,monkeypatch)
+    with engine.begin() as conn:
+        headers.prepare_copy(conn,placement=storage.copy_plan)
+        raw.prepare_copy(conn)
+    finish_headers(engine)
+    finish_raw(engine)
+    with engine.begin() as conn:
+        headers.enable_identity_capture(conn)
+    _stage_all(engine)
+    for relation in references.RELATIONS:
+        assert references.move_reference_catalog(engine,relation=relation,
+                                                  **reference_options(storage))["committed"]
+    with engine.begin() as conn:
+        stage_shadow_handoff_fixture(conn,storage,prevalidated=True,raw_mapping=True)
+        retained=conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_versions"))
+        raw_retained=conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.raw_archive_record_mappings"))
+    restarted=Database(storage.dsn)
+    try:
+        assert restarted.ensure_schema(),str(restarted.last_error)
+    finally:
+        restarted._reset_engine()
+    return {"header_rows":retained,"raw_rows":raw_retained,
+            "tiny_handoff_seconds":round(monotonic()-started,3)}
+
+
+@pytest.mark.parametrize("preserving_upgrade",[False,True],ids=["clean-layout","preserved-v1"])
+def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_results(
+        storage,tmp_path,monkeypatch,preserving_upgrade):
     assert os.getuid()==70
     source_root=tmp_path/"source-archives"
     source_root.mkdir()
     _cold_book(storage,source_root,monkeypatch,split_sources=False)
-    _placement(monkeypatch,storage.today)
+    storage.open_day=storage.today+timedelta(days=1) if preserving_upgrade else storage.today
+    _placement(monkeypatch,storage.open_day)
     recent=replace(storage.fact,observation_key="recovery-recent",observation_time=BASE+timedelta(days=2))
     assert storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,facts=[recent]).inserted_count==1
     engine=storage.database._engine
     history_root=Path("/qt-history")
-    tablespace=history_root/"qt_demo_history_cold"
-    tablespace.mkdir()
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        conn.exec_driver_sql(f"CREATE TABLESPACE qt_demo_history_cold LOCATION '{tablespace}'")
-    prepare_metadata_candidate(engine,Path("/qt-source/pgdata"),history_root,
-                               tablespace_name="qt_demo_history_cold")
+    retained=None
+    if preserving_upgrade:
+        retained=_preserving_handoff(storage,tmp_path,monkeypatch)
+        # These commits exist only in v2. Restoring the retained v1 tables alone
+        # would lose both a new observation and a correction to an existing one.
+        post_switch=replace(recent,observation_key="recovery-after-switch")
+        assert storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,
+                                        facts=[post_switch]).inserted_count==1
+        correction=replace(recent,payload={**recent.payload,"rate":"0.3","raw_rate":"0.3"},
+                           accepted_at=recent.accepted_at+timedelta(seconds=1),
+                           known_at=recent.known_at+timedelta(seconds=1))
+        assert storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,
+                                        facts=[correction]).corrected_count==1
+        # An independent instrument avoids stealing the original series'
+        # current book state or reusing another fixture's active stream lease.
+        with storage.database.session() as session:
+            session.add(InstrumentRecord(id="recovery-new-book",datasource="TEST",
+                exchange="ISOLATED",symbol="ETH-TEST",instrument_type="spot",
+                can_short=False,short_requires_borrow=False,has_funding=False,extra_metadata={}))
+        book=_raw_book_fixture(storage,source_root,monkeypatch,
+            definition_id="recovery-after-switch-book",instrument_id="recovery-new-book",
+            provider_product_id="ETH-USD",replay_features=True)
+        _placement(monkeypatch,storage.open_day)
+        for index in range(len(book.results)):
+            _publish_book_result(book,index)
+        config=book.claim.config
+        bbo,depth=derive_book_features((item.state for item in book.results),
+            contract=MarketStateValuationContract(
+                product_definition_version_id=config["product_definition_version_id"],
+                provider_size_unit="base",base_currency=config["base_currency"],
+                quote_currency=config["quote_currency"]),
+            bbo_series_id=config["bbo_series_id"],depth_series_id=config["depth_series_id"],
+            computed_at=BASE+timedelta(minutes=1))
+        book.structures.ingest_market_state_features(bbo_facts=bbo,depth_facts=depth)
+        with engine.connect() as conn:
+            assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_versions"))==retained["header_rows"]
+            assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.raw_archive_record_mappings"))==retained["raw_rows"]
+            assert conn.scalar(text("SELECT count(*) FROM market.raw_archive_record_mappings"))>retained["raw_rows"]
+    else:
+        tablespace=history_root/"qt_demo_history_cold"
+        tablespace.mkdir()
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.exec_driver_sql(f"CREATE TABLESPACE qt_demo_history_cold LOCATION '{tablespace}'")
+        prepare_metadata_candidate(engine,Path("/qt-source/pgdata"),history_root,
+                                   tablespace_name="qt_demo_history_cold")
     metadata=observe_metadata(engine,Path("/qt-source/pgdata"))
     assert all(item["rows"]>0 for item in metadata.values())
     with engine.connect() as conn:
@@ -151,8 +235,8 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
                            {"name":market_lifecycle._LIFECYCLE_LOCK_NAME})
     # Replace the fixture's archive mount path with copied bytes; keep originals
     # out of the reader path. No hardlinks or fallback to source files qualify.
-    retained=tmp_path/"retained-source-archives"
-    source_root.rename(retained)
+    retained_archives=tmp_path/"retained-source-archives"
+    source_root.rename(retained_archives)
     source_root.mkdir()
     shutil.copytree(recovery/"objects",source_root/"objects")
     assert _files(source_root/"objects")==copied
@@ -210,9 +294,37 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
             for name,before in metadata.items():
                 assert (after_metadata[name]["rows"],after_metadata[name]["content_hash"])==(before["rows"],before["content_hash"])
                 assert all(member["device"]==history_root.stat().st_dev for member in after_metadata[name]["files"])
+            if preserving_upgrade:
+                with restored._engine.connect() as conn:
+                    assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_versions"))==retained["header_rows"]
+                    assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.raw_archive_record_mappings"))==retained["raw_rows"]
+                    assert conn.scalar(text("SELECT count(*) FROM market.fact_versions WHERE observation_key='recovery-after-switch'"))==1
+                    assert conn.scalar(text("SELECT max(revision) FROM market.fact_versions WHERE observation_key='recovery-recent'"))==2
+                    days=conn.execute(text("SELECT storage_day FROM market.fact_header_partitions")).scalars().all()
+                    assert any(day<storage.open_day for day in days)
+                    for day in days:
+                        root=history_root if day<storage.open_day else Path("/qt-source/pgdata")
+                        _assert_disk(conn,"market.fact_versions_"+day.strftime("%Y%m%d"),root)
+                # Fresh writes must work in the restored active layout. Retained
+                # source/capture state is evidence, never a restore-ready cursor.
+                _placement(monkeypatch,storage.open_day+timedelta(days=1))
+                after_restore=replace(recent,observation_key="recovery-after-restore")
+                assert repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,
+                                         facts=[after_restore]).inserted_count==1
+                actual=repo.read_facts(series_id=storage.series_id,start=BASE+timedelta(days=2),
+                                      end=BASE+timedelta(days=3))
+                assert any(row.fact.observation_key=="recovery-after-restore" for row in actual)
+                with restored._engine.connect() as conn:
+                    _assert_disk(conn,"market.fact_identities",history_root)
+                    _assert_disk(conn,"market.fact_versions_"+(storage.open_day+timedelta(days=1)).strftime("%Y%m%d"),
+                                 Path("/qt-source/pgdata"))
+                    assert conn.scalar(text("SELECT count(*) FROM qt_fact_header_retained_v1.fact_versions"))==retained["header_rows"]
         finally:
             restored._reset_engine()
     print("QT_RECOVERY_RESTORE_RESULT="+json.dumps({
+        "layout_source":"preserved-v1" if preserving_upgrade else "clean-layout",
+        "preserving_handoff":retained,
+        "post_switch_records_correction_raw_mapping_and_restored_collection_proven":preserving_upgrade,
         "consistent_snapshot_excludes_later_commit":True,"collection_continued":True,
         "archive_expiry_fenced":True,"copied_archive_hashes_match":True,
         "startup_recent_history_frozen_and_book_replay_preserved":True,
@@ -221,6 +333,6 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
         "archive_copy_bytes":sum(p.stat().st_size for p in (recovery/"objects").rglob("*") if p.is_file()),
         "local_generation_rotation_implemented":True,
         "failed_copy_preserves_completed_and_retry_cleans_partial":True,
-        "routine_scheduling_implemented":False,
+        "routine_scheduling_exercised":False,
         "limits":["tiny disposable data","not production capacity or restore-duration qualification"],
     },sort_keys=True))
