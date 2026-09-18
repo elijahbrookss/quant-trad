@@ -12,6 +12,9 @@ code_paths:
   - scripts/automation/server_deploy.sh
   - scripts/automation/check_release_ci.py
   - scripts/automation/pin_deploy_recovery.py
+  - scripts/automation/storage_handoff_pause.py
+  - scripts/ci/test_storage_handoff_pause.py
+  - tests/test_storage_handoff_pause.py
   - scripts/ci/test_server_promotion.py
   - scripts/ci/test_server_core_recreation.py
   - .github/workflows/test.yaml
@@ -70,3 +73,33 @@ cutover still requires actual-state admission and post-deploy acquisition checks
 
 See [server deployment](../../engineering/server-deployment.md) for commands,
 rehearsal scope, and first-cutover requirements.
+
+## Preserving storage handoff interlock
+
+The incompatible storage switch must not enter compatible promotion recovery.
+The internal fixed-layout `paused_storage_clients` boundary shares the existing
+host deployment lock and durably writes `storage-handoff.json` before stopping
+any clients. It pauses backend/initializer/collector, both frontends, Grafana and
+pgAdmin; PostgreSQL and passive telemetry remain running. It inventories both
+the Compose project and its network, refuses unexpected peers (including bot
+runtimes), unsafe restart policies, forced kills, identity changes and unhealthy
+process state. It never stops an unrecognized container. Container exit is not
+proof of application spool durability or a successful database handoff.
+
+The lock spans the caller's procedure. The private hold survives process death,
+exceptions and successful pause; re-entry requires the same recorded release
+and container/image identities. Ordinary helper mutations, including direct
+`deploy`, `recover`, `rollback`, `qt` and environment initialization, refuse any
+hold presence, even a partial file or broken symlink. Read-only release status
+reports it. No automatic restart, old-image fallback, or hold-clear operation is
+provided. Direct Docker/SQL, a different state directory or an older checkout
+remain privileged bypasses; the complete cutover must exclude them.
+
+This is an internal, locally rehearsed boundary, not a public cutover command.
+The owning procedure still needs to compose publisher pause, exact database
+outcome reconciliation, two-root/policy/runtime activation and recovery before
+it can safely retire the hold and resume collection. The database's handoff
+certificate remains the sole authority for database commit outcome; the host
+hold cannot substitute for it. Synthetic Docker rehearsal qualifies process
+stop/lost-reply retry and the interlock, not the real database, actual server,
+application drain, disk performance or the one-day migration budget.

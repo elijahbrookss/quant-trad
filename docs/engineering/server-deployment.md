@@ -540,6 +540,28 @@ Never enable live broker mode as a side effect of an application release.
 
 ## Storage Move And Recovery
 
+The preserving storage release is not yet a complete deployable cutover. Its
+internal pause boundary records a persistent `storage-handoff.json` in the
+existing deployment state directory before stopping the fixed application and
+query clients. All ordinary mutating deployment-helper actions refuse that
+hold, including compatible old-image recovery. `server_deploy.sh release`
+continues to show the hold even if no successful release is recorded.
+
+Do not remove the hold to bypass an interrupted storage switch or use an older
+checkout/direct Docker command to restart clients. The storage procedure must
+first reconcile the database certificate and align the archive root, policy and
+runtime. The current internal boundary deliberately has no public pause/resume
+command and never clears the hold automatically. The complete activation and
+recovery coordinator remains required before this path can be used on a host.
+
+The fixed pause refuses unexpected project/network peers, including bot runtime
+containers; it does not silently stop trading work. It retains PostgreSQL and
+passive telemetry, accepts only `no`/`unless-stopped` restart policies, and checks
+that known clients actually exited without a forced kill. Stopped processes are
+not proof that spool contents or a database switch are safe; those remain
+separate checks in the preserving procedure.
+
+
 For a dedicated HDD, configure both values in the private operator environment:
 
 ```dotenv

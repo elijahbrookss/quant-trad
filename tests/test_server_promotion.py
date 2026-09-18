@@ -95,3 +95,42 @@ def test_release_reports_unfinished_promotion_separately_from_last_success(tmp_p
     assert "current revision: " + "a" * 40 in result.stdout
     assert "unfinished promotion candidate: " + "b" * 40 in result.stdout
     assert "activation started: true" in result.stdout
+
+
+@pytest.mark.parametrize("entry", ["deploy_release fixture", "recover_promotion", "promote_release fixture"])
+@pytest.mark.parametrize("hold", ["valid", "corrupt", "symlink"])
+def test_storage_hold_blocks_deploy_and_old_image_recovery_before_side_effects(tmp_path, entry, hold):
+    state = tmp_path / "state"
+    state.mkdir()
+    marker = state / "storage-handoff.json"
+    if hold == "symlink":
+        marker.symlink_to(state / "missing")
+    else:
+        marker.write_text('{}' if hold == "valid" else '{')
+    result = shell(tmp_path, "require_runtime() { echo INCORRECT_RUNTIME; }; select_release() { echo INCORRECT_CHECKOUT; }; " + entry)
+    assert result.returncode != 0
+    assert "storage handoff hold" in result.stderr
+    assert "INCORRECT" not in result.stdout
+    assert os.path.lexists(marker)
+
+
+@pytest.mark.parametrize("action", ["init-env", "deploy", "rollback", "promote", "recover", "apply-alerts", "preview-alerts", "restore-alerts", "stop", "qt", "credentials-coinbase"])
+def test_every_mutating_action_refuses_storage_hold_at_dispatch(tmp_path, action):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "storage-handoff.json").write_text("{")
+    result = subprocess.run(["bash", str(SCRIPT), action], capture_output=True, text=True, timeout=10,
+                            env={**os.environ, "QT_SINGLE_NODE_STATE_ROOT": str(state),
+                                 "QT_SINGLE_NODE_ENV_FILE": str(tmp_path / "nonexistent-synthetic.env")})
+    assert result.returncode != 0
+    assert "storage handoff hold" in result.stderr
+
+
+def test_release_reports_hold_even_without_successful_release(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "storage-handoff.json").write_text("{")
+    result = shell(tmp_path, "show_release")
+    assert result.returncode == 0
+    assert "Storage handoff hold: active" in result.stdout
+    assert "No successful release" in result.stdout
