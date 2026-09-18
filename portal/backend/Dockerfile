@@ -29,6 +29,20 @@ COPY cli/ /app/cli
 COPY portal/ /app/portal
 COPY scripts/qt /app/scripts/qt
 COPY scripts/provenance/ /app/scripts/provenance/
+# Explicit operator entry points only; no startup migration or manual SQL bundle.
+COPY scripts/db/fact_header_v2_handoff.py \
+     scripts/db/fact_header_v2_capture.py \
+     scripts/db/fact_header_v2_copy.py \
+     scripts/db/fact_header_v2_admission.py \
+     scripts/db/fact_header_v2_placement.py \
+     scripts/db/fact_header_v2_references.py \
+     scripts/db/raw_mapping_v2_copy.py \
+     scripts/db/archive_root_v2_copy.py \
+     scripts/db/archive_reference_v2_placement.py /app/scripts/db/
+
+# The opt-in fixed storage layout uses the database UID. Application scratch
+# paths remain usable without changing ownership of source code or host data.
+RUN install -d -o 70 -g 70 -m 0750 /app/logs /app/reports
 
 RUN chmod +x /app/scripts/qt
 

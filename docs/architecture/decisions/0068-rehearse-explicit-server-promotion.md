@@ -17,6 +17,8 @@ code_paths:
   - tests/test_storage_handoff_pause.py
   - scripts/ci/test_server_promotion.py
   - scripts/ci/test_server_core_recreation.py
+  - docker/docker-compose.storage-server.yml
+  - tests/test_server_storage_config.py
   - .github/workflows/test.yaml
   - tests/test_release_ci.py
   - tests/test_server_promotion.py
@@ -103,3 +105,39 @@ certificate remains the sole authority for database commit outcome; the host
 hold cannot substitute for it. Synthetic Docker rehearsal qualifies process
 stop/lost-reply retry and the interlock, not the real database, actual server,
 application drain, disk performance or the one-day migration budget.
+
+
+## Fixed storage runtime wiring
+
+The opt-in `docker-compose.storage-server.yml` overlay is the prepared first
+SSD/HDD layout. It keeps the existing PostgreSQL volume/path and the absolute
+SSD spool path, adds the prepared HDD at the same `/qt-history` path for database
+and application services, and points archive readers/writers at its `archives`
+subdirectory. Inventory and operating limits are explicit read-only files;
+missing host paths never become implicit directories. The host archive path used
+by bot readers must name that same HDD archive subtree. Host admission must prove
+these relationships and distinct filesystem UUIDs before activation.
+
+Backend, initializer and collector use the pinned database UID/GID 70 so private
+archive files have compatible ownership. The collector shares PostgreSQL's PID
+namespace for real file/resource verification. Backend retains its existing
+Docker socket through an explicitly supplied supplemental group; neither other
+writer receives socket authority. Compose-injected environment values are the
+configuration source, with dotenv loading disabled for these non-root services.
+Application scratch/report directories in the image are owned by UID 70; source
+code and host data are not recursively chowned by the image or overlay.
+
+The exact preserving-operator Python modules are packaged in the backend image
+and included in its existing source-tree attestation. Unrelated manual SQL is not
+bundled and no migration runs at startup. The existing actual-core rehearsal has
+a fixed-storage mode that uses owned disposable PostgreSQL/working and history
+volumes, synthetic UUID metadata/configuration and no provider egress. It checks
+real application startup, cross-service private archive reads, preserved legacy
+spool bytes, PostgreSQL namespace/resource observation, collector shutdown and
+container recreation. It does not qualify physical disks, live file permissions,
+real Docker socket access or a full migration/backup workload.
+
+This overlay is not selected by the ordinary deployment helper yet. The preserving
+cutover must compose its host admission, pause, database/policy result, matching
+runtime activation and recovery before releasing the persistent host hold. Adding
+a file or rendering it is not a deployment or authority to activate it directly.

@@ -540,6 +540,31 @@ Never enable live broker mode as a side effect of an application release.
 
 ## Storage Move And Recovery
 
+The opt-in fixed layout is defined in `docker/docker-compose.storage-server.yml`.
+It is not automatically activated by the normal deployment helper. Its host
+inputs are prepared HDD root (`QT_STORAGE_HDD_ROOT`), that HDD's `archives`
+subdirectory (`QT_MARKET_DATA_ROOT`), its UUID (`QT_MARKET_DATA_EXPECTED_UUID`),
+the unchanged SSD spool directory (`QT_MARKET_DATA_WORKING_ROOT`) and SSD UUID
+(`QT_MARKET_DATA_WORKING_EXPECTED_UUID`), prepared inventory/limits files
+(`QT_STORAGE_INVENTORY_HOST_PATH`, `QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH`),
+and the backend's existing Docker socket group (`QT_DOCKER_SOCKET_GID`).
+
+Inside the fixed layout, history is `/qt-history`, archives are
+`/qt-history/archives`, PostgreSQL retains `/var/lib/postgresql/data`, and spool
+references retain `/app/logs/market-structure`. All three application writers use
+UID/GID 70. The collector also shares the database PID namespace. Existing host
+files must be admitted for that ownership; neither this overlay nor image build
+changes host ownership, mounts or formats a device. Runtime reads injected Compose
+environment values instead of attempting to open the host-owner-only secrets file.
+
+The fixed-layout disposable core rehearsal is available as
+`python scripts/ci/test_server_core_recreation.py --storage-layout`. It requires
+built matching application images and the pinned PostgreSQL image. Its temporary
+volumes and synthetic UUID/configuration fixtures do not establish production
+permissions or physical-HDD performance. The complete preserving activation and
+recovery procedure remains required before this overlay is used on a host.
+
+
 The preserving storage release is not yet a complete deployable cutover. Its
 internal pause boundary records a persistent `storage-handoff.json` in the
 existing deployment state directory before stopping the fixed application and

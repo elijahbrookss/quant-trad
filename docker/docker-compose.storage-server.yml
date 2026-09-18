@@ -1,0 +1,87 @@
+# Fixed first-release SSD/HDD wiring. The preserving cutover owns activation;
+# this file alone is not permission to restart clients or skip host admission.
+# All host directories/files must already exist. No fallback mount creation.
+x-storage-environment: &storage-environment
+  # Compose env_file already injects operator values. UID 70 must not read the
+  # host-owner-only secrets file mounted by the baseline server configuration.
+  QT_DISABLE_DOTENV: "1"
+  MARKET_STRUCTURE_STORAGE_ROOT: /qt-history/archives
+  MARKET_STRUCTURE_WORKING_ROOT: /app/logs/market-structure
+  QT_MARKET_DATA_EXPECTED_UUID: ${QT_MARKET_DATA_EXPECTED_UUID:?HDD filesystem UUID is required}
+  QT_MARKET_DATA_WORKING_EXPECTED_UUID: ${QT_MARKET_DATA_WORKING_EXPECTED_UUID:?SSD filesystem UUID is required}
+  QT_STORAGE_INVENTORY_PATH: /run/quanttrad/storage-inventory.json
+
+x-history-mount: &history-mount
+  type: bind
+  source: ${QT_STORAGE_HDD_ROOT:?Prepared HDD root is required}
+  target: /qt-history
+  bind:
+    create_host_path: false
+
+x-working-mount: &working-mount
+  type: bind
+  source: ${QT_MARKET_DATA_WORKING_ROOT:?Existing SSD working root is required}
+  # Preserve existing absolute spool references.
+  target: /app/logs/market-structure
+  bind:
+    create_host_path: false
+
+x-inventory-mount: &inventory-mount
+  type: bind
+  source: ${QT_STORAGE_INVENTORY_HOST_PATH:?Prepared storage inventory file is required}
+  target: /run/quanttrad/storage-inventory.json
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  tsdb:
+    volumes:
+      - *history-mount
+
+  backend:
+    # Match the pinned PostgreSQL UID so every archive writer owns compatible
+    # private files. Only backend retains its existing Docker-socket authority.
+    user: "70:70"
+    group_add:
+      - ${QT_DOCKER_SOCKET_GID:?Docker socket group is required for backend}
+    environment:
+      <<: *storage-environment
+      # Bot readers receive the HDD archive subtree, read-only, through the
+      # existing runner. This host path must equal QT_STORAGE_HDD_ROOT/archives.
+      QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:?HDD archive host path is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - *history-mount
+      - *working-mount
+      - *inventory-mount
+
+  initialize:
+    user: "70:70"
+    environment: *storage-environment
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - *history-mount
+      - *working-mount
+      - *inventory-mount
+
+  market-data-collector:
+    user: "70:70"
+    pid: "service:tsdb"
+    environment:
+      <<: *storage-environment
+      QT_MARKET_DATA_LIFECYCLE_ENABLED: "true"
+      QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED: "true"
+      QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED: "true"
+      QT_STORAGE_MAINTENANCE_LIMITS_PATH: /run/quanttrad/storage-maintenance.json
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - *history-mount
+      - *working-mount
+      - *inventory-mount
+      - type: bind
+        source: ${QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH:?Reviewed storage maintenance limits file is required}
+        target: /run/quanttrad/storage-maintenance.json
+        read_only: true
+        bind:
+          create_host_path: false

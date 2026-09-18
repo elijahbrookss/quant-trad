@@ -10,7 +10,20 @@ from pathlib import Path, PurePosixPath
 
 
 ROOTS = ("config", "src", "cli", "portal", "scripts/provenance")
-ROOT_FILES = ("requirements.txt", "requirements.lock", "scripts/qt")
+# The fixed preserving operator is packaged with the matching runtime. Keep
+# this inventory aligned with Dockerfile COPY; unrelated manual SQL stays out.
+OPERATOR_FILES = (
+    "scripts/db/fact_header_v2_handoff.py",
+    "scripts/db/fact_header_v2_capture.py",
+    "scripts/db/fact_header_v2_copy.py",
+    "scripts/db/fact_header_v2_admission.py",
+    "scripts/db/fact_header_v2_placement.py",
+    "scripts/db/fact_header_v2_references.py",
+    "scripts/db/raw_mapping_v2_copy.py",
+    "scripts/db/archive_root_v2_copy.py",
+    "scripts/db/archive_reference_v2_placement.py",
+)
+ROOT_FILES = ("requirements.txt", "requirements.lock", "scripts/qt", *OPERATOR_FILES)
 IGNORED_PARTS = {"__pycache__", "node_modules", "dist", ".vite", ".npm-cache"}
 IGNORED_PART_SUFFIXES = (".egg-info",)
 IGNORED_SUFFIXES = {".pyc", ".pyo"}

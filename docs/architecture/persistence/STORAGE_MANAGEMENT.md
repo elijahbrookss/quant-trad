@@ -27,6 +27,7 @@ code_paths:
   - portal/backend/service/storage/maintenance_runtime.py
   - portal/backend/service/storage/history_policy.py
   - portal/backend/Dockerfile
+  - scripts/provenance/source_tree_hash.py
   - docker/test/storage-demo.compose.yml
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
@@ -904,3 +905,23 @@ Dedicated filesystem mode requires the host mapping and read-only udev metadata
 for the same UUID checks. This closes the launch-time archive visibility gap;
 it does not by itself qualify all server permissions or rehearse the preserving
 production migration. No advanced placement or rebalancing setting is added.
+
+
+### Fixed server runtime packaging and layout
+
+The optional server storage overlay preserves the current SSD working/spool and
+PostgreSQL paths, exposes the prepared HDD consistently at `/qt-history`, and
+uses UID/GID 70 for application archive writers. Only the collector shares the
+PostgreSQL PID namespace for physical maintenance observation. Inventory and
+maintenance limits are read-only prepared configuration; the existing saved
+policy remains the placement/schedule authority. The normal deployment helper
+does not select this overlay automatically; activation belongs to the preserving
+cutover under its persistent host hold.
+
+The production backend image now includes only the exact preserving-operator
+Python dependencies, covered by the ordinary runtime source-tree fingerprint.
+No manual SQL bundle or implicit startup migration is added. UID-owned image
+scratch/report directories support the non-root services without modifying host
+file ownership. See ADR 0068 and the server deployment guide for the fixed
+layout inputs and disposable actual-core rehearsal scope. Real host permissions,
+Docker socket group, full cutover/recovery and HDD performance remain separate.
