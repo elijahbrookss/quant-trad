@@ -20,6 +20,7 @@ code_paths:
   - scripts/db/fact_header_v2_references.py
   - scripts/db/fact_header_v2_placement.py
   - scripts/db/raw_mapping_v2_copy.py
+  - scripts/db/archive_reference_v2_placement.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -228,3 +229,38 @@ Full exact verification still reads every source and target record while writers
 are fenced (ordinary readers continue); its duration must be measured. Bounded memory and timeout do not
 establish acceptable downtime, commit supervision, post-resume recovery or the
 complete migration's one-day qualification.
+
+
+## Preserving archive-reference placement — 2026-09-18
+
+The fixed upgrade also needs its material-alias and canonical-dependency
+catalogs and indexes on the history HDD. An internal operator step moves one of
+these two known ordinary tables in place, retaining its OID, columns, constraints,
+index identities/definitions and triggers. PostgreSQL owns atomic file relocation
+and rollback; no logical rows are copied or deleted by this step. Only that
+catalog takes a nonwaiting exclusive fence. Source header collection remains
+permitted, and the v1 layout stays authoritative.
+
+The operation uses the copy's existing fixed physical binding, migration clock
+and storage ownership lock. It reuses physical WAL/temp observation, the existing
+resource-limit format and headroom calculation, and the movement watcher through
+commit/rollback. The caller must supply qualified WAL, temporary, growth and
+maintenance allowances. Existing durable claims and policy reserve remain
+protected; future source frees are never credited. No new reservation ledger,
+storage policy, scheduler, placement UI or generic table mover is introduced.
+
+All heap/index files must be wholly on the admitted recent filesystem or wholly
+on the bound history filesystem. Mixed, unknown or unavailable placement refuses
+movement. Changed registered identities, inactive targets, changed saved policy,
+insufficient capacity, timeout and cancellation refuse work or roll back before
+commit. An error around commit may have an unknown outcome; inspect verified
+placement instead of assuming rollback. A committed already-history table is verified and acknowledged without copying
+again. Read-only placement inspection remains available after attempt expiry;
+reconciliation does not reset the original one-day clock.
+
+The watcher bounds observed net filesystem consumption, not each producer's
+WAL/temp attribution or instantaneous allocation. Real allowances, catalog
+sizes, exclusive-lock duration and complete migration time still need rehearsal.
+This step is not the final schema switch, archive-file migration or complete
+production operator. Reusing the retained v1 source after new v2 writes resume
+is still not a valid rollback strategy.

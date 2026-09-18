@@ -785,3 +785,21 @@ scenarios exercise this same verification path.
 This is an internal prerequisite, not the finished migration command. The final
 scan still fences writers for its measured duration; there is no production
 downtime claim, completed one-day rehearsal or post-resume rollback qualification.
+
+
+### Fixed archive-reference placement rehearsal
+
+The preserving migration has an internal step for its material-alias and
+canonical-dependency tables and indexes. Native disposable scenarios exercise
+actual two-filesystem relocation, continued source collection while the selected
+catalog is fenced, database termination after heap movement, and atomic rollback
+of heap/index placement. A lost commit reply must reconcile from verified
+physical placement without recopying. A real allocation on the owned history
+tmpfs must trip the existing space guard and restore the original placement.
+
+Other scenarios refuse a busy catalog, wrong drive, mixed heap/index placement
+and insufficient declared capacity. The preserving fixture then switches using
+prevalidated references and must retain frozen results, earlier records and
+records collected during movement. The limits are explicit synthetic allowances;
+passing does not qualify real HDD rates, operational budgets, full source sizes,
+a complete under-one-day migration or production deployment.
