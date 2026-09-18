@@ -175,9 +175,9 @@ failure cannot commit half-installed capture.
 It adds no operator command, startup action or cutover permission. The source
 must still receive full v1 contract admission by the preserving migration
 orchestrator. An intact retry reuses the queue; changed identity, replaced
-queue, altered function or disabled trigger blocks resumption. The helper
-does not copy headers, drain the queue, rewire dependencies or issue a ready
-certificate. Those remain implementation work before a production rehearsal.
+queue, altered function or disabled trigger blocks resumption. The capture helper itself does not copy headers or drain its queue. The
+separate internal shadow-copy stage below owns that work. Neither helper rewires
+active dependencies or issues a ready certificate.
 
 The capture stage passed isolated PostgreSQL qualification: original rows remain
 unchanged, late IDs are tracked, caller and backend failures roll back source
@@ -186,3 +186,46 @@ access, and broken capture cannot be silently reused. Competing writers or
 migration actors cause an explicit preparation retry. This establishes capture
 behavior only; it is not a rehearsal of copying or switching the installed
 database. The normal backend checks also passed.
+
+
+## Preserving shadow-copy stage
+
+The internal scripts/db/fact_header_v2_copy.py primitive copies a tiered-v1
+source into private v2 header partitions, global identities and a series/day
+directory. The target reuses the clean ORM model definitions. Existing payload
+bytes and archive objects are not recopied by this stage.
+
+Preparation records a bounded baseline endpoint while installing transactional
+insert capture. Each page verifies every persisted header field and global
+identity before advancing its cursor or retiring pending IDs. A page failure
+rolls back target rows, directory bounds, cursor and queue retirement together.
+After the baseline, pending IDs are copied using the source's global ID index.
+This also handles a lower sequence that commits after a higher sequence was
+already copied; a sequence watermark is not treated as a complete commit set.
+
+Retry refuses changed source columns, a missing copy index, changed target
+definitions, replaced capture, incompatible recorded partitions and conflicting
+target content. Full source schema/guard admission and a complete final
+verification pass still belong to the future operator orchestrator.
+
+There is no CLI, active-table rename, ready certificate, placement assignment or
+startup wiring. The caught-up report covers only the currently visible queue;
+an uncommitted source writer may still add an entry later. It is not permission
+to switch. Final cutover requires the coordinated writer fence, queue drain,
+validation and explicit FK/view/function/trigger handoff. The original source
+is retained and remains authoritative throughout this stage.
+
+The disposable preserving-copy rehearsal passed against a source header layout
+pinned to the installed v1 revision. It preserved every header field, existing
+hot payloads, archived bytes and frozen dataset metadata; copied a lower
+sequence that committed after a higher one; recovered from backend termination;
+and refused source-index, target-definition and target-content drift. This
+proves private-copy correctness and recovery, not a final switch or production
+duration. The target used default disposable storage, so these results do not
+qualify HDD throughput or the one-day migration limit.
+
+The queued-write failure rehearsal also passed: a caught failure after row
+verification restored the pending ID, removed partial target changes and left
+the source intact. Retrying copied the record successfully. The private copy
+does not expose a separate acknowledgement path that could discard an
+unverified pending record.

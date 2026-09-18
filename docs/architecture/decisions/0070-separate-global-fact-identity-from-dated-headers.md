@@ -15,6 +15,7 @@ code_paths:
   - portal/backend/db/market_storage_models.py
   - portal/backend/db/fact_storage_schema.py
   - scripts/db/fact_header_v2_capture.py
+  - scripts/db/fact_header_v2_copy.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -77,3 +78,19 @@ cutover. No CLI/runtime path calls it. The preserving orchestrator still needs
 complete v1 schema admission, bounded copy and catch-up, capacity and one-day
 rehearsal, correct FK/view handoff, rollback and final verification before
 activating v2. Capturing IDs alone never makes migration_ready true.
+
+
+The internal shadow-copy stage builds the existing v2 models in the same private
+migration schema. It reads bounded pages using the installed source's
+(storage_day, market_commit_seq, id) index, preserves every persisted header
+field, builds global identity and conservative series/day bounds, and commits
+the verified page and cursor together. New IDs drain from the transactional
+queue without a sequence watermark. An ID leaves that queue only in the
+transaction that verified its matching target header and identity.
+
+The original header table, hot payloads, archive objects and frozen dataset
+records remain authoritative and untouched. A private copy is not an admitted
+runtime layout. No v2 ready certificate is written. Source admission, physical
+placement, complete final verification and dependency handoff are separate
+release requirements; the private target is never selected by application
+queries. This primitive adds no alternate DSN, runtime writer or placement UI.
