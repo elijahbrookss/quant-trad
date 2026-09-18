@@ -1262,9 +1262,13 @@ def test_continuous_level2_recovery_rewinds_partially_committed_spool(
     assert not retained.sealed_path.exists()
 
 
+@pytest.mark.parametrize("separate_working", [False, True])
 def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projection(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch, separate_working,
 ) -> None:
+    working = tmp_path/"live" if separate_working else tmp_path
+    if separate_working:
+        monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(working))
     claim = StreamClaim(
         definition_id="future-provider-quotes",
         definition_generation=1,
@@ -1458,3 +1462,9 @@ def test_continuous_runtime_accepts_registered_non_coinbase_transport_and_projec
         "continuous_capture_stopped",
     ]
     assert {row["connection_epoch"] for row in repository.events} == {0}
+    assert (working/"spool").is_dir()
+    assert (working/"tmp").is_dir()
+    assert (tmp_path/"objects").is_dir()
+    if separate_working:
+        assert not (tmp_path/"spool").exists()
+        assert not (tmp_path/"tmp").exists()

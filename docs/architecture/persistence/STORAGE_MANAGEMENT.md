@@ -839,3 +839,21 @@ movement, resumes payload archival and header movement, and reads the same froze
 results. A separate injected pause after planning must prevent sealing. These
 checks qualify the policy connection only on the disposable layout, not actual
 HDD performance, existing-server permissions or the full preserving migration.
+
+### Preserve recent intake on SSD
+
+Live stream spool and raw encoding scratch have an explicit optional working
+root, separate from the HDD archive root. Preserve the current SSD directory as
+MARKET_STRUCTURE_WORKING_ROOT and configure its
+QT_MARKET_DATA_WORKING_EXPECTED_UUID when preparing the two-drive release.
+MARKET_STRUCTURE_STORAGE_ROOT can then identify the verified HDD archive path
+without rewriting existing spool paths. Both mount identities are checked before
+use, including before repairing a retained incomplete spool.
+
+No default path changes or new portal controls are introduced. The existing
+archive configuration remains the fallback when no working root is configured.
+Raw compaction and canonical archive staging retain their archive-side behavior;
+streaming scratch uses the working root. Qualification must include retained
+files, common writer ownership, source-disk scratch peaks and failure recovery.
+The server Compose mount/user integration remains an explicit release blocker;
+this code does not activate or move live storage.

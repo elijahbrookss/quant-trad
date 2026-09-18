@@ -72,6 +72,8 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         _, namespace = _identity(session)
     archive = Path("/qt-history")/("qt_worker_archive_"+uuid4().hex)
     (archive/"objects").mkdir(parents=True)
+    working = Path("/qt-source/pgdata")/("qt_worker_live_"+uuid4().hex)
+    working.mkdir()
     limits_path = tmp_path/"limits.json"
     limits_path.write_text(json.dumps(configuration()))
     env = os.environ.copy()
@@ -91,6 +93,7 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         QT_MARKET_DATA_LIFECYCLE_INTERVAL_SECONDS="3600",
         QT_STORAGE_MAINTENANCE_LIMITS_PATH=str(limits_path),
         MARKET_STRUCTURE_STORAGE_ROOT=str(archive), QT_MARKET_DATA_EXPECTED_UUID="uuid-copy-hdd",
+        MARKET_STRUCTURE_WORKING_ROOT=str(working), QT_MARKET_DATA_WORKING_EXPECTED_UUID="uuid-copy-ssd",
         QT_WORKERS_COLLECTORS_SHUTDOWN_DRAIN_TIMEOUT_SECONDS="10",
     )
     copies = Path("/qt-history")/"recovery"/namespace

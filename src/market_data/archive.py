@@ -22,7 +22,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from core.storage_mounts import require_configured_archive_mount
+from core.storage_mounts import (
+    require_configured_archive_mount, require_configured_working_mount,
+    require_configured_staging_mount,
+)
 from .structure import RawStreamRecord, build_spool_segment_id
 
 
@@ -389,7 +392,7 @@ class DurableRawSpoolSegment:
             / _safe_component(self.session_id)
             / f"epoch={self.connection_epoch}"
         )
-        require_configured_archive_mount(directory)
+        require_configured_working_mount(directory)
         directory.mkdir(parents=True, exist_ok=True)
         self.open_path = directory / f"{self.spool_segment_id}.open"
         self.sealed_path = directory / f"{self.spool_segment_id}.sealed"
@@ -668,6 +671,7 @@ def _infer_spool_root(path: Path, header: Mapping[str, Any]) -> Path:
 def _read_spool_file(
     path: Path, *, repair_tail: bool
 ) -> tuple[Mapping[str, Any], list[Mapping[str, Any]], int]:
+    require_configured_working_mount(path, require_writable=repair_tail)
     raw = Path(path).read_bytes()
     truncated = 0
     if raw and not raw.endswith(b"\n"):
@@ -984,7 +988,7 @@ def encode_raw_records_to_parquet(
         schema=schema,
     )
     temporary_root = Path(temporary_directory) if temporary_directory else Path(tempfile.gettempdir())
-    require_configured_archive_mount(temporary_root)
+    require_configured_staging_mount(temporary_root)
     temporary_root.mkdir(parents=True, exist_ok=True)
     descriptor, raw_path = tempfile.mkstemp(
         prefix=f"{segment_id}.", suffix=".parquet", dir=temporary_root

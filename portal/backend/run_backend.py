@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from core.settings import get_settings
-from core.storage_mounts import require_configured_archive_mount
+from core.storage_mounts import require_configured_archive_mount, require_configured_working_mount
 
 _SETTINGS = get_settings()
 
@@ -80,6 +80,7 @@ def main() -> int:
     global _STOP
     _configure_logging()
     require_configured_archive_mount()
+    require_configured_working_mount()
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
