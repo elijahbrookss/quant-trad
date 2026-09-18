@@ -109,3 +109,18 @@ Admission performs no repair. A refused preparation rolls back both capture and
 shadow DDL, while a retry rechecks the current source. This is source-contract
 admission only; the eventual operator must repeat it under the final writer
 fence and still qualify physical placement, capacity, timing and rollback.
+
+After baseline copying, a bounded catch-up step takes the source writer fence
+and enables a fixed trigger that mirrors new global identities in the source
+transaction. A busy writer or excess backlog refuses activation; a failed
+activation rolls back catch-up, trigger and phase together. Enabling this
+mirror at initial preparation caused private-partition DDL to wait on unfinished
+source writers in the disposable rehearsal, so the initial phase remains
+queue-only. This supports validating old
+payload/archive references against the new identity registry while collection
+continues. The original source is still the authoritative header during this
+stage; an identity whose private header is still queued is not an active v2
+record. The normal identity-to-header guard is installed only at the reviewed
+handoff after draining and verifying the copy. Source, identity and pending ID
+commit or roll back together. Retry refuses a changed mirror instead of repairing
+it. This does not introduce a second runtime writer or a new storage policy.

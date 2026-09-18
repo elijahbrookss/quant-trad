@@ -15,7 +15,10 @@ from sqlalchemy import MetaData, inspect, text
 from sqlalchemy.dialects.postgresql import insert
 
 from portal.backend.db import Base, MarketFactVersionRecord
-from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE, QUEUE, LOCK, install_capture, inspect_capture
+from scripts.db.fact_header_v2_capture import (
+    SCHEMA, SOURCE, QUEUE, LOCK, install_capture, inspect_capture,
+    install_identity_capture, inspect_identity_capture,
+)
 from scripts.db.fact_header_v2_admission import assert_v1_source_admission
 
 STATE = SCHEMA + ".copy_progress"
@@ -95,6 +98,14 @@ def _inspect_progress(conn):
     inspect_capture(conn)
     _source_columns(conn)
     state = dict(conn.execute(text(f"SELECT * FROM {STATE} WHERE id=1")).mappings().one())
+    if state["identity_capture"]:
+        inspect_identity_capture(conn)
+    elif conn.scalar(text("""
+        SELECT to_regprocedure(:function) IS NOT NULL OR EXISTS(
+            SELECT 1 FROM pg_trigger WHERE tgrelid='market.fact_versions'::regclass
+            AND tgname='trg_qt_header_v2_capture_identity')
+    """),{"function":SCHEMA+".capture_fact_identity()"}):
+        raise RuntimeError("fact_header_copy_unrecorded_identity_capture")
     if state["targets"] != {name:_shape(conn,name) for name in TABLE_NAMES}:
         raise RuntimeError("fact_header_copy_shadow_definition_changed")
     return state
@@ -108,7 +119,7 @@ def prepare_copy(conn):
         _source_columns(conn)
         if conn.scalar(text("SELECT to_regclass(:name)"), {"name":STATE}) is not None:
             state = _inspect_progress(conn)
-            assert_v1_source_admission(conn)
+            assert_v1_source_admission(conn,identity_capture=state["identity_capture"])
             return _report(conn, state, verified=0, reused=True)
         tables = _tables()
         for name in TABLE_NAMES:
@@ -122,6 +133,7 @@ def prepare_copy(conn):
                 high_day date,high_seq bigint,high_id text,
                 after_day date,after_seq bigint,after_id text,
                 baseline_complete boolean NOT NULL,
+                identity_capture boolean NOT NULL DEFAULT false,
                 verified_rows bigint NOT NULL DEFAULT 0 CHECK(verified_rows>=0),
                 targets jsonb NOT NULL,
                 CHECK((high_day IS NULL)=(high_seq IS NULL) AND (high_day IS NULL)=(high_id IS NULL)),
@@ -238,6 +250,40 @@ def copy_page(conn, *, page_rows=128):
         logger.info("fact_header_v2_shadow_page_verified | rows=%s baseline_complete=%s",
                     len(rows),state["baseline_complete"])
         return _report(conn,state,verified=len(rows),reused=True)
+
+
+def enable_identity_capture(conn, *, page_rows=128):
+    """Finish bounded catch-up and mirror new IDs under a short writer fence.
+
+    Baseline partitions must already exist. Mirroring before backfill would let
+    long source writers block creation of private header partitions. A busy
+    writer or excess backlog requires another ordinary copy pass and retry.
+    """
+    if type(page_rows) is not int or not 1 <= page_rows <= 4096:
+        raise ValueError("fact_header_copy_page_rows_out_of_bounds")
+    _lock(conn)
+    with conn.begin_nested():
+        conn.exec_driver_sql("LOCK TABLE market.fact_versions IN SHARE ROW EXCLUSIVE MODE NOWAIT")
+        state=_inspect_progress(conn)
+        if not state["baseline_complete"]:
+            raise RuntimeError("fact_header_identity_capture_baseline_required")
+        assert_v1_source_admission(conn,identity_capture=state["identity_capture"])
+        if state["identity_capture"]:
+            return {**_report(conn,state,verified=0,reused=True),"identity_capture_active":True}
+        pending=conn.execute(text(f"SELECT id FROM {QUEUE} ORDER BY id LIMIT :limit"),
+                             {"limit":page_rows+1}).scalars().all()
+        if len(pending)>page_rows:
+            raise RuntimeError("fact_header_identity_capture_backlog_exceeds_fence_budget")
+        report=copy_page(conn,page_rows=page_rows)
+        if not report["caught_up_at_observation"]:
+            raise RuntimeError("fact_header_identity_capture_catchup_incomplete")
+        install_identity_capture(conn)
+        conn.exec_driver_sql(f"UPDATE {STATE} SET identity_capture=true WHERE id=1")
+        state=_inspect_progress(conn)
+        assert_v1_source_admission(conn,identity_capture=True)
+        logger.info("fact_header_v2_identity_capture_enabled | source=%s", SOURCE)
+        return {**_report(conn,state,verified=report["verified_page_rows"],reused=False),
+                "identity_capture_active":True}
 
 
 def _report(conn, state, *, verified, reused):

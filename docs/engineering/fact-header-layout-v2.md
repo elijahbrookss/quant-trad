@@ -281,3 +281,51 @@ the fixture switch, and interruption recovery. Altered guards or dependencies
 were refused without changing source rows or leaving partial preparation.
 The normal backend and documentation checks passed. This evidence remains
 local and does not qualify production cutover duration or physical placement.
+
+
+## Moving reference validation before the final pause
+
+A disposable PostgreSQL 15 capability rehearsal established that validated
+foreign keys on the existing payload children can be adopted by the parent
+without replacing their constraint identities. Collection transactions remained
+able to insert while the child validation transaction was open. An unvalidated
+child with a missing target record blocked parent attachment and retained the
+original reference. This supports staging validation ahead of the final writer
+fence; it is not a measured production cutover duration.
+
+This matches PostgreSQL 15's [constraint attachment implementation](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/commands/tablecmds.c)
+and its [ALTER TABLE restrictions](https://www.postgresql.org/docs/15/sql-altertable.html).
+Direct NOT VALID foreign keys on a partitioned parent are unsupported; the
+rehearsal uses ordinary child constraints, then their validated attachment.
+
+After baseline copying, an explicit bounded catch-up step installs a fixed
+identity capture trigger under a NOWAIT source writer fence. A busy writer or
+backlog larger than one bounded page refuses activation. The catch-up, trigger
+installation and recorded phase commit or roll back together. Installing this
+mirror before backfill was rejected by a disposable rehearsal: an unfinished
+source insert then held an identity-table lock needed to create a private
+header partition. The initial queue-only phase retains its late-commit behavior.
+Each subsequent original-source insert creates and verifies its new global
+identity in the same transaction as the source and pending-copy entry. This
+allows reference validation to proceed before all corresponding header copies
+have caught up. The original source remains authoritative; no new identity
+alone certifies copy completion.
+
+The mirror binds to the original source and private target relation identities,
+uses a fixed definer function, and requires no private-schema permission for
+collectors. Retry checks its exact function and enabled trigger. A conflict
+aborts the source insert; source rollback also rolls back identity and queue.
+No automatic repair or mirror replacement occurs on retry. All existing source identities require baseline completion and the guarded
+activation step before staging new foreign keys. New-day partition creation
+during later catch-up still needs the operator's bounded statement budget.
+Production FK orchestration, final fencing and verified placement remain
+unfinished; the capability test is not an operator command.
+
+The corrected post-baseline activation passed the disposable late-commit,
+bounded catch-up, failed activation, terminated collection and restricted-writer
+rehearsals. Next-day copying respected a caller timeout while an unfinished
+collector held the identity table, retained the committed source/identity/queue,
+and succeeded after that writer committed. Enabling identity capture before the
+fixture switch preserved normal startup, recent/history/frozen reads and new
+collection; terminating the switch restored the original layout and allowed
+retry. These remain tiny fixtures, not a production operator or duration proof.

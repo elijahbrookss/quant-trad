@@ -178,3 +178,87 @@ def _install_capture(conn):
     logger.info("fact_header_v2_capture_staged | source_oid=%s database_oid=%s",
                 context["source_oid"],context["database_oid"])
     return {**result,"reused":False}
+
+
+def _identity_body(source_oid, target_oid):
+    return f"""
+BEGIN
+    IF TG_RELID <> {source_oid}::oid
+       OR '{SCHEMA}.fact_identities'::regclass::oid <> {target_oid}::oid THEN
+        RAISE EXCEPTION 'fact_header_identity_capture_relation_changed';
+    END IF;
+    INSERT INTO {SCHEMA}.fact_identities(id,storage_day,series_id,observation_key,revision)
+        VALUES(NEW.id,NEW.storage_day,NEW.series_id,NEW.observation_key,NEW.revision)
+        ON CONFLICT(id) DO NOTHING;
+    IF NOT EXISTS(
+        SELECT 1 FROM {SCHEMA}.fact_identities i WHERE i.id=NEW.id
+          AND (i.storage_day,i.series_id,i.observation_key,i.revision)
+              IS NOT DISTINCT FROM
+              (NEW.storage_day,NEW.series_id,NEW.observation_key,NEW.revision)
+    ) THEN
+        RAISE EXCEPTION 'fact_header_identity_capture_content_mismatch';
+    END IF;
+    RETURN NULL;
+END;
+"""
+
+
+def inspect_identity_capture(conn):
+    """Check the fixed prepared shadow mirror, not completeness or cutover."""
+    context=inspect_capture(conn)
+    target_oid=conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+                           {"name":SCHEMA+".fact_identities"})
+    if target_oid is None:
+        raise RuntimeError("fact_header_identity_capture_target_missing")
+    row=conn.execute(text("""
+        SELECT p.prosrc,p.prosecdef,p.proconfig,p.provolatile,p.proretset,
+               p.pronargs,p.pronargdefaults,p.prorettype='trigger'::regtype AS returns_trigger,
+               l.lanname,p.proowner=n.nspowner AS owned,
+               t.tgtype,t.tgenabled,t.tgnargs,t.tgqual IS NULL AS unfiltered,
+               t.tgdeferrable,t.tginitdeferred,t.tgoldtable,t.tgnewtable
+        FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+        JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang
+        WHERE t.tgrelid=:source AND t.tgname='trg_qt_header_v2_capture_identity'
+          AND NOT t.tgisinternal AND p.oid=to_regprocedure(:function)
+    """),{"source":context["source_oid"],
+          "function":SCHEMA+".capture_fact_identity()"}).mappings().one_or_none()
+    if (row is None or row["prosrc"].strip()!=_identity_body(context["source_oid"],target_oid).strip()
+            or not row["prosecdef"] or row["proconfig"]!=["search_path=pg_catalog"]
+            or row["provolatile"]!="v" or row["proretset"] or row["pronargs"]!=0
+            or row["pronargdefaults"]!=0 or not row["returns_trigger"]
+            or row["lanname"]!="plpgsql" or not row["owned"] or row["tgtype"]!=5
+            or row["tgenabled"]!="A" or row["tgnargs"]!=0 or not row["unfiltered"]
+            or row["tgdeferrable"] or row["tginitdeferred"]
+            or row["tgoldtable"] is not None or row["tgnewtable"] is not None):
+        raise RuntimeError("fact_header_identity_capture_changed")
+    return {"identity_capture_active":True,"target_oid":target_oid,"migration_ready":False}
+
+
+def install_identity_capture(conn):
+    """Internal post-baseline step, after verifying the trusted shadow copy.
+
+    The caller owns activation's writer fence and savepoint. This primitive
+    never upgrades an existing mirror silently or certifies identity coverage.
+    """
+    if not conn.in_transaction():
+        raise ValueError("fact_header_identity_capture_caller_transaction_required")
+    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
+                       {"name":LOCK}):
+        raise RuntimeError("fact_header_capture_migration_busy")
+    conn.exec_driver_sql("LOCK TABLE market.fact_versions IN SHARE ROW EXCLUSIVE MODE NOWAIT")
+    context=inspect_capture(conn)
+    target_oid=conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),
+                           {"name":SCHEMA+".fact_identities"})
+    if target_oid is None:
+        raise RuntimeError("fact_header_identity_capture_target_missing")
+    body=_identity_body(context["source_oid"],target_oid)
+    conn.exec_driver_sql(f"CREATE FUNCTION {SCHEMA}.capture_fact_identity() RETURNS trigger "
+                        "LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $qt$"
+                        +body+"$qt$")
+    conn.exec_driver_sql(f"REVOKE ALL ON FUNCTION {SCHEMA}.capture_fact_identity() FROM PUBLIC")
+    conn.exec_driver_sql(f"""
+        CREATE TRIGGER trg_qt_header_v2_capture_identity AFTER INSERT ON {SOURCE}
+        FOR EACH ROW EXECUTE FUNCTION {SCHEMA}.capture_fact_identity()
+    """)
+    conn.exec_driver_sql(f"ALTER TABLE {SOURCE} ENABLE ALWAYS TRIGGER trg_qt_header_v2_capture_identity")
+    return inspect_identity_capture(conn)

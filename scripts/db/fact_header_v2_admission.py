@@ -13,7 +13,7 @@ import logging
 from sqlalchemy import text
 
 from portal.backend.db.fact_storage_schema import _view_signature
-from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE, inspect_capture
+from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE, inspect_capture, inspect_identity_capture
 
 logger = logging.getLogger(__name__)
 MAX_CATALOG_ROWS = 8192
@@ -176,7 +176,7 @@ def _assert_guard_functions(conn, owner):
             raise RuntimeError("fact_header_source_function_changed: "+signature)
 
 
-def _assert_source_triggers(conn):
+def _assert_source_triggers(conn, *, identity_capture):
     rows=_rows(conn,"""
         SELECT t.tgname,t.tgtype,t.tgenabled,t.tgdeferrable,t.tginitdeferred,
                t.tgnargs,t.tgqual IS NULL AS unfiltered,
@@ -193,6 +193,8 @@ def _assert_source_triggers(conn):
         "trg_qt_header_v2_capture":(5,False,SCHEMA+".capture_fact_insert()","A"),
         "trg_qt_header_v2_reject_change":(58,False,SCHEMA+".reject_fact_source_change()","A"),
     }
+    if identity_capture:
+        expected["trg_qt_header_v2_capture_identity"]=(5,False,SCHEMA+".capture_fact_identity()","A")
     if {row["tgname"] for row in rows}!=set(expected):
         raise RuntimeError("fact_header_source_trigger_set_changed")
     for row in rows:
@@ -289,9 +291,11 @@ def _incoming_references(conn):
     return rows
 
 
-def assert_v1_source_admission(conn):
+def assert_v1_source_admission(conn, *, identity_capture=False):
     """Check the known source contract; never authorize placement or switching."""
     context=inspect_capture(conn)
+    if identity_capture:
+        inspect_identity_capture(conn)
     if conn.scalar(text("""
         SELECT to_regclass('market.fact_identities') IS NOT NULL
             OR to_regclass('market.fact_header_partitions') IS NOT NULL
@@ -341,7 +345,7 @@ def assert_v1_source_admission(conn):
     if invalid_unique or _secondary_indexes(conn,SOURCE)!=_secondary_indexes(conn,shadow):
         raise RuntimeError("fact_header_source_indexes_changed")
     _assert_guard_functions(conn,source["owner"])
-    _assert_source_triggers(conn)
+    _assert_source_triggers(conn,identity_capture=identity_capture)
     references=_incoming_references(conn)
     views=_rows(conn,"""
         SELECT DISTINCT n.nspname||'.'||c.relname AS relation,c.relkind

@@ -248,6 +248,8 @@ def test_copied_v1_handoff_preserves_reads_freezes_and_new_collection(source):
         copy.prepare_copy(conn)
     _finish(engine)
     with engine.begin() as conn:
+        copy.enable_identity_capture(conn)
+    with engine.begin() as conn:
         assert stage_shadow_handoff_fixture(conn,source)["source_rows_retained"]==7
     _assert_application_after_handoff(source)
     new=replace(source.fact,observation_key="after-handoff",observation_time=BASE+timedelta(days=2))
@@ -283,6 +285,8 @@ def test_interrupted_handoff_restores_original_layout_before_retry(source):
     with engine.begin() as conn:
         copy.prepare_copy(conn)
     _finish(engine)
+    with engine.begin() as conn:
+        copy.enable_identity_capture(conn)
     killed=[False]
     def terminate(conn,cursor,statement,parameters,context,executemany):
         if not killed[0] and statement==f"ALTER TABLE {SCHEMA}.fact_versions SET SCHEMA market":
@@ -308,3 +312,183 @@ def test_interrupted_handoff_restores_original_layout_before_retry(source):
     with engine.begin() as conn:
         stage_shadow_handoff_fixture(conn,source)
     _assert_application_after_handoff(source)
+
+
+def test_source_identity_and_queue_commit_or_roll_back_together(source):
+    engine=source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+    _finish(engine)
+    with engine.begin() as conn:
+        assert copy.enable_identity_capture(conn)["identity_capture_active"]
+        row=_insert(conn,source,"identity-before-copy")
+        identity=dict(conn.execute(text(f"""
+            SELECT {",".join(copy.IDENTITY_COLUMNS)} FROM {SCHEMA}.fact_identities WHERE id=:id
+        """),{"id":row["id"]}).mappings().one())
+        assert identity=={name:row[name] for name in copy.IDENTITY_COLUMNS}
+        assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions WHERE id=:id"),
+                           {"id":row["id"]})==0
+    # A terminated collection transaction must leave no source, identity or queue entry.
+    with pytest.raises(DBAPIError):
+        with engine.begin() as conn:
+            killed=_insert(conn,source,"identity-killed")
+            pid=conn.connection.driver_connection.get_backend_pid()
+            with engine.begin() as killer:
+                assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),{"pid":pid})
+            conn.exec_driver_sql("SELECT 1")
+    with engine.begin() as conn:
+        for relation in (copy.SOURCE,SCHEMA+".fact_identities",QUEUE):
+            assert not conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {relation} WHERE id=:id)"),
+                                   {"id":killed["id"]})
+        # Stage a conflicting identity without committing its source record.
+        transaction=conn.begin_nested()
+        conflicting=_insert(conn,source,"conflicting-identity")
+        transaction.rollback()
+        wrong={name:conflicting[name] for name in copy.IDENTITY_COLUMNS}
+        wrong["storage_day"]+=timedelta(days=1)
+        conn.execute(text(f"""
+            INSERT INTO {SCHEMA}.fact_identities({",".join(copy.IDENTITY_COLUMNS)})
+            VALUES({",".join(":"+name for name in copy.IDENTITY_COLUMNS)})
+        """),wrong)
+        with pytest.raises(DBAPIError,match="identity_capture_content_mismatch"):
+            with conn.begin_nested():
+                _insert(conn,source,"conflicting-identity")
+        for relation in (copy.SOURCE,QUEUE):
+            assert not conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {relation} WHERE id=:id)"),
+                                   {"id":conflicting["id"]})
+
+
+def test_identity_capture_requires_no_private_access_and_drift_blocks_resume(source):
+    from uuid import uuid4
+    engine=source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+    _finish(engine)
+    with engine.begin() as conn:
+        copy.enable_identity_capture(conn)
+    role="qt_identity_writer_"+uuid4().hex[:16]
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"CREATE ROLE {role} NOLOGIN")
+        conn.exec_driver_sql(f"GRANT USAGE ON SCHEMA market TO {role}")
+        conn.exec_driver_sql(f"GRANT SELECT ON ALL TABLES IN SCHEMA market TO {role}")
+        conn.exec_driver_sql(f"GRANT INSERT ON market.fact_versions,market.fact_hot_payloads TO {role}")
+        conn.exec_driver_sql(f"GRANT USAGE ON SEQUENCE market.fact_commit_seq TO {role}")
+        # Existing payload validation takes FOR SHARE on this row, which needs
+        # UPDATE privilege as well as SELECT; no private-schema grant is added.
+        conn.exec_driver_sql(f"GRANT UPDATE(state) ON market.fact_retention_partitions TO {role}")
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"SET LOCAL ROLE {role}")
+            row=_insert(conn,source,"identity-restricted-writer")
+            conn.exec_driver_sql("SET CONSTRAINTS ALL IMMEDIATE")
+            with pytest.raises(DBAPIError,match="permission denied"):
+                with conn.begin_nested():
+                    conn.exec_driver_sql(f"SELECT * FROM {SCHEMA}.fact_identities")
+        with engine.connect() as conn:
+            assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_identities WHERE id=:id"),
+                               {"id":row["id"]})==1
+        for sql in (
+            "ALTER TABLE market.fact_versions DISABLE TRIGGER trg_qt_header_v2_capture_identity",
+            f"""CREATE OR REPLACE FUNCTION {SCHEMA}.capture_fact_identity()
+                RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog
+                AS $$ BEGIN RETURN NULL; END; $$""",
+        ):
+            with engine.connect() as conn:
+                transaction=conn.begin()
+                try:
+                    conn.exec_driver_sql(sql)
+                    with pytest.raises(RuntimeError,match="identity_capture_changed"):
+                        copy.copy_page(conn)
+                    with pytest.raises(RuntimeError,match="identity_capture_changed"):
+                        copy.prepare_copy(conn)
+                    assert conn.scalar(text(f"SELECT count(*) FROM {QUEUE} WHERE id=:id"),
+                                       {"id":row["id"]})==1
+                finally:
+                    transaction.rollback()
+        _finish(engine)
+        with engine.connect() as conn:
+            assert _headers(conn,copy.SOURCE)==_headers(conn,SCHEMA+".fact_versions")
+    finally:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"DROP OWNED BY {role}")
+            conn.exec_driver_sql(f"DROP ROLE {role}")
+
+
+def test_identity_capture_boundary_requires_catchup_and_rolls_back_on_failure(source,monkeypatch):
+    engine=source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+        with pytest.raises(RuntimeError,match="baseline_required"):
+            copy.enable_identity_capture(conn)
+    _finish(engine)
+    with engine.begin() as writer:
+        row=_insert(writer,source,"before-identity-boundary")
+        with engine.begin() as conn:
+            with pytest.raises(DBAPIError,match="could not obtain lock"):
+                copy.enable_identity_capture(conn)
+    with engine.begin() as conn:
+        second=_insert(conn,source,"second-before-boundary")
+        with pytest.raises(RuntimeError,match="backlog_exceeds_fence_budget"):
+            copy.enable_identity_capture(conn,page_rows=1)
+        assert conn.scalar(text(f"SELECT count(*) FROM {QUEUE}"))==2
+    original=copy.install_identity_capture
+    def fail_after_install(conn):
+        original(conn)
+        raise RuntimeError("injected mirror installation failure")
+    monkeypatch.setattr(copy,"install_identity_capture",fail_after_install)
+    with engine.begin() as conn:
+        with pytest.raises(RuntimeError,match="injected mirror"):
+            copy.enable_identity_capture(conn,page_rows=2)
+        assert not conn.scalar(text(f"SELECT identity_capture FROM {copy.STATE}"))
+        assert conn.scalar(text(f"SELECT count(*) FROM {QUEUE}"))==2
+        assert not conn.scalar(text("SELECT to_regprocedure(:name)"),
+                               {"name":SCHEMA+".capture_fact_identity()"})
+        for saved in (row,second):
+            assert not conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {SCHEMA}.fact_versions WHERE id=:id)"),
+                                   {"id":saved["id"]})
+    monkeypatch.setattr(copy,"install_identity_capture",original)
+    with engine.begin() as conn:
+        result=copy.enable_identity_capture(conn,page_rows=2)
+        assert result["identity_capture_active"] and not result["migration_ready"]
+        assert result["caught_up_at_observation"]
+        assert _headers(conn,copy.SOURCE)==_headers(conn,SCHEMA+".fact_versions")
+    with engine.begin() as conn:
+        assert copy.enable_identity_capture(conn)["reused"]
+        assert copy.prepare_copy(conn)["reused"]
+
+
+def test_new_day_after_identity_activation_respects_caller_timeout_and_retries(source):
+    engine=source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+    _finish(engine)
+    with engine.begin() as conn:
+        copy.enable_identity_capture(conn)
+        source.open_day+=timedelta(days=1)
+        end=source.open_day+timedelta(days=1)
+        child="market.fact_hot_payloads_"+source.open_day.strftime("%Y%m%d")
+        conn.exec_driver_sql(f"CREATE TABLE {child} PARTITION OF market.fact_hot_payloads "
+                             f"FOR VALUES FROM ('{source.open_day}') TO ('{end}')")
+        conn.execute(text("INSERT INTO market.fact_retention_partitions(storage_day) VALUES(:day)"),
+                     {"day":source.open_day})
+    with engine.begin() as slow:
+        late=_insert(slow,source,"new-day-late")
+        with engine.begin() as fast:
+            earlier=_insert(fast,source,"new-day-earlier")
+        with engine.begin() as copier:
+            copier.exec_driver_sql("SET LOCAL statement_timeout='500ms'")
+            with pytest.raises(DBAPIError,match="statement timeout"):
+                copy.copy_page(copier)
+            # Page savepoint restores the target and queue. The committed source
+            # and its identity survive; the unfinished writer remains independent.
+            assert copier.scalar(text(f"SELECT count(*) FROM {QUEUE}"))==1
+            assert copier.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions WHERE id=:id"),
+                                 {"id":earlier["id"]})==0
+            assert copier.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_identities WHERE id=:id"),
+                                 {"id":earlier["id"]})==1
+    _finish(engine)
+    with engine.connect() as conn:
+        assert _headers(conn,copy.SOURCE)==_headers(conn,SCHEMA+".fact_versions")
+        assert not conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))
+        assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions WHERE id=:id"),
+                           {"id":late["id"]})==1
