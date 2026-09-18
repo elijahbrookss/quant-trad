@@ -7,7 +7,8 @@ for a production orchestrator. This stage never deletes source records.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from contextlib import nullcontext
+from datetime import date, timedelta
 import json
 import logging
 
@@ -20,6 +21,7 @@ from scripts.db.fact_header_v2_capture import (
     install_identity_capture, inspect_identity_capture,
 )
 from scripts.db.fact_header_v2_admission import assert_v1_source_admission
+from scripts.db import fact_header_v2_placement as physical
 
 STATE = SCHEMA + ".copy_progress"
 TABLE_NAMES = ("fact_identities", "fact_header_partitions", "fact_header_series_days", "fact_versions")
@@ -110,24 +112,37 @@ def _inspect_progress(conn):
         raise RuntimeError("fact_header_copy_unrecorded_identity_capture")
     if state["targets"] != {name:_shape(conn,name) for name in TABLE_NAMES}:
         raise RuntimeError("fact_header_copy_shadow_definition_changed")
+    state["_placement_pid"]=None
+    if state["placement"] is not None:
+        state["_placement_pid"]=physical.verify(conn,state["placement"])
+        for name in (*TABLE_NAMES,"pending_fact_ids","capture","copy_progress"):
+            physical.verify_group(conn,SCHEMA+"."+name,history=name=="fact_identities",
+                                  saved=state["placement"],pid=state["_placement_pid"])
     return state
 
 
-def prepare_copy(conn):
+def prepare_copy(conn, *, placement=None):
     """Create a private target atomically; retry never resets copied progress."""
     _lock(conn)
-    with conn.begin_nested():
+    with conn.begin_nested(), (physical.tablespace(conn,"") if placement is not None else nullcontext()):
+        binding=physical.observe(conn,placement)[0] if placement is not None else None
         install_capture(conn)
+        if binding is not None:
+            physical.verify_group(conn,SOURCE,history=False,saved=binding,pid=physical.verify(conn,binding))
         _source_columns(conn)
         if conn.scalar(text("SELECT to_regclass(:name)"), {"name":STATE}) is not None:
             state = _inspect_progress(conn)
+            if state["placement"]!=binding:
+                raise RuntimeError("fact_header_copy_placement_cannot_change")
             assert_v1_source_admission(conn,identity_capture=state["identity_capture"])
             return _report(conn, state, verified=0, reused=True)
         tables = _tables()
         for name in TABLE_NAMES:
             if conn.scalar(text("SELECT to_regclass(:name)"), {"name":SCHEMA+"."+name}) is not None:
                 raise RuntimeError("fact_header_copy_unregistered_shadow")
-            tables[name].create(conn)
+            with (physical.tablespace(conn,binding["history_name"])
+                  if binding is not None and name=="fact_identities" else nullcontext()):
+                tables[name].create(conn)
         assert_v1_source_admission(conn)
         conn.exec_driver_sql(f"""
             CREATE TABLE {STATE}(
@@ -138,6 +153,7 @@ def prepare_copy(conn):
                 identity_capture boolean NOT NULL DEFAULT false,
                 verified_rows bigint NOT NULL DEFAULT 0 CHECK(verified_rows>=0),
                 targets jsonb NOT NULL,
+                placement jsonb,
                 CHECK((high_day IS NULL)=(high_seq IS NULL) AND (high_day IS NULL)=(high_id IS NULL)),
                 CHECK((after_day IS NULL)=(after_seq IS NULL) AND (after_day IS NULL)=(after_id IS NULL)))
         """)
@@ -146,16 +162,17 @@ def prepare_copy(conn):
             ORDER BY storage_day DESC,market_commit_seq DESC,id DESC LIMIT 1
         """)).one_or_none()
         conn.execute(text(f"""
-            INSERT INTO {STATE}(id,high_day,high_seq,high_id,baseline_complete,targets)
-            VALUES(1,:day,:seq,:identity,:empty,CAST(:targets AS jsonb))
+            INSERT INTO {STATE}(id,high_day,high_seq,high_id,baseline_complete,targets,placement)
+            VALUES(1,:day,:seq,:identity,:empty,CAST(:targets AS jsonb),CAST(:placement AS jsonb))
         """), {"day":high[0] if high else None,"seq":high[1] if high else None,
                "identity":high[2] if high else None,"empty":high is None,
-               "targets":json.dumps({name:_shape(conn,name) for name in TABLE_NAMES})})
+               "targets":json.dumps({name:_shape(conn,name) for name in TABLE_NAMES}),
+               "placement":json.dumps(binding) if binding is not None else None})
         logger.info("fact_header_v2_shadow_prepared | source=%s", SOURCE)
         return _report(conn, _inspect_progress(conn), verified=0, reused=False)
 
 
-def _partition(conn, day):
+def _partition(conn, day, *, placement=None, pid=None):
     name = "fact_versions_"+day.strftime("%Y%m%d")
     relation = SCHEMA+"."+name
     bound = f"FOR VALUES FROM ('{day.isoformat()}') TO ('{(day+timedelta(days=1)).isoformat()}')"
@@ -165,21 +182,29 @@ def _partition(conn, day):
         FROM pg_class c LEFT JOIN pg_inherits i ON i.inhrelid=c.oid
         WHERE c.oid=to_regclass(:name)
     """),{"name":relation}).one_or_none()
+    history=bool(placement and day<date.fromisoformat(placement["plan"]["history_before"]))
     if recorded:
         if existing is None or tuple(existing)!=("r","p",bound,SCHEMA+".fact_versions"):
             raise RuntimeError("fact_header_copy_shadow_partition_changed")
+        if placement:
+            physical.verify_group(conn,relation,history=history,saved=placement,pid=pid)
         return
     if existing is not None:
         raise RuntimeError("fact_header_copy_shadow_partition_unregistered")
-    conn.exec_driver_sql(f"CREATE TABLE {relation} PARTITION OF {SCHEMA}.fact_versions {bound}")
+    space=placement["history_name"] if history else "pg_default"
+    with (physical.tablespace(conn,space) if placement else nullcontext()):
+        clause=" TABLESPACE "+conn.dialect.identifier_preparer.quote(space) if placement else ""
+        conn.exec_driver_sql(f"CREATE TABLE {relation} PARTITION OF {SCHEMA}.fact_versions {bound}{clause}")
+    if placement:
+        physical.verify_group(conn,relation,history=history,saved=placement,pid=pid)
     conn.execute(text(f"INSERT INTO {SCHEMA}.fact_header_partitions(storage_day) VALUES(:day)"),{"day":day})
 
 
-def _copy_rows(conn, rows):
+def _copy_rows(conn, rows, *, placement=None, pid=None):
     if not rows:
         return
     for day in sorted({row["storage_day"] for row in rows}):
-        _partition(conn,day)
+        _partition(conn,day,placement=placement,pid=pid)
     tables = _tables()
     conn.execute(insert(tables["fact_identities"]).on_conflict_do_nothing(),
                  [{name:row[name] for name in IDENTITY_COLUMNS} for row in rows])
@@ -238,7 +263,13 @@ def copy_page(conn, *, page_rows=128):
             """),{"ids":queued}).mappings()] if queued else []
             if {row["id"] for row in rows} != set(queued):
                 raise RuntimeError("fact_header_copy_captured_source_missing")
-        _copy_rows(conn,rows)
+        _copy_rows(conn,rows,placement=state["placement"],pid=state["_placement_pid"])
+        if state["placement"]:
+            pid=physical.verify(conn,state["placement"])
+            for day in sorted({row["storage_day"] for row in rows}):
+                physical.verify_group(conn,SCHEMA+".fact_versions_"+day.strftime("%Y%m%d"),
+                    history=day<date.fromisoformat(state["placement"]["plan"]["history_before"]),
+                    saved=state["placement"],pid=pid)
         if not state["baseline_complete"]:
             if rows:
                 last = rows[-1]
@@ -293,4 +324,5 @@ def _report(conn, state, *, verified, reused):
     return {"schema_version":"qt.fact_header_shadow_copy.v1","verified_page_rows":verified,
             "baseline_complete":state["baseline_complete"],"capture_pending":pending,
             "caught_up_at_observation":state["baseline_complete"] and not pending,
-            "migration_ready":False,"source_authoritative":True,"reused":reused}
+            "migration_ready":False,"source_authoritative":True,"reused":reused,
+            "physical_placement_configured":state["placement"] is not None}

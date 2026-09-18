@@ -371,3 +371,44 @@ termination, rollback and retry. A separate old-snapshot rehearsal refused
 preparation before changing the source and included the concurrent committed
 record when retried with READ COMMITTED. These results establish correctness for
 small disposable data, not full-volume timing or production deployment readiness.
+
+
+## Fixed physical placement during preserving copy
+
+The optional internal CopyPlacement input binds exactly one recent SSD (the
+current pg_default database filesystem), one history HDD, its already prepared
+PostgreSQL 15 tablespace, and one fixed history cutoff. This avoids creating a
+second historical copy on the SSD only to move it afterward. It does not create
+tablespaces, format drives, alter mounts, activate policy or choose among drives.
+
+Preparation verifies the serving PostgreSQL process and shared file namespace,
+filesystem UUIDs, separate devices, destination ownership/writability and
+tablespace identity. The plan and observed binding are saved with copy progress.
+Every physically configured page rechecks that binding, and verifies heap,
+ordinary indexes and TOAST files for the groups it touches. A changed binding,
+missing drive, wrong filesystem or separately misplaced index refuses the page;
+its savepoint preserves the prior cursor and source records.
+
+Identity rows and their indexes are created on history. New dated header files
+are created directly on history before the fixed cutoff and on recent otherwise.
+The source remains on recent; small routing catalogs and capture/progress state
+also remain there. Caller default_tablespace settings are restored. Omitting or
+changing an already recorded placement on prepare/retry is refused. Earlier
+placement-free disposable helpers remain available but prove no physical layout.
+
+The eventual operator still needs capacity/WAL/time budgets, a complete final
+placement/content sweep, shared raw/archive metadata migration, final switch and
+post-resume recovery. There is no readiness certificate or production entrypoint
+in this step, and no physical-HDD performance or one-day duration claim.
+
+
+The two-filesystem rehearsal verified direct creation of historical headers,
+global identities and all their native index/TOAST files on history, with recent
+headers and copy state on the recent filesystem. Backend termination rolled back
+the interrupted page; retry and fixture handoff preserved recent/history/frozen
+reads, clean startup and new collection. Changed UUID evidence or an index moved
+to the wrong tablespace stopped progress without advancing the cursor; correcting
+the condition allowed retry. The rehearsal caught PostgreSQL's restriction on
+explicitly naming pg_default for a partitioned parent. Preparation uses the
+verified database default through an empty setting instead, then verifies actual
+files. These results still do not qualify physical HDD speed or full-volume time.

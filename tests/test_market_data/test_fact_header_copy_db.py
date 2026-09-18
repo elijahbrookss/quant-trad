@@ -177,8 +177,8 @@ def test_failed_page_savepoint_cannot_commit_partial_progress(source,monkeypatch
     with engine.begin() as conn:
         copy.prepare_copy(conn)
     original=copy._copy_rows
-    def fail_after_copy(conn,rows):
-        original(conn,rows)
+    def fail_after_copy(conn,rows,**placement):
+        original(conn,rows,**placement)
         raise RuntimeError("injected failure after verification")
     monkeypatch.setattr(copy,"_copy_rows",fail_after_copy)
     with engine.begin() as conn:

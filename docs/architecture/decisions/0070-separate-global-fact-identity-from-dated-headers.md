@@ -18,6 +18,7 @@ code_paths:
   - scripts/db/fact_header_v2_copy.py
   - scripts/db/fact_header_v2_admission.py
   - scripts/db/fact_header_v2_references.py
+  - scripts/db/fact_header_v2_placement.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -135,3 +136,13 @@ constraints are attached to a parent constraint without replacement. Changed
 definitions, disabled enforcement or incomplete coverage refuse advancement.
 These steps do not remove original references, activate v2 or qualify capacity
 and final cutover duration.
+
+
+The internal preserving copy can bind a fixed recent SSD and history HDD before
+creating its shadow tables. It reuses the storage boundary's PostgreSQL process
+and namespace checks. New global identities and their indexes go directly to the
+verified history tablespace; dated headers use that tablespace before the fixed
+cutoff and pg_default afterward. The current database, small routing catalogs and
+temporary capture state remain on the verified recent filesystem. Copy progress
+records the binding and refuses a changed destination rather than relocating
+already copied data. This is not a general placement API or runtime policy.
