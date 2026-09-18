@@ -84,9 +84,22 @@ class PostgresCanonicalFactRetentionRepository:
             sizes = dict(query(text("""
                 SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date AS database_day,
                        pg_database_size(current_database()) AS database_bytes,
-                       pg_total_relation_size('market.fact_versions') AS canonical_header_bytes,
+                       pg_total_relation_size('market.fact_identities') AS global_identity_bytes,
+                       pg_total_relation_size('market.fact_header_series_days') AS series_day_directory_bytes,
                        pg_total_relation_size('market.raw_archive_record_mappings') AS raw_mapping_bytes
             """)).mappings().one())
+            # A partitioned parent has no heap or index storage of its own.
+            # Include every node once; each physical relation total includes its
+            # indexes and TOAST. Header history survives hot-payload reclamation.
+            headers = list(query(text("""
+                SELECT tree.relid, pg_total_relation_size(tree.relid) AS bytes
+                FROM pg_partition_tree('market.fact_versions'::regclass) AS tree
+                LIMIT :limit
+            """), {"limit": policy.max_inventory_partitions + 2}).mappings())
+            # The tree includes its root in addition to the configured children.
+            if len(headers) > policy.max_inventory_partitions + 1:
+                raise RuntimeError("canonical_retention_inventory_budget_exceeded: no partial storage total is reported")
+            sizes["canonical_header_bytes"] = sum(int(row["bytes"]) for row in headers)
             partitions = [dict(row) for row in query(text("""
                 SELECT storage_day,state,expected_rows,manifest_set_hash FROM market.fact_retention_partitions
                 WHERE state <> 'reclaimed' ORDER BY storage_day LIMIT :limit
@@ -221,7 +234,7 @@ class PostgresCanonicalFactRetentionRepository:
             "execution_enabled": policy.execution_enabled,
             "execution_blockers": [] if policy.execution_enabled else ["canonical_retention_execution_disabled"],
             "inventory": {name: inventory[name] for name in (
-                "database_bytes", "canonical_header_bytes", "raw_mapping_bytes", "hot_payload_bytes", "hot_partition_count")},
+                "database_bytes", "canonical_header_bytes", "global_identity_bytes", "series_day_directory_bytes", "raw_mapping_bytes", "hot_payload_bytes", "hot_partition_count")},
             "archive_filesystem": filesystem,
             "pressure": {"hot_payload_excess_bytes": hot_excess,
                          "hot_payload_budget_reached": hot_pressure,

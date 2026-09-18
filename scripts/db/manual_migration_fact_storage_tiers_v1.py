@@ -7,6 +7,8 @@ for operator rollback; this command never drops the source or enables retention.
 Run PR #196/#197's required migrations first. PG_DSN is the only connection input.
 On an already-ready older tiered layout, the same explicit execution adds only
 missing empty proof tables. It never backfills verification receipts.
+This build creates the current v2 dated-header target from legacy full rows.
+It does not upgrade an existing tiered v1 target or resume an older v1 copy.
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ from portal.backend.db.fact_storage_schema import (
     assert_fact_storage_contract, ensure_fact_payload_partition, install_fact_storage_functions,
 )
 from portal.backend.db.session import Database
+from portal.backend.db.fact_identity_schema import IDENTITY_TABLES
+from portal.backend.db.fact_series_day_schema import assert_fact_series_day_contract
 
 SOURCE_SCHEMA = "qt_fact_storage_cutover_v1"
 SOURCE = SOURCE_SCHEMA + ".fact_versions"
@@ -48,7 +52,8 @@ def _state(conn):
         "SELECT state, evidence FROM market.fact_storage_state WHERE layout_version=:version"
     ), {"version": FACT_STORAGE_LAYOUT_VERSION}).mappings().one_or_none()
     if row is None:
-        raise RuntimeError("fact_storage_cutover_certificate_missing")
+        raise RuntimeError("fact_storage_cutover_certificate_missing: this release requires dated headers; "
+                           "see docs/engineering/fact-header-layout-v2.md before upgrading")
     return dict(row)
 
 
@@ -120,6 +125,9 @@ def _prepare(conn):
         prefix, canonical = _missing_proof_tables(conn)
         missing = prefix + canonical
         if state["state"] == "copying":
+            # A copy begun by code without transactional directory capture
+            # cannot be resumed by silently constructing an empty directory.
+            assert_fact_series_day_contract(conn)
             _assert_source(conn, SOURCE)
             _ensure_source_page_index(conn)
             _drop_bulk_secondary_indexes(conn)
@@ -170,9 +178,11 @@ def _prepare(conn):
     # index, the copy repeatedly scans the full retained relation as it grows.
     _ensure_source_page_index(conn)
     # Clean definitions only. No ALTER-column/backfill path is installed in runtime.
+    for name in IDENTITY_TABLES:
+        Base.metadata.tables["market." + name].create(conn)
     MarketFactVersionRecord.__table__.create(conn)
     for table in Base.metadata.sorted_tables:
-        if table.schema == "market" and table.name in FACT_STORAGE_TABLES:
+        if table.schema == "market" and table.name in FACT_STORAGE_TABLES and table.name not in IDENTITY_TABLES:
             table.create(conn)
     # Primary keys and every integrity constraint stay live. Rebuildable
     # secondary indexes are created once, after the bulk copy is complete.
@@ -260,6 +270,7 @@ def _copy_page(conn, batch_rows):
         f"SELECT count(*) FROM (SELECT * FROM {SOURCE} WHERE {PAGE_PREDICATE} "
         "ORDER BY market_commit_seq,id LIMIT :limit OFFSET 0) old "
         "LEFT JOIN market.fact_versions header ON header.id=old.id "
+        "AND header.storage_day=(old.accepted_at AT TIME ZONE 'UTC')::date "
         "LEFT JOIN market.fact_hot_payloads hot "
         "ON hot.storage_day=header.storage_day AND hot.id=header.id "
         "WHERE to_jsonb(old) IS DISTINCT FROM ("

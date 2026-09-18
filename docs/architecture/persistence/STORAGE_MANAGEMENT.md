@@ -1,0 +1,580 @@
+---
+component: storage-management
+subsystem: persistence
+layer: service
+doc_type: architecture
+status: active
+tags:
+  - storage
+  - postgres
+  - recovery
+code_paths:
+  - cli/main.py
+  - src/core/storage_targets.py
+  - src/core/storage_header_placement.py
+  - src/core/storage_move_budget.py
+  - portal/backend/service/storage/header_catalog.py
+  - portal/backend/service/storage/header_filesystem.py
+  - portal/backend/service/storage/header_journal.py
+  - portal/backend/service/storage/header_inspection.py
+  - portal/backend/service/storage/header_movement.py
+  - portal/backend/service/storage/header_resources.py
+  - portal/backend/service/storage/header_admission.py
+  - portal/backend/service/storage/header_destinations.py
+  - src/core/storage_inventory.py
+  - portal/backend/db/storage_target_models.py
+  - portal/backend/controller/storage_management.py
+  - portal/backend/service/storage_management.py
+  - portal/frontend/src/adapters/storage.adapter.js
+  - portal/frontend/src/v2/rooms/StorageRoom.jsx
+  - portal/frontend/src/v2/rooms/storage.css
+  - scripts/automation/storage_device_audit.py
+  - scripts/automation/storage_host_prepare.py
+---
+# Storage Management
+
+The Storage settings page enrolls host-prepared drives and reviews role
+assignments. It is being implemented alongside the existing storage layout.
+It does not yet move database records, publish archives across a drive pool,
+schedule backups, or activate policy. Apply returns an explicit conflict while
+that executor is absent. Existing collection and retention settings remain
+authoritative until an explicit tested cutover replaces them.
+
+## From a prepared drive to a reviewed change
+
+The read-only host inventory at QT_STORAGE_INVENTORY_PATH lists at most 32
+targets. Each has target_id, label, filesystem_uuid, root, medium (ssd or hdd),
+and eligible roles (recent, history, archives, backups). Its schema_version is
+qt.storage_inventory.v1. Missing inventory means no prepared drives; malformed
+inventory is an error. The deployment must bind this file read-only and expose
+the target roots and host udev identity metadata at stable container paths.
+
+POST /api/storage/targets accepts only target_id. The service verifies the
+filesystem UUID and writability, then records the identity under the shared
+storage advisory lock. Repeated identical enrollment is harmless. Repointing a
+target ID or registering the same filesystem twice is rejected.
+
+GET /api/storage reports enrollment, observed filesystem capacity, policy
+revision, recent plans and prepared candidates. Filesystem availability alone
+does not prove that movement or backups are working. Their status is explicitly
+unknown or unconfigured until authoritative execution evidence exists.
+
+POST /api/storage/plans validates a complete policy against its base revision.
+The durable request ID prevents retries from creating different plans.
+Assignments and advanced settings appear in the impact preview. The browser
+does not calculate readiness or silently activate a draft. A fresh review is
+required after another policy revision. GET /api/storage/plans/{id} retrieves
+the same server-owned plan.
+
+The allocator subtracts the free-space reserve and in-flight reservations,
+then chooses the eligible filesystem with the most headroom. Its caller must
+serialize allocation and persist a reservation atomically. It never finds old
+objects by applying today's allocation policy. StorageLocation resolves an
+explicit target and safe relative key, checking mount identity and containment.
+
+## Historical header placement preview
+
+`core.storage_header_placement.plan_header_placement` is a pure planning
+boundary for dated header partitions. It accepts a typed catalog snapshot and
+observed filesystem capacity; it does not inspect disks, run SQL, save
+reservations, or connect to the Storage API yet. The snapshot must come from a
+catalog and filesystem adapters that prove parent attachment, daily bounds, complete
+ordinary-index ownership, TOAST colocation, and physical relation-to-target
+bindings. Caller-provided flags are not a substitute for that adapter.
+
+Each proposed group contains its table and every ordinary index. Heap bytes
+include TOAST and its internal indexes; ordinary indexes are counted
+separately. PostgreSQL table tablespace changes do not move ordinary indexes,
+so a future executor must move and verify the complete group transactionally.
+The plan records OIDs, physical file identifiers, target UUIDs, sizes and a
+deterministic evidence hash. Relation names are descriptive labels, not SQL.
+
+The planner handles at most 4,096 daily groups and 32 registered targets;
+a smaller caller budget is rejected before sorting or planning if exceeded.
+Incomplete inventory, unverified source filesystems, or insufficient
+destination capacity blocks the whole proposal. No partial move list or
+additional reservation is returned on a blocked plan. Read-only evidence is
+not admitted for this movement preview; this does not prohibit historical
+reads from a read-only filesystem.
+
+Days strictly before the database UTC day minus `recent_days` are historical.
+Recent groups must already be on the selected recent target; moving active
+groups requires a separate cutover. Historical groups keep an eligible existing
+heap location if the rest of the group fits. Otherwise, allocation selects the
+eligible target with most remaining headroom, with target ID breaking ties.
+Adding an HDD therefore does not redistribute already valid history.
+
+Copy reservations accumulate across the proposed batch, subtract existing
+reservations and the policy reserve, and never credit space expected to be
+freed by another move. They cover only measured files that change target.
+The minimum reservation for an empty moving group is one byte; it is not a
+filesystem-allocation or WAL estimate. WAL, temporary files, concurrent growth,
+recovery copies and operational margin still require separate budgeting.
+
+`planning_complete` means only that this limited preview has no blockers.
+`execution_available` and `activation_ready` remain false, including when
+the proposed policy enables movement. Global identity and raw-mapping growth,
+payload/archive placement, the physical executor, recovery and performance
+acceptance remain explicitly uncovered. Before any future execution, a worker
+must recheck the catalog, policy revision, mount identities and capacity, then
+reserve space under the shared lock. This preview cannot authorize a cutover
+or establish a whole-system storage forecast.
+
+### Catalog adapter
+
+`portal.backend.service.storage.header_catalog.read_header_catalog` now
+implements the read-only PostgreSQL half of the inventory boundary. It has
+disposable-database coverage and is not called by the Storage API.
+It accepts the existing PG_DSN-backed engine, opens a read-only repeatable-read
+transaction, and applies a decreasing statement-time budget. Access-share
+locks protect admitted tables against destructive rewrites while permitting
+ordinary collection. Partition and index counts are bounded before accepting
+a complete result. Concurrent file growth and index maintenance still require
+fresh checks before execution.
+
+The reader checks the registered daily partitions against their attached
+relations, schema, persistence and exact daily bounds. It observes table,
+ordinary-index and TOAST sizes/placement, rejects invalid ordinary indexes,
+and reports whether TOAST and its internal indexes are colocated. PostgreSQL's
+effective database-default tablespace is resolved when a relation stores
+tablespace OID zero.
+
+Its result contains an unbound `HeaderPlacementSnapshot` plus PostgreSQL
+tablespace OIDs, locations and relative file paths. Every relation target ID
+remains null and `filesystem_bindings_verified` remains false. Paths describe
+the database server's namespace, not necessarily the API container's
+filesystem. An empty built-in tablespace location does not mean HDD storage.
+A host-side UUID/device verification and explicit path binding are still
+required before these observations can produce a usable placement plan.
+The reader requires access to the header catalog and PostgreSQL cluster
+identity; it does not load application settings, create a second DSN, bootstrap
+schema, or perform disk operations.
+
+### Filesystem binding
+
+`header_filesystem.verify_header_filesystem` connects the unbound catalog
+snapshot to registered targets through read-only file probes. The future worker
+must share the database server's PID namespace and database storage paths; running it
+against similar-looking paths in the API container is insufficient. Its
+absolute `pg_controldata` executable is trusted worker configuration, not a
+portal setting. The executable runs with a small explicit environment and
+without a shell or inherited database credentials.
+
+The verifier compares the PostgreSQL 15 control-data cluster identifier with
+the SQL inventory. It also checks the observed postmaster start time, PID file
+directory and running process executable. It compares the device and inode of
+`global/pg_control` in the worker's mounted data directory with that file
+accessed through the postmaster's `/proc/PID/root`. The latter uses a
+kernel filesystem lookup, not a userspace resolution of the proc root link.
+This permits different worker/server binary locations without accepting a
+different mounted copy of the database. The configured utility must still be
+PostgreSQL 15. A backup copy's cluster identifier
+alone cannot establish that it is active database storage. The catalog reader
+now includes the server data directory and postmaster start time for this
+purpose.
+
+Each reported ordinary table/index file must match its database OID, physical
+file identifier and expected PostgreSQL default/tablespace path. Tablespace
+directory links are resolved and compared with the server's declared location.
+Individual relation-file symlinks, missing files and paths outside a unique
+registered root are refused. Target roots must pass UUID, device and writable
+filesystem checks. TOAST placement remains the catalog reader's tablespace
+colocation observation, not a separate file-by-file TOAST audit.
+
+Process identity, mount identity and relation-file inode/device evidence are
+checked again before returning bound target IDs and fresh capacity observations.
+The function has a bounded inventory and elapsed-time checks between probes;
+this is not a hard interrupt for a kernel filesystem call that hangs. The
+future worker needs an outer operation timeout as well as retry/recovery
+controls. None of these checks reserve capacity or prevent later file growth,
+so a movement worker must obtain fresh evidence before executing.
+
+Temporary-file tests cover default and linked tablespaces, stale identities,
+wrong UUIDs/devices, malformed paths, missing files and mid-check file/mount
+changes. The PostgreSQL utility is mocked in those tests. A real
+PostgreSQL/worker-namespace fixture in
+`tests/test_market_data/test_header_namespace_db.py` has passed locally and in CI.
+It starts PostgreSQL 15 as a non-root OS user, with TCP disabled and a private
+Unix socket. It probes real control data, process identity and relation files;
+the udev UUID entry is synthetic. It exercises a table-only tablespace change,
+the subsequent index move, transaction rollback after table-only and whole-group
+movement, preserved row hashes, and rejection of copied
+identity, stale start time and a wrong UUID. Cleanup is restricted to its
+generated temporary cluster. This fixture does not qualify physical HDD
+performance or a production migration. Runtime wiring and movement remain
+pending; these helpers do not enable Apply.
+
+## Database records and cutover work
+
+portal_storage_targets, portal_storage_policy, portal_storage_plans, and
+portal_storage_object_locations are clean-schema ORM models under the existing
+Base and PG_DSN. The current bootstrap can create their missing clean tables.
+A deployment cutover still needs explicit schema validation, grants, host
+mounts, and a worker. These models do not alter market.fact_versions, its global
+identity constraints, raw mappings, or existing archive manifest locations.
+
+The next physical design must move historical headers, mappings and indexes as
+well as payloads, bound SSD growth, preserve exact known-at and frozen-dataset
+results, and survive interrupted movement. It must account for global identity
+index costs on HDD rather than describe that cost as a small SSD directory.
+
+[ADR 0069](../decisions/0069-bind-storage-objects-to-registered-targets.md) explains
+why target identity is independent of placement policy. The
+[implementation and benchmark runbook](../../engineering/storage-tiering-validation.md)
+records the remaining proof and cutover gates.
+
+## CLI
+
+The same API is available through qt storage status, qt storage enroll TARGET,
+qt storage review --policy-file FILE --base-revision N --request-id ID,
+qt storage plan ID, and qt storage apply ID --policy-hash HASH. Apply preserves
+the server execution blocker. CLI success from review means a plan was saved,
+not that data moved. The existing CLI audit records these requests.
+
+The clean-schema dated-header foundation is now described in
+[ADR 0070](../decisions/0070-separate-global-fact-identity-from-dated-headers.md).
+It preserves global identity while allowing detail partitions to move later.
+It does not enable Apply or prove physical tiering, and cannot yet be deployed
+over an existing v1 layout.
+
+## Durable header intent and reservations
+
+The internal header journal saves one immutable batch per reviewed storage plan,
+with at most 4,096 daily groups and 64 ordinary indexes per group. Each group
+retains its original OIDs, file identifiers, source target IDs, destination
+target UUID and copy-byte requirement. A batch binds these to the database
+identity, policy revision, proposal hash and observation timestamps. Evidence
+per group is limited to 64 KiB; the journal does not grow a per-file array in
+the plan's UI progress JSON. These limits bound each batch, not lifetime
+journal retention; terminal-ledger retention and its SSD budget must be included
+in whole-system capacity accounting before activation.
+
+Reservation requires an already queued/running plan with movement enabled,
+the current policy revision, and filesystem-adapter observations no more than
+60 seconds old according to database time. The repository recomputes the pure
+proposal from registered targets and current aggregate reservations. Changed
+capacity, placement evidence or reservations require a fresh review. It uses
+the same storage advisory-lock key as policy management, refuses contention
+immediately, and requires READ COMMITTED transactions. The database identity
+must match the observed PostgreSQL cluster and database.
+
+Saving the entire batch and adding its copy reservations happens in the
+caller's transaction. Structured lifecycle logs identify these writes as staged;
+a returned receipt or staged log does not claim that the caller committed. A partial unique index prevents two active intents from
+owning the same database heap. An identical retry returns its durable receipt
+without reserving again, even if the original observation has since expired.
+That receipt is not fresh physical evidence and cannot authorize execution.
+A changed review hash for an existing batch is rejected.
+
+Cancellation releases capacity only when every group remains reserved and
+unstarted. It is atomic, preserves reservations belonging to other work and
+cannot reactivate a cancelled batch on retry. Running, blocked, completed,
+mixed or incomplete groups require reconciliation; a client-side timeout must
+never automatically release their space. There is no completion or running
+transition exposed by this repository yet.
+
+These are canonical clean-schema models, with no runtime backfill or live
+migration. The journal remains internal and unconnected to the public queue
+endpoint. Destination enrollment/worker wiring, locked pre-execution
+checks, physical table/index DDL, crash reconciliation, execution logging and
+full capacity coverage still belong to the future worker. No reservation
+activates policy or moves bytes. Existing installations will require explicit,
+reviewed schema preparation as part of the later operator cutover.
+
+
+## Prepared PostgreSQL destination evidence
+
+The catalog reader can observe at most 32 explicitly requested destination
+tablespace OIDs in the same read-only inventory. It records the current name,
+location and CREATE privilege, plus PostgreSQL's catalog version. Missing,
+duplicate, malformed or global-tablespace requests are refused. This reads
+already prepared tablespaces; it never creates directories or tablespaces.
+
+The filesystem verifier optionally accepts a target-to-tablespace assignment.
+Its requested OIDs must exactly match those catalog observations. It verifies
+the existing PG15 catalog-version directory for a custom tablespace, or the
+database directory under pg_default. An empty custom tablespace is admissible
+before PostgreSQL has created a per-database subdirectory. No probe file or
+database directory is created. The destination must belong to the exact
+registered UUID/device/root, permit the history role, and have CREATE privilege.
+The directory must belong to the postmaster's OS user, allow that owner full
+access, prohibit group/other writes, and be on a writable mount in the server's
+own filesystem view. Identity and permissions are rechecked before returning.
+
+Sharing pg_control does not by itself prove that other mounted files are shared.
+Source relations and destinations are now checked through file descriptors
+opened from /proc/PID/root. Every later path component uses O_NOFOLLOW; an
+absolute symlink cannot escape into the worker's root and falsely prove a match.
+Custom tablespace links are read from both process views. Verification follows
+the server's catalog path, not an unrelated path obtained by resolving a
+worker-only alias. Device/inode equality
+must hold for the actual source files and destination directories, and
+server-side mount flags are read from the destination descriptor. This requires
+Linux O_PATH support, visibility of the postmaster's PID namespace, and suitable
+permissions; a permission or namespace mismatch is a refusal.
+
+Returned destination evidence includes database identity, the observed configured target root, target UUID/device,
+tablespace OID/name/location, worker and server directory paths, the verified
+directory inode and catalog version.
+It remains an observation until the internal registration and reservation
+boundaries below accept it. The future worker must repeat the checks while
+holding execution locks before moving any table or index. Neither these
+observations nor an existing reservation enables Apply.
+
+
+## Registered destinations and bound movement reviews
+
+The internal registration boundary saves one prepared tablespace per database
+identity and target under the shared storage-management lock. It accepts only
+fresh verified observations for the current database and enrolled active history
+targets. The configured root recorded by the verifier must match current
+enrollment, preventing reuse of an observation from an old target root. Existing registrations are immutable: changing the OID, name, location,
+directory paths, catalog version, target root or filesystem UUID is refused.
+A tablespace cannot belong to two targets in the same database. Registration is
+idempotent and transactional; it creates no PostgreSQL tablespace or directory
+and is not yet connected to a public API or operator command.
+
+Stable registration excludes the current device number and directory inode.
+A remount or physical restore can change those observations without changing
+the registered identity. This is not automatic restore approval: the filesystem
+verifier must supply fresh matching evidence, every move review binds the
+current observations, and running/uncertain work still requires reconciliation.
+Changed database identity or stable destination details require an explicit,
+reviewed recovery/cutover; they are never silently repointed.
+
+The destination-bound review wraps the pure placement plan with the exact
+verified destinations used by its moves. Its hash includes both the placement
+evidence and destination OID/name/location, target UUID, current device and
+directory inode. Missing destination proof blocks the entire move batch and
+clears all additional copy reservations. The pure placement hash alone is no
+longer an admissible journal review.
+
+Before reserving, the journal recomputes this review and checks each destination
+against immutable registration. Each durable move stores its destination
+evidence and has a foreign key to its registration. A new hash does not
+override a changed registration. Registration/review only record intent and
+capacity ownership; the physical executor, runtime wiring, crash recovery and
+policy activation remain absent. These canonical model additions require the
+later explicit deployment cutover, with no runtime backfill of old intentions.
+
+
+## Locked single-group observations
+
+The internal read_locked_header_group boundary observes one registered daily
+heap and its complete ordinary-index group on the caller's existing READ COMMITTED
+connection. It takes an ACCESS EXCLUSIVE lock on that exact date-derived child,
+checks the expected heap OID and attachment/bounds, and holds a key-share lock
+on its registry row. It never opens a second connection or commits the caller's
+transaction. Unrelated children are neither inventoried nor locked by this
+boundary. The caller must roll back on any error.
+
+It shares catalog validation and file/TOAST accounting with the complete reader.
+The operation uses a declining statement budget, honors a shorter caller
+statement timeout, and restores that setting after success. A subsequent call
+on the same transaction sees the caller's table/index DDL. This avoids checking
+a moved group on a second connection that would block on the worker's own lock.
+
+Its inventory explicitly identifies the selected storage day and remains
+inventory_complete=false. The filesystem adapter can verify that one group's
+files and prepared destinations while retaining this partial status. Global
+placement/review refuses partial inventories and cannot create reservations
+from them. A partial observation is not a capacity reservation or proof of
+policy eligibility, storage-management ownership, successful commit or recovery.
+
+This observer alone does not acquire policy/intent ownership, authorize DDL,
+change rows or enable Apply. The inspection and atomic movement boundaries below
+compose those responsibilities. Runtime execution still requires whole-system
+copy/WAL/temp/growth admission and supervision.
+
+
+## Inspecting a reserved move
+
+inspect_reserved_header_move retains the storage-management advisory lock and
+uses the same caller transaction for a fresh locked-group catalog observation
+and filesystem verification. It accepts a move ID and its saved review hash;
+it does not accept a caller-provided physical certificate. The plan must remain
+queued/running at the admitted policy revision, the batch must be complete and
+uncancelled, and the selected move must still be reserved. Running, blocked and
+terminal moves are refused by inspection. The atomic primitive below separately
+reconciles completed moves against their durable physical evidence.
+
+The inspection compares database identity, historical eligibility, immutable
+tablespace registration and the exact destination evidence saved in the review,
+including device/inode observations. The source heap and ordinary-index membership
+must retain their original OIDs, file identifiers, schema/names and target IDs.
+Current bytes may shrink or grow within the original reservation; an overgrown
+copy requires a new reviewed reservation. Malformed or internally inconsistent
+stored intent is refused.
+
+The returned moving-members list excludes relations already on the selected
+target, preserving their existing tablespaces and avoiding unreserved extra
+copies. Capacity must still cover the current copy, other aggregate claims and
+the policy reserve, subtracting this move's own reservation exactly once. Known
+active claims within its bounded batch cannot exceed aggregate reservations.
+This does not certify lifetime ledger accounting across every batch.
+
+Inspection changes no journal state, capacity reservation or physical location.
+A competing cancellation receives the same busy-owner response until the
+transaction ends. Logs identify inspection and its copy-only capacity scope.
+The result explicitly reports execution unavailable: WAL, temporary files,
+ingest growth, physical execution/reconciliation and recovery/performance
+qualification remain uncovered. Apply stays disabled.
+
+
+## Internal atomic movement primitive
+
+stage_header_move is an internal primitive for disposable qualification and a
+future budgeted worker; no API, CLI or scheduler calls it. It uses the caller's
+READ COMMITTED transaction and wraps its own operations in a savepoint. This
+rolls back native DDL and journal changes on Python failures as well as SQL
+errors, while preserving work the caller performed before the savepoint.
+The outer caller remains responsible for commit/rollback.
+
+After reserved-move inspection, it moves only the listed heap and ordinary
+indexes to the verified tablespace, with dialect-quoted catalog identifiers and
+a declining statement timeout. The heap carries its TOAST data. Post-copy
+catalog/filesystem verification uses the same connection and retained locks.
+Logical membership and names must remain unchanged, copied members must be in
+the intended tablespace, and retained members must keep their exact physical
+identity. Byte growth alone is not part of completion identity.
+
+Completion evidence and the completed state, together with release of this
+move's reservation, are staged in the same transaction as the DDL. The bounded
+64 KiB evidence records database/day/heap identity and each member's OID, file
+identifier, target UUID, device, inode, tablespace and server-path hash.
+State/evidence constraints reject completed records without a bounded v1 proof
+and reject proofs attached to other states. This is a canonical model addition;
+existing installations containing older draft tables require an explicit
+reviewed schema cutover, never an implicit startup alteration.
+
+A retry of a completed move re-observes registered files under ownership and
+group locks, compares the saved completion identity, and performs no DDL or
+second release. Changed files, a changed destination, or incomplete proof
+requires reconciliation. If a prior backend is still running, ownership is busy;
+a client timeout is not evidence that its transaction rolled back.
+Lifecycle logs and returned receipts remain provisional until caller commit.
+
+This does not make automatic execution ready. Verified WAL/temp/ingest-growth
+headroom, outer worker supervision, full current/frozen query qualification,
+historical read latency during actual copies, and data-preserving deployment
+migration remain required before runtime wiring or Apply activation.
+
+### PostgreSQL process identity during movement
+
+The PostgreSQL 15 catalog observer reads the first 4096 bytes of the fixed
+`postmaster.pid` file through `pg_read_file`. Its first three lines (PID, data
+directory, process start time) must exactly match the local file before physical
+placement can be verified. The observer therefore requires permission to read
+that server file; missing permission fails closed. This internal worker
+requirement does not grant file access to the portal or to a UI-selected path.
+
+PostgreSQL records `MyStartTime` in that file and samples `PgStartTime` later;
+`pg_postmaster_start_time()` is not required to equal the file timestamp.
+The SQL timestamp must fall between the process start and the observation.
+Cluster ID, process executable, shared control-file identity, filesystem UUIDs,
+and relation/destination identity checks still apply and are repeated at the
+end of verification. See PostgreSQL 15
+[process startup](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/postmaster/postmaster.c)
+and [PID-file creation](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/utils/init/miscinit.c).
+
+
+## Movement resource envelope
+
+The pure assess_header_move_resources boundary evaluates declared headroom for
+a single historical move across every supplied registered filesystem. It
+requires fresh, timezone-aware capacity observations (at most thirty seconds
+old), complete per-target copy claims, temporary and maintenance allowances,
+and non-WAL/non-temporary growth rates. The move timeout is bounded to one hour;
+an explicit one-to-sixty-second cancellation grace also counts toward growth.
+Elapsed observation age is rounded up and added to that growth window, so space
+consumed since the free-space reading is not assumed available.
+WAL allowance is explicit and includes all expected additional retained WAL
+from observation through that window; max_wal_size alone does not establish it.
+
+Each filesystem is counted once by target UUID and current device identity.
+Roles sharing a drive add their copy, WAL, temporary, maintenance and growth
+requirements before comparison with available bytes and the policy reserve.
+The selected move's own copy claim is removed from the aggregate exactly once
+and replaced with its current copy requirement; competing claims remain.
+Copies exceeding their reservation refuse assessment. Already occupied space
+is reflected in free capacity, and no future source deletion is credited.
+
+Incomplete maps, unknown targets, stale/future capacity, invalid or duplicate
+filesystem identity and numeric overflow refuse assessment. Read-only storage
+and insufficient headroom produce explicit blockers. Zero allowances must be
+specified rather than inferred from missing values.
+
+A sufficient result is conditional on the declared limits. This calculation
+does not inspect WAL/temp paths, prove or enforce the limits, reserve auxiliary
+capacity, supervise a worker or enable Apply. Those runtime responsibilities
+remain required before composing it with the atomic movement primitive. No new
+portal controls are introduced by this internal calculation.
+
+
+## PostgreSQL resource-path observations
+
+observe_header_resources observes PGDATA, WAL and the caller session's new
+temporary-file and temporary-relation locations on its active READ COMMITTED
+connection. It shares binary/process/cluster identity checks with header-file
+verification, honors a tighter caller statement timeout, restores that setting
+on success and requires caller rollback on failure. It creates no files,
+tablespaces, directories or additional database connections.
+
+The observed database default tablespace is always included as a temporary-file
+fallback. Quoted temporary tablespace identifiers (including embedded quotes and
+commas) are split within a bounded list and normalized by PostgreSQL parse_ident.
+Missing or inaccessible named spaces refuse observation rather than silently
+assuming a fallback. This is conservative relative to PostgreSQL's own fallback
+behavior. Catalog, process identity, directories and filesystem bindings are
+rechecked before returning evidence.
+
+Every resource directory must be writable by the database OS owner and belong
+to one registered filesystem UUID/device. Directory identity must match through
+the postmaster's process root. A relocated pg_wal link must agree in worker and
+server namespaces; its target is verified against registration. Tablespace
+links must likewise agree with catalog locations. Unexpected directory links,
+unregistered paths and namespace disagreement refuse observation.
+
+For a not-yet-created pgsql_tmp or per-database temporary-relation directory,
+the observer proves the existing immediate parent and absence in both
+namespaces. It records that distinction and never creates a placeholder.
+Existing children are checked directly, including ownership and writability.
+
+This evidence covers the caller's allocation settings, not every producer's
+existing temporary objects or allocations on other sessions. It does not
+qualify peak rates, enforce resource limits, reserve capacity or enable Apply.
+The reserved-move resource inspection now repeats these observations under
+movement ownership and composes them with the resource-envelope calculation.
+Accounting for other producers remains required before execution.
+
+The PostgreSQL 15 behavior is defined by
+[temporary tablespace selection](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/commands/tablespace.c)
+and [temporary file paths and fallback](https://github.com/postgres/postgres/blob/REL_15_STABLE/src/backend/storage/file/fd.c).
+
+
+## Reserved-move resource inspection
+
+The inspect_reserved_header_move_resources boundary combines the saved move,
+current physical group, PostgreSQL resource paths and declared headroom on one
+caller transaction and connection. It retains storage ownership and the selected
+daily table lock, derives the WAL and temporary targets from verified bindings,
+and requires both observations to identify the same enrolled filesystems.
+Database identity, backend PID, observation ordering, freshness, policy revision
+and saved review must still agree. Caller maps are copied before probes begin.
+
+The budget uses fresh available capacity and current aggregate copy reservations.
+The selected copy replaces its own claim once; it does not reserve new capacity,
+move files, update the journal, commit or activate policy. Shortages report the
+affected drive, including a source drive whose growth or WAL would exhaust it.
+
+Inspection phases share a declining deadline, clamped to a tighter caller
+statement timeout. A late result is refused, and the original timeout is restored
+on success. Caller rollback remains required on failure. This bounds SQL and
+rejects stale completion; cancellation of a stalled filesystem call still needs
+worker supervision.
+
+Even a sufficient result has execution disabled. Declared limits are estimates,
+not enforced ceilings. Other producers and existing temporary objects, durable
+auxiliary reservations, resource-limit qualification and worker supervision
+remain uncovered. This internal preview adds no portal control or execution
+entrypoint.

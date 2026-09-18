@@ -914,3 +914,24 @@ def test_bootstrap_rejects_async_index_predicate_semantic_drift(
         match="mismatched index definitions.*inflight_request",
     ):
         database._bootstrap_schema_contract()
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_book_status_partitioned_index_still_requires_validity(monkeypatch, valid):
+    index_name = "ix_market_fact_series_commit"
+    inspector = _Inspector(
+        schemas={"public", "market"},
+        tables=_CLEAN_BOOTSTRAP_TABLES,
+        book_operational_index_overrides={
+            index_name: {
+                "indisvalid": valid,
+                "definition": "CREATE INDEX ix_market_fact_series_commit ON ONLY market.fact_versions USING btree (series_id, market_commit_seq)",
+            }
+        },
+    )
+    database, connection = _database_with_fake_engine(monkeypatch, inspector)
+    if valid:
+        database._assert_book_operational_status_indexes(connection)
+    else:
+        with pytest.raises(RuntimeError, match="bounded status indexes"):
+            database._assert_book_operational_status_indexes(connection)

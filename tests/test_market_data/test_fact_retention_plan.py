@@ -19,7 +19,7 @@ def _row(*, age=31, state="open", fact_types=None, **overrides):
 
 def _inventory(rows):
     return {"database_day": TODAY, "database_bytes": 65536, "canonical_header_bytes": 8192,
-            "raw_mapping_bytes": 16384, "hot_payload_bytes": sum(row["hot_payload_bytes"] for row in rows),
+            "global_identity_bytes": 4096, "series_day_directory_bytes": 4096, "raw_mapping_bytes": 16384, "hot_payload_bytes": sum(row["hot_payload_bytes"] for row in rows),
             "hot_partition_count": len(rows), "partitions": rows, "next_after_storage_day": None}
 
 

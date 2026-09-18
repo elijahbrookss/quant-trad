@@ -178,15 +178,63 @@ class MarketFactSchemaRecord(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class MarketFactIdentityRecord(Base):
+    """Global immutable identity; detailed headers can occupy dated partitions."""
+
+    __tablename__ = "fact_identities"
+    __table_args__ = (
+        UniqueConstraint("id", "storage_day", name="uq_market_fact_identity_day"),
+        UniqueConstraint("series_id", "observation_key", "revision",
+                         name="uq_market_fact_identity_revision"),
+        CheckConstraint("revision > 0", name="ck_market_fact_identity_revision"),
+        CheckConstraint("observation_key <> ''", name="ck_market_fact_identity_key"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+    id = Column(String(64), primary_key=True)
+    storage_day = Column(Date, nullable=False)
+    series_id = Column(BigInteger, nullable=False)
+    observation_key = Column(String(512), nullable=False)
+    revision = Column(Integer, nullable=False)
+
+
+class MarketFactHeaderPartitionRecord(Base):
+    """Expected header partitions; a missing relation must not be recreated empty."""
+
+    __tablename__ = "fact_header_partitions"
+    __table_args__ = ({"schema": MARKET_DATA_SCHEMA},)
+    storage_day = Column(Date, primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        server_default=text("clock_timestamp()"))
+
+
+class MarketFactHeaderSeriesDayRecord(Base):
+    """Conservative observation bounds for each series and physical header day."""
+
+    __tablename__ = "fact_header_series_days"
+    __table_args__ = (
+        CheckConstraint("min_observation_time <= max_observation_time",
+                        name="ck_market_fact_series_day_bounds"),
+        {"schema": MARKET_DATA_SCHEMA},
+    )
+    series_id = Column(BigInteger, primary_key=True)
+    storage_day = Column(Date, primary_key=True)
+    min_observation_time = Column(DateTime(timezone=True), nullable=False)
+    max_observation_time = Column(DateTime(timezone=True), nullable=False)
+
+
 class MarketFactVersionRecord(Base):
-    """Immutable canonical revision index; bulky JSON evidence lives by storage tier."""
+    """Immutable dated headers; fact_identities owns global uniqueness."""
 
     __tablename__ = "fact_versions"
     __table_args__ = (
+        ForeignKeyConstraint(("id", "storage_day"),
+            ("market.fact_identities.id", "market.fact_identities.storage_day"),
+            name="fk_market_fact_identity_day", ondelete="RESTRICT"),
         UniqueConstraint(
             "series_id",
             "observation_key",
             "revision",
+            "storage_day",
             name="uq_market_fact_observation_revision",
         ),
         ForeignKeyConstraint(
@@ -248,12 +296,12 @@ class MarketFactVersionRecord(Base):
             "row_hash ~ '^[0-9a-f]{64}$'",
             name="ck_market_fact_row_hash",
         ),
-        {"schema": MARKET_DATA_SCHEMA},
+        {"schema": MARKET_DATA_SCHEMA, "postgresql_partition_by": "RANGE (storage_day)"},
     )
 
     id = Column(String(64), primary_key=True)
     storage_day = Column(
-        Date, nullable=False,
+        Date, primary_key=True,
         server_default=text("(clock_timestamp() AT TIME ZONE 'UTC')::date"),
     )
     series_id = Column(

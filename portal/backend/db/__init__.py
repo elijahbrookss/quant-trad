@@ -52,6 +52,9 @@ from .market_data_models import (
     MarketFactAcquisitionCoverageRecord,
     MarketFactSchemaRecord,
     MarketFactVersionRecord,
+    MarketFactIdentityRecord,
+    MarketFactHeaderPartitionRecord,
+    MarketFactHeaderSeriesDayRecord,
     MarketProviderRateBudgetRecord,
     MarketDatasetArchiveRefRecord,
     MarketArchiveRetentionPinVersionRecord,
@@ -81,6 +84,10 @@ from .market_storage_models import (
     MarketFactArchiveVerificationRecord,
     MarketFactBookPrefixChunkRecord,
     MarketFactBookPrefixDependencyRecord,
+)
+from .storage_target_models import (
+    StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord, StorageObjectLocationRecord,
+    StorageHeaderBatchRecord, StorageHeaderMoveRecord, StorageHeaderTablespaceRecord,
 )
 from .session import Database, db
 
@@ -132,6 +139,9 @@ __all__ = [
     "MarketFactAcquisitionCoverageRecord",
     "MarketFactSchemaRecord",
     "MarketFactVersionRecord",
+    "MarketFactIdentityRecord",
+    "MarketFactHeaderPartitionRecord",
+    "MarketFactHeaderSeriesDayRecord",
     "MarketFactHotPayloadRecord",
     "MarketFactStorageStateRecord",
     "MarketFactRetentionPartitionRecord",
