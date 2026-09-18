@@ -26,6 +26,10 @@ pytestmark=[
 
 @pytest.fixture
 def placed(source,tmp_path,monkeypatch):
+    return _configure_placement(source,tmp_path,monkeypatch)
+
+
+def _configure_placement(source,tmp_path,monkeypatch):
     assert os.getenv("QT_DB_TEST_ISOLATED")=="1" and os.getuid()==70
     recent,history=Path("/qt-source/pgdata"),Path("/qt-history")
     assert recent.stat().st_dev!=history.stat().st_dev

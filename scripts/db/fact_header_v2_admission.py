@@ -138,7 +138,7 @@ def _constraints(conn, relation):
     """,{"relation":relation})
 
 
-def _secondary_indexes(conn, relation):
+def _secondary_indexes(conn, relation, *, include_constraints=False):
     return _rows(conn,"""
         SELECT c.relname,i.indisvalid,i.indisready,i.indisunique,i.indnkeyatts,i.indnatts,
                i.indoption::text,i.indclass::text,i.indcollation::text,am.amname,
@@ -148,9 +148,9 @@ def _secondary_indexes(conn, relation):
                      FROM generate_series(1,i.indnkeyatts) p ORDER BY p) AS keys
         FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid JOIN pg_am am ON am.oid=c.relam
         WHERE i.indrelid=to_regclass(:relation)
-          AND NOT EXISTS(SELECT 1 FROM pg_constraint con WHERE con.conindid=i.indexrelid)
+          AND (:include_constraints OR NOT EXISTS(SELECT 1 FROM pg_constraint con WHERE con.conindid=i.indexrelid))
         ORDER BY c.relname LIMIT 8193
-    """,{"relation":relation})
+    """,{"relation":relation,"include_constraints":include_constraints})
 
 
 def _assert_guard_functions(conn, owner):

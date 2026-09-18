@@ -68,7 +68,7 @@ def restore_tiered_v1_fixture(storage):
         conn.exec_driver_sql("DROP TABLE preserved_headers")
 
 
-def stage_shadow_handoff_fixture(conn, storage, *, prevalidated=False):
+def stage_shadow_handoff_fixture(conn, storage, *, prevalidated=False, raw_mapping=False):
     """Rehearse the fixed dependency switch; never an operator entry point.
 
     Only tiny owned fixtures qualify. Production source admission, lock/capacity
@@ -91,6 +91,24 @@ def stage_shadow_handoff_fixture(conn, storage, *, prevalidated=False):
         raise RuntimeError("shadow_handoff_fixture_references_incomplete")
     if not state["baseline_complete"] or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})")):
         raise RuntimeError("shadow_handoff_fixture_copy_incomplete")
+    if raw_mapping:
+        from scripts.db import raw_mapping_v2_copy as raw
+        conn.exec_driver_sql(f"LOCK TABLE {raw.SOURCE} IN ACCESS EXCLUSIVE MODE NOWAIT")
+        raw_state=raw._inspect(conn)
+        if (not raw_state["baseline_complete"]
+                or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {raw.QUEUE})"))):
+            raise RuntimeError("shadow_handoff_fixture_raw_mapping_copy_incomplete")
+        raw_count=conn.scalar(text(f"SELECT count(*) FROM {raw.SOURCE}"))
+        if raw_count>1024 or raw_count!=conn.scalar(text(f"SELECT count(*) FROM {raw.TARGET}")):
+            raise RuntimeError("shadow_handoff_fixture_requires_tiny_raw_mapping_copy")
+        columns=",".join(raw.COLUMNS)
+        if conn.scalar(text(f"""
+            SELECT EXISTS(
+                (SELECT {columns} FROM {raw.SOURCE} EXCEPT ALL SELECT {columns} FROM {raw.TARGET})
+                UNION ALL
+                (SELECT {columns} FROM {raw.TARGET} EXCEPT ALL SELECT {columns} FROM {raw.SOURCE}))
+        """)):
+            raise RuntimeError("shadow_handoff_fixture_raw_mapping_content_mismatch")
     count = conn.scalar(text("SELECT count(*) FROM market.fact_versions"))
     target_count = conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions"))
     if count > 1024 or target_count != count:
@@ -150,6 +168,20 @@ def stage_shadow_handoff_fixture(conn, storage, *, prevalidated=False):
         else:
             definition=row["definition"].replace("market.fact_versions","market.fact_identities")
             conn.exec_driver_sql(f'ALTER TABLE {row["relation"]} ADD CONSTRAINT {name} {definition}')
+    if raw_mapping:
+        conn.exec_driver_sql(f"ALTER TABLE {raw.SOURCE} SET SCHEMA {retained}")
+        conn.exec_driver_sql(f"""
+            CREATE TRIGGER trg_fixture_retained_raw_source_closed
+            BEFORE INSERT ON {retained}.{raw.NAME}
+            FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()
+        """)
+        conn.exec_driver_sql(f"ALTER TABLE {retained}.{raw.NAME} ENABLE ALWAYS TRIGGER trg_fixture_retained_raw_source_closed")
+        conn.exec_driver_sql(f"ALTER TABLE {raw.TARGET} SET SCHEMA market")
+        conn.exec_driver_sql(f"""
+            CREATE TRIGGER trg_reject_mutation_raw_archive_record_mappings
+            BEFORE UPDATE OR DELETE ON {raw.SOURCE}
+            FOR EACH ROW EXECUTE FUNCTION market.reject_immutable_mutation()
+        """)
     storage.database._ensure_canonical_fact_insert_trigger(conn)
     install_fact_storage_functions(conn)
     for name in ("fact_versions","fact_identities","fact_header_partitions"):

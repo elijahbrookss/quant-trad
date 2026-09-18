@@ -19,6 +19,7 @@ code_paths:
   - scripts/db/fact_header_v2_admission.py
   - scripts/db/fact_header_v2_references.py
   - scripts/db/fact_header_v2_placement.py
+  - scripts/db/raw_mapping_v2_copy.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -146,3 +147,26 @@ cutoff and pg_default afterward. The current database, small routing catalogs an
 temporary capture state remain on the verified recent filesystem. Copy progress
 records the binding and refuses a changed destination rather than relocating
 already copied data. This is not a general placement API or runtime policy.
+
+
+The same fixed migration now has a bounded copy for the installed immutable
+raw archive record lookup. This table is a measured source of SSD growth; it
+cannot be left behind when the historical headers move. Its replacement and
+all indexes are created directly on the already bound history HDD. The source,
+small cursor and transactional composite-key queue remain on the recent SSD
+during the copy.
+
+Preparation admits the known model, original immutable guard, permissions,
+indexes and foreign-key enforcement, and refuses unexpected dependents or
+replication arrangements. Each page rechecks bound schema, trigger/function
+definitions and physical placement. Every field is compared before its exact
+(raw_record_id, manifest_id) queue key is retired. Cursor, copied rows and queue
+retirement commit together. Source writes capture keys without waiting for an
+HDD mirror. Changes and truncation of the original immutable table are refused.
+
+This adds no generic table mover or runtime writer. It requires the prepared
+header migration and does not switch the authoritative raw lookup, delete its
+source or emit readiness. The production operator must still qualify final
+verification, dependency handoff, capacity, throughput and the full one-day
+migration budget. The optional raw lookup switch in the tiny disposable fixture
+is test evidence only, never an operator entrypoint.

@@ -75,8 +75,8 @@ def _source_columns(conn):
         raise RuntimeError("fact_header_copy_bounded_source_index_required")
 
 
-def _shape(conn, name):
-    relation = SCHEMA+"."+name
+def _shape(conn, name, *, schema=SCHEMA):
+    relation = schema+"."+name
     oid, kind, persistence, partkey = conn.execute(text("""
         SELECT oid::bigint,relkind,relpersistence,pg_get_partkeydef(oid)
         FROM pg_class WHERE oid=to_regclass(:name)

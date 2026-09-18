@@ -658,3 +658,34 @@ This is local capability and validation. Production composition still must suppl
 the verified PostgreSQL namespace, trusted utilities and measured growth/copy
 budgets. The current production collector entrypoint does not supply that runner.
 No policy activation, live backup, server change, merge or deployment occurred.
+
+
+### Preserving the raw archive lookup on HDD
+
+The fixed raw-record lookup copy now uses the header migration's existing
+SSD/HDD binding. The disposable rehearsal killed a database backend during
+copying, verified that source rows and the committed cursor stayed intact, and
+resumed successfully. Real archive publication continued during copying and
+after the baseline scan; captured keys brought the private target up to date.
+Frozen manifests and original archive bytes stayed unchanged.
+
+The refusal rehearsal preserved progress when it encountered an unexpected
+source index or dependent view, disabled capture, damaged target content,
+a misplaced lookup index or a changed filesystem identity. Preparation failure
+left neither an unregistered target nor a capture queue behind.
+
+A populated cold-book rehearsal switched headers and the copied raw lookup
+together in the tiny guarded fixture. Rolling that switch back restored the old
+authoritative layout. After the successful fixture switch, normal startup,
+recent/history reads, frozen research and book replay agreed with their original
+results. Actual relation files, indexes and TOAST belonged to the history
+filesystem. Newly published raw records used the new table while retained
+original rows stayed unchanged.
+
+This is preservation and placement evidence on disposable filesystems, not
+production HDD throughput or a migration-time estimate. The production operator,
+remaining shared metadata placement, complete capacity budget, full-layout
+performance and the complete migration within 24 hours remain release blockers.
+The shared raw lookup accepts new entries on HDD too; its ingestion cost belongs
+in the full-workload measurement. No server data, policy, merge or deployment
+was changed.
