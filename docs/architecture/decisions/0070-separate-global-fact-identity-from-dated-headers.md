@@ -340,7 +340,8 @@ reported committed outcome.
 This remains a database boundary, not a complete deployment operator: the
 caller must drain publishers and hold them stopped, activate the matching
 runtime/root, and coordinate recovery for subsequent writes. No service,
-configuration, device, collection state or storage policy is changed here.
+configuration, device, collection state or storage policy is changed by
+`commit_handoff` itself.
 A committed database result explicitly does not authorize collection resumption.
 Full-volume scan/commit duration and hardware workload qualification remain open.
 
@@ -351,3 +352,41 @@ the step budget. Migration contexts now share one connection-local listener and
 apply the earliest active deadline. Nested rollback removes only its deadline;
 the outermost exit removes the listener and its metadata, including disconnect
 paths. This preserves cumulative/attempt/caller limits without query amplification.
+
+
+## Initial policy after preserving handoff
+
+The fixed internal `activate_handoff_policy` step fills the initial policy gap
+without bypassing the ordinary settings boundary. It requires the committed
+handoff certificate and unchanged SSD/HDD roots, uses the same original one-day
+attempt clock and storage ownership fence, and supervises resource/deadline
+limits through commit. History movement and local recovery must both be enabled
+in the reviewed policy. Recent work stays assigned to the SSD; history, archives
+and local copies all select the same existing HDD. The copied history cutoff
+cannot extend into the policy's recent window, and freshly verified recent
+header/index files must actually reside on the SSD.
+
+The step enrolls only the two exact targets from the verified copy binding,
+observes the current header catalog through its established read-only boundary,
+verifies physical files/prepared HDD destination, and uses the existing
+prepared-tablespace registration function. Those registry rows, the first
+revisioned policy and its completed plan commit together. Unknown targets,
+changed identities, outstanding claims, active competing plans and an already
+applied unrelated policy refuse activation. No directories, tablespaces, generic
+placement mechanisms or new storage-state tables are introduced.
+
+The plan identity derives from the existing handoff receipt. Read-only outcome
+inspection shares the migration/storage ownership fences: in-flight remains
+pending, a committed initial policy is distinguished from a later settings
+revision, and inspection still works after attempt expiry. An admitted retry
+of the same current activation does not increment the revision. It cannot
+overwrite later policy changes. The initial policy and existing prepared-target
+records remain the authorities used by automatic history/recovery workers and
+minimal Storage settings.
+
+The caller must keep publishers stopped throughout this step. Its result never
+authorizes service restart: deployment still must align the SSD working path,
+HDD archive path, execution settings, operating-limit file and matching runtime.
+An activated policy alone does not prove those runtime gates are enabled, a
+backup has run, application spool drain, or acceptable physical-HDD performance.
+This remains internal until the complete cutover/recovery procedure is composed.

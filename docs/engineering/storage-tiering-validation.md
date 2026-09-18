@@ -901,3 +901,29 @@ shares one active-deadline listener per connection. Native regressions exercise
 deep nesting without amplified SQL, an expired child with a surviving parent,
 shorter caller limits, the durable attempt clock, and disconnect cleanup.
 The failed iteration is not counted as a successful commit rehearsal.
+
+
+### Initial preserving-policy activation
+
+Extend the native preserving archive/database rehearsal with the first policy
+and prepared-tablespace registration. It must refuse activation before database
+commit and reject a policy that disables automatic history/local recovery or
+differs from the handoff. Move a recent header heap onto the owned HDD and
+require activation to refuse its actual placement, then restore that heap to
+the SSD. Kill the actual PostgreSQL backend after inserting the
+initial policy: target registration, tablespace registration, policy and plan
+must all roll back while the already committed database handoff remains intact.
+
+On retry, observe an in-flight activation as pending, then lose the actual outer
+commit reply and reconcile the completed policy. Repeating that activation must
+not increment its revision; read-only inspection must distinguish a later policy
+revision and remain available after the original migration clock expires. The
+real automatic-history runner must consume the operator-installed policy and HDD
+registration without fixture-seeded settings. Existing recent/history/frozen and
+book reads then run with the original archive root unavailable.
+
+This qualifies the internal database/policy boundary only. Publisher/spool drain,
+active runtime/root/execution configuration, actual server permissions, complete
+restore integration and physical-HDD/one-day migration measurements remain
+separate release blockers. No public cutover or automatic service restart is
+implied by saving the policy.

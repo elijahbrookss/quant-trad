@@ -70,6 +70,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     _placement(monkeypatch, storage.open_day)
     restore_tiered_v1_fixture(storage)
     _configure_placement(storage, tmp_path, monkeypatch)
+    storage.copy_plan = replace(storage.copy_plan, history_before=storage.today-timedelta(days=30))
     engine = storage.database._engine
     with engine.begin() as conn:
         headers.prepare_copy(conn, placement=storage.copy_plan)
@@ -84,6 +85,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     monkeypatch.setenv("QT_MARKET_DATA_EXPECTED_UUID", storage.copy_plan.history.filesystem_uuid)
     options = dict(source_root=source_objects, destination_root=objects,
                    max_page_bytes=32*1024**2, **_options(storage))
+    options["policy"] = replace(options["policy"], movement_enabled=True, backup_enabled=True)
     family = "raw_archive_manifests"
 
     with pytest.raises(RuntimeError, match="root_wrong_filesystem"):
@@ -235,9 +237,13 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         headers.enable_identity_capture(conn)
     _stage_all(engine)
     for relation in references.RELATIONS:
-        references.move_reference_catalog(engine, relation=relation, **_options(storage))
+        references.move_reference_catalog(engine, relation=relation,
+            policy=options["policy"], resource_limits=options["resource_limits"])
     inspect_options = dict(policy=options["policy"], source_root=source_objects,
                            destination_root=objects)
+    activation_options = {**inspect_options, "resource_limits": options["resource_limits"]}
+    with pytest.raises(RuntimeError, match="policy_database_handoff_required"):
+        handoff.activate_handoff_policy(engine, **activation_options)
     with engine.connect() as conn:
         original_oids = [handoff._oid(conn, relation) for relation in (headers.SOURCE, raw.SOURCE)]
 
@@ -302,6 +308,108 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         receipt = committed["receipt"]
         assert receipt["verified_archive_objects"] > baseline_inventory["verified_catalog_objects"]
         assert receipt["archive_inventory_sha256"] != baseline_inventory["inventory_sha256"]
+    # First policy is a separate, supervised atomic transaction after the
+    # database commit. Services remain paused; no host/runtime resume is implied.
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
+        assert not handoff.inspect_handoff_policy(conn, **inspect_options)["policy_activated"]
+    with pytest.raises(ValueError, match="automatic_history_and_recovery_required"):
+        handoff.activate_handoff_policy(engine, **(activation_options | {
+            "policy": replace(options["policy"], backup_enabled=False)}))
+    with pytest.raises(RuntimeError, match="receipt_mismatch"):
+        handoff.activate_handoff_policy(engine, **(activation_options | {
+            "policy": replace(options["policy"], recent_days=31)}))
+
+    # The intended cutoff alone is insufficient if actual placement drifted.
+    # Move a recent heap to the owned HDD and require refusal, then put it back.
+    recent_relation = "market.fact_versions_" + storage.today.strftime("%Y%m%d")
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"ALTER TABLE {recent_relation} SET TABLESPACE {storage.copy_history_name}")
+    try:
+        with pytest.raises(RuntimeError, match="policy_recent_files_not_on_ssd"):
+            handoff.activate_handoff_policy(engine, **activation_options)
+    finally:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"ALTER TABLE {recent_relation} SET TABLESPACE pg_default")
+
+    # Kill a real PG backend after policy insertion. Targets, registration,
+    # policy and completed plan all roll back, retaining the committed database.
+    policy_killed = [False]
+    def kill_policy(conn, cursor, statement, parameters, context, executemany):
+        if not policy_killed[0] and statement.startswith("INSERT INTO portal_storage_policy"):
+            policy_killed[0] = True
+            with engine.begin() as killer:
+                assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),
+                    {"pid": conn.connection.driver_connection.get_backend_pid()})
+            conn.exec_driver_sql("SELECT 1")
+    event.listen(engine, "after_cursor_execute", kill_policy)
+    try:
+        with pytest.raises(DBAPIError):
+            handoff.activate_handoff_policy(engine, **activation_options)
+    finally:
+        event.remove(engine, "after_cursor_execute", kill_policy)
+    assert policy_killed[0]
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
+        assert handoff.inspect_handoff(conn, **inspect_options)["database_handoff_committed"]
+        assert not handoff.inspect_handoff_policy(conn, **inspect_options)["policy_activated"]
+        for table in ("portal_storage_targets", "portal_storage_header_tablespaces", "portal_storage_policy", "portal_storage_plans"):
+            assert conn.scalar(text("SELECT count(*) FROM public."+table)) == 0
+
+    policy_lost = [False]
+    policy_pending = [False]
+    def mark_policy_transaction(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO portal_storage_policy"):
+            conn.info["qt_test_initial_policy_transaction"] = True
+    def policy_committed_then_lost(conn):
+        if not conn.info.pop("qt_test_initial_policy_transaction", False):
+            return original_commit(conn)
+        if not policy_lost[0]:
+            with engine.connect() as observer:
+                transaction = observer.begin()
+                try:
+                    observer.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    observer.exec_driver_sql("SET LOCAL statement_timeout='5s'")
+                    with pytest.raises(RuntimeError, match="outcome_pending"):
+                        handoff.inspect_handoff_policy(observer, **inspect_options)
+                    policy_pending[0] = True
+                finally:
+                    transaction.rollback()
+        original_commit(conn)
+        if not policy_lost[0]:
+            policy_lost[0] = True
+            raise RuntimeError("injected_policy_commit_reply_lost")
+    event.listen(engine, "after_cursor_execute", mark_policy_transaction)
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(Connection, "_commit_impl", policy_committed_then_lost)
+            with pytest.raises(RuntimeError, match="injected_policy_commit_reply_lost"):
+                handoff.activate_handoff_policy(engine, **activation_options)
+    finally:
+        event.remove(engine, "after_cursor_execute", mark_policy_transaction)
+    assert policy_lost[0] and policy_pending[0]
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
+        policy_result = handoff.inspect_handoff_policy(conn, **inspect_options)
+        assert policy_result["policy_activated"] and policy_result["policy_current"]
+        assert policy_result["policy_revision"] == 1 and not policy_result["collection_resume_authorized"]
+        assert conn.scalar(text("SELECT count(*) FROM public.portal_storage_targets")) == 2
+        assert conn.scalar(text("SELECT count(*) FROM public.portal_storage_header_tablespaces")) == 1
+    retry = handoff.activate_handoff_policy(engine, **activation_options)
+    assert retry["policy_revision"] == 1 and retry["plan_id"] == policy_result["plan_id"]
+    with engine.connect() as conn, conn.begin() as transaction:
+        conn.exec_driver_sql("UPDATE public.portal_storage_policy SET revision=2")
+        changed = handoff.inspect_handoff_policy(conn, **inspect_options)
+        assert changed["policy_activated"] and not changed["policy_current"]
+        transaction.rollback()
+    # Exercise the real automatic-history runner against the operator-installed
+    # registry/policy, without seeding either through a test-only shortcut.
+    from portal.backend.service.storage.history_maintenance import run_history_maintenance
+    maintained = run_history_maintenance(storage.database,
+        pg_controldata=storage.copy_plan.pg_controldata, resource_limits=options["resource_limits"])
+    assert maintained["state"] in ("idle", "completed"), maintained
+
     # Inspection remains possible after the attempt clock expires.
     with engine.begin() as conn:
         conn.exec_driver_sql(f"UPDATE {SCHEMA}.capture SET prepared_at=clock_timestamp()-interval '25 hours'")
@@ -309,6 +417,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         conn.exec_driver_sql("SET TRANSACTION READ ONLY")
         conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
         assert handoff.inspect_handoff(conn, **inspect_options)["receipt"] == receipt
+        assert handoff.inspect_handoff_policy(conn, **inspect_options)["policy_current"]
     with engine.connect() as conn, conn.begin() as transaction:
         conn.exec_driver_sql("""
             UPDATE market.fact_storage_state SET evidence=jsonb_set(evidence,
@@ -350,6 +459,12 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         "lost_commit_inspected_without_repeating_switch": lost[0],
         "inflight_commit_reports_pending": pending[0],
         "inspection_after_deadline_and_wrong_relation_refusal": True,
+        "initial_policy_and_tablespace_registry_activated_atomically": True,
+        "recent_files_on_wrong_drive_refused_before_activation": True,
+        "policy_process_death_rolled_back_without_undoing_database_handoff": policy_killed[0],
+        "policy_lost_commit_reconciled_without_revision_increment": policy_lost[0],
+        "policy_inflight_outcome_pending": policy_pending[0],
+        "automatic_history_consumed_operator_policy": maintained["state"],
         "copied_objects": len(copied), "copied_bytes": sum((objects/key).stat().st_size for key in copied),
         "limits": ["tiny disposable data", "page progress is not final inventory readiness; publisher drain/root activation remain separate",
                    "no production root switch, migration-duration or hardware qualification"]
