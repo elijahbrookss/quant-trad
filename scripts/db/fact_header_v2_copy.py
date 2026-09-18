@@ -17,8 +17,8 @@ from sqlalchemy.dialects.postgresql import insert
 
 from portal.backend.db import Base, MarketFactVersionRecord
 from scripts.db.fact_header_v2_capture import (
-    SCHEMA, SOURCE, QUEUE, LOCK, install_capture, inspect_capture,
-    install_identity_capture, inspect_identity_capture,
+    SCHEMA, SOURCE, QUEUE, install_capture, inspect_capture,
+    install_identity_capture, inspect_identity_capture, migration_step,
 )
 from scripts.db.fact_header_v2_admission import assert_v1_source_admission
 from scripts.db import fact_header_v2_placement as physical
@@ -40,15 +40,6 @@ def _tables():
         return SCHEMA if constraint.elements[0].target_fullname.rsplit(".", 1)[0] in selected else referred_schema
     return {name: Base.metadata.tables["market."+name].to_metadata(
         metadata, schema=SCHEMA, referred_schema_fn=referred) for name in TABLE_NAMES}
-
-
-def _lock(conn):
-    if not conn.in_transaction():
-        raise ValueError("fact_header_copy_caller_transaction_required")
-    if conn.get_isolation_level() != "READ COMMITTED":
-        raise ValueError("fact_header_copy_read_committed_required")
-    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"), {"name":LOCK}):
-        raise RuntimeError("fact_header_copy_migration_busy")
 
 
 def _source_columns(conn):
@@ -121,10 +112,9 @@ def _inspect_progress(conn):
     return state
 
 
-def prepare_copy(conn, *, placement=None):
+def prepare_copy(conn, *, placement=None, timeout_seconds=30):
     """Create a private target atomically; retry never resets copied progress."""
-    _lock(conn)
-    with conn.begin_nested(), (physical.tablespace(conn,"") if placement is not None else nullcontext()):
+    with migration_step(conn, timeout_seconds), (physical.tablespace(conn,"") if placement is not None else nullcontext()):
         binding=physical.observe(conn,placement)[0] if placement is not None else None
         install_capture(conn)
         if binding is not None:
@@ -239,12 +229,11 @@ def _copy_rows(conn, rows, *, placement=None, pid=None):
     conn.execute(text(f"DELETE FROM {QUEUE} WHERE id=ANY(:ids)"),{"ids":ids})
 
 
-def copy_page(conn, *, page_rows=128):
+def copy_page(conn, *, page_rows=128, timeout_seconds=30):
     """Copy a bounded baseline or captured page, including its durable cursor."""
     if type(page_rows) is not int or not 1 <= page_rows <= 4096:
         raise ValueError("fact_header_copy_page_rows_out_of_bounds")
-    _lock(conn)
-    with conn.begin_nested():
+    with migration_step(conn, timeout_seconds):
         state = _inspect_progress(conn)
         if not state["baseline_complete"]:
             predicate = "(storage_day,market_commit_seq,id) <= (:high_day,:high_seq,:high_id)"
@@ -285,7 +274,7 @@ def copy_page(conn, *, page_rows=128):
         return _report(conn,state,verified=len(rows),reused=True)
 
 
-def enable_identity_capture(conn, *, page_rows=128):
+def enable_identity_capture(conn, *, page_rows=128, timeout_seconds=30):
     """Finish bounded catch-up and mirror new IDs under a short writer fence.
 
     Baseline partitions must already exist. Mirroring before backfill would let
@@ -294,8 +283,7 @@ def enable_identity_capture(conn, *, page_rows=128):
     """
     if type(page_rows) is not int or not 1 <= page_rows <= 4096:
         raise ValueError("fact_header_copy_page_rows_out_of_bounds")
-    _lock(conn)
-    with conn.begin_nested():
+    with migration_step(conn, timeout_seconds):
         conn.exec_driver_sql("LOCK TABLE market.fact_versions IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         state=_inspect_progress(conn)
         if not state["baseline_complete"]:

@@ -17,8 +17,7 @@ from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement 
 from scripts.db.fact_header_v2_admission import (
     _columns, _constraints, _secondary_indexes, V1_IMMUTABLE_GUARD_BODY,
 )
-from scripts.db.fact_header_v2_capture import SCHEMA
-from scripts.db.fact_header_v2_references import _step
+from scripts.db.fact_header_v2_capture import SCHEMA, migration_step as _step
 
 NAME = "raw_archive_record_mappings"
 SOURCE = "market." + NAME

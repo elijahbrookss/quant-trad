@@ -6,9 +6,12 @@ All DDL belongs to the caller's transaction; original records are never changed.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import timedelta
 import logging
+from time import monotonic
 
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, text
 
 SCHEMA = "qt_fact_header_cutover_v2"
 SOURCE = "market.fact_versions"
@@ -16,6 +19,87 @@ QUEUE = SCHEMA + ".pending_fact_ids"
 STATE = SCHEMA + ".capture"
 LOCK = "quant-trad:fact-header-cutover:v2"
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def migration_step(conn, timeout_seconds=30):
+    """Bound one fixed migration step and reuse capture's original 24-hour clock.
+
+    The caller owns commit. This is not a cutover or a duration qualification.
+    A rejected/expired step leaves the original source and capture intact.
+    """
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
+        raise ValueError("fact_header_migration_timeout_out_of_bounds")
+    if not conn.in_transaction():
+        raise ValueError("fact_header_copy_caller_transaction_required")
+    if conn.get_isolation_level() != "READ COMMITTED":
+        raise ValueError("fact_header_copy_read_committed_required")
+    deadline = monotonic() + timeout_seconds
+    with conn.begin_nested():
+        settings = {row["name"]: dict(row) for row in conn.execute(text("""
+            SELECT name,current_setting(name) AS original,setting::bigint AS milliseconds
+            FROM pg_settings WHERE name IN ('statement_timeout','lock_timeout')
+        """)).mappings()}
+        previous = settings["statement_timeout"]["milliseconds"]
+        if previous:
+            deadline = min(deadline, monotonic() + previous / 1000)
+
+        def remaining():
+            milliseconds = int((deadline - monotonic()) * 1000)
+            if milliseconds <= 0:
+                raise RuntimeError("fact_header_migration_step_timeout")
+            return milliseconds
+
+        configuring_timeout = False
+
+        def bound_statement(connection, cursor, statement, parameters, context, executemany):
+            nonlocal configuring_timeout
+            if configuring_timeout or statement.lstrip().upper().startswith("ROLLBACK TO SAVEPOINT "):
+                return  # An expired outer step must still let a nested step unwind.
+            milliseconds = remaining()
+            configuring_timeout = True
+            try:
+                # Use the normal connection path so disconnects invalidate the
+                # pool entry. The flag prevents this listener calling itself;
+                # LEAST retains a shorter enclosing step's allowance.
+                connection.exec_driver_sql("""
+                    SELECT set_config('statement_timeout',
+                        LEAST(%s, CASE WHEN setting::bigint=0 THEN %s
+                                       ELSE setting::bigint END)::text, true)
+                    FROM pg_settings WHERE name='statement_timeout'
+                """, (milliseconds, milliseconds)).close()
+            finally:
+                configuring_timeout = False
+
+        event.listen(conn, "before_cursor_execute", bound_statement)
+        try:
+            original_lock = settings["lock_timeout"]["milliseconds"]
+            conn.execute(text("SELECT set_config('lock_timeout',:value,true)"),
+                         {"value": str(min(original_lock, 1000) if original_lock else 1000)})
+            if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),
+                               {"name": LOCK}):
+                raise RuntimeError("fact_header_copy_migration_busy")
+            if conn.scalar(text("SELECT to_regclass(:name)"), {"name": STATE}) is not None:
+                seconds = conn.scalar(text(f"""
+                    SELECT EXTRACT(EPOCH FROM
+                        prepared_at + interval '24 hours' - clock_timestamp())::double precision
+                    FROM {STATE} WHERE id=1
+                """))
+                if seconds is None or seconds > 86400:
+                    raise RuntimeError("fact_header_migration_start_time_invalid")
+                if seconds <= 0:
+                    raise RuntimeError("fact_header_migration_attempt_expired")
+                deadline = min(deadline, monotonic() + seconds)
+            yield
+            remaining()
+        finally:
+            # Remove before savepoint rollback or returning this connection;
+            # an expired guard must never prevent recovery or leak to other work.
+            event.remove(conn, "before_cursor_execute", bound_statement)
+        for name, item in settings.items():
+            conn.execute(text("SELECT set_config(:name,:value,true)"),
+                         {"name": name, "value": item["original"]})
+
 
 _REJECT_BODY = """
 BEGIN
@@ -87,7 +171,7 @@ def inspect_capture(conn):
         if tuple(kind) != ("r","p"):
             raise RuntimeError("fact_header_capture_durable_tables_required")
     saved = conn.execute(text(f"""
-        SELECT id,source_oid::bigint,database_oid::bigint,cluster_id,queue_oid::bigint FROM {STATE}
+        SELECT id,source_oid::bigint,database_oid::bigint,cluster_id,queue_oid::bigint,prepared_at FROM {STATE}
     """)).mappings().one()
     queue_oid = conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"),{"name":QUEUE})
     if (saved["id"] != 1 or saved["queue_oid"] != queue_oid
@@ -123,18 +207,19 @@ def inspect_capture(conn):
                 or not row["function_matches"] or row["tgnargs"]!=0 or not row["unfiltered"]):
             raise RuntimeError("fact_header_capture_trigger_changed")
     return {"schema_version":"qt.fact_header_capture.v1",**context,
-            "capture_active":True,"migration_ready":False}
+            "capture_active":True,"migration_ready":False,
+            "started_at":saved["prepared_at"].isoformat(),
+            "deadline_at":(saved["prepared_at"]+timedelta(hours=24)).isoformat()}
 
 
-def install_capture(conn):
+def install_capture(conn, *, timeout_seconds=30):
     """Stage insert capture atomically; retry only reuses an intact capture."""
-    if not conn.in_transaction():
-        raise ValueError("fact_header_capture_caller_transaction_required")
-    with conn.begin_nested():
+    with migration_step(conn, timeout_seconds):
         return _install_capture(conn)
 
 
 def _install_capture(conn):
+    started_at = conn.scalar(text("SELECT clock_timestamp()"))
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"),{"name":LOCK}):
         raise RuntimeError("fact_header_capture_migration_busy")
     # Require a short writer-free boundary; a busy source causes a retry.
@@ -153,9 +238,9 @@ def _install_capture(conn):
             prepared_at timestamptz NOT NULL DEFAULT clock_timestamp())
     """)
     conn.execute(text(f"""
-        INSERT INTO {STATE}(id,source_oid,database_oid,cluster_id,queue_oid)
-        VALUES(1,:source_oid,:database_oid,:cluster_id,to_regclass(:queue))
-    """),{**context,"queue":QUEUE})
+        INSERT INTO {STATE}(id,source_oid,database_oid,cluster_id,queue_oid,prepared_at)
+        VALUES(1,:source_oid,:database_oid,:cluster_id,to_regclass(:queue),:started_at)
+    """),{**context,"queue":QUEUE,"started_at":started_at})
     for name,body,security in (
         ("capture_fact_insert",_capture_body(context["source_oid"]),"DEFINER"),
         ("reject_fact_source_change",_REJECT_BODY,"INVOKER"),
@@ -234,7 +319,13 @@ def inspect_identity_capture(conn):
     return {"identity_capture_active":True,"target_oid":target_oid,"migration_ready":False}
 
 
-def install_identity_capture(conn):
+def install_identity_capture(conn, *, timeout_seconds=30):
+    """Install the existing identity mirror within the original attempt budget."""
+    with migration_step(conn, timeout_seconds):
+        return _install_identity_capture(conn)
+
+
+def _install_identity_capture(conn):
     """Internal post-baseline step, after verifying the trusted shadow copy.
 
     The caller owns activation's writer fence and savepoint. This primitive

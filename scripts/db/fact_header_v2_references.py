@@ -4,42 +4,18 @@ Internal one-time migration steps, not a cutover command. Original source FKs
 stay in force. No table rename, old-FK removal, ready certificate or runtime
 wiring occurs here. The caller commits each preparation/validation separately.
 """
-from contextlib import contextmanager
 import logging
 
 from sqlalchemy import text
 
 from scripts.db import fact_header_v2_copy as copy
 from scripts.db.fact_header_v2_admission import assert_v1_source_admission, _incoming_references
-from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE
+from scripts.db.fact_header_v2_capture import SCHEMA, SOURCE, migration_step as _step
 
 PARENT = "market.fact_hot_payloads"
 STAGED = "qt_header_v2_identity_reference"
 TARGET = SCHEMA + ".fact_identities"
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def _step(conn, timeout_seconds):
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
-        raise ValueError("fact_header_reference_timeout_out_of_bounds")
-    if not conn.in_transaction():
-        raise ValueError("fact_header_reference_caller_transaction_required")
-    with conn.begin_nested():
-        settings = {row["name"]:dict(row) for row in conn.execute(text("""
-            SELECT name,current_setting(name) AS original,setting::bigint AS milliseconds
-            FROM pg_settings WHERE name IN ('statement_timeout','lock_timeout')
-        """)).mappings()}
-        for name,limit in (("statement_timeout",timeout_seconds*1000),("lock_timeout",1000)):
-            previous=settings[name]["milliseconds"]
-            conn.execute(text("SELECT set_config(:name,:value,true)"),
-                         {"name":name,"value":str(min(previous,limit) if previous else limit)})
-        copy._lock(conn)
-        yield
-        # On error the savepoint restores settings and partial DDL together.
-        for name,item in settings.items():
-            conn.execute(text("SELECT set_config(:name,:value,true)"),
-                         {"name":name,"value":item["original"]})
 
 
 def _qualified(conn, relation):

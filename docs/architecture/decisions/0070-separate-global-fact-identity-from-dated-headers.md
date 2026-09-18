@@ -170,3 +170,33 @@ source or emit readiness. The production operator must still qualify final
 verification, dependency handoff, capacity, throughput and the full one-day
 migration budget. The optional raw lookup switch in the tiny disposable fixture
 is test evidence only, never an operator entrypoint.
+
+
+## Fixed migration timing boundary — 2026-09-18
+
+Capture already records a durable preparation timestamp. The preserving header,
+identity-mirror, reference and raw-lookup steps now use that same timestamp as
+the start of their 24-hour attempt window. A reconnect, another page or repeated
+preparation cannot reset it. An expired or future-dated start refuses further
+migration work without rewriting the capture record, source or prior progress.
+Read-only capture inspection still exposes the original start and deadline.
+
+Each step also has one cumulative time budget. Before a SQL statement it reduces
+PostgreSQL statement_timeout to the remaining allowance, preserving a stricter
+caller or enclosing-step timeout. The existing savepoint owns partial DDL, copy
+rows and cursor changes. Timeout rolls that step back while earlier committed
+progress and source collection remain intact; transaction cleanup is never
+blocked by the expired guard. The connection listener is removed before the
+step leaves, and caller settings are restored or rolled back with the savepoint.
+Timeout configuration uses the normal database connection path, with reentry
+suppression, so a dropped connection is invalidated before it can return to the
+pool. The guard must not bypass the existing disconnect and rollback behavior.
+
+This uses the existing migration boundary and clock, not another journal,
+scheduler or generic migration framework. Python filesystem probes retain their
+own bounded checks, and an over-budget step cannot return success after such a
+probe. The caller still owns commit. A future final-switch operator must check
+the same deadline through its commit boundary and qualify physical capacity,
+copy/catch-up throughput, final verification and recovery. These guards enforce
+admission and per-step SQL time; they do not prove completion within one day.
+No runtime startup migration or live cutover is introduced.

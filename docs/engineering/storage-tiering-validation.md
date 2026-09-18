@@ -101,6 +101,14 @@ duration exceeds that limit, stop before cutover and compare a different layout
 or an explicitly approved clean start. A service restart does not imply a data
 wipe. Preserve the existing data and recovery material by default.
 
+The fixed preserving primitives reuse capture's original prepared_at timestamp
+for their 24-hour attempt deadline and cumulative per-step SQL budgets. A new
+connection does not restart the clock. Rehearsals must show a timed-out page
+rolls back its own work, retains earlier committed progress and leaves original
+collection usable. An expired attempt stops before further copying; source and
+capture are retained for an explicit operator decision. This deadline guard is
+not a throughput measurement or a completed final-switch implementation.
+
 ## Finish the operational boundary
 
 Finish the fixed SSD/HDD layout, schema admission, recoverable automatic history

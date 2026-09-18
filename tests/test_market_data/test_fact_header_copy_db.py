@@ -477,7 +477,7 @@ def test_new_day_after_identity_activation_respects_caller_timeout_and_retries(s
             earlier=_insert(fast,source,"new-day-earlier")
         with engine.begin() as copier:
             copier.exec_driver_sql("SET LOCAL statement_timeout='500ms'")
-            with pytest.raises(DBAPIError,match="statement timeout"):
+            with pytest.raises((DBAPIError, RuntimeError),match="statement timeout|step_timeout"):
                 copy.copy_page(copier)
             # Page savepoint restores the target and queue. The committed source
             # and its identity survive; the unfinished writer remains independent.
@@ -513,3 +513,24 @@ def test_old_snapshot_refused_before_preparation_and_committed_record_preserved(
         assert _headers(conn,copy.SOURCE)==_headers(conn,SCHEMA+".fact_versions")
         assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions WHERE id=:id"),
                            {"id":committed["id"]})==1
+
+
+
+def test_expired_attempt_refuses_copy_resume_without_resetting_progress(source):
+    from scripts.db.fact_header_v2_capture import STATE as CAPTURE_STATE
+    engine = source.database._engine
+    with engine.begin() as conn:
+        copy.prepare_copy(conn)
+        copy.copy_page(conn, page_rows=2)
+        before = conn.execute(text(f"SELECT * FROM {copy.STATE}")).mappings().one()
+        shadow = _headers(conn, SCHEMA+".fact_versions")
+        conn.exec_driver_sql(f"UPDATE {CAPTURE_STATE} SET prepared_at=clock_timestamp()-interval '25 hours'")
+    engine.dispose()
+    for operation in (copy.prepare_copy, copy.copy_page, copy.enable_identity_capture):
+        with engine.begin() as conn:
+            with pytest.raises(RuntimeError, match="attempt_expired"):
+                operation(conn)
+            assert conn.execute(text(f"SELECT * FROM {copy.STATE}")).mappings().one() == before
+            assert _headers(conn, SCHEMA+".fact_versions") == shadow
+            assert _headers(conn, copy.SOURCE) == source.source_before
+    assert source.archive_path.read_bytes() == source.archive_bytes
