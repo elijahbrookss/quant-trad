@@ -505,3 +505,62 @@ The compact settings implementation is preserved. Advanced placement controls,
 automatic rebalancing and hypothetical arrangements remain deferred. There is
 no seven-day waiting gate and no authorization to erase existing data implied
 by this disposable demonstration.
+
+### Fixed shared-metadata candidate, 2026-09-18
+
+The same supported storage-demo command now compares the source-resident
+metadata control with one fixed history-filesystem candidate. It adds real raw
+spool publication, archive acknowledgement, record mapping and canonical
+raw-reference admission alongside the existing collection and query workload.
+No new product placement control, query layer or rebalancing mechanism is added.
+
+The candidate places these existing tables and every index on the history
+filesystem: fact_identities, raw_archive_record_mappings,
+fact_archive_material_aliases and fact_archive_canonical_dependencies.
+The concurrency fixture populates the first two. A separate existing cold-book
+and frozen-feature scenario now populates all four on the history filesystem,
+covering the archive aliases and dependency records absent from that fixture.
+
+The bounded test-only preparation compares all catalog row content before and
+after placement. An injected failure after moving the first table rolls back
+to the original physical files; retry preserves the rows and moves all table,
+index and TOAST members. This preparation is not a production migration
+command and must not be used as the existing-data cutover.
+
+Both layouts passed the complete application demonstration. New Fact identity
+rows and raw mappings continued landing on their assigned filesystem. Archive
+mapping lag stayed zero; published bytes and raw-reference admission remained
+valid. Historical, recent, combined and frozen reads retained their expected
+content, including a late correction. The existing real-backend interruption
+and header-movement retry also passed with shared metadata on history storage.
+
+For the HDD-role candidate, the largest local latency during header movement
+was 40 ms for a recent query, 785 ms for a canonical collection write, 2,281 ms
+for a combined recent/history query and 2,807 ms for raw publication plus its
+read/reference checks. These include application work on a tiny, cached local
+fixture. The history filesystem is tmpfs, not the server HDD, and the short
+sequential layout comparisons do not qualify physical performance or establish
+a statistically stable speed comparison. The saved physical HDD identity
+benchmark remains separate evidence with its original limitations.
+
+The result supports a fixed tablespace layout without changing QT query
+semantics. It does not close the production metadata-placement blocker: the
+preserving v1-to-v2 cutover, physical performance, one automatic policy,
+recovery-copy restore and capacity forecast
+remain necessary. No existing data, server, PR merge or deployment changed.
+
+Candidate evidence base revision 33e6c4928b930c531c2782d807d80614a441875d; working source-tree hash
+adf759010c4793b9866a7beae18a190295dbc7d47983c80926b8aeb528793edc.
+
+The focused populated cold-family run also completed successfully and removed
+its disposable stack. It reused the existing archive/reclaim/frozen-feature
+scenario with the four shared catalogs on history storage. Exact frozen
+features, checkpoint-versus-delta replay, known-at results and dependency holds
+were preserved. Missing/corrupted required source bytes still prevented unsafe
+reclamation, and unrelated raw archives remained independently releasable.
+This closes the populated alias/dependency correctness gap without adding
+another product execution path. It does not simulate a full local-copy restore.
+
+The normal backend validation completed successfully. The new fixture helpers
+are test-only and explicitly restricted to the disposable topology; no API,
+startup migration, production table move or automatic policy was enabled.

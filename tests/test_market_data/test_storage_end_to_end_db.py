@@ -21,7 +21,10 @@ from sqlalchemy.orm import Session
 
 from core.market_storage_lifecycle import CanonicalFactRetentionPolicy
 from core.storage_targets import StoragePolicy, StorageTarget
-from market_data.archive import FilesystemRawArchiveObjectStore
+from market_data.archive import (
+    DurableRawSpoolSegment, FilesystemRawArchiveObjectStore,
+    publish_spool_archive, read_raw_archive_parquet,
+)
 from market_data.contracts import DatasetSeriesRequest
 from portal.backend.db.storage_target_models import (
     StorageTargetRecord, StoragePolicyRecord, StoragePlanRecord, StorageHeaderMoveRecord,
@@ -37,6 +40,10 @@ from portal.backend.service.storage.repos import market_data
 from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from tests.test_market_data.test_fact_storage_tiers_db import storage, _placement, BASE
+from tests.test_market_data.test_fact_raw_lineage_db import _raw_trade_fixture, _canonical_trade
+from tests.test_market_data.test_market_structure_archive import _record
+from tests.test_market_data.storage_metadata_fixture import prepare_metadata_candidate, observe_metadata
+from portal.backend.service.storage.repos.fact_references import lock_canonical_raw_references
 
 pytestmark = [
     pytest.mark.db,
@@ -52,7 +59,9 @@ def _summary(samples):
             "max_ms": round(ordered[-1]*1000, 3)} if ordered else {"samples": 0}
 
 
-def test_collect_move_freeze_interrupt_recover_and_measure(storage, tmp_path, monkeypatch):
+@pytest.mark.parametrize("shared_metadata_on_history", [False, True], ids=["current-metadata", "hdd-metadata"])
+def test_collect_move_freeze_interrupt_recover_and_measure(
+        storage, tmp_path, monkeypatch, shared_metadata_on_history):
     assert os.getenv("QT_DB_TEST_ISOLATED") == "1" and os.getuid() == 70
     source_root, history_root = Path("/qt-source/pgdata"), Path("/qt-history")
     assert source_root.stat().st_dev != history_root.stat().st_dev
@@ -67,6 +76,27 @@ def test_collect_move_freeze_interrupt_recover_and_measure(storage, tmp_path, mo
         (udev / f"b{os.major(device)}:{os.minor(device)}").write_text("E:ID_FS_UUID="+target.filesystem_uuid+"\n")
     monkeypatch.setenv("QT_STORAGE_UDEV_ROOT", str(udev))
     engine = storage.database._engine
+    archive_root = history_root / ("archives-hdd-metadata" if shared_metadata_on_history else "archives-control")
+    archive_root.mkdir()
+    raw_fixture = _raw_trade_fixture(storage, archive_root, monkeypatch)
+    raw_ordinal = [3]
+    def publish_raw():
+        ordinal = raw_ordinal[0]
+        raw_ordinal[0] += 1
+        segment = DurableRawSpoolSegment(root=tmp_path / "raw-spool",
+            definition_id=raw_fixture.claim.definition_id, session_id=raw_fixture.claim.session_id,
+            connection_epoch=0, segment_ordinal=ordinal-1)
+        raw = _record(segment, ordinal)
+        segment.append(raw)
+        segment.seal()
+        encoded, ack, records = publish_spool_archive(segment, object_store=raw_fixture.store,
+                                                     temporary_directory=tmp_path / "raw-staging")
+        committed = raw_fixture.structures.commit_archive(
+            raw_fixture.claim, encoded=encoded, acknowledgement=ack, records=records)
+        assert read_raw_archive_parquet(raw_fixture.store.local_path(ack.object_key)) == [raw]
+        with storage.database.session() as session:
+            lock_canonical_raw_references(session, [_canonical_trade(raw_fixture,raw)])
+        assert raw_fixture.structures.get_manifest(committed.manifest_id)["record_count"] == 1
     old_day = storage.today - timedelta(days=45)
     _placement(monkeypatch, old_day)
     history_facts = [replace(storage.fact, observation_key=f"history-{i}",
@@ -90,8 +120,6 @@ def test_collect_move_freeze_interrupt_recover_and_measure(storage, tmp_path, mo
     assert storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
                                     facts=[correction]).corrected_count == 1
 
-    archive_root = history_root / "archives"
-    archive_root.mkdir()
     archive = CanonicalFactRetentionExecutor(
         repository=PostgresCanonicalFactRetentionRepository(database=storage.database))
     archive_policy = CanonicalFactRetentionPolicy(execution_enabled=True, hot_days=30,
@@ -111,11 +139,20 @@ def test_collect_move_freeze_interrupt_recover_and_measure(storage, tmp_path, mo
     assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,
                                                    series_id=storage.series_id) == frozen_before
 
-    tablespace = history_root / "tablespace"
+    tablespace_name = "qt_demo_history_hdd" if shared_metadata_on_history else "qt_demo_history_control"
+    tablespace = history_root / tablespace_name
     tablespace.mkdir()
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        conn.exec_driver_sql("CREATE TABLESPACE qt_demo_history LOCATION '/qt-history/tablespace'")
-        destination = conn.scalar(text("SELECT oid::bigint FROM pg_tablespace WHERE spcname='qt_demo_history'"))
+        conn.exec_driver_sql(f"CREATE TABLESPACE {tablespace_name} LOCATION '{tablespace}'")
+        destination = conn.scalar(text("SELECT oid::bigint FROM pg_tablespace WHERE spcname=:name"),
+                                  {"name": tablespace_name})
+    metadata_result = None
+    if shared_metadata_on_history:
+        metadata_result = prepare_metadata_candidate(engine, source_root, history_root)
+        assert storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,
+                                                       series_id=storage.series_id) == frozen_before
+        with storage.database.session() as session:
+            lock_canonical_raw_references(session, [_canonical_trade(raw_fixture,raw) for raw in raw_fixture.raws])
     policy = StoragePolicy(recent=("ssd",), history=("hdd",), archives=("hdd",),
                            backups=("hdd",), recent_days=30, movement_enabled=True)
     with storage.database.session() as session:
@@ -191,7 +228,7 @@ def test_collect_move_freeze_interrupt_recover_and_measure(storage, tmp_path, mo
         rows = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,series_id=storage.series_id)
         assert rows == frozen_before
         return rows
-    operations = {"recent_query":query_recent,"history_query":query_history,"frozen_query":query_frozen,"cross_drive_query":query_across_drives}
+    operations = {"recent_query":query_recent,"history_query":query_history,"frozen_query":query_frozen,"cross_drive_query":query_across_drives,"raw_archive_write":publish_raw}
     samples = {phase:{name:[] for name in (*operations,"collection")} for phase in ("baseline","concurrent")}
     collection_number = [100]
     def collect():
@@ -255,7 +292,18 @@ def test_collect_move_freeze_interrupt_recover_and_measure(storage, tmp_path, mo
         name:_summary([end-start for start,end in intervals if start < move_ended and end > ddl_started[0]])
         for name,intervals in operation_intervals.items()}
     assert all(values["samples"] > 0 for values in overlapping_copy.values()), overlapping_copy
+    metadata_after = observe_metadata(engine, source_root)
+    expected_device = (history_root if shared_metadata_on_history else source_root).stat().st_dev
+    assert all(f["device"] == expected_device for entry in metadata_after.values() for f in entry["files"])
+    assert metadata_after["raw_archive_record_mappings"]["rows"] == 2+12+12
+    archive_status = raw_fixture.structures.archive_status(definition_id=raw_fixture.claim.definition_id)
+    assert archive_status["archive_mapping_lag_records"] == 0
+    assert archive_status["archived_records"] == 2+12+12
     report = {
+        "shared_metadata_layout": "hdd_candidate" if shared_metadata_on_history else "source_control",
+        "metadata_cutover": metadata_result,
+        "metadata_after": metadata_after,
+        "raw_archive_writes_and_reference_checks": True,
         "schema_version":"qt.storage_end_to_end_demo.v1",
         "recorded_at":datetime.now(UTC).isoformat(),
         "source_revision":os.environ["SOURCE_REVISION"],
@@ -279,6 +327,35 @@ def test_collect_move_freeze_interrupt_recover_and_measure(storage, tmp_path, mo
                        "local source filesystem and tmpfs history; not physical HDD performance",
                        "small dataset; not two-year capacity or full-volume migration evidence",
                        "internal movement primitive; automatic scheduling not yet qualified",
-                       "global identity/raw mappings still require measured SSD growth resolution"],
+                       "fixed shared-metadata candidate only; not an existing-data production cutover"],
     }
     print("QT_STORAGE_DEMO_REPORT="+json.dumps(report,sort_keys=True))
+
+
+def test_cold_book_metadata_and_frozen_features_on_history(storage, monkeypatch):
+    """Reuse the populated cold-family proof; don't invent alternative admission."""
+    from tests.test_market_data.test_fact_book_retention_db import (
+        test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay,
+    )
+    assert os.getenv("QT_DB_TEST_ISOLATED") == "1" and os.getuid() == 70
+    source_root, history_root = Path("/qt-source/pgdata"), Path("/qt-history")
+    tablespace = history_root / "qt_demo_history_cold"
+    tablespace.mkdir()
+    engine = storage.database._engine
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql("CREATE TABLESPACE qt_demo_history_cold LOCATION '/qt-history/qt_demo_history_cold'")
+    prepare_metadata_candidate(engine,source_root,history_root,
+                               tablespace_name="qt_demo_history_cold",require_populated=False)
+    test_cold_book_handoff_preserves_frozen_features_checkpoint_and_replay(
+        storage,history_root / "book-family",monkeypatch,split_sources=False)
+    after = observe_metadata(engine,source_root)
+    assert all(entry["rows"] > 0 for entry in after.values()), after
+    assert all(f["device"] == history_root.stat().st_dev for entry in after.values() for f in entry["files"])
+    print("QT_STORAGE_COLD_METADATA_REPORT="+json.dumps({
+        "schema_version":"qt.storage_cold_metadata_demo.v1",
+        "all_shared_metadata_populated_on_history":True,
+        "frozen_features_checkpoint_replay_and_dependency_holds_preserved":True,
+        "metadata":after,
+        "source_revision":os.environ["SOURCE_REVISION"],
+        "source_tree_hash":os.environ["SOURCE_TREE_HASH"],
+    },sort_keys=True))
