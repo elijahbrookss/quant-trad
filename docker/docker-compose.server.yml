@@ -106,6 +106,7 @@ services:
     environment:
       <<: *runtime-environment
       QT_BOT_RUNTIME_IMAGE: quanttrad-backend:${QT_RELEASE_REVISION}
+      QT_MARKET_DATA_ROOT: ${QT_MARKET_DATA_ROOT:-/srv/quanttrad/market-structure}
       QT_BOT_RUNTIME_NETWORK: ${QT_COMPOSE_PROJECT_NAME:-quant-trad-single-node}_quanttrad
       SOURCE_REVISION: ${QT_RELEASE_REVISION}
       SOURCE_TREE_HASH: ${QT_SOURCE_TREE_HASH}

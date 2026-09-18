@@ -857,3 +857,13 @@ streaming scratch uses the working root. Qualification must include retained
 files, common writer ownership, source-disk scratch peaks and failure recovery.
 The server Compose mount/user integration remains an explicit release blocker;
 this code does not activate or move live storage.
+
+### Runtime access to archived history
+
+The server backend receives the existing host QT_MARKET_DATA_ROOT assignment
+and gives spawned bot readers a read-only archive bind at the configured
+container root. The runtime receives MARKET_STRUCTURE_STORAGE_ROOT explicitly.
+Dedicated filesystem mode requires the host mapping and read-only udev metadata
+for the same UUID checks. This closes the launch-time archive visibility gap;
+it does not by itself qualify all server permissions or rehearse the preserving
+production migration. No advanced placement or rebalancing setting is added.

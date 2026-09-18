@@ -5,9 +5,11 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Mapping, Protocol
 
 from core.settings import get_settings
+from core.storage_mounts import configured_archive_root, require_configured_archive_mount
 
 logger = logging.getLogger(__name__)
 DEFAULT_BOT_RUNTIME_NETWORK = "quant-trad_quanttrad"
@@ -80,6 +82,38 @@ class DockerBotRunner:
         )
 
     @staticmethod
+    def _runtime_archive_mount_args() -> list[str]:
+        """Give server readers the same archive bytes, without write access."""
+        host_root = os.environ.get("QT_MARKET_DATA_ROOT", "").strip()
+        expected_uuid = os.environ.get("QT_MARKET_DATA_EXPECTED_UUID", "").strip()
+        if not host_root:
+            if expected_uuid:
+                raise RuntimeError(
+                    "runtime_archive_host_root_required: QT_MARKET_DATA_ROOT must "
+                    "identify the Docker host archive directory"
+                )
+            return []
+
+        def checked_path(value: str) -> str:
+            path = Path(value)
+            if (not path.is_absolute() or not value.strip("/") or ".." in path.parts
+                    or any(character in value for character in (",", "\n", "\r", "\0"))):
+                raise RuntimeError(
+                    "runtime_archive_mount_invalid: use an absolute non-root "
+                    "directory without mount-option separators"
+                )
+            return str(path)
+
+        source = checked_path(host_root)
+        destination = checked_path(str(configured_archive_root().resolve()))
+        require_configured_archive_mount(require_writable=False)
+        args = ["--mount", f"type=bind,src={source},dst={destination},readonly"]
+        if expected_uuid:
+            udev = checked_path(os.environ.get("QT_STORAGE_UDEV_ROOT", "/run/udev/data"))
+            args.extend(["--mount", f"type=bind,src=/run/udev/data,dst={udev},readonly"])
+        return args
+
+    @staticmethod
     def _runtime_process_env(
         bot_id: str,
         run_id: str,
@@ -89,6 +123,8 @@ class DockerBotRunner:
         run_lease_runner_id: str | None = None,
     ) -> Dict[str, str]:
         env_map = {key: str(value) for key, value in os.environ.items() if key.startswith("QT_")}
+        if os.environ.get("QT_MARKET_DATA_ROOT") or os.environ.get("MARKET_STRUCTURE_STORAGE_ROOT"):
+            env_map["MARKET_STRUCTURE_STORAGE_ROOT"] = str(configured_archive_root().resolve())
         source_revision = str(os.getenv("SOURCE_REVISION") or "").strip()
         if source_revision:
             env_map["SOURCE_REVISION"] = source_revision
@@ -198,6 +234,7 @@ class DockerBotRunner:
                 "QT_SECURITY_PROVIDER_CREDENTIAL_KEY is required for bot runtime containers. "
                 "Set it on the backend service environment before starting bots."
             )
+        archive_mount_args = self._runtime_archive_mount_args()
         name = self._container_name(bot_id, run_id=normalized_run_id)
         existing = self.inspect_bot_container(
             bot_id,
@@ -240,6 +277,7 @@ class DockerBotRunner:
             "--network",
             network,
         ]
+        cmd.extend(archive_mount_args)
         for key, value in sorted(runtime_labels.items()):
             cmd.extend(["--label", f"{key}={value}"])
         for key, value in sorted(runtime_env.items()):
