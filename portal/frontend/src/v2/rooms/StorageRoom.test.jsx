@@ -56,6 +56,18 @@ describe('Storage settings', () => {
     expect(screen.getByRole('button', { name: 'Apply changes' })).toBeDisabled()
     expect(api.applyStorageChange).not.toHaveBeenCalled()
   })
+  it('reports saved settings without claiming physical movement completed', async () => {
+    api.reviewStorageChange.mockResolvedValue({ id: 'settings-1', policy_hash: 'hash',
+      impact: { changes: [], warnings: [], blockers: [] } })
+    api.applyStorageChange.mockResolvedValue({ state: 'completed',
+      progress: { operation: 'qt.storage_policy_settings.v1', physical_data_moved: false } })
+    render(<StorageRoom />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Review changes' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply changes' }))
+    expect(await screen.findByText('Storage settings saved. Check movement and recovery status below.')).toBeVisible()
+    expect(screen.getByText(/Movement: unknown/)).toHaveTextContent('Backup: unknown')
+    expect(screen.queryByText('Storage change completed.')).not.toBeInTheDocument()
+  })
   it('displays a failed review and never reports completion', async () => {
     api.reviewStorageChange.mockRejectedValue(new Error('storage_policy_changed'))
     render(<StorageRoom />)

@@ -1,7 +1,8 @@
 """Server-owned storage enrollment, revisioned policy plans and status.
 
-HTTP and CLI adapters share this service. A plan is never an applied policy:
-activation belongs to the worker after its physical operations are verified.
+HTTP and CLI adapters share this service. Reviewed settings can update an
+operator-applied layout; initial preparation and relocation remain operator work.
+Saving settings never reports physical movement or recovery as completed.
 """
 from __future__ import annotations
 
@@ -46,6 +47,23 @@ def _plan(record: StoragePlanRecord) -> dict[str, Any]:
 
 def _lock(session) -> None:
     session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('qt.storage.management.v1', 0))"))
+
+
+def _settings_blockers(config: StoragePolicyRecord, desired: StoragePolicy) -> list[dict[str, str]]:
+    # An existing applied policy is the operator-owned cutover boundary. Merely
+    # enrolling drives or reviewing their assignment does not cross it.
+    if config.policy is None or config.revision < 1:
+        return [{"code": "storage_setup_required",
+                 "detail": "Complete and verify the initial storage cutover before saving settings."}]
+    current = StoragePolicy.from_dict(config.policy)
+    blockers = []
+    if any(getattr(current, role) != getattr(desired, role) for role in STORAGE_ROLES):
+        blockers.append({"code": "storage_role_change_requires_cutover",
+                         "detail": "Changing drive assignments requires a verified operator cutover."})
+    if desired.recent_days > current.recent_days:
+        blockers.append({"code": "storage_recent_window_increase_requires_cutover",
+                         "detail": "A longer recent window may include data already on the HDD. Review its placement before increasing this setting."})
+    return blockers
 
 
 class StorageManagementService:
@@ -166,8 +184,7 @@ class StorageManagementService:
             blockers = [{"code": "storage_target_unavailable", "target_id": item["target_id"],
                          "detail": item["error"] or item["status"]}
                         for item in checks if item["status"] != "available"]
-            blockers.append({"code": "storage_execution_unavailable",
-                             "detail": "Storage movement and activation are not implemented in this build."})
+            blockers.extend(_settings_blockers(config, desired))
             warnings = []
             if any(t.medium == "hdd" and t.target_id in desired.recent for t in targets):
                 warnings.append("Recent data on HDD requires a measured latency check.")
@@ -227,7 +244,27 @@ class StorageManagementService:
             for target in targets:
                 if any(target.target_id in getattr(desired, role) for role in STORAGE_ROLES):
                     target.inspect(require_writable=True)
-            raise StorageConflict("storage_execution_unavailable: movement and activation are not implemented")
+            blockers = _settings_blockers(config, desired)
+            if blockers:
+                raise StorageConflict(blockers[0]["code"] + ": " + blockers[0]["detail"])
+            now = datetime.now(UTC)
+            config.policy = desired.to_dict()
+            config.revision += 1
+            config.applied_plan_id = record.id
+            config.updated_at = now
+            record.state = "completed"
+            record.updated_at = now
+            record.progress = {
+                "operation": "qt.storage_policy_settings.v1",
+                "policy_revision": config.revision,
+                "physical_data_moved": False,
+                "detail": "Settings saved; movement and recovery are reported by the worker.",
+            }
+            session.flush()
+            result = _plan(record)
+        logger.info("storage_policy_settings_saved | plan_id=%s policy_revision=%s policy_hash=%s",
+                    plan_id, result["progress"]["policy_revision"], policy_hash)
+        return result
 
 
 storage_management_service = StorageManagementService()

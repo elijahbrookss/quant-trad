@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -81,7 +81,27 @@ print(json.dumps([[r.fact_version_id,r.row_hash,r.market_commit_seq,r.revision,r
                                     env=peer_env, capture_output=True, text=True, timeout=60)
             assert result.returncode == 0, result.stderr[-6000:]
             return json.loads(result.stdout.strip().splitlines()[-1])
-        return read_status, frozen_rows
+        def save_policy(policy):
+            current = read_status()
+            def post(suffix, payload):
+                request = Request(f"http://127.0.0.1:{port}/api/storage"+suffix,
+                    data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"},
+                    method="POST")
+                with urlopen(request, timeout=10) as response:
+                    return json.load(response)
+            review = post("/plans", {"policy": policy, "base_revision": current["revision"],
+                                    "request_id": "fixture-settings-"+str(current["revision"])})
+            assert review["impact"]["blockers"] == []
+            result = post("/plans/"+review["id"]+"/apply", {"policy_hash": review["policy_hash"]})
+            assert result["state"] == "completed"
+            assert result["progress"]["operation"] == "qt.storage_policy_settings.v1"
+            assert result["progress"]["physical_data_moved"] is False
+            assert post("/plans/"+review["id"]+"/apply", {"policy_hash": review["policy_hash"]}) == result
+            saved = read_status()
+            assert saved["revision"] == current["revision"]+1
+            assert saved["policy"] == policy
+            return saved
+        return read_status, frozen_rows, save_policy
 
     yield start
     failures = []

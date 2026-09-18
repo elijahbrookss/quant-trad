@@ -42,12 +42,13 @@ code_paths:
 ---
 # Storage Management
 
-The Storage settings page enrolls host-prepared drives and reviews role
-assignments. It is being implemented alongside the existing storage layout.
-It does not yet move database records, publish archives across a drive pool,
-schedule backups, or activate policy. Apply returns an explicit conflict while
-that executor is absent. Existing collection and retention settings remain
-authoritative until an explicit tested cutover replaces them.
+The Storage settings page enrolls host-prepared drives and reviews configuration.
+After an explicit operator cutover has installed an applied policy, Apply can
+save settings for that same layout. Initial setup and role changes remain
+blocked: a UI confirmation cannot prepare a database or prove a migration.
+The existing collector loop performs history movement and local recovery copies
+under its deployment gates, saved policy and explicit operating limits. The
+settings page reports observed outcomes separately from saving configuration.
 
 ## From a prepared drive to a reviewed change
 
@@ -93,6 +94,23 @@ Assignments and advanced settings appear in the impact preview. The browser
 does not calculate readiness or silently activate a draft. A fresh review is
 required after another policy revision. GET /api/storage/plans/{id} retrieves
 the same server-owned plan.
+
+POST /api/storage/plans/{id}/apply saves settings only when a non-null policy
+with a positive revision already exists and all drive assignments remain
+unchanged. Initial policy installation belongs to the explicit, verified operator
+cutover; this API cannot perform it. Apply rechecks mount identity/writability,
+review hash, policy revision and exclusive change ownership. Policy revision and
+the completed settings plan commit atomically; a retry returns the same result.
+Its completion means settings saved, never physical movement completed.
+
+The current planner requires recent groups on SSD. Increasing recent_days could
+include groups already moved to HDD, so this settings path rejects increases
+until placement has been reviewed by an operator. Shortening the window, pausing
+or resuming maintenance, and changing reserve/recovery settings do not relocate
+data in the request. An outstanding move must finish or reconcile before settings
+can be saved. The worker retains all existing per-operation resource, deployment,
+revision and physical-admission checks. A saved policy is not proof of worker
+readiness, migration qualification or a successful recovery copy.
 
 The allocator subtracts the free-space reserve and in-flight reservations,
 then chooses the eligible filesystem with the most headroom. Its caller must
@@ -256,7 +274,7 @@ records the remaining proof and cutover gates.
 The same API is available through qt storage status, qt storage enroll TARGET,
 qt storage review --policy-file FILE --base-revision N --request-id ID,
 qt storage plan ID, and qt storage apply ID --policy-hash HASH. Apply preserves
-the server execution blocker. CLI success from review means a plan was saved,
+the same settings-only and physical-cutover guards as the page. CLI success from review means a plan was saved,
 not that data moved. The existing CLI audit records these requests.
 
 The clean-schema dated-header foundation is now described in
@@ -446,7 +464,7 @@ A competing cancellation receives the same busy-owner response until the
 transaction ends. Logs identify inspection and its copy-only capacity scope.
 The result explicitly reports execution unavailable: WAL, temporary files,
 ingest growth, physical execution/reconciliation and recovery/performance
-qualification remain uncovered. Apply stays disabled.
+qualification remain uncovered by inspection alone. Initial activation stays blocked.
 
 
 ## Internal atomic movement primitive
@@ -512,8 +530,8 @@ physical result without moving files or releasing space twice.
 This is a sampled net-space guard, not per-backend WAL/temp attribution or an
 instantaneous limit on every filesystem allocation. Qualified headroom and the
 cancellation margin must cover concurrent producers and observation delay.
-The actual HDD workload, automatic policy wiring and preserving deployment
-remain unqualified; public Apply stays blocked.
+The actual HDD workload and preserving deployment remain unqualified. The
+settings-only Apply path does not perform or certify that initial cutover.
 
 ### PostgreSQL process identity during movement
 
@@ -721,7 +739,7 @@ its transaction. Each phase has an independent outcome and shutdown cancellation
 a failed history phase does not suppress the recovery attempt.
 The production entrypoint accepts explicitly configured operating limits through
 the runtime connection below. The default server composition does not provide
-the verified namespace, and Storage Apply remains blocked. Deployment
+the verified namespace; settings-only Apply does not provide it. Deployment
 composition and final measured limits remain necessary; portal status consumes
 worker evidence only when those runners are actually configured.
 
@@ -753,8 +771,8 @@ ownership before recovery is considered on the existing lifecycle thread.
 This is an internal execution seam, not public activation. The production
 entrypoint accepts explicit limits through the connection below, but the server
 still needs the verified PostgreSQL filesystem namespace and qualified budgets.
-Portal health projects its persisted phase evidence. Storage Apply remains
-unavailable until those release prerequisites are met.
+Portal health projects its persisted phase evidence. Initial policy installation
+still requires the operator cutover; settings-only Apply cannot bypass it.
 
 ### Explicit runtime operating limits
 

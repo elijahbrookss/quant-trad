@@ -20,7 +20,6 @@ from portal.backend.service.market.canonical_retention import CanonicalFactReten
 from portal.backend.service.storage.repos.fact_retention import PostgresCanonicalFactRetentionRepository
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from portal.backend.service.storage.repos import market_data as repository_module
-from portal.backend.service.storage.header_admission import lock_header_storage
 from market_data.contracts import DatasetSeriesRequest
 from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
 from portal.backend.db.storage_target_models import StoragePolicyRecord, StorageTargetRecord
@@ -98,7 +97,7 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         MARKET_STRUCTURE_WORKING_ROOT=str(working), QT_MARKET_DATA_WORKING_EXPECTED_UUID="uuid-copy-ssd",
         QT_WORKERS_COLLECTORS_SHUTDOWN_DRAIN_TIMEOUT_SECONDS="10",
     )
-    read_status, peer_frozen_rows = server_peers(env)
+    read_status, peer_frozen_rows, save_policy = server_peers(env)
     frozen_identity = [[r.fact_version_id, r.row_hash, r.market_commit_seq,
                         r.revision, r.fact.known_at.isoformat()] for r in before]
     assert peer_frozen_rows(frozen.dataset_id, storage.series_id) == frozen_identity
@@ -144,11 +143,7 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
     def change_policy(**changes):
         nonlocal policy
         policy = replace(policy, **changes)
-        with storage.database.session() as session:
-            lock_header_storage(session)
-            row = session.get(StoragePolicyRecord, 1)
-            row.policy = policy.to_dict()
-            row.revision += 1
+        save_policy(policy.to_dict())
 
     # A path outside the assigned HDD cannot become the archival destination.
     from portal.backend.service.storage.history_policy import saved_canonical_policy
@@ -156,6 +151,12 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         saved_canonical_policy(storage.database,
             policy=CanonicalFactRetentionPolicy(execution_enabled=True),
             storage_root=tmp_path)
+
+    # The saved long window protects history; legacy windows are not authority.
+    run_process("idle", "completed")
+    first_copies = sorted(path.name for path in copies.glob("copy_*"))
+    assert len(first_copies) == 1
+    assert (copies/first_copies[0]/"database.dump").is_file()
 
     # A pause after planning must stop even the first sealing transaction.
     change_policy(recent_days=7)
@@ -180,13 +181,6 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         assert session.scalar(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
                               {"day": old_day}) == 4
 
-    # The saved long window protects history; legacy windows are not authority.
-    change_policy(recent_days=60, movement_enabled=True)
-    run_process("idle", "completed")
-    first_copies = sorted(path.name for path in copies.glob("copy_*"))
-    assert len(first_copies) == 1
-    assert (copies/first_copies[0]/"database.dump").is_file()
-    change_policy(recent_days=7, movement_enabled=False)
     run_process("disabled", "not_due")
     with storage.database.session() as session:
         assert session.scalar(text("SELECT count(*) FROM market.fact_hot_payloads WHERE storage_day=:day"),
@@ -227,5 +221,6 @@ def test_real_collector_process_maintains_storage_and_restarts_without_duplicate
         "storage_api_reads_both_drive_identities": True,
         "fresh_process_frozen_reads_before_and_after_movement_agree": True,
         "collector_history_recovery_and_restart_with_api_running": True,
+        "reviewed_http_settings_pause_and_resume_control_worker": True,
         "limitation": "shared UID/process namespace fixture, not complete server Compose, Docker socket access or retained ownership migration",
     }, sort_keys=True))

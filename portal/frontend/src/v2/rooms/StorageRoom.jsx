@@ -189,7 +189,9 @@ export function StorageRoom() {
             <button type="button" className="qt2-storage-primary" disabled={busy || !!plan?.impact.blockers.length}
               onClick={() => action(async () => {
                 const result = await applyStorageChange(plan)
-                setNotice(`Storage change ${words(result.state)}.`)
+                setNotice(result.progress?.operation === 'qt.storage_policy_settings.v1'
+                  ? 'Storage settings saved. Check movement and recovery status below.'
+                  : `Storage change ${words(result.state)}.`)
                 dirty.current = false; setPlan(null); await refresh()
               })}>Apply changes</button>
           </div>

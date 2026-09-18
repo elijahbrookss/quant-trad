@@ -143,3 +143,21 @@ release authority. Savepoint/transaction rollback preserves ownership and
 completed retries cannot release twice. Terminal claims remain audit evidence;
 their lifetime must be included in journal retention. This implements durable
 ownership only, not proof or enforcement of the producer limits.
+
+
+## Settings on an operator-applied layout — 2026-09-18
+
+The initial physical cutover remains an operator boundary and is not enabled by
+the Storage page. Once that cutover has installed an applied policy (non-null,
+positive revision), an unchanged set of drive assignments permits a reviewed
+settings-only update. The policy revision and completed settings receipt commit
+together under the existing ownership lock. Completion describes configuration
+saved; worker observations separately describe movement and recovery.
+
+No new executor is needed for this transaction. Existing execution limits,
+deployment gates and physical verification still govern every worker operation.
+Missing mounts, stale reviews and competing active changes reject application.
+An increased recent window is also rejected because the current planner would
+otherwise require previously moved groups back on SSD. Initial setup, role
+changes, reverse movement and migration qualification remain outside this path.
+This refinement does not certify the existing-data cutover or enable deployment.
