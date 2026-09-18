@@ -162,3 +162,27 @@ concurrent ingestion still require measurement. The directory grows with
 series/day combinations; series_day_directory_bytes is separately visible in
 retention inventory. Its size belongs in the SSD budget and migration forecast.
 No physical placement or hard SSD budget is established by this query change.
+
+## Transactional migration capture
+
+The internal fact_header_v2_capture helper implements only the pending-ID
+capture stage. It keeps collection inserts and their migration tracking in one
+transaction, including rollback or backend loss. Its private queue retains
+late commits even when their sequence would fall behind a backfill cursor.
+Installation is caller-transactional and uses a savepoint so a caught setup
+failure cannot commit half-installed capture.
+
+It adds no operator command, startup action or cutover permission. The source
+must still receive full v1 contract admission by the preserving migration
+orchestrator. An intact retry reuses the queue; changed identity, replaced
+queue, altered function or disabled trigger blocks resumption. The helper
+does not copy headers, drain the queue, rewire dependencies or issue a ready
+certificate. Those remain implementation work before a production rehearsal.
+
+The capture stage passed isolated PostgreSQL qualification: original rows remain
+unchanged, late IDs are tracked, caller and backend failures roll back source
+and tracking together, ordinary restricted writers need no private-queue
+access, and broken capture cannot be silently reused. Competing writers or
+migration actors cause an explicit preparation retry. This establishes capture
+behavior only; it is not a rehearsal of copying or switching the installed
+database. The normal backend checks also passed.

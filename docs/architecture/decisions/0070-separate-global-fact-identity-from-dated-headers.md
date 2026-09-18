@@ -14,6 +14,7 @@ code_paths:
   - portal/backend/db/market_data_models.py
   - portal/backend/db/market_storage_models.py
   - portal/backend/db/fact_storage_schema.py
+  - scripts/db/fact_header_v2_capture.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -53,3 +54,26 @@ default tablespace pending registered-target placement and recovery tests.
 The [v2 layout notes](../../engineering/fact-header-layout-v2.md) distinguish
 implemented clean-schema support from the remaining operator cutover. This
 decision extends [ADR 0069](0069-bind-storage-objects-to-registered-targets.md).
+
+## Capture during the preserving upgrade
+
+The one-time tiered-v1 upgrade uses a private pending-ID queue so writes
+committed during backfill cannot fall behind the copy cursor. The internal
+capture primitive in scripts/db/fact_header_v2_capture.py installs the queue
+and source INSERT trigger in one caller-owned transaction and savepoint.
+Every queued ID commits or rolls back with its original Fact. It does not
+filter by commit sequence or a wall-clock watermark.
+
+Preparation requires a brief writer-free boundary: a busy source is refused
+immediately for coordinated retry, while ordinary readers remain permitted.
+The source stays immutable, including against truncation, during capture.
+The queue is logged PostgreSQL storage under the same PG_DSN. A narrowly scoped
+trigger function writes it without granting collectors access to migration
+internals. Retry verifies the original database, source and queue identities,
+function bodies and enabled triggers instead of silently resetting progress.
+
+This is a capture primitive, not full source admission or an executable
+cutover. No CLI/runtime path calls it. The preserving orchestrator still needs
+complete v1 schema admission, bounded copy and catch-up, capacity and one-day
+rehearsal, correct FK/view handoff, rollback and final verification before
+activating v2. Capturing IDs alone never makes migration_ready true.
