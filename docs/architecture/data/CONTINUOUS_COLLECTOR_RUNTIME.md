@@ -452,7 +452,8 @@ silently selecting fallback budgets. Both runners receive the same database,
 archive root and shutdown callback used by the existing loop.
 
 The configured worker must run in the verified PostgreSQL storage namespace
-with qualified resource limits and PostgreSQL 15 tools. The ordinary server
-collector image/mounts do not yet supply these prerequisites and cannot
-substitute similar-looking filesystem paths. This is local implementation and
-disposable validation, not activation of backups or storage policy on a server.
+with qualified resource limits and PostgreSQL 15 tools. The runtime image
+provides PostgreSQL 15 utilities, but the ordinary server collector mounts and
+permissions are not yet qualified for this layout and cannot substitute
+similar-looking filesystem paths. This is local implementation and disposable
+validation, not activation of backups or storage policy on a server.

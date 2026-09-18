@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM python:3.12.3-slim
+FROM python:3.12.3-slim AS runtime
 
 ARG QT_SOURCE_REVISION
 ARG QT_SOURCE_TREE_HASH
@@ -13,7 +13,9 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.11.17 /uv /uvx /bin/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev docker.io \
+    && apt-get install -y --no-install-recommends build-essential libpq-dev docker.io postgresql-common \
+    && printf 'create_main_cluster = false\n' > /etc/postgresql-common/createcluster.conf \
+    && apt-get install -y --no-install-recommends postgresql-15 postgresql-client-15 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements.lock /app/
@@ -46,3 +48,13 @@ RUN ls -la /app && ls -la /app/src || true
 EXPOSE 8000
 
 CMD ["python", "-m", "portal.backend.run_backend"]
+
+# Exercise the deployable code and tools in the existing disposable storage
+# topology. Test-only files never enter the default production target.
+FROM runtime AS storage-test
+COPY tests/ /app/tests/
+COPY scripts/ /app/scripts/
+COPY pytest.ini pyproject.toml /app/
+RUN chmod +x /app/scripts/wait-for-db.sh
+
+FROM runtime AS production

@@ -294,3 +294,18 @@ rejection, compatible promotion, failed rollout recovery, synthetic worker
 drain/restart, and volume continuity. It does not replace the real-QT core smoke
 or the PostgreSQL and collector contract suites. Reproduce it with the same
 command on a Docker-enabled local machine; no provider credentials are needed.
+
+## Local disposable storage demonstration
+
+The storage-demo suite of scripts/ci/run_test_suite.sh exercises the storage
+release on an isolated PostgreSQL instance with separate disposable
+source/history filesystems. Its test service uses the backend Dockerfile's
+storage-test target, which inherits production code, dependencies and PostgreSQL
+tools and adds test inputs. Normal database tests retain their existing test
+image. The final production target excludes these added storage-test inputs.
+
+This local demonstration is not another GitHub Actions job or a deployment.
+Its internal network, generated credentials, owned resources and cleanup remain
+unchanged. A passed run supports only the exercised disposable layout; actual
+HDD performance, preserving migration duration and server permissions require
+their own evidence.

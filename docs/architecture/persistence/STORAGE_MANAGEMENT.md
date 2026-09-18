@@ -25,6 +25,8 @@ code_paths:
   - portal/backend/service/storage/history_maintenance.py
   - portal/backend/service/storage/maintenance_status.py
   - portal/backend/service/storage/maintenance_runtime.py
+  - portal/backend/Dockerfile
+  - docker/test/storage-demo.compose.yml
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -716,7 +718,7 @@ its transaction. Each phase has an independent outcome and shutdown cancellation
 a failed history phase does not suppress the recovery attempt.
 The production entrypoint accepts explicitly configured operating limits through
 the runtime connection below. The default server composition does not provide
-the verified namespace or tools, and Storage Apply remains blocked. Deployment
+the verified namespace, and Storage Apply remains blocked. Deployment
 composition and final measured limits remain necessary; portal status consumes
 worker evidence only when those runners are actually configured.
 
@@ -781,8 +783,38 @@ policy. The same supervisor and heartbeat own schedule and status.
 
 Valid configuration proves only that limits have the required shape, not that
 they are measured or sufficient. Production values require the workload and
-capacity evidence in the release checklist. The default server image/mounts do
-not yet provide the matching PostgreSQL namespace and utilities. Configure the
+capacity evidence in the release checklist. The runtime image includes
+PostgreSQL 15 control/dump utilities without creating a distribution-managed
+database cluster. The default server mounts
+still do not provide the matching PostgreSQL namespace. Configure the
 runtime only as part of the explicit preserving cutover after those deployment
 prerequisites and the one-day migration rehearsal are qualified. No live
 configuration or deployment is implied by this local implementation.
+
+### Runtime-image storage rehearsal
+
+The existing storage-demo topology now builds the backend Dockerfile's
+storage-test target. It inherits the deployable runtime code, locked Python
+dependencies and PostgreSQL 15 utilities, adding only test inputs. The default
+production target inherits the same runtime without those storage test inputs.
+The topology still uses isolated PostgreSQL and two disposable filesystems,
+UID 70 and a shared PostgreSQL PID namespace; it introduces no live host mounts.
+
+This closes the test-image dependency difference when the demonstration passes.
+It does not qualify current server file ownership, change server Compose mounts,
+or authorize activation. A collector-process rehearsal uses the unmodified
+entrypoint with no enrolled acquisition definitions and an internal-only network,
+so its maintenance/heartbeat/shutdown observations must not be described as live
+provider, full acquisition-load or existing-spool permission qualification.
+
+Archive object manifests use logical market-archive keys resolved beneath the
+configured object root. A verified root relocation need not rewrite those keys.
+Preservation still requires copying/verifying every referenced object and
+handling retained acquisition spool paths explicitly during the cutover.
+
+The process fixture disables legacy payload retention to isolate the new
+maintenance connection. Payload retention still reads the lifecycle hot-window
+configuration, while header movement reads the saved Storage policy. First-release
+activation must make both follow the same saved recent-days setting and honor
+movement being disabled; matching defaults are not proof of a single policy.
+This fixture does not qualify that remaining integration.

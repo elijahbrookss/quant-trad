@@ -7,6 +7,10 @@ services:
       - storage-demo-source:/qt-source
       - storage-demo-history:/qt-history
   test:
+    # Use production code/dependencies/tools; only test fixtures are added.
+    build:
+      dockerfile: portal/backend/Dockerfile
+      target: storage-test
     # PostgreSQL in the pinned Alpine image runs as UID 70. Sharing its PID
     # namespace and UID lets the real verifier inspect /proc/PID/root without
     # privileged mode or substituting filesystem evidence.
