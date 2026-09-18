@@ -329,3 +329,45 @@ and succeeded after that writer committed. Enabling identity capture before the
 fixture switch preserved normal startup, recent/history/frozen reads and new
 collection; terminating the switch restored the original layout and allowed
 retry. These remain tiny fixtures, not a production operator or duration proof.
+
+
+## Known-reference prevalidation
+
+The internal fact_header_v2_references module stages the existing payload-child
+and two archive-reference families against the private global identities after
+identity capture is active. It does not accept arbitrary tables or drop an
+original foreign key. Each preparation and validation is a separate caller
+transaction. Preparation takes a short source writer fence; validation uses
+PostgreSQL's ordinary online constraint validation. Both obey explicit statement
+budgets and a short lock timeout, preserving tighter caller settings.
+
+Progress is the real constraint state, not a second copy of it in a journal.
+Retry verifies its target, columns, actions, validation flag, parent attachment
+and enforcement triggers. The parent attachment requires complete prevalidated
+ordinary references and verifies that every existing child constraint OID was
+reused. New payload partitions inherit the parent reference after attachment.
+
+This prepares the known references for the eventual final writer fence and
+schema handoff. It never switches active tables, removes source FKs, writes a
+ready certificate or claims migration_ready. Physical placement, complete target
+verification, capacity and total-duration limits, and post-resume recovery still
+belong to the production operator. The disposable handoff helper has an explicit
+prevalidated path for rehearsing that final reference rename without rescanning
+the copied fixture data through newly added foreign keys.
+
+
+Copy and reference steps require READ COMMITTED transactions. A snapshot taken
+before the source writer fence could miss a record committed before capture was
+installed; rejecting older fixed snapshots prevents that gap before preparation
+changes anything. The source remains authoritative when this check refuses.
+
+
+The known-reference rehearsal passed on actual QT payload and archive relations:
+collection committed while validation held its locks, validated child constraints
+were reused, and incomplete identities or disabled enforcement were refused.
+The prevalidated fixture switch preserved populated archive relationships,
+recent/historical queries, frozen results and archive bytes after backend
+termination, rollback and retry. A separate old-snapshot rehearsal refused
+preparation before changing the source and included the concurrent committed
+record when retried with READ COMMITTED. These results establish correctness for
+small disposable data, not full-volume timing or production deployment readiness.

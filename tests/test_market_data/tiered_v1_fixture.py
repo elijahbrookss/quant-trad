@@ -68,7 +68,7 @@ def restore_tiered_v1_fixture(storage):
         conn.exec_driver_sql("DROP TABLE preserved_headers")
 
 
-def stage_shadow_handoff_fixture(conn, storage):
+def stage_shadow_handoff_fixture(conn, storage, *, prevalidated=False):
     """Rehearse the fixed dependency switch; never an operator entry point.
 
     Only tiny owned fixtures qualify. Production source admission, lock/capacity
@@ -77,6 +77,7 @@ def stage_shadow_handoff_fixture(conn, storage):
     """
     from scripts.db import fact_header_v2_copy as copy
     from scripts.db.fact_header_v2_capture import QUEUE, SCHEMA
+    from scripts.db import fact_header_v2_references as references
     from portal.backend.db.fact_storage_schema import assert_fact_storage_contract, install_fact_storage_functions
 
     if os.getenv("QT_DB_TEST_ISOLATED") != "1" or not conn.in_transaction():
@@ -86,6 +87,8 @@ def stage_shadow_handoff_fixture(conn, storage):
     retained = "qt_fact_header_retained_v1"
     conn.exec_driver_sql("LOCK TABLE market.fact_versions IN ACCESS EXCLUSIVE MODE NOWAIT")
     state = copy._inspect_progress(conn)
+    if prevalidated and not references.inspect_references(conn)["references_complete"]:
+        raise RuntimeError("shadow_handoff_fixture_references_incomplete")
     if not state["baseline_complete"] or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})")):
         raise RuntimeError("shadow_handoff_fixture_copy_incomplete")
     count = conn.scalar(text("SELECT count(*) FROM market.fact_versions"))
@@ -142,8 +145,11 @@ def stage_shadow_handoff_fixture(conn, storage):
         conn.exec_driver_sql(f"ALTER TABLE {SCHEMA}.{quoted} SET SCHEMA market")
     for row in incoming:
         name=conn.dialect.identifier_preparer.quote(row["conname"])
-        definition=row["definition"].replace("market.fact_versions","market.fact_identities")
-        conn.exec_driver_sql(f'ALTER TABLE {row["relation"]} ADD CONSTRAINT {name} {definition}')
+        if prevalidated:
+            conn.exec_driver_sql(f'ALTER TABLE {row["relation"]} RENAME CONSTRAINT {references.STAGED} TO {name}')
+        else:
+            definition=row["definition"].replace("market.fact_versions","market.fact_identities")
+            conn.exec_driver_sql(f'ALTER TABLE {row["relation"]} ADD CONSTRAINT {name} {definition}')
     storage.database._ensure_canonical_fact_insert_trigger(conn)
     install_fact_storage_functions(conn)
     for name in ("fact_versions","fact_identities","fact_header_partitions"):

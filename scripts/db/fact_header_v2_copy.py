@@ -43,6 +43,8 @@ def _tables():
 def _lock(conn):
     if not conn.in_transaction():
         raise ValueError("fact_header_copy_caller_transaction_required")
+    if conn.get_isolation_level() != "READ COMMITTED":
+        raise ValueError("fact_header_copy_read_committed_required")
     if not conn.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended(:name,0))"), {"name":LOCK}):
         raise RuntimeError("fact_header_copy_migration_busy")
 

@@ -492,3 +492,24 @@ def test_new_day_after_identity_activation_respects_caller_timeout_and_retries(s
         assert not conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))
         assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions WHERE id=:id"),
                            {"id":late["id"]})==1
+
+
+def test_old_snapshot_refused_before_preparation_and_committed_record_preserved(source):
+    engine=source.database._engine
+    with engine.connect().execution_options(isolation_level="REPEATABLE READ") as stale:
+        with stale.begin():
+            previous=stale.scalar(text("SELECT count(*) FROM market.fact_versions"))
+            with engine.begin() as writer:
+                committed=_insert(writer,source,"committed-after-snapshot")
+            assert stale.scalar(text("SELECT count(*) FROM market.fact_versions"))==previous
+            with pytest.raises(ValueError,match="read_committed_required"):
+                copy.prepare_copy(stale)
+    with engine.begin() as conn:
+        assert conn.scalar(text("SELECT to_regnamespace(:schema)"),{"schema":SCHEMA}) is None
+        assert conn.scalar(text("SELECT count(*) FROM market.fact_versions"))==previous+1
+        copy.prepare_copy(conn)
+    _finish(engine)
+    with engine.connect() as conn:
+        assert _headers(conn,copy.SOURCE)==_headers(conn,SCHEMA+".fact_versions")
+        assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions WHERE id=:id"),
+                           {"id":committed["id"]})==1

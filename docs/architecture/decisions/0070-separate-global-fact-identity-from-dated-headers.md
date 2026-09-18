@@ -17,6 +17,7 @@ code_paths:
   - scripts/db/fact_header_v2_capture.py
   - scripts/db/fact_header_v2_copy.py
   - scripts/db/fact_header_v2_admission.py
+  - scripts/db/fact_header_v2_references.py
 ---
 # ADR 0070: Separate Global Fact Identity from Dated Headers
 
@@ -124,3 +125,13 @@ record. The normal identity-to-header guard is installed only at the reviewed
 handoff after draining and verifying the copy. Source, identity and pending ID
 commit or roll back together. Retry refuses a changed mirror instead of repairing
 it. This does not introduce a second runtime writer or a new storage policy.
+
+
+The internal reference stage prepares and validates only the known payload
+children and archive references against the mirrored private identities.
+Original source FKs remain in force. Preparation briefly fences writers;
+validation is separate and permits normal collection. Validated child
+constraints are attached to a parent constraint without replacement. Changed
+definitions, disabled enforcement or incomplete coverage refuse advancement.
+These steps do not remove original references, activate v2 or qualify capacity
+and final cutover duration.
