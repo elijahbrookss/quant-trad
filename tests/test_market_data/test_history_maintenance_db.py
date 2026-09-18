@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import timedelta, datetime, UTC
 import os
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from portal.backend.db.storage_target_models import (
 )
 from portal.backend.service.market.market_storage_lifecycle import MarketStorageLifecycleSupervisor
 from portal.backend.service.storage import history_maintenance as history
+from portal.backend.service.storage.maintenance_runtime import storage_maintenance_runners
+from tests.test_storage_maintenance_runtime import configuration
 from portal.backend.service.storage.header_catalog import read_header_catalog
 from portal.backend.service.storage.header_destinations import register_header_tablespaces
 from portal.backend.service.storage.header_filesystem import verify_header_filesystem
@@ -81,10 +84,16 @@ def test_saved_history_policy_recovers_and_advances_without_duplicate_moves(stor
                    for row in session.scalars(select(StorageTargetRecord)))
 
     recoveries=[]
+    runtime_config=configuration()
+    runtime_config["history"]=limits
+    runtime_path=tmp_path/"maintenance-limits.json"
+    runtime_path.write_text(json.dumps(runtime_config))
+    runners=storage_maintenance_runners(storage.database,storage_root=tmp_path,
+                                       limits_path=runtime_path)
+    recovery=runners["recovery_runner"]
+    runners["recovery_runner"]=lambda **kwargs:recoveries.append("ran") or recovery(**kwargs)
     supervisor=MarketStorageLifecycleSupervisor(
-        policy=MarketStorageLifecyclePolicy(enabled=False,execution_enabled=True),
-        history_runner=lambda **kwargs:invoke(**kwargs),
-        recovery_runner=lambda **kwargs:recoveries.append("ran") or {"state":"not_due"})
+        policy=MarketStorageLifecyclePolicy(enabled=False,execution_enabled=True),**runners)
     killed=[False]
     def kill(conn,cursor,statement,parameters,context,executemany):
         if not killed[0] and statement.startswith("ALTER TABLE ONLY"):
@@ -99,7 +108,7 @@ def test_saved_history_policy_recovers_and_advances_without_duplicate_moves(stor
     finally:
         event.remove(engine,"after_cursor_execute",kill)
     assert killed[0] and result["history_movement"]["state"]=="failed"
-    assert result["local_recovery"]["state"]=="not_due" and recoveries==["ran"]
+    assert result["local_recovery"]["state"]=="disabled" and recoveries==["ran"]
     assert supervisor.snapshot()["state"]=="degraded"
     with storage.database.session() as session:
         first_plan=session.scalar(select(StoragePlanRecord))

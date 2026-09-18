@@ -443,8 +443,16 @@ succeed. Shutdown cancellation reaches active work
 and skips later phases. A maintenance-only configuration never executes disabled
 retention.
 
-The production collector entrypoint does not yet supply these runners. They must
-be composed in the verified PostgreSQL storage namespace with measured resource
-limits and the applied Storage policy; the ordinary collector container cannot
+The collector entrypoint supplies these runners only when the optional central
+storage.maintenance_limits_path setting names an explicit operating-limits file
+(QT_STORAGE_MAINTENANCE_LIMITS_PATH). Default configuration leaves the connection
+absent. The file contains resource limits only; placement and enablement remain
+in the saved Storage policy. Invalid configured files fail startup instead of
+silently selecting fallback budgets. Both runners receive the same database,
+archive root and shutdown callback used by the existing loop.
+
+The configured worker must run in the verified PostgreSQL storage namespace
+with qualified resource limits and PostgreSQL 15 tools. The ordinary server
+collector image/mounts do not yet supply these prerequisites and cannot
 substitute similar-looking filesystem paths. This is local implementation and
 disposable validation, not activation of backups or storage policy on a server.

@@ -20,6 +20,7 @@ backend:
 
 storage:
   inventory_path: /run/quanttrad/storage-inventory.json
+  maintenance_limits_path: null
 
 database:
   dsn: null

@@ -23,6 +23,19 @@ from .recovery_copies import LocalRecoveryCopies, _identity
 logger = logging.getLogger(__name__)
 
 
+def validate_recovery_maintenance_limits(*, max_bytes, timeout_seconds, headroom_bytes,
+                                        max_objects=1000000):
+    """Validate operating budgets before configuration or execution."""
+    if (type(max_bytes) is not int or not 1<=max_bytes<=2**63-1
+            or type(timeout_seconds) is not int or not 1<=timeout_seconds<=86400
+            or type(max_objects) is not int or not 1<=max_objects<=1000000
+            or not isinstance(headroom_bytes,dict) or not 1<=len(headroom_bytes)<=32
+            or any(not isinstance(key,str) or not 1<=len(key)<=48
+                   or type(value) is not int or not 0<=value<=2**63-1
+                   for key,value in headroom_bytes.items())):
+        raise ValueError("recovery_maintenance_limits_invalid")
+
+
 def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                            max_bytes, timeout_seconds, headroom_bytes,
                            max_objects=1000000, cancelled=None):
@@ -33,12 +46,8 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
     overhead remain unavailable. Collection continues; actual free space on both
     drives is rechecked during copying. No limits are inferred from toy fixtures.
     """
-    if (type(max_bytes) is not int or not 1<=max_bytes<=2**63-1
-            or type(timeout_seconds) is not int or not 1<=timeout_seconds<=86400
-            or not isinstance(headroom_bytes,dict)
-            or any(not isinstance(key,str) or type(value) is not int or not 0<=value<=2**63-1
-                   for key,value in headroom_bytes.items())):
-        raise ValueError("recovery_maintenance_limits_invalid")
+    validate_recovery_maintenance_limits(max_bytes=max_bytes, timeout_seconds=timeout_seconds,
+        headroom_bytes=headroom_bytes, max_objects=max_objects)
     deadline=monotonic()+timeout_seconds
     with database.session() as owner:
         if owner.connection().get_isolation_level()!="READ COMMITTED":

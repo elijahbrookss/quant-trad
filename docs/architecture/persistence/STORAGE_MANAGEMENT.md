@@ -24,6 +24,7 @@ code_paths:
   - portal/backend/service/storage/recovery_maintenance.py
   - portal/backend/service/storage/history_maintenance.py
   - portal/backend/service/storage/maintenance_status.py
+  - portal/backend/service/storage/maintenance_runtime.py
   - portal/backend/service/storage/header_admission.py
   - portal/backend/service/storage/header_destinations.py
   - src/core/storage_inventory.py
@@ -713,10 +714,11 @@ Its budgets must come from the measured deployment plan. The existing lifecycle
 supervisor accepts optional history and recovery runners after retention releases
 its transaction. Each phase has an independent outcome and shutdown cancellation;
 a failed history phase does not suppress the recovery attempt.
-The production entrypoint does not supply the verified namespace and measured
-budgets yet, and Storage Apply remains blocked. Deployment composition and final
-measured limits remain necessary; portal status consumes worker evidence only
-when those runners are actually configured.
+The production entrypoint accepts explicitly configured operating limits through
+the runtime connection below. The default server composition does not provide
+the verified namespace or tools, and Storage Apply remains blocked. Deployment
+composition and final measured limits remain necessary; portal status consumes
+worker evidence only when those runners are actually configured.
 
 ### Saved-policy historical maintenance
 
@@ -744,6 +746,43 @@ turn into successful or silently skipped work. A complete pass releases its
 ownership before recovery is considered on the existing lifecycle thread.
 
 This is an internal execution seam, not public activation. The production
-entrypoint still needs the verified PostgreSQL filesystem namespace, qualified
-limits. Portal health now projects its persisted phase evidence. Storage Apply remains unavailable until
-those release prerequisites are met.
+entrypoint accepts explicit limits through the connection below, but the server
+still needs the verified PostgreSQL filesystem namespace and qualified budgets.
+Portal health projects its persisted phase evidence. Storage Apply remains
+unavailable until those release prerequisites are met.
+
+### Explicit runtime operating limits
+
+The collector entrypoint supplies history and local-recovery runners to its
+existing lifecycle supervisor when storage.maintenance_limits_path is configured.
+QT_STORAGE_MAINTENANCE_LIMITS_PATH is the environment override. Its default is
+null: existing deployments do not acquire new movement or backup behavior merely
+by loading this code. The saved database policy still controls eligibility,
+enablement, backup interval and rotation count. The limits file does not contain
+placement policy, credentials, another DSN or executable paths.
+
+The file is read once at worker startup from an absolute administrator-provided
+path, bounded to 128 KiB. Missing configured files, duplicate JSON fields,
+unknown fields, invalid versions and invalid limits fail before runners are
+created. Changing limits requires a worker restart. The exact top-level fields
+are schema_version (qt.storage_maintenance_limits.v1), history and recovery.
+
+| Section | Required limits |
+| --- | --- |
+| history | wal_bytes; temporary_bytes, growth_bytes_per_second and maintenance_bytes keyed by registered target ID; movement_timeout_seconds; cancellation_grace_seconds |
+| recovery | max_bytes; timeout_seconds; headroom_bytes keyed by the recent and backup target IDs; max_objects |
+
+Both operations retain their existing transaction, filesystem, capacity,
+cancellation and policy checks at execution. Runners share the existing database
+object and archive root; PostgreSQL 15 utilities use the fixed /usr/lib/postgresql/15/bin
+paths used by the qualified disposable topology. Constructing the runners does
+not inspect drives, perform schema changes, create recovery copies or activate
+policy. The same supervisor and heartbeat own schedule and status.
+
+Valid configuration proves only that limits have the required shape, not that
+they are measured or sufficient. Production values require the workload and
+capacity evidence in the release checklist. The default server image/mounts do
+not yet provide the matching PostgreSQL namespace and utilities. Configure the
+runtime only as part of the explicit preserving cutover after those deployment
+prerequisites and the one-day migration rehearsal are qualified. No live
+configuration or deployment is implied by this local implementation.

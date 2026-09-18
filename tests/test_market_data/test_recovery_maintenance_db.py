@@ -1,5 +1,6 @@
 """Due-copy policy, namespace and capacity ownership on disposable filesystems."""
 import os
+import json
 from datetime import datetime, UTC, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -14,6 +15,8 @@ from portal.backend.db.storage_target_models import StorageTargetRecord,StorageP
 from portal.backend.db.market_data_models import MarketCollectorWorkerStateRecord
 from portal.backend.service.storage_management import StorageManagementService
 from portal.backend.service.storage.recovery_maintenance import run_due_local_recovery
+from portal.backend.service.storage.maintenance_runtime import storage_maintenance_runners
+from tests.test_storage_maintenance_runtime import configuration
 from portal.backend.service.storage.recovery_copies import _identity
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from tests.test_market_data.test_fact_storage_tiers_db import storage
@@ -74,8 +77,15 @@ def test_due_recovery_owns_capacity_skips_busy_and_preserves_completed_copy(stor
     def cancellation():
         called.append(True)
         return False
-    worker=MarketStorageLifecycleSupervisor(policy=MarketStorageLifecyclePolicy(enabled=False),
-        recovery_runner=lambda *,cancelled:run(cancelled=lambda:cancellation() or cancelled()))
+    runtime_config=configuration()
+    runtime_config["recovery"]={key:args[key] for key in
+        ("max_bytes","timeout_seconds","headroom_bytes","max_objects")}
+    runtime_path=tmp_path/"maintenance-limits.json"
+    runtime_path.write_text(json.dumps(runtime_config))
+    runners=storage_maintenance_runners(storage.database,storage_root=archive,limits_path=runtime_path)
+    recovery=runners["recovery_runner"]
+    runners["recovery_runner"]=lambda *,cancelled:recovery(cancelled=lambda:cancellation() or cancelled())
+    worker=MarketStorageLifecycleSupervisor(policy=MarketStorageLifecyclePolicy(enabled=False),**runners)
     result=worker.run_once()["local_recovery"]
     assert worker.snapshot()["last_run"]["local_recovery"]==result
     assert result["state"]=="completed" and result["policy_revision"]==1 and len(called)>5
