@@ -1075,3 +1075,10 @@ retains the source records and puts newly staged identity files on HDD. It also
 requires refusal of that nonempty directory under another target identity.
 This extension awaits native qualification; it does not prepare host ownership
 or activate application services.
+
+
+The uninterrupted sequence scenario uses a separate SSD mount path outside the
+configured PostgreSQL root, matching the fixed server's working-directory layout.
+It checks that frozen results survive completion and retries cannot overwrite a
+later policy revision. The older descendant-of-PGDATA restriction incorrectly
+rejected this layout; filesystem and exact-directory identity remain required.

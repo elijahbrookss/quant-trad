@@ -138,8 +138,10 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
             raise RuntimeError("fact_header_staging_recent_window_on_history")
         source, _ = archives._root(source_root, saved["recent_device"])
         destination, _ = archives._root(destination_root, saved["history_device"])
-        if (not source.is_relative_to(Path(placement.recent.root).resolve(strict=True))
-                or not destination.is_relative_to(Path(placement.history.root).resolve(strict=True))):
+        # The server exposes the old SSD archive/working directory separately
+        # from PGDATA. _root binds it to the verified SSD filesystem; requiring
+        # it below PGDATA would reject that existing fixed server layout.
+        if not destination.is_relative_to(Path(placement.history.root).resolve(strict=True)):
             raise RuntimeError("fact_header_staging_archive_outside_fixed_target")
         headers.prepare_copy(conn, placement=placement,
                              timeout_seconds=step_limits()["movement_timeout_seconds"])

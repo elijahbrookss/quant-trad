@@ -458,3 +458,11 @@ cannot leak into the pool. A lost CREATE reply is reconciled against the existin
 catalog name, owner and directory; a nonempty unregistered directory refuses.
 The returned fixed CopyPlacement is verified by the same namespace/filesystem
 checks used by staging. Existing source rows and their relations are untouched.
+
+
+Staging admits the existing source archive root by its canonical directory and
+verified SSD filesystem identity, as the archive-copy and final-inventory
+boundaries already do. It does not require old archive files to live beneath
+PGDATA: the fixed server exposes its SSD working directory through a separate
+container path. The destination must still lie beneath the configured HDD root.
+The handoff receipt binds both exact root paths and directory identities.

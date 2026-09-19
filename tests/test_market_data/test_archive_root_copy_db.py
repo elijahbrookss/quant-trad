@@ -626,3 +626,42 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         "limits": ["tiny disposable data", "page progress is not final inventory readiness; publisher drain/root activation remain separate",
                    "no production root switch, migration-duration or hardware qualification"]
     }, sort_keys=True))
+
+
+def test_fixed_database_sequence_completes_and_refuses_later_policy_change(storage,tmp_path,monkeypatch):
+    from market_data.contracts import DatasetSeriesRequest
+    facts = [replace(storage.fact,observation_key="sequence-"+str(i),
+                     observation_time=BASE+timedelta(seconds=i)) for i in range(3)]
+    storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,facts=facts)
+    request = DatasetSeriesRequest(storage.series_id,BASE-timedelta(seconds=1),BASE+timedelta(seconds=4))
+    frozen = storage.repo.freeze_dataset([request])
+    expected = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,series_id=storage.series_id)
+    source = Path("/qt-working")/("sequence-"+uuid4().hex)/"objects"
+    source.mkdir(parents=True)
+    destination = Path("/qt-history")/("sequence-"+uuid4().hex)/"objects"
+    destination.mkdir(parents=True)
+    storage.open_day = storage.today
+    restore_tiered_v1_fixture(storage)
+    _configure_placement(storage,tmp_path,monkeypatch)
+    storage.copy_plan = replace(storage.copy_plan,history_before=storage.today-timedelta(days=30))
+    assert not source.is_relative_to(Path(storage.copy_plan.recent.root))
+    assert source.stat().st_dev == Path(storage.copy_plan.recent.root).stat().st_dev
+    options = _options(storage)
+    options["policy"] = replace(options["policy"],movement_enabled=True,backup_enabled=True)
+    options.update(placement=storage.copy_plan,source_root=source,destination_root=destination,
+                   max_page_bytes=32*1024**2,max_objects=100,max_bytes=32*1024**2,page_rows=2)
+    monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT",str(destination.parent))
+    monkeypatch.setenv("QT_MARKET_DATA_EXPECTED_UUID",storage.copy_plan.history.filesystem_uuid)
+    engine = storage.database._engine
+    completed = handoff.finish_database_handoff(engine,**options)
+    assert completed["database_sequence_complete"] and completed["policy_current"]
+    assert completed["source_preserved"] and not completed["collection_resume_authorized"]
+    assert storage.repo.read_dataset_fact_revisions(
+        dataset_id=frozen.dataset_id,series_id=storage.series_id) == expected
+    assert handoff.finish_database_handoff(engine,**options) == completed
+    with engine.begin() as conn:
+        conn.exec_driver_sql("UPDATE public.portal_storage_policy SET revision=2")
+    with pytest.raises(RuntimeError,match="policy_changed_after_activation"):
+        handoff.finish_database_handoff(engine,**options)
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT revision FROM public.portal_storage_policy WHERE id=1")) == 2

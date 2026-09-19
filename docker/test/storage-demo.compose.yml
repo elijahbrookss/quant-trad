@@ -23,6 +23,13 @@ services:
     volumes:
       - storage-demo-source:/qt-source
       - storage-demo-history:/qt-history
+      # Model the real app's separate SSD working mount path on the same
+      # filesystem. PGDATA already exists before the dependent test starts.
+      - type: volume
+        source: storage-demo-source
+        target: /qt-working
+        volume:
+          subpath: pgdata
 volumes:
   storage-demo-source:
   storage-demo-history:
