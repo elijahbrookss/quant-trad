@@ -740,3 +740,137 @@ def finish_database_handoff(engine, *, placement, policy, resource_limits,
     logger.info("fact_header_handoff_sequence_completed | runtime_activation_required=true")
     return {**outcome, **initial_policy, "database_sequence_complete": True,
             "collection_resume_authorized": False, "runtime_activation_required": True}
+
+
+def run_database_operator(request, *, engine):
+    """Run the existing sequence in the prepared PostgreSQL runtime namespace.
+
+    Internal host-held operation. The host owns publisher exclusion and must
+    retain its durable hold until runtime activation and recovery are verified.
+    This boundary never bootstraps a schema or starts application services.
+    """
+    from datetime import date
+    import os
+    import re
+    from core.storage_inventory import read_storage_inventory
+    from core.storage_targets import StoragePolicy
+
+    fields = {"schema_version", "source_revision", "source_tree_hash",
+              "database_identity", "inventory_path", "policy", "resource_limits",
+              "history_before", "source_root", "destination_root", "max_page_bytes",
+              "max_objects", "max_bytes", "page_rows", "max_duration_seconds"}
+    if (not isinstance(request, dict) or set(request) != fields
+            or request["schema_version"] != "qt.storage_database_operator.v1"
+            or os.getuid() != 70):
+        raise ValueError("storage_database_operator_request_invalid")
+    for key, pattern, variable in (
+        ("source_revision", r"[0-9a-f]{40}", "QT_IMAGE_SOURCE_REVISION"),
+        ("source_tree_hash", r"[0-9a-f]{64}", "QT_IMAGE_SOURCE_TREE_HASH"),
+    ):
+        if (not isinstance(request[key], str) or not re.fullmatch(pattern, request[key])
+                or os.environ.get(variable) != request[key]):
+            raise ValueError("storage_database_operator_source_mismatch")
+    if (not isinstance(request["database_identity"], str)
+            or not re.fullmatch(r"[0-9]{1,20}/[0-9]{1,10}", request["database_identity"])):
+        raise ValueError("storage_database_operator_identity_invalid")
+    for key in ("max_page_bytes", "max_objects", "max_bytes", "page_rows", "max_duration_seconds"):
+        if type(request[key]) is not int or request[key] <= 0:
+            raise ValueError("storage_database_operator_budget_invalid")
+    if request["page_rows"] > 256 or request["max_duration_seconds"] > 86400:
+        raise ValueError("storage_database_operator_budget_invalid")
+    for key in ("inventory_path", "source_root", "destination_root"):
+        value = request[key]
+        if (not isinstance(value, str) or not Path(value).is_absolute()
+                or Path(value).resolve(strict=True) != Path(value)):
+            raise ValueError("storage_database_operator_canonical_path_required")
+    targets = read_storage_inventory(Path(request["inventory_path"]))
+    policy = StoragePolicy.from_dict(request["policy"])
+    limits = _limits(request["resource_limits"])
+    if len(targets) != 2:
+        raise ValueError("storage_database_operator_two_targets_required")
+    reference_move._fixed_inputs(policy, limits, targets)
+    if (policy.archives != policy.history or policy.backups != policy.history
+            or not policy.movement_enabled or not policy.backup_enabled):
+        raise ValueError("storage_database_operator_fixed_policy_required")
+    by_id = {target.target_id: target for target in targets}
+    recent, history = by_id[policy.recent[0]], by_id[policy.history[0]]
+    before = date.fromisoformat(request["history_before"])
+    source, destination = Path(request["source_root"]), Path(request["destination_root"])
+    if (source.name != "objects" or destination.name != "objects"
+            or destination != Path(history.root)/"archives"/"objects"
+            or os.environ.get("MARKET_STRUCTURE_STORAGE_ROOT") != str(destination.parent)
+            or os.environ.get("MARKET_STRUCTURE_WORKING_ROOT") != str(source.parent)
+            or os.environ.get("QT_MARKET_DATA_EXPECTED_UUID") != history.filesystem_uuid
+            or os.environ.get("QT_MARKET_DATA_WORKING_EXPECTED_UUID") != recent.filesystem_uuid):
+        raise ValueError("storage_database_operator_runtime_roots_mismatch")
+    # Validate source/destination filesystem identity before creating anything.
+    capacities = {t.target_id: t.inspect(require_writable=True) for t in targets}
+    archives._root(source, capacities[recent.target_id].device_id)
+    archives._root(destination, capacities[history.target_id].device_id)
+    with engine.connect() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        conn.exec_driver_sql("SET LOCAL statement_timeout='10s'")
+        identity = conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text "
+            "FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
+        if identity != request["database_identity"]:
+            raise RuntimeError("storage_database_operator_database_changed")
+    started = monotonic()
+    placement = physical.prepare_history_tablespace(engine, recent=recent, history=history,
+        history_before=before, pg_controldata=Path("/usr/lib/postgresql/15/bin/pg_controldata"),
+        timeout_seconds=min(60, request["max_duration_seconds"]))
+    remaining = int(request["max_duration_seconds"]-(monotonic()-started))
+    if remaining < 1:
+        raise RuntimeError("storage_database_operator_time_budget_exceeded")
+    result = finish_database_handoff(engine, placement=placement, policy=policy,
+        resource_limits=limits, source_root=source, destination_root=destination,
+        max_page_bytes=request["max_page_bytes"], max_objects=request["max_objects"],
+        max_bytes=request["max_bytes"], page_rows=request["page_rows"],
+        max_duration_seconds=remaining)
+    # Return only the bounded certificate summary; no DSN or resolved secrets.
+    return {"schema_version": "qt.storage_database_operator_result.v1",
+            "request_sha256": hashlib.sha256(json.dumps(request, sort_keys=True,
+                separators=(",", ":")).encode()).hexdigest(),
+            "database_identity": identity, "database_sequence_complete": True,
+            "source_preserved": result["source_preserved"],
+            "policy_current": result["policy_current"], "plan_id": result["plan_id"],
+            "collection_resume_authorized": False, "runtime_activation_required": True}
+
+
+def database_operator_main():
+    """Private stdin request; PG_DSN remains the sole connection setting."""
+    import os
+    import sys
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+    from portal.backend.service.storage.maintenance_runtime import _unique_fields
+
+    engine = None
+    try:
+        raw = sys.stdin.buffer.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("storage_database_operator_request_too_large")
+        request = json.loads(raw, object_pairs_hook=_unique_fields)
+        dsn = os.environ.get("PG_DSN")
+        if not dsn:
+            raise ValueError("storage_database_operator_connection_missing")
+        engine = create_engine(dsn, poolclass=NullPool, hide_parameters=True,
+                               connect_args={"connect_timeout": 10})
+        result = run_database_operator(request, engine=engine)
+        print(json.dumps(result, sort_keys=True), flush=True)
+        return 0
+    except Exception as exc:
+        # Database exceptions can include SQL parameters and provider payloads.
+        # Report our explicit guard code only; other failures retain their type.
+        message = str(exc).split(":", 1)[0]
+        import re
+        code = message if re.fullmatch(r"[a-z][a-z0-9_]{1,160}", message) else type(exc).__name__
+        print("event=storage_database_operator_failed hold_required=true code="+code,
+              file=sys.stderr, flush=True)
+        return 1
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+if __name__ == "__main__":
+    raise SystemExit(database_operator_main())

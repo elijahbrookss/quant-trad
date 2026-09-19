@@ -1112,3 +1112,21 @@ Owned disposable containers, volumes, image and network were removed. Backend,
 documentation and runner-isolation checks passed after updating the isolation
 fixture to verify the additional bounded diagnostics. These small disposable
 fixtures do not establish physical throughput or the representative one-day limit.
+
+
+## Packaged database operator process
+
+The existing handoff module now exposes its internal process entry point for the
+fixed host procedure. A bounded stdin request binds the image revision/hash,
+existing database identity, two-target inventory, policy, roots and resource
+budgets. PG_DSN remains the sole connection setting. Wrong identity or root
+binding is rejected before tablespace creation. The process prepares the checked
+HDD destination and runs the existing preserving sequence without schema
+bootstrap, service startup or hold retirement. Only a bounded outcome summary
+is returned; database errors do not expose connection strings or record values.
+
+The clean native scenario now launches this packaged process and verifies
+wrong-database refusal before destination creation, preserved frozen results,
+repeat reconciliation and refusal to overwrite a later policy. This extension
+awaits qualification. Host invocation under the deployment hold and final
+runtime activation remain separate unfinished work.

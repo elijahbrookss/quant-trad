@@ -638,12 +638,13 @@ def test_fixed_database_sequence_completes_and_refuses_later_policy_change(stora
     expected = storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,series_id=storage.series_id)
     source = Path("/qt-working")/("sequence-"+uuid4().hex)/"objects"
     source.mkdir(parents=True)
-    destination = Path("/qt-history")/("sequence-"+uuid4().hex)/"objects"
+    destination = Path("/qt-history")/("sequence-"+uuid4().hex)/"archives"/"objects"
     destination.mkdir(parents=True)
     storage.open_day = storage.today
     restore_tiered_v1_fixture(storage)
     _configure_placement(storage,tmp_path,monkeypatch)
-    storage.copy_plan = replace(storage.copy_plan,history_before=storage.today-timedelta(days=30))
+    storage.copy_plan = replace(storage.copy_plan,history_before=storage.today-timedelta(days=30),
+        history=replace(storage.copy_plan.history,root=str(destination.parent.parent)))
     assert not source.is_relative_to(Path(storage.copy_plan.recent.root))
     assert source.stat().st_dev == Path(storage.copy_plan.recent.root).stat().st_dev
     options = _options(storage)
@@ -653,15 +654,49 @@ def test_fixed_database_sequence_completes_and_refuses_later_policy_change(stora
     monkeypatch.setenv("MARKET_STRUCTURE_STORAGE_ROOT",str(destination.parent))
     monkeypatch.setenv("QT_MARKET_DATA_EXPECTED_UUID",storage.copy_plan.history.filesystem_uuid)
     engine = storage.database._engine
-    completed = handoff.finish_database_handoff(engine,**options)
+    # Exercise the same packaged process boundary the host will invoke, with
+    # no schema bootstrap and no process-local patching of migration functions.
+    from dataclasses import asdict
+    import subprocess
+    import sys
+    inventory = tmp_path/"operator-inventory.json"
+    inventory.write_text(json.dumps({"schema_version":"qt.storage_inventory.v1",
+        "targets":[asdict(storage.copy_plan.recent),asdict(storage.copy_plan.history)]}))
+    with engine.connect() as conn:
+        identity = conn.scalar(text("SELECT c.system_identifier::text||'/'||d.oid::text "
+            "FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()"))
+    operator = dict(schema_version="qt.storage_database_operator.v1",
+        source_revision=os.environ["QT_IMAGE_SOURCE_REVISION"],
+        source_tree_hash=os.environ["QT_IMAGE_SOURCE_TREE_HASH"],
+        database_identity=identity,inventory_path=str(inventory),
+        policy=options["policy"].to_dict(),resource_limits=options["resource_limits"],
+        history_before=storage.copy_plan.history_before.isoformat(),
+        source_root=str(source),destination_root=str(destination),
+        max_page_bytes=options["max_page_bytes"],max_objects=options["max_objects"],
+        max_bytes=options["max_bytes"],page_rows=2,max_duration_seconds=600)
+    child_env = {**os.environ,"PG_DSN":storage.dsn,
+        "MARKET_STRUCTURE_WORKING_ROOT":str(source.parent),
+        "QT_MARKET_DATA_WORKING_EXPECTED_UUID":storage.copy_plan.recent.filesystem_uuid}
+    def invoke(payload):
+        return subprocess.run([sys.executable,"-m","scripts.db.fact_header_v2_handoff"],
+            input=json.dumps(payload),env=child_env,text=True,capture_output=True,timeout=650)
+    # Wrong-cluster admission must not even create the destination tablespace.
+    wrong = invoke({**operator,"database_identity":"1/1"})
+    assert wrong.returncode and "storage_database_operator_database_changed" in wrong.stderr
+    assert not (Path(storage.copy_plan.history.root)/"postgres").exists()
+    first = invoke(operator)
+    assert first.returncode == 0, first.stderr[-5000:]
+    completed = json.loads(first.stdout)
     assert completed["database_sequence_complete"] and completed["policy_current"]
     assert completed["source_preserved"] and not completed["collection_resume_authorized"]
     assert storage.repo.read_dataset_fact_revisions(
         dataset_id=frozen.dataset_id,series_id=storage.series_id) == expected
-    assert handoff.finish_database_handoff(engine,**options) == completed
+    again = invoke(operator)
+    assert again.returncode == 0, again.stderr[-5000:]
+    assert json.loads(again.stdout) == completed
     with engine.begin() as conn:
         conn.exec_driver_sql("UPDATE public.portal_storage_policy SET revision=2")
-    with pytest.raises(RuntimeError,match="policy_changed_after_activation"):
-        handoff.finish_database_handoff(engine,**options)
+    changed = invoke(operator)
+    assert changed.returncode and "fact_header_policy_changed_after_activation" in changed.stderr
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT revision FROM public.portal_storage_policy WHERE id=1")) == 2

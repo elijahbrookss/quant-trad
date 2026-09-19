@@ -953,3 +953,15 @@ The disposable native rehearsal uses real process UIDs, filesystem permissions
 and tmpfs mounts; only hardware audit/findmnt observations are synthetic. This
 does not qualify the live disk or transfer ownership of existing SSD files. That
 existing-data permission admission and the complete host cutover remain required.
+
+
+### Preserving database process boundary
+
+The packaged fact_header_v2_handoff module accepts a bounded internal stdin
+request for the existing checked destination preparation and database sequence.
+It requires UID 70, matching image provenance, the expected database identity,
+exact existing roots and one fixed SSD/HDD policy. It does not use application
+startup to bootstrap or migrate a schema. The host must retain the publisher
+pause and durable hold through runtime activation; successful database completion
+explicitly does not authorize collection to resume. PG_DSN remains the sole
+connection setting. Errors expose a guard code/type, never SQL values or DSNs.
