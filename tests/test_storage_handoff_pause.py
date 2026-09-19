@@ -820,7 +820,11 @@ def runtime_activation_setup(runtime_recipe_setup,operator_setup,monkeypatch):
         wait=False
         def __call__(self,action,*args,**kwargs):
             if action=="compose" and "--hash" in args:
-                return "\n".join(name+" "+pause._digest(service) for name,service in model["services"].items())
+                assert args[args.index("--file")+1] == "-"
+                resolved=json.loads(kwargs["input"])
+                assert resolved["services"]["market-data-collector"]["pid"] == "container:"+database.rows["tsdb"]["id"]
+                assert pause._load(state/pause.RUNTIME_RECIPE,max_bytes=524288)["services"]["market-data-collector"]["pid"] == "service:tsdb"
+                return "\n".join(name+" "+pause._digest(service) for name,service in resolved["services"].items())
             if action=="compose" and "up" in args:
                 self.ups+=1
                 saved=pause._load(state/pause._RUNTIME_STATE)
@@ -846,7 +850,7 @@ def runtime_activation_setup(runtime_recipe_setup,operator_setup,monkeypatch):
                         mounts.append(mount)
                     database.details[identity]=dict(id=identity,image=service["image"],
                         config=dict(Env=[key+"="+value for key,value in environment.items()],Cmd=service.get("command"),Entrypoint=None,
-                            User=service.get("user",""),Labels={"com.docker.compose.config-hash":pause._digest(service)},
+                            User=service.get("user",""),Labels={"com.docker.compose.config-hash":pause._digest(service|({"pid":"container:"+saved["binding"]["database_id"]} if name=="market-data-collector" else {}))},
                             Healthcheck={"Test":service.get("healthcheck",{}).get("test")}),
                         host=dict(PidMode="container:"+saved["binding"]["database_id"] if name=="market-data-collector" else ""),
                         mounts=mounts,networks={PROJECT+"_quanttrad":{"NetworkID":database.network_id}})

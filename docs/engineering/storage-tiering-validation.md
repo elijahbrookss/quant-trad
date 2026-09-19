@@ -1279,5 +1279,20 @@ full schema initialization. The probe now reads only its own live database
 heartbeat, with connection/query timeouts and a read-only connection. The native
 seed also now records reclaimed state for the hot partition that its reader-only
 archive helper had already removed. No retention admission guard was relaxed.
-Focused checks pass; the rebuilt combined rehearsal remains pending. No live
-recovery or deployment readiness is claimed.
+The rebuilt run made all core services healthy, completed retention planning and
+published a current-layout copy. Recovery after the injected controller stop then
+exposed Compose's resolved PID namespace changing the collector configuration
+hash. The host now calculates that hash using the already verified database
+container ID, preserving the admitted on-disk recipe and all identity checks.
+A small real-container proof confirmed the calculated hashes match. Focused
+checks pass. The corrected combined rehearsal also passed: the same migration
+worker recovered after interruption; actual API, initializer, collector and both
+portals became healthy; interrupted activation resumed the same candidate
+containers; the published current-layout recovery generation was verified before
+the release record and hold retirement. A repeated completed call was idempotent,
+and final recent/frozen reads and physical placement remained correct. The owned
+fixture was removed and its containers, volumes and network independently checked
+absent. Runtime source was b79e0130 with the recorded host PID-hash and fixture
+receipt corrections. Normal backend/docs checks passed. This is disposable
+functional evidence, not physical-drive performance, full-volume migration,
+complete capacity qualification or a live deployment.

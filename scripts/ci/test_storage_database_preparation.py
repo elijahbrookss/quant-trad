@@ -188,11 +188,14 @@ with pytest.MonkeyPatch.context() as mp:
     request=DatasetSeriesRequest(storage.series_id,tiers.BASE-timedelta(hours=1),tiers.BASE+timedelta(hours=1))
     frozen=storage.repo.freeze_dataset([request])
     expected=storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,series_id=storage.series_id)
+    with storage.database.session() as session:
+        reclaimed_bytes=session.scalar(text("SELECT pg_total_relation_size(to_regclass(:name))"),
+            {'name':'market.'+tiers.fact_partition_name(storage.today)})
     tiers._verified_cold_fixture(storage,root,mp)
     # The reader-only helper drops the hot partition. This full runtime seed
     # must also represent its completed reclamation for the retention planner.
     with storage.database.session() as session:
-        session.execute(text("UPDATE market.fact_retention_partitions SET state='reclaimed', reclaimed_at=now() WHERE storage_day=:day"), {'day':storage.today})
+        session.execute(text("UPDATE market.fact_retention_partitions SET state='reclaimed', reclaimed_at=now(), reclaimed_bytes=:bytes WHERE storage_day=:day"), {'day':storage.today,'bytes':reclaimed_bytes})
     storage.open_day=current
     tiers._placement(mp,current)
     recent=replace(storage.fact,observation_key='held-recent',observation_time=tiers.BASE+timedelta(days=2))

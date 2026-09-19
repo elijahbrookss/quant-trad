@@ -1190,8 +1190,13 @@ def run_held_runtime_handoff(state_root: Path, *, activation_timeout_seconds: in
     with _held_database_handoff(state_root, **options) as (database_result, receipt, binding):
         admission = _runtime_recipe(state_root, receipt, binding, request)
         model = _load(state_root/RUNTIME_RECIPE, max_bytes=524288)
-        hashes = _docker("compose", "--project-name", receipt["project"], "--file", str(state_root/RUNTIME_RECIPE),
-            "config", "--hash", "*")
+        # Compose hashes the collector after resolving its shared PID namespace.
+        # Bind that resolution to the already prepared database; keep the admitted
+        # on-disk recipe unchanged for startup and retry comparisons.
+        hash_model = json.loads(json.dumps(model))
+        hash_model["services"]["market-data-collector"]["pid"] = "container:" + binding["database_id"]
+        hashes = _docker("compose", "--project-name", receipt["project"], "--file", "-",
+            "config", "--hash", "*", input=json.dumps(hash_model))
         compose_hashes = dict(line.split() for line in hashes.splitlines())
         if set(compose_hashes) != set(model["services"]) or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in compose_hashes.values()):
             raise RuntimeError("storage_runtime_compose_hashes_invalid")
