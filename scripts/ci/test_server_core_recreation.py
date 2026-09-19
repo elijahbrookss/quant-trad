@@ -194,8 +194,10 @@ def main():
                 for key,(major,minor) in devices.items():
                     (udev/'data'/f'b{major}:{minor}').write_text('E:ID_FS_UUID=fixture-'+key+'\n')
             run(compose + ['up', '--detach', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '360'], env=env)
+            print('Core startup healthy; checking storage access', flush=True)
             storage_probe()
             database('CREATE TABLE public.qt_deployment_rehearsal (value text PRIMARY KEY); INSERT INTO public.qt_deployment_rehearsal VALUES (\'retained\')')
+            print('Storage access verified; checking clean collector stop', flush=True)
             first_health = worker_state()
             run(compose + ['stop', 'market-data-collector'], env=env)
             old = cid('market-data-collector')
@@ -204,6 +206,7 @@ def main():
             assert 'market_data_collector_stopped' in logs.stdout + logs.stderr
             run(compose + ['up', '--detach', '--no-build', '--pull', 'never', '--force-recreate', '--wait', '--wait-timeout', '360'], env=env)
             storage_probe()
+            print('Recreated storage access verified', flush=True)
             second_health = worker_state()
             assert cid('market-data-collector') != old, 'expected a recreated collector container'
             assert second_health['started_at'] > first_health['started_at']
@@ -218,8 +221,11 @@ def main():
                 print('PASS: fixed SSD/HDD UID70 layout, preserved legacy spool bytes, shared archive ownership, packaged operator, PostgreSQL namespace and maintenance configuration before/after recreation; synthetic filesystems and no provider enrollment', flush=True)
             print('PASS: actual QT clean bootstrap, API/frontends, initializer, collector heartbeat, clean worker stop, recreation, exact image revision, and PostgreSQL data retention; provider enrollment and network egress disabled', flush=True)
         except BaseException:
-            diagnostics = run(compose + ['logs', '--tail', '100', '--no-color'], env=env, ok=False)
-            print(diagnostics.stdout[-16000:] + diagnostics.stderr[-2000:], flush=True)
+            # Keep each service's tail: a busy backend must not displace the
+            # failing collector's error from a combined output budget.
+            for service in SERVICES:
+                diagnostics = run(compose + ['logs', '--tail', '60', '--no-color', service], env=env, ok=False)
+                print(diagnostics.stdout[-10000:] + diagnostics.stderr[-2000:], flush=True)
             raise
         finally:
             if keeper_started:
