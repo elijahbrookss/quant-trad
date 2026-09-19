@@ -1259,5 +1259,10 @@ state refuse. Pending recovery never records a successful release.
 Readiness reconciles the actual database layout/policy in the collector namespace
 and checks a published current-layout copy as well as its heartbeat. The initial
 cutover does not advertise pre-migration software as an automatic rollback.
-Real PostgreSQL readiness and combined application startup qualification are
-pending; this section does not claim deployment or live recovery readiness.
+The real PostgreSQL readiness rehearsal passed on source afaf37e3. It rejects a
+heartbeat without a published recovery copy, an old-layout copy, changed policy
+and a busy storage operation; a verified current-layout generation qualifies.
+The existing owned migration harness now extends through the real API, initializer,
+collector and both portals, with synthetic auxiliary clients and provider
+enrollment disabled. Its combined startup/interruption run is pending. No live
+recovery or deployment readiness is claimed.

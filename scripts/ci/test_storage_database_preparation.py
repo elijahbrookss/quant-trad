@@ -228,7 +228,7 @@ print('frozen_history_and_recent_placement_preserved')
 """
 
 
-def operator_rehearsal_inner(project, image, source_root, history_root, control_root):
+def operator_rehearsal_inner(project, image, source_root, history_root, control_root, *runtime_images):
     """Run the real host code in the daemon's owned-volume filesystem namespace."""
     from datetime import date
     from urllib.parse import quote
@@ -244,6 +244,9 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     for path in (history_root,history_root/'archives',history_root/'archives'/'objects'):
         os.chown(path,70,70);path.chmod(0o700)
     udev=control_root/'udev';udev.mkdir()
+    if runtime_images:
+        assert len(runtime_images)==2
+        udev=udev/'data';udev.mkdir()
     for path,uuid_value in ((source_root,'fixture-ssd'),(history_root,'fixture-hdd')):
         device=path.stat().st_dev
         (udev/f'b{os.major(device)}:{os.minor(device)}').write_text('E:ID_FS_UUID='+uuid_value+'\n')
@@ -292,6 +295,17 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     legacy_files={str(path.relative_to(working)):(path.stat(),hashlib.sha256(path.read_bytes()).hexdigest())
                   for path in working.rglob('*') if path.is_file()}
     assert any(info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600 for info,_ in legacy_files.values())
+    private=control_root/'candidate.env'
+    if runtime_images:
+        setup_env={**env,'QT_SINGLE_NODE_ENV_FILE':str(private),'QT_SINGLE_NODE_STATE_ROOT':str(state)}
+        run(['bash','scripts/automation/server_deploy.sh','init-env'],env=setup_env)
+        values=dict(line.split('=',1) for line in private.read_text().splitlines())
+        values['PG_DSN']=dsn.replace('@127.0.0.1:','@tsdb:')
+        values['POSTGRES_DB']=pg_database
+        values['POSTGRES_PASSWORD']=secret
+        for flag in ('BOOTSTRAP_MARKET_DATA','ENABLE_SCHEDULED_FACTS','ENABLE_STRUCTURED_FACTS','ENABLE_TRADE_STREAMS','ENABLE_L2_STREAMS'):
+            values['QT_SINGLE_NODE_'+flag]='false'
+        private.write_text(''.join(key+'='+value+'\n' for key,value in values.items()))
     for name in pause.STOP+tuple(v for v in pause.PASSIVE if v!='tsdb'):
         args=['docker','run','--detach','--pull','never','--network',network,'--name',project+'-'+name,
             '--read-only','--user','65534:65534','--init','--restart','unless-stopped',
@@ -299,6 +313,8 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
             '--label','com.docker.compose.oneoff=False']
         if name=='market-data-collector':
             args+=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN']
+        if runtime_images and name in pause._RUNTIME_WRITERS:
+            args+=['--mount','type=bind,source='+str(private)+',target=/app/secrets.env,readonly']
         args+=['--entrypoint','sh',client_image,'-c',"trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"]
         run(args,env={**env,'PG_DSN':dsn.replace('@127.0.0.1:','@tsdb:')})
     image_env=dict(v.split('=',1) for v in json.loads(run(['docker','image','inspect',image,'--format','{{json .Config.Env}}'],env=env).stdout))
@@ -310,7 +326,7 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
         resource_limits=dict(wal_bytes=16*1024**2,temporary_bytes={'ssd':1024**2,'hdd':0},growth_bytes_per_second={'ssd':0,'hdd':0},
             maintenance_bytes={'ssd':1024**2,'hdd':1024**2},movement_timeout_seconds=60,cancellation_grace_seconds=5),
         history_before=proof['history_before'],source_root='/app/logs/market-structure/objects',destination_root='/qt-history/archives/objects',
-        max_page_bytes=32*1024**2,max_objects=100,max_bytes=32*1024**2,page_rows=2,max_duration_seconds=600)
+        max_page_bytes=32*1024**2,max_objects=100,max_bytes=32*1024**2,page_rows=2,max_duration_seconds=1800 if runtime_images else 600)
     options=dict(project=project,source_revision=revision,history_uuid='fixture-hdd',image=image,request=request,inventory_path=str(inventory))
     input_file=control_root/'invocation.json';input_file.write_text(json.dumps(options));input_file.chmod(0o600)
     child_code="\n".join([
@@ -353,14 +369,100 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     assert not any(pause._inventory(project,operator_id=operator_id)[name]['running'] for name in pause.STOP)
     assert pause.run_held_database_handoff(state,**options)==result
     print('PASS: held host procedure recovered the same actual operator, preserved frozen archived reads and recent records, placed old headers/identities on HDD, and kept application clients paused',flush=True)
+    if runtime_images:
+        _activate_fixture_runtime(state=state,project=project,image=image,runtime_images=runtime_images,
+            options=options,recipe=recipe,working=working,history_root=history_root,
+            private=private,udev=udev,inventory=inventory,control_root=control_root,
+            env=env,client_image=client_image,application=application)
 
 
-def operator_rehearsal_outer(image):
+
+def _activate_fixture_runtime(*, state, project, image, runtime_images, options, recipe,
+        working, history_root, private, udev, inventory, control_root, env, client_image, application):
+    """Real API, initializer, collector and portals; auxiliary clients stay synthetic."""
+    limits=control_root/'maintenance.json'
+    limits.write_text(json.dumps(dict(schema_version='qt.storage_maintenance_limits.v1',
+        history=options['request']['resource_limits'],
+        recovery=dict(max_bytes=32*1024**2,timeout_seconds=120,
+            headroom_bytes={'ssd':1024**2,'hdd':1024**2},max_objects=1000))))
+    configured={**env,'QT_SERVER_ENV_FILE':str(private),'QT_COMPOSE_PROJECT_NAME':project,
+        'QT_RELEASE_REVISION':options['request']['source_revision'],
+        'QT_SOURCE_TREE_HASH':options['request']['source_tree_hash'],
+        'QT_STORAGE_HDD_ROOT':str(history_root),'QT_MARKET_DATA_ROOT':str(history_root/'archives'),
+        'QT_MARKET_DATA_EXPECTED_UUID':'fixture-hdd','QT_MARKET_DATA_WORKING_ROOT':str(working),
+        'QT_MARKET_DATA_WORKING_EXPECTED_UUID':'fixture-ssd','QT_STORAGE_INVENTORY_HOST_PATH':str(inventory),
+        'QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH':str(limits),
+        'QT_DOCKER_SOCKET_GID':str(Path('/var/run/docker.sock').stat().st_gid)}
+    for flag in ('BOOTSTRAP_MARKET_DATA','ENABLE_SCHEDULED_FACTS','ENABLE_STRUCTURED_FACTS','ENABLE_TRADE_STREAMS','ENABLE_L2_STREAMS'):
+        configured['QT_SINGLE_NODE_'+flag]='false'
+    rendered=json.loads(run(['docker','compose','--env-file',str(private),
+        '--file','docker/docker-compose.server.yml','--file','docker/docker-compose.storage-server.yml',
+        'config','--format','json'],env=configured).stdout)
+    model=json.loads(json.dumps(recipe))
+    for name in ('backend','initialize','market-data-collector','frontend','frontend-v2'):
+        service=rendered['services'][name]
+        service.pop('build',None);service.pop('ports',None)
+        service['image']=runtime_images[0] if name=='frontend' else runtime_images[1] if name=='frontend-v2' else image
+        service['pull_policy']='never';service['restart']='no'
+        for mount in service.get('volumes',[]):
+            if mount['target']=='/run/qt-host-udev':mount['source']=str(udev.parent)
+        model['services'][name]=service
+    for name in (*pause.STOP,*pause.PASSIVE):
+        if name in model['services']:continue
+        model['services'][name]=dict(image=image if name=='docker-stats' else client_image,
+            pull_policy='never',restart='no',user='65534:65534',
+            command=['python','-c','import time; time.sleep(3600)'],
+            healthcheck=dict(test=['CMD','true'],interval='1s',timeout='2s',retries=30),
+            networks={'quanttrad':{}})
+    path=state/pause.RUNTIME_RECIPE
+    path.write_text(json.dumps(model));path.chmod(0o600)
+    normalized=json.loads(run(['docker','compose','--project-name',project,'--file',str(path),
+        'config','--format','json'],env=env).stdout)
+    path.write_text(json.dumps(normalized))
+    invocation=control_root/'runtime-invocation.json'
+    invocation.write_text(json.dumps(options));invocation.chmod(0o600)
+    # Kill the actual host controller after Compose changed the real services,
+    # before it can record readiness or remove the durable hold.
+    code="\n".join([
+        'import json,os,signal,sys','from pathlib import Path','from scripts.automation import storage_handoff_pause as pause',
+        'actual=pause._docker','def interrupted(*args,**kwargs):','    result=actual(*args,**kwargs)',
+        "    if args[0]=='compose' and 'up' in args:",
+        '        os.kill(os.getpid(),signal.SIGKILL)','    return result','pause._docker=interrupted',
+        'pause.run_held_runtime_handoff(Path(sys.argv[1]),activation_timeout_seconds=600,**json.loads(Path(sys.argv[2]).read_text()))'])
+    print('Starting real candidate services and interrupting the owning activation controller',flush=True)
+    child=run([sys.executable,'-c',code,str(state),str(invocation)],
+        env={**env,'QT_STORAGE_UDEV_ROOT':str(udev)},timeout=800,ok=False)
+    try:
+        assert child.returncode==-9,child.stderr[-4000:]
+        saved=pause._load(state/pause._RUNTIME_STATE)
+        before=pause._identities(pause._inventory(project,operator_id=saved['operator_id'],activating=True))
+        assert (state/pause.HOLD).exists() and 'storage_layout=' not in (state/'release.env').read_text()
+        outcome=pause.run_held_runtime_handoff(state,activation_timeout_seconds=600,**options)
+        assert outcome['ready'] and not (state/pause.HOLD).exists()
+        after=pause._identities(pause._inventory(project,operator_id=saved['operator_id'],activating=True))
+        assert after==before,'recovery must retain the same actual candidate containers'
+        assert 'storage_layout=ssd-hdd-v1\n' in (state/'release.env').read_text()
+        assert 'previous_revision=\n' in (state/'release.env').read_text()
+        assert pause.run_held_runtime_handoff(state,activation_timeout_seconds=600,**options)==outcome
+        print(application(_VERIFY,saved['binding']['database_id']).stdout[-400:],flush=True)
+        print('PASS: real API, initializer, collector and both portals healthy; current-layout recovery copy verified; interrupted activation resumed same candidate; hold retired only after verified release; database and frozen/recent reads preserved',flush=True)
+    except Exception:
+        for service in ('backend','initialize','market-data-collector','frontend','frontend-v2'):
+            ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.project='+project,
+                '--filter','label=com.docker.compose.service='+service],env=env).stdout.split()
+            if ids:
+                detail=run(['docker','logs','--tail','20',ids[0]],env=env,ok=False)
+                print('Owned candidate '+service+': '+detail.stdout[-3000:]+detail.stderr[-3000:],flush=True)
+        raise
+
+
+def operator_rehearsal_outer(image, *runtime_images):
     """Only owned disposable volumes are visible as host storage to this fixture."""
     env={key:value for key,value in os.environ.items() if not key.startswith(('QT_','PG_','POSTGRES_','COMPOSE_'))}
     project='qt-held-operator-'+uuid.uuid4().hex[:12]
     print('Owned disposable project: '+project,flush=True)
     image=run(['docker','image','inspect',image,'--format','{{.Id}}'],env=env).stdout.strip()
+    runtime_images=tuple(run(['docker','image','inspect',value,'--format','{{.Id}}'],env=env).stdout.strip() for value in runtime_images)
     plugins=json.loads(run(['docker','info','--format','{{json .ClientInfo.Plugins}}'],env=env).stdout)
     plugin=next(value['Path'] for value in plugins if value['Name']=='compose')
     created=[]
@@ -389,7 +491,7 @@ def operator_rehearsal_outer(image):
             '--entrypoint','python','--workdir','/qt-host']
         for volume,root in zip(created,roots):
             args+=['--mount','type=volume,source='+volume+',target='+root]
-        result=run(args+[image,'scripts/ci/test_storage_database_preparation.py','--operator-inner',project,image,roots[0],history,roots[1]],env=env,timeout=1800,ok=False)
+        result=run(args+[image,'scripts/ci/test_storage_database_preparation.py','--operator-inner',project,image,roots[0],history,roots[1],*runtime_images],env=env,timeout=2400,ok=False)
         print(result.stdout[-14000:],flush=True)
         if result.returncode:
             print(result.stderr[-10000:],flush=True)
@@ -413,9 +515,11 @@ def operator_rehearsal_outer(image):
 if __name__ == "__main__":
     if len(sys.argv)==3 and sys.argv[1]=='--operator-image':
         operator_rehearsal_outer(sys.argv[2])
-    elif len(sys.argv)==7 and sys.argv[1]=='--operator-inner':
+    elif len(sys.argv)==5 and sys.argv[1]=='--runtime-images':
+        operator_rehearsal_outer(*sys.argv[2:])
+    elif len(sys.argv) in (7,9) and sys.argv[1]=='--operator-inner':
         operator_rehearsal_inner(*sys.argv[2:])
     elif len(sys.argv)==1:
         main()
     else:
-        raise SystemExit('Use --operator-image IMAGE for the owned held-operator rehearsal')
+        raise SystemExit('Use --operator-image IMAGE or --runtime-images BACKEND FRONTEND FRONTEND_V2')
