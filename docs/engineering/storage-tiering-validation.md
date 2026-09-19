@@ -1238,6 +1238,11 @@ gap where a recent pre-migration copy could postpone the first post-migration
 copy. The existing snapshot, capacity limits, archive fences and rotation remain
 in use. Old receipts remain readable but cannot certify current-layout coverage.
 
-Focused filesystem and runtime checks pass. The disposable PostgreSQL rehearsal
-for old-layout receipts, lost completion responses and clean/preserved restore
-certificates is pending. This is not deployment or proof of live recovery.
+Focused filesystem and runtime checks pass. The source-pinned disposable
+PostgreSQL rehearsal also passed: old-layout and legacy receipts trigger a new
+copy despite a recent completion time; a lost completion reply reuses the durable
+matching generation without a duplicate. Both clean-layout and preserving-v1
+restores reproduce the snapshot certificate, recent/frozen reads and historical
+metadata. The preserving case also restores new observations, corrections and
+raw archive writes made after the switch, and accepts new collection afterward.
+The owned test stack was removed. This is not deployment or live recovery proof.
