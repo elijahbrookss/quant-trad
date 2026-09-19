@@ -158,3 +158,32 @@ result, matching runtime activation and recovery before recording the layout and
 releasing the persistent host hold. Adding a file, setting a state field manually
 or rendering Compose is not authority to activate it directly. Older helpers or
 manual edits remain privileged bypasses and must be excluded by the cutover.
+
+
+## Preparing PostgreSQL access to the HDD
+
+A host-mounted HDD is not sufficient: the existing PostgreSQL container also
+needs the fixed `/qt-history` mount before it can use historical tablespaces.
+Preparation must preserve the original PostgreSQL data volume, image and cluster
+identity. Include database container preparation in the planned pause and measured
+migration duration; do not assume a zero-downtime mount change.
+
+The fixed actual-core disposable rehearsal now starts PostgreSQL without the
+history mount, writes an SSD record, stops it cleanly and creates the same-image
+replacement with the history mount and unchanged PGDATA. It kills the preparation
+controller before restart, reconciles the created replacement without recreating
+it again, then checks cluster identity and source records. It also resolves real
+historical table and index files beneath the HDD path and verifies their records
+after the full application recreation. Synthetic filesystems and an empty owned
+cluster limit this evidence; it does not authorize a live database replacement.
+
+The preserving host procedure must still bind the intended replacement durably
+under its existing hold and reconcile an interrupted container transition. The
+current pause boundary admits only its original container identities. Do not
+clear that hold or bypass its checks to use the rehearsal sequence on a server.
+
+
+The PostgreSQL readiness probe uses loopback TCP, matching application transport.
+The pinned image starts a socket-only temporary server during first initialization;
+that server must not admit application startup or database preparation as healthy.
+This correction does not weaken the requirement for a clean database stop.

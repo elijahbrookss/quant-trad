@@ -989,3 +989,30 @@ Backend, documentation and shell/configuration checks passed. The fixture cleanu
 now remembers both recovery snapshots when its refusal probe replaces the first.
 These outcomes do not establish the complete preserving cutover, physical
 performance or the one-day budget.
+
+
+## First PostgreSQL HDD mount preparation
+
+The actual-core fixed-storage fixture now exercises an SSD-only PostgreSQL
+container before introducing the HDD mount. It retains PGDATA and the pinned
+image, kills the preparation controller after replacement creation, reconciles
+that existing stopped replacement and verifies the original cluster identity and
+SSD record. A real table and its index then use an HDD tablespace and retain their
+data through application recreation. The completed native run passed: original
+cluster identity and SSD data survived interrupted preparation; real table/index
+files resolved below the history mount; application startup, private archive
+access, collector clean stop/restart, namespace observation and both storage
+records survived recreation. Owned disposable containers, volumes and networks
+were removed and checked. This does not test a live volume, a v1-to-v2 schema
+migration, host-hold retirement, disk throughput or representative elapsed time.
+
+
+The first mount-preparation rehearsal failed its clean-stop assertion. Inspection
+of the pinned image confirmed that its temporary initialization server accepts
+local socket probes while explicitly disabling TCP. The server health probe now
+requires loopback TCP before admitting readiness. Repeat native qualification
+passed with the clean-stop assertion retained. An unsupported Compose option in
+the disposable creation command was corrected separately; no runtime stop or
+recovery guard was relaxed. Backend, documentation, shell and synthetic Compose
+checks also passed. The existing host hold still needs a durable, verified
+container transition before this sequence can be part of a live preserving cutover.

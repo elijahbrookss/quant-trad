@@ -78,7 +78,9 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+        # The image uses a socket-only server during first initialization.
+        # Wait for the TCP server used by application clients.
+        - pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
       interval: 5s
       timeout: 5s
       retries: 24

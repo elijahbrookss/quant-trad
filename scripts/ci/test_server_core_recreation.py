@@ -6,6 +6,8 @@ from datetime import datetime
 import json
 import re
 import os
+import select
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,6 +30,7 @@ def main():
     parser.add_argument('--storage-layout', action='store_true', help='rehearse the fixed non-root SSD/HDD overlay on disposable volumes')
     args = parser.parse_args()
     project = 'qt-core-rehearsal-' + uuid.uuid4().hex[:12]
+    print('Owned disposable project: '+project, flush=True)
     with tempfile.TemporaryDirectory(prefix='qt-core-rehearsal-') as directory:
         root = Path(directory)
         archive = root / 'archive'
@@ -166,6 +169,77 @@ def main():
             ])
             assert 'postgres_namespace_and_maintenance_wiring_verified' in run(
                 compose + ['exec', '-T', 'market-data-collector', 'python', '-c', code], env=env).stdout
+        def prepare_database_mount():
+            if not args.storage_layout:
+                return
+            # Start the real database with its existing SSD volume only. The
+            # fixed HDD overlay must be introduced explicitly, not assumed to
+            # have been present since this disposable cluster was initialized.
+            original = json.loads(json.dumps(config))
+            original['services']['tsdb']['volumes'] = [
+                volume for volume in original['services']['tsdb']['volumes']
+                if volume.get('target') != '/qt-history']
+            path.write_text(json.dumps(original))
+            run(compose + ['up', '--detach', '--no-deps', '--no-build', '--pull', 'never',
+                           '--force-recreate', '--wait', '--wait-timeout', '180', 'tsdb'], env=env)
+            prior = cid('tsdb')
+            inspect = lambda target, field: json.loads(run(
+                ['docker', 'inspect', '--format', '{{json '+field+'}}', target], env=env).stdout)
+            old_mounts = {v['Destination']: v for v in inspect(prior, '.Mounts')}
+            assert '/qt-history' not in old_mounts
+            prior_image = inspect(prior, '.Image')
+            identity = database('SELECT system_identifier FROM pg_control_system()')
+            database("CREATE TABLE public.qt_mount_preparation_source (value text PRIMARY KEY); "
+                     "INSERT INTO public.qt_mount_preparation_source VALUES ('retained-before-hdd')")
+            run(compose + ['stop', '--timeout', '120', 'tsdb'], env=env)
+            exit_code = inspect(prior, '.State.ExitCode')
+            assert exit_code == 0, ('database preparation requires a clean stop', exit_code)
+            path.write_text(json.dumps(config))
+            print('Database preparation: same PGDATA, adding HDD; interrupting before restart', flush=True)
+            # Real controller-process death after Docker creates the replacement
+            # but before it can start it or report preparation success.
+            child_code = ("import signal,subprocess,sys; "
+                          "subprocess.run(sys.argv[1:],check=True,capture_output=True); "
+                          "print('DATABASE_CREATED',flush=True); signal.pause()")
+            with (root / 'database-preparation-child.log').open('w') as child_errors:
+                child = subprocess.Popen([sys.executable, '-c', child_code, *compose,
+                    'create', '--no-build', '--pull', 'never', '--force-recreate', 'tsdb'],
+                    cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=child_errors)
+                try:
+                    assert select.select([child.stdout], [], [], 60)[0], 'database replacement did not reach interruption point'
+                    if child.stdout.readline() != b'DATABASE_CREATED\n':
+                        raise RuntimeError('disposable_database_preparation_failed: '+(root / 'database-preparation-child.log').read_text()[-4000:])
+                finally:
+                    child.kill()
+                    child.communicate(timeout=10)
+            assert child.returncode == -9
+            prepared = cid('tsdb')
+            assert prepared != prior and inspect(prepared, '.State.Status') == 'created'
+            mounts = {v['Destination']: v for v in inspect(prepared, '.Mounts')}
+            assert mounts['/var/lib/postgresql/data'] == old_mounts['/var/lib/postgresql/data']
+            assert mounts['/qt-history']['Name'] == project+'-history'
+            assert inspect(prepared, '.Image') == prior_image
+            # Reconcile the existing replacement without forcing another create.
+            run(compose + ['create', '--no-build', '--pull', 'never', 'tsdb'], env=env)
+            assert cid('tsdb') == prepared
+            run(compose + ['up', '--detach', '--no-deps', '--no-build', '--pull', 'never',
+                           '--wait', '--wait-timeout', '180', 'tsdb'], env=env)
+            assert cid('tsdb') == prepared
+            assert database('SELECT system_identifier FROM pg_control_system()') == identity
+            assert database('SELECT value FROM public.qt_mount_preparation_source') == 'retained-before-hdd'
+            run(compose + ['exec', '-T', '--user', '70:70', 'tsdb', 'mkdir', '-m', '700', '/qt-history/mount-rehearsal'], env=env)
+            database("CREATE TABLESPACE qt_mount_rehearsal LOCATION '/qt-history/mount-rehearsal'")
+            database("CREATE TABLE public.qt_mount_preparation_history (value text) TABLESPACE qt_mount_rehearsal; "
+                     "CREATE UNIQUE INDEX qt_mount_preparation_history_idx ON public.qt_mount_preparation_history (value) "
+                     "TABLESPACE qt_mount_rehearsal; "
+                     "INSERT INTO public.qt_mount_preparation_history VALUES ('retained-on-hdd')")
+            for relation in ('qt_mount_preparation_history', 'qt_mount_preparation_history_idx'):
+                relative = database(f"SELECT pg_relation_filepath('public.{relation}')")
+                resolved = run(compose + ['exec', '-T', 'tsdb', 'readlink', '-f',
+                    '/var/lib/postgresql/data/pgdata/'+relative], env=env).stdout.strip()
+                assert resolved.startswith('/qt-history/mount-rehearsal/'), resolved
+            print('Database preparation recovered: unchanged cluster/SSD records; actual HDD table and index verified', flush=True)
+
         keeper = project + '-history-lifetime'
         keeper_started = False
         try:
@@ -193,6 +267,7 @@ def main():
                 assert devices['ssd'] != devices['hdd']
                 for key,(major,minor) in devices.items():
                     (udev/'data'/f'b{major}:{minor}').write_text('E:ID_FS_UUID=fixture-'+key+'\n')
+            prepare_database_mount()
             run(compose + ['up', '--detach', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '360'], env=env)
             print('Core startup healthy; checking storage access', flush=True)
             storage_probe()
@@ -212,6 +287,10 @@ def main():
             assert second_health['started_at'] > first_health['started_at']
             assert second_health['heartbeat_at'] >= second_health['started_at']
             assert database('SELECT value FROM public.qt_deployment_rehearsal') == 'retained'
+            if args.storage_layout:
+                assert database('SELECT value FROM public.qt_mount_preparation_source') == 'retained-before-hdd'
+                assert database('SELECT value FROM public.qt_mount_preparation_history') == 'retained-on-hdd'
+                assert database("SELECT spcname FROM pg_tablespace WHERE oid=(SELECT reltablespace FROM pg_class WHERE oid='public.qt_mount_preparation_history_idx'::regclass)") == 'qt_mount_rehearsal'
             assert run(['docker', 'inspect', '--format', '{{.State.ExitCode}}', cid('initialize')], env=env).stdout.strip() == '0'
             for service in ('backend', 'market-data-collector', 'frontend', 'frontend-v2'):
                 actual = run(compose + ['exec', '-T', service, 'printenv', 'QT_IMAGE_SOURCE_REVISION'], env=env).stdout.strip()
