@@ -390,3 +390,30 @@ HDD archive path, execution settings, operating-limit file and matching runtime.
 An activated policy alone does not prove those runtime gates are enabled, a
 backup has run, application spool drain, or acceptable physical-HDD performance.
 This remains internal until the complete cutover/recovery procedure is composed.
+
+## Fixed staging composition
+
+The internal stage_handoff entry point sequences the existing shadow header and
+raw-lookup copies, identity capture, reference preparation/validation, HDD
+reference-catalog placement and archive-page copying. It creates no new progress
+table, scheduler or generic migration framework. Each page/constraint commits
+separately under the existing migration and storage ownership fences; a retry
+uses existing cursors, queues, identities and completed archive files.
+
+SQL staging transactions now own the existing filesystem/resource watch through
+their actual commit, including the original caller statement limit. Per-step
+limits and an invocation ceiling cannot extend capture's original one-day clock.
+Copy/index allocations use explicitly supplied maintenance allowances on both
+drives; WAL, temporary space and concurrent growth keep their existing allowances.
+Existing reservations and policy reserve remain unavailable. These are observed
+per-step limits, not a reservation for the entire migration or per-producer IO
+attribution; full overlap capacity and duration still need measurement.
+
+A staging retry starts archive catalog scans from the beginning and verifies
+completed files before reuse. The pass may run while source collection continues,
+but brief nonwaiting preparation fences may refuse a busy writer. It never
+silently retries those failures, changes the active database, activates policy,
+selects the new archive root or resumes services. Completion is an observed
+staging pass, not final concurrent-inventory readiness. The owning deployment
+procedure must still pause/drain publishers, perform the separate verified
+handoff, align runtime and recovery, and retire the host hold only after success.

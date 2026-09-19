@@ -30,9 +30,7 @@ from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as ra
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
 from tests.test_market_data.test_fact_book_retention_db import _cold_book_handoff
 from tests.test_market_data.test_fact_header_copy_placement_db import _configure_placement
-from tests.test_market_data.test_fact_header_copy_db import _finish as finish_headers, _insert
-from tests.test_market_data.test_raw_mapping_copy_db import _finish as finish_raw
-from tests.test_market_data.test_fact_header_references_db import _stage_all
+from tests.test_market_data.test_fact_header_copy_db import _insert
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_archive_reference_placement_db import _options
 from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture
@@ -276,14 +274,33 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
 
     # The fixed commit boundary owns complete verification and its transaction.
     # Publisher drain/root activation and full-volume qualification stay separate.
-    finish_headers(engine)
-    finish_raw(engine)
+    staging = dict(placement=storage.copy_plan, page_rows=2, **options)
+    with pytest.raises(RuntimeError, match="storage_move_cancelled"):
+        handoff.stage_handoff(engine, cancelled=lambda: True, **staging)
+    stage_pages = [0]
+    def interrupt_staging(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO "+SCHEMA+".fact_versions "):
+            stage_pages[0] += 1
+            if stage_pages[0] == 2:
+                with engine.begin() as killer:
+                    assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),
+                        {"pid": conn.connection.driver_connection.get_backend_pid()})
+                conn.exec_driver_sql("SELECT 1")
+    event.listen(engine, "after_cursor_execute", interrupt_staging)
+    try:
+        with pytest.raises(DBAPIError):
+            handoff.stage_handoff(engine, **staging)
+    finally:
+        event.remove(engine, "after_cursor_execute", interrupt_staging)
+    assert stage_pages[0] == 2
     with engine.begin() as conn:
-        headers.enable_identity_capture(conn)
-    _stage_all(engine)
-    for relation in references.RELATIONS:
-        references.move_reference_catalog(engine, relation=relation,
-            policy=options["policy"], resource_limits=options["resource_limits"])
+        assert conn.scalar(text(f"SELECT verified_rows FROM {headers.STATE} WHERE id=1")) > 0
+        assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions")) > 0
+        _insert(conn, storage, "collection-between-staging-attempts")
+    staged = handoff.stage_handoff(engine, **staging)
+    assert staged["staging_pass_complete"] and not staged["migration_ready"]
+    assert not staged["database_handoff_committed"] and not staged["collection_resume_authorized"]
+    assert handoff.stage_handoff(engine, **staging) == staged
     inspect_options = dict(policy=options["policy"], source_root=source_objects,
                            destination_root=objects)
     activation_options = {**inspect_options, "resource_limits": options["resource_limits"]}
@@ -463,6 +480,8 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
         assert handoff.inspect_handoff(conn, **inspect_options)["receipt"] == receipt
         assert handoff.inspect_handoff_policy(conn, **inspect_options)["policy_current"]
+    with pytest.raises(RuntimeError, match="migration_attempt_expired"):
+        handoff.stage_handoff(engine, **staging)
     with engine.connect() as conn, conn.begin() as transaction:
         conn.exec_driver_sql("""
             UPDATE market.fact_storage_state SET evidence=jsonb_set(evidence,
@@ -534,6 +553,9 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
                                      facts=[recent]).inserted_count == 1
     print("QT_ARCHIVE_ROOT_COPY_RESULT="+json.dumps({
         "source_preserved": True, "interrupted_copy_reused_verified_objects": True,
+        "fixed_staging_resumed_after_real_backend_death_with_prior_pages_retained": True,
+        "collection_between_staging_attempts_preserved": True,
+        "repeated_staging_did_not_switch_or_authorize_resume": True,
         "pre_cutover_ssd_spool_recovered_to_hdd_and_canonical_v2": True,
         "recovery_interruption_retained_spool_and_retry_did_not_duplicate": True,
         "frozen_results_unchanged_after_pending_spool_recovery": True,

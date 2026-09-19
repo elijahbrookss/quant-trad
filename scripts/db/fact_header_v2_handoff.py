@@ -7,6 +7,8 @@ is changed by these internal database/policy operations.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import hashlib
 import json
 import logging
@@ -30,6 +32,156 @@ logger = logging.getLogger(__name__)
 RETAINED = "qt_fact_header_retained_v1"
 RECEIPT_VERSION = "qt.fact_header_preserving_handoff.v1"
 
+
+
+@contextmanager
+def _staging_transaction(engine, *, placement, policy, limits, deadline, cancelled):
+    """Own a fixed staging transaction and its resource watch through commit."""
+    deadline = min(deadline, monotonic()+limits["movement_timeout_seconds"])
+    watch = None
+    with engine.connect() as conn:
+        try:
+            with conn.begin():
+                previous = conn.scalar(text(
+                    "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'"))
+                if previous:
+                    deadline = min(deadline, monotonic()+previous/1000)
+                with migration_step(conn, limits["movement_timeout_seconds"]):
+                    if not conn.scalar(text("SELECT pg_try_advisory_xact_lock("
+                                            "hashtextextended('qt.storage.management.v1',0))")):
+                        raise RuntimeError("fact_header_staging_storage_busy")
+                    saved, _ = physical.observe(conn, placement)
+                    targets = (placement.recent, placement.history)
+                    if conn.scalar(text("SELECT to_regclass(:name)"),
+                                   {"name": SCHEMA+".capture"}) is not None:
+                        seconds = conn.scalar(text(f"""SELECT EXTRACT(EPOCH FROM
+                            prepared_at+interval '24 hours'-clock_timestamp())
+                            FROM {SCHEMA}.capture WHERE id=1"""))
+                        deadline = min(deadline, monotonic()+float(seconds))
+                    resources = observe_header_resources(conn, targets,
+                        pg_controldata=placement.pg_controldata,
+                        timeout_seconds=min(30, limits["movement_timeout_seconds"]))
+                    # Page/index allocations use the explicitly supplied maintenance
+                    # allowances on BOTH drives; WAL/temp/growth retain their own
+                    # allowances. No whole-copy size or free-space estimate is invented.
+                    _, floors = reference_move._budget(conn,
+                        observed={"bytes": 0, "_binding": saved}, policy=policy,
+                        limits=limits, targets=targets, resources=resources)
+                    watch = _MoveWatch(driver=conn.connection.driver_connection,
+                        targets=targets, capacity=resources.capacity, floors=floors,
+                        deadline=deadline, cancelled=cancelled,
+                        grace=limits["cancellation_grace_seconds"])
+                    watch.start()
+                    yield conn, saved
+                    watch.check()
+            watch.check()
+        except Exception as exc:
+            if watch is not None and watch.failure is not None:
+                raise RuntimeError(watch.failure) from exc
+            raise
+        finally:
+            if watch is not None:
+                watch.stop(conn)
+
+
+def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
+                  destination_root, max_page_bytes, page_rows=128,
+                  max_duration_seconds=3600, cancelled=None):
+    """Run one bounded fixed-layout staging pass; never switch or resume clients.
+
+    Existing copy cursors/queues/constraints are the only durable progress.
+    Retry rechecks those identities and reuses verified archive objects; archive
+    scans restart from the beginning. This pass is not final concurrent-inventory
+    readiness. The original capture clock, including time between retries,
+    remains the one-day limit. Callers must supply measured per-step allowances.
+    """
+    limits = _limits(resource_limits)
+    if (not isinstance(placement, physical.CopyPlacement)
+            or type(page_rows) is not int or not 1 <= page_rows <= 256
+            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
+            or type(max_page_bytes) is not int or max_page_bytes <= 0
+            or (cancelled is not None and not callable(cancelled))):
+        raise ValueError("fact_header_staging_inputs_invalid")
+    reference_move._fixed_inputs(policy, limits, (placement.recent, placement.history))
+    if (policy.archives != policy.history or policy.backups != policy.history
+            or not policy.movement_enabled or not policy.backup_enabled):
+        raise ValueError("fact_header_staging_fixed_automatic_policy_required")
+    deadline = monotonic()+max_duration_seconds
+
+    def step_limits():
+        if cancelled is not None and cancelled():
+            raise RuntimeError("storage_move_cancelled")
+        seconds = min(limits["movement_timeout_seconds"], int(deadline-monotonic()))
+        if seconds < 1:
+            raise RuntimeError("fact_header_staging_time_budget_exceeded")
+        return {**limits, "movement_timeout_seconds": seconds}
+
+    def transaction():
+        return _staging_transaction(engine, placement=placement, policy=policy,
+            limits=step_limits(), deadline=deadline, cancelled=cancelled)
+
+    def catch_up():
+        # Separate transactions retain each successful page across interruption.
+        for copier in (headers, raw):
+            while True:
+                with transaction() as (conn, _):
+                    report = copier.copy_page(conn, page_rows=page_rows,
+                                              timeout_seconds=step_limits()["movement_timeout_seconds"])
+                if report["caught_up_at_observation"]:
+                    break
+
+    logger.info("fact_header_staging_started | original_attempt_clock_preserved=true")
+    with transaction() as (conn, saved):
+        cutoff = conn.scalar(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date - :days"),
+                             {"days": policy.recent_days})
+        if placement.history_before > cutoff:
+            raise RuntimeError("fact_header_staging_recent_window_on_history")
+        source, _ = archives._root(source_root, saved["recent_device"])
+        destination, _ = archives._root(destination_root, saved["history_device"])
+        if (not source.is_relative_to(Path(placement.recent.root).resolve(strict=True))
+                or not destination.is_relative_to(Path(placement.history.root).resolve(strict=True))):
+            raise RuntimeError("fact_header_staging_archive_outside_fixed_target")
+        headers.prepare_copy(conn, placement=placement,
+                             timeout_seconds=step_limits()["movement_timeout_seconds"])
+        raw.prepare_copy(conn, timeout_seconds=step_limits()["movement_timeout_seconds"])
+    catch_up()
+    with transaction() as (conn, _):
+        headers.enable_identity_capture(conn, page_rows=page_rows,
+                                         timeout_seconds=step_limits()["movement_timeout_seconds"])
+        slots = references.inspect_references(conn)["references"]
+    for slot in slots:
+        if slot["relation"] == references.PARENT:
+            continue
+        with transaction() as (conn, _):
+            references.prepare_reference(conn, relation=slot["relation"],
+                timeout_seconds=step_limits()["movement_timeout_seconds"])
+        with transaction() as (conn, _):
+            references.validate_reference(conn, relation=slot["relation"],
+                timeout_seconds=step_limits()["movement_timeout_seconds"])
+    with transaction() as (conn, _):
+        references.adopt_payload_references(conn,
+            timeout_seconds=step_limits()["movement_timeout_seconds"])
+    for relation in reference_move.RELATIONS:
+        reference_move.move_reference_catalog(engine, relation=relation,
+            policy=policy, resource_limits=step_limits(), cancelled=cancelled)
+    for family in archives.FAMILIES:
+        cursor = ""
+        while True:
+            report = archives.copy_archive_page(engine, family=family,
+                source_root=source_root, destination_root=destination_root,
+                after_id=cursor, page_rows=page_rows, max_page_bytes=max_page_bytes,
+                policy=policy, resource_limits=step_limits(), cancelled=cancelled)
+            if report["page_objects"] < page_rows:
+                break
+            if report["next_after_id"] <= cursor:
+                raise RuntimeError("fact_header_staging_archive_cursor_did_not_advance")
+            cursor = report["next_after_id"]
+    catch_up()
+    step_limits()
+    logger.info("fact_header_staging_pass_completed | final_fenced_verification_required=true")
+    return {"staging_pass_complete": True, "source_authoritative": True,
+            "migration_ready": False, "final_fenced_verification_required": True,
+            "collection_resume_authorized": False, "database_handoff_committed": False}
 
 def _oid(conn, relation):
     return conn.scalar(text("SELECT to_regclass(:name)::oid::bigint"), {"name": relation})

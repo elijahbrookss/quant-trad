@@ -948,3 +948,19 @@ or a simulated repository.
 This is preserved-spool consumer evidence. It does not prove that all application
 publishers have drained, admit live host ownership, compose the host hold with the
 database/runtime switch, or qualify migration duration and hardware performance.
+
+### Fixed staging sequence
+
+The native preserving handoff uses stage_handoff instead of manually composing
+header/raw copy loops, reference validation and HDD catalog relocation. Cancel
+before work begins, then terminate the actual PostgreSQL backend during the
+second header page. The first committed page must remain, source collection must
+still accept another record, and a repeated staging pass must catch up without
+resetting identities or switching the active database. Repeat the completed pass
+and require it to remain non-authorizing. After the original attempt expires,
+staging must refuse even though read-only handoff inspection remains available.
+
+The subsequent commit/policy interruption, HDD-only query and pending-SSD-spool
+recovery scenarios still run. This qualifies fixed database/file staging, not
+host pause/drain, runtime activation, production service recovery or full-volume
+migration/performance acceptance.
