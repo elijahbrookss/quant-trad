@@ -646,3 +646,95 @@ def activate_handoff_policy(engine, *, policy, resource_limits, source_root, des
         finally:
             if watch is not None:
                 watch.stop(conn)
+
+
+def finish_database_handoff(engine, *, placement, policy, resource_limits,
+                            source_root, destination_root, max_page_bytes,
+                            max_objects, max_bytes, page_rows=128,
+                            max_duration_seconds=3600, cancelled=None):
+    """Finish the fixed database sequence while the host keeps publishers paused.
+
+    Retry inspects the durable database/policy outcomes before any mutation.
+    Existing progress and certificates remain the sole authority. An uncertain
+    operation raises to the host, retaining its hold; another invocation can
+    reconcile it without replaying a committed schema switch or policy change.
+    This never activates runtime mounts, resumes clients or retires that hold.
+    """
+    limits = _limits(resource_limits)
+    if (not isinstance(placement, physical.CopyPlacement)
+            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
+            or type(page_rows) is not int or not 1 <= page_rows <= 256
+            or any(type(value) is not int or value <= 0
+                   for value in (max_page_bytes, max_objects, max_bytes))
+            or (cancelled is not None and not callable(cancelled))):
+        raise ValueError("fact_header_handoff_sequence_inputs_invalid")
+    reference_move._fixed_inputs(policy, limits, (placement.recent, placement.history))
+    if (policy.archives != policy.history or policy.backups != policy.history
+            or not policy.movement_enabled or not policy.backup_enabled):
+        raise ValueError("fact_header_handoff_sequence_fixed_policy_required")
+    source_root, destination_root = Path(source_root), Path(destination_root)
+    if (not source_root.is_absolute() or not destination_root.is_absolute()
+            or source_root.resolve(strict=True) != source_root
+            or destination_root.resolve(strict=True) != destination_root):
+        raise ValueError("fact_header_handoff_sequence_canonical_roots_required")
+    deadline = monotonic() + max_duration_seconds
+    common = dict(policy=policy, source_root=source_root, destination_root=destination_root)
+
+    def check_cancelled():
+        if cancelled is not None and cancelled():
+            raise RuntimeError("storage_move_cancelled")
+
+    def remaining():
+        check_cancelled()
+        seconds = int(deadline - monotonic())
+        if seconds < 1:
+            raise RuntimeError("fact_header_handoff_sequence_time_budget_exceeded")
+        return seconds
+
+    def step_limits():
+        return {**limits, "movement_timeout_seconds":
+                min(limits["movement_timeout_seconds"], remaining())}
+
+    def inspect():
+        check_cancelled()
+        # Roll back this read-only transaction even on success: inspection is
+        # never another commit whose lost reply can obscure a mutation outcome.
+        with engine.connect() as conn:
+            transaction = conn.begin()
+            try:
+                conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                conn.execute(text("SELECT set_config('statement_timeout',:value,true)"),
+                             {"value": str(min(30, limits["movement_timeout_seconds"])*1000)})
+                outcome = inspect_handoff(conn, **common)
+                if outcome["database_handoff_committed"]:
+                    if outcome["receipt"]["binding"]["plan"] != placement.describe():
+                        raise RuntimeError("fact_header_handoff_sequence_placement_changed")
+                    initial_policy = inspect_handoff_policy(conn, **common)
+                    if initial_policy["policy_activated"] and not initial_policy["policy_current"]:
+                        raise RuntimeError("fact_header_policy_changed_after_activation")
+                else:
+                    initial_policy = {"policy_activated": False}
+                return outcome, initial_policy
+            finally:
+                transaction.rollback()
+
+    logger.info("fact_header_handoff_sequence_started | publishers_must_remain_paused=true")
+    outcome, initial_policy = inspect()
+    if not outcome["database_handoff_committed"]:
+        stage_handoff(engine, placement=placement, resource_limits=step_limits(),
+            max_page_bytes=max_page_bytes, page_rows=page_rows,
+            max_duration_seconds=remaining(), cancelled=cancelled, **common)
+        commit_handoff(engine, resource_limits=step_limits(), max_objects=max_objects,
+            max_bytes=max_bytes, page_rows=page_rows, cancelled=cancelled, **common)
+        outcome, initial_policy = inspect()
+        if not outcome["database_handoff_committed"]:
+            raise RuntimeError("fact_header_handoff_sequence_commit_not_observed")
+    if not initial_policy["policy_activated"]:
+        activate_handoff_policy(engine, resource_limits=step_limits(),
+                                cancelled=cancelled, **common)
+        outcome, initial_policy = inspect()
+    if not initial_policy.get("policy_current"):
+        raise RuntimeError("fact_header_handoff_sequence_policy_not_observed")
+    logger.info("fact_header_handoff_sequence_completed | runtime_activation_required=true")
+    return {**outcome, **initial_policy, "database_sequence_complete": True,
+            "collection_resume_authorized": False, "runtime_activation_required": True}

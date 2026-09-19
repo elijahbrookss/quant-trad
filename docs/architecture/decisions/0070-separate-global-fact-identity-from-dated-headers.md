@@ -417,3 +417,26 @@ selects the new archive root or resumes services. Completion is an observed
 staging pass, not final concurrent-inventory readiness. The owning deployment
 procedure must still pause/drain publishers, perform the separate verified
 handoff, align runtime and recovery, and retire the host hold only after success.
+
+
+## Fixed database sequence and retry
+
+The internal finish_database_handoff entry point composes the existing staging,
+verified database commit and initial-policy activation while the owning host
+procedure keeps publishers paused. It first inspects the durable certificate
+under the migration fence. Committed schema work is never staged or switched
+again; committed current policy is never reactivated. A pending outcome or a
+later policy revision fails without selecting an alternative automatically.
+
+The supplied fixed placement must match the committed receipt. Canonical archive
+roots, automatic history/local-copy policy and positive work budgets are required.
+Mutating steps share an invocation ceiling and retain their existing original
+one-day attempt clock. Read-only reconciliation may recognize an already-complete
+sequence after that attempt expired. Inspection rolls back its read-only
+transaction and introduces no new progress table or host state.
+
+Uncertain operation responses propagate to the host with the hold retained; a
+later call inspects before continuing. Database-sequence completion still requires
+runtime activation and never authorizes collector restart or host-hold retirement.
+This internal composition does not implement host namespace setup, recovery-copy
+restoration, performance qualification or a full-volume migration forecast.

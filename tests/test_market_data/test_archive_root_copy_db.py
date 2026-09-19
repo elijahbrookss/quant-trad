@@ -127,8 +127,9 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
                    max_page_bytes=32*1024**2, **_options(storage))
     options["policy"] = replace(options["policy"], movement_enabled=True, backup_enabled=True)
     staging = dict(placement=storage.copy_plan, page_rows=2, **options)
+    finishing = dict(staging, max_objects=100, max_bytes=32*1024**2)
     with pytest.raises(RuntimeError, match="storage_move_cancelled"):
-        handoff.stage_handoff(engine, cancelled=lambda: True, **staging)
+        handoff.finish_database_handoff(engine, cancelled=lambda: True, **finishing)
     with engine.connect() as conn:
         assert conn.scalar(text("SELECT to_regclass(:name)"), {"name": headers.STATE}) is None
     prepared_reply_lost = [False]
@@ -148,7 +149,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         uncertainty.setattr(raw, "prepare_copy", mark_prepared)
         uncertainty.setattr(Connection, "_commit_impl", lose_preparation_reply)
         with pytest.raises(RuntimeError, match="injected_staging_preparation_reply_lost"):
-            handoff.stage_handoff(engine, **staging)
+            handoff.finish_database_handoff(engine, **finishing)
     assert prepared_reply_lost[0]
     with engine.connect() as conn:
         original_attempt = conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1"))
@@ -311,7 +312,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     event.listen(engine, "after_cursor_execute", interrupt_staging)
     try:
         with pytest.raises(DBAPIError):
-            handoff.stage_handoff(engine, **staging)
+            handoff.finish_database_handoff(engine, **finishing)
     finally:
         event.remove(engine, "after_cursor_execute", interrupt_staging)
     assert stage_pages[0] == 2
@@ -346,7 +347,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     event.listen(engine, "after_cursor_execute", kill_mid_switch)
     try:
         with pytest.raises(DBAPIError):
-            handoff.commit_handoff(engine, **verification)
+            handoff.finish_database_handoff(engine, **finishing)
     finally:
         event.remove(engine, "after_cursor_execute", kill_mid_switch)
     assert killed[0]
@@ -361,7 +362,12 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     original_commit = Connection._commit_impl
     lost = [False]
     pending = [False]
+    def mark_switch(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("ALTER TABLE market.fact_versions SET SCHEMA"):
+            conn.info["fixture_handoff_switch"] = True
     def committed_then_lost(conn):
+        if not conn.info.pop("fixture_handoff_switch", False):
+            return original_commit(conn)
         if not lost[0]:
             # The switch is fully staged but not yet committed. A second
             # connection cannot interpret its invisible certificate as rollback.
@@ -381,10 +387,14 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         if not lost[0]:
             lost[0] = True
             raise RuntimeError("injected_handoff_commit_reply_lost")
-    with monkeypatch.context() as fault:
-        fault.setattr(Connection, "_commit_impl", committed_then_lost)
-        with pytest.raises(RuntimeError, match="injected_handoff_commit_reply_lost"):
-            handoff.commit_handoff(engine, **verification)
+    event.listen(engine, "after_cursor_execute", mark_switch)
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(Connection, "_commit_impl", committed_then_lost)
+            with pytest.raises(RuntimeError, match="injected_handoff_commit_reply_lost"):
+                handoff.finish_database_handoff(engine, **finishing)
+    finally:
+        event.remove(engine, "after_cursor_execute", mark_switch)
     assert lost[0] and pending[0]
     with engine.begin() as conn:
         conn.exec_driver_sql("SET TRANSACTION READ ONLY")
@@ -394,6 +404,15 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         receipt = committed["receipt"]
         assert receipt["verified_archive_objects"] > baseline_inventory["verified_catalog_objects"]
         assert receipt["archive_inventory_sha256"] != baseline_inventory["inventory_sha256"]
+    original_stage_handoff = handoff.stage_handoff
+    def no_replayed_schema(*args, **kwargs):
+        pytest.fail("committed database staging/switch replayed")
+    monkeypatch.setattr(handoff, "stage_handoff", no_replayed_schema)
+    monkeypatch.setattr(handoff, "commit_handoff", no_replayed_schema)
+    with pytest.raises(RuntimeError, match="sequence_placement_changed"):
+        handoff.finish_database_handoff(engine, **(finishing | {
+            "placement": replace(storage.copy_plan,
+                                 history_before=storage.copy_plan.history_before-timedelta(days=1))}))
     # First policy is a separate, supervised atomic transaction after the
     # database commit. Services remain paused; no host/runtime resume is implied.
     with engine.begin() as conn:
@@ -431,7 +450,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     event.listen(engine, "after_cursor_execute", kill_policy)
     try:
         with pytest.raises(DBAPIError):
-            handoff.activate_handoff_policy(engine, **activation_options)
+            handoff.finish_database_handoff(engine, **finishing)
     finally:
         event.remove(engine, "after_cursor_execute", kill_policy)
     assert policy_killed[0]
@@ -470,7 +489,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         with monkeypatch.context() as fault:
             fault.setattr(Connection, "_commit_impl", policy_committed_then_lost)
             with pytest.raises(RuntimeError, match="injected_policy_commit_reply_lost"):
-                handoff.activate_handoff_policy(engine, **activation_options)
+                handoff.finish_database_handoff(engine, **finishing)
     finally:
         event.remove(engine, "after_cursor_execute", mark_policy_transaction)
     assert policy_lost[0] and policy_pending[0]
@@ -482,7 +501,9 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         assert policy_result["policy_revision"] == 1 and not policy_result["collection_resume_authorized"]
         assert conn.scalar(text("SELECT count(*) FROM public.portal_storage_targets")) == 2
         assert conn.scalar(text("SELECT count(*) FROM public.portal_storage_header_tablespaces")) == 1
-    retry = handoff.activate_handoff_policy(engine, **activation_options)
+    monkeypatch.setattr(handoff, "activate_handoff_policy", no_replayed_schema)
+    retry = handoff.finish_database_handoff(engine, **finishing)
+    assert retry["database_sequence_complete"] and not retry["collection_resume_authorized"]
     assert retry["policy_revision"] == 1 and retry["plan_id"] == policy_result["plan_id"]
     with engine.connect() as conn, conn.begin() as transaction:
         conn.exec_driver_sql("UPDATE public.portal_storage_policy SET revision=2")
@@ -504,8 +525,9 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         conn.exec_driver_sql("SET LOCAL statement_timeout='30s'")
         assert handoff.inspect_handoff(conn, **inspect_options)["receipt"] == receipt
         assert handoff.inspect_handoff_policy(conn, **inspect_options)["policy_current"]
+    assert handoff.finish_database_handoff(engine, **finishing) == retry
     with pytest.raises(RuntimeError, match="migration_attempt_expired"):
-        handoff.stage_handoff(engine, **staging)
+        original_stage_handoff(engine, **staging)
     with engine.connect() as conn, conn.begin() as transaction:
         conn.exec_driver_sql("""
             UPDATE market.fact_storage_state SET evidence=jsonb_set(evidence,

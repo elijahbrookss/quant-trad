@@ -1048,3 +1048,19 @@ Backend and documentation validation passed. This step does not activate
 application roots, run the schema handoff, resume collectors or retire the hold;
 full cutover, physical performance, capacity and the one-day migration
 qualification remain release blockers.
+
+
+## Fixed database-sequence rehearsal
+
+The existing preserving fixture now calls finish_database_handoff for preparation,
+staging interruption, final-switch interruption and policy interruption. Its
+existing lost-COMMIT and pending-outcome probes remain on real database transactions.
+After a committed switch, replay of staging or schema mutation is forbidden by the
+fixture; after policy commitment, replay of activation is forbidden too.
+The supplied placement must match the recorded one. Completed reconciliation is
+also exercised after the original attempt deadline expires.
+
+This extension is implemented and awaits native qualification. It connects only
+the database steps. The full host procedure must still invoke it in the verified
+namespace, align runtime roots, establish recovery and retire the hold after
+successful activation.
