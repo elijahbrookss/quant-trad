@@ -1014,5 +1014,37 @@ requires loopback TCP before admitting readiness. Repeat native qualification
 passed with the clean-stop assertion retained. An unsupported Compose option in
 the disposable creation command was corrected separately; no runtime stop or
 recovery guard was relaxed. Backend, documentation, shell and synthetic Compose
-checks also passed. The existing host hold still needs a durable, verified
-container transition before this sequence can be part of a live preserving cutover.
+checks also passed. The durable host container transition is qualified separately below; the complete
+preserving cutover remains unfinished.
+
+
+## Durable host database replacement
+
+The fixed host hold now records PostgreSQL preparation intent, verified clean
+stop and expected replacement before each corresponding operation. The saved
+private recipe admits only the existing database image/volume/network and the
+history bind. All other clients remain stopped and unchanged. Re-entry handles
+uncertain stop/remove/create/start outcomes; completed preparation keeps the hold.
+
+Focused synthetic checks exercise changed recipes, settings, mounts, image,
+network and cluster identities, expiry, wrong filesystem UUID and duplicate-start
+prevention. Source admission also proves that the actual database directory is
+inside the retained volume and refuses pre-existing external tablespaces.
+
+The native PostgreSQL/synthetic-client rehearsal passed: the owning process was
+killed after replacement creation; re-entry started that same replacement with
+the original cluster and SQL record, the history bind remained readable, and all
+application clients stayed paused. Re-entry did not create another replacement.
+Ordinary deployment and recovery remained blocked by the retained hold. The
+fixture removed its owned containers, database volume and network.
+
+A failed earlier attempt exposed Docker reporting an unset OOM flag as null for
+a running container and false for a created container. A separate disposable probe
+confirmed that default transition. Only null/false are normalized; an explicit
+true setting still fails admission. Removal is explicitly sequenced after a
+verified clean stop and never deletes the retained named volume.
+
+Backend and documentation validation passed. This step does not activate
+application roots, run the schema handoff, resume collectors or retire the hold;
+full cutover, physical performance, capacity and the one-day migration
+qualification remain release blockers.

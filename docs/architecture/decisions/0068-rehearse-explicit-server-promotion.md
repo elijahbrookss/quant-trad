@@ -14,6 +14,7 @@ code_paths:
   - scripts/automation/pin_deploy_recovery.py
   - scripts/automation/storage_handoff_pause.py
   - scripts/ci/test_storage_handoff_pause.py
+  - scripts/ci/test_storage_database_preparation.py
   - tests/test_storage_handoff_pause.py
   - scripts/ci/test_server_promotion.py
   - scripts/ci/test_server_core_recreation.py
@@ -187,3 +188,41 @@ The PostgreSQL readiness probe uses loopback TCP, matching application transport
 The pinned image starts a socket-only temporary server during first initialization;
 that server must not admit application startup or database preparation as healthy.
 This correction does not weaken the requirement for a clean database stop.
+
+
+## Fixed database replacement under the host hold
+
+The existing `paused_storage_clients` boundary can explicitly prepare PostgreSQL
+using one private `storage-database.compose.json` file in its state directory.
+The file describes only `tsdb`, the existing external database volume/network,
+and the approved existing history bind. Build/pull, dependencies, extra services,
+fallback bind creation and unrelated mounts are refused. The recipe must preserve
+the original image, database environment and command; preparation also requires
+the corrected TCP readiness probe. Filesystem UUID admission reuses the existing
+kernel/udev check. The recipe may contain resolved secrets and must remain private.
+
+Before stopping PostgreSQL, the same durable hold records the recipe fingerprint,
+original container/image/data-volume/configuration/network binding and cluster
+identifier. Admission verifies the actual database directory is inside the
+retained volume and refuses existing external tablespaces. It records a verified
+clean source stop before explicitly removing only the old container (not its
+volume) and creating the replacement,
+then binds the admitted replacement ID before starting it. Created-container
+settings and mounts must match; Docker-generated bookkeeping labels and inactive
+endpoint IDs do not substitute for the separately checked external network.
+Application clients stay stopped with exactly their original identities throughout.
+
+Re-entry recognizes the original stopped database, the absent service during
+creation, or the expected new created/running database. It does not force another
+recreation after a replacement is observed. A single persisted ten-minute deadline
+bounds preparation mutations across retries; read-only reconciliation can still
+confirm an already-running replacement. Changed recipes, volume/image/settings,
+cluster identity, unexpected clients and unverified replacement IDs retain the
+hold and fail. Success records `database_prepared`; it does not resume applications,
+run schema migration or release the host hold.
+
+This remains an internal step for the complete preserving procedure. The native
+rehearsal uses real PostgreSQL with synthetic clients and UUID evidence, kills the
+owning preparation process after container creation, and resumes from the durable
+hold. This does not qualify physical disks, real host permission/socket access,
+the full migration/recovery procedure or its one-day elapsed budget.
