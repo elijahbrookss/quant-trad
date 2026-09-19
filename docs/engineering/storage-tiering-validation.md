@@ -1205,3 +1205,26 @@ and peak rotated recovery copies. Earlier isolated restore checks do not by
 themselves qualify the complete cutover. There is no defensible next-HDD date yet.
 Advanced placement controls, automatic rebalancing and hypothetical layouts remain
 deferred, and there is no seven-day waiting gate.
+
+
+## Fixed runtime recipe admission (local, 2026-09-19)
+
+The host handoff now admits a private, image-pinned candidate Compose snapshot
+against the prepared database and original services. It preserves the existing
+PostgreSQL volume, external network, database configuration and filesystem
+bindings, and requires matching application source images, UID 70 writers, the
+fixed SSD/HDD paths and the existing automatic history policy. Inventory and
+maintenance files are bound by content hash. Changed images, credentials, mounts,
+writer identity or resource limits refuse admission while clients remain held.
+
+Actual Compose rendering was exercised with disposable configuration, including
+literal dollar signs in synthetic credentials. The original database recipe stays
+unchanged. The database handoff context retains the deployment lock through caller
+verification; an exception releases only that transient lock, preserving the
+durable hold. No containers were started by this configuration rehearsal.
+
+This is implemented and locally tested admission, not runtime activation.
+Completing the matching service startup, fresh-layout recovery check, restart
+reconciliation and verified hold retirement remains necessary before deployment.
+The physical performance, complete capacity and representative one-day migration
+limits remain unqualified. No merge, push, server access or deployment occurred.

@@ -112,5 +112,45 @@ def main():
             print("Disposable storage-pause resources removed.", flush=True)
 
 
+def runtime_recipe_rehearsal():
+    """Real Compose normalization against synthetic inspected runtime bindings.
+
+    No containers are started. This qualifies the serialized recipe boundary,
+    not application activation, runtime health or source database correctness.
+    """
+    import pytest
+    from tests import test_storage_handoff_pause as fixture
+    env={k:v for k,v in os.environ.items() if not k.startswith(("QT_","PG_","POSTGRES_","COMPOSE_"))}
+    with tempfile.TemporaryDirectory(prefix="qt-runtime-recipe-") as folder, pytest.MonkeyPatch.context() as monkeypatch:
+        root=Path(folder)
+        database=fixture.database_setup.__wrapped__(root,monkeypatch)
+        operator=fixture.operator_setup.__wrapped__(database,root,monkeypatch)
+        state,database,worker,model,check=fixture.runtime_recipe_setup.__wrapped__(operator)
+        synthetic="postgresql+psycopg2://fixture:literal$secret@tsdb:5432/fixture"
+        collector=database.details[database.rows["market-data-collector"]["id"]]
+        collector["config"]["Env"]=["PG_DSN="+synthetic]
+        for name in pause._RUNTIME_WRITERS:
+            model["services"][name]["environment"]["PG_DSN"]=synthetic.replace("$","$$")
+        def render(path):
+            return json.loads(run(["docker","compose","--file",str(path),"config","--format","json"],env=env))
+        # Keep the prepared DB recipe untouched; only the candidate snapshot
+        # passes through Compose normalization before comparing its meaning.
+        path=state/pause.RUNTIME_RECIPE
+        path.write_text(json.dumps(model));path.chmod(0o600)
+        normalized=render(path);model.clear();model.update(normalized)
+        result=check()
+        assert result["recipe_sha256"]==pause._digest(normalized)
+        assert model["services"]["market-data-collector"]["environment"]["PG_DSN"]==synthetic.replace("$","$$")
+        again=render(path);assert again==normalized
+        assert (state/pause.HOLD).exists()
+        assert not any(database.rows[name]["running"] for name in pause.STOP)
+        print("PASS: actual Compose rendering preserves the fixed candidate recipe, existing database topology and literal-dollar synthetic credentials; admission retains the client hold; no containers were created")
+
+
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:]==["--runtime-recipe"]:
+        runtime_recipe_rehearsal()
+    elif not sys.argv[1:]:
+        main()
+    else:
+        raise SystemExit("usage: test_storage_handoff_pause.py [--runtime-recipe]")

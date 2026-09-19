@@ -118,13 +118,15 @@ def _save(path: Path, receipt: dict, *, initial: bool) -> None:
     _sync_directory(path.parent)
 
 
-def _load(path: Path) -> dict:
+def _load(path: Path, *, max_bytes: int = 65536) -> dict:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 65536:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > max_bytes:
             raise RuntimeError("storage_pause_invalid_hold_file")
-        data = stream.read(65537)
+        data = stream.read(max_bytes+1)
+        if len(data)>max_bytes:
+            raise RuntimeError("storage_pause_invalid_hold_file")
     def fields(pairs):
         result = {}
         for key, value in pairs:
@@ -235,11 +237,21 @@ def _history_filesystem(root: str, uuid: str) -> None:
         raise RuntimeError("storage_database_history_path_must_be_canonical")
 
 
+def _existing_network_recipe(networks: dict, project: str) -> bool:
+    if not isinstance(networks,dict) or set(networks)!={"quanttrad"} or not isinstance(networks["quanttrad"],dict):
+        return False
+    definition=dict(networks["quanttrad"])
+    # Compose emits this empty default when rendering an external network.
+    if definition.get("ipam")=={}:
+        definition.pop("ipam")
+    return definition=={"name":project+"_quanttrad","external":True}
+
+
 def _database_recipe(state_root: Path, project: str) -> tuple[dict, str]:
     model = _load(state_root / DATABASE_RECIPE)
     if (set(model) != {"name", "services", "networks", "volumes"} or model["name"] != project
             or set(model["services"]) != {"tsdb"}
-            or model["networks"] != {"quanttrad": {"name": project+"_quanttrad", "external": True}}):
+            or not _existing_network_recipe(model["networks"],project)):
         raise RuntimeError("storage_database_invalid_fixed_recipe")
     service = model["services"]["tsdb"]
     allowed = {"image", "command", "hostname", "init", "restart", "shm_size", "healthcheck",
@@ -542,7 +554,8 @@ def _operator_admit(identity, saved):
     return details
 
 
-def run_held_database_handoff(state_root: Path, *, project: str, source_revision: str,
+@contextmanager
+def _held_database_handoff(state_root: Path, *, project: str, source_revision: str,
                               history_uuid: str, image: str, request: dict,
                               inventory_path: Path):
     """Invoke the packaged database sequence under the existing deployment hold.
@@ -713,4 +726,177 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
         if _identities(rows)!=receipt["containers"] or any(rows[s]["running"] for s in STOP):
             raise RuntimeError("storage_database_operator_clients_changed")
         print("event=storage_database_operator_completed clients_held=true",file=sys.stderr,flush=True)
+        yield result,receipt,binding
+
+
+def run_held_database_handoff(state_root: Path, **options):
+    """Database-only boundary; retain the host hold after its lock is released."""
+    with _held_database_handoff(state_root,**options) as (result,_,__):
         return result
+
+
+RUNTIME_RECIPE = "storage-runtime.compose.json"
+_RUNTIME_WRITERS = {
+    "backend": "portal.backend.run_backend",
+    "initialize": "portal.backend.workers.single_node_initializer",
+    "market-data-collector": "portal.backend.workers.market_data_collector",
+}
+
+
+def _runtime_configuration_bytes(path: Path, maximum: int = 128*1024) -> bytes:
+    if not path.is_absolute() or path.resolve(strict=True)!=path:
+        raise RuntimeError("storage_runtime_configuration_path_changed")
+    descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(descriptor,"rb") as handle:
+        before=os.fstat(handle.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_size>maximum
+                or before.st_uid not in (0,os.getuid()) or before.st_mode & 0o022):
+            raise RuntimeError("storage_runtime_configuration_file_invalid")
+        raw=handle.read(maximum+1)
+        after=os.fstat(handle.fileno())
+        if len(raw)>maximum or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns):
+            raise RuntimeError("storage_runtime_configuration_changed_during_read")
+        return raw
+
+
+def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dict):
+    """Admit the fixed candidate before any application container is changed.
+
+    The private recipe is a rendered, image-pinned Compose snapshot using only
+    existing volumes/network. It is not a public placement or deployment API.
+    Compose preserves dollar escaping in rendered JSON; decode it only when
+    comparing with the actual environment of the stopped collector.
+    """
+    path = state_root/RUNTIME_RECIPE
+    model = _load(path,max_bytes=524288)
+    recipe_hash = _digest(model)
+    project = receipt["project"]
+    if (set(model)!={"name","services","networks","volumes"} or model["name"]!=project
+            or set(model["services"])!=set(receipt["containers"])
+            or not _existing_network_recipe(model["networks"],project)):
+        raise RuntimeError("storage_runtime_fixed_topology_required")
+    # The prepared database definition and its existing volume are retained.
+    database_model,_ = _database_recipe(state_root,project)
+    candidate_database=json.loads(json.dumps(model["services"]["tsdb"]))
+    if candidate_database.get("entrypoint") is None:
+        candidate_database.pop("entrypoint",None)
+    shared_memory=candidate_database.get("shm_size")
+    if (isinstance(shared_memory,str) and re.fullmatch(r"[0-9]{1,20}",shared_memory)
+            and type(database_model["services"]["tsdb"].get("shm_size")) is int):
+        candidate_database["shm_size"]=int(shared_memory)
+    for mount in candidate_database.get("volumes",[]):
+        if mount.get("volume")=={}:
+            mount.pop("volume")
+    if (_digest(database_model)!=receipt["database_preparation"]["recipe_sha256"]
+            or candidate_database!=database_model["services"]["tsdb"]
+            or model["volumes"].get("postgres-data")!=database_model["volumes"]["postgres-data"]):
+        raise RuntimeError("storage_runtime_database_recipe_changed")
+    old = {name:_database_details(row["id"]) for name,row in receipt["containers"].items()}
+    volume_names = {m["Name"] for details in old.values() for m in details["mounts"] if m["Type"]=="volume"}
+    if any(set(value)!={"name","external"} or value["external"] is not True
+           or value["name"] not in volume_names for value in model["volumes"].values()):
+        raise RuntimeError("storage_runtime_existing_volumes_required")
+    mounts = binding["mounts"]
+    history = mounts["/qt-history"][1]
+    working = mounts["/app/logs/market-structure"][1]
+    inventory = Path(mounts["/run/quanttrad/storage-inventory.json"][1])
+    inventory_bytes=_runtime_configuration_bytes(inventory)
+    if hashlib.sha256(inventory_bytes).hexdigest()!=binding["inventory_sha256"]:
+        raise RuntimeError("storage_runtime_inventory_changed")
+    targets = json.loads(inventory_bytes)["targets"]
+    ssd = next(t for t in targets if t["medium"]=="ssd")
+    hdd = next(t for t in targets if t["medium"]=="hdd")
+    original_env = dict(value.split("=",1) for value in old["market-data-collector"]["config"]["Env"])
+    literal = lambda value: value.replace("$$","$") if isinstance(value,str) else value
+    file_bindings = {str(inventory):binding["inventory_sha256"]}
+    pinned = {}
+    for name,service in model["services"].items():
+        image = service.get("image", "")
+        if (not re.fullmatch(r"sha256:[0-9a-f]{64}",image) or service.get("pull_policy")!="never"
+                or any(key in service for key in ("build","env_file","extends","profiles"))
+                or set(service.get("networks",{}))!={"quanttrad"}):
+            raise RuntimeError("storage_runtime_pinned_image_and_network_required")
+        pinned[name]=image
+        if name in _RUNTIME_WRITERS:
+            if (image!=binding["image"] or service.get("user")!="70:70"
+                    or service.get("command")!=["python","-m",_RUNTIME_WRITERS[name]]
+                    or service.get("entrypoint") is not None
+                    or service.get("privileged",False) or service.get("devices") or service.get("cap_add")
+                    or (name!="backend" and service.get("group_add"))):
+                raise RuntimeError("storage_runtime_writer_identity_or_command_changed")
+        if name in (*_RUNTIME_WRITERS,"docker-stats","frontend","frontend-v2"):
+            details=json.loads(_docker("image","inspect","--format",'{{json .}}',image))
+            environment=dict(value.split("=",1) for value in details["Config"].get("Env") or [])
+            if (details["Id"]!=image
+                    or environment.get("QT_IMAGE_SOURCE_REVISION")!=request["source_revision"]
+                    or environment.get("QT_IMAGE_SOURCE_TREE_HASH")!=request["source_tree_hash"]):
+                raise RuntimeError("storage_runtime_candidate_source_changed")
+        elif image!=receipt["containers"][name]["image"]:
+            raise RuntimeError("storage_runtime_unrelated_image_changed")
+        if name not in _RUNTIME_WRITERS:
+            continue
+        environment={key:literal(value) for key,value in service.get("environment",{}).items()}
+        required={"QT_DISABLE_DOTENV":"1","PG_DSN":original_env["PG_DSN"],
+            "MARKET_STRUCTURE_STORAGE_ROOT":"/qt-history/archives",
+            "MARKET_STRUCTURE_WORKING_ROOT":"/app/logs/market-structure",
+            "QT_MARKET_DATA_EXPECTED_UUID":hdd["filesystem_uuid"],
+            "QT_MARKET_DATA_WORKING_EXPECTED_UUID":ssd["filesystem_uuid"],
+            "QT_STORAGE_INVENTORY_PATH":"/run/quanttrad/storage-inventory.json",
+            "QT_STORAGE_UDEV_ROOT":"/run/qt-host-udev/data"}
+        if any(environment.get(key)!=value for key,value in required.items()):
+            raise RuntimeError("storage_runtime_writer_configuration_changed")
+        if name=="backend" and environment.get("QT_MARKET_DATA_ROOT")!=history+"/archives":
+            raise RuntimeError("storage_runtime_bot_archive_root_changed")
+        if name=="market-data-collector":
+            if (service.get("pid")!="service:tsdb"
+                    or any(environment.get(key)!="true" for key in ("QT_MARKET_DATA_LIFECYCLE_ENABLED",
+                        "QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED","QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED"))
+                    or environment.get("QT_STORAGE_MAINTENANCE_LIMITS_PATH")!="/run/quanttrad/storage-maintenance.json"):
+                raise RuntimeError("storage_runtime_automatic_policy_configuration_changed")
+        entries=service.get("volumes",[])
+        by_target={value["target"]:value for value in entries}
+        if len(entries)!=len(by_target):
+            raise RuntimeError("storage_runtime_duplicate_mount")
+        expected={"/qt-history":(history,False),"/app/logs/market-structure":(working,False),
+            "/run/quanttrad/storage-inventory.json":(str(inventory),True),
+            "/run/qt-host-udev":(str(Path(mounts["/run/qt-handoff/udev"][1]).parent),True)}
+        for target,(source,readonly) in expected.items():
+            value=by_target.get(target,{})
+            if (value.get("type")!="bind" or literal(value.get("source"))!=source
+                    or value.get("read_only",False)!=readonly
+                    or value.get("bind")!={"create_host_path":False}):
+                raise RuntimeError("storage_runtime_writer_mount_changed")
+        allowed=set(expected)|{"/var/lib/postgresql/data","/app/secrets.env"}
+        if name=="backend":
+            allowed.add("/var/run/docker.sock")
+        if name=="market-data-collector":
+            allowed.add("/run/quanttrad/storage-maintenance.json")
+        if set(by_target)!=allowed:
+            raise RuntimeError("storage_runtime_unexpected_writer_mount")
+        secret=by_target["/app/secrets.env"]
+        original_secrets=[value for value in old[name]["mounts"] if value["Destination"]=="/app/secrets.env"]
+        if (len(original_secrets)!=1 or secret.get("type")!="bind" or secret.get("read_only") is not True
+                or literal(secret.get("source"))!=original_secrets[0]["Source"]):
+            raise RuntimeError("storage_runtime_secrets_mount_changed")
+        if name=="backend":
+            socket=by_target["/var/run/docker.sock"]
+            if socket.get("type")!="bind" or literal(socket.get("source"))!="/var/run/docker.sock":
+                raise RuntimeError("storage_runtime_backend_socket_changed")
+        pgdata=by_target.get("/var/lib/postgresql/data",{})
+        if (pgdata.get("type")!="volume" or pgdata.get("source")!="postgres-data"
+                or pgdata.get("read_only",False) or pgdata.get("volume")):
+            raise RuntimeError("storage_runtime_writer_database_mount_changed")
+        if name=="market-data-collector":
+            value=by_target.get("/run/quanttrad/storage-maintenance.json",{})
+            limits_path=Path(literal(value.get("source","")))
+            if (value.get("type")!="bind" or value.get("read_only") is not True
+                    or value.get("bind")!={"create_host_path":False}
+                    or not limits_path.is_absolute() or limits_path.resolve(strict=True)!=limits_path):
+                raise RuntimeError("storage_runtime_maintenance_mount_changed")
+            raw=_runtime_configuration_bytes(limits_path)
+            if len(raw)>128*1024 or json.loads(raw).get("history")!=request["resource_limits"]:
+                raise RuntimeError("storage_runtime_history_limits_changed")
+            file_bindings[str(limits_path)]=hashlib.sha256(raw).hexdigest()
+    if _digest(_load(path,max_bytes=524288))!=recipe_hash:
+        raise RuntimeError("storage_runtime_recipe_changed_during_admission")
+    return dict(recipe_sha256=recipe_hash,images=pinned,files=file_bindings)

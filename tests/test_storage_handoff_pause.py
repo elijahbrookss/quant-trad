@@ -671,3 +671,107 @@ def test_held_database_operator_refuses_additional_ownership_capability(operator
     with pytest.raises(RuntimeError,match="operator_container_changed"):
         pause.run_held_database_handoff(state,**options)
     assert operator.starts==0 and (state/pause.HOLD).exists()
+
+
+@pytest.fixture
+def runtime_recipe_setup(operator_setup):
+    import copy
+    from pathlib import Path
+    state,database,operator,options=operator_setup
+    options["request"]["resource_limits"]={"fixture_limit":1}
+    pause.run_held_database_handoff(state,**options)
+    receipt=pause._load(state/pause.HOLD)
+    binding=pause._load(state/pause._OPERATOR_STATE)["binding"]
+    source=pause._load(state/pause.DATABASE_RECIPE)
+    model=copy.deepcopy(source)
+    secret=state/"old-secrets.env";secret.write_text("synthetic-only")
+    limits=state/"limits.json";limits.write_text(json.dumps({"history":options["request"]["resource_limits"]}))
+    for name,row in receipt["containers"].items():
+        if name=="tsdb":continue
+        details=database.details.setdefault(row["id"],dict(config={"Env":[]},mounts=[]))
+        details["mounts"].append(dict(Type="bind",Destination="/app/secrets.env",Source=str(secret),RW=False))
+        service=dict(image=row["image"],pull_policy="never",networks={"quanttrad":{}})
+        if name in (*pause._RUNTIME_WRITERS,"docker-stats","frontend","frontend-v2"):
+            service["image"]=options["image"]
+        if name in pause._RUNTIME_WRITERS:
+            environment=dict(QT_DISABLE_DOTENV="1",PG_DSN="postgresql+psycopg2://fixture:fixture-secret@tsdb:5432/fixture",
+                MARKET_STRUCTURE_STORAGE_ROOT="/qt-history/archives",MARKET_STRUCTURE_WORKING_ROOT="/app/logs/market-structure",
+                QT_MARKET_DATA_EXPECTED_UUID="fixture-hdd",QT_MARKET_DATA_WORKING_EXPECTED_UUID="fixture-ssd",
+                QT_STORAGE_INVENTORY_PATH="/run/quanttrad/storage-inventory.json",QT_STORAGE_UDEV_ROOT="/run/qt-host-udev/data")
+            service.update(user="70:70",command=["python","-m",pause._RUNTIME_WRITERS[name]],environment=environment)
+            service["volumes"]=[dict(type="volume",source="postgres-data",target="/var/lib/postgresql/data"),
+                dict(type="bind",source=str(secret),target="/app/secrets.env",read_only=True)]
+            mapping={"/qt-history":(binding["mounts"]["/qt-history"][1],False),
+                "/app/logs/market-structure":(binding["mounts"]["/app/logs/market-structure"][1],False),
+                "/run/quanttrad/storage-inventory.json":(str(options["inventory_path"]),True),
+                "/run/qt-host-udev":(str(Path(binding["mounts"]["/run/qt-handoff/udev"][1]).parent),True)}
+            if name=="backend":
+                environment["QT_MARKET_DATA_ROOT"]=binding["mounts"]["/qt-history"][1]+"/archives"
+                service["volumes"].append(dict(type="bind",source="/var/run/docker.sock",target="/var/run/docker.sock"))
+            if name=="market-data-collector":
+                service["pid"]="service:tsdb"
+                environment.update(QT_MARKET_DATA_LIFECYCLE_ENABLED="true",QT_MARKET_DATA_LIFECYCLE_EXECUTION_ENABLED="true",
+                    QT_MARKET_DATA_LIFECYCLE_CANONICAL_EXECUTION_ENABLED="true",QT_STORAGE_MAINTENANCE_LIMITS_PATH="/run/quanttrad/storage-maintenance.json")
+                mapping["/run/quanttrad/storage-maintenance.json"]=(str(limits),True)
+            for target,(host,readonly) in mapping.items():
+                service["volumes"].append(dict(type="bind",source=host,target=target,read_only=readonly,bind=dict(create_host_path=False)))
+        model["services"][name]=service
+    def check():
+        path=state/pause.RUNTIME_RECIPE
+        path.write_text(json.dumps(model));path.chmod(0o600)
+        return pause._runtime_recipe(state,receipt,binding,options["request"])
+    return state,database,operator,model,check
+
+
+def test_runtime_recipe_keeps_clients_held_and_binds_fixed_images_and_files(runtime_recipe_setup):
+    state,database,operator,model,check=runtime_recipe_setup
+    result=check()
+    assert result["recipe_sha256"]==pause._digest(model)
+    assert len(result["files"])==2
+    assert set(result["images"])==set(pause.STOP+pause.PASSIVE)
+    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert (state/pause.HOLD).exists()
+
+
+@pytest.mark.parametrize("change",["image","database","working","history","identity","policy","namespace","shadow","volumes","secrets","entrypoint","shared-memory"])
+def test_runtime_recipe_refuses_configuration_drift_before_activation(runtime_recipe_setup,change):
+    state,database,operator,model,check=runtime_recipe_setup
+    worker=model["services"]["market-data-collector"]
+    if change=="image":worker["image"]="sha256:"+"1"*64
+    elif change=="database":model["services"]["tsdb"]["hostname"]="other"
+    elif change in ("working","history"):
+        target="/app/logs/market-structure" if change=="working" else "/qt-history"
+        next(v for v in worker["volumes"] if v["target"]==target)["source"]="/wrong"
+    elif change=="identity":worker["user"]="0:0"
+    elif change=="policy":worker["environment"]["QT_MARKET_DATA_LIFECYCLE_ENABLED"]="false"
+    elif change=="namespace":worker["pid"]="host"
+    elif change=="shadow":worker["volumes"].append(dict(type="bind",source="/wrong",target="/qt-history/archives"))
+    elif change=="volumes":model["volumes"]["other"]={"name":"foreign","external":True}
+    elif change=="secrets":next(v for v in worker["volumes"] if v["target"]=="/app/secrets.env")["source"]="/wrong"
+    elif change=="entrypoint":worker["entrypoint"]=["different-command"]
+    elif change=="shared-memory":model["services"]["tsdb"]["shm_size"]="1073741825"
+    with pytest.raises(RuntimeError,match="storage_runtime"):
+        check()
+    assert (state/pause.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in pause.STOP)
+
+
+def test_fixed_network_recipe_accepts_only_empty_compose_ipam_default():
+    assert pause._existing_network_recipe({"quanttrad":{"name":PROJECT+"_quanttrad","external":True,"ipam":{}}},PROJECT)
+    assert not pause._existing_network_recipe({"quanttrad":{"name":PROJECT+"_quanttrad","external":True,"ipam":{"config":[{"subnet":"10.0.0.0/24"}]}}},PROJECT)
+
+
+def test_database_handoff_context_holds_lock_across_runtime_admission(operator_setup):
+    state,database,operator,options=operator_setup
+    with pytest.raises(RuntimeError,match="later_runtime_step_failed"):
+        with pause._held_database_handoff(state,**options) as (result,receipt,binding):
+            assert result["database_sequence_complete"] and receipt["phase"]=="database_prepared"
+            assert binding["image"]==options["image"]
+            with (state/"deployment.lock").open("w") as other:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            raise RuntimeError("later_runtime_step_failed")
+    assert (state/pause.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    with (state/"deployment.lock").open("w") as other:
+        fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)

@@ -466,3 +466,20 @@ boundaries already do. It does not require old archive files to live beneath
 PGDATA: the fixed server exposes its SSD working directory through a separate
 container path. The destination must still lie beneath the configured HDD root.
 The handoff receipt binds both exact root paths and directory identities.
+
+
+## Fixed runtime candidate boundary
+
+The internal host handoff can retain its existing deployment lock after the
+verified database sequence returns. A private candidate Compose snapshot is
+admitted against the prepared database recipe, original services and bound
+operator request. It must retain the existing PostgreSQL volume and network,
+fixed recent/history mounts, source-attested application images and explicit
+automatic maintenance configuration. Inventory and maintenance contents are
+hashed; Compose serialization defaults do not change the original database
+recipe or authorize a different mount or database setting.
+
+Admission alone does not start services or retire the durable hold. The complete
+activation must still verify current database policy, recovery coverage and
+running services, and recover the same candidate after interruption. Returning
+from the database-only entry point continues to leave clients held.
