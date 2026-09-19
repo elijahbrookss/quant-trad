@@ -226,3 +226,10 @@ rehearsal uses real PostgreSQL with synthetic clients and UUID evidence, kills t
 owning preparation process after container creation, and resumes from the durable
 hold. This does not qualify physical disks, real host permission/socket access,
 the full migration/recovery procedure or its one-day elapsed budget.
+
+
+The backend image declares revision and source-hash build arguments immediately
+before source attestation. Changing the reviewed revision therefore invalidates
+attestation without reinstalling unchanged system/Python dependencies. Attestation
+still checks the copied source hash and embeds the exact supplied revision; the
+storage-test stage continues to derive from that verified runtime.

@@ -1,9 +1,6 @@
 # syntax=docker/dockerfile:1
 FROM python:3.12.3-slim AS runtime
 
-ARG QT_SOURCE_REVISION
-ARG QT_SOURCE_TREE_HASH
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH="/app/src:${PYTHONPATH}"
@@ -45,6 +42,10 @@ COPY scripts/db/fact_header_v2_handoff.py \
 RUN install -d -o 70 -g 70 -m 0750 /app/logs /app/reports
 
 RUN chmod +x /app/scripts/qt
+
+# Revision changes invalidate attestation, not unchanged dependency installs.
+ARG QT_SOURCE_REVISION
+ARG QT_SOURCE_TREE_HASH
 
 RUN actual_hash="$(python /app/scripts/provenance/source_tree_hash.py --root /app)" \
     && test -n "$QT_SOURCE_REVISION" \
