@@ -166,9 +166,19 @@ def main():
             ])
             assert 'postgres_namespace_and_maintenance_wiring_verified' in run(
                 compose + ['exec', '-T', 'market-data-collector', 'python', '-c', code], env=env).stdout
+        keeper = project + '-history-lifetime'
+        keeper_started = False
         try:
             if args.storage_layout:
                 run(compose + ['create', '--no-build', '--pull', 'never', 'tsdb'], env=env)
+                # A Docker tmpfs volume loses its bytes after its last user
+                # stops. Keep this synthetic HDD mounted across service
+                # recreation, as a physical filesystem would remain mounted.
+                run(['docker', 'run', '--detach', '--name', keeper, '--pull', 'never',
+                     '--network', 'none', '--user', '70:70', '--entrypoint', 'python',
+                     '--volume', project+'-history:/history', 'quanttrad-backend:'+revision,
+                     '-c', 'import time; time.sleep(1800)'], env=env)
+                keeper_started = True
                 preparation = '\n'.join([
                     'import os,json; from pathlib import Path',
                     "source=Path('/source'); history=Path('/history')",
@@ -212,6 +222,8 @@ def main():
             print(diagnostics.stdout[-16000:] + diagnostics.stderr[-2000:], flush=True)
             raise
         finally:
+            if keeper_started:
+                run(['docker', 'rm', '--force', keeper], env=env)
             run(compose + ['down', '--volumes', '--remove-orphans'], env=env)
 
 
