@@ -1127,6 +1127,23 @@ is returned; database errors do not expose connection strings or record values.
 
 The clean native scenario now launches this packaged process and verifies
 wrong-database refusal before destination creation, preserved frozen results,
-repeat reconciliation and refusal to overwrite a later policy. This extension
-awaits qualification. Host invocation under the deployment hold and final
-runtime activation remain separate unfinished work.
+repeat reconciliation and refusal to overwrite a later policy. The separate-process native rehearsal passed those outcomes. Host invocation
+under the deployment hold is now implemented and under separate native
+qualification; final runtime activation remains unfinished.
+
+
+## Held host and database process rehearsal
+
+The existing host fixture now seeds actual recent, archived and frozen records,
+pauses its synthetic application clients, prepares the database history mount,
+and interrupts the controller after creation of the real pinned migration
+container. Re-entry must use that same container, preserve frozen archive reads,
+keep recent headers on SSD, put old headers and identities on HDD, and keep
+application clients paused. This combined extension is awaiting qualification.
+
+The initial attempt failed during archive fixture setup, before migration,
+because Docker Desktop's ordinary socket translated the nested daemon-volume
+bind paths to different host paths. An owned scratch-volume probe confirmed
+different device/inode identities. The fixture now uses Desktop's direct daemon
+socket; no production filesystem guard was relaxed. The translated scratch
+folders were verified as empty/probe-only and removed.

@@ -233,3 +233,33 @@ before source attestation. Changing the reviewed revision therefore invalidates
 attestation without reinstalling unchanged system/Python dependencies. Attestation
 still checks the copied source hash and embeds the exact supplied revision; the
 storage-test stage continues to derive from that verified runtime.
+
+
+## Invoking the preserving database process under the hold
+
+The existing host pause module now connects its prepared PostgreSQL replacement
+to the packaged database handoff process. It pins the candidate image by digest
+and checks its embedded source revision/hash against the reviewed request. The
+process shares only the prepared database's PID/network/data mounts, the existing
+SSD working bind, and read-only inventory, request and filesystem metadata. It
+runs as UID 70 without a Docker socket, provider settings or added capabilities.
+PG_DSN is derived from the admitted existing database/collector connection and
+passed privately through the process environment; it is not stored in the
+operator receipt or command arguments.
+
+A private intent records the request, image, database/container, mount, inventory
+and environment fingerprints before creation. Re-entry admits only that exact
+operator; all other unrecognized clients remain a refusal. Lost creation/start/
+completion replies reconcile the same container. The original execution deadline
+survives retries, and a timed-out operator is stopped with the host hold retained.
+The database's existing receipt/policy inspection still determines whether work
+has committed; container exit alone is insufficient. Success requires its bound
+result, unchanged paused clients and the retained host hold. It does not activate
+application services, record the new release or retire the hold.
+
+The native combined fixture uses disposable daemon-visible source, history and
+control volumes. Its host controller alone has Docker authority; the migration
+process uses the same restricted invocation as the host implementation. Docker
+Desktop's raw daemon socket is required by this local fixture so its nested bind
+paths refer to the owned volumes rather than translated host paths. This is a
+fixture requirement, not an additional production deployment arrangement.

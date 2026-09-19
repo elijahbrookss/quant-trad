@@ -36,8 +36,8 @@ FIELDS = {
 INSPECT = "{" + ",".join(json.dumps(k) + ":{{json (" + v + ")}}" for k, v in FIELDS.items()) + "}"
 
 
-def _docker(*args: str, timeout: int = 30) -> str:
-    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+def _docker(*args: str, timeout: int = 30, env=None) -> str:
+    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, env=env)
     # Do not expose Docker diagnostics or inspected configuration: these may
     # include credentials. Private database settings are hashed by the caller.
     if result.returncode:
@@ -47,12 +47,16 @@ def _docker(*args: str, timeout: int = 30) -> str:
     return result.stdout
 
 
-def _inventory(project: str, *, database_preparing: bool = False) -> dict[str, dict]:
+def _inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None) -> dict[str, dict]:
     ids = set()
     for selector in (f"label=com.docker.compose.project={project}", f"network={project}_quanttrad"):
         ids.update(_docker("ps", "--all", "--quiet", "--no-trunc", "--filter", selector).split())
     if not ids or len(ids) > 64 or any(not re.fullmatch(r"[0-9a-f]{64}", x) for x in ids):
         raise RuntimeError("storage_pause_invalid_container_inventory")
+    if operator_id is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", operator_id):
+            raise ValueError("storage_pause_invalid_operator_identity")
+        ids.discard(operator_id)
     rows = [json.loads(line) for line in _docker("inspect", "--format", INSPECT, *sorted(ids)).splitlines()]
     if {x["id"] for x in rows} != ids or len(rows) != len(ids):
         raise RuntimeError("storage_pause_incomplete_inspection")
@@ -294,7 +298,7 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
     return {**receipt, "phase": "preparing_database", "database_preparation": preparation}
 
 
-def _prepare_database(state_root: Path, receipt: dict) -> dict:
+def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> dict:
     preparation = receipt["database_preparation"]
     project = receipt["project"]
     path = state_root / HOLD
@@ -303,7 +307,7 @@ def _prepare_database(state_root: Path, receipt: dict) -> dict:
         if _digest(model) != preparation["recipe_sha256"] or root != preparation["history_root"]:
             raise RuntimeError("storage_database_preparation_recipe_changed")
         _history_filesystem(root, preparation["history_uuid"])
-        rows = _inventory(project, database_preparing=True)
+        rows = _inventory(project, database_preparing=True, operator_id=operator_id)
         if ({key: value for key, value in _identities(rows).items() if key != "tsdb"}
                 != {key: value for key, value in receipt["containers"].items() if key != "tsdb"}
                 or any(rows[name]["running"] for name in STOP)):
@@ -398,7 +402,7 @@ def _prepare_database(state_root: Path, receipt: dict) -> dict:
 
 @contextmanager
 def paused_storage_clients(state_root: Path, *, project: str, source_revision: str,
-                           prepare_database: bool = False, history_uuid: str = ""):
+                           prepare_database: bool = False, history_uuid: str = "", _operator_id=None):
     """Pause fixed clients and optionally prepare only the PostgreSQL HDD mount.
 
     The fixed private recipe must exist in the state directory. Initial and
@@ -430,7 +434,7 @@ def paused_storage_clients(state_root: Path, *, project: str, source_revision: s
         path = state_root / HOLD
         receipt = _load(path) if os.path.lexists(path) else None
         preparing = bool(receipt and receipt.get("phase") == "preparing_database")
-        rows = _inventory(project, database_preparing=preparing)
+        rows = _inventory(project, database_preparing=preparing, operator_id=_operator_id)
         identities = _identities(rows)
         if receipt:
             has_database = "database_preparation" in receipt
@@ -457,10 +461,10 @@ def paused_storage_clients(state_root: Path, *, project: str, source_revision: s
                                  or not re.fullmatch(r"[0-9a-f]{64}", preparation["replacement_id"])))):
                     raise RuntimeError("storage_pause_database_binding_mismatch")
                 if preparing:
-                    receipt = _prepare_database(state_root, receipt)
+                    receipt = _prepare_database(state_root, receipt, operator_id=_operator_id)
                 else:
                     # Re-enter through all physical/configuration/cluster checks.
-                    receipt = _prepare_database(state_root, {**receipt, "phase": "preparing_database"})
+                    receipt = _prepare_database(state_root, {**receipt, "phase": "preparing_database"}, operator_id=_operator_id)
                 yield receipt
                 return
         else:
@@ -483,6 +487,209 @@ def paused_storage_clients(state_root: Path, *, project: str, source_revision: s
         if prepare_database:
             receipt = _begin_database_preparation(state_root, receipt, rows, history_uuid)
             _save(path, receipt, initial=False)  # intent precedes every DB mutation
-            receipt = _prepare_database(state_root, receipt)
+            receipt = _prepare_database(state_root, receipt, operator_id=_operator_id)
         print("event=storage_handoff_clients_stopped resume_authorized=false", file=sys.stderr, flush=True)
         yield receipt
+
+
+_OPERATOR_STATE = "storage-operator-state.json"
+_OPERATOR_REQUEST = "storage-operator-request.json"
+_OPERATOR_COMMAND = ["-c", "import sys; from scripts.db.fact_header_v2_handoff import database_operator_main; "
+    "sys.stdin=open('/run/qt-handoff/request.json'); sys.exit(database_operator_main())"]
+
+
+def _operator_admit(identity, saved):
+    details = _database_details(identity)
+    config, host = details["config"], details["host"]
+    expected = saved["binding"]
+    mounted = [m for m in details["mounts"] if m["Type"] != "tmpfs"]
+    mounts = {m["Destination"]: (m["Type"], m["Source"], m["RW"]) for m in mounted}
+    admitted = (
+        details["image"] == expected["image"] and config["User"] == "70:70"
+        and config["Entrypoint"] == ["python"] and config["Cmd"] == _OPERATOR_COMMAND
+        and config["Labels"].get("qt.storage.handoff") == expected["request_sha256"]
+        and _digest(sorted(config["Env"])) == expected["environment_sha256"]
+        and host["NetworkMode"] == "container:"+expected["database_id"]
+        and host["PidMode"] == "container:"+expected["database_id"]
+        and host["ReadonlyRootfs"] and not host["Privileged"]
+        and host["RestartPolicy"]["Name"] == "no" and host["Init"] is True
+        and host["CapDrop"] == ["ALL"] and not host.get("CapAdd")
+        and not host.get("Devices") and not host.get("DeviceRequests")
+        and not host.get("GroupAdd") and not host.get("Sysctls")
+        and host["SecurityOpt"] == ["no-new-privileges"]
+        and host["Memory"] == 2*1024**3 and host["NanoCpus"] == 2*10**9
+        and host["PidsLimit"] == 128
+        and host["Tmpfs"] == {"/tmp":"rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
+                              "/app/logs":"rw,nosuid,nodev,size=16777216,uid=70,gid=70,mode=0750"}
+        and len(mounts) == len(mounted) == len(expected["mounts"])
+        and {m["Destination"] for m in details["mounts"] if m["Type"] == "tmpfs"} == set(host["Tmpfs"])
+        and mounts == {key: tuple(value) for key,value in expected["mounts"].items()}
+    )
+    if not admitted or (saved["contract"] is not None
+                        and _database_contract(details) != saved["contract"]):
+        raise RuntimeError("storage_database_operator_container_changed")
+    return details
+
+
+def run_held_database_handoff(state_root: Path, *, project: str, source_revision: str,
+                              history_uuid: str, image: str, request: dict,
+                              inventory_path: Path):
+    """Invoke the packaged database sequence under the existing deployment hold.
+
+    The operator uses the prepared database's PID/network/storage namespaces and
+    the existing SSD working bind. It has no Docker socket or provider settings.
+    An interrupted controller reuses its exact container; clients remain held on
+    every outcome. Runtime activation/hold retirement are intentionally separate.
+    """
+    from urllib.parse import quote, urlsplit, unquote
+    state_root, inventory_path = Path(state_root), Path(inventory_path)
+    if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image)
+            or not inventory_path.is_absolute() or inventory_path.resolve(strict=True) != inventory_path
+            or len(json.dumps(request)) > 65536):
+        raise ValueError("storage_database_operator_invalid_inputs")
+    request_hash = _digest(request)
+    state_path = state_root/_OPERATOR_STATE
+    saved = _load(state_path) if os.path.lexists(state_path) else None
+    name = project+"-storage-handoff"
+    found = _docker("ps", "-aq", "--no-trunc", "--filter", "name=^/"+name+"$").split()
+    if len(found) > 1 or (found and (saved is None or saved.get("container_id") not in (None,found[0]))):
+        raise RuntimeError("storage_database_operator_unexpected_container")
+    if saved is not None:
+        if (set(saved) != {"binding", "container_id", "contract", "deadline"}
+                or saved["binding"].get("request_sha256") != request_hash
+                or saved["binding"].get("image") != image
+                or saved["binding"].get("project") != project
+                or saved["binding"].get("source_revision") != source_revision
+                or (saved["container_id"] is not None and not found)):
+            raise RuntimeError("storage_database_operator_saved_binding_changed")
+        if found:
+            _operator_admit(found[0],saved)
+    with paused_storage_clients(state_root,project=project,source_revision=source_revision,
+            prepare_database=True,history_uuid=history_uuid,
+            _operator_id=found[0] if found else None) as receipt:
+        database_id = receipt["containers"]["tsdb"]["id"]
+        database = _database_details(database_id)
+        collector = _database_details(receipt["containers"]["market-data-collector"]["id"])
+        mounts = [m for m in collector["mounts"] if m["Destination"] == "/app/logs/market-structure"]
+        if len(mounts) != 1 or mounts[0]["Type"] != "bind" or not mounts[0]["RW"]:
+            raise RuntimeError("storage_database_operator_existing_working_bind_required")
+        working = mounts[0]["Source"]
+        if Path(working).resolve(strict=True) != Path(working):
+            raise RuntimeError("storage_database_operator_working_path_changed")
+        udev = Path(os.environ.get("QT_STORAGE_UDEV_ROOT", "/run/udev/data"))
+        if not udev.is_absolute() or udev.resolve(strict=True) != udev:
+            raise RuntimeError("storage_database_operator_udev_path_invalid")
+        image_details = json.loads(_docker("image", "inspect", "--format", '{{json .}}', image))
+        image_env = dict(v.split("=",1) for v in image_details["Config"].get("Env") or [])
+        if (image_details["Id"] != image
+                or image_env.get("QT_IMAGE_SOURCE_REVISION") != request.get("source_revision")
+                or image_env.get("QT_IMAGE_SOURCE_TREE_HASH") != request.get("source_tree_hash")):
+            raise RuntimeError("storage_database_operator_image_source_changed")
+        if (request.get("source_root") != "/app/logs/market-structure/objects"
+                or request.get("destination_root") != "/qt-history/archives/objects"
+                or request.get("inventory_path") != "/run/quanttrad/storage-inventory.json"):
+            raise RuntimeError("storage_database_operator_fixed_paths_required")
+        identity = _database_query(database_id,
+            "SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c "
+            "CROSS JOIN pg_database d WHERE d.datname=current_database()")
+        if identity != request.get("database_identity"):
+            raise RuntimeError("storage_database_operator_database_changed")
+        old_env = dict(v.split("=",1) for v in collector["config"].get("Env") or [])
+        db_env = dict(v.split("=",1) for v in database["config"]["Env"])
+        url = urlsplit(old_env.get("PG_DSN", ""))
+        if (url.scheme != "postgresql+psycopg2" or url.hostname not in ("tsdb","tsdb.quanttrad")
+                or url.port not in (None,5432) or url.query or url.fragment
+                or unquote(url.username or "") != db_env["POSTGRES_USER"]
+                or unquote(url.password or "") != db_env["POSTGRES_PASSWORD"]
+                or unquote(url.path.removeprefix("/")) != db_env["POSTGRES_DB"]):
+            raise RuntimeError("storage_database_operator_connection_binding_changed")
+        dsn = "postgresql+psycopg2://"+quote(db_env["POSTGRES_USER"],safe="")+":"+quote(db_env["POSTGRES_PASSWORD"],safe="")+"@127.0.0.1:5432/"+quote(db_env["POSTGRES_DB"],safe="")
+        inventory = json.loads(inventory_path.read_text())
+        targets = inventory.get("targets",[])
+        ssd = [t for t in targets if t.get("medium")=="ssd"]
+        hdd = [t for t in targets if t.get("medium")=="hdd"]
+        if (len(targets)!=2 or len(ssd)!=1 or len(hdd)!=1
+                or ssd[0].get("root")!="/var/lib/postgresql/data"
+                or hdd[0].get("root")!="/qt-history" or hdd[0].get("filesystem_uuid")!=history_uuid):
+            raise RuntimeError("storage_database_operator_inventory_changed")
+        overrides = {"PG_DSN":dsn,"QT_DISABLE_DOTENV":"1",
+            "MARKET_STRUCTURE_STORAGE_ROOT":"/qt-history/archives",
+            "MARKET_STRUCTURE_WORKING_ROOT":"/app/logs/market-structure",
+            "QT_STORAGE_UDEV_ROOT":"/run/qt-handoff/udev",
+            "QT_MARKET_DATA_EXPECTED_UUID":history_uuid,
+            "QT_MARKET_DATA_WORKING_EXPECTED_UUID":ssd[0]["filesystem_uuid"]}
+        request_path = state_root/_OPERATOR_REQUEST
+        if not saved and not os.path.lexists(request_path):
+            descriptor = os.open(request_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o444)
+            with os.fdopen(descriptor,"w") as handle:
+                handle.write(json.dumps(request,sort_keys=True));handle.flush();os.fsync(handle.fileno())
+            _sync_directory(state_root)
+        if (request_path.is_symlink() or request_path.stat().st_uid != os.getuid()
+                or stat.S_IMODE(request_path.stat().st_mode)!=0o444
+                or _digest(json.loads(request_path.read_text()))!=request_hash):
+            raise RuntimeError("storage_database_operator_request_file_changed")
+        expected_mounts = {m["Destination"]:[m["Type"],m["Source"],m["RW"]] for m in database["mounts"]}
+        binds = {"/app/logs/market-structure":working,
+                 "/run/quanttrad/storage-inventory.json":str(inventory_path),
+                 "/run/qt-handoff/request.json":str(request_path),"/run/qt-handoff/udev":str(udev)}
+        expected_mounts.update({target:["bind",source,False] for target,source in binds.items()})
+        expected_env = {**image_env,**overrides}
+        binding = dict(project=project,source_revision=source_revision,image=image,
+            request_sha256=request_hash,database_id=database_id,mounts=expected_mounts,
+            inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
+            environment_sha256=_digest(sorted(k+"="+v for k,v in expected_env.items())))
+        if saved is None:
+            saved = dict(binding=binding,container_id=None,contract=None,
+                         deadline=time.time()+request["max_duration_seconds"]+60)
+            _save(state_path,saved,initial=True)
+        elif saved["binding"] != binding:
+            raise RuntimeError("storage_database_operator_saved_binding_changed")
+        remaining = int(saved["deadline"]-time.time())
+        if remaining < 1:
+            if found:
+                _docker("stop","--time","30",found[0],timeout=45)
+            raise RuntimeError("storage_database_operator_deadline_expired")
+        if not found:
+            args = ["create","--name",name,"--pull","never","--user","70:70","--init",
+                "--restart","no","--read-only","--cap-drop","ALL","--security-opt","no-new-privileges",
+                "--memory","2g","--cpus","2","--pids-limit","128",
+                "--network","container:"+database_id,"--pid","container:"+database_id,
+                "--volumes-from",database_id,"--entrypoint","python",
+                "--label","qt.storage.handoff="+request_hash,
+                "--tmpfs","/tmp:rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
+                "--tmpfs","/app/logs:rw,nosuid,nodev,size=16777216,uid=70,gid=70,mode=0750"]
+            for target,source in binds.items():
+                if "," in source:
+                    raise ValueError("storage_database_operator_mount_path_invalid")
+                args += ["--mount","type=bind,source="+source+",target="+target+",readonly"]
+            for key,value in overrides.items():
+                args += ["--env",key if key=="PG_DSN" else key+"="+value]
+            found = [_docker(*args,image,*_OPERATOR_COMMAND,env={**os.environ,"PG_DSN":dsn}).strip()]
+        details = _operator_admit(found[0],saved)
+        saved.update(container_id=found[0],contract=_database_contract(details))
+        _save(state_path,saved,initial=False)
+        state = json.loads(_docker("inspect","--format","{{json .State}}",found[0]))
+        if state["OOMKilled"] or state["Paused"] or state["Restarting"]:
+            raise RuntimeError("storage_database_operator_unstable")
+        if not state["Running"]:
+            _docker("start",found[0])
+        print("event=storage_database_operator_waiting clients_held=true",file=sys.stderr,flush=True)
+        try:
+            status = _docker("wait",found[0],timeout=remaining).strip()
+        except subprocess.TimeoutExpired:
+            _docker("stop","--time","30",found[0],timeout=45)
+            raise RuntimeError("storage_database_operator_deadline_expired") from None
+        _operator_admit(found[0],saved)
+        if status != "0":
+            raise RuntimeError("storage_database_operator_failed_hold_retained")
+        result = json.loads(_docker("logs","--tail","1",found[0]).strip())
+        if (result.get("schema_version")!="qt.storage_database_operator_result.v1"
+                or result.get("request_sha256")!=request_hash or result.get("database_identity")!=identity
+                or any(result.get(key) is not True for key in ("database_sequence_complete","source_preserved","policy_current","runtime_activation_required"))
+                or result.get("collection_resume_authorized") is not False):
+            raise RuntimeError("storage_database_operator_outcome_invalid")
+        rows = _inventory(project,operator_id=found[0])
+        if _identities(rows)!=receipt["containers"] or any(rows[s]["running"] for s in STOP):
+            raise RuntimeError("storage_database_operator_clients_changed")
+        print("event=storage_database_operator_completed clients_held=true",file=sys.stderr,flush=True)
+        return result

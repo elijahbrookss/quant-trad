@@ -161,5 +161,228 @@ def main():
             print("Owned disposable host-hold resources removed.", flush=True)
 
 
+
+
+_SEED = r"""
+import contextlib,hashlib,json,os
+from dataclasses import replace,asdict,is_dataclass
+from datetime import timedelta
+from pathlib import Path
+os.environ['MARKET_STRUCTURE_STORAGE_ROOT']='/app/logs/market-structure'
+os.environ['QT_MARKET_DATA_EXPECTED_UUID']='fixture-ssd'
+import pytest
+from sqlalchemy import text
+from market_data.contracts import DatasetSeriesRequest
+from tests.test_market_data import test_fact_storage_tiers_db as tiers
+from tests.test_market_data.tiered_v1_fixture import restore_tiered_v1_fixture
+root=Path('/app/logs/market-structure')
+with pytest.MonkeyPatch.context() as mp:
+    mp.setattr(tiers,'fresh_migration_database',lambda label:contextlib.nullcontext(os.environ['PG_DSN']))
+    fixture=tiers.storage.__wrapped__(mp)
+    storage=next(fixture)
+    current=storage.today
+    storage.today=current-timedelta(days=31)
+    tiers._placement(mp,storage.today)
+    facts=[replace(storage.fact,observation_key='held-'+str(i),observation_time=tiers.BASE+timedelta(seconds=i)) for i in range(3)]
+    storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,facts=facts)
+    request=DatasetSeriesRequest(storage.series_id,tiers.BASE-timedelta(hours=1),tiers.BASE+timedelta(hours=1))
+    frozen=storage.repo.freeze_dataset([request])
+    expected=storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,series_id=storage.series_id)
+    tiers._verified_cold_fixture(storage,root,mp)
+    storage.open_day=current
+    tiers._placement(mp,current)
+    recent=replace(storage.fact,observation_key='held-recent',observation_time=tiers.BASE+timedelta(days=2))
+    storage.repo.ingest_facts(series_id=storage.series_id,source_id=storage.source_id,facts=[recent])
+    restore_tiered_v1_fixture(storage)
+    proof=dict(dataset_id=frozen.dataset_id,series_id=storage.series_id,
+        frozen_sha256=hashlib.sha256(json.dumps(expected,sort_keys=True,default=lambda v:asdict(v) if is_dataclass(v) else str(v)).encode()).hexdigest(),
+        history_before=(current-timedelta(days=30)).isoformat(),old_day=storage.today.isoformat(),recent_day=current.isoformat())
+    (root/'held-proof.json').write_text(json.dumps(proof))
+    fixture.close()
+print('owned_v1_data_seeded')
+"""
+
+_VERIFY = r"""
+import hashlib,json,os
+from dataclasses import asdict,is_dataclass
+from pathlib import Path
+from sqlalchemy import text
+from portal.backend.db.session import Database
+from portal.backend.service.storage.repos import market_data
+proof=json.loads(Path('/app/logs/market-structure/held-proof.json').read_text())
+database=Database(os.environ['PG_DSN'])
+assert database.ensure_schema(),str(database.last_error)
+market_data.db=database
+repo=market_data.PostgresMarketDataRepository()
+rows=repo.read_dataset_fact_revisions(dataset_id=proof['dataset_id'],series_id=proof['series_id'])
+assert hashlib.sha256(json.dumps(rows,sort_keys=True,default=lambda v:asdict(v) if is_dataclass(v) else str(v)).encode()).hexdigest()==proof['frozen_sha256']
+with database.session() as session:
+    def disk(relation):
+        return session.scalar(text('SELECT COALESCE(NULLIF(reltablespace,0),1663) FROM pg_class WHERE oid=to_regclass(:name)'),{'name':relation})
+    assert disk('market.fact_identities')!=1663
+    assert disk('market.fact_versions_'+proof['old_day'].replace('-',''))!=1663
+    assert disk('market.fact_versions_'+proof['recent_day'].replace('-',''))==1663
+    assert session.scalar(text('SELECT count(*) FROM market.fact_versions'))==4
+    assert session.scalar(text("SELECT count(*) FROM market.fact_versions WHERE observation_key='held-recent'"))==1
+print('frozen_history_and_recent_placement_preserved')
+"""
+
+
+def operator_rehearsal_inner(project, image, source_root, history_root, control_root):
+    """Run the real host code in the daemon's owned-volume filesystem namespace."""
+    from datetime import date
+    from urllib.parse import quote
+    source_root,history_root,control_root=map(Path,(source_root,history_root,control_root))
+    env={key:value for key,value in os.environ.items() if not key.startswith(('QT_','PG_','POSTGRES_','COMPOSE_'))}
+    state=control_root/'state';state.mkdir(mode=0o700)
+    working=source_root/'working';working.mkdir(mode=0o700);os.chown(working,70,70)
+    (history_root/'archives'/'objects').mkdir(parents=True)
+    for path in (history_root,history_root/'archives',history_root/'archives'/'objects'):
+        os.chown(path,70,70);path.chmod(0o700)
+    udev=control_root/'udev';udev.mkdir()
+    for path,uuid_value in ((source_root,'fixture-ssd'),(history_root,'fixture-hdd')):
+        device=path.stat().st_dev
+        (udev/f'b{os.major(device)}:{os.minor(device)}').write_text('E:ID_FS_UUID='+uuid_value+'\n')
+    assert source_root.stat().st_dev!=history_root.stat().st_dev
+    os.environ['QT_STORAGE_UDEV_ROOT']=str(udev)
+    inventory=control_root/'inventory.json'
+    inventory.write_text(json.dumps(dict(schema_version='qt.storage_inventory.v1',targets=[
+        dict(target_id='ssd',label='Recent',filesystem_uuid='fixture-ssd',root='/var/lib/postgresql/data',medium='ssd'),
+        dict(target_id='hdd',label='History',filesystem_uuid='fixture-hdd',root='/qt-history',medium='hdd')])))
+    pg_image=run(['docker','image','inspect','quanttrad-postgres:2.14.2-pg15','--format','{{.Id}}'],env=env).stdout.strip()
+    pg_database='qt_migration_held_'+uuid.uuid4().hex[:12]
+    secret=uuid.uuid4().hex
+    revision='a'*40
+    (state/'release.env').write_text('current_revision='+revision+'\n')
+    network=project+'_quanttrad'
+    service=dict(image=pg_image,pull_policy='never',hostname='tsdb.quanttrad',init=True,restart='no',shm_size=1073741824,
+        command=['postgres','-c','shared_buffers=64MB','-c','max_connections=30'],
+        environment=dict(POSTGRES_DB=pg_database,POSTGRES_USER='quanttrad',POSTGRES_PASSWORD=secret,PGDATA='/var/lib/postgresql/data/pgdata'),
+        healthcheck=dict(test=pause._TCP_PROBE,interval='1s',timeout='2s',retries=120,start_period='10s'),
+        volumes=[dict(type='volume',source='postgres-data',target='/var/lib/postgresql/data')],
+        networks={'quanttrad':dict(aliases=['tsdb.quanttrad'])})
+    model=dict(name=project,services={'tsdb':service},volumes={'postgres-data':dict(name=project+'-source',external=True)},
+        networks={'quanttrad':dict(name=network,external=True)})
+    source=control_root/'source.json';source.write_text(json.dumps(model));source.chmod(0o600)
+    recipe=json.loads(json.dumps(model));recipe['services']['tsdb']['volumes'].append(
+        dict(type='bind',source=str(history_root),target='/qt-history',bind=dict(create_host_path=False)))
+    recipe_path=state/pause.DATABASE_RECIPE;recipe_path.write_text(json.dumps(recipe));recipe_path.chmod(0o600)
+    run(['docker','network','create','--internal',network],env=env)
+    compose=['docker','compose','--project-name',project,'--file',str(source)]
+    run(compose+['up','--detach','--no-build','--pull','never','--wait','--wait-timeout','180'],env=env)
+    dbid=run(compose+['ps','--quiet','tsdb'],env=env).stdout.strip()
+    dsn='postgresql+psycopg2://quanttrad:'+secret+'@127.0.0.1:5432/'+pg_database
+    def application(code, container):
+        return run(['docker','run','--rm','--pull','never','--user','70:70',
+            '--network','container:'+container,'--pid','container:'+container,'--volumes-from',container,
+            '--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure',
+            '--mount','type=bind,source='+str(udev)+',target=/run/qt-handoff/udev,readonly',
+            '--env','PG_DSN','--env','QT_DISABLE_DOTENV=1','--env','QT_DB_TEST_ISOLATED=1',
+            '--env','MARKET_STRUCTURE_STORAGE_ROOT=/qt-history/archives',
+            '--env','QT_MARKET_DATA_EXPECTED_UUID=fixture-hdd','--env','QT_STORAGE_UDEV_ROOT=/run/qt-handoff/udev',
+            '--entrypoint','python',image,'-c',code],env={**env,'PG_DSN':dsn},timeout=600)
+    print('Seeding real collected/frozen recent and archived records in owned database',flush=True)
+    print(application(_SEED,dbid).stdout[-300:],flush=True)
+    for name in pause.STOP+tuple(v for v in pause.PASSIVE if v!='tsdb'):
+        args=['docker','run','--detach','--pull','never','--network',network,'--name',project+'-'+name,
+            '--read-only','--user','65534:65534','--init','--restart','unless-stopped',
+            '--label','com.docker.compose.project='+project,'--label','com.docker.compose.service='+name,
+            '--label','com.docker.compose.oneoff=False']
+        if name=='market-data-collector':
+            args+=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN']
+        args+=['--entrypoint','sh',image,'-c',"trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"]
+        run(args,env={**env,'PG_DSN':dsn.replace('@127.0.0.1:','@tsdb:')})
+    image_env=dict(v.split('=',1) for v in json.loads(run(['docker','image','inspect',image,'--format','{{json .Config.Env}}'],env=env).stdout))
+    proof=json.loads((working/'held-proof.json').read_text())
+    identity=pause._database_query(dbid,"SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()")
+    request=dict(schema_version='qt.storage_database_operator.v1',source_revision=image_env['QT_IMAGE_SOURCE_REVISION'],
+        source_tree_hash=image_env['QT_IMAGE_SOURCE_TREE_HASH'],database_identity=identity,inventory_path='/run/quanttrad/storage-inventory.json',
+        policy=dict(recent=['ssd'],history=['hdd'],archives=['hdd'],backups=['hdd'],movement_enabled=True,backup_enabled=True),
+        resource_limits=dict(wal_bytes=16*1024**2,temporary_bytes={'ssd':1024**2,'hdd':0},growth_bytes_per_second={'ssd':0,'hdd':0},
+            maintenance_bytes={'ssd':1024**2,'hdd':1024**2},movement_timeout_seconds=60,cancellation_grace_seconds=5),
+        history_before=proof['history_before'],source_root='/app/logs/market-structure/objects',destination_root='/qt-history/archives/objects',
+        max_page_bytes=32*1024**2,max_objects=100,max_bytes=32*1024**2,page_rows=2,max_duration_seconds=600)
+    options=dict(project=project,source_revision=revision,history_uuid='fixture-hdd',image=image,request=request,inventory_path=str(inventory))
+    input_file=control_root/'invocation.json';input_file.write_text(json.dumps(options));input_file.chmod(0o600)
+    child_code="\n".join([
+        'import json,os,signal,sys','from pathlib import Path','from scripts.automation import storage_handoff_pause as pause',
+        'actual=pause._docker','def interrupted(*args,**kwargs):','    result=actual(*args,**kwargs)',
+        "    if args[0]=='create':",'        os.kill(os.getpid(),signal.SIGKILL)','    return result',
+        'pause._docker=interrupted','pause.run_held_database_handoff(Path(sys.argv[1]),**json.loads(Path(sys.argv[2]).read_text()))'])
+    print('Interrupting host controller after creating its actual migration container',flush=True)
+    child=run([sys.executable,'-c',child_code,str(state),str(input_file)],env={**env,'QT_STORAGE_UDEV_ROOT':str(udev)},timeout=800,ok=False)
+    if child.returncode!=-9:
+        held=pause._load(state/pause.HOLD)
+        current=run(['docker','ps','-aq','--no-trunc','--filter','label=com.docker.compose.project='+project,
+                     '--filter','label=com.docker.compose.service=tsdb'],env=env).stdout.strip()
+        if current:
+            observed=pause._database_details(current)
+            print('Prepared database mount/network evidence: '+json.dumps(dict(
+                mounts=observed['mounts'],networks=pause._database_networks(observed),
+                expected_networks=held.get('database_preparation',{}).get('networks'),
+                expected_history=held.get('database_preparation',{}).get('history_root'))),flush=True)
+    assert child.returncode==-9,child.stderr[-4000:]
+    operator_id=run(['docker','ps','-aq','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()
+    result=pause.run_held_database_handoff(state,**options)
+    assert result['database_sequence_complete'] and not result['collection_resume_authorized']
+    assert run(['docker','ps','-aq','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()==operator_id
+    print(application(_VERIFY,pause._load(state/pause.HOLD)['containers']['tsdb']['id']).stdout[-400:],flush=True)
+    assert (state/pause.HOLD).exists()
+    assert not any(pause._inventory(project,operator_id=operator_id)[name]['running'] for name in pause.STOP)
+    assert pause.run_held_database_handoff(state,**options)==result
+    print('PASS: held host procedure recovered the same actual operator, preserved frozen archived reads and recent records, placed old headers/identities on HDD, and kept application clients paused',flush=True)
+
+
+def operator_rehearsal_outer(image):
+    """Only owned disposable volumes are visible as host storage to this fixture."""
+    env={key:value for key,value in os.environ.items() if not key.startswith(('QT_','PG_','POSTGRES_','COMPOSE_'))}
+    project='qt-held-operator-'+uuid.uuid4().hex[:12]
+    print('Owned disposable project: '+project,flush=True)
+    image=run(['docker','image','inspect',image,'--format','{{.Id}}'],env=env).stdout.strip()
+    plugins=json.loads(run(['docker','info','--format','{{json .ClientInfo.Plugins}}'],env=env).stdout)
+    plugin=next(value['Path'] for value in plugins if value['Name']=='compose')
+    created=[]
+    controller=project+'-controller'
+    try:
+        roots=[]
+        for name in ('source','history','control'):
+            volume=project+'-'+name
+            args=['docker','volume','create']
+            if name=='history':
+                args+=['--driver','local','--opt','type=tmpfs','--opt','device=tmpfs','--opt','o=size=268435456,uid=70,gid=70,mode=0700']
+            run(args+[volume],env=env);created.append(volume)
+            roots.append(run(['docker','volume','inspect',volume,'--format','{{.Mountpoint}}'],env=env).stdout.strip())
+        args=['docker','run','--rm','--pull','never','--name',controller,'--network','none','--user','0:0',
+            '--mount','type=bind,source='+str(ROOT)+',target=/qt-host,readonly',
+            # Docker Desktop's raw socket preserves the daemon-volume paths below.
+            '--mount','type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
+            '--mount','type=bind,source='+plugin+',target=/usr/local/lib/docker/cli-plugins/docker-compose,readonly',
+            '--entrypoint','python','--workdir','/qt-host']
+        for volume,root in zip(created,roots):
+            args+=['--mount','type=volume,source='+volume+',target='+root]
+        result=run(args+[image,'scripts/ci/test_storage_database_preparation.py','--operator-inner',project,image,*roots],env=env,timeout=1800,ok=False)
+        print(result.stdout[-14000:],flush=True)
+        if result.returncode:
+            print(result.stderr[-10000:],flush=True)
+            raise RuntimeError('owned_held_operator_rehearsal_failed')
+    finally:
+        for name in (controller,project+'-storage-handoff'):
+            ids=run(['docker','ps','-aq','--filter','name=^/'+name+'$'],env=env).stdout.split()
+            if ids:run(['docker','rm','--force',*ids],env=env)
+        ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.project='+project],env=env).stdout.split()
+        if ids:run(['docker','rm','--force',*ids],env=env)
+        networks=run(['docker','network','ls','-q','--filter','name=^'+project+'_quanttrad$'],env=env).stdout.split()
+        if networks:run(['docker','network','rm',*networks],env=env)
+        for volume in reversed(created):run(['docker','volume','rm',volume],env=env)
+        print('Owned held-operator fixture resources removed',flush=True)
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv)==3 and sys.argv[1]=='--operator-image':
+        operator_rehearsal_outer(sys.argv[2])
+    elif len(sys.argv)==7 and sys.argv[1]=='--operator-inner':
+        operator_rehearsal_inner(*sys.argv[2:])
+    elif len(sys.argv)==1:
+        main()
+    else:
+        raise SystemExit('Use --operator-image IMAGE for the owned held-operator rehearsal')

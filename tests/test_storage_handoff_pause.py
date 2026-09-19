@@ -489,3 +489,133 @@ def test_source_storage_outside_retained_volume_is_refused_before_stop(database_
             pytest.fail("unpreserved database files admitted")
     assert "tsdb" not in docker.stops
     assert not docker.operations
+
+
+@pytest.fixture
+def operator_setup(database_setup, tmp_path, monkeypatch):
+    import copy
+    state, database = database_setup
+    working = tmp_path/"working"; working.mkdir()
+    inventory = tmp_path/"inventory.json"
+    inventory.write_text(json.dumps({"schema_version":"qt.storage_inventory.v1","targets":[
+        dict(target_id="ssd",label="Recent",filesystem_uuid="fixture-ssd",root="/var/lib/postgresql/data",medium="ssd"),
+        dict(target_id="hdd",label="History",filesystem_uuid="fixture-hdd",root="/qt-history",medium="hdd")]}))
+    database.details[database.original["id"]]["config"]["Env"].append("POSTGRES_DB=fixture")
+    database.model["services"]["tsdb"]["environment"]["POSTGRES_DB"]="fixture"
+    (state/pause.DATABASE_RECIPE).write_text(json.dumps(database.model))
+    collector_id=database.rows["market-data-collector"]["id"]
+    database.details[collector_id]={"config":{"Env":["PG_DSN=postgresql+psycopg2://fixture:fixture-secret@tsdb:5432/fixture"]},
+        "mounts":[dict(Type="bind",Source=str(working),Destination="/app/logs/market-structure",RW=True)]}
+    source_query=pause._database_query
+    monkeypatch.setattr(pause,"_database_query",lambda container,sql:
+        "123456789/16384" if "system_identifier::text" in sql else source_query(container,sql))
+    request=dict(schema_version="qt.storage_database_operator.v1",source_revision="b"*40,
+        source_tree_hash="c"*64,database_identity="123456789/16384",
+        source_root="/app/logs/market-structure/objects",destination_root="/qt-history/archives/objects",
+        inventory_path="/run/quanttrad/storage-inventory.json",max_duration_seconds=600)
+    image="sha256:"+"e"*64
+    image_env=["PATH=/usr/bin","QT_IMAGE_SOURCE_REVISION="+request["source_revision"],
+        "QT_IMAGE_SOURCE_TREE_HASH="+request["source_tree_hash"]]
+    class Operator:
+        identity="f"*64
+        detail=None
+        fault=None
+        running=False
+        creates=0
+        starts=0
+        def __call__(self, action,*args,**kwargs):
+            if action=="ps" and any(str(a).startswith("name=") for a in args):
+                return self.identity if self.detail else ""
+            if action=="ps":
+                result=database(action,*args,**kwargs)
+                return result+("\n"+self.identity if self.detail else "")
+            if action=="image" and image in args:
+                return json.dumps({"Id":image,"Config":{"Env":image_env}})
+            if action=="inspect" and args[1]==pause.INSPECT:
+                return "\n".join(json.dumps(row) for row in database.rows.values() if row["id"] in args[2:])
+            if action=="inspect" and args[-1]==self.identity:
+                if args[1]=="{{json .State}}":
+                    return json.dumps(dict(Running=self.running,OOMKilled=False,Paused=False,Restarting=False))
+                return json.dumps(self.detail)
+            if action=="create":
+                assert not any(database.rows[name]["running"] for name in pause.STOP)
+                saved=json.loads((state/pause._OPERATOR_STATE).read_text())
+                assert saved["container_id"] is None
+                assert all("fixture-secret" not in a for a in args)
+                overrides=[]
+                for i,arg in enumerate(args):
+                    if arg=="--env":
+                        value=args[i+1]
+                        overrides.append("PG_DSN="+kwargs["env"]["PG_DSN"] if value=="PG_DSN" else value)
+                assert "@127.0.0.1:5432/fixture" in kwargs["env"]["PG_DSN"]
+                self.detail=dict(image=image,config=dict(User="70:70",Entrypoint=["python"],Cmd=pause._OPERATOR_COMMAND,
+                    Labels={"qt.storage.handoff":pause._digest(request)},Env=image_env+overrides),
+                    host=dict(NetworkMode="container:"+database.rows["tsdb"]["id"],PidMode="container:"+database.rows["tsdb"]["id"],
+                    ReadonlyRootfs=True,Privileged=False,RestartPolicy={"Name":"no"},Init=True,CapDrop=["ALL"],
+                    SecurityOpt=["no-new-privileges"],Memory=2*1024**3,NanoCpus=2*10**9,PidsLimit=128,
+                    Tmpfs={"/tmp":"rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
+                           "/app/logs":"rw,nosuid,nodev,size=16777216,uid=70,gid=70,mode=0750"}),
+                    mounts=[dict(Type=v[0],Source=v[1],RW=v[2],Destination=k) for k,v in saved["binding"]["mounts"].items()]
+                        +[dict(Type="tmpfs",Source="",RW=True,Destination=k) for k in ("/tmp","/app/logs")])
+                self.creates+=1
+                if self.fault=="create":
+                    self.fault=None;raise TimeoutError("lost create reply")
+                return self.identity
+            if action=="start" and args[0]==self.identity:
+                self.running=True;self.starts+=1
+                if self.fault=="start":
+                    self.fault=None;raise TimeoutError("lost start reply")
+                return self.identity
+            if action=="wait":
+                self.running=False
+                if self.fault=="wait":
+                    self.fault=None;raise TimeoutError("lost completion reply")
+                return "0"
+            if action=="logs":
+                return json.dumps(dict(schema_version="qt.storage_database_operator_result.v1",
+                    request_sha256=pause._digest(request),database_identity=request["database_identity"],
+                    database_sequence_complete=True,source_preserved=True,policy_current=True,
+                    plan_id="fixture",collection_resume_authorized=False,runtime_activation_required=True))
+            return database(action,*args,**kwargs)
+    operator=Operator()
+    monkeypatch.setattr(pause,"_docker",operator)
+    options=dict(project=PROJECT,source_revision=REVISION,history_uuid="fixture-hdd",image=image,
+                 request=request,inventory_path=inventory)
+    return state,database,operator,options
+
+
+@pytest.mark.parametrize("fault",["create","start","wait"])
+def test_held_database_operator_recovers_its_exact_process_without_resuming_clients(operator_setup,fault):
+    state,database,operator,options=operator_setup
+    operator.fault=fault
+    with pytest.raises(TimeoutError):
+        pause.run_held_database_handoff(state,**options)
+    assert (state/pause.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in pause.STOP)
+    assert "fixture-secret" not in (state/pause._OPERATOR_STATE).read_text()
+    result=pause.run_held_database_handoff(state,**options)
+    assert result["database_sequence_complete"] and not result["collection_resume_authorized"]
+    assert operator.creates==1
+    assert operator.starts==(2 if fault=="wait" else 1)
+    assert (state/pause.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in pause.STOP)
+
+
+def test_held_database_operator_refuses_changed_mount_before_reentry(operator_setup):
+    state,database,operator,options=operator_setup
+    operator.fault="create"
+    with pytest.raises(TimeoutError):
+        pause.run_held_database_handoff(state,**options)
+    operator.detail["mounts"][0]["Source"]="/wrong-source"
+    with pytest.raises(RuntimeError,match="operator_container_changed"):
+        pause.run_held_database_handoff(state,**options)
+    assert operator.starts==0 and (state/pause.HOLD).exists()
+
+
+def test_held_database_operator_refuses_changed_request_after_commit(operator_setup):
+    state,database,operator,options=operator_setup
+    pause.run_held_database_handoff(state,**options)
+    changed={**options,"request":{**options["request"],"max_duration_seconds":601}}
+    with pytest.raises(RuntimeError,match="saved_binding_changed"):
+        pause.run_held_database_handoff(state,**changed)
+    assert operator.starts==1 and (state/pause.HOLD).exists()
