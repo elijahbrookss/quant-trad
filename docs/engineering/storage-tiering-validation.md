@@ -966,3 +966,26 @@ The subsequent commit/policy interruption, HDD-only query and pending-SSD-spool
 recovery scenarios still run. This qualifies fixed database/file staging, not
 host pause/drain, runtime activation, production service recovery or full-volume
 migration/performance acceptance.
+
+
+## Fixed layout continuity through compatible deployment
+
+The helper now retains the first SSD/HDD layout from existing release state,
+refuses a checkout that lacks its overlay, and binds compatible recovery to the
+recorded layout and exact image-pinned Compose snapshot. Recovery does not merge
+current storage/alert settings. Initial preserving activation, database commit
+reconciliation and hold retirement remain outside ordinary deployment.
+
+Focused synthetic checks cover layout retention, missing-overlay refusal even
+inside a shell conditional, mismatch/changed-snapshot refusal before checkout,
+and frozen recovery composition. The existing disposable Docker promotion
+rehearsal has a storage mode for real container lifecycle and mount continuity.
+The final disposable run passed compatible rollout, rejection of a missing-overlay
+candidate without collector recreation, unhealthy-candidate recovery, changed
+snapshot refusal and offline recovery despite changed current mount settings.
+History/working sentinels survived. The real fixed server Compose model also
+retained PGDATA, the SSD spool path, HDD mounts and required UID/PID settings.
+Backend, documentation and shell/configuration checks passed. The fixture cleanup
+now remembers both recovery snapshots when its refusal probe replaces the first.
+These outcomes do not establish the complete preserving cutover, physical
+performance or the one-day budget.

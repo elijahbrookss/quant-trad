@@ -701,3 +701,24 @@ Keep a release that can read both hot and cold payloads. Do not roll back to an
 inline-only reader after reclaiming a hot partition, drop the cold catalogs, or
 point readers at an older archive copy. Restoration to the old layout requires
 an explicit offline restore/rehydration plan and verification, not a config flip.
+
+
+### Retaining the first SSD/HDD layout
+
+The preserving storage procedure owns first activation. Once it records
+`storage_layout=ssd-hdd-v1` in private `release.env`, subsequent helper operations
+retain the fixed storage overlay; a candidate without that overlay is refused
+before service replacement. Do not activate storage by manually editing this
+field. The complete preserving cutover is still under local qualification.
+
+Compatible recovery retains the exact rendered mounts and image tags captured
+before promotion. Its recorded layout and snapshot fingerprint must match before
+recovery changes the checkout. Current storage/alert overlays are not merged into
+the saved recovery configuration. A mismatch retains the promotion evidence and
+requires investigation; do not clear the marker or replace the fingerprint to
+force an old layout to start. The separate storage-handoff hold continues to
+block all ordinary deployment/recovery during an incompatible database cutover.
+
+The disposable controller rehearsal also accepts `--storage-layout` to exercise
+this behavior with synthetic services, owned history/working directories and no
+provider egress. It is not a database migration or actual-drive performance test.

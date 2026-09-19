@@ -137,7 +137,24 @@ spool bytes, PostgreSQL namespace/resource observation, collector shutdown and
 container recreation. It does not qualify physical disks, live file permissions,
 real Docker socket access or a full migration/backup workload.
 
-This overlay is not selected by the ordinary deployment helper yet. The preserving
-cutover must compose its host admission, pause, database/policy result, matching
-runtime activation and recovery before releasing the persistent host hold. Adding
-a file or rendering it is not a deployment or authority to activate it directly.
+After the preserving cutover records `storage_layout=ssd-hdd-v1` in the existing
+private release state, the ordinary helper retains that layout across releases
+and selects the matching checkout's storage overlay. A checkout missing the
+overlay is refused before replacing services. Alert preview/restore also retain
+the recorded layout. Operator environment values cannot deselect it. Initial
+activation remains owned by the complete preserving procedure; there is no new
+layout toggle or automatic migration in the deployment helper.
+
+Compatible promotion records the layout and SHA-256 of its fully rendered,
+image-pinned recovery snapshot in the existing promotion state. Recovery requires
+the same recorded layout and unchanged snapshot before changing the checkout.
+It uses the frozen snapshot alone, without merging current storage or alert
+settings. Legacy non-storage promotion records remain recoverable; fixed-layout
+records must include the fingerprint. This checksum binds local evidence, not
+arbitrary schema compatibility or the contents of bind-mounted configuration.
+
+The preserving cutover must still compose host admission, pause, database/policy
+result, matching runtime activation and recovery before recording the layout and
+releasing the persistent host hold. Adding a file, setting a state field manually
+or rendering Compose is not authority to activate it directly. Older helpers or
+manual edits remain privileged bypasses and must be excluded by the cutover.

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Internal recovery mode is never selected by an inherited environment value.
+recovery_config_frozen=false
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 repo_root="$(cd "$script_dir/../.." >/dev/null 2>&1 && pwd)"
 deployment_root="$(dirname "$repo_root")"
@@ -359,9 +362,38 @@ select_release() {
   compute_release_material
 }
 
+# Only the preserving cutover may first record this field. Ordinary deployments
+# retain it; operator environment overrides cannot turn an active layout off.
+recorded_storage_layout() {
+  local layout
+  layout="$(state_value storage_layout)"
+  case "$layout" in
+    ""|ssd-hdd-v1) printf '%s' "$layout" ;;
+    *) die "unsupported recorded storage layout: $layout" ;;
+  esac
+}
+
+storage_overlay_for() {
+  local source_root="$1"
+  local layout
+  layout="$(recorded_storage_layout)" || return
+  if test "$layout" = ssd-hdd-v1; then
+    test -f "$source_root/docker/docker-compose.storage-server.yml" \
+      || die "recorded SSD/HDD layout is not supported by this checkout"
+    printf '%s' "$source_root/docker/docker-compose.storage-server.yml"
+  fi
+}
+
 compose() {
   local profile_args=()
   local compose_file_args=(--file "$compose_file")
+  local storage_overlay
+  if test "${recovery_config_frozen:-false}" != true; then
+    storage_overlay="$(storage_overlay_for "$repo_root")" || return
+    if test -n "$storage_overlay"; then
+      compose_file_args+=(--file "$storage_overlay")
+    fi
+  fi
   local profile
   local profiles="${single_node_profiles//,/ }"
   for profile in $profiles; do
@@ -385,7 +417,7 @@ compose_from_repo_root() {
   local source_compose_file="$source_root/docker/docker-compose.server.yml"
   local source_alerting_file="$source_root/docker/docker-compose.alert-email.yml"
   local cleanup_provisioning_root="$repo_root/docker/grafana/server-alerting/cleanup-provisioning"
-  local source_revision source_tree_hash
+  local source_revision source_tree_hash storage_overlay
   local compose_file_args=(--file "$source_compose_file")
   local profile_args=()
   local profile
@@ -404,6 +436,10 @@ compose_from_repo_root() {
   done
   if test "$alerts_enabled" = "true" && test -f "$source_alerting_file"; then
     compose_file_args+=(--file "$source_alerting_file")
+  fi
+  storage_overlay="$(storage_overlay_for "$source_root")" || return
+  if test -n "$storage_overlay"; then
+    compose_file_args+=(--file "$storage_overlay")
   fi
   if test -n "$extra_compose_file"; then
     test -f "$extra_compose_file" \
@@ -479,7 +515,8 @@ state_value() {
 }
 
 record_release() {
-  local prior_current prior_previous next_previous deployed_at temporary
+  local prior_current prior_previous next_previous deployed_at temporary layout
+  layout="$(recorded_storage_layout)" || return
   mkdir -p "$state_root"
   prior_current="$(state_value current_revision)"
   prior_previous="$(state_value previous_revision)"
@@ -496,6 +533,7 @@ record_release() {
     printf 'current_source_tree_hash=%s\n' "$QT_SOURCE_TREE_HASH"
     printf 'previous_revision=%s\n' "$next_previous"
     printf 'deployed_at=%s\n' "$deployed_at"
+    printf 'storage_layout=%s\n' "$layout"
   } >"$temporary"
   mv "$temporary" "$state_file"
   printf '{"deployed_at":"%s","revision":"%s","source_tree_hash":"%s","previous_revision":"%s"}\n' \
@@ -553,6 +591,7 @@ show_release() {
     -e 's/^current_source_tree_hash=/source tree hash: /p' \
     -e 's/^previous_revision=/previous revision: /p' \
     -e 's/^deployed_at=/deployed at: /p' \
+    -e 's/^storage_layout=/storage layout: /p' \
     "$state_file"
   if test -f "$state_root/promotion.env"; then
     echo "unfinished promotion candidate: $(promotion_value candidate_revision)"
@@ -812,7 +851,7 @@ prepare_recovery() {
 recover_promotion() {
   require_no_storage_handoff
   test -f "$state_root/promotion.env" || die "no unfinished promotion is recorded"
-  local previous candidate activation
+  local previous candidate activation layout snapshot_hash actual_hash
   previous="$(promotion_value previous_revision)"
   candidate="$(promotion_value candidate_revision)"
   activation="$(promotion_value activation_started)"
@@ -820,6 +859,19 @@ recover_promotion() {
   [[ "$previous" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]] \
     || die "invalid promotion recovery state"
   test -f "$state_root/recovery.compose.json" || die "recovery Compose snapshot is missing"
+  layout="$(recorded_storage_layout)" || return
+  test "$(promotion_value storage_layout)" = "$layout" \
+    || die "recovery storage layout does not match the recorded release"
+  snapshot_hash="$(promotion_value recovery_compose_sha256)"
+  # Legacy compatible promotions without fixed storage can predate this field.
+  # A fixed-layout recovery must bind the exact rendered mounts and image tags.
+  if test -n "$layout" || test -n "$snapshot_hash"; then
+    [[ "$snapshot_hash" =~ ^[0-9a-f]{64}$ ]] \
+      || die "recovery Compose fingerprint is missing or invalid"
+    actual_hash="$(sha256sum "$state_root/recovery.compose.json")"
+    test "${actual_hash%% *}" = "$snapshot_hash" \
+      || die "recovery Compose snapshot changed; evidence retained"
+  fi
   echo "event=promotion_recovery_started candidate=$candidate previous=$previous" >&2
   # Run outside a shell conditional: Bash otherwise disables errexit inside
   # called functions and can record a failed deployment as successful.
@@ -829,6 +881,9 @@ recover_promotion() {
     reuse_release_images=true
     compose_file="$state_root/recovery.compose.json"
     alerts_enabled=false
+    recovery_config_frozen=true
+    # Snapshot already contains the original layout; never merge current
+    # operator values/overlays into that pinned recovery configuration.
     # Select locally before consulting source-owned runtime admission helpers.
     select_release "$previous"
     if test "$activation" = "true"; then
@@ -870,10 +925,14 @@ promote_release() {
     verify_release_image "$service"
   done
   prepare_recovery
-  local temporary
+  local temporary layout snapshot_hash
+  layout="$(recorded_storage_layout)" || return
+  snapshot_hash="$(sha256sum "$state_root/recovery.compose.json")"
+  snapshot_hash="${snapshot_hash%% *}"
   temporary="$(mktemp "$state_root/promotion.XXXXXX")"
   chmod 0600 "$temporary"
-  printf 'previous_revision=%s\ncandidate_revision=%s\nactivation_started=false\n' "$previous" "$candidate" >"$temporary"
+  printf 'previous_revision=%s\ncandidate_revision=%s\nactivation_started=false\nstorage_layout=%s\nrecovery_compose_sha256=%s\n' \
+    "$previous" "$candidate" "$layout" "$snapshot_hash" >"$temporary"
   mv "$temporary" "$state_root/promotion.env"
   echo "event=promotion_started candidate=$candidate previous=$previous"
   (
