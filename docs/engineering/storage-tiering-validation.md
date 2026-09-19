@@ -953,7 +953,9 @@ database/runtime switch, or qualify migration duration and hardware performance.
 
 The native preserving handoff uses stage_handoff instead of manually composing
 header/raw copy loops, reference validation and HDD catalog relocation. Cancel
-before work begins, then terminate the actual PostgreSQL backend during the
+before work begins and require no copy state to be created. Lose the actual
+commit reply after fresh preparation, then require retry to reuse that preparation
+and its original attempt timestamp. Terminate the actual PostgreSQL backend during the
 second header page. The first committed page must remain, source collection must
 still accept another record, and a repeated staging pass must catch up without
 resetting identities or switching the active database. Repeat the completed pass

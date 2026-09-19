@@ -115,9 +115,6 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     _configure_placement(storage, tmp_path, monkeypatch)
     storage.copy_plan = replace(storage.copy_plan, history_before=storage.today-timedelta(days=30))
     engine = storage.database._engine
-    with engine.begin() as conn:
-        headers.prepare_copy(conn, placement=storage.copy_plan)
-        raw.prepare_copy(conn)
     destination = Path("/qt-history") / ("archive-copy-"+uuid4().hex)
     destination.mkdir()
     objects = destination / "objects"
@@ -129,6 +126,34 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     options = dict(source_root=source_objects, destination_root=objects,
                    max_page_bytes=32*1024**2, **_options(storage))
     options["policy"] = replace(options["policy"], movement_enabled=True, backup_enabled=True)
+    staging = dict(placement=storage.copy_plan, page_rows=2, **options)
+    with pytest.raises(RuntimeError, match="storage_move_cancelled"):
+        handoff.stage_handoff(engine, cancelled=lambda: True, **staging)
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT to_regclass(:name)"), {"name": headers.STATE}) is None
+    prepared_reply_lost = [False]
+    original_prepare = raw.prepare_copy
+    original_prepare_commit = Connection._commit_impl
+    def mark_prepared(conn, **kwargs):
+        result = original_prepare(conn, **kwargs)
+        conn.info["fixture_staging_preparation"] = True
+        return result
+    def lose_preparation_reply(conn):
+        prepared = conn.info.pop("fixture_staging_preparation", False)
+        original_prepare_commit(conn)
+        if prepared and not prepared_reply_lost[0]:
+            prepared_reply_lost[0] = True
+            raise RuntimeError("injected_staging_preparation_reply_lost")
+    with monkeypatch.context() as uncertainty:
+        uncertainty.setattr(raw, "prepare_copy", mark_prepared)
+        uncertainty.setattr(Connection, "_commit_impl", lose_preparation_reply)
+        with pytest.raises(RuntimeError, match="injected_staging_preparation_reply_lost"):
+            handoff.stage_handoff(engine, **staging)
+    assert prepared_reply_lost[0]
+    with engine.connect() as conn:
+        original_attempt = conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1"))
+        assert conn.scalar(text(f"SELECT verified_rows FROM {headers.STATE} WHERE id=1")) == 0
+        assert conn.scalar(text(f"SELECT verified_rows FROM {raw.STATE} WHERE id=1")) == 0
     family = "raw_archive_manifests"
 
     with pytest.raises(RuntimeError, match="root_wrong_filesystem"):
@@ -274,9 +299,6 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
 
     # The fixed commit boundary owns complete verification and its transaction.
     # Publisher drain/root activation and full-volume qualification stay separate.
-    staging = dict(placement=storage.copy_plan, page_rows=2, **options)
-    with pytest.raises(RuntimeError, match="storage_move_cancelled"):
-        handoff.stage_handoff(engine, cancelled=lambda: True, **staging)
     stage_pages = [0]
     def interrupt_staging(conn, cursor, statement, parameters, context, executemany):
         if statement.startswith("INSERT INTO "+SCHEMA+".fact_versions "):
@@ -301,6 +323,8 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     assert staged["staging_pass_complete"] and not staged["migration_ready"]
     assert not staged["database_handoff_committed"] and not staged["collection_resume_authorized"]
     assert handoff.stage_handoff(engine, **staging) == staged
+    with engine.connect() as conn:
+        assert conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1")) == original_attempt
     inspect_options = dict(policy=options["policy"], source_root=source_objects,
                            destination_root=objects)
     activation_options = {**inspect_options, "resource_limits": options["resource_limits"]}
@@ -553,6 +577,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
                                      facts=[recent]).inserted_count == 1
     print("QT_ARCHIVE_ROOT_COPY_RESULT="+json.dumps({
         "source_preserved": True, "interrupted_copy_reused_verified_objects": True,
+        "fixed_staging_fresh_prepare_lost_reply_reused_without_resetting_clock": prepared_reply_lost[0],
         "fixed_staging_resumed_after_real_backend_death_with_prior_pages_retained": True,
         "collection_between_staging_attempts_preserved": True,
         "repeated_staging_did_not_switch_or_authorize_resume": True,
