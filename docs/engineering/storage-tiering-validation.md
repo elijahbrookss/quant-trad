@@ -1064,3 +1064,14 @@ This extension is implemented and awaits native qualification. It connects only
 the database steps. The full host procedure must still invoke it in the verified
 namespace, align runtime roots, establish recovery and retire the hold after
 successful activation.
+
+
+## HDD tablespace preparation rehearsal
+
+The physical-placement module now supplies the missing checked creation/reuse of
+the dedicated HDD tablespace. A native fixture interrupts after PostgreSQL commits
+CREATE TABLESPACE, then checks that re-entry preserves its OID and directory inode,
+retains the source records and puts newly staged identity files on HDD. It also
+requires refusal of that nonempty directory under another target identity.
+This extension awaits native qualification; it does not prepare host ownership
+or activate application services.

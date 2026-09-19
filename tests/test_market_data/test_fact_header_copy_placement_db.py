@@ -185,3 +185,44 @@ def test_copy_refuses_missing_mount_and_misplaced_index_without_advancing(placed
     with engine.connect() as conn:
         assert _headers(conn,copy.SOURCE)==_headers(conn,SCHEMA+".fact_versions")
         _assert_disk(conn,partition,Path("/qt-history"))
+
+
+def test_history_destination_recovers_lost_create_without_replacing_files(placed):
+    from scripts.db.fact_header_v2_placement import prepare_history_tablespace, observe
+    engine = placed.database._engine
+    old_plan = placed.copy_plan
+    options = dict(recent=old_plan.recent,history=old_plan.history,
+        history_before=old_plan.history_before,pg_controldata=old_plan.pg_controldata)
+    lost = [False]
+    def lose_reply(conn,cursor,statement,parameters,context,executemany):
+        if not lost[0] and statement.startswith("CREATE TABLESPACE "):
+            lost[0] = True
+            raise RuntimeError("injected_tablespace_reply_lost")
+    event.listen(engine,"after_cursor_execute",lose_reply)
+    try:
+        with pytest.raises(RuntimeError,match="injected_tablespace_reply_lost"):
+            prepare_history_tablespace(engine,**options)
+    finally:
+        event.remove(engine,"after_cursor_execute",lose_reply)
+    assert lost[0]
+    with engine.connect() as conn:
+        oid = conn.scalar(text("SELECT oid FROM pg_tablespace WHERE spcname='qt_history_hdd'"))
+        assert oid
+        assert _headers(conn,copy.SOURCE) == placed.source_before
+    directory = Path(old_plan.history.root)/"postgres"
+    inode = directory.stat().st_ino
+    plan = prepare_history_tablespace(engine,**options)
+    assert plan.history_tablespace_oid == oid
+    assert prepare_history_tablespace(engine,**options) == plan
+    assert directory.stat().st_ino == inode
+    with engine.begin() as conn:
+        binding,_ = observe(conn,plan)
+        assert binding["history_location"] == str(directory)
+        copy.prepare_copy(conn,placement=plan)
+        _assert_disk(conn,SCHEMA+".fact_identities",Path(old_plan.history.root))
+    # An existing directory with catalog data is never adopted under another
+    # target identity or cleared to make preparation succeed.
+    with pytest.raises(RuntimeError,match="nonempty_unregistered_directory"):
+        prepare_history_tablespace(engine,**(options | {
+            "history": replace(old_plan.history,target_id="other_hdd")}))
+    assert directory.stat().st_ino == inode

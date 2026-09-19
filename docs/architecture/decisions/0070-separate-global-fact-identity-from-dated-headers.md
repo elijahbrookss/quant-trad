@@ -440,3 +440,21 @@ later call inspects before continuing. Database-sequence completion still requir
 runtime activation and never authorizes collector restart or host-hold retirement.
 This internal composition does not implement host namespace setup, recovery-copy
 restoration, performance qualification or a full-volume migration forecast.
+
+
+## Prepare the existing HDD destination
+
+The preserving operator can prepare the history tablespace through the existing
+physical-placement module. It verifies the PostgreSQL cluster/process and both
+configured filesystem UUIDs before using the dedicated postgres child under the
+HDD target. The child must be privately owned and writable by PostgreSQL; it may
+be created by that same unprivileged identity if its parent permits it. Host
+permission preparation remains a separate prerequisite. No existing files are
+removed, permissions changed, or device mounted/formatted.
+
+A session migration lock protects the nontransactional CREATE TABLESPACE step.
+The private connection is discarded on every exit so lock and timeout state
+cannot leak into the pool. A lost CREATE reply is reconciled against the existing
+catalog name, owner and directory; a nonempty unregistered directory refuses.
+The returned fixed CopyPlacement is verified by the same namespace/filesystem
+checks used by staging. Existing source rows and their relations are untouched.

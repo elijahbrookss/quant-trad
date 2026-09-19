@@ -1,6 +1,6 @@
 """Fixed SSD/HDD placement for the preserving header copy.
 
-No device preparation, tablespace creation, allocator or runtime policy. Reuses
+No device preparation, allocator or runtime policy. Fixed tablespace creation reuses
 the existing PostgreSQL process/namespace verifier. The operator must separately
 budget capacity, WAL and the full migration duration.
 """
@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 import json
+import os
 import stat
 from time import monotonic
 
@@ -64,10 +65,7 @@ def _restore(description):
     return CopyPlacement(**values)
 
 
-def observe(conn, plan):
-    """Bind two configured roots and an existing history tablespace to this PG."""
-    if not isinstance(plan,CopyPlacement):
-        raise ValueError("fact_header_copy_placement_invalid")
+def _observe_database(conn, pg_controldata, deadline):
     context=conn.execute(text("""
         SELECT clock_timestamp() AS captured_at,current_setting('data_directory') AS root,
           pg_postmaster_start_time() AS started,pg_read_file('postmaster.pid',0,4096) AS pidfile,
@@ -79,6 +77,22 @@ def observe(conn, plan):
     """)).mappings().one()
     if context["version"]//10000!=15 or context["default_space"]!=1663:
         raise RuntimeError("fact_header_copy_fixed_default_storage_required")
+    binary=pg_controldata.resolve(strict=True)
+    _check_control_binary(binary,deadline)
+    process=PostgresProcessObservation(context["identity"],context["captured_at"],context["root"],
+        context["started"],tuple(context["pidfile"].splitlines()[:3]))
+    cluster=_cluster_identity(process,binary,deadline)
+    root,pid=cluster[:2]
+    return context, process, cluster, binary
+
+
+def observe(conn, plan, *, deadline=None):
+    """Bind two configured roots and an existing history tablespace to this PG."""
+    if not isinstance(plan,CopyPlacement):
+        raise ValueError("fact_header_copy_placement_invalid")
+    deadline=min(monotonic()+30,deadline) if deadline is not None else monotonic()+30
+    context,process,cluster,binary=_observe_database(conn,plan.pg_controldata,deadline)
+    root,pid=cluster[:2]
     destination=conn.execute(text("""
         SELECT oid::bigint AS oid,spcname,pg_tablespace_location(oid) AS location,
                has_tablespace_privilege(oid,'CREATE') AS can_create
@@ -86,13 +100,6 @@ def observe(conn, plan):
     """),{"oid":plan.history_tablespace_oid}).mappings().one_or_none()
     if destination is None or not destination["can_create"]:
         raise RuntimeError("fact_header_copy_history_tablespace_unavailable")
-    deadline=monotonic()+30
-    binary=plan.pg_controldata.resolve(strict=True)
-    _check_control_binary(binary,deadline)
-    process=PostgresProcessObservation(context["identity"],context["captured_at"],context["root"],
-        context["started"],tuple(context["pidfile"].splitlines()[:3]))
-    cluster=_cluster_identity(process,binary,deadline)
-    root,pid=cluster[:2]
     roots={}
     capacities={}
     for role in ("recent","history"):
@@ -197,3 +204,104 @@ def verify_group(conn, relation, *, history, saved, pid):
         if _device_id(info.st_dev)!=saved["history_device" if history else "recent_device"]:
             raise RuntimeError("fact_header_copy_relation_on_wrong_filesystem")
         _same_process_file(pid,serving,info)
+
+
+def prepare_history_tablespace(engine, *, recent, history, history_before,
+                               pg_controldata, timeout_seconds=60):
+    """Prepare only the first HDD destination, preserving all existing files.
+
+    Runs in the same verified PostgreSQL filesystem/PID namespace as migration.
+    The fixed child directory must be privately owned by PostgreSQL, or its
+    parent must permit this same unprivileged user to create it. No chmod,
+    chown, mount, format, file deletion or relation movement is performed.
+    Existing catalog identity resolves an uncertain CREATE response on retry.
+    """
+    if (not isinstance(recent, StorageTarget) or not isinstance(history, StorageTarget)
+            or recent.medium != "ssd" or history.medium != "hdd"
+            or recent.state != "active" or history.state != "active"
+            or "recent" not in recent.roles or "history" not in history.roles
+            or recent.target_id == history.target_id
+            or recent.filesystem_uuid == history.filesystem_uuid
+            or type(history_before) is not date
+            or not isinstance(pg_controldata, Path) or not pg_controldata.is_absolute()
+            or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 300):
+        raise ValueError("fact_header_history_preparation_inputs_invalid")
+    deadline = monotonic()+timeout_seconds
+    name = "qt_history_"+history.target_id
+    directory = Path(history.root)/"postgres"
+    # CREATE TABLESPACE cannot run in a transaction. This private connection
+    # owns a session lock and is discarded on every exit, including uncertainty.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        try:
+            conn.execute(text("SELECT set_config('statement_timeout',:value,false)"),
+                         {"value": str(timeout_seconds*1000)})
+            if not conn.scalar(text("SELECT pg_try_advisory_lock("
+                                    "hashtextextended('quant-trad:fact-header-cutover:v2',0))")):
+                raise RuntimeError("fact_header_history_preparation_busy")
+            context, process, cluster, binary = _observe_database(conn,pg_controldata,deadline)
+            database_root, pid = cluster[:2]
+
+            def roots():
+                capacities = {}
+                for target in (recent,history):
+                    evidence = target.inspect(require_writable=True)
+                    path = Path(target.root)
+                    if path.resolve(strict=True) != path:
+                        raise RuntimeError("fact_header_history_preparation_canonical_root_required")
+                    _same_process_file(pid,path,path.stat())
+                    capacities[target.target_id] = evidence
+                if (capacities[recent.target_id].device_id == capacities[history.target_id].device_id
+                        or not database_root.is_relative_to(Path(recent.root))
+                        or _device_id(database_root.stat().st_dev) != capacities[recent.target_id].device_id):
+                    raise RuntimeError("fact_header_history_preparation_source_binding_changed")
+                if _cluster_identity(process,binary,deadline) != cluster:
+                    raise RuntimeError("fact_header_history_preparation_database_changed")
+                if monotonic() >= deadline:
+                    raise RuntimeError("fact_header_history_preparation_time_budget_exceeded")
+                return capacities
+
+            capacities = roots()
+            row = conn.execute(text("""
+                SELECT oid::bigint AS oid,pg_tablespace_location(oid) AS location,
+                    spcowner=(SELECT oid FROM pg_roles WHERE rolname=current_user) AS owned
+                FROM pg_tablespace WHERE spcname=:name
+            """), {"name": name}).mappings().one_or_none()
+            if row is not None and (row["location"] != str(directory) or not row["owned"]):
+                raise RuntimeError("fact_header_history_preparation_catalog_mismatch")
+            if not directory.exists():
+                if directory.is_symlink() or row is not None:
+                    raise RuntimeError("fact_header_history_preparation_directory_missing")
+                directory.mkdir(mode=0o700)
+                parent = os.open(directory.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                try:
+                    os.fsync(parent)
+                finally:
+                    os.close(parent)
+            info = directory.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or directory.resolve(strict=True) != directory
+                    or _device_id(info.st_dev) != capacities[history.target_id].device_id):
+                raise RuntimeError("fact_header_history_preparation_directory_changed")
+            _same_process_file(pid,directory,info,require_writable=True)
+            if row is None:
+                if next(directory.iterdir(),None) is not None:
+                    raise RuntimeError("fact_header_history_preparation_nonempty_unregistered_directory")
+                roots()
+                conn.execute(text("SELECT set_config('statement_timeout',:value,false)"),
+                             {"value": str(max(1,int((deadline-monotonic())*1000)))})
+                # Driver quoting is required: names/paths never become shell text.
+                from psycopg2 import sql
+                statement = sql.SQL("CREATE TABLESPACE {} LOCATION {}").format(
+                    sql.Identifier(name),sql.Literal(str(directory)))
+                conn.exec_driver_sql(statement.as_string(conn.connection.driver_connection))
+                row = conn.execute(text(
+                    "SELECT oid::bigint AS oid FROM pg_tablespace WHERE spcname=:name"),
+                    {"name": name}).mappings().one()
+            roots()
+            plan = CopyPlacement(recent,history,row["oid"],history_before,pg_controldata)
+            observe(conn,plan,deadline=deadline)
+            if monotonic() >= deadline:
+                raise RuntimeError("fact_header_history_preparation_time_budget_exceeded")
+            return plan
+        finally:
+            # Session-lock and timeout state must never escape into the pool.
+            conn.invalidate()
