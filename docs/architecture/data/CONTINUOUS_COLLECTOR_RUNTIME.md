@@ -427,6 +427,12 @@ heartbeat with enrollment disabled. It does not certify active provider-stream
 continuity; collector leases, finalizers, gap evidence, and release-specific
 post-cutover acquisition checks retain their existing authority.
 
+The container health probe reads the latest live heartbeat for its own hostname
+through a bounded, read-only `PG_DSN` connection. It does not initialize or provision
+schema; the worker retains startup schema validation. Missing/stale heartbeats and
+a failed continuous supervisor fail the probe. Maintenance readiness separately
+requires its completed outcomes and recovery-copy evidence.
+
 
 The existing storage-lifecycle supervisor accepts optional history-movement and
 local-recovery runners after retention releases its transaction/fence. They use

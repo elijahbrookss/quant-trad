@@ -603,6 +603,32 @@ def test_held_database_operator_recovers_its_exact_process_without_resuming_clie
     assert not any(database.rows[name]["running"] for name in pause.STOP)
 
 
+@pytest.mark.parametrize("receipt", ["valid", "empty", "malformed", "non_object"])
+def test_operator_receipt_survives_later_stderr_but_missing_receipt_retains_hold(operator_setup, monkeypatch, receipt):
+    state, database, operator, options = operator_setup
+    actual = operator
+
+    def logs_with_shutdown_stderr(action, *args, **kwargs):
+        if action == "logs":
+            # Tail one can contain only stderr; Docker's stdout is then empty.
+            if args[:2] == ("--tail", "1"):
+                return ""
+            assert args[:2] == ("--tail", "100")
+            if receipt == "valid":
+                return "operator started\n" + actual(action, *args, **kwargs) + "\n"
+            return {"empty": "", "malformed": "incomplete {", "non_object": "[]"}[receipt]
+        return actual(action, *args, **kwargs)
+
+    monkeypatch.setattr(pause, "_docker", logs_with_shutdown_stderr)
+    if receipt == "valid":
+        assert pause.run_held_database_handoff(state, **options)["database_sequence_complete"]
+    else:
+        with pytest.raises(RuntimeError, match="operator_outcome_invalid"):
+            pause.run_held_database_handoff(state, **options)
+    assert (state / pause.HOLD).exists()
+    assert not any(database.rows[name]["running"] for name in pause.STOP)
+
+
 def test_held_database_operator_refuses_changed_mount_before_reentry(operator_setup):
     state,database,operator,options=operator_setup
     operator.fault="create"

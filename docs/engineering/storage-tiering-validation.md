@@ -1264,5 +1264,20 @@ heartbeat without a published recovery copy, an old-layout copy, changed policy
 and a busy storage operation; a verified current-layout generation qualifies.
 The existing owned migration harness now extends through the real API, initializer,
 collector and both portals, with synthetic auxiliary clients and provider
-enrollment disabled. Its combined startup/interruption run is pending. No live
+enrollment disabled. The combined run preserved the migrated data and frozen
+reads, but actual service startup failed before the injected activation
+interruption. A rerun also exposed Docker's combined stdout/stderr tail hiding
+the operator's success receipt. The host now reads a bounded stdout tail and
+rejects missing or malformed receipts while retaining the hold; focused checks
+pass. Startup diagnostics identified the other failure as manually labelled
+placeholder clients surviving beside Compose replacements; the fixture now
+starts its old clients through Compose too. That rerun successfully replaced
+services, completed initialization, started the API and both portals, and created
+a recovery copy. Its collector health probe nevertheless exceeded Docker's
+five-second limit: the measured successful probe took 7.47 seconds and repeated
+full schema initialization. The probe now reads only its own live database
+heartbeat, with connection/query timeouts and a read-only connection. The native
+seed also now records reclaimed state for the hot partition that its reader-only
+archive helper had already removed. No retention admission guard was relaxed.
+Focused checks pass; the rebuilt combined rehearsal remains pending. No live
 recovery or deployment readiness is claimed.

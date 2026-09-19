@@ -189,6 +189,10 @@ with pytest.MonkeyPatch.context() as mp:
     frozen=storage.repo.freeze_dataset([request])
     expected=storage.repo.read_dataset_fact_revisions(dataset_id=frozen.dataset_id,series_id=storage.series_id)
     tiers._verified_cold_fixture(storage,root,mp)
+    # The reader-only helper drops the hot partition. This full runtime seed
+    # must also represent its completed reclamation for the retention planner.
+    with storage.database.session() as session:
+        session.execute(text("UPDATE market.fact_retention_partitions SET state='reclaimed', reclaimed_at=now() WHERE storage_day=:day"), {'day':storage.today})
     storage.open_day=current
     tiers._placement(mp,current)
     recent=replace(storage.fact,observation_key='held-recent',observation_time=tiers.BASE+timedelta(days=2))
@@ -306,17 +310,27 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
         for flag in ('BOOTSTRAP_MARKET_DATA','ENABLE_SCHEDULED_FACTS','ENABLE_STRUCTURED_FACTS','ENABLE_TRADE_STREAMS','ENABLE_L2_STREAMS'):
             values['QT_SINGLE_NODE_'+flag]='false'
         private.write_text(''.join(key+'='+value+'\n' for key,value in values.items()))
-    for name in pause.STOP+tuple(v for v in pause.PASSIVE if v!='tsdb'):
-        args=['docker','run','--detach','--pull','never','--network',network,'--name',project+'-'+name,
-            '--read-only','--user','65534:65534','--init','--restart','unless-stopped',
-            '--label','com.docker.compose.project='+project,'--label','com.docker.compose.service='+name,
-            '--label','com.docker.compose.oneoff=False']
+    # Start old clients through Compose: manually labelled docker-run clients
+    # survive alongside replacements instead of following Compose ownership.
+    client_names=pause.STOP+tuple(v for v in pause.PASSIVE if v!='tsdb')
+    clients=json.loads(json.dumps(model))
+    for name in client_names:
+        client=dict(image=client_image,pull_policy='never',read_only=True,user='65534:65534',
+            init=True,restart='unless-stopped',entrypoint=['sh'],
+            command=['-c',"trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"],
+            networks={'quanttrad':{}})
+        mounts=[]
         if name=='market-data-collector':
-            args+=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN']
+            mounts.append(dict(type='bind',source=str(working),target='/app/logs/market-structure'))
+            client['environment']={'PG_DSN':dsn.replace('@127.0.0.1:','@tsdb:')}
         if runtime_images and name in pause._RUNTIME_WRITERS:
-            args+=['--mount','type=bind,source='+str(private)+',target=/app/secrets.env,readonly']
-        args+=['--entrypoint','sh',client_image,'-c',"trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"]
-        run(args,env={**env,'PG_DSN':dsn.replace('@127.0.0.1:','@tsdb:')})
+            mounts.append(dict(type='bind',source=str(private),target='/app/secrets.env',read_only=True))
+        if mounts:client['volumes']=mounts
+        clients['services'][name]=client
+    client_recipe=control_root/'source-clients.json'
+    client_recipe.write_text(json.dumps(clients));client_recipe.chmod(0o600)
+    run(['docker','compose','--project-name',project,'--file',str(client_recipe),
+        'up','--detach','--no-deps','--no-build','--pull','never',*client_names],env=env)
     image_env=dict(v.split('=',1) for v in json.loads(run(['docker','image','inspect',image,'--format','{{json .Config.Env}}'],env=env).stdout))
     proof=json.loads((working/'held-proof.json').read_text())
     identity=pause._database_query(dbid,"SELECT c.system_identifier::text||'/'||d.oid::text FROM pg_control_system() c CROSS JOIN pg_database d WHERE d.datname=current_database()")
@@ -425,7 +439,15 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
     # before it can record readiness or remove the durable hold.
     code="\n".join([
         'import json,os,signal,sys','from pathlib import Path','from scripts.automation import storage_handoff_pause as pause',
-        'actual=pause._docker','def interrupted(*args,**kwargs):','    result=actual(*args,**kwargs)',
+        'actual=pause._docker',
+        'actual_run=pause.subprocess.run',
+        'def diagnosed_run(command,*args,**kwargs):',
+        '    result=actual_run(command,*args,**kwargs)',
+        "    if command[:2]==['docker','compose'] and 'up' in command and result.returncode:",
+        "        print('Owned synthetic Compose startup: '+result.stderr[-4000:],file=sys.stderr,flush=True)",
+        '    return result',
+        'pause.subprocess.run=diagnosed_run',
+        'def interrupted(*args,**kwargs):','    result=actual(*args,**kwargs)',
         "    if args[0]=='compose' and 'up' in args:",
         '        os.kill(os.getpid(),signal.SIGKILL)','    return result','pause._docker=interrupted',
         'pause.run_held_runtime_handoff(Path(sys.argv[1]),activation_timeout_seconds=600,**json.loads(Path(sys.argv[2]).read_text()))'])
@@ -451,6 +473,10 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
             ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.project='+project,
                 '--filter','label=com.docker.compose.service='+service],env=env).stdout.split()
             if ids:
+                status=run(['docker','inspect','--format',
+                    '{{json .State.Status}} {{json .State.Error}} {{if .State.Health}}{{json .State.Health.Status}}{{end}}',
+                    ids[0]],env=env,ok=False)
+                print('Owned candidate state '+service+': '+status.stdout[-1000:],flush=True)
                 detail=run(['docker','logs','--tail','20',ids[0]],env=env,ok=False)
                 print('Owned candidate '+service+': '+detail.stdout[-3000:]+detail.stderr[-3000:],flush=True)
         raise

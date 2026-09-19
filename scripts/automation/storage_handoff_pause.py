@@ -730,7 +730,15 @@ def _held_database_handoff(state_root: Path, *, project: str, source_revision: s
         _operator_admit(found[0],saved)
         if status != "0":
             raise RuntimeError("storage_database_operator_failed_hold_retained")
-        result = json.loads(_docker("logs","--tail","1",found[0]).strip())
+        # Docker applies --tail across stdout and stderr together. A final
+        # stderr shutdown message can otherwise hide the stdout receipt.
+        lines = _docker("logs", "--tail", "100", found[0]).strip().splitlines()
+        try:
+            result = json.loads(lines[-1]) if lines else None
+        except (json.JSONDecodeError, TypeError):
+            raise RuntimeError("storage_database_operator_outcome_invalid") from None
+        if not isinstance(result, dict):
+            raise RuntimeError("storage_database_operator_outcome_invalid")
         if (result.get("schema_version")!="qt.storage_database_operator_result.v1"
                 or result.get("request_sha256")!=request_hash or result.get("database_identity")!=identity
                 or any(result.get(key) is not True for key in ("database_sequence_complete","source_preserved","policy_current","runtime_activation_required"))
