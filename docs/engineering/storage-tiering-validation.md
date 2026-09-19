@@ -927,3 +927,24 @@ active runtime/root/execution configuration, actual server permissions, complete
 restore integration and physical-HDD/one-day migration measurements remain
 separate release blockers. No public cutover or automatic service restart is
 implied by saving the policy.
+
+
+### Pending SSD work across the preserving handoff
+
+The same native handoff fixture leaves a real trade in an open durable SSD spool
+before the schema switch, including an incomplete trailing record. Its original
+session and raw bytes remain on the unchanged working path. After handoff, the
+old SSD archive directory is unavailable; the existing collector recovery path
+must publish to HDD and create the corresponding canonical v2 Fact.
+
+Interrupt recovery after the HDD archive and raw mapping commit but before
+canonical publication. The spool must remain available. Retry must recover one
+canonical trade with one raw mapping and one manifest, remove only acknowledged
+spool input, and leave frozen results and retained source archive bytes unchanged.
+A further recovery attempt must not duplicate the trade. This exercises the
+existing recovery implementation with real PostgreSQL, not a replacement reader
+or a simulated repository.
+
+This is preserved-spool consumer evidence. It does not prove that all application
+publishers have drained, admit live host ownership, compose the host hold with the
+database/runtime switch, or qualify migration duration and hardware performance.

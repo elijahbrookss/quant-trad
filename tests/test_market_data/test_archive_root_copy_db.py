@@ -12,7 +12,12 @@ from sqlalchemy import event, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
-from market_data.archive import FilesystemRawArchiveObjectStore
+from market_data.archive import DurableRawSpoolSegment, FilesystemRawArchiveObjectStore
+from data_providers.streams.contracts import ProviderRawMessage
+from market_data.structure import RawStreamRecord
+from portal.backend.service.market.continuous_stream_collector import (
+    ContinuousMarketStructureCollector, CoinbaseMarketTradeProjectionAdapter,
+)
 from portal.backend.service.market.market_structure_service import MarketStructureService
 from portal.backend.service.storage.repos import market_data, market_structure
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
@@ -44,11 +49,51 @@ def _hashes(root):
             for path in root.rglob("*") if path.is_file()}
 
 
+def _pending_trade_spool(storage, book, source):
+    """Leave one genuinely unpublished trade on the preserved working drive."""
+    series = storage.repo.register_series(instrument_id="storage-fixture", fact_type="market.trade",
+        contract_version="market.trade.v1", timeframe_seconds=None)
+    structures = book.structures
+    structures.upsert_stream_definition(definition_id="handoff-pending-spool",
+        source_id=book.source_id, series_id=series, provider=book.source.provider,
+        venue=book.source.venue, provider_product_id="BTC-USD", channels=("market_trades",),
+        auth_mode="public", contract_version="market.trade.v1",
+        max_spool_bytes=1024**3, max_segment_bytes=128*1024**2,
+        config={"product_definition_version_id": book.claim.config["product_definition_version_id"]})
+    claim = structures.claim_stream(definition_id="handoff-pending-spool",
+        owner_id="before-handoff", lease_seconds=600, bounded=True)
+    structures.append_session_event(claim, event_ordinal=0, connection_epoch=0,
+        event_type="connected", occurred_at=BASE)
+    segment = DurableRawSpoolSegment(root=source/"spool", definition_id=claim.definition_id,
+        session_id=claim.session_id, connection_epoch=0, segment_ordinal=0)
+    timestamp = (BASE+timedelta(seconds=10)).isoformat()
+    message = ProviderRawMessage.build(provider=book.source.provider, venue=book.source.venue,
+        stream_session_id=claim.session_id, connection_epoch=0, receive_ordinal=1,
+        received_at=timestamp, raw_frame=json.dumps({
+            "channel": "market_trades", "timestamp": timestamp, "sequence_num": 1,
+            "events": [{"type": "update", "trades": [{
+                "product_id": "BTC-USD", "trade_id": "handoff-pending-trade",
+                "price": "100", "size": "0.01", "side": "BUY", "time": timestamp}]}]}))
+    record = RawStreamRecord.from_provider_message(message, definition_id=claim.definition_id,
+        spool_segment_id=segment.spool_segment_id, provider_product_id="BTC-USD",
+        requested_channel="market_trades", observed_channel="market_trades")
+    segment.append(record)
+    segment.close()
+    with segment.open_path.open("ab") as handle:
+        handle.write(b'{"partial"')
+        handle.flush()
+        os.fsync(handle.fileno())
+    structures.release(claim)
+    return claim, segment, record
+
+
 def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, tmp_path, monkeypatch):
     assert os.getuid() == 70 and os.getenv("QT_DB_TEST_ISOLATED") == "1"
     source = Path("/qt-source/pgdata") / ("archive-copy-"+uuid4().hex)
     source.mkdir()
     book = _cold_book_handoff(storage, source, monkeypatch, split_sources=False)
+    pending_claim, pending_spool, pending_record = _pending_trade_spool(storage, book, source)
+    pending_bytes = pending_spool.open_path.read_bytes()
     service = MarketStructureService(repository=book.structures)
     replay_args = dict(definition_id=book.claim.definition_id, session_id=book.claim.session_id)
     replay = service.replay_book_session(**replay_args, storage_root=source)
@@ -428,9 +473,12 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
             handoff.inspect_handoff(conn, **inspect_options)
         transaction.rollback()
 
-    retained = source.with_name(source.name+"-retained")
-    source.rename(retained)
-    assert not source.exists()  # Readers cannot fall back to the original root.
+    retained = source_objects.with_name("objects-retained")
+    source_objects.rename(retained)
+    assert not source_objects.exists()  # Archive readers cannot fall back to SSD.
+    assert pending_spool.open_path.read_bytes() == pending_bytes
+    monkeypatch.setenv("MARKET_STRUCTURE_WORKING_ROOT", str(source))
+    monkeypatch.setenv("QT_MARKET_DATA_WORKING_EXPECTED_UUID", storage.copy_plan.recent.filesystem_uuid)
     reader = FilesystemRawArchiveObjectStore(objects, writable=False)
     tiered = PostgresCanonicalFactStorageRepository(object_store_factory=lambda: reader)
     monkeypatch.setattr(market_data, "canonical_fact_storage_repository", tiered)
@@ -441,14 +489,54 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         assert storage.repo.read_facts(series_id=series, start=start-timedelta(seconds=1),
                                       end=end+timedelta(seconds=1)) == expected
     assert service.replay_book_session(**replay_args, storage_root=destination) == replay
-    assert _hashes(retained/"objects") == before
+    assert _hashes(retained) == before
     _placement(monkeypatch, storage.open_day)
+    # The old archive root is unavailable, but the unchanged SSD working path
+    # still contains a trade received before cutover and never published.
+    recovery = ContinuousMarketStructureCollector(repository=book.structures)
+    recovery_options = dict(definition={"id": pending_claim.definition_id},
+        owner_id="after-handoff", lease_seconds=90, spool_root=source/"spool",
+        object_store=FilesystemRawArchiveObjectStore(objects),
+        temporary_root=source/"raw-staging", projection=CoinbaseMarketTradeProjectionAdapter())
+    def before_canonical_ack(*args, **kwargs):
+        raise RuntimeError("injected_pending_spool_publication_interruption")
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(book.structures, "ingest_trades", before_canonical_ack)
+        with pytest.raises(RuntimeError, match="injected_pending_spool_publication_interruption"):
+            recovery._recover_orphaned_spools_sync(**recovery_options)
+    assert pending_spool.sealed_path.exists()  # Durable input survives failure.
+    with engine.connect() as conn:
+        key = conn.scalar(text("SELECT object_key FROM market.raw_archive_manifests WHERE session_id=:id"),
+                          {"id": pending_claim.session_id})
+        assert key and (objects/key).is_file()
+        assert not (source_objects/key).exists()
+        assert conn.scalar(text("SELECT count(*) FROM market.fact_versions WHERE series_id=:id"),
+                           {"id": pending_claim.series_id}) == 0
+    recovery._recover_orphaned_spools_sync(**recovery_options)
+    assert not pending_spool.open_path.exists() and not pending_spool.sealed_path.exists()
+    recovered = storage.repo.read_facts(series_id=pending_claim.series_id,
+        start=BASE, end=BASE+timedelta(minutes=1))
+    assert len(recovered) == 1
+    recovery._recover_orphaned_spools_sync(**recovery_options)
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM market.raw_archive_record_mappings WHERE raw_record_id=:id"),
+                           {"id": pending_record.raw_record_id}) == 1
+        assert conn.scalar(text("SELECT count(*) FROM market.raw_archive_manifests WHERE session_id=:id"),
+                           {"id": pending_claim.session_id}) == 1
+    assert storage.repo.read_facts(series_id=pending_claim.series_id,
+        start=BASE, end=BASE+timedelta(minutes=1)) == recovered
+    for (dataset,series), expected in frozen.items():
+        assert storage.repo.read_dataset_fact_revisions(dataset_id=dataset, series_id=series) == expected
+    assert _hashes(retained) == before
     recent = replace(storage.fact, observation_key="after-archive-root-handoff",
                      observation_time=BASE+timedelta(days=3))
     assert storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
                                      facts=[recent]).inserted_count == 1
     print("QT_ARCHIVE_ROOT_COPY_RESULT="+json.dumps({
         "source_preserved": True, "interrupted_copy_reused_verified_objects": True,
+        "pre_cutover_ssd_spool_recovered_to_hdd_and_canonical_v2": True,
+        "recovery_interruption_retained_spool_and_retry_did_not_duplicate": True,
+        "frozen_results_unchanged_after_pending_spool_recovery": True,
         "collection_during_copy_and_after_handoff": True,
         "recent_history_frozen_and_book_replay_with_original_root_unavailable": True,
         "wrong_filesystem_expiry_lock_byte_budget_low_capacity_and_corruption_refused": True,
