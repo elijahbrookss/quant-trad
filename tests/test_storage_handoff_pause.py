@@ -933,3 +933,34 @@ def test_runtime_activation_recovers_when_compose_died_between_remove_and_create
     assert result["ready"] and set(database.rows)==set(model["services"])
     assert database.rows["tsdb"]["id"]==database_id and runtime.ups==2
     assert not (state/pause.HOLD).exists()
+
+
+@pytest.mark.parametrize("key,value",[("history_uuid","another-disk"),("inventory_path","/another-inventory.json")])
+def test_runtime_activation_retry_retains_original_host_inputs(runtime_activation_setup,key,value):
+    state,database,options,runtime,model=runtime_activation_setup
+    runtime.fault="start"
+    with pytest.raises(TimeoutError):pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    with pytest.raises(RuntimeError,match="saved_binding_changed"):
+        pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**(options|{key:value}))
+    assert (state/pause.HOLD).exists() and runtime.ups==1
+
+
+def test_completed_candidate_can_be_verified_after_attempt_deadline_without_restart(runtime_activation_setup,monkeypatch):
+    state,database,options,runtime,model=runtime_activation_setup
+    runtime.fault="start"
+    with pytest.raises(TimeoutError):pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    deadline=pause._load(state/pause._RUNTIME_STATE)["deadline"]
+    monkeypatch.setattr(pause.time,"time",lambda:deadline+1)
+    assert pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)["ready"]
+    assert runtime.ups==1 and not (state/pause.HOLD).exists()
+
+
+def test_incomplete_candidate_cannot_restart_after_original_deadline(runtime_activation_setup,monkeypatch):
+    state,database,options,runtime,model=runtime_activation_setup
+    runtime.fault="partial"
+    with pytest.raises(TimeoutError):pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    deadline=pause._load(state/pause._RUNTIME_STATE)["deadline"]
+    monkeypatch.setattr(pause.time,"time",lambda:deadline+1)
+    with pytest.raises(RuntimeError,match="activation_deadline_expired"):
+        pause.run_held_runtime_handoff(state,activation_timeout_seconds=86400,**options)
+    assert runtime.ups==1 and (state/pause.HOLD).exists()

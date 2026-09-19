@@ -1174,7 +1174,9 @@ def run_held_runtime_handoff(state_root: Path, *, activation_timeout_seconds: in
             if (saved.get("request_sha256") != _digest(request)
                     or saved.get("binding", {}).get("image") != options["image"]
                     or saved.get("receipt", {}).get("project") != options["project"]
-                    or saved.get("receipt", {}).get("source_revision") != options["source_revision"]):
+                    or saved.get("receipt", {}).get("source_revision") != options["source_revision"]
+                    or saved["receipt"]["database_preparation"]["history_uuid"] != options["history_uuid"]
+                    or saved["binding"]["mounts"]["/run/quanttrad/storage-inventory.json"][1] != str(Path(options["inventory_path"]))):
                 raise RuntimeError("storage_runtime_saved_binding_changed")
             return _finish_runtime_activation(state_root, saved, request)
     with _held_database_handoff(state_root, **options) as (database_result, receipt, binding):
