@@ -74,7 +74,7 @@ def main():
                     'maintenance_bytes': {'ssd': 1024**2, 'hdd': 1024**2},
                     'movement_timeout_seconds': 60, 'cancellation_grace_seconds': 5},
                 'recovery': {'max_bytes': 64*1024**2, 'timeout_seconds': 60,
-                             'headroom_bytes': 1024**2, 'max_objects': 100}}))
+                             'headroom_bytes': {'ssd': 1024**2, 'hdd': 1024**2}, 'max_objects': 100}}))
             limits.chmod(0o644)
             env.update(QT_STORAGE_HDD_ROOT=str(hdd), QT_MARKET_DATA_ROOT=str(hdd / 'archives'),
                 QT_MARKET_DATA_EXPECTED_UUID='fixture-hdd', QT_MARKET_DATA_WORKING_ROOT=str(archive),
