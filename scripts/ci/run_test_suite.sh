@@ -48,6 +48,20 @@ run_pytest_docker() (
     original_status=$?
     trap - EXIT
     cleanup_status=0
+    if [[ "$original_status" -ne 0 ]]; then
+      # This project has only generated test credentials/data. Preserve startup
+      # diagnostics before removing its failed database; never inspect peers.
+      if ! "${compose[@]}" logs --no-color --tail 120 timescaledb >&2; then
+        echo "ci_runner_database_logs_unavailable: project=$test_project" >&2
+      fi
+      local database_id
+      database_id="$("${compose[@]}" ps --all --quiet timescaledb)" || database_id=""
+      if [[ "$database_id" =~ ^[0-9a-f]{64}$ ]]; then
+        if ! docker inspect --format '{{json .State}}' "$database_id" >&2; then
+          echo "ci_runner_database_status_unavailable: project=$test_project" >&2
+        fi
+      fi
+    fi
     "${compose[@]}" down --volumes --remove-orphans --rmi local || cleanup_status=$?
     if [[ "$original_status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
       original_status=$cleanup_status
