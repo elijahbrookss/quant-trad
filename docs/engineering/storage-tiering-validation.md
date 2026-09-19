@@ -1082,3 +1082,26 @@ configured PostgreSQL root, matching the fixed server's working-directory layout
 It checks that frozen results survive completion and retries cannot overwrite a
 later policy revision. The older descendant-of-PGDATA restriction incorrectly
 rejected this layout; filesystem and exact-directory identity remain required.
+
+
+## Fixed runtime-directory qualification
+
+The existing host preparation helper can now prepare dedicated data/archive
+roots on the already mounted HDD without formatting or moving data. Focused
+admission checks refuse blank, mismatched and unmounted disks before directory
+operations. The initial disposable real-UID rehearsal passed interrupted ownership
+setup, operator/runtime write access, preservation of private files and directory
+identities, and refusal of symlinks or inconsistent nonempty-directory permissions.
+The final native run also passed refusal of read-only and nested foreign filesystems.
+
+No live filesystem has been changed. The helper does not transfer permissions
+on existing SSD working files or provide the complete host activation procedure.
+
+
+The first fixed-sequence interruption run passed on its original source snapshot.
+The subsequent combined run built and passed source attestation, but its disposable
+database became unhealthy before tests started. This is an unavailable database
+qualification result, not a passing migration result. The runner now captures
+bounded database startup logs and health/exit state before removing its owned
+resources. A fresh combined qualification is required; the readiness gate is
+unchanged.

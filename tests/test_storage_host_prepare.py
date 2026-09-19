@@ -53,3 +53,22 @@ def test_mount_path_cannot_be_root_or_traverse_outside_storage():
     for path in ("/", "/srv/quanttrad/storage/../app", "/srv/quanttrad/storage"):
         with pytest.raises(ValueError):
             validate_plan({**PLAN, "mountpoint": path})
+
+
+@pytest.mark.parametrize("device", [
+    evidence(),
+    evidence(fstype="ext4",uuid=PLAN["filesystem_uuid"]),
+    evidence(fstype="ext4",uuid="foreign",mountpoints=[PLAN["mountpoint"]]),
+])
+def test_runtime_directories_require_existing_verified_mount(monkeypatch,device):
+    from types import SimpleNamespace
+    from scripts.automation import storage_host_prepare as preparation
+    monkeypatch.setattr(preparation.os,"geteuid",lambda:0)
+    monkeypatch.setattr(preparation.pwd,"getpwnam",lambda value:SimpleNamespace(pw_gid=1000))
+    monkeypatch.setattr(preparation,"audit",lambda *args:device)
+    def mutation_forbidden(*args,**kwargs):
+        pytest.fail("directory or mount command reached for unprepared disk")
+    monkeypatch.setattr(preparation,"run",mutation_forbidden)
+    monkeypatch.setattr(preparation,"_runtime_directory",mutation_forbidden)
+    with pytest.raises(ValueError,match="existing_verified_mount|existing data"):
+        preparation.prepare_runtime_directories(PLAN)

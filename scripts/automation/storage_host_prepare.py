@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare one explicitly approved, signature-free HDD; never move live data."""
+"""Prepare an approved HDD or its fixed runtime directories; never move existing data."""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +10,7 @@ from pathlib import Path
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 from uuid import UUID
@@ -169,11 +170,97 @@ def prepare(plan: dict, *, initialize_empty_device: bool) -> dict:
             "created_filesystem": needs_format, "database_moved": False}
 
 
+
+def _runtime_directory(parent_fd: int, name: str, operator_gid: int) -> int:
+    """Open one fixed child; finish only empty interrupted preparation."""
+    try:
+        os.mkdir(name,mode=0o700,dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    descriptor = os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+    try:
+        info = os.fstat(descriptor)
+        if info.st_dev != os.fstat(parent_fd).st_dev:
+            raise ValueError("storage_runtime_directory_wrong_filesystem: "+name)
+        expected = (70,operator_gid,0o770)
+        current = (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))
+        if current != expected:
+            # New root-owned directories, or an empty directory interrupted
+            # after chown, are the only incomplete states we can finish.
+            pending = (info.st_uid == 0 or (info.st_uid,info.st_gid) == (70,operator_gid))
+            with os.scandir(descriptor) as entries:
+                empty = next(entries,None) is None
+            if not pending or current[2] != 0o700 or not empty:
+                raise ValueError("storage_runtime_directory_requires_review: "+name)
+            os.fchown(descriptor,70,operator_gid)
+            os.fchmod(descriptor,0o770)
+            os.fsync(descriptor)
+            os.fsync(parent_fd)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def prepare_runtime_directories(plan: dict) -> dict:
+    """Prepare the fixed runtime roots on an already mounted audited HDD.
+
+    Never format, mount, alter fstab, traverse/chown existing contents or move
+    database files. UID 70 is the pinned PostgreSQL/application identity. The
+    named operator's group retains root-directory access for host admission.
+    Private tablespace/archive files keep their own stricter permissions.
+    """
+    validate_plan(plan)
+    if os.geteuid() != 0:
+        raise ValueError("storage_runtime_directories_administrator_required")
+    account = pwd.getpwnam(plan["owner"])
+    mountpoint = Path(plan["mountpoint"])
+    for parent in (mountpoint,*mountpoint.parents):
+        if parent.is_symlink():
+            raise ValueError("storage_prepare_refused: symlink mount path")
+    evidence = audit(Path(plan["device"]),plan["expected_serial"])
+    if (admit_device(plan,evidence)
+            or plan["mountpoint"] not in (evidence["topology"]["blockdevices"][0].get("mountpoints") or [])):
+        raise ValueError("storage_runtime_directories_existing_verified_mount_required")
+    def mounted():
+        if run(["findmnt","--mountpoint",str(mountpoint),"--noheadings","--output","UUID"]) != plan["filesystem_uuid"]:
+            raise ValueError("storage_runtime_directories_mount_changed")
+    mounted()
+    root_fd = os.open(mountpoint,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        identity = os.fstat(root_fd)
+        if os.fstatvfs(root_fd).f_flag & os.ST_RDONLY:
+            raise ValueError("storage_runtime_directories_read_only")
+        if identity.st_dev == os.stat(mountpoint.parent).st_dev:
+            raise ValueError("storage_runtime_directories_distinct_hdd_filesystem_required")
+        data_fd = _runtime_directory(root_fd,"data",account.pw_gid)
+        try:
+            archive_fd = _runtime_directory(data_fd,"archives",account.pw_gid)
+            os.close(archive_fd)
+            mounted()
+            if os.fstatvfs(root_fd).f_flag & os.ST_RDONLY:
+                raise ValueError("storage_runtime_directories_read_only")
+            actual = mountpoint.stat()
+            if (actual.st_dev,actual.st_ino) != (identity.st_dev,identity.st_ino):
+                raise ValueError("storage_runtime_directories_mount_changed")
+        finally:
+            os.close(data_fd)
+    finally:
+        os.close(root_fd)
+    return {"schema_version":"qt.storage_runtime_directories.v1",
+            "history_root":str(mountpoint/"data"),"archive_root":str(mountpoint/"data"/"archives"),
+            "filesystem_uuid":plan["filesystem_uuid"],"runtime_uid":70,"operator_gid":account.pw_gid,
+            "existing_files_changed":False,"database_moved":False}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
-    parser.add_argument("--initialize-empty-device", action="store_true",
+    action = parser.add_mutually_exclusive_group()
+    action.add_argument("--initialize-empty-device", action="store_true",
                         help="Authorize initial formatting of the exact signature-free disk in the plan.")
+    action.add_argument("--prepare-runtime-directories", action="store_true",
+                        help="Prepare fixed data/archive directories on the already verified mounted HDD; never format or mount.")
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("run in the administrator's terminal")
@@ -181,7 +268,8 @@ def main() -> int:
         plan = validate_plan(json.loads(args.plan.read_text()))
         with Path("/run/lock/qt-storage-prepare.lock").open("a") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            result = prepare(plan, initialize_empty_device=args.initialize_empty_device)
+            result = (prepare_runtime_directories(plan) if args.prepare_runtime_directories
+                      else prepare(plan, initialize_empty_device=args.initialize_empty_device))
         print(json.dumps(result, indent=2))
     except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
         parser.exit(1, f"storage_prepare_failed: {exc}\n")

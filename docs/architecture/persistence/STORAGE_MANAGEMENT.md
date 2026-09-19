@@ -40,6 +40,7 @@ code_paths:
   - portal/frontend/src/v2/rooms/storage.css
   - scripts/automation/storage_device_audit.py
   - scripts/automation/storage_host_prepare.py
+  - scripts/ci/test_storage_runtime_directories.py
 ---
 # Storage Management
 
@@ -925,3 +926,30 @@ scratch/report directories support the non-root services without modifying host
 file ownership. See ADR 0068 and the server deployment guide for the fixed
 layout inputs and disposable actual-core rehearsal scope. Real host permissions,
 Docker socket group, full cutover/recovery and HDD performance remain separate.
+
+
+## Fixed runtime directories on the prepared HDD
+
+The existing storage_host_prepare helper has a separate
+--prepare-runtime-directories action. It admits the already mounted ext4 device
+by the reviewed serial, size, UUID and mountpoint, then creates or verifies only
+data and data/archives under that mount. It never formats, mounts, edits fstab,
+moves database files or recursively changes existing files.
+
+Those roots use the pinned application/PostgreSQL UID 70 and the named host
+operator's primary group, with mode 0770. Both the runtime and deployment operator
+can pass their root-directory write checks. PostgreSQL tablespace directories and
+private archive files retain their own stricter ownership/permissions. Use the
+returned history_root for QT_STORAGE_HDD_ROOT and archive_root for
+QT_MARKET_DATA_ROOT when preparing the later reviewed runtime configuration.
+
+Preparation uses directory descriptors without following symlinks. Children must
+remain on the admitted writable HDD filesystem. Re-entry preserves correctly
+prepared directories and their contents; it can finish only an empty interrupted
+root-owned or runtime-owned directory. Foreign ownership, nonempty inconsistent
+permissions, symlinks, nested foreign filesystems and read-only mounts refuse.
+
+The disposable native rehearsal uses real process UIDs, filesystem permissions
+and tmpfs mounts; only hardware audit/findmnt observations are synthetic. This
+does not qualify the live disk or transfer ownership of existing SSD files. That
+existing-data permission admission and the complete host cutover remain required.

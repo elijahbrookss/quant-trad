@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Qualify fixed root permissions on one owned disposable tmpfs container.
+
+Only hardware audit/findmnt observations are synthetic. Filesystem ownership,
+process UIDs, permissions, interruption and preservation checks are real.
+"""
+from pathlib import Path
+import os
+import subprocess
+import uuid
+
+ROOT = Path(__file__).resolve().parents[2]
+PROBE = r"""
+from pathlib import Path
+import json,os,stat,subprocess,sys
+sys.path.insert(0,"/proof")
+import storage_host_prepare as helper
+mount = Path("/srv/quanttrad/storage/hdd-fixture")
+plan = dict(device="/dev/disk/by-id/fixture",expected_serial="fixture-serial",
+    expected_size_bytes=1024,filesystem_uuid="df88b80e-1b89-49dc-87a9-ac5b48801b79",
+    mountpoint=str(mount),owner="nobody")
+helper.audit = lambda *args: {"topology":{"blockdevices":[dict(type="disk",
+    serial=plan["expected_serial"],size=1024,fstype="ext4",uuid=plan["filesystem_uuid"],
+    mountpoints=[str(mount)])]},"signatures":{"signatures":[{"type":"ext4"}]}}
+def mounted(command):
+    assert command[0] == "findmnt", "format/mount operation attempted"
+    return plan["filesystem_uuid"]
+helper.run = mounted
+expected_refusal = os.environ.get("DIRECTORY_FIXTURE_REFUSAL")
+if expected_refusal:
+    try:
+        helper.prepare_runtime_directories(plan)
+        raise AssertionError("invalid filesystem admitted")
+    except ValueError as exc:
+        assert expected_refusal in str(exc), str(exc)
+    print("PASS: filesystem refusal before directory mutation: "+expected_refusal)
+    sys.exit(0)
+original = helper.os.fchmod
+interrupted = [False]
+def lose_reply(fd,mode):
+    if not interrupted[0]:
+        interrupted[0] = True
+        raise RuntimeError("injected_after_chown")
+    return original(fd,mode)
+helper.os.fchmod = lose_reply
+try:
+    try:
+        helper.prepare_runtime_directories(plan)
+        raise AssertionError("preparation was not interrupted")
+    except RuntimeError as exc:
+        assert str(exc) == "injected_after_chown"
+finally:
+    helper.os.fchmod = original
+result = helper.prepare_runtime_directories(plan)
+data,archives = mount/"data",mount/"data"/"archives"
+for path in (data,archives):
+    info = path.stat()
+    assert (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)) == (70,65534,0o770)
+inodes = [p.stat().st_ino for p in (data,archives)]
+def as_user(uid,gid,code,path):
+    def demote():
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+    subprocess.run([sys.executable,"-c",code,str(path)],preexec_fn=demote,check=True)
+as_user(65534,65534,"from pathlib import Path; import sys; (Path(sys.argv[1])/'operator-proof').write_text('operator')",data)
+as_user(70,70,"import os,sys; from pathlib import Path; p=Path(sys.argv[1])/'private-proof'; fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,b'preserved'); os.close(fd)",archives)
+proof = archives/"private-proof"
+before = proof.stat()
+assert helper.prepare_runtime_directories(plan) == result
+after = proof.stat()
+assert [p.stat().st_ino for p in (data,archives)] == inodes
+assert (after.st_uid,after.st_gid,after.st_mode,after.st_ino) == (before.st_uid,before.st_gid,before.st_mode,before.st_ino)
+assert proof.read_bytes() == b"preserved"
+archives.chmod(0o700)
+try:
+    try:
+        helper.prepare_runtime_directories(plan)
+        raise AssertionError("nonempty directory permissions silently changed")
+    except ValueError as exc:
+        assert "requires_review" in str(exc)
+    assert stat.S_IMODE(archives.stat().st_mode) == 0o700
+finally:
+    archives.chmod(0o770)
+saved = data/"archives-retained"
+archives.rename(saved)
+archives.symlink_to("/etc",target_is_directory=True)
+try:
+    try:
+        helper.prepare_runtime_directories(plan)
+        raise AssertionError("symlink accepted")
+    except OSError:
+        pass
+finally:
+    archives.unlink()
+    saved.rename(archives)
+assert proof.read_bytes() == b"preserved"
+print(json.dumps(dict(interrupted_preparation_recovered=True,operator_and_runtime_roots_writable=True,
+    private_files_and_directory_identities_preserved=True,foreign_metadata_and_symlinks_refused=True,
+    physical_device_identity_tested=False,host_data_changed=False)))
+"""
+
+
+def main():
+    token = uuid.uuid4().hex
+    name = "qt-storage-directories-"+token[:12]
+    env = {key:value for key,value in os.environ.items()
+           if not key.startswith(("QT_","PG_","POSTGRES_","COMPOSE_"))}
+    command = ["docker","run","--rm","--name",name,"--network","none","--read-only",
+        "--memory","128m","--cpus","0.5","--pids-limit","32",
+        "--label","qt.storage-directory-proof="+token,
+        "--tmpfs","/srv/quanttrad/storage/hdd-fixture:rw,size=16m,mode=0755",
+        "--env","PYTHONDONTWRITEBYTECODE=1"]
+    for filename in ("storage_host_prepare.py","storage_device_audit.py"):
+        command += ["--mount","type=bind,source="+str(ROOT/"scripts/automation"/filename)+",target=/proof/"+filename+",readonly"]
+    command += ["--pull","never","python:3.12.3-slim","python","-c",PROBE]
+    readonly = [name+"-readonly" if value == name else value for value in command]
+    readonly[readonly.index("/srv/quanttrad/storage/hdd-fixture:rw,size=16m,mode=0755")] = "/srv/quanttrad/storage/hdd-fixture:ro,size=16m,mode=0755"
+    readonly[readonly.index("--pull"):readonly.index("--pull")] = ["--env","DIRECTORY_FIXTURE_REFUSAL=read_only"]
+    foreign = [name+"-foreign" if value == name else value for value in command]
+    foreign[foreign.index("--pull"):foreign.index("--pull")] = [
+        "--env","DIRECTORY_FIXTURE_REFUSAL=wrong_filesystem",
+        "--tmpfs","/srv/quanttrad/storage/hdd-fixture/data:rw,size=1m,mode=0700"]
+    for candidate in (command,readonly,foreign):
+        try:
+            subprocess.run(candidate,cwd=ROOT,env=env,check=True,timeout=180)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker","rm","--force",candidate[candidate.index("--name")+1]],
+                           env=env,check=True,timeout=30)
+            raise
+    left = subprocess.check_output(["docker","ps","-aq","--filter",
+        "label=qt.storage-directory-proof="+token],env=env,text=True).strip()
+    if left:
+        raise RuntimeError("disposable_directory_container_not_removed")
+    print("PASS: owned runtime-directory fixture removed; no host/device writes")
+
+
+if __name__ == "__main__":
+    main()
