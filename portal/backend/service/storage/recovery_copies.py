@@ -71,6 +71,28 @@ def _identity(session):
     return value, hashlib.sha256(value.encode()).hexdigest()[:32]
 
 
+
+def _snapshot_layout(session):
+    """Identify the storage certificate visible to this exact database snapshot."""
+    rows = session.execute(text("""
+        SELECT layout_version,state,completed_at,evidence
+        FROM market.fact_storage_state ORDER BY layout_version LIMIT 2
+    """)).mappings().all()
+    if (len(rows) != 1 or rows[0]["state"] != "ready"
+            or rows[0]["layout_version"] not in (
+                "market.fact_storage_tiers.v1", "market.fact_storage_tiers.v2")
+            or rows[0]["completed_at"] is None or rows[0]["completed_at"].tzinfo is None
+            or not isinstance(rows[0]["evidence"], dict)):
+        raise RuntimeError("recovery_storage_layout_not_ready")
+    row = rows[0]
+    certificate = {"layout_version": row["layout_version"],
+        "completed_at": row["completed_at"].astimezone(UTC).isoformat(),
+        "evidence": row["evidence"]}
+    digest = hashlib.sha256(json.dumps(certificate, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return {"layout_version": row["layout_version"], "certificate_sha256": digest}
+
+
 def _archive_rows(session, *, max_objects, check):
     count = 0
     for table, kind in _FAMILIES:
@@ -329,6 +351,17 @@ class LocalRecoveryCopies:
                     or receipt.get("database_identity") != self.identity
                     or receipt.get("filesystem_uuid") != self.target.filesystem_uuid):
                 raise RuntimeError("recovery_completion_identity_mismatch")
+            # Older copies remain recoverable, but cannot prove coverage of the
+            # current layout. Scheduling will create a newly certified copy.
+            if "storage_layout" in receipt:
+                layout = receipt["storage_layout"]
+                if (not isinstance(layout, dict)
+                        or set(layout) != {"layout_version", "certificate_sha256"}
+                        or layout["layout_version"] not in (
+                            "market.fact_storage_tiers.v1", "market.fact_storage_tiers.v2")
+                        or not isinstance(layout["certificate_sha256"], str)
+                        or not _HASH.fullmatch(layout["certificate_sha256"])):
+                    raise RuntimeError("recovery_completion_layout_invalid")
             stamp = datetime.fromisoformat(receipt["completed_at"])
             if stamp.tzinfo is None:
                 raise RuntimeError("recovery_completion_time_invalid")
@@ -356,6 +389,7 @@ class LocalRecoveryCopies:
         identity, _ = _identity(session)
         if identity != self.identity or session.connection().get_isolation_level() != "REPEATABLE READ":
             raise RuntimeError("recovery_snapshot_identity_or_isolation_invalid")
+        snapshot_layout = _snapshot_layout(session)
         # Verify the actual shared session-level expiry fence, not a caller flag.
         from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
         held=session.scalar(text("""
@@ -400,6 +434,7 @@ class LocalRecoveryCopies:
                     os.fsync(inventory.fileno())
                 receipt = {"schema_version": _VERSION, "name": name, "database_identity": self.identity,
                     "filesystem_uuid": self.target.filesystem_uuid,
+                    "storage_layout": snapshot_layout,
                     "completed_at": datetime.now(UTC).isoformat(), "database": dump,
                     "archive_objects": count, "archive_bytes": archive_bytes,
                     "inventory_sha256": inventory_digest.hexdigest(), "written_bytes": self.written}

@@ -17,7 +17,7 @@ from portal.backend.service.storage_management import StorageManagementService
 from portal.backend.service.storage.recovery_maintenance import run_due_local_recovery
 from portal.backend.service.storage.maintenance_runtime import storage_maintenance_runners
 from tests.test_storage_maintenance_runtime import configuration
-from portal.backend.service.storage.recovery_copies import _identity
+from portal.backend.service.storage.recovery_copies import _identity, LocalRecoveryCopies
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from tests.test_market_data.test_fact_storage_tiers_db import storage
 
@@ -93,6 +93,35 @@ def test_due_recovery_owns_capacity_skips_busy_and_preserves_completed_copy(stor
     assert len(generations)==1 and (generations[0]/"database.dump").is_file()
     assert worker.run_once()["local_recovery"]["state"]=="not_due"
     assert list(copy_root.glob("copy_*"))==generations
+    assert result["storage_layout"]["layout_version"]=="market.fact_storage_tiers.v2"
+    # A recent legacy receipt, or even a completed copy of a different layout,
+    # must not postpone the first recovery copy covering the current snapshot.
+    for stale in (None, {"layout_version":"market.fact_storage_tiers.v1",
+                         "certificate_sha256":"a"*64}):
+        previous=copy_root/result["generation"]
+        certificate=previous/"complete.json"
+        old=json.loads(certificate.read_text())
+        if stale is None:
+            old.pop("storage_layout")
+        else:
+            old["storage_layout"]=stale
+        certificate.write_text(json.dumps(old))
+        before={p.name for p in copy_root.glob("copy_*")}
+        create=LocalRecoveryCopies.create
+        def lost_reply(manager,*positional,**keywords):
+            create(manager,*positional,**keywords)
+            raise TimeoutError("injected lost completed-copy reply")
+        with monkeypatch.context() as patch:
+            patch.setattr(LocalRecoveryCopies,"create",lost_reply)
+            with pytest.raises(TimeoutError,match="lost completed-copy"):
+                run()
+        after={p.name for p in copy_root.glob("copy_*")}
+        assert len(after-before)==1 and previous.is_dir()
+        result=worker.run_once()["local_recovery"]
+        assert result["state"]=="not_due" and result["generation"] in after-before
+        assert result["storage_layout"]["layout_version"]=="market.fact_storage_tiers.v2"
+        assert {p.name for p in copy_root.glob("copy_*")}==after
+    generations=list(copy_root.glob("copy_*"))
     with pytest.raises(RuntimeError,match="recovery_cancelled"):
         run(cancelled=lambda:True)
     with pytest.raises(RuntimeError,match="capacity_or_filesystem_changed"):

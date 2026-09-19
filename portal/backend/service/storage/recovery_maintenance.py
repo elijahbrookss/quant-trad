@@ -18,7 +18,7 @@ from portal.backend.service.storage_management import _target
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from .header_admission import registered_header_targets
 from .header_resources import observe_header_resources
-from .recovery_copies import LocalRecoveryCopies, _identity
+from .recovery_copies import LocalRecoveryCopies, _identity, _snapshot_layout
 
 logger = logging.getLogger(__name__)
 
@@ -119,14 +119,16 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
             cancelled=cancelled,check_resources=resources)
         with copies.lock():
             completed=copies.completed()
+        current_layout=_snapshot_layout(owner)
         now=owner.scalar(text("SELECT clock_timestamp()"))
         if completed:
             last=completed[-1][0]
             if last>now:
                 raise RuntimeError("recovery_completion_clock_ahead")
             next_due=last+timedelta(hours=policy.backup_interval_hours)
-            if now<next_due:
+            if now<next_due and completed[-1][2].get("storage_layout")==current_layout:
                 return {"state":"not_due","policy_revision":config.revision,
+                        "generation":completed[-1][2]["name"],"storage_layout":current_layout,
                         "policy_hash":policy.fingerprint,"last_completed_at":last.isoformat(),
                         "next_due_at":next_due.isoformat(),"completed_copies":len(completed)}
         resources()
@@ -153,10 +155,13 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
         except DatabaseSnapshotBusyError:
             return {"state":"busy","reason":"archive_lifecycle_running"}
         resources()
+        if receipt["storage_layout"]!=current_layout:
+            raise RuntimeError("recovery_storage_layout_changed_during_copy")
         logger.info("local_recovery_maintenance_completed | generation=%s policy_revision=%s",
                     receipt["name"],config.revision)
         return {"state":"completed","last_completed_at":receipt["completed_at"],
                 "generation":receipt["name"],"policy_revision":config.revision,
+                "storage_layout":receipt["storage_layout"],
                 "policy_hash":policy.fingerprint,
                 "next_due_at":(datetime.fromisoformat(receipt["completed_at"])
                                +timedelta(hours=policy.backup_interval_hours)).isoformat()}

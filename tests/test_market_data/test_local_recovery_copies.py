@@ -141,3 +141,17 @@ def test_cancellation_and_resource_loss_stop_before_more_bytes(manager):
     with pytest.raises(RuntimeError,match="ownership lost"):
         manager._write(output,b"not written",digest)
     assert output.getvalue()==b"saved"
+
+
+@pytest.mark.parametrize("layout",[None,{},
+    {"layout_version":"unknown","certificate_sha256":"a"*64},
+    {"layout_version":"market.fact_storage_tiers.v2","certificate_sha256":"bad"}])
+def test_invalid_layout_receipt_cannot_certify_a_recovery_copy(manager,layout):
+    generation=_generation(manager)
+    recovery._json_write(generation/"complete.json",{
+        "schema_version":recovery._VERSION,"database_identity":manager.identity,
+        "filesystem_uuid":manager.target.filesystem_uuid,"name":generation.name,
+        "completed_at":"2026-09-19T00:00:00+00:00","storage_layout":layout})
+    with pytest.raises(RuntimeError,match="completion_layout_invalid"):
+        manager.completed()
+    assert generation.is_dir()

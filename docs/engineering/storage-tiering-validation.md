@@ -1228,3 +1228,16 @@ Completing the matching service startup, fresh-layout recovery check, restart
 reconciliation and verified hold retirement remains necessary before deployment.
 The physical performance, complete capacity and representative one-day migration
 limits remain unqualified. No merge, push, server access or deployment occurred.
+
+
+## Post-migration recovery coverage (local implementation)
+
+The due-copy runner now compares the latest copy's actual snapshot layout with
+the current database layout before returning not due. This closes the observed
+gap where a recent pre-migration copy could postpone the first post-migration
+copy. The existing snapshot, capacity limits, archive fences and rotation remain
+in use. Old receipts remain readable but cannot certify current-layout coverage.
+
+Focused filesystem and runtime checks pass. The disposable PostgreSQL rehearsal
+for old-layout receipts, lost completion responses and clean/preserved restore
+certificates is pending. This is not deployment or proof of live recovery.

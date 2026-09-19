@@ -724,6 +724,17 @@ for that snapshot after new writes resume. Migration progress copied by a logica
 dump is not permission to resume an incomplete migration in a different database.
 The fixed migration's database/OID/physical admission remains required.
 
+Every new completed receipt records the storage-layout version and a hash of the
+layout certificate visible in the same repeatable database snapshot as the dump.
+The copy completion time alone cannot prove which side of a migration the dump
+contains. The scheduler skips an interval only when the latest completed copy
+matches the current layout certificate. A legacy receipt without this evidence,
+or one for a different layout, requires a new bounded copy even if recent.
+Existing copies remain available until normal successful rotation. A lost
+completion response reuses the published matching generation on retry; it does
+not create another generation solely because the earlier caller lost its reply.
+This evidence does not replace restore testing or physical storage admission.
+
 ### Due-copy maintenance admission
 
 The internal run_due_local_recovery service reads the existing saved interval and

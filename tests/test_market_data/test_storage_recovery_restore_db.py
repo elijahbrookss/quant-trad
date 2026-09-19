@@ -19,7 +19,7 @@ from market_data.market_state import derive_book_features,MarketStateValuationCo
 from portal.backend.db.session import Database
 from portal.backend.db import InstrumentRecord
 from core.storage_targets import StorageTarget
-from portal.backend.service.storage.recovery_copies import LocalRecoveryCopies
+from portal.backend.service.storage.recovery_copies import LocalRecoveryCopies, _snapshot_layout
 from portal.backend.service.market.market_structure_service import MarketStructureService
 from portal.backend.service.storage.repos import market_data,market_structure,market_lifecycle
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
@@ -207,6 +207,8 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
         options={"objects":objects,"pg_dump":Path("/usr/lib/postgresql/15/bin/pg_dump"),"keep_copies":2}
         first_manager=copies(identity)
         first=first_manager.create(snapshot,**options)
+        assert first["storage_layout"]==_snapshot_layout(snapshot)
+        assert first["storage_layout"]["layout_version"]=="market.fact_storage_tiers.v2"
         first_path=first_manager.root/first["name"]
         # A failed new copy cannot retire the known completed generation.
         with pytest.raises(RuntimeError,match="recovery_byte_budget_exceeded"):
@@ -278,6 +280,7 @@ def test_consistent_local_copy_restores_hdd_metadata_cold_books_and_frozen_resul
             monkeypatch.setattr(market_structure,"canonical_fact_storage_repository",tiered)
             repo=market_data.PostgresMarketDataRepository()
             with restored.session() as session:
+                assert _snapshot_layout(session)==third["storage_layout"]
                 assert session.scalar(text("SELECT count(*) FROM market.fact_versions"))==snapshot_rows
                 assert not session.scalar(text("SELECT EXISTS(SELECT 1 FROM market.fact_versions WHERE observation_key='recovery-after-snapshot')"))
             for (series,start,end),expected in reads.items():
