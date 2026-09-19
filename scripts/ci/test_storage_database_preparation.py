@@ -277,8 +277,8 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     run(compose+['up','--detach','--no-build','--pull','never','--wait','--wait-timeout','180'],env=env)
     dbid=run(compose+['ps','--quiet','tsdb'],env=env).stdout.strip()
     dsn='postgresql+psycopg2://quanttrad:'+secret+'@127.0.0.1:5432/'+pg_database
-    def application(code, container):
-        return run(['docker','run','--rm','--pull','never','--name',project+'-fixture-app','--user','70:70',
+    def application(code, container, *, user="70:70"):
+        return run(['docker','run','--rm','--pull','never','--name',project+'-fixture-app','--user',user,
             '--network','container:'+container,'--pid','container:'+container,'--volumes-from',container,
             '--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure',
             '--mount','type=bind,source='+str(udev)+',target=/run/qt-handoff/udev,readonly',
@@ -287,7 +287,11 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
             '--env','QT_MARKET_DATA_EXPECTED_UUID=fixture-hdd','--env','QT_STORAGE_UDEV_ROOT=/run/qt-handoff/udev',
             '--entrypoint','python',image,'-c',code],env={**env,'PG_DSN':dsn},timeout=600)
     print('Seeding real collected/frozen recent and archived records in owned database',flush=True)
-    print(application(_SEED,dbid).stdout[-300:],flush=True)
+    print(application(_SEED,dbid,user="0:0").stdout[-300:],flush=True)
+    import hashlib,stat
+    legacy_files={str(path.relative_to(working)):(path.stat(),hashlib.sha256(path.read_bytes()).hexdigest())
+                  for path in working.rglob('*') if path.is_file()}
+    assert any(info.st_uid==0 and stat.S_IMODE(info.st_mode)==0o600 for info,_ in legacy_files.values())
     for name in pause.STOP+tuple(v for v in pause.PASSIVE if v!='tsdb'):
         args=['docker','run','--detach','--pull','never','--network',network,'--name',project+'-'+name,
             '--read-only','--user','65534:65534','--init','--restart','unless-stopped',
@@ -337,6 +341,12 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
         print('Owned migration worker outcome: '+diagnostic.stdout[-4000:]+diagnostic.stderr[-4000:],flush=True)
         raise
     assert result['database_sequence_complete'] and not result['collection_resume_authorized']
+    assert {str(path.relative_to(working)) for path in working.rglob('*') if path.is_file()}==set(legacy_files)
+    for key,(old,digest) in legacy_files.items():
+        path=working/key;now=path.stat()
+        assert now.st_uid==70 and hashlib.sha256(path.read_bytes()).hexdigest()==digest
+        assert (now.st_dev,now.st_ino,now.st_mode,now.st_gid,now.st_mtime_ns)==(old.st_dev,old.st_ino,old.st_mode,old.st_gid,old.st_mtime_ns)
+    print('Legacy root-owned private files now readable by UID70 with bytes and file identity preserved',flush=True)
     assert run(['docker','ps','-aq','--no-trunc','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()==operator_id
     print(application(_VERIFY,pause._load(state/pause.HOLD)['containers']['tsdb']['id']).stdout[-400:],flush=True)
     assert (state/pause.HOLD).exists()

@@ -151,6 +151,28 @@ for path,(old,contents) in before.items():
     if contents is not None:assert path.read_bytes()==contents
 as_user(70,70,"from pathlib import Path;import sys;p=Path(sys.argv[1]);assert (p/'objects/retained').read_bytes()==b'frozen archive bytes';assert (p/'pending-spool').read_bytes()==b'uncommitted collection'",legacy)
 print("PASS: interrupted legacy ownership transfer preserves archive/spool bytes, inodes, modes and groups; UID70 gains access; symlinks, hardlinks and foreign owners are refused before mutation")
+# Qualify the packaged entry point's privilege boundary in a separate process.
+import types
+fixed=Path("/app/logs/market-structure")
+fixed_file=fixed/"private";fixed_file.write_bytes(b"legacy bytes");fixed_file.chmod(0o600)
+request=Path("/run/qt-handoff/request.json");request.write_text("{}\n");request.chmod(0o444)
+os.environ.update(QT_HANDOFF_WORKING_DEVICE=str(fixed.stat().st_dev),
+    QT_HANDOFF_WORKING_INODE=str(fixed.stat().st_ino),QT_HANDOFF_WORKING_SECONDS="30")
+def db_boundary():
+    assert os.getresuid()==(70,70,70) and os.getresgid()==(70,70,70) and not os.getgroups()
+    assert next(line for line in Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:')).split()[1]=='0000000000000000'
+    assert fixed_file.read_bytes()==b"legacy bytes" and sys.stdin.read()=="{}\n"
+    return 0
+module=types.ModuleType("scripts.db.fact_header_v2_handoff");module.database_operator_main=db_boundary
+sys.modules[module.__name__]=module
+for wrong in (True,False):
+    pid=os.fork()
+    if pid==0:
+        if wrong:os.environ['QT_HANDOFF_WORKING_INODE']=str(fixed.stat().st_ino+1)
+        os._exit(helper.legacy_working_operator_main())
+    assert os.waitpid(pid,0)[1]==(256 if wrong else 0)
+    assert fixed_file.stat().st_uid==(0 if wrong else 70)
+print("PASS: exact source identity required before mutation; database entry point runs only after permanent UID/GID70 transition with no effective capabilities")
 print(json.dumps(dict(interrupted_preparation_recovered=True,operator_and_runtime_roots_writable=True,
     private_files_and_directory_identities_preserved=True,foreign_metadata_and_symlinks_refused=True,
     physical_device_identity_tested=False,host_data_changed=False)))
@@ -166,6 +188,8 @@ def main():
         "--memory","128m","--cpus","0.5","--pids-limit","32",
         "--label","qt.storage-directory-proof="+token,
         "--tmpfs","/srv/quanttrad/storage/hdd-fixture:rw,size=16m,mode=0755",
+        "--tmpfs","/app/logs/market-structure:rw,size=1m,mode=0700",
+        "--tmpfs","/run/qt-handoff:rw,size=64k,mode=0755",
         "--env","PYTHONDONTWRITEBYTECODE=1"]
     for filename in ("storage_host_prepare.py","storage_device_audit.py"):
         command += ["--mount","type=bind,source="+str(ROOT/"scripts/automation"/filename)+",target=/proof/"+filename+",readonly"]

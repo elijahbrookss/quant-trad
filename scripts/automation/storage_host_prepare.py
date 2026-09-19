@@ -355,6 +355,32 @@ def prepare_legacy_working_ownership(root: Path, *, expected_device: int,
         os.close(descriptor)
 
 
+def legacy_working_operator_main() -> int:
+    """Pinned, host-held worker: repair legacy ownership, then discard root."""
+    import sys
+    try:
+        prepare_legacy_working_ownership(Path("/app/logs/market-structure"),
+            expected_device=int(os.environ["QT_HANDOFF_WORKING_DEVICE"]),
+            expected_inode=int(os.environ["QT_HANDOFF_WORKING_INODE"]),
+            max_duration_seconds=int(os.environ["QT_HANDOFF_WORKING_SECONDS"]))
+        os.setgroups([])
+        os.setresgid(70,70,70)
+        os.setresuid(70,70,70)
+        if os.getresuid() != (70,70,70) or os.getresgid() != (70,70,70) or os.getgroups():
+            raise RuntimeError("storage_working_ownership_identity_drop_failed")
+        from scripts.db.fact_header_v2_handoff import database_operator_main
+        with open("/run/qt-handoff/request.json") as request:
+            sys.stdin = request
+            return database_operator_main()
+    except Exception as exc:
+        code = str(exc).split(":",1)[0]
+        if not re.fullmatch(r"[a-z][a-z0-9_]{1,160}",code):
+            code = type(exc).__name__
+        print("event=storage_working_ownership_failed hold_required=true code="+code,
+              file=sys.stderr,flush=True)
+        return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)

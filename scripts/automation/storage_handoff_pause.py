@@ -494,8 +494,9 @@ def paused_storage_clients(state_root: Path, *, project: str, source_revision: s
 
 _OPERATOR_STATE = "storage-operator-state.json"
 _OPERATOR_REQUEST = "storage-operator-request.json"
-_OPERATOR_COMMAND = ["-c", "import sys; from scripts.db.fact_header_v2_handoff import database_operator_main; "
-    "sys.stdin=open('/run/qt-handoff/request.json'); sys.exit(database_operator_main())"]
+_OPERATOR_CAPS = ["CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_SETGID", "CAP_SETUID"]
+_OPERATOR_COMMAND = ["-c", "from scripts.automation.storage_host_prepare import legacy_working_operator_main; "
+    "raise SystemExit(legacy_working_operator_main())"]
 
 
 def _operator_contract(details, binding):
@@ -512,7 +513,7 @@ def _operator_admit(identity, saved):
     mounted = [m for m in details["mounts"] if m["Type"] != "tmpfs"]
     mounts = {m["Destination"]: (m["Type"], m["Source"], m["RW"]) for m in mounted}
     admitted = (
-        details["image"] == expected["image"] and config["User"] == "70:70"
+        details["image"] == expected["image"] and config["User"] == "0:0"
         and config["Entrypoint"] == ["python"] and config["Cmd"] == _OPERATOR_COMMAND
         and config["Hostname"] in (identity[:12], expected["database_hostname"])
         and config["Labels"].get("qt.storage.handoff") == expected["request_sha256"]
@@ -521,7 +522,7 @@ def _operator_admit(identity, saved):
         and host["PidMode"] == "container:"+expected["database_id"]
         and host["ReadonlyRootfs"] and not host["Privileged"]
         and host["RestartPolicy"]["Name"] == "no" and host["Init"] is True
-        and host["CapDrop"] == ["ALL"] and not host.get("CapAdd")
+        and host["CapDrop"] == ["ALL"] and sorted(host.get("CapAdd") or []) == _OPERATOR_CAPS
         and not host.get("Devices") and not host.get("DeviceRequests")
         and not host.get("GroupAdd") and not host.get("Sysctls")
         and host["SecurityOpt"] == ["no-new-privileges"]
@@ -548,6 +549,8 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
 
     The operator uses the prepared database's PID/network/storage namespaces and
     the existing SSD working bind. It has no Docker socket or provider settings.
+    The bounded legacy ownership phase runs with only its required capabilities,
+    then permanently drops to UID/GID 70 before opening a database connection.
     An interrupted controller reuses its exact container; clients remain held on
     every outcome. Runtime activation/hold retirement are intentionally separate.
     """
@@ -627,7 +630,10 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
             "MARKET_STRUCTURE_WORKING_ROOT":"/app/logs/market-structure",
             "QT_STORAGE_UDEV_ROOT":"/run/qt-handoff/udev",
             "QT_MARKET_DATA_EXPECTED_UUID":history_uuid,
-            "QT_MARKET_DATA_WORKING_EXPECTED_UUID":ssd[0]["filesystem_uuid"]}
+            "QT_MARKET_DATA_WORKING_EXPECTED_UUID":ssd[0]["filesystem_uuid"],
+            "QT_HANDOFF_WORKING_DEVICE":str(Path(working).stat().st_dev),
+            "QT_HANDOFF_WORKING_INODE":str(Path(working).stat().st_ino),
+            "QT_HANDOFF_WORKING_SECONDS":str(request["max_duration_seconds"])}
         request_path = state_root/_OPERATOR_REQUEST
         if not saved and not os.path.lexists(request_path):
             descriptor = os.open(request_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o444)
@@ -642,7 +648,8 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
         binds = {"/app/logs/market-structure":working,
                  "/run/quanttrad/storage-inventory.json":str(inventory_path),
                  "/run/qt-handoff/request.json":str(request_path),"/run/qt-handoff/udev":str(udev)}
-        expected_mounts.update({target:["bind",source,False] for target,source in binds.items()})
+        expected_mounts.update({target:["bind",source,target=="/app/logs/market-structure"]
+                                for target,source in binds.items()})
         expected_env = {**image_env,**overrides}
         binding = dict(project=project,source_revision=source_revision,image=image,
             request_sha256=request_hash,database_id=database_id,database_hostname=database["config"]["Hostname"],
@@ -661,7 +668,7 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
                 _docker("stop","--time","30",found[0],timeout=45)
             raise RuntimeError("storage_database_operator_deadline_expired")
         if not found:
-            args = ["create","--name",name,"--pull","never","--user","70:70","--init",
+            args = ["create","--name",name,"--pull","never","--user","0:0","--init",
                 "--restart","no","--read-only","--cap-drop","ALL","--security-opt","no-new-privileges",
                 "--memory","2g","--cpus","2","--pids-limit","128",
                 "--network","container:"+database_id,"--pid","container:"+database_id,
@@ -669,10 +676,13 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
                 "--label","qt.storage.handoff="+request_hash,
                 "--tmpfs","/tmp:rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
                 "--tmpfs","/app/logs:rw,nosuid,nodev,size=16777216,uid=70,gid=70,mode=0750"]
+            for capability in _OPERATOR_CAPS:
+                args += ["--cap-add",capability]
             for target,source in binds.items():
                 if "," in source:
                     raise ValueError("storage_database_operator_mount_path_invalid")
-                args += ["--mount","type=bind,source="+source+",target="+target+",readonly"]
+                args += ["--mount","type=bind,source="+source+",target="+target
+                         + ("" if target=="/app/logs/market-structure" else ",readonly")]
             for key,value in overrides.items():
                 args += ["--env",key if key=="PG_DSN" else key+"="+value]
             found = [_docker(*args,image,*_OPERATOR_COMMAND,env={**os.environ,"PG_DSN":dsn}).strip()]

@@ -294,5 +294,14 @@ foreign mounts, special files and set-ID permissions, then changes only ownershi
 to UID 70 while preserving groups, modes, inodes, bytes and timestamps other than
 ctime. It uses descriptor-relative traversal and exact root device/inode binding.
 Partial changes are idempotent and every failure requires the caller to retain
-the deployment hold. This function is not wired into host activation yet; it adds
-no public setting, recursive administrator command, or automatic startup change.
+the deployment hold. The same pinned held worker now runs this step before database work, using only
+CHOWN, DAC_OVERRIDE, SETGID and SETUID capabilities. It binds the exact working
+root read/write for ownership metadata, with the root device/inode included in
+the private environment fingerprint. After preparation it permanently sets real,
+effective and saved UID/GID to 70, clears supplementary groups, and only then
+opens the migration request and database entry point. The native process proof
+confirms no effective capabilities remain. Re-entry repeats the idempotent step
+within the original host deadline; no separate ownership job or public setting
+is introduced. Packaging and source attestation include this explicit entry
+point; it never runs during ordinary application startup. The complete runtime
+activation and verified retirement of the host hold remain separate blockers.

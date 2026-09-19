@@ -41,7 +41,7 @@ def test_fixed_overlay_preserves_spool_and_database_paths_without_fallback_mount
 
 def test_packaged_preserving_operator_is_part_of_runtime_attestation(tmp_path):
     dockerfile = (ROOT / "portal/backend/Dockerfile").read_text().split("FROM runtime AS storage-test")[0]
-    copied = set(re.findall(r"scripts/db/[a-z_0-9]+\.py", dockerfile))
+    copied = set(re.findall(r"scripts/(?:db|automation)/[a-z_0-9]+\.py", dockerfile))
     assert copied == set(source_tree_hash.OPERATOR_FILES)
     assert "COPY scripts/db/ /" not in dockerfile
     for name in source_tree_hash.OPERATOR_FILES:

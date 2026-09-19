@@ -549,10 +549,10 @@ def operator_setup(database_setup, tmp_path, monkeypatch):
                         value=args[i+1]
                         overrides.append("PG_DSN="+kwargs["env"]["PG_DSN"] if value=="PG_DSN" else value)
                 assert "@127.0.0.1:5432/fixture" in kwargs["env"]["PG_DSN"]
-                self.detail=dict(id=self.identity,image=image,config=dict(Hostname=self.identity[:12],User="70:70",Entrypoint=["python"],Cmd=pause._OPERATOR_COMMAND,
+                self.detail=dict(id=self.identity,image=image,config=dict(Hostname=self.identity[:12],User="0:0",Entrypoint=["python"],Cmd=pause._OPERATOR_COMMAND,
                     Labels={"qt.storage.handoff":pause._digest(request)},Env=image_env+overrides),
                     host=dict(NetworkMode="container:"+database.rows["tsdb"]["id"],PidMode="container:"+database.rows["tsdb"]["id"],
-                    ReadonlyRootfs=True,Privileged=False,RestartPolicy={"Name":"no"},Init=True,CapDrop=["ALL"],
+                    ReadonlyRootfs=True,Privileged=False,RestartPolicy={"Name":"no"},Init=True,CapDrop=["ALL"],CapAdd=list(pause._OPERATOR_CAPS),
                     SecurityOpt=["no-new-privileges"],Memory=2*1024**3,NanoCpus=2*10**9,PidsLimit=128,
                     Tmpfs={"/tmp":"rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
                            "/app/logs":"rw,nosuid,nodev,size=16777216,uid=70,gid=70,mode=0750"}),
@@ -657,6 +657,17 @@ def test_held_database_operator_refuses_foreign_hostname(operator_setup):
     with pytest.raises(TimeoutError):
         pause.run_held_database_handoff(state,**options)
     operator.detail["config"]["Hostname"]="unrelated-host"
+    with pytest.raises(RuntimeError,match="operator_container_changed"):
+        pause.run_held_database_handoff(state,**options)
+    assert operator.starts==0 and (state/pause.HOLD).exists()
+
+
+def test_held_database_operator_refuses_additional_ownership_capability(operator_setup):
+    state,database,operator,options=operator_setup
+    operator.fault="create"
+    with pytest.raises(TimeoutError):
+        pause.run_held_database_handoff(state,**options)
+    operator.detail["host"]["CapAdd"].append("CAP_SYS_ADMIN")
     with pytest.raises(RuntimeError,match="operator_container_changed"):
         pause.run_held_database_handoff(state,**options)
     assert operator.starts==0 and (state/pause.HOLD).exists()

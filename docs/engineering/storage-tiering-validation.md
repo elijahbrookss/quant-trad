@@ -1177,3 +1177,20 @@ foreign owners are refused during preflight before any ownership mutation. This
 native helper proof passed. Integration into the paused host cutover remains a
 release blocker: a helper test alone does not qualify existing server files or
 runtime activation. No server files were accessed or changed.
+
+The corrected combined held-host rehearsal passed on the runtime built from
+`76416b2f`, with host fixes recorded in `2acf8cd4`: owning-controller death after
+actual worker creation recovered that same worker, preserved recent records and
+frozen archived results, placed old headers/identities on the history filesystem,
+and retained the client pause through a repeated completed invocation. The final
+fixture correction used full Docker IDs for its own pause assertion. This is
+disposable correctness evidence, not physical HDD performance or activation.
+
+The pinned worker now includes the legacy ownership step before permanently
+dropping to UID/GID 70. Its separate real-process proof passed wrong-root refusal,
+private-file access and zero effective capabilities at database entry. The
+combined fixture now seeds root-owned private archive files and checks their
+bytes, inode, group, mode and mtime after automatic ownership repair. Qualification
+of this newly connected sequence is pending. Runtime activation, hold retirement,
+representative whole-volume duration/performance and complete capacity remain
+release blockers.
