@@ -1188,9 +1188,20 @@ disposable correctness evidence, not physical HDD performance or activation.
 
 The pinned worker now includes the legacy ownership step before permanently
 dropping to UID/GID 70. Its separate real-process proof passed wrong-root refusal,
-private-file access and zero effective capabilities at database entry. The
-combined fixture now seeds root-owned private archive files and checks their
-bytes, inode, group, mode and mtime after automatic ownership repair. Qualification
-of this newly connected sequence is pending. Runtime activation, hold retirement,
-representative whole-volume duration/performance and complete capacity remain
-release blockers.
+private-file access and zero effective capabilities at database entry. The combined fixture now seeds root-owned private archive files and checks their
+bytes, inode, group, mode and mtime after automatic ownership repair. The complete
+connected sequence passed on `4e9947c2`, using its source-attested pinned image:
+controller interruption reused the exact worker, old private files became readable
+by UID 70 without content or identity changes, frozen archived and recent reads
+were preserved, and completed invocation safely repeated while clients stayed
+paused. All owned containers, volumes and networks were removed and independently
+checked absent. Ordinary backend and documentation validation passed. These changes
+are committed locally; they have not been merged or deployed.
+
+Remaining release blockers are the full runtime activation/recovery and verified
+hold retirement, representative actual-drive performance, whole-volume migration
+within 24 hours, and capacity covering database/indexes, archives, working space
+and peak rotated recovery copies. Earlier isolated restore checks do not by
+themselves qualify the complete cutover. There is no defensible next-HDD date yet.
+Advanced placement controls, automatic rebalancing and hypothetical layouts remain
+deferred, and there is no seven-day waiting gate.

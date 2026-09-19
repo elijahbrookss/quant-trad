@@ -305,3 +305,10 @@ within the original host deadline; no separate ownership job or public setting
 is introduced. Packaging and source attestation include this explicit entry
 point; it never runs during ordinary application startup. The complete runtime
 activation and verified retirement of the host hold remain separate blockers.
+
+The combined disposable held-worker rehearsal passed with the packaged legacy
+ownership phase on `4e9947c2`: original private file bytes/identities and frozen
+historical reads survive controller interruption and retry, with the recent/history
+placement preserved. Successful database handoff still does not authorize resuming
+application clients or removing the durable hold. The complete activation/recovery
+path and representative physical performance/capacity remain release blockers.
