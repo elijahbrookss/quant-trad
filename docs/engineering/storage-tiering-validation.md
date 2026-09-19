@@ -1060,8 +1060,9 @@ fixture; after policy commitment, replay of activation is forbidden too.
 The supplied placement must match the recorded one. Completed reconciliation is
 also exercised after the original attempt deadline expires.
 
-This extension is implemented and awaits native qualification. It connects only
-the database steps. The full host procedure must still invoke it in the verified
+The combined current-source native rehearsal passed the interrupted and clean
+sequences, frozen-history reads, no replay after commit and refusal to overwrite
+a later policy revision. It connects only the database steps. The full host procedure must still invoke it in the verified
 namespace, align runtime roots, establish recovery and retire the hold after
 successful activation.
 
@@ -1073,8 +1074,10 @@ the dedicated HDD tablespace. A native fixture interrupts after PostgreSQL commi
 CREATE TABLESPACE, then checks that re-entry preserves its OID and directory inode,
 retains the source records and puts newly staged identity files on HDD. It also
 requires refusal of that nonempty directory under another target identity.
-This extension awaits native qualification; it does not prepare host ownership
-or activate application services.
+The combined native rehearsal passed lost-CREATE reconciliation with the original
+OID/directory and source data retained, physical HDD identity placement, and
+refusal to reuse that nonempty directory under another identity. It does not
+prepare host ownership or activate application services.
 
 
 The uninterrupted sequence scenario uses a separate SSD mount path outside the
@@ -1103,5 +1106,9 @@ The subsequent combined run built and passed source attestation, but its disposa
 database became unhealthy before tests started. This is an unavailable database
 qualification result, not a passing migration result. The runner now captures
 bounded database startup logs and health/exit state before removing its owned
-resources. A fresh combined qualification is required; the readiness gate is
-unchanged.
+resources. The fresh combined run passed with the readiness gate unchanged. The earlier
+startup failure has no confirmed root cause and remains recorded separately.
+Owned disposable containers, volumes, image and network were removed. Backend,
+documentation and runner-isolation checks passed after updating the isolation
+fixture to verify the additional bounded diagnostics. These small disposable
+fixtures do not establish physical throughput or the representative one-day limit.
