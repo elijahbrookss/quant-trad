@@ -1147,3 +1147,33 @@ bind paths to different host paths. An owned scratch-volume probe confirmed
 different device/inode identities. The fixture now uses Desktop's direct daemon
 socket; no production filesystem guard was relaxed. The translated scratch
 folders were verified as empty/probe-only and removed.
+
+
+The next combined attempt reached database preparation and refused changed
+network/history observations. Diagnostics showed a generated short container-ID
+alias (now excluded by exact identity) and Docker's forced slave propagation for
+binds inside its data root. An explicit-private scratch probe confirmed that
+Docker refuses that topology. The fixture history directory now uses an owned
+subdirectory of the existing shared-memory filesystem outside Docker's data
+root; production propagation/identity checks remain strict. The corrected native
+run is pending. Synthetic client stand-ins use the small cached Python image;
+seed, verification and migration still use the real pinned runtime code.
+
+The next native attempts exposed Docker's omitted pre-start tmpfs mount entries,
+its hostname transition when joining the database network, and a fixture volume
+root owned by root instead of PostgreSQL's runtime UID. Focused lifecycle checks
+now accept the expected Docker transitions while refusing unrelated hostnames,
+mounts and settings. The fixture root ownership is corrected; source archive
+mounts remain read-only. The combined native run is still pending.
+
+## Legacy working-file access
+
+The existing disposable real-UID host preparation fixture now includes an old
+collector's root-owned private archive and pending spool. It confirms that UID
+70 cannot initially read them, then interrupts ownership transfer after an actual
+chown. Retry preserves file bytes, inodes, groups and modes and grants the runtime
+access. A repeated completed transfer changes nothing. Symlinks, hardlinks and
+foreign owners are refused during preflight before any ownership mutation. This
+native helper proof passed. Integration into the paused host cutover remains a
+release blocker: a helper test alone does not qualify existing server files or
+runtime activation. No server files were accessed or changed.

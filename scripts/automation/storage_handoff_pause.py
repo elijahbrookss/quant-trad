@@ -152,7 +152,7 @@ def _digest(value) -> str:
 def _database_details(container: str) -> dict:
     # Resolved environment is inspected privately and hashed, never persisted
     # into the hold or exposed in diagnostics.
-    expression = '{"config":{{json .Config}},"host":{{json .HostConfig}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"image":{{json .Image}}}'
+    expression = '{"id":{{json .Id}},"config":{{json .Config}},"host":{{json .HostConfig}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}},"image":{{json .Image}}}'
     return json.loads(_docker("inspect", "--format", expression, container))
 
 
@@ -181,7 +181,7 @@ def _database_contract(details: dict, *, tcp_upgrade: bool = False) -> str:
 def _database_networks(details: dict) -> dict:
     return {name: {"network_id": value["NetworkID"],
                    "aliases": sorted(alias for alias in value.get("Aliases") or []
-                                     if not re.fullmatch(r"[0-9a-f]{64}", alias)),
+                                     if alias not in (details["id"], details["id"][:12])),
                    "ipam": value.get("IPAMConfig")}
             for name, value in details["networks"].items()}
 
@@ -498,6 +498,13 @@ _OPERATOR_COMMAND = ["-c", "import sys; from scripts.db.fact_header_v2_handoff i
     "sys.stdin=open('/run/qt-handoff/request.json'); sys.exit(database_operator_main())"]
 
 
+def _operator_contract(details, binding):
+    # Docker inherits the peer hostname only when the shared network starts.
+    # Admission separately permits only the worker's default or that exact peer.
+    normalized = {**details, "config": {**details["config"], "Hostname": binding["database_hostname"]}}
+    return _database_contract(normalized)
+
+
 def _operator_admit(identity, saved):
     details = _database_details(identity)
     config, host = details["config"], details["host"]
@@ -507,6 +514,7 @@ def _operator_admit(identity, saved):
     admitted = (
         details["image"] == expected["image"] and config["User"] == "70:70"
         and config["Entrypoint"] == ["python"] and config["Cmd"] == _OPERATOR_COMMAND
+        and config["Hostname"] in (identity[:12], expected["database_hostname"])
         and config["Labels"].get("qt.storage.handoff") == expected["request_sha256"]
         and _digest(sorted(config["Env"])) == expected["environment_sha256"]
         and host["NetworkMode"] == "container:"+expected["database_id"]
@@ -522,11 +530,13 @@ def _operator_admit(identity, saved):
         and host["Tmpfs"] == {"/tmp":"rw,nosuid,nodev,size=67108864,uid=70,gid=70,mode=1770",
                               "/app/logs":"rw,nosuid,nodev,size=16777216,uid=70,gid=70,mode=0750"}
         and len(mounts) == len(mounted) == len(expected["mounts"])
-        and {m["Destination"] for m in details["mounts"] if m["Type"] == "tmpfs"} == set(host["Tmpfs"])
+        # Docker reports configured tmpfs in HostConfig even when Mounts omits
+        # them on a created container. Reject any reported foreign tmpfs target.
+        and {m["Destination"] for m in details["mounts"] if m["Type"] == "tmpfs"} <= set(host["Tmpfs"])
         and mounts == {key: tuple(value) for key,value in expected["mounts"].items()}
     )
     if not admitted or (saved["contract"] is not None
-                        and _database_contract(details) != saved["contract"]):
+                        and _operator_contract(details, expected) != saved["contract"]):
         raise RuntimeError("storage_database_operator_container_changed")
     return details
 
@@ -635,7 +645,8 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
         expected_mounts.update({target:["bind",source,False] for target,source in binds.items()})
         expected_env = {**image_env,**overrides}
         binding = dict(project=project,source_revision=source_revision,image=image,
-            request_sha256=request_hash,database_id=database_id,mounts=expected_mounts,
+            request_sha256=request_hash,database_id=database_id,database_hostname=database["config"]["Hostname"],
+            mounts=expected_mounts,
             inventory_sha256=hashlib.sha256(inventory_path.read_bytes()).hexdigest(),
             environment_sha256=_digest(sorted(k+"="+v for k,v in expected_env.items())))
         if saved is None:
@@ -666,7 +677,7 @@ def run_held_database_handoff(state_root: Path, *, project: str, source_revision
                 args += ["--env",key if key=="PG_DSN" else key+"="+value]
             found = [_docker(*args,image,*_OPERATOR_COMMAND,env={**os.environ,"PG_DSN":dsn}).strip()]
         details = _operator_admit(found[0],saved)
-        saved.update(container_id=found[0],contract=_database_contract(details))
+        saved.update(container_id=found[0],contract=_operator_contract(details, binding))
         _save(state_path,saved,initial=False)
         state = json.loads(_docker("inspect","--format","{{json .State}}",found[0]))
         if state["OOMKilled"] or state["Paused"] or state["Restarting"]:

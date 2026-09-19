@@ -247,7 +247,7 @@ class DatabaseDocker(Docker):
         self.interrupt = None
         self.tamper = None
         self.details = {self.original["id"]: {
-            "image": self.original["image"],
+            "id": self.original["id"], "image": self.original["image"],
             "config": {"Image": "postgres-fixture", "Env": ["POSTGRES_USER=fixture", "POSTGRES_PASSWORD=fixture-secret"],
                        "Cmd": ["postgres"], "Entrypoint": ["entrypoint"], "Hostname": "tsdb.quanttrad",
                        "Labels": {"com.docker.compose.project": PROJECT, "com.docker.compose.service": "tsdb"},
@@ -303,6 +303,7 @@ class DatabaseDocker(Docker):
             row = {**self.original, "id": identity, "running": False, "pid": 0, "status": "created", "exit_code": 0}
             self.rows["tsdb"] = row
             details = copy.deepcopy(self.details[self.original["id"]])
+            details["id"] = identity
             details["config"]["Healthcheck"]["Test"] = pause._TCP_INSPECT
             details["mounts"].append({"Type": "bind", "Source": str(self.history), "Destination": "/qt-history",
                                       "Mode": "rw", "RW": True, "Propagation": "rprivate"})
@@ -548,7 +549,7 @@ def operator_setup(database_setup, tmp_path, monkeypatch):
                         value=args[i+1]
                         overrides.append("PG_DSN="+kwargs["env"]["PG_DSN"] if value=="PG_DSN" else value)
                 assert "@127.0.0.1:5432/fixture" in kwargs["env"]["PG_DSN"]
-                self.detail=dict(image=image,config=dict(User="70:70",Entrypoint=["python"],Cmd=pause._OPERATOR_COMMAND,
+                self.detail=dict(id=self.identity,image=image,config=dict(Hostname=self.identity[:12],User="70:70",Entrypoint=["python"],Cmd=pause._OPERATOR_COMMAND,
                     Labels={"qt.storage.handoff":pause._digest(request)},Env=image_env+overrides),
                     host=dict(NetworkMode="container:"+database.rows["tsdb"]["id"],PidMode="container:"+database.rows["tsdb"]["id"],
                     ReadonlyRootfs=True,Privileged=False,RestartPolicy={"Name":"no"},Init=True,CapDrop=["ALL"],
@@ -563,6 +564,7 @@ def operator_setup(database_setup, tmp_path, monkeypatch):
                 return self.identity
             if action=="start" and args[0]==self.identity:
                 self.running=True;self.starts+=1
+                self.detail["config"]["Hostname"]=database.details[database.rows["tsdb"]["id"]]["config"]["Hostname"]
                 if self.fault=="start":
                     self.fault=None;raise TimeoutError("lost start reply")
                 return self.identity
@@ -619,3 +621,42 @@ def test_held_database_operator_refuses_changed_request_after_commit(operator_se
     with pytest.raises(RuntimeError,match="saved_binding_changed"):
         pause.run_held_database_handoff(state,**changed)
     assert operator.starts==1 and (state/pause.HOLD).exists()
+
+
+def test_database_networks_ignore_only_own_generated_container_aliases():
+    identity="123456789abc"+"d"*52
+    details={"id":identity,"networks":{"fixed":{"NetworkID":"network",
+        "Aliases":["tsdb",identity,identity[:12],"fedcba987654","f"*64],"IPAMConfig":None}}}
+    assert pause._database_networks(details)["fixed"]["aliases"]==sorted(["tsdb","fedcba987654","f"*64])
+
+
+def test_held_database_operator_accepts_created_tmpfs_configuration_without_mount_entries(operator_setup):
+    state,database,operator,options=operator_setup
+    operator.fault="create"
+    with pytest.raises(TimeoutError):
+        pause.run_held_database_handoff(state,**options)
+    operator.detail["mounts"]=[m for m in operator.detail["mounts"] if m["Type"]!="tmpfs"]
+    assert pause.run_held_database_handoff(state,**options)["database_sequence_complete"]
+    assert operator.creates==1
+
+
+def test_held_database_operator_refuses_unconfigured_tmpfs(operator_setup):
+    state,database,operator,options=operator_setup
+    operator.fault="create"
+    with pytest.raises(TimeoutError):
+        pause.run_held_database_handoff(state,**options)
+    operator.detail["mounts"].append(dict(Type="tmpfs",Destination="/foreign",Source="",RW=True))
+    with pytest.raises(RuntimeError,match="operator_container_changed"):
+        pause.run_held_database_handoff(state,**options)
+    assert operator.starts==0
+
+
+def test_held_database_operator_refuses_foreign_hostname(operator_setup):
+    state,database,operator,options=operator_setup
+    operator.fault="create"
+    with pytest.raises(TimeoutError):
+        pause.run_held_database_handoff(state,**options)
+    operator.detail["config"]["Hostname"]="unrelated-host"
+    with pytest.raises(RuntimeError,match="operator_container_changed"):
+        pause.run_held_database_handoff(state,**options)
+    assert operator.starts==0 and (state/pause.HOLD).exists()

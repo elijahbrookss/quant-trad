@@ -257,9 +257,42 @@ has committed; container exit alone is insufficient. Success requires its bound
 result, unchanged paused clients and the retained host hold. It does not activate
 application services, record the new release or retire the hold.
 
-The native combined fixture uses disposable daemon-visible source, history and
-control volumes. Its host controller alone has Docker authority; the migration
+The native combined fixture uses disposable daemon-visible source/control
+volumes and an owned history directory on the existing shared-memory filesystem. Its host controller alone has Docker authority; the migration
 process uses the same restricted invocation as the host implementation. Docker
 Desktop's raw daemon socket is required by this local fixture so its nested bind
 paths refer to the owned volumes rather than translated host paths. This is a
 fixture requirement, not an additional production deployment arrangement.
+
+
+Docker's generated full or short container-ID alias is excluded from network
+comparison using that exact inspected container identity. Configured aliases,
+including unrelated hexadecimal names, remain part of the binding. The native
+rehearsal exposed the short-ID variant across database replacement.
+
+Docker requires slave/shared propagation for bind sources inside its own data
+root. The fixture therefore keeps its owned history directory outside that root,
+on the daemon's existing shared-memory filesystem. Only the disposable controller
+and its directory preparation/cleanup share host IPC to reach that filesystem;
+the migration process retains its fixed restricted invocation. No host filesystem
+is mounted/formatted by the fixture, and the production private-bind requirement
+is unchanged.
+
+The held worker contract accounts for two observed Docker lifecycle details:
+configured tmpfs entries may be absent from the reported mount list, and a
+container sharing the database network inherits that database's hostname only
+at startup. Admission permits only those exact configured tmpfs targets and the
+worker's own default or recorded database hostname; other configuration changes
+remain a refusal. The database network comparison ignores only its own generated
+full/short container-ID aliases, retaining every configured alias.
+
+The existing host preparation helper also provides a separate internal legacy
+working-tree ownership step. The old collector's root-owned private files cannot
+be read by the fixed UID 70 runtime. Under an externally held publisher pause,
+the helper preflights the complete bounded tree, refuses links, foreign owners,
+foreign mounts, special files and set-ID permissions, then changes only ownership
+to UID 70 while preserving groups, modes, inodes, bytes and timestamps other than
+ctime. It uses descriptor-relative traversal and exact root device/inode binding.
+Partial changes are idempotent and every failure requires the caller to retain
+the deployment hold. This function is not wired into host activation yet; it adds
+no public setting, recursive administrator command, or automatic startup change.

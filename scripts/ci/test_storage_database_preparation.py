@@ -233,8 +233,12 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     from datetime import date
     from urllib.parse import quote
     source_root,history_root,control_root=map(Path,(source_root,history_root,control_root))
+    assert history_root==Path('/dev/shm')/(project+'-history')
     env={key:value for key,value in os.environ.items() if not key.startswith(('QT_','PG_','POSTGRES_','COMPOSE_'))}
     state=control_root/'state';state.mkdir(mode=0o700)
+    # PGDATA is a child only to share this disposable SSD with the legacy
+    # working bind. Match the real runtime-owned PostgreSQL volume root.
+    os.chown(source_root,70,70)
     working=source_root/'working';working.mkdir(mode=0o700);os.chown(working,70,70)
     (history_root/'archives'/'objects').mkdir(parents=True)
     for path in (history_root,history_root/'archives',history_root/'archives'/'objects'):
@@ -250,6 +254,7 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
         dict(target_id='ssd',label='Recent',filesystem_uuid='fixture-ssd',root='/var/lib/postgresql/data',medium='ssd'),
         dict(target_id='hdd',label='History',filesystem_uuid='fixture-hdd',root='/qt-history',medium='hdd')])))
     pg_image=run(['docker','image','inspect','quanttrad-postgres:2.14.2-pg15','--format','{{.Id}}'],env=env).stdout.strip()
+    client_image=run(['docker','image','inspect','python:3.12.3-slim','--format','{{.Id}}'],env=env).stdout.strip()
     pg_database='qt_migration_held_'+uuid.uuid4().hex[:12]
     secret=uuid.uuid4().hex
     revision='a'*40
@@ -273,7 +278,7 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     dbid=run(compose+['ps','--quiet','tsdb'],env=env).stdout.strip()
     dsn='postgresql+psycopg2://quanttrad:'+secret+'@127.0.0.1:5432/'+pg_database
     def application(code, container):
-        return run(['docker','run','--rm','--pull','never','--user','70:70',
+        return run(['docker','run','--rm','--pull','never','--name',project+'-fixture-app','--user','70:70',
             '--network','container:'+container,'--pid','container:'+container,'--volumes-from',container,
             '--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure',
             '--mount','type=bind,source='+str(udev)+',target=/run/qt-handoff/udev,readonly',
@@ -290,7 +295,7 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
             '--label','com.docker.compose.oneoff=False']
         if name=='market-data-collector':
             args+=['--mount','type=bind,source='+str(working)+',target=/app/logs/market-structure','--env','PG_DSN']
-        args+=['--entrypoint','sh',image,'-c',"trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"]
+        args+=['--entrypoint','sh',client_image,'-c',"trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"]
         run(args,env={**env,'PG_DSN':dsn.replace('@127.0.0.1:','@tsdb:')})
     image_env=dict(v.split('=',1) for v in json.loads(run(['docker','image','inspect',image,'--format','{{json .Config.Env}}'],env=env).stdout))
     proof=json.loads((working/'held-proof.json').read_text())
@@ -322,10 +327,17 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
                 expected_networks=held.get('database_preparation',{}).get('networks'),
                 expected_history=held.get('database_preparation',{}).get('history_root'))),flush=True)
     assert child.returncode==-9,child.stderr[-4000:]
-    operator_id=run(['docker','ps','-aq','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()
-    result=pause.run_held_database_handoff(state,**options)
+    operator_id=run(['docker','ps','-aq','--no-trunc','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()
+    try:
+        result=pause.run_held_database_handoff(state,**options)
+    except Exception:
+        # This owned fixture uses only synthetic connection settings; the
+        # packaged worker emits bounded, sanitized guard outcomes.
+        diagnostic=run(['docker','logs','--tail','12',operator_id],env=env,ok=False)
+        print('Owned migration worker outcome: '+diagnostic.stdout[-4000:]+diagnostic.stderr[-4000:],flush=True)
+        raise
     assert result['database_sequence_complete'] and not result['collection_resume_authorized']
-    assert run(['docker','ps','-aq','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()==operator_id
+    assert run(['docker','ps','-aq','--no-trunc','--filter','name=^/'+project+'-storage-handoff$'],env=env).stdout.strip()==operator_id
     print(application(_VERIFY,pause._load(state/pause.HOLD)['containers']['tsdb']['id']).stdout[-400:],flush=True)
     assert (state/pause.HOLD).exists()
     assert not any(pause._inventory(project,operator_id=operator_id)[name]['running'] for name in pause.STOP)
@@ -343,16 +355,23 @@ def operator_rehearsal_outer(image):
     plugin=next(value['Path'] for value in plugins if value['Name']=='compose')
     created=[]
     controller=project+'-controller'
+    history='/dev/shm/'+project+'-history'
+    history_created=False
     try:
         roots=[]
-        for name in ('source','history','control'):
+        for name in ('source','control'):
             volume=project+'-'+name
             args=['docker','volume','create']
-            if name=='history':
-                args+=['--driver','local','--opt','type=tmpfs','--opt','device=tmpfs','--opt','o=size=268435456,uid=70,gid=70,mode=0700']
             run(args+[volume],env=env);created.append(volume)
             roots.append(run(['docker','volume','inspect',volume,'--format','{{.Mountpoint}}'],env=env).stdout.strip())
-        args=['docker','run','--rm','--pull','never','--name',controller,'--network','none','--user','0:0',
+        # The daemon's existing shared-memory filesystem is outside its data
+        # root, so ordinary private propagation is preserved. Only this unique
+        # owned directory is touched; no host mount operation is performed.
+        prepare_code="import os,sys;from pathlib import Path;p=Path(sys.argv[1]);p.mkdir(mode=0o700);(p/'.qt-rehearsal-owner').write_text(sys.argv[2]);os.chown(p,70,70)"
+        run(['docker','run','--rm','--pull','never','--network','none','--ipc','host',
+             '--entrypoint','python',image,'-c',prepare_code,history,project],env=env)
+        history_created=True
+        args=['docker','run','--rm','--pull','never','--name',controller,'--network','none','--ipc','host','--user','0:0',
             '--mount','type=bind,source='+str(ROOT)+',target=/qt-host,readonly',
             # Docker Desktop's raw socket preserves the daemon-volume paths below.
             '--mount','type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
@@ -360,19 +379,23 @@ def operator_rehearsal_outer(image):
             '--entrypoint','python','--workdir','/qt-host']
         for volume,root in zip(created,roots):
             args+=['--mount','type=volume,source='+volume+',target='+root]
-        result=run(args+[image,'scripts/ci/test_storage_database_preparation.py','--operator-inner',project,image,*roots],env=env,timeout=1800,ok=False)
+        result=run(args+[image,'scripts/ci/test_storage_database_preparation.py','--operator-inner',project,image,roots[0],history,roots[1]],env=env,timeout=1800,ok=False)
         print(result.stdout[-14000:],flush=True)
         if result.returncode:
             print(result.stderr[-10000:],flush=True)
             raise RuntimeError('owned_held_operator_rehearsal_failed')
     finally:
-        for name in (controller,project+'-storage-handoff'):
+        for name in (controller,project+'-storage-handoff',project+'-fixture-app'):
             ids=run(['docker','ps','-aq','--filter','name=^/'+name+'$'],env=env).stdout.split()
             if ids:run(['docker','rm','--force',*ids],env=env)
         ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.project='+project],env=env).stdout.split()
         if ids:run(['docker','rm','--force',*ids],env=env)
         networks=run(['docker','network','ls','-q','--filter','name=^'+project+'_quanttrad$'],env=env).stdout.split()
         if networks:run(['docker','network','rm',*networks],env=env)
+        if history_created:
+            cleanup_code="import shutil,sys;from pathlib import Path;p=Path(sys.argv[1]);assert p.parent==Path('/dev/shm') and p.resolve(strict=True)==p and not p.is_symlink();assert (p/'.qt-rehearsal-owner').read_text()==sys.argv[2];shutil.rmtree(p)"
+            run(['docker','run','--rm','--pull','never','--network','none','--ipc','host',
+                 '--entrypoint','python',image,'-c',cleanup_code,history,project],env=env)
         for volume in reversed(created):run(['docker','volume','rm',volume],env=env)
         print('Owned held-operator fixture resources removed',flush=True)
 

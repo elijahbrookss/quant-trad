@@ -95,6 +95,62 @@ finally:
     archives.unlink()
     saved.rename(archives)
 assert proof.read_bytes() == b"preserved"
+# The legacy collector runs as root and publishes private 0600 files. Exercise
+# that actual ownership boundary, including a reply lost after the first chown.
+legacy=mount/"legacy";legacy.mkdir(mode=0o700);os.chown(legacy,1000,1000)
+objects=legacy/"objects";objects.mkdir(mode=0o700)
+private=objects/"retained";private.write_bytes(b"frozen archive bytes");private.chmod(0o600)
+spool=legacy/"pending-spool";spool.write_bytes(b"uncommitted collection");spool.chmod(0o600)
+def binding():
+    info=legacy.stat()
+    return dict(expected_device=info.st_dev,expected_inode=info.st_ino,max_duration_seconds=30)
+def denied(uid,code):
+    pid=os.fork()
+    if pid==0:
+        os.setgroups([]);os.setgid(uid);os.setuid(uid)
+        try:exec(code)
+        except PermissionError:os._exit(0)
+        os._exit(1)
+    assert os.waitpid(pid,0)[1]==0
+
+denied(70,"private.read_bytes()")
+before={path:(path.stat(),path.read_bytes() if path.is_file() else None)
+        for path in (legacy,objects,private,spool)}
+# Every unsupported entry must be refused during preflight, before any chown.
+for kind in ("symlink","hardlink","foreign-owner"):
+    bad=legacy/"unsupported"
+    if kind=="symlink":bad.symlink_to("/etc")
+    elif kind=="hardlink":os.link(private,bad)
+    else:bad.write_bytes(b"foreign");os.chown(bad,65534,65534)
+    try:
+        try:helper.prepare_legacy_working_ownership(legacy,**binding())
+        except ValueError as exc:assert "unsupported_entry" in str(exc)
+        else:raise AssertionError("foreign legacy entry accepted")
+        assert all(path.stat().st_uid==old.st_uid for path,(old,_) in before.items())
+    finally:bad.unlink()
+before={path:(path.stat(),path.read_bytes() if path.is_file() else None) for path in (legacy,objects,private,spool)}
+original_chown=helper.os.fchown
+lost=[False]
+def interrupted_owner(fd,uid,gid):
+    original_chown(fd,uid,gid)
+    if not lost[0]:
+        lost[0]=True
+        raise RuntimeError("injected_after_legacy_chown")
+helper.os.fchown=interrupted_owner
+try:
+    try:helper.prepare_legacy_working_ownership(legacy,**binding())
+    except RuntimeError as exc:assert str(exc)=="injected_after_legacy_chown"
+    else:raise AssertionError("ownership interruption missing")
+finally:helper.os.fchown=original_chown
+helper.prepare_legacy_working_ownership(legacy,**binding())
+assert helper.prepare_legacy_working_ownership(legacy,**binding())["changed"]==0
+for path,(old,contents) in before.items():
+    now=path.stat()
+    assert now.st_uid==70
+    assert (now.st_dev,now.st_ino,now.st_mode,now.st_gid,now.st_size,now.st_mtime_ns)==(old.st_dev,old.st_ino,old.st_mode,old.st_gid,old.st_size,old.st_mtime_ns)
+    if contents is not None:assert path.read_bytes()==contents
+as_user(70,70,"from pathlib import Path;import sys;p=Path(sys.argv[1]);assert (p/'objects/retained').read_bytes()==b'frozen archive bytes';assert (p/'pending-spool').read_bytes()==b'uncommitted collection'",legacy)
+print("PASS: interrupted legacy ownership transfer preserves archive/spool bytes, inodes, modes and groups; UID70 gains access; symlinks, hardlinks and foreign owners are refused before mutation")
 print(json.dumps(dict(interrupted_preparation_recovered=True,operator_and_runtime_roots_writable=True,
     private_files_and_directory_identities_preserved=True,foreign_metadata_and_symlinks_refused=True,
     physical_device_identity_tested=False,host_data_changed=False)))

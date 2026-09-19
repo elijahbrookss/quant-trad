@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from uuid import UUID
 
 if __package__:
@@ -251,6 +252,107 @@ def prepare_runtime_directories(plan: dict) -> dict:
             "history_root":str(mountpoint/"data"),"archive_root":str(mountpoint/"data"/"archives"),
             "filesystem_uuid":plan["filesystem_uuid"],"runtime_uid":70,"operator_gid":account.pw_gid,
             "existing_files_changed":False,"database_moved":False}
+
+
+def prepare_legacy_working_ownership(root: Path, *, expected_device: int,
+                                     expected_inode: int, max_duration_seconds: int,
+                                     max_entries: int = 1000000) -> dict:
+    """Transfer the paused legacy working tree to UID 70, preserving its contents.
+
+    Internal cutover step: the caller owns the deployment lock, has stopped all
+    writers, and binds only the exact existing collector root into this helper.
+    Preflight the entire tree before changing anything. Interrupted ownership
+    changes are repeatable; any failure keeps the caller's deployment hold.
+    """
+    root = Path(root)
+    if os.geteuid() != 0:
+        raise ValueError("storage_working_ownership_administrator_required")
+    if (type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
+            or type(max_entries) is not int or not 1 <= max_entries <= 1000000
+            or type(expected_device) is not int or type(expected_inode) is not int):
+        raise ValueError("storage_working_ownership_invalid_limits")
+    if (not root.is_absolute() or root == Path("/") or root.resolve(strict=True) != root
+            or any(parent.is_symlink() for parent in (root,*root.parents))):
+        raise ValueError("storage_working_ownership_canonical_root_required")
+    deadline = time.monotonic()+max_duration_seconds
+    descriptor = os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        initial = os.fstat(descriptor)
+        if (initial.st_dev,initial.st_ino) != (expected_device,expected_inode):
+            raise ValueError("storage_working_ownership_root_changed")
+        if os.fstatvfs(descriptor).f_flag & os.ST_RDONLY:
+            raise ValueError("storage_working_ownership_read_only")
+        def mount_id(fd):
+            values = [line.split(":",1)[1].strip() for line in
+                      Path(f"/proc/self/fdinfo/{fd}").read_text().splitlines()
+                      if line.startswith("mnt_id:")]
+            if len(values)!=1:
+                raise ValueError("storage_working_ownership_mount_identity_unavailable")
+            return values[0]
+        initial_mount = mount_id(descriptor)
+        owners = {0,70,initial.st_uid}
+        inventory = {}
+        changed = 0
+        def stamp(info):
+            return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+                    info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+        def check(fd,parts):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("storage_working_ownership_deadline_expired")
+            info = os.fstat(fd)
+            if (info.st_dev != initial.st_dev or mount_id(fd)!=initial_mount or info.st_uid not in owners
+                    or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                    or info.st_mode & (stat.S_ISUID|stat.S_ISGID)
+                    or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)):
+                raise ValueError("storage_working_ownership_unsupported_entry")
+            return info
+        def walk(fd,parts,apply):
+            nonlocal changed
+            info = check(fd,parts)
+            key = tuple(parts)
+            if apply:
+                if inventory.pop(key,None) != stamp(info):
+                    raise ValueError("storage_working_ownership_entry_changed")
+            else:
+                if len(inventory) >= max_entries or len(parts)>64:
+                    raise ValueError("storage_working_ownership_inventory_limit")
+                inventory[key] = stamp(info)
+            if stat.S_ISDIR(info.st_mode):
+                with os.scandir(fd) as entries:
+                    for entry in entries:
+                        child_info = entry.stat(follow_symlinks=False)
+                        if not (stat.S_ISDIR(child_info.st_mode) or stat.S_ISREG(child_info.st_mode)):
+                            raise ValueError("storage_working_ownership_unsupported_entry")
+                        child = os.open(entry.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,
+                                        dir_fd=fd)
+                        try:
+                            if (os.fstat(child).st_dev,os.fstat(child).st_ino)!=(child_info.st_dev,child_info.st_ino):
+                                raise ValueError("storage_working_ownership_entry_changed")
+                            walk(child,(*parts,entry.name),apply)
+                        finally:
+                            os.close(child)
+            if apply and info.st_uid != 70:
+                current = check(fd,parts)
+                if stamp(current) != stamp(info):
+                    raise ValueError("storage_working_ownership_entry_changed")
+                os.fchown(fd,70,-1)
+                os.fsync(fd)
+                after = os.fstat(fd)
+                if (after.st_uid!=70 or (after.st_dev,after.st_ino,after.st_mode,after.st_gid,
+                        after.st_nlink,after.st_size,after.st_mtime_ns) !=
+                        (info.st_dev,info.st_ino,info.st_mode,info.st_gid,
+                         info.st_nlink,info.st_size,info.st_mtime_ns)):
+                    raise ValueError("storage_working_ownership_preservation_failed")
+                changed += 1
+        walk(descriptor,(),False)
+        entries = len(inventory)
+        walk(descriptor,(),True)
+        if inventory or (root.stat().st_dev,root.stat().st_ino)!=(initial.st_dev,initial.st_ino):
+            raise ValueError("storage_working_ownership_tree_changed")
+        return dict(schema_version="qt.storage_working_ownership.v1",runtime_uid=70,
+                    entries=entries,changed=changed,contents_preserved=True)
+    finally:
+        os.close(descriptor)
 
 
 def main() -> int:
