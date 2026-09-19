@@ -479,7 +479,11 @@ automatic maintenance configuration. Inventory and maintenance contents are
 hashed; Compose serialization defaults do not change the original database
 recipe or authorize a different mount or database setting.
 
-Admission alone does not start services or retire the durable hold. The complete
-activation must still verify current database policy, recovery coverage and
-running services, and recover the same candidate after interruption. Returning
-from the database-only entry point continues to leave clients held.
+Admission alone does not start services or retire the durable hold. The internal
+run_held_runtime_handoff now composes that admission with fixed service startup,
+current database/policy inspection, actual matching recovery-generation evidence
+and service health. A durable activation record precedes startup; retries retain
+the same candidate and bounded attempt. Only verified completion records the new
+storage layout and retires the hold. Pre-migration software is excluded from the
+initial release's automatic rollback field. The combined real-service rehearsal
+remains required. The database-only entry point continues to leave clients held.

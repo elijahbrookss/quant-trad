@@ -836,6 +836,84 @@ def run_database_operator(request, *, engine):
             "collection_resume_authorized": False, "runtime_activation_required": True}
 
 
+
+def inspect_runtime_handoff(request, *, engine, worker):
+    """Verify the held candidate's live collector and current-layout recovery.
+
+    The host supplies its bound request and the collector's own live heartbeat.
+    This never migrates, activates policy, creates a recovery copy or resumes a
+    service. Busy maintenance is a pending observation, not release readiness.
+    """
+    import os
+    from core.storage_inventory import read_storage_inventory
+    from core.storage_targets import StoragePolicy
+    from portal.backend.service.storage.recovery_copies import (
+        LocalRecoveryCopies, _identity, _snapshot_layout,
+    )
+
+    if os.getuid() != 70 or not isinstance(worker, dict) or worker.get("alive") is not True:
+        raise RuntimeError("storage_runtime_live_collector_required")
+    policy = StoragePolicy.from_dict(request["policy"])
+    lifecycle = (worker.get("context") or {}).get("storage_lifecycle") or {}
+    maintenance = lifecycle.get("maintenance") or {}
+    if any((maintenance.get(key) or {}).get("configured") is not True
+           for key in ("history_movement", "local_recovery")):
+        return {"ready": False, "reason": "maintenance_starting"}
+    if lifecycle.get("state") == "degraded":
+        return {"ready": False, "reason": "maintenance_degraded"}
+    recovery = (lifecycle.get("last_run") or {}).get("local_recovery") or {}
+    if recovery.get("state") not in ("completed", "not_due"):
+        return {"ready": False, "reason": "current_layout_recovery_pending"}
+    with engine.connect() as conn:
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        conn.exec_driver_sql("SET LOCAL statement_timeout='10s'")
+        identity, namespace = _identity(conn)
+        if identity != request["database_identity"]:
+            raise RuntimeError("storage_runtime_database_changed")
+        try:
+            outcome = inspect_handoff_policy(conn, policy=policy,
+                source_root=request["source_root"], destination_root=request["destination_root"])
+        except RuntimeError as exc:
+            if str(exc) in ("fact_header_handoff_outcome_pending", "fact_header_policy_outcome_pending"):
+                return {"ready": False, "reason": "storage_operation_running"}
+            raise
+        if not outcome.get("policy_current"):
+            raise RuntimeError("storage_runtime_handoff_policy_changed")
+        layout = _snapshot_layout(conn)
+        if (recovery.get("storage_layout") != layout
+                or recovery.get("policy_hash") != policy.fingerprint
+                or recovery.get("policy_revision") != outcome["policy_revision"]):
+            return {"ready": False, "reason": "current_layout_recovery_pending"}
+        targets = read_storage_inventory(Path(request["inventory_path"]))
+        policy.validate_targets(targets)
+        if len(targets) != 2 or len(policy.backups) != 1:
+            raise RuntimeError("storage_runtime_fixed_recovery_target_required")
+        history = next(target for target in targets if target.target_id == policy.backups[0])
+        root = Path(history.root)/"recovery"/namespace
+        # Only inspect a published recovery directory. The existing copy class
+        # may create these paths for writers; admission must never create them.
+        if root.resolve(strict=False) != root:
+            raise RuntimeError("storage_runtime_recovery_path_changed")
+        if not root.is_dir() or not (root/"writer.lock").is_file():
+            return {"ready": False, "reason": "current_layout_recovery_pending"}
+        copies = LocalRecoveryCopies(target=history, database_identity=identity,
+            max_bytes=1, reserve_bytes=0, timeout_seconds=10)
+        try:
+            with copies.lock():
+                completed = copies.completed()
+        except RuntimeError as exc:
+            if str(exc) == "recovery_copy_already_running":
+                return {"ready": False, "reason": "storage_operation_running"}
+            raise
+        if (not completed or completed[-1][2].get("storage_layout") != layout
+                or completed[-1][2]["name"] != recovery.get("generation")):
+            return {"ready": False, "reason": "current_layout_recovery_pending"}
+        return {"ready": True, "database_identity": identity,
+            "plan_id": outcome["plan_id"], "policy_revision": outcome["policy_revision"],
+            "storage_layout": layout, "recovery_generation": completed[-1][2]["name"],
+            "worker_id": worker["worker_id"]}
+
+
 def database_operator_main():
     """Private stdin request; PG_DSN remains the sole connection setting."""
     import os

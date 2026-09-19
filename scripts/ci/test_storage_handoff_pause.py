@@ -142,6 +142,10 @@ def runtime_recipe_rehearsal():
         assert result["recipe_sha256"]==pause._digest(normalized)
         assert model["services"]["market-data-collector"]["environment"]["PG_DSN"]==synthetic.replace("$","$$")
         again=render(path);assert again==normalized
+        hashes=run(["docker","compose","--file",str(path),"config","--hash","*"],env=env)
+        values=dict(line.split() for line in hashes.splitlines())
+        assert set(values)==set(model["services"])
+        assert all(len(value)==64 and int(value,16)>=0 for value in values.values())
         assert (state/pause.HOLD).exists()
         assert not any(database.rows[name]["running"] for name in pause.STOP)
         print("PASS: actual Compose rendering preserves the fixed candidate recipe, existing database topology and literal-dollar synthetic credentials; admission retains the client hold; no containers were created")

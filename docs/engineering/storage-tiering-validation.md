@@ -1246,3 +1246,18 @@ restores reproduce the snapshot certificate, recent/frozen reads and historical
 metadata. The preserving case also restores new observations, corrections and
 raw archive writes made after the switch, and accepts new collection afterward.
 The owned test stack was removed. This is not deployment or live recovery proof.
+
+
+## Fixed runtime activation sequence (local implementation)
+
+The internal activation path now starts the admitted candidate under the same
+host lock and durable hold. Focused interruption checks cover lost startup and
+probe responses, release-file replacement and hold retirement. Retries preserve
+the candidate and database; changed configuration, images, mounts or release
+state refuse. Pending recovery never records a successful release.
+
+Readiness reconciles the actual database layout/policy in the collector namespace
+and checks a published current-layout copy as well as its heartbeat. The initial
+cutover does not advertise pre-migration software as an automatic rollback.
+Real PostgreSQL readiness and combined application startup qualification are
+pending; this section does not claim deployment or live recovery readiness.

@@ -976,3 +976,31 @@ startup to bootstrap or migrate a schema. The host must retain the publisher
 pause and durable hold through runtime activation; successful database completion
 explicitly does not authorize collection to resume. PG_DSN remains the sole
 connection setting. Errors expose a guard code/type, never SQL values or DSNs.
+
+
+### Fixed service activation after preserving migration
+
+The internal held runtime handoff consumes the same image-pinned candidate recipe
+and database request. It keeps the existing deployment lock and durable hold
+while starting only the fixed application services; the prepared PostgreSQL
+container and its existing volume are retained. Candidate images, environment,
+commands, mounts, network and health are checked against the private snapshot.
+
+Before retiring the hold, inspection inside the collector's PostgreSQL namespace
+reconciles the committed layout and current policy, checks its live maintenance
+heartbeat, and verifies an actual completed recovery generation for that exact
+snapshot layout. The existing collector makes that copy. A pending or degraded
+maintenance phase retains the hold; a heartbeat claiming success without a
+matching published copy does not qualify. Inspection does not migrate, change
+policy or create a recovery generation.
+
+A private fixed activation record precedes service changes. Interrupted startup
+reuses the matching candidate and refuses changed configuration. Verified release
+bytes are recorded before the hold is removed, allowing lost completion replies
+to reconcile without reverting to old software. The initial release records
+ssd-hdd-v1 and leaves previous_revision empty: the pre-migration image is not an
+automatic rollback for new-layout writes. Its revision remains in migration
+evidence. The original bounded attempt deadline is not extended on retry.
+
+This implementation still requires the combined real-service rehearsal and
+physical-drive qualification before deployment or a public activation control.

@@ -775,3 +775,161 @@ def test_database_handoff_context_holds_lock_across_runtime_admission(operator_s
     assert not any(database.rows[name]["running"] for name in pause.STOP)
     with (state/"deployment.lock").open("w") as other:
         fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
+
+
+@pytest.fixture
+def runtime_activation_setup(runtime_recipe_setup,operator_setup,monkeypatch):
+    state,database,operator,model,check=runtime_recipe_setup
+    options=operator_setup[3]
+    import copy
+    initial_rows=copy.deepcopy(database.rows)
+    for name,service in model["services"].items():
+        if name not in ("tsdb","initialize"):
+            service["healthcheck"]={"test":["CMD","true"]}
+    check()
+    class Runtime:
+        fault=None
+        ups=0
+        probes=0
+        wait=False
+        def __call__(self,action,*args,**kwargs):
+            if action=="compose" and "--hash" in args:
+                return "\n".join(name+" "+pause._digest(service) for name,service in model["services"].items())
+            if action=="compose" and "up" in args:
+                self.ups+=1
+                saved=pause._load(state/pause._RUNTIME_STATE)
+                assert saved["phase"]=="starting" and (state/pause.HOLD).exists()
+                assert database.rows["tsdb"]["id"]==saved["binding"]["database_id"]
+                assert "--no-deps" in args and "--no-build" in args and args[-1]!="tsdb"
+                with (state/"deployment.lock").open("w") as other:
+                    with pytest.raises(BlockingIOError):fcntl.flock(other,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                for i,(name,service) in enumerate(model["services"].items()):
+                    if name=="tsdb":continue
+                    row=database.rows.setdefault(name,copy.deepcopy(initial_rows[name]))
+                    identity=f"{3000+i:064x}"
+                    row.update(id=identity,image=service["image"],running=name!="initialize",
+                        pid=0 if name=="initialize" else i+1,status="exited" if name=="initialize" else "running",exit_code=0)
+                    image=json.loads(self("image","inspect","--format",'{{json .}}',service["image"]))
+                    environment=dict(value.split("=",1) for value in image["Config"].get("Env") or [])
+                    environment.update(service.get("environment",{}))
+                    mounts=[]
+                    for value in service.get("volumes",[]):
+                        mount=dict(Type=value["type"],Destination=value["target"],RW=not value.get("read_only",False))
+                        if value["type"]=="volume":mount.update(Name=model["volumes"][value["source"]]["name"],Source="/fixture/postgres")
+                        else:mount["Source"]=value["source"]
+                        mounts.append(mount)
+                    database.details[identity]=dict(id=identity,image=service["image"],
+                        config=dict(Env=[key+"="+value for key,value in environment.items()],Cmd=service.get("command"),Entrypoint=None,
+                            User=service.get("user",""),Labels={"com.docker.compose.config-hash":pause._digest(service)},
+                            Healthcheck={"Test":service.get("healthcheck",{}).get("test")}),
+                        host=dict(PidMode="container:"+saved["binding"]["database_id"] if name=="market-data-collector" else ""),
+                        mounts=mounts,networks={PROJECT+"_quanttrad":{"NetworkID":database.network_id}})
+                    if self.fault=="partial":
+                        self.fault=None;database.rows.pop("initialize")
+                        raise TimeoutError("interrupted after removing old initializer")
+                if self.fault=="start":
+                    self.fault=None;raise TimeoutError("lost candidate start reply")
+                return ""
+            if action=="image" and args[-1] not in (options["image"],database.original["image"]):
+                return json.dumps({"Id":args[-1],"Config":{"Env":[]}})
+            if action=="inspect" and args[1]=="{{json .State}}" and args[-1]!=operator.identity:
+                row=next(row for row in database.rows.values() if row["id"]==args[-1])
+                return json.dumps(dict(Running=row["running"],Status=row["status"],ExitCode=row["exit_code"],
+                    OOMKilled=row["oom"],Paused=row["paused"],Restarting=row["restarting"],Health={"Status":"healthy"}))
+            if action=="exec" and args[0]=="-i":
+                self.probes+=1
+                assert json.loads(kwargs["input"])==options["request"]
+                if self.fault=="probe":self.fault=None;raise TimeoutError("lost candidate probe reply")
+                if self.wait:
+                    monkeypatch.setattr(pause.time,"time",lambda:10**12)
+                    return json.dumps({"ready":False,"reason":"current_layout_recovery_pending"})
+                return json.dumps(dict(ready=True,database_identity=options["request"]["database_identity"],plan_id="fixture",
+                    policy_revision=1,recovery_generation="copy_"+"1"*32,worker_id="fixture-worker",
+                    storage_layout={"layout_version":"market.fact_storage_tiers.v2","certificate_sha256":"9"*64}))
+            return operator(action,*args,**kwargs)
+    runtime=Runtime()
+    monkeypatch.setattr(pause,"_docker",runtime)
+    return state,database,options,runtime,model
+
+
+def test_runtime_activation_records_fixed_layout_only_after_candidate_and_recovery(runtime_activation_setup):
+    state,database,options,runtime,model=runtime_activation_setup
+    result=pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    assert result["ready"] and runtime.ups==1 and runtime.probes==1
+    assert not (state/pause.HOLD).exists()
+    release=(state/"release.env").read_text()
+    assert "storage_layout=ssd-hdd-v1\n" in release
+    assert "previous_revision=\n" in release
+    assert "current_revision="+options["request"]["source_revision"]+"\n" in release
+    assert pause._load(state/pause._RUNTIME_STATE)["phase"]=="complete"
+    assert pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)==result
+    assert runtime.ups==1 and runtime.probes==1
+
+
+@pytest.mark.parametrize("fault",["start","probe","release","hold"])
+def test_runtime_activation_recovers_same_candidate_across_completion_boundaries(runtime_activation_setup,monkeypatch,fault):
+    state,database,options,runtime,model=runtime_activation_setup
+    if fault in ("start","probe"):runtime.fault=fault
+    original_replace=pause.os.replace
+    original_unlink=pause.Path.unlink
+    armed=True
+    def replace(source,destination):
+        nonlocal armed
+        original_replace(source,destination)
+        if armed and fault=="release" and pause.Path(destination).name=="release.env":
+            armed=False;raise TimeoutError("lost release replacement reply")
+    def unlink(path,*args,**kwargs):
+        nonlocal armed
+        original_unlink(path,*args,**kwargs)
+        if armed and fault=="hold" and path.name==pause.HOLD:
+            armed=False;raise TimeoutError("lost hold retirement reply")
+    monkeypatch.setattr(pause.os,"replace",replace)
+    monkeypatch.setattr(pause.Path,"unlink",unlink)
+    with pytest.raises(TimeoutError):
+        pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    identities=pause._identities(database.rows)
+    assert (state/pause.HOLD).exists() or fault=="hold"
+    result=pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    assert result["ready"] and pause._identities(database.rows)==identities and runtime.ups==1
+    assert not (state/pause.HOLD).exists()
+
+
+def test_runtime_activation_pending_backup_never_retires_hold(runtime_activation_setup):
+    state,database,options,runtime,model=runtime_activation_setup
+    runtime.wait=True
+    with pytest.raises(RuntimeError,match="activation_deadline_expired"):
+        pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    assert (state/pause.HOLD).exists()
+    assert (state/"release.env").read_text()=="current_revision="+REVISION+"\n"
+
+
+@pytest.mark.parametrize("change",["recipe","limits","image","mount","command","release"])
+def test_runtime_activation_changed_candidate_cannot_resume(runtime_activation_setup,change):
+    state,database,options,runtime,model=runtime_activation_setup
+    runtime.fault="start"
+    with pytest.raises(TimeoutError):pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    collector=database.details[database.rows["market-data-collector"]["id"]]
+    if change=="recipe":
+        path=state/pause.RUNTIME_RECIPE;value=json.loads(path.read_text());value["services"]["backend"]["user"]="0:0";path.write_text(json.dumps(value))
+    elif change=="limits":(state/"limits.json").write_text('{}')
+    elif change=="image":database.rows["market-data-collector"]["image"]="sha256:"+"2"*64
+    elif change=="mount":collector["mounts"][0]["Name"]="other-volume"
+    elif change=="command":collector["config"]["Cmd"]=["different"]
+    elif change=="release":(state/"release.env").write_text("current_revision="+"f"*40+"\n")
+    with pytest.raises(RuntimeError,match="storage_runtime"):
+        pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    assert (state/pause.HOLD).exists() and runtime.ups==1
+
+
+
+def test_runtime_activation_recovers_when_compose_died_between_remove_and_create(runtime_activation_setup):
+    state,database,options,runtime,model=runtime_activation_setup
+    runtime.fault="partial"
+    with pytest.raises(TimeoutError,match="removing old initializer"):
+        pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    assert "initialize" not in database.rows and (state/pause.HOLD).exists()
+    database_id=database.rows["tsdb"]["id"]
+    result=pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    assert result["ready"] and set(database.rows)==set(model["services"])
+    assert database.rows["tsdb"]["id"]==database_id and runtime.ups==2
+    assert not (state/pause.HOLD).exists()

@@ -694,8 +694,51 @@ def test_fixed_database_sequence_completes_and_refuses_later_policy_change(stora
     again = invoke(operator)
     assert again.returncode == 0, again.stderr[-5000:]
     assert json.loads(again.stdout) == completed
+    # Runtime admission must independently inspect the committed database and a
+    # real completed copy, not accept the host's earlier operator result alone.
+    from portal.backend.service.storage.recovery_maintenance import run_due_local_recovery
+    from portal.backend.service.storage.recovery_copies import _snapshot_layout, _identity
+    worker={"alive":True,"worker_id":"disposable-candidate",
+        "context":{"storage_lifecycle":{"state":"running",
+            "maintenance":{"history_movement":{"configured":True},"local_recovery":{"configured":True}},
+            "last_run":{"local_recovery":{"state":"starting"}}}}}
+    inspect=lambda:handoff.inspect_runtime_handoff(operator,engine=engine,worker=worker)
+    assert inspect()=={"ready":False,"reason":"current_layout_recovery_pending"}
+    recovery_root=Path(storage.copy_plan.history.root)/"recovery"
+    assert not recovery_root.exists(),"inspection must not create recovery directories"
+    with engine.connect() as conn:
+        layout=_snapshot_layout(conn)
+        _,namespace=_identity(conn)
+    worker["context"]["storage_lifecycle"]["last_run"]["local_recovery"]={
+        "state":"completed","storage_layout":layout,"policy_revision":1,
+        "policy_hash":options["policy"].fingerprint,"generation":"copy_"+"1"*32}
+    assert inspect()=={"ready":False,"reason":"current_layout_recovery_pending"}
+    assert not recovery_root.exists(),"a heartbeat alone is not a published recovery copy"
+    copied=run_due_local_recovery(storage.database,storage_root=destination.parent,
+        pg_dump=Path("/usr/lib/postgresql/15/bin/pg_dump"),
+        pg_controldata=Path("/usr/lib/postgresql/15/bin/pg_controldata"),max_bytes=16*1024**2,
+        timeout_seconds=120,headroom_bytes={"ssd":1024**2,"hdd":1024**2},max_objects=1000)
+    assert copied["state"]=="completed"
+    worker["context"]["storage_lifecycle"]["last_run"]["local_recovery"]=copied
+    ready=inspect()
+    assert ready["ready"] and ready["plan_id"]==completed["plan_id"]
+    assert ready["recovery_generation"]==copied["generation"] and ready["storage_layout"]==layout
+    with engine.begin() as owner:
+        assert owner.scalar(text("SELECT pg_try_advisory_xact_lock(hashtextextended('qt.storage.management.v1',0))"))
+        assert inspect()=={"ready":False,"reason":"storage_operation_running"}
+    certificate=recovery_root/namespace/copied["generation"]/"complete.json"
+    original=certificate.read_text()
+    stale=json.loads(original);stale["storage_layout"]={"layout_version":"market.fact_storage_tiers.v1","certificate_sha256":"a"*64}
+    try:
+        certificate.write_text(json.dumps(stale))
+        assert inspect()=={"ready":False,"reason":"current_layout_recovery_pending"}
+    finally:
+        certificate.write_text(original)
+    assert inspect()==ready
     with engine.begin() as conn:
         conn.exec_driver_sql("UPDATE public.portal_storage_policy SET revision=2")
+    with pytest.raises(RuntimeError,match="storage_runtime_handoff_policy_changed"):
+        inspect()
     changed = invoke(operator)
     assert changed.returncode and "fact_header_policy_changed_after_activation" in changed.stderr
     with engine.connect() as conn:

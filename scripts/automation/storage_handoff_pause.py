@@ -36,8 +36,8 @@ FIELDS = {
 INSPECT = "{" + ",".join(json.dumps(k) + ":{{json (" + v + ")}}" for k, v in FIELDS.items()) + "}"
 
 
-def _docker(*args: str, timeout: int = 30, env=None) -> str:
-    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, env=env)
+def _docker(*args: str, timeout: int = 30, env=None, input=None) -> str:
+    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout, env=env, input=input)
     # Do not expose Docker diagnostics or inspected configuration: these may
     # include credentials. Private database settings are hashed by the caller.
     if result.returncode:
@@ -47,7 +47,7 @@ def _docker(*args: str, timeout: int = 30, env=None) -> str:
     return result.stdout
 
 
-def _inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None) -> dict[str, dict]:
+def _inventory(project: str, *, database_preparing: bool = False, operator_id: str | None = None, activating: bool = False) -> dict[str, dict]:
     ids = set()
     for selector in (f"label=com.docker.compose.project={project}", f"network={project}_quanttrad"):
         ids.update(_docker("ps", "--all", "--quiet", "--no-trunc", "--filter", selector).split())
@@ -68,6 +68,11 @@ def _inventory(project: str, *, database_preparing: bool = False, operator_id: s
             raise RuntimeError("storage_pause_unexpected_client: resolve active bots, one-off or unrecognized containers first")
         if row["restart"] not in ("no", "unless-stopped"):
             raise RuntimeError(f"storage_pause_unsafe_restart_policy: service={service}")
+        if activating and service != "tsdb":
+            if row["paused"] or row["status"] not in ("created", "running", "restarting", "exited"):
+                raise RuntimeError(f"storage_runtime_unexpected_container_state: service={service}")
+            result[service] = row
+            continue
         if row["paused"] or row["restarting"] or row["oom"]:
             raise RuntimeError(f"storage_pause_unstable_container: service={service}")
         if row["running"]:
@@ -76,7 +81,7 @@ def _inventory(project: str, *, database_preparing: bool = False, operator_id: s
         elif row["status"] not in ("exited", "created") or row["pid"] != 0 or row["exit_code"] not in (0, 143):
             raise RuntimeError(f"storage_pause_unclean_stop: service={service}")
         result[service] = row
-    required = STOP if database_preparing else STOP + ("tsdb",)
+    required = ("tsdb",) if activating else (STOP if database_preparing else STOP + ("tsdb",))
     if not set(required) <= result.keys() or (not database_preparing and not result["tsdb"]["running"]):
         raise RuntimeError("storage_pause_required_service_missing_or_database_stopped")
     return result
@@ -412,6 +417,23 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
     return receipt
 
 
+
+@contextmanager
+def _deployment_lock(state_root: Path):
+    if not state_root.is_absolute() or state_root == Path("/"):
+        raise ValueError("storage_pause_invalid_state_root")
+    info = state_root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise RuntimeError("storage_pause_unsafe_state_directory")
+    descriptor = os.open(state_root / "deployment.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("storage_pause_deployment_lock_busy") from exc
+        yield
+
+
 @contextmanager
 def paused_storage_clients(state_root: Path, *, project: str, source_revision: str,
                            prepare_database: bool = False, history_uuid: str = "", _operator_id=None):
@@ -428,15 +450,7 @@ def paused_storage_clients(state_root: Path, *, project: str, source_revision: s
             or bool(history_uuid) != prepare_database
             or (prepare_database and not re.fullmatch(r"[A-Za-z0-9-]{4,128}", history_uuid))):
         raise ValueError("storage_pause_invalid_binding")
-    info = state_root.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-        raise RuntimeError("storage_pause_unsafe_state_directory")
-    descriptor = os.open(state_root / "deployment.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("storage_pause_deployment_lock_busy") from exc
+    with _deployment_lock(state_root):
         for name in ("promotion.env", "alert-preview.env"):
             if os.path.lexists(state_root / name):
                 raise RuntimeError("storage_pause_unfinished_server_operation")
@@ -900,3 +914,283 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
     if _digest(_load(path,max_bytes=524288))!=recipe_hash:
         raise RuntimeError("storage_runtime_recipe_changed_during_admission")
     return dict(recipe_sha256=recipe_hash,images=pinned,files=file_bindings)
+
+
+_RUNTIME_PROBE = """
+import json, os, sys
+from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
+from scripts.db.fact_header_v2_handoff import inspect_runtime_handoff
+from portal.backend.service.storage.maintenance_runtime import _unique_fields
+from portal.backend.workers.market_data_collector_health import live_worker_for_host
+raw=sys.stdin.buffer.read(65537)
+if len(raw)>65536: raise ValueError('storage_runtime_request_too_large')
+request=json.loads(raw,object_pairs_hook=_unique_fields)
+worker=live_worker_for_host()
+engine=create_engine(os.environ['PG_DSN'],poolclass=NullPool,hide_parameters=True,
+                     connect_args={'connect_timeout':10})
+try:
+    result=inspect_runtime_handoff(request,engine=engine,worker=worker)
+    print(json.dumps(result,sort_keys=True),flush=True)
+finally:
+    engine.dispose()
+"""
+
+
+def _runtime_observation(container: str, request: dict, database_result: dict):
+    value=json.loads(_docker("exec","-i",container,"python","-c",_RUNTIME_PROBE,
+        input=json.dumps(request,sort_keys=True),timeout=45).strip().splitlines()[-1])
+    if value.get("ready") is False and set(value)=={"ready","reason"} and value["reason"] in (
+            "maintenance_starting","maintenance_degraded","current_layout_recovery_pending",
+            "storage_operation_running"):
+        return value
+    if (value.get("ready") is not True or value.get("database_identity")!=request["database_identity"]
+            or value.get("plan_id")!=database_result["plan_id"]
+            or not re.fullmatch(r"copy_[0-9a-f]{32}",value.get("recovery_generation",""))
+            or not isinstance(value.get("storage_layout"),dict)
+            or value["storage_layout"].get("layout_version")!="market.fact_storage_tiers.v2"
+            or not re.fullmatch(r"[0-9a-f]{64}",value["storage_layout"].get("certificate_sha256",""))):
+        raise RuntimeError("storage_runtime_observation_invalid")
+    return value
+
+
+_RUNTIME_STATE = "storage-runtime-state.json"
+
+
+def _runtime_candidate_details(name, row, model, saved):
+    """Inspect created or running candidate containers against the fixed recipe."""
+    details = _database_details(row["id"])
+    service = model["services"][name]
+    image = json.loads(_docker("image", "inspect", "--format", '{{json .}}', service["image"]))
+    config, host = details["config"], details["host"]
+    literal = lambda value: value.replace("$$", "$") if isinstance(value, str) else value
+    expected_env = dict(value.split("=", 1) for value in image["Config"].get("Env") or [])
+    for key, value in service.get("environment", {}).items():
+        if value is None:
+            expected_env.pop(key, None)
+        else:
+            expected_env[key] = literal(str(value))
+    expected_command = service.get("command")
+    if expected_command is None:
+        expected_command = image["Config"].get("Cmd")
+    expected_entrypoint = service.get("entrypoint")
+    if expected_entrypoint is None:
+        expected_entrypoint = image["Config"].get("Entrypoint")
+    if (row["image"] != saved["admission"]["images"][name] or details["image"] != row["image"]
+            or image["Id"] != row["image"]
+            or config.get("Labels", {}).get("com.docker.compose.config-hash") != saved["compose_hashes"][name]
+            or dict(value.split("=", 1) for value in config.get("Env") or []) != expected_env
+            or config.get("Cmd") != expected_command or config.get("Entrypoint") != expected_entrypoint
+            or config.get("User", "") != service.get("user", image["Config"].get("User", ""))
+            or host.get("Privileged") or host.get("Devices") or host.get("DeviceRequests")
+            or host.get("CapAdd") or host.get("PidMode", "") != (
+                "container:"+saved["binding"]["database_id"] if name == "market-data-collector" else "")):
+        raise RuntimeError("storage_runtime_candidate_configuration_changed: service="+name)
+    network = saved["receipt"]["project"]+"_quanttrad"
+    network_id = saved["receipt"]["database_preparation"]["networks"][network]["network_id"]
+    if (set(details["networks"]) != {network}
+            or details["networks"][network]["NetworkID"] not in ("", network_id)):
+        raise RuntimeError("storage_runtime_candidate_network_changed: service="+name)
+    expected_mounts = {}
+    for mount in service.get("volumes", []):
+        kind = mount["type"]
+        source = literal(mount["source"])
+        if kind == "volume":
+            source = model["volumes"][source]["name"]
+        elif kind != "bind":
+            raise RuntimeError("storage_runtime_unsupported_mount: service="+name)
+        expected_mounts[mount["target"]] = (kind, source, not mount.get("read_only", False))
+    actual_mounts = {mount["Destination"]: (mount["Type"],
+        mount["Name"] if mount["Type"] == "volume" else mount["Source"], mount["RW"])
+        for mount in details["mounts"]}
+    if actual_mounts != expected_mounts or len(actual_mounts) != len(details["mounts"]):
+        raise RuntimeError("storage_runtime_candidate_mount_changed: service="+name)
+    expected_probe = service.get("healthcheck", {}).get("test", image["Config"].get("Healthcheck", {}).get("Test"))
+    if expected_probe is not None and config.get("Healthcheck", {}).get("Test") != [literal(part) for part in expected_probe]:
+        raise RuntimeError("storage_runtime_candidate_healthcheck_changed: service="+name)
+    return details
+
+
+def _runtime_bound_model(state_root, saved, request):
+    if (saved.get("schema_version") != "qt.storage_runtime_activation.v1"
+            or saved.get("request_sha256") != _digest(request)
+            or saved.get("probe_sha256") != hashlib.sha256(_RUNTIME_PROBE.encode()).hexdigest()
+            or saved.get("phase") not in ("starting", "verified", "complete")):
+        raise RuntimeError("storage_runtime_saved_binding_changed")
+    if any(os.path.lexists(state_root/name) for name in ("promotion.env", "alert-preview.env")):
+        raise RuntimeError("storage_runtime_unfinished_server_operation")
+    model = _load(state_root/RUNTIME_RECIPE, max_bytes=524288)
+    if _digest(model) != saved["admission"]["recipe_sha256"]:
+        raise RuntimeError("storage_runtime_recipe_changed")
+    for name, expected in saved["admission"]["files"].items():
+        if hashlib.sha256(_runtime_configuration_bytes(Path(name))).hexdigest() != expected:
+            raise RuntimeError("storage_runtime_configuration_file_changed")
+    preparation = saved["receipt"]["database_preparation"]
+    _history_filesystem(preparation["history_root"], preparation["history_uuid"])
+    database = _database_details(saved["binding"]["database_id"])
+    actual_mounts = {m["Destination"]: (m["Type"], m["Source"], m["RW"]) for m in database["mounts"]}
+    expected_mounts = {target: tuple(saved["binding"]["mounts"][target])
+                       for target in ("/var/lib/postgresql/data", "/qt-history")}
+    if (database["image"] != preparation["image"]
+            or _database_contract(database) != preparation["target_contract"]
+            or actual_mounts != expected_mounts or len(database["mounts"]) != 2
+            or not _same_database_networks(database, preparation["networks"])
+            or _cluster_identifier(database["id"]) != preparation["cluster_identifier"]):
+        raise RuntimeError("storage_runtime_prepared_database_changed")
+    return model
+
+
+def _runtime_rows(saved):
+    rows = _inventory(saved["receipt"]["project"], operator_id=saved["operator_id"], activating=True)
+    if not set(rows) <= set(saved["receipt"]["containers"]) or rows["tsdb"]["id"] != saved["binding"]["database_id"]:
+        raise RuntimeError("storage_runtime_service_inventory_changed")
+    return rows
+
+
+def _runtime_healthy(rows, model, saved):
+    if set(rows) != set(saved["receipt"]["containers"]):
+        return False
+    for name, row in rows.items():
+        if name == "tsdb":
+            continue
+        _runtime_candidate_details(name, row, model, saved)
+        state = json.loads(_docker("inspect", "--format", "{{json .State}}", row["id"]))
+        if state["OOMKilled"] or state["Paused"] or state["Restarting"]:
+            return False
+        if name == "initialize":
+            if state["Running"] or state["Status"] != "exited" or state["ExitCode"] != 0:
+                return False
+        elif (not state["Running"]
+                or state.get("Health", {}).get("Status", "healthy") != "healthy"
+                or (name in ("backend", "market-data-collector", "frontend", "frontend-v2")
+                    and "Health" not in state)):
+            return False
+    return True
+
+
+def _record_storage_release(state_root, saved, request):
+    from datetime import datetime, timezone
+    # Persist the exact intended release bytes before replacing release.env.
+    # A crash after replacement can then reconcile without selecting an old image.
+    if "release_text" not in saved:
+        # The pre-migration image is not a compatible automatic rollback for
+        # new writes. Its revision remains in the private migration receipt.
+        saved["release_text"] = (
+            "current_revision="+request["source_revision"]+"\n"
+            "current_source_tree_hash="+request["source_tree_hash"]+"\n"
+            "previous_revision=\n"
+            "deployed_at="+datetime.now(timezone.utc).isoformat()+"\n"
+            "storage_layout=ssd-hdd-v1\n")
+        _save(state_root/_RUNTIME_STATE, saved, initial=False)
+    current = (state_root/"release.env").read_text()
+    if current not in (saved["prior_release"], saved["release_text"]):
+        raise RuntimeError("storage_runtime_recorded_release_changed")
+    if current != saved["release_text"]:
+        descriptor, name = tempfile.mkstemp(prefix=".storage-release-", dir=state_root)
+        try:
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(saved["release_text"]); handle.flush(); os.fsync(handle.fileno())
+            os.replace(name, state_root/"release.env")
+            _sync_directory(state_root)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+
+def _finish_runtime_activation(state_root, saved, request):
+    path = state_root/_RUNTIME_STATE
+    hold = state_root/HOLD
+    # The host hold is retained through every app mutation and verification.
+    # Completion reentry only observes the already recorded exact release.
+    if saved["phase"] == "complete":
+        if os.path.lexists(hold) or (state_root/"release.env").read_text() != saved["release_text"]:
+            raise RuntimeError("storage_runtime_completed_release_changed")
+        return saved["outcome"]
+    if os.path.lexists(hold):
+        if _load(hold) != saved["receipt"]:
+            raise RuntimeError("storage_runtime_hold_changed")
+    elif saved["phase"] != "verified" or (state_root/"release.env").read_text() != saved.get("release_text"):
+        raise RuntimeError("storage_runtime_hold_missing_before_completion")
+    model = _runtime_bound_model(state_root, saved, request)
+    current_release = (state_root/"release.env").read_text()
+    if current_release not in (saved["prior_release"], saved.get("release_text")):
+        raise RuntimeError("storage_runtime_recorded_release_changed")
+    rows = _runtime_rows(saved)
+    if saved["phase"] == "starting":
+        for name, row in rows.items():
+            if name != "tsdb" and row["id"] != saved["receipt"]["containers"][name]["id"]:
+                _runtime_candidate_details(name, row, model, saved)
+        candidates = all(name == "tsdb" or row["id"] != saved["receipt"]["containers"][name]["id"]
+                         for name, row in rows.items())
+        already_running = candidates and _runtime_healthy(rows, model, saved)
+        if not already_running:
+            remaining = int(saved["deadline"]-time.time())
+            if remaining < 1:
+                raise RuntimeError("storage_runtime_activation_deadline_expired")
+            print("event=storage_runtime_candidate_starting hold_retained=true", file=sys.stderr, flush=True)
+            _docker("compose", "--project-name", saved["receipt"]["project"], "--file", str(state_root/RUNTIME_RECIPE),
+                "up", "--detach", "--no-deps", "--no-build", "--pull", "never", "--wait",
+                "--wait-timeout", str(min(360, remaining)), *sorted(set(model["services"])-{"tsdb"}), timeout=min(360, remaining)+30)
+    last_reason = None
+    while True:
+        model = _runtime_bound_model(state_root, saved, request)
+        rows = _runtime_rows(saved)
+        if not _runtime_healthy(rows, model, saved):
+            reason = "candidate_services_not_healthy"
+        else:
+            outcome = _runtime_observation(rows["market-data-collector"]["id"], request, saved["database_result"])
+            if outcome["ready"]:
+                break
+            reason = outcome["reason"]
+        remaining = saved["deadline"]-time.time()
+        if remaining <= 0:
+            raise RuntimeError("storage_runtime_activation_deadline_expired")
+        if reason != last_reason:
+            print("event=storage_runtime_activation_waiting reason="+reason+" hold_retained=true", file=sys.stderr, flush=True)
+            last_reason = reason
+        time.sleep(min(2, remaining))
+    saved.update(phase="verified", outcome=outcome)
+    _save(path, saved, initial=False)
+    _record_storage_release(state_root, saved, request)
+    if os.path.lexists(hold):
+        hold.unlink()
+        _sync_directory(state_root)
+    saved["phase"] = "complete"
+    _save(path, saved, initial=False)
+    print("event=storage_runtime_activation_completed storage_layout=ssd-hdd-v1", file=sys.stderr, flush=True)
+    return outcome
+
+
+def run_held_runtime_handoff(state_root: Path, *, activation_timeout_seconds: int, **options):
+    """Complete only the fixed initial cutover; never fall back to old images."""
+    state_root = Path(state_root)
+    if type(activation_timeout_seconds) is not int or not 1 <= activation_timeout_seconds <= 86400:
+        raise ValueError("storage_runtime_activation_budget_invalid")
+    path = state_root/_RUNTIME_STATE
+    request = options["request"]
+    if os.path.lexists(path):
+        with _deployment_lock(state_root):
+            saved = _load(path, max_bytes=131072)
+            if (saved.get("request_sha256") != _digest(request)
+                    or saved.get("binding", {}).get("image") != options["image"]
+                    or saved.get("receipt", {}).get("project") != options["project"]
+                    or saved.get("receipt", {}).get("source_revision") != options["source_revision"]):
+                raise RuntimeError("storage_runtime_saved_binding_changed")
+            return _finish_runtime_activation(state_root, saved, request)
+    with _held_database_handoff(state_root, **options) as (database_result, receipt, binding):
+        admission = _runtime_recipe(state_root, receipt, binding, request)
+        model = _load(state_root/RUNTIME_RECIPE, max_bytes=524288)
+        hashes = _docker("compose", "--project-name", receipt["project"], "--file", str(state_root/RUNTIME_RECIPE),
+            "config", "--hash", "*")
+        compose_hashes = dict(line.split() for line in hashes.splitlines())
+        if set(compose_hashes) != set(model["services"]) or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in compose_hashes.values()):
+            raise RuntimeError("storage_runtime_compose_hashes_invalid")
+        operator = _load(state_root/_OPERATOR_STATE)
+        saved = dict(schema_version="qt.storage_runtime_activation.v1", phase="starting",
+            request_sha256=_digest(request), probe_sha256=hashlib.sha256(_RUNTIME_PROBE.encode()).hexdigest(),
+            database_result=database_result, receipt=receipt, binding=binding,
+            admission=admission, compose_hashes=compose_hashes, operator_id=operator["container_id"],
+            prior_release=(state_root/"release.env").read_text(),
+            deadline=min(operator["deadline"], time.time()+activation_timeout_seconds))
+        _save(path, saved, initial=True)
+        return _finish_runtime_activation(state_root, saved, request)
