@@ -250,3 +250,25 @@ def test_lookup_final_verification_refuses_content_drift_and_unfenced_use(placed
             with copy.verified_copy(conn,page_rows=1) as report:
                 assert report["verified_lookup_rows"]==2
     assert placed.archive_path.read_bytes()==placed.archive_bytes
+
+
+def test_copy_lookup_and_queue_retirement_preserve_key_pairs(placed,tmp_path,monkeypatch):
+    engine=placed.database._engine
+    _raw_trade_fixture(placed,tmp_path,monkeypatch)
+    _raw_book_fixture(placed,tmp_path,monkeypatch,definition_id="raw-copy-pairs")
+    with engine.begin() as conn:
+        before=_rows(conn)
+        first=before[0]
+        other=next(row for row in before if row["manifest_id"]!=first["manifest_id"])
+        crossed=[(first["raw_record_id"],other["manifest_id"]),
+                 (other["raw_record_id"],first["manifest_id"])]
+        assert copy._rows_for_keys(conn,copy.SOURCE,crossed)==[]
+        headers.prepare_copy(conn,placement=placed.copy_plan)
+        copy.prepare_copy(conn)
+        actual=(first["raw_record_id"],first["manifest_id"])
+        conn.execute(text(f"INSERT INTO {copy.QUEUE}(raw_record_id,manifest_id) VALUES(:raw,:manifest)"),
+                     [{"raw":raw,"manifest":manifest} for raw,manifest in [actual,*crossed]])
+        copy.copy_page(conn,page_rows=1)
+        assert _rows(conn,copy.TARGET)==[first]
+        assert set(conn.execute(text(f"SELECT raw_record_id,manifest_id FROM {copy.QUEUE}")))==set(crossed)
+        assert _rows(conn)==before

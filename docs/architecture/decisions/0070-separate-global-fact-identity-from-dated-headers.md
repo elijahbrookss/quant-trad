@@ -159,6 +159,13 @@ all indexes are created directly on the already bound history HDD. The source,
 small cursor and transactional composite-key queue remain on the recent SSD
 during the copy.
 
+Raw-copy page lookup and queue retirement join paired raw-record/manifest arrays.
+This preserves composite-key identity while avoiding the large disjunction plans
+produced by thousands of composite IN values. Physical measurement on the
+one-million-row disposable lookup showed the old query scanning with a parallel
+plan; the paired join used indexed lookups. Every field is still compared before
+progress or exact captured keys retire, and the 4096-row page bound is unchanged.
+
 Preparation admits the known model, original immutable guard, permissions,
 indexes and foreign-key enforcement, and refuses unexpected dependents or
 replication arrangements. Each page rechecks bound schema, trigger/function
