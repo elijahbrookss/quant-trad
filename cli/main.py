@@ -1280,7 +1280,7 @@ def _cmd_data_series(args: argparse.Namespace) -> int:
     _print_json(
         _client(args).request_json(
             "GET",
-            "/api/candles/series",
+            "/api/candles/series/metadata" if args.metadata_only else "/api/candles/series",
             params={"instrument_id": args.instrument_id},
         )
     )
@@ -3777,6 +3777,8 @@ def build_parser() -> argparse.ArgumentParser:
         "series", help="Inspect canonical logical market-data series."
     )
     data_series.add_argument("--instrument-id")
+    data_series.add_argument("--metadata-only", action="store_true",
+                             help="List registered identities without full-history counts; check coverage separately.")
     data_series.set_defaults(func=_cmd_data_series)
     data_prepare = data_sub.add_parser(
         "prepare-backtest-dataset",

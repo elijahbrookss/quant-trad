@@ -295,6 +295,11 @@ class QuantTradMcpServer:
             return _ensure_object(client.request_json("GET", f"/api/indicators/{parts[1]}"), f"GET indicator {parts[1]}")
         if len(parts) == 3 and parts[0] == "indicators" and parts[2] == "strategies":
             return {"items": client.request_json("GET", f"/api/indicators/{parts[1]}/strategies")}
+        if parts == ["data", "series"]:
+            return _ensure_object(client.request_json(
+                "GET", "/api/candles/series/metadata",
+                params={"instrument_id": _query_str(query, "instrument_id", None)},
+            ), "GET market series metadata")
         if parts == ["instruments"]:
             return {"items": client.request_json("GET", "/api/instruments/")}
         if len(parts) == 2 and parts[0] == "instruments":
@@ -1099,6 +1104,7 @@ class QuantTradMcpServer:
             _resource("quanttrad://strategies", "Strategies"),
             _resource("quanttrad://indicators", "Indicator instances"),
             _resource("quanttrad://indicators/types", "Indicator type catalog"),
+            _resource("quanttrad://data/series", "Registered series metadata; preflight coverage separately"),
             _resource("quanttrad://instruments", "Canonical instruments"),
             _resource("quanttrad://providers", "Providers"),
             _resource("quanttrad://reports", "Recent completed reports"),

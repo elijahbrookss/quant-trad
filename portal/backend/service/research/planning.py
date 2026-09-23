@@ -207,7 +207,7 @@ def _coverage_for_requirement(
     candidates = []
     fact_contract = get_fact_contract(str(requirement["fact_type"]))
     dimensions = fact_contract.normalize_dimensions(requirement.get("dimensions"))
-    for row in store.list_series(instrument_id=str(requirement["instrument_id"])):
+    for row in store.list_series_metadata(instrument_id=str(requirement["instrument_id"])):
         if (
             str(row.get("fact_type") or "").strip().lower()
             == str(requirement["fact_type"])

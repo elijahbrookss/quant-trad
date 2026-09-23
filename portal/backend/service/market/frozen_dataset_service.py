@@ -303,7 +303,7 @@ def prepare_frozen_dataset_from_requirements(
         policy = dict(requirement.get("source_policy") or {})
         candidates = [
             _listed_series(row)
-            for row in store.list_series(
+            for row in store.list_series_metadata(
                 instrument_id=str(requirement.get("instrument_id") or "")
             )
             if _series_matches(row, requirement)
