@@ -195,8 +195,12 @@ def test_exporter_rollup_bounds_label_cardinality(capture_batches: dict[str, lis
 
 
 def test_exporter_high_volume_burst_writes_one_rollup_row(
-    capture_batches: dict[str, list[dict]],
+    capture_batches: dict[str, list[dict]], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from portal.backend.service import observability
+
+    timestamp = observability._utcnow_iso()
+    monkeypatch.setattr(observability, "_utcnow_iso", lambda: timestamp)
     sink = InMemoryObservabilitySink(pending_metrics_max=500)
     observer = BackendObserver(component="test_component", sink=sink)
     exporter = ObservabilityExporter(
