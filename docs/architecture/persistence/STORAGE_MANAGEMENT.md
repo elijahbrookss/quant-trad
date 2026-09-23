@@ -697,7 +697,14 @@ archive pages remain required. Collection may continue outside the snapshot.
 The configured drive UUID is rechecked during work. Byte, object, elapsed-time
 and free-space limits stop the attempt without publishing a completed copy.
 Object lengths and SHA-256 are checked; the dump subprocess is terminated and
-reaped on failure. Completion is published only after files and directories are
+reaped on failure. The explicit object budget may be set up to ten million;
+the default remains one million. September 2026 measurements already observed
+about 380,000 raw objects and roughly 11,000 new objects per day, so an unchanged
+one-million ceiling is insufficient for the requested retention horizon.
+Duplicate archive keys are rejected by exclusive creation in the private
+generation, without retaining every key in process memory. Catalog reads remain
+paged at 256 rows. Raising this ceiling does not qualify duration, byte capacity
+or retention throughput: those operating budgets still require measurement. Completion is published only after files and directories are
 synced. A failed attempt retains earlier completed copies. Retry removes only
 marked private partial copies belonging to this database and drive.
 

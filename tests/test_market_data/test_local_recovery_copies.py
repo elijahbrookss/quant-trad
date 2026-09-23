@@ -112,6 +112,11 @@ def test_object_copy_verifies_bytes_and_stays_in_owned_generation(manager,tmp_pa
     result=manager._object(objects,row,generation)
     assert result["sha256"]==row["object_sha256"]
     assert (generation/"objects"/row["object_key"]).read_bytes()==b"durable archive"
+    written = manager.written
+    with pytest.raises(RuntimeError, match="duplicate_archive_key"):
+        manager._object(objects,row,generation)
+    assert manager.written == written
+    assert (generation/"objects"/row["object_key"]).read_bytes() == b"durable archive"
     row["object_key"]="../outside"
     with pytest.raises(ValueError):
         manager._object(objects,row,generation)
@@ -155,3 +160,12 @@ def test_invalid_layout_receipt_cannot_certify_a_recovery_copy(manager,layout):
     with pytest.raises(RuntimeError,match="completion_layout_invalid"):
         manager.completed()
     assert generation.is_dir()
+
+
+def test_large_object_budget_admits_existing_target_without_allocating_inventory(manager):
+    options=dict(target=manager.target,database_identity=manager.identity,
+                 max_bytes=manager.max_bytes,reserve_bytes=0,timeout_seconds=60)
+    larger=recovery.LocalRecoveryCopies(**options,max_objects=10_000_000)
+    assert larger.max_objects==10_000_000
+    with pytest.raises(ValueError,match="recovery_budget_invalid"):
+        recovery.LocalRecoveryCopies(**options,max_objects=10_000_001)

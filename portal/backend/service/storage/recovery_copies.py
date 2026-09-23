@@ -34,6 +34,7 @@ _FAMILIES = (
     ("fact_archive_manifests", None),
 )
 _CHUNK = 1024 * 1024
+MAX_RECOVERY_OBJECTS = 10_000_000
 
 
 def _sync(path):
@@ -131,7 +132,7 @@ class LocalRecoveryCopies:
             raise ValueError("recovery_target_or_database_invalid")
         for value, lower, upper in (
             (max_bytes, 1, 2**63-1), (reserve_bytes, 0, 2**63-1),
-            (timeout_seconds, 1, 86400), (max_objects, 1, 1000000),
+            (timeout_seconds, 1, 86400), (max_objects, 1, MAX_RECOVERY_OBJECTS),
         ):
             if type(value) is not int or not lower <= value <= upper:
                 raise ValueError("recovery_budget_invalid")
@@ -270,7 +271,11 @@ class LocalRecoveryCopies:
             before = os.fstat(incoming.fileno())
             if not stat.S_ISREG(before.st_mode) or before.st_size != size:
                 raise RuntimeError("recovery_archive_size_mismatch")
-            with destination.open("xb") as output:
+            try:
+                output = destination.open("xb")
+            except FileExistsError as exc:
+                raise RuntimeError("recovery_duplicate_archive_key") from exc
+            with output:
                 os.chmod(destination, 0o600)
                 while data := incoming.read(_CHUNK):
                     self._write(output, data, digest)
@@ -417,14 +422,9 @@ class LocalRecoveryCopies:
                 dump = self._dump(session, partial/"database.dump", pg_dump)
                 inventory_digest = hashlib.sha256()
                 count = archive_bytes = 0
-                seen = set()
                 with (partial/"objects.jsonl").open("xb") as inventory:
                     os.chmod(partial/"objects.jsonl", 0o600)
                     for row in _archive_rows(session, max_objects=self.max_objects, check=phase):
-                        key = row["object_key"]
-                        if key in seen:
-                            raise RuntimeError("recovery_duplicate_archive_key")
-                        seen.add(key)
                         item = self._object(objects, row, partial)
                         encoded = (json.dumps(item, sort_keys=True, separators=(",", ":"))+"\n").encode()
                         self._write(inventory, encoded, inventory_digest)

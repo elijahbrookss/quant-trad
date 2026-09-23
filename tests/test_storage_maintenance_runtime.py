@@ -27,6 +27,7 @@ def test_absent_configuration_does_not_read_files_or_access_database(monkeypatch
 
 def test_configured_runners_share_database_limits_and_cancellation(tmp_path, monkeypatch):
     config = configuration()
+    config["recovery"]["max_objects"] = 10_000_000
     path = tmp_path/"limits.json"
     path.write_text(json.dumps(config))
     seen = []
@@ -48,6 +49,7 @@ def test_configured_runners_share_database_limits_and_cancellation(tmp_path, mon
     assert seen[0][1]["resource_limits"] == config["history"]
     assert seen[1][1]["storage_root"] == root
     assert seen[1][1]["max_bytes"] == config["recovery"]["max_bytes"]
+    assert seen[1][1]["max_objects"] == 10_000_000
     assert str(seen[1][1]["pg_dump"]) == "/usr/lib/postgresql/15/bin/pg_dump"
 
 
@@ -57,7 +59,7 @@ def test_configured_runners_share_database_limits_and_cancellation(tmp_path, mon
     lambda value: value.update(PG_DSN="not-an-accepted-setting"),
     lambda value: value["history"].update(movement_timeout_seconds=True),
     lambda value: value["recovery"].update(max_bytes=0),
-    lambda value: value["recovery"].update(max_objects=1000001),
+    lambda value: value["recovery"].update(max_objects=10_000_001),
     lambda value: value["recovery"].update(headroom_bytes={}),
     lambda value: value["recovery"].pop("timeout_seconds"),
 ])

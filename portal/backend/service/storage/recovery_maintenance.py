@@ -18,7 +18,7 @@ from portal.backend.service.storage_management import _target
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 from .header_admission import registered_header_targets
 from .header_resources import observe_header_resources
-from .recovery_copies import LocalRecoveryCopies, _identity, _snapshot_layout
+from .recovery_copies import MAX_RECOVERY_OBJECTS, LocalRecoveryCopies, _identity, _snapshot_layout
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def validate_recovery_maintenance_limits(*, max_bytes, timeout_seconds, headroom
     """Validate operating budgets before configuration or execution."""
     if (type(max_bytes) is not int or not 1<=max_bytes<=2**63-1
             or type(timeout_seconds) is not int or not 1<=timeout_seconds<=86400
-            or type(max_objects) is not int or not 1<=max_objects<=1000000
+            or type(max_objects) is not int or not 1<=max_objects<=MAX_RECOVERY_OBJECTS
             or not isinstance(headroom_bytes,dict) or not 1<=len(headroom_bytes)<=32
             or any(not isinstance(key,str) or not 1<=len(key)<=48
                    or type(value) is not int or not 0<=value<=2**63-1
