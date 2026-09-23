@@ -95,7 +95,7 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
     readiness. The original capture clock, including time between retries,
     remains the one-day limit. Callers must supply measured per-step allowances.
     """
-    limits = _limits(resource_limits)
+    limits = _limits(resource_limits, migration=True)
     if (not isinstance(placement, physical.CopyPlacement)
             or type(page_rows) is not int or not 1 <= page_rows <= 4096
             or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
@@ -147,6 +147,8 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
                              timeout_seconds=step_limits()["movement_timeout_seconds"])
         raw.prepare_copy(conn, timeout_seconds=step_limits()["movement_timeout_seconds"])
     catch_up()
+    with transaction() as (conn, _):
+        raw.place_on_history(conn,timeout_seconds=step_limits()["movement_timeout_seconds"])
     with transaction() as (conn, _):
         headers.enable_identity_capture(conn, page_rows=page_rows,
                                          timeout_seconds=step_limits()["movement_timeout_seconds"])
@@ -301,7 +303,7 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
     uncertain response, use inspect_handoff; never blindly replay the switch.
     This does not prove publisher drain or authorize collection to resume.
     """
-    limits = _limits(resource_limits)
+    limits = _limits(resource_limits, migration=True)
     if cancelled is not None and not callable(cancelled):
         raise ValueError("fact_header_handoff_cancellation_callback_invalid")
     started = monotonic()
@@ -522,7 +524,7 @@ def activate_handoff_policy(engine, *, policy, resource_limits, source_root, des
     from portal.backend.service.storage.header_destinations import register_header_tablespaces
     from portal.backend.service.storage_management import _target
 
-    limits = _limits(resource_limits)
+    limits = _limits(resource_limits, migration=True)
     if cancelled is not None and not callable(cancelled):
         raise ValueError("fact_header_policy_cancellation_callback_invalid")
     if not policy.movement_enabled or not policy.backup_enabled:
@@ -664,7 +666,7 @@ def finish_database_handoff(engine, *, placement, policy, resource_limits,
     reconcile it without replaying a committed schema switch or policy change.
     This never activates runtime mounts, resumes clients or retires that hold.
     """
-    limits = _limits(resource_limits)
+    limits = _limits(resource_limits, migration=True)
     if (not isinstance(placement, physical.CopyPlacement)
             or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
             or type(page_rows) is not int or not 1 <= page_rows <= 4096
@@ -787,7 +789,7 @@ def run_database_operator(request, *, engine):
             raise ValueError("storage_database_operator_canonical_path_required")
     targets = read_storage_inventory(Path(request["inventory_path"]))
     policy = StoragePolicy.from_dict(request["policy"])
-    limits = _limits(request["resource_limits"])
+    limits = _limits(request["resource_limits"], migration=True)
     if len(targets) != 2:
         raise ValueError("storage_database_operator_two_targets_required")
     reference_move._fixed_inputs(policy, limits, targets)

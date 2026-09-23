@@ -56,7 +56,7 @@ def test_nested_step_cannot_extend_its_parent_budget(capture_source):
         with pytest.raises((DBAPIError, RuntimeError), match="statement timeout|step_timeout"):
             with migration_step(conn, timeout_seconds=1):
                 conn.exec_driver_sql("SELECT pg_sleep(0.65)")
-                with migration_step(conn, timeout_seconds=10):
+                with migration_step(conn, timeout_seconds=7200):
                     conn.exec_driver_sql("SELECT pg_sleep(0.65)")
         assert conn.scalar(text("SELECT 1")) == 1
 
@@ -66,18 +66,19 @@ def test_caller_timeout_is_preserved_on_success_and_failure(capture_source):
         install_capture(conn)
         conn.exec_driver_sql("SET LOCAL statement_timeout='200ms'")
         conn.exec_driver_sql("SET LOCAL lock_timeout='75ms'")
-        with migration_step(conn, timeout_seconds=10):
+        with migration_step(conn, timeout_seconds=7200):
             assert conn.scalar(text("SELECT 1")) == 1
         assert conn.scalar(text("SHOW statement_timeout")) == "200ms"
         assert conn.scalar(text("SHOW lock_timeout")) == "75ms"
         with pytest.raises((DBAPIError, RuntimeError), match="statement timeout|step_timeout"):
-            with migration_step(conn, timeout_seconds=10):
+            with migration_step(conn, timeout_seconds=7200):
                 conn.exec_driver_sql("SELECT pg_sleep(0.4)")
         assert conn.scalar(text("SHOW statement_timeout")) == "200ms"
         assert conn.scalar(text("SHOW lock_timeout")) == "75ms"
 
 
-def test_remaining_attempt_time_caps_a_longer_requested_step(capture_source):
+@pytest.mark.parametrize("requested_seconds",[10,7200])
+def test_remaining_attempt_time_caps_a_longer_requested_step(capture_source,requested_seconds):
     with capture_source.begin() as conn:
         install_capture(conn)
         conn.exec_driver_sql(f"""
@@ -86,7 +87,7 @@ def test_remaining_attempt_time_caps_a_longer_requested_step(capture_source):
         """)
         original = inspect_capture(conn)
         with pytest.raises((DBAPIError, RuntimeError), match="statement timeout|step_timeout|attempt_expired"):
-            with migration_step(conn, timeout_seconds=10):
+            with migration_step(conn, timeout_seconds=requested_seconds):
                 conn.exec_driver_sql("SELECT pg_sleep(2)")
         assert inspect_capture(conn)["started_at"] == original["started_at"]
 

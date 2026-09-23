@@ -103,7 +103,7 @@ def copy_archive_page(engine, *, family, source_root, destination_root, after_id
         raise ValueError("archive_copy_cursor_invalid")
     if cancelled is not None and not callable(cancelled):
         raise ValueError("archive_copy_cancellation_callback_invalid")
-    limits = _limits(resource_limits)
+    limits = _limits(resource_limits, migration=True)
     started = monotonic()
     deadline = started + limits["movement_timeout_seconds"]
     watch = None
@@ -222,7 +222,7 @@ def verified_archive_inventory(conn, *, source_root, destination_root, max_objec
         raise ValueError("archive_inventory_byte_budget_invalid")
     if cancelled is not None and not callable(cancelled):
         raise ValueError("archive_copy_cancellation_callback_invalid")
-    limits = _limits(resource_limits)
+    limits = _limits(resource_limits, migration=True)
     started = monotonic()
     deadline = started + limits["movement_timeout_seconds"]
     watch = None

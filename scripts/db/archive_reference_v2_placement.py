@@ -167,7 +167,7 @@ def move_reference_catalog(engine, *, relation, policy, resource_limits, cancell
     while the original attempt is still valid, retrying: a verified already-HDD catalog is acknowledged without rewriting.
     """
     _known(relation)
-    limits = _limits(resource_limits)
+    limits = _limits(resource_limits, migration=True)
     if cancelled is not None and not callable(cancelled):
         raise ValueError("archive_reference_move_cancellation_callback_invalid")
     if cancelled is not None and cancelled():

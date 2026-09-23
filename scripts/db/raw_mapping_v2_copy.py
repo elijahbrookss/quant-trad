@@ -167,7 +167,7 @@ def _inspect(conn):
         raise RuntimeError("raw_mapping_copy_bound_layout_changed")
     _dependencies(conn)
     pid=header_state["_placement_pid"]
-    for relation,history in ((SOURCE,False),(TARGET,True),(QUEUE,False),(STATE,False)):
+    for relation,history in ((SOURCE,False),(TARGET,state["history_ready"]),(QUEUE,False),(STATE,False)):
         physical.verify_group(conn,relation,history=history,saved=state["placement"],pid=pid)
     return state
 
@@ -185,8 +185,9 @@ def prepare_copy(conn, *, timeout_seconds=30):
         for relation in (TARGET,QUEUE):
             if conn.scalar(text("SELECT to_regclass(:name)"),{"name":relation}) is not None:
                 raise RuntimeError("raw_mapping_copy_unregistered_shadow")
-        with physical.tablespace(conn,placement["history_name"]):
-            _table().create(conn)
+        # Build random-write indexes on the recent SSD, then relocate the
+        # completed private table/index files in one transactional HDD copy.
+        _table().create(conn)
         _admit_source(conn)
         conn.exec_driver_sql(f"""
             CREATE TABLE {QUEUE}(raw_record_id varchar(80),manifest_id varchar(128),
@@ -198,6 +199,7 @@ def prepare_copy(conn, *, timeout_seconds=30):
                 high_raw varchar(80),high_manifest varchar(128),
                 after_raw varchar(80),after_manifest varchar(128),
                 baseline_complete boolean NOT NULL,
+                history_ready boolean NOT NULL DEFAULT false,
                 verified_rows bigint NOT NULL DEFAULT 0 CHECK(verified_rows>=0),
                 binding jsonb NOT NULL,placement jsonb NOT NULL,
                 CHECK((high_raw IS NULL)=(high_manifest IS NULL)),
@@ -297,12 +299,46 @@ def copy_page(conn, *, page_rows=128, timeout_seconds=30):
         return _report(conn,state,verified=len(rows),reused=True)
 
 
+def place_on_history(conn, *, timeout_seconds=30):
+    """Move the completed private copy and indexes; leave source authoritative.
+
+    The operator owns the same cumulative deadline and resource watch used for
+    staging pages. Its SSD allowance must include this full temporary copy.
+    Placement and its progress bit commit atomically; interruption rolls both
+    back, and an uncertain commit is resolved by fresh state/file inspection.
+    Late captured inserts may catch up on HDD before final fenced verification.
+    """
+    with _step(conn,timeout_seconds):
+        state=_inspect(conn)
+        if state["history_ready"]:
+            return {"history_ready":True,"reused":True}
+        if not state["baseline_complete"]:
+            raise RuntimeError("raw_mapping_history_baseline_incomplete")
+        conn.exec_driver_sql(f"LOCK TABLE {TARGET} IN ACCESS EXCLUSIVE MODE NOWAIT")
+        indexes=conn.execute(text("""
+            SELECT n.nspname,c.relname FROM pg_index i
+            JOIN pg_class c ON c.oid=i.indexrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE i.indrelid=to_regclass(:target) ORDER BY c.oid
+        """),{"target":TARGET}).all()
+        quote=conn.dialect.identifier_preparer.quote_identifier
+        destination=quote(state["placement"]["history_name"])
+        conn.exec_driver_sql(f"ALTER TABLE {TARGET} SET TABLESPACE {destination}")
+        for schema,name in indexes:
+            conn.exec_driver_sql(f"ALTER INDEX {quote(schema)}.{quote(name)} SET TABLESPACE {destination}")
+        conn.exec_driver_sql(f"UPDATE {STATE} SET history_ready=true WHERE id=1")
+        _inspect(conn)
+        logger.info("raw_mapping_v2_history_placement_staged | target=%s",TARGET)
+        return {"history_ready":True,"reused":False}
+
+
 def _report(conn,state,*,verified,reused):
     pending=conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))
     return {"schema_version":"qt.raw_mapping_shadow_copy.v1",
             "verified_page_rows":verified,"baseline_complete":state["baseline_complete"],
             "capture_pending":pending,
             "caught_up_at_observation":state["baseline_complete"] and not pending,
+            "history_ready":state["history_ready"],
             "source_authoritative":True,"migration_ready":False,"reused":reused}
 
 
@@ -326,6 +362,8 @@ def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
             raise RuntimeError("raw_mapping_handoff_header_fence_required")
         conn.exec_driver_sql(f"LOCK TABLE {SOURCE},{TARGET},{QUEUE},{STATE} IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         state = _inspect(conn)
+        if not state["history_ready"]:
+            raise RuntimeError("raw_mapping_handoff_history_placement_required")
         if (not state["baseline_complete"]
                 or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))):
             raise RuntimeError("raw_mapping_handoff_copy_incomplete")

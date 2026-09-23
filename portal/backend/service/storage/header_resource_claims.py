@@ -25,7 +25,9 @@ _MAX = 2**63 - 1
 _MAPS = ("temporary_bytes", "growth_bytes_per_second", "maintenance_bytes")
 
 
-def _limits(values):
+def _limits(values, *, migration=False):
+    if type(migration) is not bool:
+        raise ValueError("storage_resource_claim_limits_invalid")
     if not isinstance(values, Mapping) or set(values) != {
         *_MAPS, "wal_bytes", "movement_timeout_seconds", "cancellation_grace_seconds"
     }:
@@ -40,7 +42,7 @@ def _limits(values):
         result[key] = dict(value)
     if any(set(result[key]) != set(result[_MAPS[0]]) for key in _MAPS):
         raise ValueError("storage_resource_claim_limits_invalid")
-    for key, maximum in (("wal_bytes", _MAX), ("movement_timeout_seconds", 3600),
+    for key, maximum in (("wal_bytes", _MAX), ("movement_timeout_seconds", 86400 if migration else 3600),
                          ("cancellation_grace_seconds", 60)):
         value = values[key]
         if type(value) is not int or not 1 <= value <= maximum:

@@ -28,7 +28,7 @@ def migration_step(conn, timeout_seconds=30):
     The caller owns commit. This is not a cutover or a duration qualification.
     A rejected/expired step leaves the original source and capture intact.
     """
-    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
+    if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 86400:
         raise ValueError("fact_header_migration_timeout_out_of_bounds")
     if not conn.in_transaction():
         raise ValueError("fact_header_copy_caller_transaction_required")

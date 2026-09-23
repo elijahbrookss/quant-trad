@@ -633,6 +633,7 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
 
 
 def test_fixed_database_sequence_completes_and_refuses_later_policy_change(storage,tmp_path,monkeypatch):
+    migration_window=7200
     from market_data.contracts import DatasetSeriesRequest
     facts = [replace(storage.fact,observation_key="sequence-"+str(i),
                      observation_time=BASE+timedelta(seconds=i)) for i in range(3)]
@@ -652,6 +653,7 @@ def test_fixed_database_sequence_completes_and_refuses_later_policy_change(stora
     assert not source.is_relative_to(Path(storage.copy_plan.recent.root))
     assert source.stat().st_dev == Path(storage.copy_plan.recent.root).stat().st_dev
     options = _options(storage)
+    options["resource_limits"]["movement_timeout_seconds"]=migration_window
     options["policy"] = replace(options["policy"],movement_enabled=True,backup_enabled=True)
     options.update(placement=storage.copy_plan,source_root=source,destination_root=destination,
                    max_page_bytes=32*1024**2,max_objects=100,max_bytes=32*1024**2,page_rows=2)
@@ -677,7 +679,7 @@ def test_fixed_database_sequence_completes_and_refuses_later_policy_change(stora
         history_before=storage.copy_plan.history_before.isoformat(),
         source_root=str(source),destination_root=str(destination),
         max_page_bytes=options["max_page_bytes"],max_objects=options["max_objects"],
-        max_bytes=options["max_bytes"],page_rows=4096,max_duration_seconds=600)
+        max_bytes=options["max_bytes"],page_rows=4096,max_duration_seconds=migration_window)
     child_env = {**os.environ,"PG_DSN":storage.dsn,
         "MARKET_STRUCTURE_WORKING_ROOT":str(source.parent),
         "QT_MARKET_DATA_WORKING_EXPECTED_UUID":storage.copy_plan.recent.filesystem_uuid}

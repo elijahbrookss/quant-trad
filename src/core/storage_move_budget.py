@@ -53,7 +53,9 @@ def assess_header_move_resources(
     excluding separately counted WAL,
     temporary and maintenance demand. Existing occupied bytes are already
     reflected in available_bytes; neither those bytes nor future source frees
-    are added to available capacity. Zero allowances must be explicit.
+    are added to available capacity. Zero allowances must be explicit. Arithmetic
+    admits the one-day initial migration horizon; routine movement admission
+    independently retains its one-hour limit.
     """
     if (not isinstance(targets, Sequence) or not 1 <= len(targets) <= 32
             or any(not isinstance(item, StorageTarget) for item in targets)
@@ -74,7 +76,7 @@ def assess_header_move_resources(
     age = (now - observed_at).total_seconds()
     if not 0 <= age <= 30:
         raise ValueError("storage_move_budget_invalid: stale or future observation")
-    _integer(timeout_seconds, "movement timeout", 1, 3600)
+    _integer(timeout_seconds, "movement timeout", 1, 86400)
     _integer(cancellation_grace_seconds, "cancellation grace", 1, 60)
     observation_age = ceil(age)
     window = observation_age + timeout_seconds + cancellation_grace_seconds

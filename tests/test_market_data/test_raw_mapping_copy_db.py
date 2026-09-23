@@ -39,6 +39,7 @@ def _finish(engine):
         with engine.begin() as conn:
             report=copy.copy_page(conn,page_rows=1)
         if report["caught_up_at_observation"]:
+            with engine.begin() as conn:copy.place_on_history(conn,timeout_seconds=60)
             return report
     pytest.fail("raw mapping copy did not catch up within fixture budget")
 
@@ -56,7 +57,7 @@ def test_raw_mapping_copy_resumes_killed_page_and_captures_new_archives(placed,t
         assert report["source_authoritative"] and not report["migration_ready"]
         assert conn.scalar(text("SHOW statement_timeout"))==original_timeout
         assert copy.prepare_copy(conn)["reused"]
-        _assert_disk(conn,copy.TARGET,Path("/qt-history"))
+        _assert_disk(conn,copy.TARGET,Path("/qt-source/pgdata"))
         _assert_disk(conn,copy.SOURCE,Path("/qt-source/pgdata"))
         _assert_disk(conn,copy.QUEUE,Path("/qt-source/pgdata"))
     killed=[False]
@@ -132,7 +133,9 @@ def test_raw_mapping_copy_refuses_changed_guards_content_and_mount(placed,tmp_pa
         assert _rows(conn)==before
         conn.exec_driver_sql(f"DELETE FROM {copy.TARGET}")
         with conn.begin_nested() as temporary:
-            conn.exec_driver_sql(f"ALTER INDEX {SCHEMA}.ix_market_raw_archive_mapping_segment SET TABLESPACE pg_default")
+            destination=conn.dialect.identifier_preparer.quote_identifier(
+                headers._inspect_progress(conn)["placement"]["history_name"])
+            conn.exec_driver_sql(f"ALTER INDEX {SCHEMA}.ix_market_raw_archive_mapping_segment SET TABLESPACE {destination}")
             with pytest.raises(RuntimeError,match="relation_on_wrong_tablespace"):
                 copy.copy_page(conn)
             temporary.rollback()
@@ -272,3 +275,48 @@ def test_copy_lookup_and_queue_retirement_preserve_key_pairs(placed,tmp_path,mon
         assert _rows(conn,copy.TARGET)==[first]
         assert set(conn.execute(text(f"SELECT raw_record_id,manifest_id FROM {copy.QUEUE}")))==set(crossed)
         assert _rows(conn)==before
+
+
+def test_raw_history_placement_is_atomic_and_required_for_handoff(placed,tmp_path,monkeypatch):
+    engine=placed.database._engine
+    _raw_trade_fixture(placed,tmp_path,monkeypatch)
+    with engine.begin() as conn:
+        headers.prepare_copy(conn,placement=placed.copy_plan)
+        copy.prepare_copy(conn)
+        before=_rows(conn)
+        with pytest.raises(RuntimeError,match="baseline_incomplete"):
+            copy.place_on_history(conn)
+    finish_headers(engine)
+    for _ in range(8):
+        with engine.begin() as conn:report=copy.copy_page(conn,page_rows=2)
+        if report["caught_up_at_observation"]:break
+    assert report["caught_up_at_observation"] and not report["history_ready"]
+    with engine.begin() as conn:headers.enable_identity_capture(conn)
+    with engine.begin() as conn:
+        with headers.verified_copy(conn,timeout_seconds=60):
+            with pytest.raises(RuntimeError,match="history_placement_required"):
+                with copy.verified_copy(conn):pytest.fail("SSD staging admitted as completed history")
+    killed=[False]
+    def terminate(conn,cursor,statement,parameters,context,executemany):
+        if not killed[0] and statement.startswith("ALTER TABLE "+copy.TARGET+" SET TABLESPACE"):
+            killed[0]=True
+            with engine.begin() as killer:
+                assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),
+                    {"pid":conn.connection.driver_connection.get_backend_pid()})
+            conn.exec_driver_sql("SELECT 1")
+    event.listen(engine,"after_cursor_execute",terminate)
+    try:
+        with pytest.raises(DBAPIError),engine.begin() as conn:copy.place_on_history(conn)
+    finally:event.remove(engine,"after_cursor_execute",terminate)
+    assert killed[0]
+    with engine.begin() as conn:
+        assert not copy._inspect(conn)["history_ready"]
+        _assert_disk(conn,copy.TARGET,Path("/qt-source/pgdata"))
+        assert _rows(conn)==before==_rows(conn,copy.TARGET)
+        assert not copy.place_on_history(conn)["reused"]
+    with engine.begin() as conn:
+        assert copy.place_on_history(conn)["reused"]
+        _assert_disk(conn,copy.TARGET,Path("/qt-history"))
+        assert _rows(conn)==before==_rows(conn,copy.TARGET)
+        with headers.verified_copy(conn,timeout_seconds=60):
+            with copy.verified_copy(conn) as verified:assert verified["verified_lookup_rows"]==len(before)

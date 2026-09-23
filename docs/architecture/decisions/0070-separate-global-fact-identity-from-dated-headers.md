@@ -155,9 +155,24 @@ already copied data. This is not a general placement API or runtime policy.
 The same fixed migration now has a bounded copy for the installed immutable
 raw archive record lookup. This table is a measured source of SSD growth; it
 cannot be left behind when the historical headers move. Its replacement and
-all indexes are created directly on the already bound history HDD. The source,
-small cursor and transactional composite-key queue remain on the recent SSD
-during the copy.
+all indexes are first built in a private temporary copy on the recent SSD.
+After baseline copying, the table and all indexes move transactionally to the
+already bound history HDD. This avoids random HDD index insertion during the
+large initial migration. SSD staging consumes additional temporary space and
+must be included in the operator's measured admission budget. The source, small
+cursor and transactional composite-key queue remain on the recent SSD.
+
+A durable placement bit changes in the same transaction as the physical move.
+Interruption rolls back both; retry rechecks the actual table/index files and
+reuses a committed move. New captured inserts can catch up on HDD afterward.
+Final fenced verification refuses an unrelocated SSD copy.
+
+Manual migration phases can use an explicitly declared horizon up to one day,
+including full final comparison of the preserved records. The original capture
+clock and any tighter caller timeout still cap every nested phase and retry;
+this does not grant a new day per step. Capacity accounting covers growth over
+that full declared horizon. Routine history movement and its saved operating
+limits retain their separate one-hour maximum.
 
 Raw-copy page lookup and queue retirement join paired raw-record/manifest arrays.
 This preserves composite-key identity while avoiding the large disjunction plans
