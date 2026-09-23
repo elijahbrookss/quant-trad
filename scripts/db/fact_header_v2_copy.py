@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
 from datetime import date, timedelta
+from functools import lru_cache
 import json
 import logging
 from time import monotonic
@@ -31,7 +32,11 @@ IDENTITY_COLUMNS = ("id", "storage_day", "series_id", "observation_key", "revisi
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1)
 def _tables():
+    # These are fixed code-defined SQLAlchemy declarations, never observed database
+    # state. Rebuilding the entire model graph for each small page dominated the
+    # physical rehearsal. Catalog/content/placement admission still runs per page.
     metadata = MetaData()
     selected = {"market."+name for name in TABLE_NAMES}
     for key, table in Base.metadata.tables.items():

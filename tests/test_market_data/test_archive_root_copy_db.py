@@ -168,8 +168,12 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
     with pytest.raises(RuntimeError, match="page_byte_budget_exceeded"):
         archives.copy_archive_page(engine, family=family,
                                    **(options | {"max_page_bytes": 1}))
+    # Exceed this fixture filesystem's capacity without allocating it. The
+    # history drive may be the small CI tmpfs or an isolated physical HDD path.
+    filesystem = os.statvfs(objects)
     constrained = {**options["resource_limits"],
-        "maintenance_bytes": {"ssd": 1024**2, "hdd": 256*1024**2}}
+        "maintenance_bytes": {"ssd": 1024**2,
+                              "hdd": filesystem.f_blocks * filesystem.f_frsize}}
     with pytest.raises(RuntimeError, match="capacity_blocked"):
         archives.copy_archive_page(engine, family=family,
                                    **(options | {"resource_limits": constrained}))
@@ -673,13 +677,16 @@ def test_fixed_database_sequence_completes_and_refuses_later_policy_change(stora
         history_before=storage.copy_plan.history_before.isoformat(),
         source_root=str(source),destination_root=str(destination),
         max_page_bytes=options["max_page_bytes"],max_objects=options["max_objects"],
-        max_bytes=options["max_bytes"],page_rows=2,max_duration_seconds=600)
+        max_bytes=options["max_bytes"],page_rows=4096,max_duration_seconds=600)
     child_env = {**os.environ,"PG_DSN":storage.dsn,
         "MARKET_STRUCTURE_WORKING_ROOT":str(source.parent),
         "QT_MARKET_DATA_WORKING_EXPECTED_UUID":storage.copy_plan.recent.filesystem_uuid}
     def invoke(payload):
         return subprocess.run([sys.executable,"-m","scripts.db.fact_header_v2_handoff"],
             input=json.dumps(payload),env=child_env,text=True,capture_output=True,timeout=650)
+    oversized = invoke({**operator,"page_rows":4097})
+    assert oversized.returncode and "storage_database_operator_budget_invalid" in oversized.stderr
+    assert not (Path(storage.copy_plan.history.root)/"postgres").exists()
     # Wrong-cluster admission must not even create the destination tablespace.
     wrong = invoke({**operator,"database_identity":"1/1"})
     assert wrong.returncode and "storage_database_operator_database_changed" in wrong.stderr

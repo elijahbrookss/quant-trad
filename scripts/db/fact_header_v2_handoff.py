@@ -97,7 +97,7 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
     """
     limits = _limits(resource_limits)
     if (not isinstance(placement, physical.CopyPlacement)
-            or type(page_rows) is not int or not 1 <= page_rows <= 256
+            or type(page_rows) is not int or not 1 <= page_rows <= 4096
             or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
             or type(max_page_bytes) is not int or max_page_bytes <= 0
             or (cancelled is not None and not callable(cancelled))):
@@ -166,14 +166,16 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
     for relation in reference_move.RELATIONS:
         reference_move.move_reference_catalog(engine, relation=relation,
             policy=policy, resource_limits=step_limits(), cancelled=cancelled)
+    # Metadata batches and archive object batches have different resource bounds.
+    archive_page_rows = min(page_rows, 256)
     for family in archives.FAMILIES:
         cursor = ""
         while True:
             report = archives.copy_archive_page(engine, family=family,
                 source_root=source_root, destination_root=destination_root,
-                after_id=cursor, page_rows=page_rows, max_page_bytes=max_page_bytes,
+                after_id=cursor, page_rows=archive_page_rows, max_page_bytes=max_page_bytes,
                 policy=policy, resource_limits=step_limits(), cancelled=cancelled)
-            if report["page_objects"] < page_rows:
+            if report["page_objects"] < archive_page_rows:
                 break
             if report["next_after_id"] <= cursor:
                 raise RuntimeError("fact_header_staging_archive_cursor_did_not_advance")
@@ -342,7 +344,7 @@ def commit_handoff(engine, *, policy, resource_limits, source_root, destination_
                     watch.start()
                     with archives.verified_archive_inventory(conn, source_root=source_root,
                             destination_root=destination_root, max_objects=max_objects,
-                            max_bytes=max_bytes, page_rows=page_rows, policy=policy,
+                            max_bytes=max_bytes, page_rows=min(page_rows, 256), policy=policy,
                             resource_limits=limits, cancelled=cancelled) as inventory:
                         with headers.verified_copy(conn, page_rows=page_rows,
                                 timeout_seconds=limits["movement_timeout_seconds"]) as verified:
@@ -665,7 +667,7 @@ def finish_database_handoff(engine, *, placement, policy, resource_limits,
     limits = _limits(resource_limits)
     if (not isinstance(placement, physical.CopyPlacement)
             or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 86400
-            or type(page_rows) is not int or not 1 <= page_rows <= 256
+            or type(page_rows) is not int or not 1 <= page_rows <= 4096
             or any(type(value) is not int or value <= 0
                    for value in (max_page_bytes, max_objects, max_bytes))
             or (cancelled is not None and not callable(cancelled))):
@@ -776,7 +778,7 @@ def run_database_operator(request, *, engine):
     for key in ("max_page_bytes", "max_objects", "max_bytes", "page_rows", "max_duration_seconds"):
         if type(request[key]) is not int or request[key] <= 0:
             raise ValueError("storage_database_operator_budget_invalid")
-    if request["page_rows"] > 256 or request["max_duration_seconds"] > 86400:
+    if request["page_rows"] > 4096 or request["max_duration_seconds"] > 86400:
         raise ValueError("storage_database_operator_budget_invalid")
     for key in ("inventory_path", "source_root", "destination_root"):
         value = request[key]

@@ -1004,3 +1004,17 @@ evidence. The original bounded attempt deadline is not extended on retry.
 
 This implementation still requires the combined real-service rehearsal and
 physical-drive qualification before deployment or a public activation control.
+
+### Preserving-copy throughput
+
+The fixed header migration reuses its code-defined SQLAlchemy table declarations
+between pages. This caches no database observations: source definitions, capture
+state, copied content and physical placement are still admitted on every page.
+A physical-drive profile identified repeated reconstruction of the entire model
+graph as a significant part of the copy time. The optimization does not change
+transaction boundaries, the original one-day deadline or recovery. The internal
+operator admits up to 4,096 rows per page, matching the existing header and raw
+copy primitives; the default remains 128. Measured requests may select the larger
+bounded batch while retaining the same per-step duration and resource limits.
+Archive copying and final object inventory keep their separate 256-object page
+ceiling and byte budgets.
