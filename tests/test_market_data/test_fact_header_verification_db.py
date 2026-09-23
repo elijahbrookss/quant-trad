@@ -60,6 +60,19 @@ def test_exact_verification_rejects_damaged_headers_ids_and_routing(source):
                 with copy.verified_copy(conn, page_rows=2):
                     pytest.fail("extra target record admitted")
             damage.rollback()
+        # A detached/unregistered target day must not disappear from the
+        # per-day comparison while its original source rows still exist.
+        with conn.begin_nested() as damage:
+            child=SCHEMA+".fact_versions_"+source.today.strftime("%Y%m%d")
+            conn.exec_driver_sql(f"ALTER TABLE {SCHEMA}.fact_versions DETACH PARTITION {child}")
+            conn.execute(text(f"DELETE FROM {SCHEMA}.fact_header_series_days WHERE storage_day=:day"),
+                         {"day":source.today})
+            conn.execute(text(f"DELETE FROM {SCHEMA}.fact_header_partitions WHERE storage_day=:day"),
+                         {"day":source.today})
+            with pytest.raises(RuntimeError,match="source_day_missing"):
+                with copy.verified_copy(conn,page_rows=2):
+                    pytest.fail("source day missing from target admitted")
+            damage.rollback()
         with copy.verified_copy(conn, page_rows=1) as report:
             assert report["verified_header_rows"] == 7
         assert _frozen_records(conn) == source.frozen_before

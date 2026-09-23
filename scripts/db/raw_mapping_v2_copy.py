@@ -12,7 +12,6 @@ from time import monotonic
 import logging
 
 from sqlalchemy import MetaData, text
-from sqlalchemy.dialects.postgresql import insert
 
 from portal.backend.db import Base
 from scripts.db import fact_header_v2_copy as headers, fact_header_v2_placement as physical
@@ -273,9 +272,14 @@ def copy_page(conn, *, page_rows=128, timeout_seconds=30):
             if {tuple(row[key] for key in KEYS) for row in rows}!=set(queued):
                 raise RuntimeError("raw_mapping_copy_captured_source_missing")
         if rows:
-            target=_table()
             copied_keys=[tuple(row[key] for key in KEYS) for row in rows]
-            conn.execute(insert(target).on_conflict_do_nothing(),rows)
+            conn.execute(text(f"""INSERT INTO {TARGET} ({','.join(COLUMNS)})
+                SELECT {','.join('original.'+name for name in COLUMNS)}
+                FROM {SOURCE} AS original JOIN {_KEY_ROWS}
+                  ON original.raw_record_id=wanted.raw_record_id
+                 AND original.manifest_id=wanted.manifest_id
+                ON CONFLICT DO NOTHING
+            """),_key_parameters(copied_keys))
             actual={tuple(row[key] for key in KEYS):row
                     for row in _rows_for_keys(conn,TARGET,copied_keys)}
             if any(actual.get(tuple(row[key] for key in KEYS))!=row for row in rows):

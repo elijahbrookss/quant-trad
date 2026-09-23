@@ -196,21 +196,30 @@ def _partition(conn, day, *, placement=None, pid=None):
     conn.execute(text(f"INSERT INTO {SCHEMA}.fact_header_partitions(storage_day) VALUES(:day)"),{"day":day})
 
 
-def _copy_rows(conn, rows, *, placement=None, pid=None):
+def _copy_rows(conn, rows, *, placement=None, pid=None, from_source=False):
     if not rows:
         return
     for day in sorted({row["storage_day"] for row in rows}):
         _partition(conn,day,placement=placement,pid=pid)
-    tables = _tables()
-    conn.execute(insert(tables["fact_identities"]).on_conflict_do_nothing(),
-                 [{name:row[name] for name in IDENTITY_COLUMNS} for row in rows])
     ids = [row["id"] for row in rows]
+    if from_source:
+        conn.execute(text(f"INSERT INTO {SCHEMA}.fact_identities ({','.join(IDENTITY_COLUMNS)}) "
+                          f"SELECT {','.join(IDENTITY_COLUMNS)} FROM {SOURCE} WHERE id=ANY(:ids) "
+                          "ON CONFLICT DO NOTHING"),{"ids":ids})
+    else:
+        conn.execute(insert(_tables()["fact_identities"]).on_conflict_do_nothing(),
+                     [{name:row[name] for name in IDENTITY_COLUMNS} for row in rows])
     identities = {row["id"]:dict(row) for row in conn.execute(text(f"""
         SELECT {",".join(IDENTITY_COLUMNS)} FROM {SCHEMA}.fact_identities WHERE id=ANY(:ids)
     """),{"ids":ids}).mappings()}
     if any(identities.get(row["id"]) != {name:row[name] for name in IDENTITY_COLUMNS} for row in rows):
         raise RuntimeError("fact_header_copy_identity_mismatch")
-    conn.execute(insert(tables["fact_versions"]).on_conflict_do_nothing(),rows)
+    if from_source:
+        conn.execute(text(f"INSERT INTO {SCHEMA}.fact_versions ({','.join(HEADER_COLUMNS)}) "
+                          f"SELECT {','.join(HEADER_COLUMNS)} FROM {SOURCE} WHERE id=ANY(:ids) "
+                          "ON CONFLICT DO NOTHING"),{"ids":ids})
+    else:
+        conn.execute(insert(_tables()["fact_versions"]).on_conflict_do_nothing(),rows)
     copied = {row["id"]:dict(row) for row in conn.execute(text(f"""
         SELECT {",".join(HEADER_COLUMNS)} FROM {SCHEMA}.fact_versions
         WHERE storage_day=ANY(:days) AND id=ANY(:ids)
@@ -258,7 +267,7 @@ def copy_page(conn, *, page_rows=128, timeout_seconds=30):
             """),{"ids":queued}).mappings()] if queued else []
             if {row["id"] for row in rows} != set(queued):
                 raise RuntimeError("fact_header_copy_captured_source_missing")
-        _copy_rows(conn,rows,placement=state["placement"],pid=state["_placement_pid"])
+        _copy_rows(conn,rows,placement=state["placement"],pid=state["_placement_pid"],from_source=True)
         if state["placement"]:
             pid=physical.verify(conn,state["placement"])
             for day in sorted({row["storage_day"] for row in rows}):
@@ -363,7 +372,7 @@ def _report(conn, state, *, verified, reused):
             "physical_placement_configured":state["placement"] is not None}
 
 
-def _verified_pages(conn, *, source, target, columns, keys, page_rows, label):
+def _verified_pages(conn, *, source, target, columns, keys, page_rows, label, storage_day=None):
     """Compare two fixed internal relations exactly, with bounded client memory.
 
     Callers own both relation locks and the cumulative migration deadline.
@@ -374,9 +383,13 @@ def _verified_pages(conn, *, source, target, columns, keys, page_rows, label):
     while True:
         params = {"limit": page_rows}
         predicate = ""
+        if storage_day is not None:
+            params["storage_day"] = storage_day
+            predicate = "WHERE storage_day=:storage_day"
         if after is not None:
             params.update({f"after_{i}": value for i, value in enumerate(after)})
-            predicate = f"WHERE ({','.join(keys)}) > ({','.join(':after_'+str(i) for i in range(len(keys)))})"
+            conjunction = " AND " if predicate else "WHERE "
+            predicate += f"{conjunction}({','.join(keys)}) > ({','.join(':after_'+str(i) for i in range(len(keys)))})"
         pages = [conn.execute(text(
             f"SELECT {','.join(columns)} FROM {relation} {predicate} "
             f"ORDER BY {','.join(keys)} LIMIT :limit"), params).mappings().all()
@@ -444,12 +457,19 @@ def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
             raise RuntimeError("fact_header_handoff_partition_catalog_mismatch")
         for day in days:
             _partition(conn, day, placement=state["placement"], pid=state["_placement_pid"])
+        # A date-leading row comparison badly underestimates remaining rows
+        # within its last day. Compare each admitted day with its indexed cursor.
+        # Check source-day coverage first so a missing target day cannot hide data.
+        if conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {SOURCE} "
+                            "WHERE NOT(storage_day=ANY(CAST(:days AS date[]))))"),{"days":days}):
+            raise RuntimeError("fact_header_handoff_content_mismatch: source_day_missing")
         header_rows = 0
-        for rows in _verified_pages(conn, source=SOURCE, target=SCHEMA+".fact_versions",
-                                    columns=HEADER_COLUMNS, keys=("storage_day","market_commit_seq","id"),
-                                    page_rows=page_rows, label="headers"):
-            _verify_routing(conn, rows)
-            header_rows += len(rows)
+        for day in days:
+            for rows in _verified_pages(conn, source=SOURCE, target=SCHEMA+".fact_versions",
+                                        columns=HEADER_COLUMNS, keys=("market_commit_seq","id"),
+                                        page_rows=page_rows, label="headers",storage_day=day):
+                _verify_routing(conn, rows)
+                header_rows += len(rows)
         identity_rows = sum(len(rows) for rows in _verified_pages(
             conn, source=SOURCE, target=SCHEMA+".fact_identities",
             columns=IDENTITY_COLUMNS, keys=("id",), page_rows=page_rows, label="identities"))

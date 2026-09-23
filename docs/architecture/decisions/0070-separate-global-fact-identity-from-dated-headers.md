@@ -169,7 +169,11 @@ hold a long source-writer fence. Final verification requires HDD placement.
 Before the writer fence, explicit ANALYZE refreshes the new partition-parent and
 identity statistics so bounded ordered verification does not repeatedly scan
 and sort the remaining copied table. Normal child auto-analysis is insufficient
-for PostgreSQL's partition-parent estimates.
+for PostgreSQL's partition-parent estimates. Header comparison uses one admitted
+storage day at a time with its sequence/ID index, avoiding poor estimates for a
+date-leading cursor within the last day. A separate source-day coverage check
+prevents a missing target day from hiding source records. All fields and routing
+bounds are still compared, including empty and extra target partitions.
 
 A durable placement bit changes in the same transaction as the physical move.
 Interruption rolls back both; retry rechecks the actual table/index files and
@@ -182,6 +186,12 @@ clock and any tighter caller timeout still cap every nested phase and retry;
 this does not grant a new day per step. Capacity accounting covers growth over
 that full declared horizon. Routine history movement and its saved operating
 limits retain their separate one-hour maximum.
+
+Bounded production copy pages insert directly from the admitted immutable source
+inside PostgreSQL, avoiding a second transfer of every field through Python.
+The selected page remains the comparison baseline: each target field must still
+match before its capture keys retire and its cursor advances. Source rows remain
+protected by the existing immutable/capture guards and transaction boundaries.
 
 Raw-copy page lookup and queue retirement join paired raw-record/manifest arrays.
 This preserves composite-key identity while avoiding the large disjunction plans
