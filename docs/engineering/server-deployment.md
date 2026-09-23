@@ -565,19 +565,31 @@ permissions or physical-HDD performance. The complete preserving activation and
 recovery procedure remains required before this overlay is used on a host.
 
 
-The preserving storage release is not yet a complete deployable cutover. Its
-internal pause boundary records a persistent `storage-handoff.json` in the
-existing deployment state directory before stopping the fixed application and
-query clients. All ordinary mutating deployment-helper actions refuse that
-hold, including compatible old-image recovery. `server_deploy.sh release`
-continues to show the hold even if no successful release is recorded.
+The preserving procedure is implemented in the internal
+`run_held_runtime_handoff` entrypoint in
+`scripts/automation/storage_handoff_pause.py`. It records a persistent
+`storage-handoff.json` in the existing deployment state directory before stopping
+the fixed application and query clients. All ordinary mutating deployment-helper
+actions refuse that hold, including compatible old-image recovery.
+`server_deploy.sh release` continues to show the hold even if no successful release
+is recorded. An ordinary deployment does not perform the initial storage cutover.
 
 Do not remove the hold to bypass an interrupted storage switch or use an older
-checkout/direct Docker command to restart clients. The storage procedure must
-first reconcile the database certificate and align the archive root, policy and
-runtime. The current internal boundary deliberately has no public pause/resume
-command and never clears the hold automatically. The complete activation and
-recovery coordinator remains required before this path can be used on a host.
+checkout/direct Docker command to restart clients. The preserving procedure
+reconciles the database certificate, archive root and policy, then starts the
+admitted candidate services under the same deployment lock. Interrupted calls
+resume the saved worker or candidate containers with the original deadline and
+bound inputs. Only verified layout, service health and a published recovery copy
+for the current layout permit the procedure to record the release and retire the
+hold. Automatic rollback to a pre-migration image is disabled after that switch.
+
+The combined disposable rehearsal passed migration and activation interruption,
+recent and frozen reads, service health, recovery publication and repeat-call
+reconciliation. This establishes functional recovery, not production readiness:
+physical SSD/HDD performance during movement, representative migration within
+24 hours and complete capacity accounting must still qualify the release. The
+internal entrypoint requires an explicitly prepared request, inventory, operating
+limits and pinned runtime recipe; there is no public pause/resume command.
 
 The fixed pause refuses unexpected project/network peers, including bot runtime
 containers; it does not silently stop trading work. It retains PostgreSQL and
