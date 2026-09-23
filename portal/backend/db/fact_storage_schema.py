@@ -51,8 +51,11 @@ DECLARE
     revision_row market.fact_versions%ROWTYPE;
     partition_state text;
 BEGIN
-    SELECT * INTO revision_row FROM market.fact_versions WHERE id = NEW.id AND storage_day = NEW.storage_day;
-    IF NOT FOUND OR
+    -- EXECUTE replans with this row's day even after a connection would otherwise
+    -- choose a generic plan that locks unrelated historical partitions.
+    EXECUTE 'SELECT * FROM market.fact_versions WHERE id = $1 AND storage_day = $2'
+        INTO revision_row USING NEW.id, NEW.storage_day;
+    IF revision_row.id IS NULL OR
        (NEW.storage_day, NEW.series_id, NEW.payload_schema_id, NEW.observation_time)
        IS DISTINCT FROM
        (revision_row.storage_day, revision_row.series_id, revision_row.payload_schema_id, revision_row.observation_time)

@@ -35,14 +35,18 @@ END;
 """
 
 REQUIRE_HEADER_BODY = """
+DECLARE
+    header_exists boolean;
 BEGIN
-    IF NOT EXISTS (
+    -- Replan with the concrete day; a generic parent plan locks old partitions.
+    EXECUTE 'SELECT EXISTS (
         SELECT 1 FROM market.fact_versions AS header
-        WHERE header.id = NEW.id AND header.storage_day = NEW.storage_day
+        WHERE header.id = $1 AND header.storage_day = $2
           AND (header.series_id, header.observation_key, header.revision)
-              IS NOT DISTINCT FROM
-              (NEW.series_id, NEW.observation_key, NEW.revision)
-    ) THEN
+              IS NOT DISTINCT FROM ($3, $4, $5)
+    )' INTO header_exists
+       USING NEW.id, NEW.storage_day, NEW.series_id, NEW.observation_key, NEW.revision;
+    IF NOT header_exists THEN
         RAISE EXCEPTION 'canonical_fact_identity_header_missing: fact_version_id=% storage_day=%',
             NEW.id, NEW.storage_day;
     END IF;

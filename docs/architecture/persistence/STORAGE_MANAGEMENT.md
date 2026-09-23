@@ -1025,3 +1025,17 @@ copy primitives; the default remains 128. Measured requests may select the large
 bounded batch while retaining the same per-step duration and resource limits.
 Archive copying and final object inventory keep their separate 256-object page
 ceiling and byte budgets.
+
+
+### Recent ingestion during historical movement
+
+Hot-payload validation and the deferred identity/header check execute their
+existing parameterized header lookup with a plan made for the concrete storage
+day. A cached generic parent plan can acquire locks on historical partitions
+even when execution later prunes them; that blocked new collection during an
+exclusive history move. Replanning these two checks preserves every identity and
+relationship condition while keeping unrelated historical locks out of recent
+ingestion. Full-model ingestion is exercised with both automatic and forced
+generic planning while another connection holds a historical partition lock.
+Clean bootstrap and the explicit v1-to-v2 cutover install the corrected bodies;
+startup refuses mismatched installed bodies instead of silently replacing them.

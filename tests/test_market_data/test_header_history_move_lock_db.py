@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from tests.test_market_data.test_fact_series_day_db import BASE, DAY, directory_engine
+from tests.test_market_data.test_fact_storage_tiers_db import storage
 
 pytestmark = pytest.mark.db
 
@@ -45,3 +46,39 @@ def test_recent_work_does_not_wait_for_unrelated_historical_header_lock(director
                     """), {"day": DAY + timedelta(days=1), "observed": BASE + timedelta(days=1, seconds=1)})
         finally:
             transaction.rollback()
+
+
+@pytest.mark.parametrize("plan_mode", ["auto", "force_generic_plan"])
+def test_canonical_ingestion_does_not_wait_for_unrelated_history(
+        storage, monkeypatch, plan_mode):
+    from dataclasses import replace
+    from sqlalchemy import event
+    from tests.test_market_data.test_fact_storage_tiers_db import _placement, BASE
+
+    engine = storage.database._engine
+    old_day = storage.today - timedelta(days=45)
+    _placement(monkeypatch, old_day)
+    assert storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
+                                    facts=[storage.fact]).inserted_count == 1
+    _placement(monkeypatch, storage.today)
+
+    def limits(connection, record, proxy):
+        with connection.cursor() as cursor:
+            cursor.execute("SET statement_timeout='1500ms'")
+            cursor.execute("SET plan_cache_mode="+plan_mode)
+
+    event.listen(engine, "checkout", limits)
+    try:
+        with engine.connect() as blocker:
+            transaction = blocker.begin()
+            blocker.exec_driver_sql("LOCK TABLE market.fact_versions_"+old_day.strftime("%Y%m%d")+
+                                   " IN ACCESS EXCLUSIVE MODE")
+            try:
+                current = replace(storage.fact, observation_key="current-during-history-move",
+                                  observation_time=BASE+timedelta(days=2))
+                assert storage.repo.ingest_facts(series_id=storage.series_id,
+                    source_id=storage.source_id, facts=[current]).inserted_count == 1
+            finally:
+                transaction.rollback()
+    finally:
+        event.remove(engine, "checkout", limits)
