@@ -28,7 +28,7 @@ def _read_live_heartbeat(worker_prefix: str) -> list[dict[str, Any]]:
     try:
         with engine.connect() as connection:
             rows = connection.execute(text("""
-                SELECT worker_id, state, heartbeat_at, context, true AS alive
+                SELECT worker_id, state, started_at, heartbeat_at, context, true AS alive
                 FROM market.collector_worker_state
                 WHERE expires_at > now() AND state NOT IN ('stopping', 'stopped')
                   AND left(worker_id, length(:prefix)) = :prefix

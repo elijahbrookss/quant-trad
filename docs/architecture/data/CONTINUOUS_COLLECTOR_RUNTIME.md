@@ -428,7 +428,9 @@ continuity; collector leases, finalizers, gap evidence, and release-specific
 post-cutover acquisition checks retain their existing authority.
 
 The container health probe reads the latest live heartbeat for its own hostname
-through a bounded, read-only `PG_DSN` connection. It does not initialize or provision
+through a bounded, read-only `PG_DSN` connection. The returned row retains both
+start and heartbeat timestamps so restart verification can distinguish a new
+worker from the prior process. It does not initialize or provision
 schema; the worker retains startup schema validation. Missing/stale heartbeats and
 a failed continuous supervisor fail the probe. Maintenance readiness separately
 requires its completed outcomes and recovery-copy evidence.
