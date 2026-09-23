@@ -79,7 +79,7 @@ def test_copy_starts_on_correct_drives_and_recovers_before_preserving_handoff(pl
         before=conn.scalar(text("SHOW default_tablespace"))
         assert copy.prepare_copy(conn,placement=storage.copy_plan)["physical_placement_configured"]
         assert conn.scalar(text("SHOW default_tablespace"))==before
-        _assert_disk(conn,SCHEMA+".fact_identities",Path("/qt-history"))
+        _assert_disk(conn,SCHEMA+".fact_identities",Path("/qt-source/pgdata"))
         _assert_disk(conn,SCHEMA+".pending_fact_ids",Path("/qt-source/pgdata"))
         with pytest.raises(RuntimeError,match="placement_cannot_change"):
             copy.prepare_copy(conn)
@@ -219,10 +219,48 @@ def test_history_destination_recovers_lost_create_without_replacing_files(placed
         binding,_ = observe(conn,plan)
         assert binding["history_location"] == str(directory)
         copy.prepare_copy(conn,placement=plan)
-        _assert_disk(conn,SCHEMA+".fact_identities",Path(old_plan.history.root))
+        _assert_disk(conn,SCHEMA+".fact_identities",Path("/qt-source/pgdata"))
     # An existing directory with catalog data is never adopted under another
     # target identity or cleared to make preparation succeed.
     with pytest.raises(RuntimeError,match="nonempty_unregistered_directory"):
         prepare_history_tablespace(engine,**(options | {
             "history": replace(old_plan.history,target_id="other_hdd")}))
     assert directory.stat().st_ino == inode
+
+
+def test_private_identity_relocation_rolls_back_then_retries(placed):
+    engine=placed.database._engine
+    target=SCHEMA+".fact_identities"
+    with engine.begin() as conn:
+        copy.prepare_copy(conn,placement=placed.copy_plan)
+        with pytest.raises(RuntimeError,match="history_baseline_incomplete"):
+            copy.place_identity_on_history(conn)
+    for _ in range(8):
+        with engine.begin() as conn:report=copy.copy_page(conn,page_rows=2)
+        if report["caught_up_at_observation"]:break
+    assert report["caught_up_at_observation"]
+    killed=[False]
+    def terminate(conn,cursor,statement,parameters,context,executemany):
+        if not killed[0] and statement.startswith("ALTER TABLE "+target+" SET TABLESPACE"):
+            killed[0]=True
+            with engine.begin() as killer:
+                assert killer.scalar(text("SELECT pg_terminate_backend(:pid,5000)"),
+                    {"pid":conn.connection.driver_connection.get_backend_pid()})
+            conn.exec_driver_sql("SELECT 1")
+    event.listen(engine,"after_cursor_execute",terminate)
+    try:
+        with pytest.raises(DBAPIError),engine.begin() as conn:copy.place_identity_on_history(conn)
+    finally:event.remove(engine,"after_cursor_execute",terminate)
+    assert killed[0]
+    with engine.begin() as conn:
+        assert not copy._inspect_progress(conn)["identity_history_ready"]
+        _assert_disk(conn,target,Path("/qt-source/pgdata"))
+        assert _headers(conn,copy.SOURCE)==placed.source_before
+        assert not copy.place_identity_on_history(conn)["reused"]
+    with engine.begin() as conn:
+        assert copy.place_identity_on_history(conn)["reused"]
+        _assert_disk(conn,target,Path("/qt-history"))
+        copy.enable_identity_capture(conn)
+        with copy.verified_copy(conn,timeout_seconds=60) as verified:
+            assert verified["verified_header_rows"]==verified["verified_identity_rows"]==7
+        assert _headers(conn,copy.SOURCE)==placed.source_before

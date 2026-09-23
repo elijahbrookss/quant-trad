@@ -144,9 +144,9 @@ and final cutover duration.
 
 The internal preserving copy can bind a fixed recent SSD and history HDD before
 creating its shadow tables. It reuses the storage boundary's PostgreSQL process
-and namespace checks. New global identities and their indexes go directly to the
-verified history tablespace; dated headers use that tablespace before the fixed
-cutoff and pg_default afterward. The current database, small routing catalogs and
+and namespace checks. Global identities and their indexes finish on the verified
+history tablespace after the private SSD staging described below; dated headers
+use that tablespace before the fixed cutoff and pg_default afterward. The current database, small routing catalogs and
 temporary capture state remain on the verified recent filesystem. Copy progress
 records the binding and refuses a changed destination rather than relocating
 already copied data. This is not a general placement API or runtime policy.
@@ -161,6 +161,15 @@ already bound history HDD. This avoids random HDD index insertion during the
 large initial migration. SSD staging consumes additional temporary space and
 must be included in the operator's measured admission budget. The source, small
 cursor and transactional composite-key queue remain on the recent SSD.
+
+The private global identity registry uses the same bounded SSD-build/HDD-transfer
+sequence. Its SSD allowance is separate from the raw lookup copy. It relocates
+before source identity mirroring is enabled, so building the registry does not
+hold a long source-writer fence. Final verification requires HDD placement.
+Before the writer fence, explicit ANALYZE refreshes the new partition-parent and
+identity statistics so bounded ordered verification does not repeatedly scan
+and sort the remaining copied table. Normal child auto-analysis is insufficient
+for PostgreSQL's partition-parent estimates.
 
 A durable placement bit changes in the same transaction as the physical move.
 Interruption rolls back both; retry rechecks the actual table/index files and

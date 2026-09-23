@@ -113,7 +113,7 @@ def _inspect_progress(conn):
     if state["placement"] is not None:
         state["_placement_pid"]=physical.verify(conn,state["placement"])
         for name in (*TABLE_NAMES,"pending_fact_ids","capture","copy_progress"):
-            physical.verify_group(conn,SCHEMA+"."+name,history=name=="fact_identities",
+            physical.verify_group(conn,SCHEMA+"."+name,history=name=="fact_identities" and state["identity_history_ready"],
                                   saved=state["placement"],pid=state["_placement_pid"])
     return state
 
@@ -136,9 +136,8 @@ def prepare_copy(conn, *, placement=None, timeout_seconds=30):
         for name in TABLE_NAMES:
             if conn.scalar(text("SELECT to_regclass(:name)"), {"name":SCHEMA+"."+name}) is not None:
                 raise RuntimeError("fact_header_copy_unregistered_shadow")
-            with (physical.tablespace(conn,binding["history_name"])
-                  if binding is not None and name=="fact_identities" else nullcontext()):
-                tables[name].create(conn)
+            # Build the private identity indexes on SSD before bulk relocation.
+            tables[name].create(conn)
         assert_v1_source_admission(conn)
         conn.exec_driver_sql(f"""
             CREATE TABLE {STATE}(
@@ -147,6 +146,7 @@ def prepare_copy(conn, *, placement=None, timeout_seconds=30):
                 after_day date,after_seq bigint,after_id text,
                 baseline_complete boolean NOT NULL,
                 identity_capture boolean NOT NULL DEFAULT false,
+                identity_history_ready boolean NOT NULL DEFAULT false,
                 verified_rows bigint NOT NULL DEFAULT 0 CHECK(verified_rows>=0),
                 targets jsonb NOT NULL,
                 placement jsonb,
@@ -280,6 +280,39 @@ def copy_page(conn, *, page_rows=128, timeout_seconds=30):
         return _report(conn,state,verified=len(rows),reused=True)
 
 
+def place_identity_on_history(conn, *, timeout_seconds=30):
+    """Relocate the completed private identity/index copy before source mirroring.
+
+    Source writers remain independent until identity capture is enabled. The
+    operator budgets the temporary SSD copy and the original attempt deadline.
+    Physical relocation and its progress flag commit or roll back together.
+    """
+    with migration_step(conn, timeout_seconds):
+        state = _inspect_progress(conn)
+        if state["placement"] is None or state["identity_history_ready"]:
+            return {"identity_history_ready":state["identity_history_ready"],"reused":True}
+        if not state["baseline_complete"]:
+            raise RuntimeError("fact_header_identity_history_baseline_incomplete")
+        if state["identity_capture"]:
+            raise RuntimeError("fact_header_identity_history_capture_already_active")
+        target = SCHEMA+".fact_identities"
+        conn.exec_driver_sql(f"LOCK TABLE {target} IN ACCESS EXCLUSIVE MODE NOWAIT")
+        indexes = conn.execute(text("""
+            SELECT n.nspname,c.relname FROM pg_index i
+            JOIN pg_class c ON c.oid=i.indexrelid
+            JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE i.indrelid=to_regclass(:target) ORDER BY c.oid
+        """),{"target":target}).all()
+        quote = conn.dialect.identifier_preparer.quote_identifier
+        destination = quote(state["placement"]["history_name"])
+        conn.exec_driver_sql(f"ALTER TABLE {target} SET TABLESPACE {destination}")
+        for schema,name in indexes:
+            conn.exec_driver_sql(f"ALTER INDEX {quote(schema)}.{quote(name)} SET TABLESPACE {destination}")
+        conn.exec_driver_sql(f"UPDATE {STATE} SET identity_history_ready=true WHERE id=1")
+        _inspect_progress(conn)
+        return {"identity_history_ready":True,"reused":False}
+
+
 def enable_identity_capture(conn, *, page_rows=128, timeout_seconds=30):
     """Finish bounded catch-up and mirror new IDs under a short writer fence.
 
@@ -290,6 +323,14 @@ def enable_identity_capture(conn, *, page_rows=128, timeout_seconds=30):
     if type(page_rows) is not int or not 1 <= page_rows <= 4096:
         raise ValueError("fact_header_copy_page_rows_out_of_bounds")
     with migration_step(conn, timeout_seconds):
+        state = _inspect_progress(conn)
+        if not state["baseline_complete"]:
+            raise RuntimeError("fact_header_identity_capture_baseline_required")
+        # Autovacuum does not maintain partition-parent statistics. Without
+        # them the ordered verification can repeatedly sort the remaining table.
+        conn.exec_driver_sql(f"ANALYZE {SCHEMA}.fact_versions, {SCHEMA}.fact_identities")
+        # Relocate before the source-writer fence, never while mirroring writes.
+        place_identity_on_history(conn,timeout_seconds=timeout_seconds)
         conn.exec_driver_sql("LOCK TABLE market.fact_versions IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         state=_inspect_progress(conn)
         if not state["baseline_complete"]:
@@ -385,6 +426,8 @@ def verified_copy(conn, *, page_rows=128, timeout_seconds=30):
                      STATE, QUEUE, SCHEMA+".capture")
         conn.exec_driver_sql("LOCK TABLE "+",".join(relations)+" IN SHARE ROW EXCLUSIVE MODE NOWAIT")
         state = _inspect_progress(conn)
+        if state["placement"] is not None and not state["identity_history_ready"]:
+            raise RuntimeError("fact_header_handoff_identity_history_required")
         if (not state["baseline_complete"] or not state["identity_capture"]
                 or conn.scalar(text(f"SELECT EXISTS(SELECT 1 FROM {QUEUE})"))):
             raise RuntimeError("fact_header_handoff_copy_incomplete")

@@ -70,6 +70,7 @@ def _finish(engine):
         with engine.begin() as conn:
             report=copy.copy_page(conn,page_rows=2)
         if report["caught_up_at_observation"]:
+            with engine.begin() as conn:copy.place_identity_on_history(conn,timeout_seconds=60)
             return report
     pytest.fail("bounded fixture copy failed to catch up")
 
