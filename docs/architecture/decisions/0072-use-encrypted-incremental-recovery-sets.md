@@ -11,6 +11,8 @@ tags:
 code_paths:
   - portal/backend/service/storage/incremental_recovery.py
   - scripts/ci/rehearse_incremental_runtime.py
+  - tests/test_market_data/test_incremental_application_db.py
+  - docker/test/incremental-application.compose.yml
   - docker/build-backup-tools.sh
   - scripts/ci/rehearse_incremental_recovery.py
   - docker/test/incremental-recovery.Dockerfile
@@ -134,3 +136,11 @@ manifest rows: concurrent post-fence archive admission, expiry exclusion, failed
 archive pairing, interrupted retirement, dependency preservation and selected
 point recovery. It does not substitute synthetic rows for full QT reader or
 Timescale application acceptance.
+
+
+The incremental-recovery suite extends the existing isolated storage demo with
+an empty second PostgreSQL instance. It captures the preserving v1-to-v2 fixture,
+then verifies current corrections, frozen revisions and archived book replay
+against the selected encrypted physical recovery point. This is an implemented
+acceptance fixture; its successful CI outcome, not its existence, qualifies the
+application boundary.

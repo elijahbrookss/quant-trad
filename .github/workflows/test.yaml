@@ -116,6 +116,9 @@ jobs:
             --pg-bin /usr/lib/postgresql/15/bin --pgbackrest /usr/local/bin/pgbackrest \
             --restic /usr/local/bin/restic
 
+      - name: Prove encrypted restore through actual QT current and frozen readers
+        run: ./scripts/ci/run_test_suite.sh incremental-recovery
+
       - name: Recreate actual QT core on disposable storage without provider egress
         run: python3 scripts/ci/test_server_core_recreation.py
 
