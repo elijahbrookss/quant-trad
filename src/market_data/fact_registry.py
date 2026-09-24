@@ -421,6 +421,7 @@ class FactContract:
     unit_dimension: str | None = None
     minimum_value: Decimal | None = None
     minimum_inclusive: bool = True
+    range_evidence_owner: str | None = None
 
     def validate(
         self, *, contract_version: str, timeframe_seconds: int | None
@@ -583,7 +584,8 @@ _CONTRACTS = {
         "market.trade_flow", "market.trade_flow.v1", "required", "raw_required", "bucket_start"
     ),
     "market.bbo": FactContract(
-        "market.bbo", "market.bbo.v1", "required", "raw_required", "bucket_start"
+        "market.bbo", "market.bbo.v1", "required", "raw_required", "bucket_start",
+        range_evidence_owner="book_event_buckets.v1",
     ),
     "market.depth_observation": FactContract(
         "market.depth_observation",
@@ -591,6 +593,7 @@ _CONTRACTS = {
         "required",
         "raw_required",
         "bucket_start",
+        range_evidence_owner="book_event_buckets.v1",
     ),
     "market.trade_flow_feature": FactContract(
         "market.trade_flow_feature",

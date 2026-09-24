@@ -33,6 +33,7 @@ code_paths:
   - portal/backend/service/providers
   - portal/backend/service/market
   - portal/backend/service/storage/repos/market_data.py
+  - portal/backend/service/storage/repos/book_range_evidence.py
   - portal/backend/service/storage/repos/market_collection.py
   - portal/backend/workers/market_data_collector.py
   - cli/main.py
@@ -433,3 +434,19 @@ replacing source provenance and quality.
 - [Market Structure Data Plane](MARKET_STRUCTURE_DATA_PLANE.md)
 - [Historical market-structure trade-capture record](MARKET_STRUCTURE_PHASE_1_TRADES.md)
 - [Accepted ADR 0053: Tiered market-structure archive and replay](../decisions/0053-use-tiered-market-structure-archive-and-replay-boundary.md)
+
+## Sparse Book Range Evidence
+
+Book BBO/depth production is event-driven within one-second buckets. Research
+coverage consumes producer-owned range evidence; it must not treat bucket width
+as proof of dense sampling. A quiet range requires exact source lineage, a valid
+book on both sides, archived contiguous transport with heartbeats, no book event
+in the range, and successful segment-processing receipts. Missing or contradictory
+witnesses remain unresolved. A real validity interruption is retained separately
+from quiet coverage, including partial edge seconds.
+
+The existing range-quality surface carries versioned producer evidence. A
+`complete` producer range is not a consumer gap; `interrupted` is. Dataset
+quality hashes pin both. Neither changes exact bucket matching, adds forward-filled
+book observations, or certifies a Check's scientific eligibility. Existing candle
+and trade-flow contracts remain unchanged.
