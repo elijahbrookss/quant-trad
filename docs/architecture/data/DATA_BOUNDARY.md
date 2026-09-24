@@ -450,3 +450,7 @@ The existing range-quality surface carries versioned producer evidence. A
 quality hashes pin both. Neither changes exact bucket matching, adds forward-filled
 book observations, or certifies a Check's scientific eligibility. Existing candle
 and trade-flow contracts remain unchanged.
+
+Normalization treats complete range evidence as quality proof, not an input gap.
+Interruptions retain their evidence hash, commit watermark and known-at clock
+when propagating invalid-input status to derived output.
