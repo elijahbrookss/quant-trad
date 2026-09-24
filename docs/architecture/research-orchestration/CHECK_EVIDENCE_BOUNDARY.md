@@ -203,9 +203,28 @@ has decision time 12:01:07. With one-minute candles, its outcome price starts at
 unchanged, including any collection batching delay.
 
 Definitions v3/v4 and their evaluator identities remain registered unchanged.
-Requests without the new trigger retain v4 behavior. The new trigger selects
+Requests with typed fact inputs and without the new trigger retain v4 behavior. The new trigger selects
 v5 and is rejected under older definitions. Frozen evidence, replay and
 Check-to-Observation admission use the same existing workflow.
+
+## Candle-Only Indicator Evidence
+
+Definition v6 (evaluator v5) admits `indicator_event` Checks with no additional
+fact aliases. The Indicator's candle requirements, transitive graph, warmup and
+outcome tail still resolve and freeze through the existing evidence boundary.
+No dummy reference feed or Strategy is required. Fact-snapshot sampling and
+unbound enriched features remain invalid without their typed inputs.
+
+New candle-only requests select v6; definitions v3/v4/v5 and their evaluator
+payloads remain unchanged. V6 adds a descriptive per-horizon outcome summary
+from eligible events before the feature complete-case filter: resolved and
+unresolved counts, positive counts, mean/median direction-signed returns and
+mean favorable/adverse excursions. Returns are fractions, not percentages.
+Required unresolved outcomes and incomplete baseline features exclude events
+from this population. Optional unresolved horizons are counted separately.
+Empty populations report null averages. Eligibility gates remain authoritative;
+a descriptive summary does not grant significance, independent samples,
+execution realism, profitability, or permission to create a validated claim.
 
 ## Gap Ownership
 

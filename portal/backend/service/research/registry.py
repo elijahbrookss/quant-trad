@@ -272,6 +272,30 @@ def _register_event_fact_family() -> None:
         availability_trigger_enabled=True,
     )
     CHECK_REGISTRY.register_evaluator(availability_evaluator)
+    candle_evaluator = EventFactEvaluator(
+        version="5",
+        result_schema_version="event_fact_analysis_result.v5",
+        descriptive_outcomes_enabled=True,
+    )
+    CHECK_REGISTRY.register_evaluator(candle_evaluator)
+    CHECK_REGISTRY.register_definition(
+        CheckDefinition(
+            schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
+            definition_id=EVENT_FACT_ANALYSIS,
+            definition_version="6",
+            evaluator_id=candle_evaluator.evaluator_id,
+            evaluator_version=candle_evaluator.version,
+            request_schema_version=CHECK_REQUEST_SCHEMA_VERSION,
+            result_schema_version=CHECK_RESULT_SCHEMA_VERSION,
+            material_rules={
+                "family": EVENT_FACT_ANALYSIS,
+                "event_ownership": "indicator",
+                "operator_model": "registered_event_fact_operators.v5",
+                "input_policy": "candle_only_indicator.v1",
+                "outcome_summary": "eligible_population_descriptive.v1",
+            },
+        )
+    )
     CHECK_REGISTRY.register_definition(
         CheckDefinition(
             schema_version=CHECK_DEFINITION_SCHEMA_VERSION,
@@ -664,7 +688,13 @@ def materialize_check_definition(
         _mapping(payload.get("detector"), field="detector").get("evaluation_trigger")
         == "required_facts_available"
     )
-    default_version = "5" if availability_trigger else "4"
+    candle_only = (
+        family == EVENT_FACT_ANALYSIS
+        and _mapping(payload.get("detector"), field="detector").get("type")
+        == "indicator_event"
+        and not payload.get("inputs")
+    )
+    default_version = "5" if availability_trigger else "6" if candle_only else "4"
     resolved_base_version = str(
         base_version or (default_version if family == EVENT_FACT_ANALYSIS else "2")
     )
@@ -686,7 +716,13 @@ def materialize_check_definition(
         checks.validate_check_detector(check_family=family, detector=detector)
     scope = _mapping(payload.get("scope"), field="scope")
     inputs = normalize_fact_inputs(payload.get("inputs"), mode=mode)
-    if family == EVENT_FACT_ANALYSIS and not inputs:
+    if family == EVENT_FACT_ANALYSIS and resolved_base_version == "6" and (
+        inputs or detector.get("type") != "indicator_event"
+    ):
+        raise ValueError(
+            "event_fact_check_invalid: definition version 6 requires a candle-only indicator_event"
+        )
+    if family == EVENT_FACT_ANALYSIS and not inputs and resolved_base_version != "6":
         raise ValueError("event_fact_check_invalid: at least one typed fact input is required")
     if family == EVENT_FACT_ANALYSIS:
         detector, statistics, inputs = _validate_event_fact_bindings(
