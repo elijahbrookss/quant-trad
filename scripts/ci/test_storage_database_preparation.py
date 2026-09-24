@@ -452,6 +452,19 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
     # normalize defaults or mount order on a second render. The production
     # guard must continue rejecting any change to the prepared database.
     normalized['services']['tsdb']=model['services']['tsdb']
+    # Some Compose versions serialize the explicit false bind option as {}.
+    # Keep the prepared-path requirement explicit in the admitted snapshot;
+    # do not relax the production guard to accept ambiguous mount recipes.
+    fixed_binds={'/qt-history','/app/logs/market-structure',
+        '/run/quanttrad/storage-inventory.json','/run/qt-host-udev',
+        '/run/quanttrad/recovery','/run/quanttrad/storage-maintenance.json'}
+    for name in pause._RUNTIME_WRITERS:
+        for mount in normalized['services'][name].get('volumes',[]):
+            if mount['target'] in fixed_binds:
+                assert mount['type']=='bind'
+                bind=mount.setdefault('bind',{})
+                assert bind.get('create_host_path',False) is False
+                bind['create_host_path']=False
     path.write_text(json.dumps(normalized))
     invocation=control_root/'runtime-invocation.json'
     invocation.write_text(json.dumps(options));invocation.chmod(0o600)
