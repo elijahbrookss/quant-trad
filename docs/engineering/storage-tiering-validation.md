@@ -1316,6 +1316,9 @@ this disposable image is not a production deployment artifact.
 A passing run demonstrates reconstruction of the chosen incremental endpoint,
 including historical tables/indexes and unchanged frozen rows, exact archive
 hashes, exclusion of later database writes, rejection of incorrect keys and
-preservation of complete archive snapshots after a forced backup-process crash.
+preservation of complete backups after forced database and archive backup-process
+crashes, and recovery after native baseline/dependency-chain expiration and
+archive pruning. This proves native tool behavior; QT publication and retention
+coordination still require implementation and application-level acceptance.
 Small-fixture duration and compressed-byte ratios must not be extrapolated to
 the growing production database.

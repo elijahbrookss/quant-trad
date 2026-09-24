@@ -82,11 +82,12 @@ for implementing this local method.
 The disposable script creates its own PostgreSQL 15 cluster, sockets and secrets.
 It compares a physical baseline and incremental recovery, historical table/index
 placement, frozen rows, matching archive hashes, exclusion of later writes,
-wrong-key rejection and interrupted archive-backup survival. It has no production
+wrong-key rejection, interrupted database/archive backup survival and recovery
+after replacing and expiring an old native dependency chain. It has no production
 DSN or QT data and is not an application acceptance test or performance forecast.
 
-Before enabling this candidate, finish actual QT/Timescale recovery, database
-backup interruption, dependency-safe expiry, key recovery, maintenance/status
+Before enabling this candidate, finish actual QT/Timescale recovery, coordinated
+QT publication/retention across both repositories, key recovery, maintenance/status
 integration, WAL/capacity guards and a production-size rehearsal with collection
 performance observed. This is a change to the authorized backup slice only;
 drive placement, storage UI and research semantics remain under their existing

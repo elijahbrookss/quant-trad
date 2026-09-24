@@ -88,13 +88,14 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
         run([pg_bin / "pg_ctl", "-D", cluster, "-l", root / (cluster.name + ".log"),
              "-w", "-t", "40", "-o", options, "start"], timeout=50)
 
-    def capture(backup_type):
-        run([*br, "--type=" + backup_type, "backup"], name=backup_type + "_database_seconds")
+    def capture(backup_type, *, phase=None):
+        phase = phase or backup_type
+        run([*br, "--type=" + backup_type, "backup"], name=phase + "_database_seconds")
         info = json.loads(run([*br, "--output=json", "info"]).stdout)[0]
         backup = info["backup"][-1]
         assert backup["type"] == backup_type
         archive_result = run([*rs, "backup", "--host", "qt-disposable", "--tag", backup["label"],
-                              "objects"], name=backup_type + "_archives_seconds")
+                              "objects"], name=phase + "_archives_seconds")
         summary = next(json.loads(line) for line in archive_result.stdout.splitlines()
                        if json.loads(line).get("message_type") == "summary")
         # This pair is only a fixture receipt, not a production recovery certificate.
@@ -182,6 +183,35 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
         after_snapshots = json.loads(run([*rs, "snapshots"]).stdout)
         assert {s["id"] for s in after_snapshots} == {s["id"] for s in before_snapshots}
         report["interrupted_archive_backup_preserved_recovery_points"] = True
+        # Kill a real physical backup after PostgreSQL has entered backup mode.
+        # A process that completes before the signal is a failed experiment,
+        # never evidence that interruption was exercised.
+        completed_labels = {b["label"] for b in
+                            json.loads(run([*br, "--output=json", "info"]).stdout)[0]["backup"]}
+        interrupt_log = root / "database-interruption.log"
+        with interrupt_log.open("w") as out:
+            physical = subprocess.Popen(
+                [str(a) for a in [*br, "--type=incr", "--no-resume",
+                                 "--log-level-console=info", "backup"]],
+                env=env, cwd=root, stdin=subprocess.DEVNULL, stdout=out,
+                stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                deadline = time.monotonic() + 30
+                while "backup start archive =" not in interrupt_log.read_text():
+                    if physical.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError("database_interruption_boundary_not_reached")
+                    time.sleep(0.01)
+                if physical.poll() is not None:
+                    raise RuntimeError("database_backup_completed_before_interruption")
+                os.killpg(physical.pid, signal.SIGKILL)
+                assert physical.wait(timeout=15) != 0
+            finally:
+                if physical.poll() is None:
+                    os.killpg(physical.pid, signal.SIGKILL)
+                    physical.wait(timeout=10)
+        assert {b["label"] for b in
+                json.loads(run([*br, "--output=json", "info"]).stdout)[0]["backup"]} == completed_labels
+        report["interrupted_database_backup_preserved_recovery_points"] = True
         # Writes after the selected endpoint must NOT leak into its restore.
         sql("INSERT INTO observations VALUES (999999,'after selected backup');")
         report["source_kept_running"] = sql("SELECT count(*) FROM observations") == "20101"
@@ -237,6 +267,38 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
         run([*rs, "check", "--read-data"], name="archive_integrity_seconds")
         # Restore reads immutable source repository; source remains independently writable.
         assert sql("SELECT count(*) FROM observations") == "20101"
+        # Rotate only after a complete replacement database+archive pair.
+        # Native tools must retain the new baseline and its archive snapshot.
+        replacement = capture("full", phase="replacement_full")
+        run([*br, "--set=" + full["database"]["label"],
+             "--repo1-retention-full=9999999", "--repo1-retention-archive=9999999", "expire"])
+        surviving = json.loads(run([*br, "--output=json", "info"]).stdout)[0]["backup"]
+        assert [b["label"] for b in surviving] == [replacement["database"]["label"]]
+        run([*rs, "forget", full["archive_snapshot"], incremental["archive_snapshot"], "--prune"])
+        remaining_snapshots = json.loads(run([*rs, "snapshots"]).stdout)
+        assert [s["id"] for s in remaining_snapshots] == [replacement["archive_snapshot"]]
+        after_rotation = root / "after-rotation"
+        rotation_history = root / "rotation-history"
+        rotation_socket = root / "rotation-socket"
+        rotation_socket.mkdir(mode=0o700)
+        run([*br, "--pg1-path=" + str(after_rotation),
+             "--tablespace-map-all=" + str(rotation_history),
+             "--set=" + replacement["database"]["label"], "--type=immediate",
+             "--target-action=promote", "--archive-mode=off", "restore"],
+            name="after_rotation_database_restore_seconds")
+        start(after_rotation, rotation_socket, restore=True)
+        assert sql("SELECT count(*) FROM observations", target_socket=rotation_socket) == "20101"
+        assert sql("SELECT md5(string_agg(id::text||payload,',' ORDER BY id)) FROM frozen",
+                   target_socket=rotation_socket) == expected_frozen
+        rotation_files = root / "rotation-archives"
+        run([*rs, "restore", replacement["archive_snapshot"], "--target", rotation_files],
+            name="after_rotation_archive_restore_seconds")
+        for row in sql("SELECT name||':'||sha256 FROM archive_refs ORDER BY name",
+                       target_socket=rotation_socket).splitlines():
+            name, expected_hash = row.split(":")
+            assert hashlib.sha256((rotation_files / "objects" / name).read_bytes()).hexdigest() == expected_hash
+        run([*rs, "check", "--read-data"])
+        report["replacement_recovered_after_old_dependency_chain_expired"] = True
         report.update(
             selected_point_exact=True, frozen_rows_preserved=True,
             historical_table_and_index_restored=True, matching_archives_restored=True,
@@ -246,7 +308,7 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
             limitations=["synthetic PostgreSQL fixture, not QT application acceptance",
                          *([] if require_timescale else ["no Timescale extension compatibility claim"]),
                          "no production timing/capacity extrapolation",
-                         "retention, database-backup interruption and key escrow not yet qualified"],
+                         "QT paired-publication/retention orchestration and key escrow not yet qualified"],
         )
         return report
     finally:
