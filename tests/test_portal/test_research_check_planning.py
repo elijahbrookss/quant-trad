@@ -50,7 +50,7 @@ class _Store:
     def current_commit_seq(self):
         return 77
 
-    def list_series(self, *, instrument_id=None):
+    def list_series_metadata(self, *, instrument_id=None):
         assert instrument_id == "instrument-1"
         return [
             {

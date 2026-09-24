@@ -922,3 +922,15 @@ def test_market_storage_lifecycle_cli_is_dry_run_first(monkeypatch) -> None:
             "body": None,
         },
     ]
+
+
+def test_series_metadata_discovery_uses_explicit_count_free_contract(monkeypatch):
+    observed = []
+    def fake_urlopen(request, timeout):
+        observed.append(urllib.parse.urlparse(request.full_url).path)
+        return _Response({"schema_version": "market_series_metadata.v1", "series": []})
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert main(["--no-audit-log", "data", "series", "--metadata-only"]) == 0
+    assert observed == ["/api/candles/series/metadata"]
+    assert main(["--no-audit-log", "data", "series"]) == 0
+    assert observed[-1] == "/api/candles/series"

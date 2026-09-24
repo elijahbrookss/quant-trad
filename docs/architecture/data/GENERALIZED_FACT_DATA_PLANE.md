@@ -1493,3 +1493,16 @@ See [ADR 0063](../decisions/0063-use-schema-registered-canonical-facts.md),
 [Chainlink Structured Facts](CHAINLINK_STRUCTURED_FACTS.md),
 [Canonical Fact Migration Discovery](../../engineering/canonical-fact-migration-discovery.md),
 and [Canonical Fact Migration Backup](../../engineering/canonical-fact-migration-backup.md).
+
+
+### Registered series discovery
+
+`MarketDataStore.list_series_metadata` and `GET /api/candles/series/metadata`
+return `market_series_metadata.v1`: registered series identities, types,
+intervals, versions and dimensions only. They never scan accepted Fact rows or
+claim counts, bounds, completeness or availability. Check requirement planning
+and frozen-dataset resolution use this discovery method before their existing
+source-bound window reads and gap checks. Registration alone never admits data.
+The existing exact-count `/series` catalog remains compatible and explicit.
+`qt data series --metadata-only` and `quanttrad://data/series` delegate to this
+same backend contract; MCP does not maintain its own catalog or count cache.

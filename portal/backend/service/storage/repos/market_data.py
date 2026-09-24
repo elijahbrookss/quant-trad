@@ -1344,6 +1344,29 @@ class PostgresMarketDataRepository:
             ).scalar_one()
         )
 
+    def list_series_metadata(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
+        """Discover registered identities without scanning accepted facts.
+
+        Registration is not coverage evidence. Counts, bounds and availability
+        are deliberately absent; consumers must preflight their exact window.
+        """
+        params: dict[str, Any] = {}
+        predicate = ""
+        if instrument_id is not None:
+            normalized = str(instrument_id or "").strip()
+            if not normalized:
+                raise ValueError("market_data_series_invalid: instrument_id is empty")
+            params["instrument_id"] = normalized
+            predicate = "WHERE instrument_id=:instrument_id"
+        with db.session() as session:
+            rows = session.execute(text(f"""
+                SELECT id, identity_key, instrument_id, fact_type,
+                       timeframe_seconds, contract_version, dimensions
+                FROM market.series {predicate}
+                ORDER BY instrument_id, fact_type, timeframe_seconds NULLS FIRST, id
+            """), params).mappings().all()
+        return [dict(row) for row in rows]
+
     def list_series(self, *, instrument_id: Optional[str] = None) -> list[dict[str, Any]]:
         """Return canonical logical series and accepted-version counts."""
 
