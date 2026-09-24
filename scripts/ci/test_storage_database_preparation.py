@@ -447,6 +447,11 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
     path.write_text(json.dumps(model));path.chmod(0o600)
     normalized=json.loads(run(['docker','compose','--project-name',project,'--file',str(path),
         'config','--format','json'],env=env).stdout)
+    # The database has already been prepared and attested. Preserve its exact
+    # saved definition when rendering the application services: Compose may
+    # normalize defaults or mount order on a second render. The production
+    # guard must continue rejecting any change to the prepared database.
+    normalized['services']['tsdb']=model['services']['tsdb']
     path.write_text(json.dumps(normalized))
     invocation=control_root/'runtime-invocation.json'
     invocation.write_text(json.dumps(options));invocation.chmod(0o600)
