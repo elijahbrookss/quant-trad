@@ -685,7 +685,7 @@ Unsupported providers cannot acquire a completeness claim through this adapter.
                 if event.product_id != left["provider_product_id"]:
                     return None
                 times = [utc(update["event_time"]) for update in event.payload.get("updates", [])]
-                if not times or start <= max(times) < end:
+                if not times or any(start <= event_time < end for event_time in times):
                     return None
             else:
                 # Decoder failures, unknown envelopes and control messages are

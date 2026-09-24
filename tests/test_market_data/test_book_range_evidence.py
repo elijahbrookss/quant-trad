@@ -174,3 +174,14 @@ def test_quiet_proof_cannot_be_known_before_its_validity_witness():
     witnesses = Witnesses()
     witnesses.intervals["valid"]["known_at"] = BASE + timedelta(minutes=1)
     assert project(witnesses)[0]["known_at"] == "2026-09-01T00:01:00.000000Z"
+
+
+def test_mixed_timestamp_update_cannot_certify_a_quiet_second():
+    records = transport()
+    frame = json.loads(records[-1].raw_frame)
+    update = dict(frame["events"][0]["updates"][0])
+    update["event_time"] = (BASE + timedelta(seconds=1.5)).isoformat()
+    frame["events"][0]["updates"].append(update)
+    records[-1].raw_frame = json.dumps(frame).encode()
+    assert quiet_transport_witness(records, left=position(1), right=position(4),
+        start=BASE + timedelta(seconds=1), end=BASE + timedelta(seconds=2)) is None
