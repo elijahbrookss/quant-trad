@@ -101,6 +101,21 @@ jobs:
             --file docker/docker-compose.server.yml \
             build tsdb backend frontend frontend-v2
 
+      - name: Prove production worker encrypted pairing and dependency retirement
+        run: |
+          revision="$(git rev-parse HEAD)"
+          tree_hash="$(python3 scripts/provenance/source_tree_hash.py --root . --git-revision "$revision")"
+          docker build --file portal/backend/Dockerfile --target storage-test \
+            --build-arg QT_SOURCE_REVISION="$revision" --build-arg QT_SOURCE_TREE_HASH="$tree_hash" \
+            --tag qt-incremental-runtime-proof .
+          docker run --rm --network none --user postgres --cpus 2 --memory 2g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --env QT_DISABLE_DOTENV=1 --env PYTHONPATH=/app/src:/app \
+            qt-incremental-runtime-proof \
+            python /app/scripts/ci/rehearse_incremental_runtime.py \
+            --pg-bin /usr/lib/postgresql/15/bin --pgbackrest /usr/local/bin/pgbackrest \
+            --restic /usr/local/bin/restic
+
       - name: Recreate actual QT core on disposable storage without provider egress
         run: python3 scripts/ci/test_server_core_recreation.py
 

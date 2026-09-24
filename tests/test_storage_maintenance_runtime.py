@@ -185,3 +185,35 @@ def test_adding_a_history_target_does_not_require_relocating_existing_archive_ro
         CanonicalFactRetentionPolicy(archive_min_free_bytes=0), archive)
     assert effective.hot_days == 7 and effective.archive_min_free_bytes == 2300
     assert inspected == ["hdd"]
+
+
+def test_encrypted_config_is_explicit_and_uses_existing_runner_without_io(tmp_path, monkeypatch):
+    config = configuration()
+    config["schema_version"] = "qt.storage_maintenance_limits.v2"
+    config["recovery"]["incremental"] = {
+        "pgbackrest": "/usr/local/bin/pgbackrest", "restic": "/usr/local/bin/restic",
+        "pg_path": "/var/lib/postgresql/data", "pg_socket_path": "/run/postgresql",
+        "database_key_path": "/run/secrets/database-key",
+        "archive_key_path": "/run/secrets/archive-key", "max_chain_backups": 30,
+    }
+    path = tmp_path/"limits.json"
+    path.write_text(json.dumps(config))
+    calls = []
+    monkeypatch.setattr(runtime, "run_due_local_recovery",
+                        lambda *args, **kwargs: calls.append(kwargs))
+    runners = runtime.storage_maintenance_runners(object(), storage_root=tmp_path, limits_path=path)
+    assert not calls
+    runners["recovery_runner"]()
+    assert calls[0]["incremental"].max_chain_backups == 30
+    assert str(calls[0]["incremental"].database_key_path) == "/run/secrets/database-key"
+    for mutate in (
+        lambda c: c["recovery"].pop("incremental"),
+        lambda c: c["recovery"]["incremental"].update(PG_DSN="not another authority"),
+        lambda c: c["recovery"]["incremental"].update(max_chain_backups=True),
+        lambda c: c["recovery"]["incremental"].update(database_key_path="relative"),
+    ):
+        value = json.loads(json.dumps(config))
+        mutate(value)
+        path.write_text(json.dumps(value))
+        with pytest.raises(ValueError):
+            runtime.storage_maintenance_runners(object(), storage_root=tmp_path, limits_path=path)

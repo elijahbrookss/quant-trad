@@ -124,6 +124,9 @@ def _archive_rows(session, *, max_objects, check):
 class LocalRecoveryCopies:
     """One private, identity-bound recovery directory on the configured HDD."""
 
+    schema_version = _VERSION
+    namespace = "recovery"
+
     def __init__(self, *, target: StorageTarget, database_identity: str,
                  max_bytes: int, reserve_bytes: int, timeout_seconds: int,
                  max_objects: int = 1000000, cancelled=None, check_resources=None):
@@ -146,7 +149,7 @@ class LocalRecoveryCopies:
         self.max_bytes, self.reserve_bytes = max_bytes, reserve_bytes
         self.deadline, self.max_objects = monotonic()+timeout_seconds, max_objects
         self.written = 0
-        parent = self.target_root/"recovery"
+        parent = self.target_root/self.namespace
         _private_directory(parent, self.device, create=True)
         self.root = parent/hashlib.sha256(database_identity.encode()).hexdigest()[:32]
         _private_directory(self.root, self.device, create=True)
@@ -297,7 +300,7 @@ class LocalRecoveryCopies:
         if marker.is_symlink() or marker.stat().st_size > 4096:
             raise RuntimeError("recovery_generation_owner_invalid")
         owner = json.loads(marker.read_text())
-        if owner != {"schema_version": _VERSION, "database_identity": self.identity,
+        if owner != {"schema_version": self.schema_version, "database_identity": self.identity,
                      "filesystem_uuid": self.target.filesystem_uuid, "name": directory.name.removeprefix(".")}:
             raise RuntimeError("recovery_generation_owner_mismatch")
         return owner
@@ -352,7 +355,7 @@ class LocalRecoveryCopies:
             if path.is_symlink() or path.stat().st_size > 16384:
                 raise RuntimeError("recovery_completion_invalid")
             receipt = json.loads(path.read_text())
-            if (receipt.get("schema_version") != _VERSION or receipt.get("name") != directory.name
+            if (receipt.get("schema_version") != self.schema_version or receipt.get("name") != directory.name
                     or receipt.get("database_identity") != self.identity
                     or receipt.get("filesystem_uuid") != self.target.filesystem_uuid):
                 raise RuntimeError("recovery_completion_identity_mismatch")
@@ -414,7 +417,7 @@ class LocalRecoveryCopies:
             name = "copy_"+uuid4().hex
             partial = self.root/("."+name)
             partial.mkdir(mode=0o700)
-            _json_write(partial/"owner.json", {"schema_version": _VERSION,
+            _json_write(partial/"owner.json", {"schema_version": self.schema_version,
                 "database_identity": self.identity, "filesystem_uuid": self.target.filesystem_uuid, "name": name})
             _sync(partial)
             _sync(self.root)
@@ -432,7 +435,7 @@ class LocalRecoveryCopies:
                         archive_bytes += item["bytes"]
                     inventory.flush()
                     os.fsync(inventory.fileno())
-                receipt = {"schema_version": _VERSION, "name": name, "database_identity": self.identity,
+                receipt = {"schema_version": self.schema_version, "name": name, "database_identity": self.identity,
                     "filesystem_uuid": self.target.filesystem_uuid,
                     "storage_layout": snapshot_layout,
                     "completed_at": datetime.now(UTC).isoformat(), "database": dump,

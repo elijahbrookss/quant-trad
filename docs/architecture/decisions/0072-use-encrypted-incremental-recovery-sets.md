@@ -9,15 +9,18 @@ tags:
   - recovery
   - storage
 code_paths:
+  - portal/backend/service/storage/incremental_recovery.py
+  - scripts/ci/rehearse_incremental_runtime.py
+  - docker/build-backup-tools.sh
   - scripts/ci/rehearse_incremental_recovery.py
   - docker/test/incremental-recovery.Dockerfile
 ---
 # ADR 0072: Use encrypted incremental recovery sets
 
 Proposed September 24, 2026 following explicit user authorization to replace
-routine full logical recovery copies. Tool rehearsal is implemented; production
-composition and application acceptance are not implemented or qualified by this
-decision. The completed legacy copy and ongoing restore must be preserved.
+routine full logical recovery copies. Tool rehearsal and the paired runtime
+engine are implemented; host activation and full application acceptance are not
+qualified by this decision. The completed legacy copy and ongoing restore must be preserved.
 
 ## Problem
 
@@ -102,3 +105,32 @@ QT's TimescaleDB 2.14.2/PostgreSQL 15 base, pinned backup-tool source checksums,
 non-root execution and a private cluster. Its extension probe restores a real
 hypertable as well as the ordinary table/index/archive fixture. A successful
 native PostgreSQL run must not be reported as this image's Timescale result.
+
+## Runtime integration boundary
+
+The explicit maintenance-limits v2 configuration selects the encrypted engine in
+the existing maintenance supervisor. Saved interval and backup_copies retain
+their meanings. v1 logical copies and their directories remain unchanged.
+No absent configuration silently activates encryption or creates repositories.
+
+The engine verifies private key files, prepared repository/database/UUID identity,
+native backup annotations and dependencies. It takes no archive MVCC snapshot
+before physical completion. A complete pair is atomically published only after
+the encrypted archive snapshot succeeds. Retirement first hides the old receipt,
+then expires wholly unneeded physical chains and archive snapshots. Hidden
+owner-marked generations make forget-before-prune interruption resumable without
+creating another backup. Stale native locks use normal unlock, never remove-all.
+
+A mandatory bounded max_chain_backups operating limit triggers replacement
+baselines; it is not a weekly full-backup promise. Peak admitted allocation and
+existing reserve/deadline/cancellation checks cover subprocess work. Pinned tools
+are packaged for the production database and worker using their respective libc.
+Configuration/key/WAL provisioning, independent key recovery, archive-growth
+failure policy, full QT frozen-reader acceptance and measured production limits
+remain release requirements before activation.
+
+The separate runtime rehearsal exercises the actual engine against disposable
+manifest rows: concurrent post-fence archive admission, expiry exclusion, failed
+archive pairing, interrupted retirement, dependency preservation and selected
+point recovery. It does not substitute synthetic rows for full QT reader or
+Timescale application acceptance.

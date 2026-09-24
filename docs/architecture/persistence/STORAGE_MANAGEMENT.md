@@ -1050,3 +1050,24 @@ physical/database-plus-archive experiment is described in
 It does not activate a new backup scheduler, alter saved retention semantics or
 qualify a production recovery. Report this candidate separately from the
 currently implemented local-copy maintenance path above.
+
+### Encrypted recovery runtime (explicit opt-in, not yet activated)
+
+Maintenance-limits schema qt.storage_maintenance_limits.v2 adds a required
+recovery.incremental object containing pinned tool paths, the verified physical
+PostgreSQL directory/socket, private database/archive key paths and a bounded
+max_chain_backups. All other saved policy and operating-budget semantics remain
+unchanged. v1 configuration continues to select logical recovery copies.
+
+EncryptedRecoveryCopies publishes a physical backup label and encrypted restic
+snapshot as one recovery point under the existing storage ownership and archive
+fence. Repository preparation is explicit; missing identity/key/repository state
+fails closed. Legacy generations are preserved in their original directory.
+Retirement keeps every physical dependency needed by the retained usable points;
+interrupted cleanup resumes before reporting a point as not_due. Native tools
+inherit no ambient credentials or configuration, and their child processes are
+bounded by the existing cancellation, deadline and filesystem reserve checks.
+
+Production images contain pinned tools. Image availability does not enable WAL
+archiving, provision keys, qualify a restore or activate a backup policy. Those
+operator steps and full QT application recovery remain pending under ADR0072.

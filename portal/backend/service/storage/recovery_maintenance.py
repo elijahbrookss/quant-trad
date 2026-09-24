@@ -38,7 +38,7 @@ def validate_recovery_maintenance_limits(*, max_bytes, timeout_seconds, headroom
 
 def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                            max_bytes, timeout_seconds, headroom_bytes,
-                           max_objects=1000000, cancelled=None):
+                           max_objects=1000000, cancelled=None, incremental=None):
     """Use the saved backup interval/count and explicit measured capacity limits.
 
     Holds the existing management lock for the copy, excluding movement and new
@@ -113,11 +113,22 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
                         or current.available_bytes<floors[target.target_id]):
                     raise RuntimeError("recovery_capacity_or_filesystem_changed")
 
-        copies=LocalRecoveryCopies(target=history,database_identity=identity,
+        copy_class = LocalRecoveryCopies
+        engine_options = {}
+        if incremental is not None:
+            from .incremental_recovery import EncryptedRecoveryCopies
+            copy_class = EncryptedRecoveryCopies
+            engine_options = {"incremental": incremental,
+                              "connection_url": owner.bind.engine.url}
+        copies=copy_class(**engine_options,target=history,database_identity=identity,
             max_bytes=max_bytes,reserve_bytes=floors[history.target_id],
             timeout_seconds=max(1,int(deadline-monotonic())),max_objects=max_objects,
             cancelled=cancelled,check_resources=resources)
         with copies.lock():
+            if incremental is not None:
+                # Finish an interrupted retirement before reporting not_due.
+                # This touches only the prepared encrypted repositories.
+                copies._prune(policy.backup_copies)
             completed=copies.completed()
         current_layout=_snapshot_layout(owner)
         now=owner.scalar(text("SELECT clock_timestamp()"))
@@ -140,6 +151,11 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
         if (proof.database_identity!=identity or any(binding["target_id"]!=recent.target_id
                 for binding in proof.bindings if binding["role"] in ("database","database_default","wal"))):
             raise RuntimeError("recovery_recent_database_binding_mismatch")
+        if incremental is not None:
+            serving = next(binding["directory"] for binding in proof.bindings
+                           if binding["role"] == "database")
+            if Path(serving) != incremental.pg_path.resolve(strict=True):
+                raise RuntimeError("incremental_physical_source_mismatch")
         objects=FilesystemRawArchiveObjectStore(Path(storage_root)/"objects",writable=False)
         archive_root=objects.root.resolve(strict=True)
         archive_targets=[by_id[key] for key in policy.archives]

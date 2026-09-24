@@ -1,4 +1,12 @@
 # syntax=docker/dockerfile:1
+FROM debian:bookworm-slim AS backup-tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential meson ninja-build pkg-config curl ca-certificates bzip2 \
+    libssl-dev libxml2-dev liblz4-dev libzstd-dev libbz2-dev libyaml-dev libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/build-backup-tools.sh /build-backup-tools.sh
+RUN sh /build-backup-tools.sh
+
 FROM python:3.12.3-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -10,10 +18,14 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.11.17 /uv /uvx /bin/
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev docker.io postgresql-common \
+    && apt-get install -y --no-install-recommends build-essential libpq-dev docker.io postgresql-common libxml2 liblz4-1 libzstd1 libbz2-1.0 libyaml-0-2 \
     && printf 'create_main_cluster = false\n' > /etc/postgresql-common/createcluster.conf \
     && apt-get install -y --no-install-recommends postgresql-15 postgresql-client-15 \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=backup-tools /opt/qt-backup-tools/ /usr/local/bin/
+# pgBackRest resolves its operating-system identity; fixed storage runs as UID70.
+RUN groupadd --gid 70 qtstorage && useradd --uid 70 --gid 70 --no-create-home qtstorage
 
 COPY requirements.txt requirements.lock /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
