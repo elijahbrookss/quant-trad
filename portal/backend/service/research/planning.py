@@ -176,7 +176,11 @@ def _unrecorded_interval_gaps(
 ) -> list[dict[str, Any]]:
     observed = {_record_time(record) for record in records}
     step = timedelta(seconds=int(timeframe_seconds))
-    cursor = start
+    # Requirement edges can be off-grid when an outcome tail uses a different
+    # timeframe. Anchor to canonical source timestamps, then extrapolate back
+    # to the first grid point inside the half-open request (including any leading
+    # missing intervals). Do not invent a provider/session anchor at request start.
+    cursor = start + ((min(observed) - start) % step) if observed else start
     missing: list[dict[str, Any]] = []
     while cursor < end:
         if cursor not in observed:

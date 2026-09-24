@@ -95,3 +95,84 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
     assert replay["original_result_hash"] == replay["replayed_result_hash"]
     assert replay["original_evidence_hash"] == replay["replayed_evidence_hash"]
     assert replay["original_plan_hash"] == replay["replayed_plan_hash"]
+
+
+def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypatch):
+    import portal.backend.service.market.runtime_market_data as runtime_market_data
+
+    token = uuid.uuid4().hex
+    instrument_id = f"profile-check-{token[:18]}"
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with db.session() as session:
+        session.add(InstrumentRecord(
+            id=instrument_id, datasource="TEST", exchange="ISOLATED",
+            symbol=f"CANDLE-{token[:8]}", instrument_type="spot",
+            can_short=False, short_requires_borrow=False, has_funding=False,
+            extra_metadata={"fixture": "candle-only-check"},
+        ))
+    source = SourceIdentity(provider="TEST", venue="ISOLATED", source_kind="historical",
+                            adapter_version=f"candle-check.{token}")
+    source_id = market_data_repo.register_source(source, lineage={"fixture": token})
+    for minutes in (5, 30):
+        series = market_data_repo.register_series(
+            instrument_id=instrument_id, fact_type=CANDLE_FACT_TYPE,
+            timeframe_seconds=minutes * 60, contract_version=CANDLE_FACT_VERSION,
+        )
+        candles = []
+        for index in range(5 * 24 * 60 // minutes):
+            opened = start + timedelta(minutes=index * minutes)
+            closed = opened + timedelta(minutes=minutes)
+            price = 150 if start + timedelta(days=2, hours=12) <= opened else 100
+            candles.append(CandleFact(
+                open_time=opened, close_time=closed, open=price, high=price + 1,
+                low=price - 1, close=price, volume=10 * minutes, trade_count=None,
+                source_published_at=None, received_at=None,
+                accepted_at=start + timedelta(days=6), known_at=closed,
+                known_at_method="interval_close_inferred",
+            ))
+        market_data_repo.ingest_candles(series_id=series, source_id=source_id,
+                                       facts=candles, request={"fixture": token})
+    indicator = create_instance("market_profile", f"Mixed frame {token}", {
+        "bin_size": 1, "days_back": 3, "use_merged_value_areas": False,
+    })
+
+    class ProviderCallTrap:
+        def __init__(self, **kwargs):
+            pass
+
+        def __getattr__(self, name):
+            raise AssertionError(f"frozen Check attempted provider access: {name}")
+
+    monkeypatch.setattr(runtime_market_data, "MarketDataCollectorService", ProviderCallTrap)
+    payload = {
+        "check_family": "event_fact_analysis",
+        "scope": {"instrument_id": instrument_id, "indicator_id": indicator["id"],
+                  "timeframe": "5m", "start": (start + timedelta(days=2)).isoformat(),
+                  "end": (start + timedelta(days=3)).isoformat()},
+        "detector": {"type": "indicator_event", "output_name": "balance_breakout",
+                     "event_keys": [{"key": "balance_breakout_long", "direction": "long"}]},
+        "outcomes": {"horizons": [6, 24, 72], "primary_horizon": 24, "entry_lag_bars": 1},
+        "statistics": {"features": {"baseline": [], "enriched": []},
+                       "eligibility": {"min_samples": 1}},
+        "inputs": [], "gap_policy": "reject",
+        "preparation": {"freeze": True, "name": f"candle-only-{token}"},
+    }
+    prepared = service.prepare_research_check_evidence(payload)
+    assert prepared["status"] == "frozen", prepared
+    run = service.run_research_check(prepared["next_request"])
+    assert run["replayable"] is True
+    assert run["evidence"]["input_binding"]["provider_access"] == "disabled"
+    evaluated = run["result"]["result"]
+    assert evaluated["schema_version"] == "event_fact_analysis_result.v5"
+    assert evaluated["analysis_status"] == "completed"
+    assert evaluated["sample_count"] > 0
+    assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
+    assert all(event["fact_references"] == {} for event in evaluated["events"])
+
+    replay = service.replay_research_check(run["check"]["id"])
+    assert replay["status"] == "matched", replay
+    assert replay["matches"] is True
+    assert replay["provider_call_performed"] is False
+    assert replay["original_result_hash"] == replay["replayed_result_hash"]
+    assert replay["original_evidence_hash"] == replay["replayed_evidence_hash"]
+    assert replay["original_plan_hash"] == replay["replayed_plan_hash"]
