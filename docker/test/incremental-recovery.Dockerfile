@@ -20,7 +20,7 @@ RUN curl --fail --location --retry 3 \
 
 FROM timescale/timescaledb:2.14.2-pg15
 USER root
-RUN apk add --no-cache python3 libxml2 lz4-libs zstd-libs bzip2-libs yaml libpq
+RUN apk add --no-cache python3 libxml2 lz4-libs zstd-libs libbz2 yaml libpq
 COPY --from=tools /build/build/src/pgbackrest /usr/local/bin/pgbackrest
 COPY --from=tools /build/restic /usr/local/bin/restic
 COPY scripts/ci/rehearse_incremental_recovery.py /opt/qt/rehearse_incremental_recovery.py
