@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
+import json
 import logging
 from typing import Any
 
@@ -187,7 +188,27 @@ class PostgresCanonicalFactStorageRepository:
             WHERE series_id=ANY(:series_ids) AND material_hash=:material_hash
             UNION ALL
         """ if include_canonical else ""
-        selected = session.execute(text(f"""
+        # The keyed hot case can use the existing provenance GIN index. Keep
+        # the legacy scan below for numeric witnesses, arbitrary keys, and cold
+        # aliases; candidate selection still requires payload verification.
+        selected = None
+        if evidence_key is not None:
+            params["hot_witness"] = json.dumps({
+                str(evidence_key): {"legacy_material_hash": material_hash},
+            })
+            selected = session.execute(text("""
+                SELECT versions.id
+                FROM market.fact_hot_payloads AS hot
+                JOIN market.fact_versions AS versions
+                  ON versions.storage_day=hot.storage_day AND versions.id=hot.id
+                WHERE hot.provenance @> CAST(:hot_witness AS jsonb)
+                  AND versions.series_id=ANY(:series_ids)
+                  AND jsonb_typeof(hot.provenance->:evidence_key)='object'
+                  AND hot.provenance->:evidence_key->>'legacy_material_hash'=:material_hash
+                ORDER BY versions.id LIMIT 1
+            """), params).scalar_one_or_none()
+        if selected is None:
+            selected = session.execute(text(f"""
             SELECT DISTINCT id FROM (
                 {direct}
                 SELECT versions.id FROM market.fact_versions AS versions
@@ -208,7 +229,7 @@ class PostgresCanonicalFactStorageRepository:
                   AND NOT EXISTS (SELECT 1 FROM market.fact_hot_payloads AS hot
                                   WHERE hot.storage_day=versions.storage_day AND hot.id=versions.id)
             ) AS candidates ORDER BY id LIMIT 1
-        """), params).scalar_one_or_none()
+            """), params).scalar_one_or_none()
 
         def matches(row):
             if int(row["series_id"]) not in ids:
