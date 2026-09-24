@@ -1079,3 +1079,10 @@ logs for all saved points while bounding obsolete between-backup history;
 arbitrary later PITR is outside the paired archive contract. The existing
 maintenance failure surface reports disabled or failing PostgreSQL archiving
 even when the next backup is not due.
+
+Release validation runs the fixed SSD/HDD core recreation and actual held
+preserving-cutover fixture in the existing deployment-contract CI job. The latter
+exercises the explicitly admitted recovery key/socket mounts across database
+preparation and interrupted activation. The separate actual encrypted recovery
+fixture verifies the configured receipt format and stale-generation rejection.
+These disposable tests do not replace physical-drive performance qualification.

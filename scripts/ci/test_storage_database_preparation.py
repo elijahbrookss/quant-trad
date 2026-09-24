@@ -506,6 +506,13 @@ def operator_rehearsal_outer(image, *runtime_images):
     runtime_images=tuple(run(['docker','image','inspect',value,'--format','{{.Id}}'],env=env).stdout.strip() for value in runtime_images)
     plugins=json.loads(run(['docker','info','--format','{{json .ClientInfo.Plugins}}'],env=env).stdout)
     plugin=next(value['Path'] for value in plugins if value['Name']=='compose')
+    # Desktop's raw socket preserves daemon-volume paths; native CI uses its
+    # ordinary local socket. No remote daemon or host discovery is supported.
+    daemon_socket=Path('/var/run/docker.sock.raw')
+    if not daemon_socket.exists():
+        daemon_socket=Path('/var/run/docker.sock')
+    if not daemon_socket.is_socket():
+        raise RuntimeError('owned_operator_local_docker_socket_required')
     created=[]
     controller=project+'-controller'
     history='/dev/shm/'+project+'-history'
@@ -527,7 +534,7 @@ def operator_rehearsal_outer(image, *runtime_images):
         args=['docker','run','--rm','--pull','never','--name',controller,'--network','none','--ipc','host','--user','0:0',
             '--mount','type=bind,source='+str(ROOT)+',target=/qt-host,readonly',
             # Docker Desktop's raw socket preserves the daemon-volume paths below.
-            '--mount','type=bind,source=/var/run/docker.sock.raw,target=/var/run/docker.sock',
+            '--mount','type=bind,source='+str(daemon_socket)+',target=/var/run/docker.sock',
             '--mount','type=bind,source='+plugin+',target=/usr/local/lib/docker/cli-plugins/docker-compose,readonly',
             '--entrypoint','python','--workdir','/qt-host']
         for volume,root in zip(created,roots):
