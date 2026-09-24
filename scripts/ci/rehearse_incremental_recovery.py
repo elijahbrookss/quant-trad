@@ -85,8 +85,15 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
             options += " -c archive_mode=off"
         # Track before startup so timeout/failure cleanup also stops a starting postmaster.
         live_clusters.append(cluster)
-        run([pg_bin / "pg_ctl", "-D", cluster, "-l", root / (cluster.name + ".log"),
-             "-w", "-t", "40", "-o", options, "start"], timeout=50)
+        server_log = root / (cluster.name + ".log")
+        try:
+            run([pg_bin / "pg_ctl", "-D", cluster, "-l", server_log,
+                 "-w", "-t", "40", "-o", options, "start"], timeout=50)
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            detail = server_log.read_text(errors="replace")[-6000:] if server_log.exists() else "no server log"
+            for secret in (db_key, archive_key):
+                detail = detail.replace(secret, "[redacted]")
+            raise RuntimeError("disposable_postmaster_start_failed:" + detail) from exc
 
     def capture(backup_type, *, phase=None):
         phase = phase or backup_type
