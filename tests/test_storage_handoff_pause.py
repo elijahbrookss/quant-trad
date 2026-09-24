@@ -994,3 +994,28 @@ def test_incomplete_candidate_cannot_restart_after_original_deadline(runtime_act
     with pytest.raises(RuntimeError,match="activation_deadline_expired"):
         pause.run_held_runtime_handoff(state,activation_timeout_seconds=86400,**options)
     assert runtime.ups==1 and (state/pause.HOLD).exists()
+
+
+def test_fixed_recovery_mounts_require_private_external_keys_and_exact_socket(tmp_path):
+    from scripts.automation import storage_handoff_pause as pause
+    history=tmp_path/"history";history.mkdir()
+    keys=tmp_path/"keys";keys.mkdir(mode=0o700)
+    key_mount=dict(type="bind",source=str(keys),target="/run/quanttrad/recovery",
+                   read_only=True,bind=dict(create_host_path=False))
+    socket=dict(type="volume",source="storage-recovery-socket",target="/var/run/postgresql")
+    service=dict(volumes=[key_mount,socket])
+    volumes={"storage-recovery-socket":dict(name="disposable-recovery",external=True)}
+    assert len(pause._database_recovery_mounts(service,volumes,str(history)))==2
+    keys.chmod(0o755)
+    with pytest.raises(RuntimeError,match="not_private"):
+        pause._database_recovery_mounts(service,volumes,str(history))
+    keys.chmod(0o700)
+    key_mount["read_only"]=False
+    with pytest.raises(RuntimeError,match="keys_mount_invalid"):
+        pause._database_recovery_mounts(service,volumes,str(history))
+    key_mount["read_only"]=True
+    with pytest.raises(RuntimeError,match="mount_pair_required"):
+        pause._database_recovery_mounts(dict(volumes=[key_mount]),volumes,str(history))
+    socket["source"]="postgres-data"
+    with pytest.raises(RuntimeError,match="socket_mount_invalid"):
+        pause._database_recovery_mounts(service,volumes,str(history))

@@ -140,6 +140,37 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
         selected = manager().create(snapshot, objects=objects, keep_copies=2)
     assert baseline["database_type"] == "full" and selected["database_type"] == "incr"
     assert selected["archive_objects"] > 0
+    # Exercise release receipt selection against the real encrypted pair.
+    # Policy activation is covered by the separate preserving operator
+    # rehearsal; this isolates its new recovery-format admission.
+    from core.storage_targets import StoragePolicy
+    from scripts.db import fact_header_v2_handoff as handoff
+    from tests.test_storage_maintenance_runtime import configuration
+    policy = StoragePolicy(("ssd",),("hdd",),("hdd",),("hdd",),
+                           movement_enabled=True,backup_enabled=True)
+    maintenance = configuration()
+    maintenance["schema_version"] = "qt.storage_maintenance_limits.v2"
+    maintenance["recovery"]["incremental"] = json.loads(config_path.read_text())
+    maintenance["recovery"]["max_bytes"] = limits["max_bytes"]
+    maintenance_path = tmp_path/"maintenance.json"
+    maintenance_path.write_text(json.dumps(maintenance))
+    worker_status = {"alive":True,"worker_id":"encrypted-receipt-fixture",
+        "context":{"storage_lifecycle":{"state":"running",
+            "maintenance":{"history_movement":{"configured":True},"local_recovery":{"configured":True}},
+            "last_run":{"local_recovery":{"state":"completed",
+                "storage_layout":selected["storage_layout"],"policy_hash":policy.fingerprint,
+                "policy_revision":1,"generation":selected["name"]}}}}}
+    request = dict(policy=policy.to_dict(),database_identity=identity,inventory_path=str(inventory),
+                   source_root=str(source_root),destination_root=str(source_root))
+    with pytest.MonkeyPatch.context() as admission:
+        admission.setenv("QT_STORAGE_MAINTENANCE_LIMITS_PATH",str(maintenance_path))
+        admission.setattr(handoff,"inspect_handoff_policy",lambda *a,**kw:
+                          dict(policy_current=True,policy_revision=1,plan_id="receipt-fixture"))
+        ready = handoff.inspect_runtime_handoff(request,engine=engine,worker=worker_status)
+        assert ready["ready"] and ready["recovery_generation"] == selected["name"]
+        worker_status["context"]["storage_lifecycle"]["last_run"]["local_recovery"]["generation"] = baseline["name"]
+        assert handoff.inspect_runtime_handoff(request,engine=engine,worker=worker_status) == {
+            "ready":False,"reason":"current_layout_recovery_pending"}
     after = replace(recent, observation_key="incremental-after-selected")
     assert storage.repo.ingest_facts(series_id=storage.series_id, source_id=storage.source_id,
                                     facts=[after]).inserted_count == 1

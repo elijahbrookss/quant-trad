@@ -893,15 +893,25 @@ def inspect_runtime_handoff(request, *, engine, worker):
         if len(targets) != 2 or len(policy.backups) != 1:
             raise RuntimeError("storage_runtime_fixed_recovery_target_required")
         history = next(target for target in targets if target.target_id == policy.backups[0])
-        root = Path(history.root)/"recovery"/namespace
+        copy_class, copy_options, byte_limit = LocalRecoveryCopies, {}, 1
+        limits_path = os.environ.get("QT_STORAGE_MAINTENANCE_LIMITS_PATH")
+        if limits_path:
+            from portal.backend.service.storage.maintenance_runtime import read_storage_maintenance_limits
+            _, limits, incremental = read_storage_maintenance_limits(limits_path)
+            if incremental is not None:
+                from portal.backend.service.storage.incremental_recovery import EncryptedRecoveryCopies
+                copy_class = EncryptedRecoveryCopies
+                copy_options = dict(incremental=incremental, connection_url=engine.url)
+                byte_limit = limits["max_bytes"]
+        root = Path(history.root)/copy_class.namespace/namespace
         # Only inspect a published recovery directory. The existing copy class
         # may create these paths for writers; admission must never create them.
         if root.resolve(strict=False) != root:
             raise RuntimeError("storage_runtime_recovery_path_changed")
         if not root.is_dir() or not (root/"writer.lock").is_file():
             return {"ready": False, "reason": "current_layout_recovery_pending"}
-        copies = LocalRecoveryCopies(target=history, database_identity=identity,
-            max_bytes=1, reserve_bytes=0, timeout_seconds=10)
+        copies = copy_class(**copy_options, target=history, database_identity=identity,
+            max_bytes=byte_limit, reserve_bytes=0, timeout_seconds=10)
         try:
             with copies.lock():
                 completed = copies.completed()

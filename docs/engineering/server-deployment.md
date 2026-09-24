@@ -547,7 +547,8 @@ subdirectory (`QT_MARKET_DATA_ROOT`), its UUID (`QT_MARKET_DATA_EXPECTED_UUID`),
 the unchanged SSD spool directory (`QT_MARKET_DATA_WORKING_ROOT`) and SSD UUID
 (`QT_MARKET_DATA_WORKING_EXPECTED_UUID`), prepared inventory/limits files
 (`QT_STORAGE_INVENTORY_HOST_PATH`, `QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH`),
-and the backend's existing Docker socket group (`QT_DOCKER_SOCKET_GID`).
+the backend's existing Docker socket group (`QT_DOCKER_SOCKET_GID`), and the
+private SSD recovery directory (`QT_STORAGE_RECOVERY_SECRETS_ROOT`).
 
 Inside the fixed layout, history is `/qt-history`, archives are
 `/qt-history/archives`, PostgreSQL retains `/var/lib/postgresql/data`, and spool
@@ -586,8 +587,10 @@ hold. Automatic rollback to a pre-migration image is disabled after that switch.
 The combined disposable rehearsal passed migration and activation interruption,
 recent and frozen reads, service health, recovery publication and repeat-call
 reconciliation. This establishes functional recovery, not production readiness:
-physical SSD/HDD performance during movement, representative migration within
-24 hours and complete capacity accounting must still qualify the release. The
+physical SSD/HDD performance during movement, measured total migration and
+collector downtime, and complete capacity accounting must still qualify the release.
+Existing cumulative operator deadlines require an explicit bounded adjustment
+if the measured plan needs longer; do not reset them between phases. The
 internal entrypoint requires an explicitly prepared request, inventory, operating
 limits and pinned runtime recipe; there is no public pause/resume command.
 
@@ -631,7 +634,8 @@ formatting, fstab/systemd changes, and data moves are separate operator actions;
 the deploy helper performs none of them. Do not combine an unverified archive
 move with enabling destructive retention.
 
-Schedule database backups outside application containers and restore-test them.
+Use the existing storage-maintenance supervisor for the explicitly configured
+recovery policy, and restore-test its paired database and archive points.
 Loki retains seven days in its single-host filesystem store. Docker JSON logs
 rotate independently so a failed log pipeline cannot consume the host without
 bound. PostgreSQL emits to container stderr in this server preset, so Alloy
@@ -734,3 +738,47 @@ block all ordinary deployment/recovery during an incompatible database cutover.
 The disposable controller rehearsal also accepts `--storage-layout` to exercise
 this behavior with synthetic services, owned history/working directories and no
 provider egress. It is not a database migration or actual-drive performance test.
+
+
+### Encrypted incremental recovery activation
+
+This is an explicit operator sequence on the existing SSD/HDD. Preserve all
+completed logical copies and any running restore. Neither repository preparation
+nor mounting the recovery directory activates backups.
+
+1. Preserve independent 256-bit database/archive keys in a private location off
+   this server. Provision matching UID/GID70, mode0600 files beneath a mode0700
+   SSD directory outside PGDATA and the HDD. Record fingerprints, never key values.
+2. Build and pin the database and worker images containing the reviewed native
+   backup tools. The deployment helper reuses an existing PostgreSQL image unless
+   QT_REBUILD_DATABASE_IMAGE=1; verify the actual image contains the pinned tools.
+   Database image replacement is a separately verified restart before the held
+   migration recipe is bound, not an unrecorded image change during that recipe.
+3. Pre-create the named recovery socket volume. Admit the database recipe's
+   existing PGDATA and HDD plus only the read-only private recovery bind and socket.
+   The collector gets the identical pair; API/frontends receive no recovery keys.
+   The held procedure retains its image, cluster, deadline and mount checks.
+4. Run packaged storage_recovery_prepare.py as UID70 in the serving database's
+   filesystem/PID namespace with canonical PG_DSN, the two-target inventory,
+   expected database identity and explicit measured resource limits. Its private
+   incremental configuration points at the shared socket, actual PGDATA and keys.
+   Only this preparation invocation may mount the key directory writable to create
+   pgbackrest.conf; routine services mount it read-only. Require the returned
+   preparation receipt. Re-entry uses exactly the same keys, cluster and UUID.
+5. Only after preparation, configure PostgreSQL's archive_command to invoke the
+   pinned pgBackRest with that private configuration and enable archive_mode=on
+   in the admitted restart sequence. Verify native archive delivery. Never enable
+   archive_mode with an empty command, discard unarchived WAL or hide errors.
+   This must precede the first physical backup. WAL generated during migration
+   belongs in the space/outage model.
+6. Supply reviewed maintenance-limits v2 to the existing supervisor, retaining
+   saved interval/count semantics. Pin max_chain_backups and resource bounds from
+   measured workload; an initial baseline is required, not a mandatory Sunday full.
+   Release readiness reads the configured recovery format and requires a complete
+   current-layout pair. A legacy receipt cannot satisfy encrypted readiness.
+7. Restore a selected pair into empty isolated destinations with compatible PG15
+   extensions, explicit tablespace mappings and the matching archive snapshot.
+   Use immediate consistency recovery; later arbitrary WAL times are not covered
+   by the paired archive inventory. Verify inventory checksums, current/corrected/
+   frozen reads and independent key recovery. Account for full native chains,
+   changed blocks, WAL, archive packs, rotation peak and preserved legacy copies.

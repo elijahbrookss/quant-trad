@@ -252,6 +252,38 @@ def _existing_network_recipe(networks: dict, project: str) -> bool:
     return definition=={"name":project+"_quanttrad","external":True}
 
 
+def _database_recovery_mounts(service, volumes, history_root):
+    """Admit only the fixed private key bind and shared PostgreSQL socket."""
+    entries = service.get("volumes", [])
+    mounts = {entry["target"]:entry for entry in entries}
+    keys = mounts.get("/run/quanttrad/recovery")
+    socket = mounts.get("/var/run/postgresql")
+    if keys is None and socket is None:
+        return {}
+    if keys is None or socket is None:
+        raise RuntimeError("storage_database_recovery_mount_pair_required")
+    root = Path(keys.get("source", ""))
+    if (keys != dict(type="bind",source=str(root),target="/run/quanttrad/recovery",
+                     read_only=True,bind=dict(create_host_path=False))
+            or not root.is_absolute() or root.resolve(strict=True) != root
+            or root.is_relative_to(Path(history_root).resolve(strict=True))):
+        raise RuntimeError("storage_database_recovery_keys_mount_invalid")
+    info = root.stat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077
+            or info.st_uid not in (0,70,os.getuid())):
+        raise RuntimeError("storage_database_recovery_keys_not_private")
+    if (socket.get("type") != "volume" or socket.get("source") != "storage-recovery-socket"
+            or socket.get("read_only",False) or socket.get("volume")
+            or set(socket)-{"type","source","target","read_only","volume"}):
+        raise RuntimeError("storage_database_recovery_socket_mount_invalid")
+    volume = volumes.get("storage-recovery-socket",{})
+    if (set(volume)!={"name","external"} or volume["external"] is not True
+            or not isinstance(volume["name"],str)
+            or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}",volume["name"])):
+        raise RuntimeError("storage_database_recovery_socket_volume_invalid")
+    return {"/run/quanttrad/recovery":keys, "/var/run/postgresql":socket}
+
+
 def _database_recipe(state_root: Path, project: str) -> tuple[dict, str]:
     model = _load(state_root / DATABASE_RECIPE)
     if (set(model) != {"name", "services", "networks", "volumes"} or model["name"] != project
@@ -268,7 +300,8 @@ def _database_recipe(state_root: Path, project: str) -> tuple[dict, str]:
         raise RuntimeError("storage_database_unsafe_fixed_recipe")
     mounts = service.get("volumes", [])
     by_target = {value["target"]: value for value in mounts}
-    if len(mounts) != 2 or set(by_target) != {"/var/lib/postgresql/data", "/qt-history"}:
+    recovery = _database_recovery_mounts(service,model["volumes"],by_target.get("/qt-history",{}).get("source","/"))
+    if len(mounts) != len(by_target) or set(by_target) != {"/var/lib/postgresql/data", "/qt-history"}|set(recovery):
         raise RuntimeError("storage_database_invalid_mount_recipe")
     history = by_target["/qt-history"]
     if history != {"type": "bind", "source": history.get("source"), "target": "/qt-history",
@@ -292,9 +325,16 @@ def _begin_database_preparation(state_root: Path, receipt: dict, rows: dict, his
     source_mount = details["mounts"][0]
     if (source_mount.get("Type") != "volume" or source_mount.get("Destination") != "/var/lib/postgresql/data"
             or not source_mount.get("RW") or set(details["networks"]) != {receipt["project"]+"_quanttrad"}
-            or model["volumes"] != {"postgres-data": {"name": source_mount["Name"], "external": True}}):
+            or model["volumes"].get("postgres-data") != {"name": source_mount["Name"], "external": True}
+            or set(model["volumes"])-{"postgres-data","storage-recovery-socket"}):
         raise RuntimeError("storage_database_source_binding_mismatch")
     service = model["services"]["tsdb"]
+    recovery = _database_recovery_mounts(service,model["volumes"],history_root)
+    if recovery:
+        # The socket volume must be explicitly provisioned before pausing.
+        _docker("volume","inspect",model["volumes"]["storage-recovery-socket"]["name"])
+    elif set(model["volumes"])!={"postgres-data"}:
+        raise RuntimeError("storage_database_unexpected_volume")
     image = json.loads(_docker("image", "inspect", "--format", '{{json .}}', service["image"]))
     image_config = image["Config"]
     proposed_env = dict(value.split("=", 1) for value in image_config.get("Env") or [])
@@ -369,13 +409,24 @@ def _prepare_database(state_root: Path, receipt: dict, *, operator_id=None) -> d
     details = _database_details(row["id"])
     mounts = {value["Destination"]: value for value in details["mounts"]}
     history = mounts.get("/qt-history", {})
+    model,_ = _database_recipe(state_root,project)
+    recovery = _database_recovery_mounts(model["services"]["tsdb"],model["volumes"],preparation["history_root"])
+    extra_ok = True
+    if recovery:
+        keys = mounts.get("/run/quanttrad/recovery",{})
+        socket = mounts.get("/var/run/postgresql",{})
+        extra_ok = (keys.get("Type")=="bind" and keys.get("Source")==recovery["/run/quanttrad/recovery"]["source"]
+            and keys.get("RW") is False and keys.get("Propagation")=="rprivate"
+            and socket.get("Type")=="volume" and socket.get("RW") is True
+            and socket.get("Name")==model["volumes"]["storage-recovery-socket"]["name"])
     admitted = {
+        "recovery_mounts": extra_ok,
         "source_stop": preparation["source_stopped"],
         "replacement_id": row["id"] != preparation["original_id"] and preparation["replacement_id"] in (None, row["id"]),
         "image": details["image"] == preparation["image"],
         "settings": _database_contract(details) == preparation["target_contract"],
         "network": _same_database_networks(details, preparation["networks"]),
-        "mount_count": len(details["mounts"]) == 2,
+        "mount_count": len(details["mounts"]) == 2+len(recovery),
         "pgdata": mounts.get("/var/lib/postgresql/data") == preparation["source_mount"],
         "history": history.get("Type") == "bind" and history.get("Source") == preparation["history_root"]
                    and history.get("RW") and history.get("Propagation") == "rprivate",
@@ -893,6 +944,15 @@ def _runtime_recipe(state_root: Path, receipt: dict, binding: dict, request: dic
             allowed.add("/var/run/docker.sock")
         if name=="market-data-collector":
             allowed.add("/run/quanttrad/storage-maintenance.json")
+            recovery_mounts = _database_recovery_mounts(
+                database_model["services"]["tsdb"],model["volumes"],history)
+            for target, expected_mount in recovery_mounts.items():
+                actual_mount = dict(by_target.get(target,{}))
+                if actual_mount.get("volume")=={}:
+                    actual_mount.pop("volume")
+                if actual_mount != expected_mount:
+                    raise RuntimeError("storage_runtime_recovery_mount_changed")
+            allowed.update(recovery_mounts)
         if set(by_target)!=allowed:
             raise RuntimeError("storage_runtime_unexpected_writer_mount")
         secret=by_target["/app/secrets.env"]

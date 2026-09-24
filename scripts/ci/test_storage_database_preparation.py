@@ -281,6 +281,15 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     source=control_root/'source.json';source.write_text(json.dumps(model));source.chmod(0o600)
     recipe=json.loads(json.dumps(model));recipe['services']['tsdb']['volumes'].append(
         dict(type='bind',source=str(history_root),target='/qt-history',bind=dict(create_host_path=False)))
+    if runtime_images:
+        recovery_secrets=control_root/'recovery-secrets'
+        recovery_secrets.mkdir(mode=0o700);os.chown(recovery_secrets,70,70)
+        socket_name=project+'-recovery-socket'
+        recipe['volumes']['storage-recovery-socket']=dict(name=socket_name,external=True)
+        recipe['services']['tsdb']['volumes'] += [
+            dict(type='bind',source=str(recovery_secrets),target='/run/quanttrad/recovery',
+                 read_only=True,bind=dict(create_host_path=False)),
+            dict(type='volume',source='storage-recovery-socket',target='/var/run/postgresql')]
     recipe_path=state/pause.DATABASE_RECIPE;recipe_path.write_text(json.dumps(recipe));recipe_path.chmod(0o600)
     run(['docker','network','create','--internal',network],env=env)
     compose=['docker','compose','--project-name',project,'--file',str(source)]
@@ -419,9 +428,6 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         '--file','docker/docker-compose.server.yml','--file','docker/docker-compose.storage-server.yml',
         'config','--format','json'],env=configured).stdout)
     model=json.loads(json.dumps(recipe))
-    model.setdefault('volumes',{})['storage-recovery-socket']=dict(name=project+'-recovery-socket')
-    model['services']['tsdb'].setdefault('volumes',[]).append(
-        dict(type='volume',source='storage-recovery-socket',target='/var/run/postgresql'))
     for name in ('backend','initialize','market-data-collector','frontend','frontend-v2'):
         service=rendered['services'][name]
         service.pop('build',None);service.pop('ports',None)
@@ -526,6 +532,9 @@ def operator_rehearsal_outer(image, *runtime_images):
             '--entrypoint','python','--workdir','/qt-host']
         for volume,root in zip(created,roots):
             args+=['--mount','type=volume,source='+volume+',target='+root]
+        if runtime_images:
+            socket_name=project+'-recovery-socket'
+            run(['docker','volume','create',socket_name],env=env);created.append(socket_name)
         result=run(args+[image,'scripts/ci/test_storage_database_preparation.py','--operator-inner',project,image,roots[0],history,roots[1],*runtime_images],env=env,timeout=2400,ok=False)
         print(result.stdout[-14000:],flush=True)
         if result.returncode:

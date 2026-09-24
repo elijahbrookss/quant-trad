@@ -24,10 +24,8 @@ def _unique_fields(pairs):
     return result
 
 
-def storage_maintenance_runners(database, *, storage_root, limits_path=None):
-    """Return the existing two runners only when operating limits are explicit."""
-    if limits_path is None:
-        return {}
+def read_storage_maintenance_limits(limits_path):
+    """One strict parser shared by maintenance and deployment admission."""
     path = Path(limits_path)
     if not path.is_absolute():
         raise ValueError("storage_maintenance_limits_absolute_path_required")
@@ -54,6 +52,14 @@ def storage_maintenance_runners(database, *, storage_root, limits_path=None):
         from .incremental_recovery import IncrementalRecoveryConfig
         incremental = IncrementalRecoveryConfig.from_dict(recovery.pop("incremental"))
     validate_recovery_maintenance_limits(**recovery)
+    return history, recovery, incremental
+
+
+def storage_maintenance_runners(database, *, storage_root, limits_path=None):
+    """Return the existing two runners only when operating limits are explicit."""
+    if limits_path is None:
+        return {}
+    history, recovery, incremental = read_storage_maintenance_limits(limits_path)
     # The existing lifecycle service owns payload archival; bind it to the
     # same saved policy as header movement without adding a second scheduler.
     from ..market.market_storage_lifecycle import MarketStorageLifecycleService
