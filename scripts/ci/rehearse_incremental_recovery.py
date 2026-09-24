@@ -125,7 +125,7 @@ def rehearse(*, pg_bin: Path, pgbackrest: Path, restic: Path,
                       f"archive_command='{command}'\n")
         if require_timescale:
             with (source / "postgresql.conf").open("a") as out:
-                out.write("\\nshared_preload_libraries='timescaledb'\\n")
+                out.write("\nshared_preload_libraries='timescaledb'\ntimescaledb.telemetry_level=off\n")
         start(source, socket)
         if require_timescale:
             sql("CREATE EXTENSION timescaledb")
