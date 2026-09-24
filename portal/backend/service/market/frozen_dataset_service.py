@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from market_data.range_evidence import is_complete_range_evidence
 from market_data.contracts import (
+    CANDLE_FACT_TYPE,
     DATASET_IDENTITY_HASH_VERSION,
     DatasetSeriesRequest,
     build_dataset_identity_hash,
@@ -343,8 +344,22 @@ def prepare_frozen_dataset_from_requirements(
                 )
                 if not source_bound_records:
                     continue
+                snapshot_bounds: dict[str, str] = {}
+                if str(requirement.get("fact_type")) == CANDLE_FACT_TYPE:
+                    step = timedelta(seconds=int(requirement["timeframe_seconds"]))
+                    anchor = min(record.fact.open_time for record in source_bound_records)
+                    snapshot_start = start - ((start - anchor) % step)
+                    snapshot_end = end + ((anchor - end) % step)
+                    if snapshot_start != start or snapshot_end != end:
+                        # Freeze whole source candles while retaining the exact
+                        # consumer range. Strict Dataset validation stays intact.
+                        snapshot_bounds = {
+                            "snapshot_start": _iso(snapshot_start),
+                            "snapshot_end": _iso(snapshot_end),
+                        }
                 matches.append(
                     {
+                        **snapshot_bounds,
                         "series_id": int(candidate["series_id"]),
                         "series_identity_key": str(candidate.get("identity_key") or ""),
                         "required_start": _iso(start),
@@ -391,8 +406,8 @@ def prepare_frozen_dataset_from_requirements(
     ranges_by_series: dict[int, tuple[datetime, datetime]] = {}
     for row in resolved:
         series_id = int(row["series_id"])
-        start = _utc(row["required_start"], field="required_start")
-        end = _utc(row["required_end"], field="required_end")
+        start = _utc(row.get("snapshot_start", row["required_start"]), field="snapshot_start")
+        end = _utc(row.get("snapshot_end", row["required_end"]), field="snapshot_end")
         current = ranges_by_series.get(series_id)
         ranges_by_series[series_id] = (
             min(start, current[0]) if current else start,

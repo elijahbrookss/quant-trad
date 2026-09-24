@@ -111,6 +111,18 @@ Requirement planning runs before execution and exposes:
 - missing coverage; and
 - current quality/gap evidence.
 
+For periodic inputs, missing-interval checks follow the canonical source's
+observed cadence, not the request start. A five-minute entry delay can put a
+thirty-minute dependency range off-grid; that does not create candles at new
+minute offsets. Planning extrapolates the source grid backward to detect leading
+holes and checks only timestamps within the half-open range. Actual missing
+intervals still require source-bound evidence. No provider or UTC-session anchor
+is invented by coverage. Dataset preparation expands off-grid candle snapshot
+edges outward to whole source candles, records those snapshot bounds, and keeps
+the consumer's exact requirement range. Strict candle duration, known-at,
+continuity and frozen-range checks remain in force. Extra boundary candles do
+not extend the Check's decision window or admit future information.
+
 Planning never calls a provider. Preparation may call an existing acquisition
 service only when the operator explicitly authorizes network access and
 budgets. Check execution never acquires.
