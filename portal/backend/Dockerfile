@@ -2,7 +2,7 @@
 FROM debian:bookworm-slim AS backup-tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential meson ninja-build pkg-config curl ca-certificates bzip2 \
-    libssl-dev libxml2-dev liblz4-dev libzstd-dev libbz2-dev libyaml-dev libpq-dev \
+    libssl-dev libxml2-dev liblz4-dev libzstd-dev libbz2-dev libyaml-dev libpq-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 COPY docker/build-backup-tools.sh /build-backup-tools.sh
 RUN sh /build-backup-tools.sh
