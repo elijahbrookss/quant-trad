@@ -29,6 +29,27 @@ Hidden fallbacks are not allowed. A second path is valid only when it is an
 explicit contract branch with clear inputs, outputs, and operator-visible
 context.
 
+## Producer-Owned Range Evidence
+
+The producing data contract owns completeness semantics. A bucket duration is
+an observation identity/alignment rule, not a universal promise that every
+bucket contains a Fact. Provider adapters interpret native transport and
+acquisition evidence; derived producers must additionally establish their
+transformation completed. Generic coverage must verify normalized, source-bound
+range evidence rather than infer completeness from provider names, collector
+types, row density, or current health.
+
+A producer may explain an empty range as complete and legitimately quiet only
+with retained continuity, validity, acquisition/archive, and processing evidence
+appropriate to that fact contract. Interrupted or invalid ranges remain gaps;
+unknown evidence cannot prove coverage. Empty-range evidence never manufactures
+Facts or changes a consumer's alignment/staleness policy. Consumers own whether
+the available evidence is suitable for their requested sample or study.
+
+Dataset freeze pins the exact range evidence and its provenance alongside Facts.
+Replay uses that pinned evidence without reinterpreting current collector state.
+Historical frozen evidence and definition semantics remain unchanged.
+
 ## Schema Semantics
 
 - No runtime migrations/backfills in app paths.

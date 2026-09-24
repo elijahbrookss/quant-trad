@@ -644,3 +644,63 @@ __all__ = [
     "CoinbaseAdvancedTradeStream",
     "CoinbaseMessageParser",
 ]
+
+
+def quiet_transport_witness(records, *, left, right, start, end):
+    """Current book adapter interprets native frames, returns neutral proof.
+
+This adapter is intentionally the existing Coinbase L2 transport contract.
+Unsupported providers cannot acquire a completeness claim through this adapter.
+"""
+    from datetime import timedelta
+    from market_data.range_evidence import utc
+
+    if not records or any(str(row.provider).upper() != "COINBASE" for row in records):
+        return None
+    ordinals = [row.receive_ordinal for row in records]
+    if (ordinals[0] != left["receive_ordinal"] or ordinals[-1] != right["receive_ordinal"]
+            or any(b != a + 1 for a, b in zip(ordinals, ordinals[1:]))):
+        return None
+    parser = CoinbaseMessageParser()
+    sequences = []
+    heartbeats = []
+    heartbeat_seconds = set()
+    for row in records:
+        if any(getattr(row, name) != left[name] for name in (
+                "definition_id", "session_id", "connection_epoch", "provider_product_id")):
+            return None
+        events = parser.parse_raw(row.raw_frame, received_at=row.received_at.isoformat())
+        frame_sequences = {event.provider_sequence_num for event in events}
+        if len(frame_sequences) != 1 or None in frame_sequences:
+            return None
+        sequences.append(frame_sequences.pop())
+        for event in events:
+            if event.event_kind == "provider_heartbeat":
+                counter = event.payload.get("heartbeat_counter")
+                if counter is None or not event.provider_message_time:
+                    return None
+                heartbeats.append(int(counter))
+                heartbeat_seconds.add(utc(event.provider_message_time).replace(microsecond=0))
+            elif event.event_kind in {"market_l2_snapshot", "market_l2_update"}:
+                if event.product_id != left["provider_product_id"]:
+                    return None
+                times = [utc(update["event_time"]) for update in event.payload.get("updates", [])]
+                if not times or any(start <= event_time < end for event_time in times):
+                    return None
+            else:
+                # Decoder failures, unknown envelopes and control messages are
+                # unresolved, not a quiet-range certificate.
+                return None
+    if (sequences[0] != left["provider_sequence_num"]
+            or sequences[-1] != right["provider_sequence_num"]
+            or any(b != a + 1 for a, b in zip(sequences, sequences[1:]))
+            or any(b != a + 1 for a, b in zip(heartbeats, heartbeats[1:]))):
+        return None
+    cursor = start
+    while cursor < end:
+        if cursor not in heartbeat_seconds:
+            return None
+        cursor += timedelta(seconds=1)
+    return {"adapter": "coinbase.l2_quiet_range.v1", "first_sequence": sequences[0],
+            "last_sequence": sequences[-1], "first_receive_ordinal": ordinals[0],
+            "last_receive_ordinal": ordinals[-1], "heartbeat_count": len(heartbeats)}

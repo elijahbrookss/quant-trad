@@ -176,7 +176,11 @@ def _unrecorded_interval_gaps(
 ) -> list[dict[str, Any]]:
     observed = {_record_time(record) for record in records}
     step = timedelta(seconds=int(timeframe_seconds))
-    cursor = start
+    # Requirement edges can be off-grid when an outcome tail uses a different
+    # timeframe. Anchor to canonical source timestamps, then extrapolate back
+    # to the first grid point inside the half-open request (including any leading
+    # missing intervals). Do not invent a provider/session anchor at request start.
+    cursor = start + ((min(observed) - start) % step) if observed else start
     missing: list[dict[str, Any]] = []
     while cursor < end:
         if cursor not in observed:
@@ -207,7 +211,7 @@ def _coverage_for_requirement(
     candidates = []
     fact_contract = get_fact_contract(str(requirement["fact_type"]))
     dimensions = fact_contract.normalize_dimensions(requirement.get("dimensions"))
-    for row in store.list_series(instrument_id=str(requirement["instrument_id"])):
+    for row in store.list_series_metadata(instrument_id=str(requirement["instrument_id"])):
         if (
             str(row.get("fact_type") or "").strip().lower()
             == str(requirement["fact_type"])

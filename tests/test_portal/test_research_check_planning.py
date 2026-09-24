@@ -50,7 +50,7 @@ class _Store:
     def current_commit_seq(self):
         return 77
 
-    def list_series(self, *, instrument_id=None):
+    def list_series_metadata(self, *, instrument_id=None):
         assert instrument_id == "instrument-1"
         return [
             {
@@ -425,3 +425,37 @@ def test_l2_fact_snapshot_plans_no_indicator_and_stops_facts_at_last_decision(tr
     assert primary["required_end"] == (
         "2026-01-02T03:30:00.000000Z" if trigger else "2026-01-02T03:00:00.000000Z"
     )
+
+
+@pytest.mark.parametrize("offset_minutes", [0, 15])
+def test_off_grid_requirement_uses_source_cadence_and_detects_leading_holes(offset_minutes):
+    from portal.backend.service.research.planning import _unrecorded_interval_gaps
+
+    base = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=offset_minutes)
+    records = [SimpleNamespace(fact=SimpleNamespace(open_time=base + timedelta(minutes=m)))
+               for m in (30, 60, 90)]
+    args = {"start": base + timedelta(minutes=5), "end": base + timedelta(minutes=95),
+            "timeframe_seconds": 1800, "recorded_gaps": []}
+    assert _unrecorded_interval_gaps(records=records, **args) == []
+    expected = {"start": _iso(base + timedelta(minutes=30)),
+                "end": _iso(base + timedelta(minutes=60)),
+                "reason": "source_bound_interval_unrecorded"}
+    assert _unrecorded_interval_gaps(records=records[1:], **args) == [expected]
+    # Coverage evidence can explain the actual missing interval, never offset fake bars.
+    assert _unrecorded_interval_gaps(records=records[1:], **{
+        **args, "recorded_gaps": [{**expected, "classification": "provider_missing_data"}]
+    }) == []
+
+
+def test_off_grid_requirement_excludes_end_boundary_and_keeps_real_interior_gap():
+    from portal.backend.service.research.planning import _unrecorded_interval_gaps
+
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    records = [SimpleNamespace(fact=SimpleNamespace(open_time=base + timedelta(minutes=m)))
+               for m in (30, 90)]
+    assert _unrecorded_interval_gaps(
+        records=records, start=base + timedelta(minutes=5), end=base + timedelta(minutes=120),
+        timeframe_seconds=1800, recorded_gaps=[],
+    ) == [{"start": _iso(base + timedelta(minutes=60)),
+           "end": _iso(base + timedelta(minutes=90)),
+           "reason": "source_bound_interval_unrecorded"}]

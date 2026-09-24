@@ -315,3 +315,28 @@ def test_availability_trigger_is_versioned_and_survives_request_normalization() 
     assert declaration["decision_price_tail_bars"] == 1
     with pytest.raises(ValueError, match="requires definition version 5"):
         materialize_check_definition(payload, mode="evidence", base_version="4")
+
+
+def test_candle_only_indicator_check_has_exact_version_and_no_dummy_fact():
+    payload = {**_payload(), "inputs": []}
+    definition, request = normalize_check_request(payload, mode="evidence")
+    assert definition.definition_version.startswith("6+")
+    assert definition.evaluator_version == "5"
+    assert request.parameters["inputs"] == []
+    assert materialize_check_definition(payload, mode="evidence", base_version="6") == definition
+    for version in ("3", "4", "5"):
+        with pytest.raises(ValueError, match="at least one typed fact input"):
+            materialize_check_definition(payload, mode="evidence", base_version=version)
+
+
+def test_candle_only_definition_rejects_fact_sampling_and_unbound_features():
+    with pytest.raises(ValueError, match="at least one typed fact input"):
+        normalize_check_request({**_l2_payload(), "inputs": []}, mode="evidence")
+    with pytest.raises(ValueError, match="requires a candle-only indicator_event"):
+        materialize_check_definition(_payload(), mode="evidence", base_version="6")
+    with pytest.raises(ValueError, match="alias"):
+        normalize_check_request({
+            **_payload(), "inputs": [], "statistics": {"features": {"enriched": [
+                {"name": "missing", "operator": "latest_value", "input_alias": "missing"}
+            ]}},
+        }, mode="evidence")

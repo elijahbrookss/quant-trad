@@ -120,6 +120,14 @@ def ingest_candles(req: CandleIngestionRequest) -> Dict[str, Any]:
     }
 
 
+@router.get("/series/metadata")
+def list_market_data_series_metadata(instrument_id: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "schema_version": "market_series_metadata.v1",
+        "series": market_data_repo.list_series_metadata(instrument_id=instrument_id),
+    }
+
+
 @router.get("/series")
 def list_market_data_series(instrument_id: Optional[str] = None) -> Dict[str, Any]:
     return {

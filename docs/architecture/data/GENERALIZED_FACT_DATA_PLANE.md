@@ -1539,3 +1539,16 @@ Disposable coverage includes actual lease release and same-series session
 rollover with later event times; preserved cold history and frozen results;
 loss of the current projection; clean and invalidated terminal intervals; and
 rejection of incorrect hashes, missing events and mismatched terminal evidence.
+
+
+### Registered series discovery
+
+`MarketDataStore.list_series_metadata` and `GET /api/candles/series/metadata`
+return `market_series_metadata.v1`: registered series identities, types,
+intervals, versions and dimensions only. They never scan accepted Fact rows or
+claim counts, bounds, completeness or availability. Check requirement planning
+and frozen-dataset resolution use this discovery method before their existing
+source-bound window reads and gap checks. Registration alone never admits data.
+The existing exact-count `/series` catalog remains compatible and explicit.
+`qt data series --metadata-only` and `quanttrad://data/series` delegate to this
+same backend contract; MCP does not maintain its own catalog or count cache.

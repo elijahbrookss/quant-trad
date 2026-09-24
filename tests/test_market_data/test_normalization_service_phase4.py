@@ -278,3 +278,26 @@ def test_cold_legacy_spec_guard_preserves_exact_text_reference_predicate(monkeyp
     cold_rows.append({"provenance": {"_qt_normalization_evidence": {"spec_id": legacy_id}}})
     with pytest.raises(RuntimeError, match="legacy_identity_referenced"):
         repo._list_specs_with_session(session)
+
+
+@pytest.mark.parametrize("status", ["complete", "interrupted"])
+def test_normalization_consumes_neutral_range_status_and_causal_witness(status):
+    from market_data.range_evidence import producer_range_evidence
+    records = [_funding_record(0, 0.001, 71), _funding_record(1, 0.002, 72)]
+    known_at = BASE + timedelta(seconds=90)
+    evidence = producer_range_evidence(series_id=11, source_id=1,
+        source_identity_key=records[0].source_identity_key, start=BASE + timedelta(minutes=1),
+        end=BASE + timedelta(minutes=2), status=status, known_at=known_at,
+        commit_seq=75, witness={"producer": "fixture.producer.v1"})
+    repository = _Repository(_funding_bps_spec())
+    service = MarketNormalizationService(repository=repository, store=_Store(records, gaps=[evidence]))
+    result = service.materialize(spec_id=repository.spec.spec_id, source_series_id=11,
+        start=BASE, end=BASE + timedelta(minutes=2), known_at=BASE + timedelta(minutes=2))
+    if status == "complete":
+        assert result["statuses"] == {"valid": 2}
+        assert repository.records[1].fact.known_at == records[1].fact.known_at
+    else:
+        assert result["statuses"] == {"invalid_input": 1, "valid": 1}
+        invalid = repository.records[1].fact
+        assert invalid.value is None and invalid.reason == "source_interrupted"
+        assert invalid.known_at == known_at and invalid.input_watermark == 75

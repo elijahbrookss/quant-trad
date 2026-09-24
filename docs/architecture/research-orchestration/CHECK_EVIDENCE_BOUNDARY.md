@@ -111,6 +111,18 @@ Requirement planning runs before execution and exposes:
 - missing coverage; and
 - current quality/gap evidence.
 
+For periodic inputs, missing-interval checks follow the canonical source's
+observed cadence, not the request start. A five-minute entry delay can put a
+thirty-minute dependency range off-grid; that does not create candles at new
+minute offsets. Planning extrapolates the source grid backward to detect leading
+holes and checks only timestamps within the half-open range. Actual missing
+intervals still require source-bound evidence. No provider or UTC-session anchor
+is invented by coverage. Dataset preparation expands off-grid candle snapshot
+edges outward to whole source candles, records those snapshot bounds, and keeps
+the consumer's exact requirement range. Strict candle duration, known-at,
+continuity and frozen-range checks remain in force. Extra boundary candles do
+not extend the Check's decision window or admit future information.
+
 Planning never calls a provider. Preparation may call an existing acquisition
 service only when the operator explicitly authorizes network access and
 budgets. Check execution never acquires.
@@ -203,9 +215,28 @@ has decision time 12:01:07. With one-minute candles, its outcome price starts at
 unchanged, including any collection batching delay.
 
 Definitions v3/v4 and their evaluator identities remain registered unchanged.
-Requests without the new trigger retain v4 behavior. The new trigger selects
+Requests with typed fact inputs and without the new trigger retain v4 behavior. The new trigger selects
 v5 and is rejected under older definitions. Frozen evidence, replay and
 Check-to-Observation admission use the same existing workflow.
+
+## Candle-Only Indicator Evidence
+
+Definition v6 (evaluator v5) admits `indicator_event` Checks with no additional
+fact aliases. The Indicator's candle requirements, transitive graph, warmup and
+outcome tail still resolve and freeze through the existing evidence boundary.
+No dummy reference feed or Strategy is required. Fact-snapshot sampling and
+unbound enriched features remain invalid without their typed inputs.
+
+New candle-only requests select v6; definitions v3/v4/v5 and their evaluator
+payloads remain unchanged. V6 adds a descriptive per-horizon outcome summary
+from eligible events before the feature complete-case filter: resolved and
+unresolved counts, positive counts, mean/median direction-signed returns and
+mean favorable/adverse excursions. Returns are fractions, not percentages.
+Required unresolved outcomes and incomplete baseline features exclude events
+from this population. Optional unresolved horizons are counted separately.
+Empty populations report null averages. Eligibility gates remain authoritative;
+a descriptive summary does not grant significance, independent samples,
+execution realism, profitability, or permission to create a validated claim.
 
 ## Gap Ownership
 
@@ -322,3 +353,14 @@ The disposable DB regression in
 preparation, archived book lineage, freezing, Check execution, and replay, including a mutable revision
 after freezing. The test image verifies its source tree using the same provenance
 attestation as the runtime image; the Check's provenance checks remain active.
+
+## Producer Range Evidence At Admission
+
+Source-bound producer evidence can explain quiet intervals without relaxing
+exact-interval sample selection. Generic planning validates its normalized range
+status, not provider-specific heartbeat or sequence rules. Complete quiet evidence
+is included in pinned quality but excluded from the consumer's recorded gaps.
+Interrupted ranges remain recorded gaps, and unexplained intervals remain admission
+failures. A missing sampled bucket still yields an unavailable sample; quiet
+coverage does not manufacture a value. Frozen replay uses its pinned classification
+and witnesses, preserving older Dataset and Check behavior.
