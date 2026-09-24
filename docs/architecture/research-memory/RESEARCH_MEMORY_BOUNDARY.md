@@ -72,6 +72,16 @@ Research memory must not:
 - fetch provider data outside existing data-boundary services,
 - reconstruct report truth or runtime truth.
 
+## Research Memory Text Admission
+
+Item creation and explicit Check-to-Observation admission accept an optional
+body of at most 8,192 characters, matching the existing persistence column.
+Their HTTP request contracts reject an oversized body with a field-specific
+422 response before invoking the service. Accepted text is never truncated;
+non-ASCII characters count as characters, not encoded bytes. Keep long Study
+material in its structured payload or linked evidence and use the body for a
+readable summary. This does not change stored records or database schema.
+
 ## Research Check Semantics
 
 A research check is a bounded analytical run that asks:

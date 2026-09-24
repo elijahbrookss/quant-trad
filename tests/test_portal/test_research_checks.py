@@ -2266,3 +2266,36 @@ def test_research_read_routes_delegate_to_service_exports(monkeypatch: pytest.Mo
         "trail_item_id": "obs-1",
         "compare": ("check-a", "check-b"),
     }
+
+
+@pytest.mark.parametrize(
+    ("route", "service_name", "item_request"),
+    [
+        ("/api/research/items", "create_research_item", {"kind": "study", "title": "Episode review"}),
+        ("/api/research/checks/check-1/observations", "create_observation_from_check_evidence", {}),
+    ],
+)
+@pytest.mark.parametrize("body", [None, "é" * 8192, "é" * 8193], ids=["null", "at-limit", "over-limit"])
+def test_research_body_limit_rejects_before_service_without_truncation(
+    monkeypatch: pytest.MonkeyPatch, route: str, service_name: str,
+    item_request: dict[str, Any], body: str | None,
+) -> None:
+    received = []
+
+    def capture(*args):
+        received.append(args[-1])
+        return {"id": "saved", "body": args[-1].get("body")}
+
+    monkeypatch.setattr(research_controller.research_service, service_name, capture)
+    response = TestClient(app).post(route, json={**item_request, "body": body})
+
+    if body is not None and len(body) > 8192:
+        assert response.status_code == 422
+        assert received == []
+        error = response.json()["detail"][0]
+        assert error["loc"] == ["body", "body"]
+        assert error["ctx"]["max_length"] == 8192
+    else:
+        assert response.status_code == 201
+        assert received[0]["body"] == body
+        assert response.json()["body"] == body
