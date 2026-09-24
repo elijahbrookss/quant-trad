@@ -489,6 +489,23 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         print(application(_VERIFY,saved['binding']['database_id']).stdout[-400:],flush=True)
         print('PASS: real API, initializer, collector and both portals healthy; current-layout recovery copy verified; interrupted activation resumed same candidate; hold retired only after verified release; database and frozen/recent reads preserved',flush=True)
     except Exception:
+        # Synthetic mount-only diagnostics: never print resolved environments.
+        binding=pause._load(state/pause._OPERATOR_STATE)['binding']
+        expected={
+            '/qt-history':(binding['mounts']['/qt-history'][1],False),
+            '/app/logs/market-structure':(binding['mounts']['/app/logs/market-structure'][1],False),
+            '/run/quanttrad/storage-inventory.json':(binding['mounts']['/run/quanttrad/storage-inventory.json'][1],True),
+            '/run/qt-host-udev':(str(Path(binding['mounts']['/run/qt-handoff/udev'][1]).parent),True)}
+        differences={}
+        for name in pause._RUNTIME_WRITERS:
+            by_target={entry['target']:entry for entry in normalized['services'][name].get('volumes',[])}
+            for target,(source,readonly) in expected.items():
+                value=by_target.get(target,{})
+                if (value.get('type')!='bind' or value.get('source')!=source
+                        or value.get('read_only',False)!=readonly
+                        or value.get('bind')!={'create_host_path':False}):
+                    differences[name+':'+target]=dict(expected_source=source,expected_read_only=readonly,actual=value)
+        print('Owned writer mount differences: '+json.dumps(differences),flush=True)
         for service in ('backend','initialize','market-data-collector','frontend','frontend-v2'):
             ids=run(['docker','ps','-aq','--filter','label=com.docker.compose.project='+project,
                 '--filter','label=com.docker.compose.service='+service],env=env).stdout.split()
