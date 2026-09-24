@@ -2299,3 +2299,58 @@ def test_research_body_limit_rejects_before_service_without_truncation(
         assert response.status_code == 201
         assert received[0]["body"] == body
         assert response.json()["body"] == body
+
+
+def test_research_check_compare_preserves_frozen_descriptive_summary_and_clocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summaries = {
+        "left": {
+            "schema_version": "eligible_population_descriptive.v1",
+            "population": "eligible_events_before_feature_complete_case_filter",
+            "population_count": 2,
+            "inference": "descriptive_only_no_significance_or_execution_claim",
+            "horizons": {"24": {"mean_direction_signed_return": None, "resolved_count": 0, "unresolved_count": 2}},
+        },
+        "right": {
+            "schema_version": "eligible_population_descriptive.v1",
+            "population": "eligible_events_before_feature_complete_case_filter",
+            "population_count": 1,
+            "inference": "descriptive_only_no_significance_or_execution_claim",
+            "horizons": {"24": {"mean_direction_signed_return": -0.01, "resolved_count": 1, "unresolved_count": 0}},
+        },
+    }
+    resolutions = {
+        "left": {"24": {"horizon": 24, "horizon_kind": "bars", "resolved_count": 0, "unresolved_count": 2}},
+        "right": {"24": {"horizon": 24, "horizon_kind": "seconds", "resolved_count": 1, "unresolved_count": 0}},
+    }
+    items = {
+        key: {
+            "id": key, "kind": "research_check", "timeframe": "5m",
+            "payload": {"result": {"schema_version": "research.check_result.v2", "result": {
+                "check_family": "event_fact_analysis", "status": "completed",
+                "sample_count": summary["population_count"],
+                "descriptive_outcomes": summary, "outcome_resolution": resolutions[key],
+            }}},
+        }
+        for key, summary in summaries.items()
+    }
+    reads = []
+
+    def get_item(item_id):
+        reads.append(item_id)
+        return items[item_id]
+
+    monkeypatch.setattr(service.repository, "get_item", get_item)
+    result = service.compare_research_checks("left", "right")
+
+    assert reads == ["left", "right"]
+    for key in items:
+        assert result[key]["descriptive_outcomes"] == summaries[key]
+        assert result[key]["outcome_resolution"] == resolutions[key]
+        assert result[key]["timeframe"] == "5m"
+    # Distinct clocks/populations and unresolved values remain visible; this
+    # projection does not manufacture matched statistics or legacy deltas.
+    assert result["deltas"]["forward_summary"] == {}
+    assert result["left"]["outcomes"] == {}
+    assert result["right"]["outcomes"] == {}

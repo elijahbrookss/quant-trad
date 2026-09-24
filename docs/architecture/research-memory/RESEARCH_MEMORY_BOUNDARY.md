@@ -341,6 +341,14 @@ fallback rank metric when intent is missing. Missing rank keys, metric
 directions, grouping fields, or required dimensions fail loud before presenting
 misleading evidence.
 
+Saved Check comparisons expose each result's emitted `descriptive_outcomes`
+and `outcome_resolution` alongside its timeframe. These projections preserve
+population definitions, unresolved values, horizon kinds and inference limits
+without recalculating events or treating absent values as zero. Legacy
+`forward_summary` deltas still apply only to legacy `outcomes.summary` metrics;
+the descriptive projection does not create paired-population, common-clock or
+causal-effect statistics. Those calculations remain Check-owned work.
+
 ## Memory Graph
 
 The storage model is intentionally small:
