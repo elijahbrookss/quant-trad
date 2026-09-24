@@ -63,6 +63,8 @@ def main():
         if args.storage_layout:
             hdd = root / 'prepared-hdd'
             (hdd / 'archives').mkdir(parents=True)
+            recovery_secrets = root / 'recovery-secrets'
+            recovery_secrets.mkdir(mode=0o700)
             inventory = root / 'inventory.json'
             inventory.write_text(json.dumps({'schema_version': 'qt.storage_inventory.v1', 'targets': [
                 dict(target_id='ssd', label='Recent', filesystem_uuid='fixture-ssd',
@@ -83,6 +85,7 @@ def main():
                 QT_MARKET_DATA_EXPECTED_UUID='fixture-hdd', QT_MARKET_DATA_WORKING_ROOT=str(archive),
                 QT_MARKET_DATA_WORKING_EXPECTED_UUID='fixture-ssd',
                 QT_STORAGE_INVENTORY_HOST_PATH=str(inventory),
+                QT_STORAGE_RECOVERY_SECRETS_ROOT=str(recovery_secrets),
                 QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH=str(limits), QT_DOCKER_SOCKET_GID='70')
             base += ['--file', 'docker/docker-compose.storage-server.yml']
         config = json.loads(run(base + ['config', '--format', 'json'], env=env).stdout)
@@ -90,6 +93,7 @@ def main():
         config['networks'] = {'quanttrad': {'name': project + '-network', 'internal': True}}
         config['volumes'] = {'postgres-data': {'name': project + '-postgres'}}
         if args.storage_layout:
+            config['volumes']['storage-recovery-socket'] = dict(name=project+'-recovery-socket')
             config['volumes']['storage-history'] = dict(name=project+'-history', driver='local',
                 driver_opts=dict(type='tmpfs', device='tmpfs', o='size=268435456,uid=70,gid=70,mode=0700'))
             # Empty disposable cluster only. The real overlay preserves PGDATA.

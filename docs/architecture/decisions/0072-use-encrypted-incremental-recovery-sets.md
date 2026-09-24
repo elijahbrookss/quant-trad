@@ -159,3 +159,17 @@ Full QT application acceptance passed at 170f7337: the preserved v1/v2 fixture's
 current corrections, frozen results and archived book replay matched after
 encrypted incremental physical restoration. The later preparation-operator
 integration requires its own exact-head CI result before deployment.
+
+The fixed storage overlay mounts the operator-provisioned private SSD recovery
+directory read-only into PostgreSQL and the collector, and shares their Unix
+socket through a named volume. Other services receive no recovery keys.
+The overlay does not enable archiving; the explicit activation sequence must
+initialize repositories before changing PostgreSQL settings.
+
+Paired points promise immediate consistency, not arbitrary later point-in-time
+recovery. Explicit native expiry retains one backup's continuous WAL window while
+preserving the WAL needed for every retained native backup. Whole-chain retirement
+remains governed by paired receipts. Every maintenance visit, including not-due
+visits, rejects disabled archiving or a failure newer than the last archive success.
+Existing filesystem reserve checks still apply; WAL is never acknowledged and
+dropped to conceal a full or unavailable backup destination.

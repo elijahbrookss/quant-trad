@@ -34,10 +34,21 @@ x-inventory-mount: &inventory-mount
   bind:
     create_host_path: false
 
+# Operator-provisioned private SSD directory. Never place these keys on the HDD.
+x-recovery-secrets: &recovery-secrets
+  type: bind
+  source: ${QT_STORAGE_RECOVERY_SECRETS_ROOT:?Prepared private SSD recovery key directory is required}
+  target: /run/quanttrad/recovery
+  read_only: true
+  bind:
+    create_host_path: false
+
 services:
   tsdb:
     volumes:
       - *history-mount
+      - *recovery-secrets
+      - storage-recovery-socket:/var/run/postgresql
 
   backend:
     # Match the pinned PostgreSQL UID so every archive writer owns compatible
@@ -79,9 +90,14 @@ services:
       - *history-mount
       - *working-mount
       - *inventory-mount
+      - *recovery-secrets
+      - storage-recovery-socket:/var/run/postgresql
       - type: bind
         source: ${QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH:?Reviewed storage maintenance limits file is required}
         target: /run/quanttrad/storage-maintenance.json
         read_only: true
         bind:
           create_host_path: false
+
+volumes:
+  storage-recovery-socket:

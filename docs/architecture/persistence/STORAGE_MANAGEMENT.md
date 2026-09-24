@@ -1071,3 +1071,11 @@ bounded by the existing cancellation, deadline and filesystem reserve checks.
 Production images contain pinned tools. Image availability does not enable WAL
 archiving, provision keys, qualify a restore or activate a backup policy. Those
 operator steps and full QT application recovery remain pending under ADR0072.
+
+The encrypted recovery deployment uses the fixed storage overlay's private SSD
+recovery-key bind (PostgreSQL and collector only) and shared database socket.
+It does not activate archiving implicitly. Native WAL expiry retains consistency
+logs for all saved points while bounding obsolete between-backup history;
+arbitrary later PITR is outside the paired archive contract. The existing
+maintenance failure surface reports disabled or failing PostgreSQL archiving
+even when the next backup is not due.

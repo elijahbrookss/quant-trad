@@ -202,6 +202,18 @@ def rehearse(*, pg_bin, pgbackrest, restic):
         # Restore the selected complete pair; later source writes stay outside.
         with engine.begin() as conn:
             conn.exec_driver_sql("INSERT INTO observations VALUES (999999,'after recovery point')")
+        older, older_socket = root/"older", root/"older-socket"
+        older_socket.mkdir(mode=0o700)
+        current._run(current._br("--pg1-path="+str(older), "--set="+third["database_label"],
+                                "--type=immediate", "--target-action=promote",
+                                "--archive-mode=off", "restore"))
+        start(older, older_socket, restored=True)
+        older_engine = create_engine(url.set(host=str(older_socket)))
+        try:
+            with older_engine.connect() as conn:
+                assert conn.scalar(text("SELECT count(*) FROM observations")) == 1001
+        finally:
+            older_engine.dispose()
         restored, restored_socket = root/"restored", root/"restored-socket"
         restored_socket.mkdir(mode=0o700)
         current._run(current._br("--pg1-path="+str(restored), "--set="+fourth["database_label"],
@@ -235,6 +247,7 @@ def rehearse(*, pg_bin, pgbackrest, restic):
             "archive_expiry_excluded":True,
             "failed_archive_half_preserved_completed_points":True,
             "paired_rotation_preserved_dependencies":True,
+            "older_and_latest_points_survive_wal_expiry":True,
             "interrupted_retirement_reconciled_without_new_backup":True,
             "later_writes_excluded":True,
             "full_qt_frozen_reader_qualified":False,

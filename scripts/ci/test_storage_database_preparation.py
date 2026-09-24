@@ -402,6 +402,8 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         history=options['request']['resource_limits'],
         recovery=dict(max_bytes=32*1024**2,timeout_seconds=120,
             headroom_bytes={'ssd':1024**2,'hdd':1024**2},max_objects=1000))))
+    recovery_secrets=control_root/'recovery-secrets'
+    recovery_secrets.mkdir(mode=0o700,exist_ok=True)
     configured={**env,'QT_SERVER_ENV_FILE':str(private),'QT_COMPOSE_PROJECT_NAME':project,
         'QT_RELEASE_REVISION':options['request']['source_revision'],
         'QT_SOURCE_TREE_HASH':options['request']['source_tree_hash'],
@@ -409,6 +411,7 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         'QT_MARKET_DATA_EXPECTED_UUID':'fixture-hdd','QT_MARKET_DATA_WORKING_ROOT':str(working),
         'QT_MARKET_DATA_WORKING_EXPECTED_UUID':'fixture-ssd','QT_STORAGE_INVENTORY_HOST_PATH':str(inventory),
         'QT_STORAGE_MAINTENANCE_LIMITS_HOST_PATH':str(limits),
+        'QT_STORAGE_RECOVERY_SECRETS_ROOT':str(recovery_secrets),
         'QT_DOCKER_SOCKET_GID':str(Path('/var/run/docker.sock').stat().st_gid)}
     for flag in ('BOOTSTRAP_MARKET_DATA','ENABLE_SCHEDULED_FACTS','ENABLE_STRUCTURED_FACTS','ENABLE_TRADE_STREAMS','ENABLE_L2_STREAMS'):
         configured['QT_SINGLE_NODE_'+flag]='false'
@@ -416,6 +419,9 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         '--file','docker/docker-compose.server.yml','--file','docker/docker-compose.storage-server.yml',
         'config','--format','json'],env=configured).stdout)
     model=json.loads(json.dumps(recipe))
+    model.setdefault('volumes',{})['storage-recovery-socket']=dict(name=project+'-recovery-socket')
+    model['services']['tsdb'].setdefault('volumes',[]).append(
+        dict(type='volume',source='storage-recovery-socket',target='/var/run/postgresql'))
     for name in ('backend','initialize','market-data-collector','frontend','frontend-v2'):
         service=rendered['services'][name]
         service.pop('build',None);service.pop('ports',None)

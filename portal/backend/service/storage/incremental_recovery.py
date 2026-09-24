@@ -358,6 +358,13 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             if label == _root_label(label) and label not in roots:
                 self._run(self._br("--set="+label, "--repo1-retention-full=9999999",
                                    "--repo1-retention-archive=9999999", "expire"))
+        # QT promises the paired backup's immediate consistency point, not
+        # arbitrary later PITR. Native expiry preserves each backup's required
+        # WAL while removing obsolete between-backup WAL. Do not expire chains
+        # implicitly: only the explicit whole-root retirement above may do so.
+        self._run(self._br("--repo1-retention-full=9999999",
+                           "--repo1-retention-archive-type=incr",
+                           "--repo1-retention-archive=1", "expire"))
         native_snapshots = json.loads(self._run(self._rs("snapshots")))
         if not snapshots <= {s["id"] for s in native_snapshots}:
             raise RuntimeError("incremental_published_archive_snapshot_missing")

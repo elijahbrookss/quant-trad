@@ -124,6 +124,21 @@ def run_due_local_recovery(database, *, storage_root, pg_dump, pg_controldata,
             max_bytes=max_bytes,reserve_bytes=floors[history.target_id],
             timeout_seconds=max(1,int(deadline-monotonic())),max_objects=max_objects,
             cancelled=cancelled,check_resources=resources)
+        if incremental is not None:
+            # Check on every maintenance visit, including not-due visits.
+            # Never acknowledge or discard unarchived WAL to hide an outage.
+            archiver = owner.execute(text("""
+                SELECT current_setting('archive_mode') AS mode,
+                       current_setting('archive_command') AS command,
+                       last_failed_time, last_archived_time
+                FROM pg_stat_archiver
+            """)).mappings().one()
+            if archiver["mode"] != "on" or not archiver["command"].strip():
+                raise RuntimeError("incremental_wal_archiving_not_enabled")
+            if (archiver["last_failed_time"] is not None
+                    and (archiver["last_archived_time"] is None
+                         or archiver["last_failed_time"] > archiver["last_archived_time"])):
+                raise RuntimeError("incremental_wal_archiving_failed")
         with copies.lock():
             if incremental is not None:
                 # Finish an interrupted retirement before reporting not_due.
