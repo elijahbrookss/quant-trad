@@ -199,6 +199,10 @@ def test_legacy_witness_and_referenced_spec_guard_survive_cooling(storage, tmp_p
             reader = market_data.canonical_fact_storage_repository
             assert reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="b" * 64)
             assert reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="7" * 64)
+            assert reader.material_witness_exists(session, series_ids=[storage.series_id],
+                material_hash="b" * 64, evidence_key="custom_old_key", include_canonical=False)
+            assert reader.material_witness_exists(session, series_ids=[storage.series_id],
+                material_hash="7" * 64, evidence_key="numeric_old_key", include_canonical=False)
             assert not reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="c" * 64)
             assert not reader.material_witness_exists(session, series_ids=[storage.series_id], material_hash="b" * 64,
                                                       evidence_key="_qt_bbo_evidence", include_canonical=False)
@@ -332,3 +336,69 @@ def test_book_sources_replay_and_trade_flow_status_survive_cooling(storage, tmp_
     _persist_reader_fixture(storage, flow_series, [canonicalize_trade_flow(newest, source=storage.fact.source)])
     after = check_sources()[0]
     assert (after["bucket_count"], after["complete_bucket_count"], after["incomplete_bucket_count"]) == (1, 1, 0)
+
+
+def test_keyed_hot_material_witness_seeks_provenance_index(storage, monkeypatch):
+    """Exercise the repository's exact fast query against a large disposable fixture."""
+    import hashlib
+    from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
+
+    wanted = hashlib.md5(b"7777").hexdigest()
+    reader = PostgresCanonicalFactStorageRepository()
+    monkeypatch.setattr(reader, "read_rows_by_ids", lambda _session, ids: {
+        identity: {"id": identity, "series_id": 1, "material_hash": "other",
+                   "provenance": {"_qt_test_evidence": {"legacy_material_hash": wanted}}}
+        for identity in ids
+    })
+    with storage.database.session() as session:
+        session.execute(text("""
+            CREATE TEMP TABLE witness_headers ON COMMIT DROP AS
+            SELECT n::text AS id, current_date AS storage_day, 1 AS series_id
+            FROM generate_series(1, 10000) n
+        """))
+        session.execute(text("CREATE UNIQUE INDEX witness_headers_id ON witness_headers(id)"))
+        session.execute(text("""
+            CREATE TEMP TABLE witness_payloads ON COMMIT DROP AS
+            SELECT id, storage_day, jsonb_build_object('_qt_test_evidence',
+                jsonb_build_object('legacy_material_hash',md5(id))) AS provenance
+            FROM witness_headers
+        """))
+        # Containment can admit structural supersets. The residual exact-text
+        # predicate must exclude arrays before the candidate is hydrated.
+        session.execute(text("""
+            UPDATE witness_payloads SET provenance=jsonb_build_object('_qt_test_evidence',
+                jsonb_build_object('legacy_material_hash',jsonb_build_array(:wanted)))
+            WHERE id='1'
+        """), {"wanted": wanted})
+        session.execute(text("""
+            CREATE INDEX witness_provenance_gin ON witness_payloads
+            USING gin(provenance jsonb_path_ops)
+        """))
+        session.execute(text("ANALYZE witness_headers"))
+        session.execute(text("ANALYZE witness_payloads"))
+        executed = []
+
+        class FixtureSession:
+            def execute(self, statement, params):
+                query = str(statement).replace("market.fact_hot_payloads", "witness_payloads")
+                query = query.replace("market.fact_versions", "witness_headers")
+                executed.append((query, dict(params)))
+                return session.execute(text(query), params)
+
+        assert reader.material_witness_exists(FixtureSession(), series_ids=[1],
+            material_hash=wanted, evidence_key="_qt_test_evidence", include_canonical=False)
+        assert len(executed) == 1
+        query, params = executed[0]
+        assert session.execute(text(query), params).scalars().all() == ["7777"]
+        plan = session.execute(text("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query),
+                               params).scalar_one()
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        observed = list(nodes(plan[0]["Plan"]))
+        assert any(node.get("Index Name") == "witness_provenance_gin" for node in observed)
+        scans = [node for node in observed if node.get("Relation Name") == "witness_payloads"]
+        assert scans and sum(node["Actual Rows"] * node["Actual Loops"] for node in scans) < 10
