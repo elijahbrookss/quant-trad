@@ -1019,3 +1019,42 @@ def test_fixed_recovery_mounts_require_private_external_keys_and_exact_socket(tm
     socket["source"]="postgres-data"
     with pytest.raises(RuntimeError,match="socket_mount_invalid"):
         pause._database_recovery_mounts(service,volumes,str(history))
+
+
+@pytest.mark.parametrize("change", [None, "key-source", "key-write", "key-propagation",
+                                  "socket-name", "socket-write", "missing", "extra"])
+def test_bound_runtime_revalidates_admitted_database_recovery_pair(runtime_activation_setup, change):
+    state,database,options,runtime,model=runtime_activation_setup
+    runtime.fault="start"
+    with pytest.raises(TimeoutError):
+        pause.run_held_runtime_handoff(state,activation_timeout_seconds=300,**options)
+    saved=pause._load(state/pause._RUNTIME_STATE)
+    keys=state/"recovery-keys";keys.mkdir(mode=0o700)
+    model["volumes"]["storage-recovery-socket"]=dict(name="fixed-recovery-socket",external=True)
+    model["services"]["tsdb"]["volumes"] += [
+        dict(type="bind",source=str(keys),target="/run/quanttrad/recovery",
+             read_only=True,bind=dict(create_host_path=False)),
+        dict(type="volume",source="storage-recovery-socket",target="/var/run/postgresql")]
+    saved["admission"]["recipe_sha256"]=pause._digest(model)
+    (state/pause.RUNTIME_RECIPE).write_text(json.dumps(model))
+    observed=database.details[saved["binding"]["database_id"]]
+    key_mount=dict(Type="bind",Source=str(keys),Destination="/run/quanttrad/recovery",
+                   RW=False,Propagation="rprivate")
+    socket_mount=dict(Type="volume",Source="/fixture/recovery-socket",
+                      Destination="/var/run/postgresql",RW=True,Name="fixed-recovery-socket")
+    observed["mounts"] += [key_mount,socket_mount]
+    for mount in (key_mount,socket_mount):
+        saved["binding"]["mounts"][mount["Destination"]]=[mount["Type"],mount["Source"],mount["RW"]]
+    if change=="key-source":key_mount["Source"]="/wrong"
+    elif change=="key-write":key_mount["RW"]=True
+    elif change=="key-propagation":key_mount["Propagation"]="rslave"
+    elif change=="socket-name":socket_mount["Name"]="other-volume"
+    elif change=="socket-write":socket_mount["RW"]=False
+    elif change=="missing":observed["mounts"].remove(socket_mount)
+    elif change=="extra":observed["mounts"].append(dict(Type="bind",Source="/wrong",Destination="/extra",RW=True))
+    if change is None:
+        assert pause._runtime_bound_model(state,saved,options["request"])==model
+    else:
+        with pytest.raises(RuntimeError,match="prepared_database_changed"):
+            pause._runtime_bound_model(state,saved,options["request"])
+    assert (state/pause.HOLD).exists() and runtime.ups==1

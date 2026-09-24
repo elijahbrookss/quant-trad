@@ -758,6 +758,8 @@ nor mounting the recovery directory activates backups.
    existing PGDATA and HDD plus only the read-only private recovery bind and socket.
    The collector gets the identical pair; API/frontends receive no recovery keys.
    The held procedure retains its image, cluster, deadline and mount checks.
+   Activation and retries revalidate the same admitted key bind and socket volume,
+   including read-only key access, private propagation and exact socket identity.
 4. Run packaged storage_recovery_prepare.py as UID70 in the serving database's
    filesystem/PID namespace with canonical PG_DSN, the two-target inventory,
    expected database identity and explicit measured resource limits. Its private

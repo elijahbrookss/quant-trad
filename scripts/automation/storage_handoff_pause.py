@@ -1097,11 +1097,24 @@ def _runtime_bound_model(state_root, saved, request):
     _history_filesystem(preparation["history_root"], preparation["history_uuid"])
     database = _database_details(saved["binding"]["database_id"])
     actual_mounts = {m["Destination"]: (m["Type"], m["Source"], m["RW"]) for m in database["mounts"]}
+    recovery = _database_recovery_mounts(model["services"]["tsdb"], model["volumes"], preparation["history_root"])
     expected_mounts = {target: tuple(saved["binding"]["mounts"][target])
-                       for target in ("/var/lib/postgresql/data", "/qt-history")}
+                       for target in {"/var/lib/postgresql/data", "/qt-history"} | set(recovery)}
+    recovery_unchanged = True
+    if recovery:
+        by_target = {m["Destination"]: m for m in database["mounts"]}
+        keys = by_target.get("/run/quanttrad/recovery", {})
+        socket = by_target.get("/var/run/postgresql", {})
+        recovery_unchanged = (
+            keys.get("Type") == "bind" and keys.get("RW") is False
+            and keys.get("Source") == recovery["/run/quanttrad/recovery"]["source"]
+            and keys.get("Propagation") == "rprivate"
+            and socket.get("Type") == "volume" and socket.get("RW") is True
+            and socket.get("Name") == model["volumes"]["storage-recovery-socket"]["name"])
     if (database["image"] != preparation["image"]
             or _database_contract(database) != preparation["target_contract"]
-            or actual_mounts != expected_mounts or len(database["mounts"]) != 2
+            or actual_mounts != expected_mounts or len(database["mounts"]) != len(expected_mounts)
+            or not recovery_unchanged
             or not _same_database_networks(database, preparation["networks"])
             or _cluster_identifier(database["id"]) != preparation["cluster_identifier"]):
         raise RuntimeError("storage_runtime_prepared_database_changed")
