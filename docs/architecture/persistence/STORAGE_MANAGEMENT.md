@@ -1039,3 +1039,14 @@ ingestion. Full-model ingestion is exercised with both automatic and forced
 generic planning while another connection holds a historical partition lock.
 Clean bootstrap and the explicit v1-to-v2 cutover install the corrected bodies;
 startup refuses mismatched installed bodies instead of silently replacing them.
+
+## Encrypted incremental recovery candidate — September 24
+
+The user authorized replacing repeated logical full copies with encrypted
+incremental recovery. The existing logical-copy implementation and completed
+receipts remain intact while its replacement is qualified. The disposable
+physical/database-plus-archive experiment is described in
+[ADR 0072](../decisions/0072-use-encrypted-incremental-recovery-sets.md).
+It does not activate a new backup scheduler, alter saved retention semantics or
+qualify a production recovery. Report this candidate separately from the
+currently implemented local-copy maintenance path above.

@@ -1296,3 +1296,26 @@ absent. Runtime source was b79e0130 with the recorded host PID-hash and fixture
 receipt corrections. Normal backend/docs checks passed. This is disposable
 functional evidence, not physical-drive performance, full-volume migration,
 complete capacity qualification or a live deployment.
+
+## Encrypted incremental backup experiment — September 24
+
+The user's amended backup scope is recorded in ADR 0072. The reusable disposable
+runner is scripts/ci/rehearse_incremental_recovery.py. It accepts explicit local
+PostgreSQL/pgBackRest/restic binaries, creates its own temporary cluster and
+secrets, rejects root execution, clears inherited connection configuration and
+never accepts a database DSN or existing data directory. The PostgreSQL native
+proof is not the production recovery result.
+
+The clean-database-bootstrap CI job builds docker/test/incremental-recovery.Dockerfile
+and runs it without networking or host volumes, with CPU, memory and process
+limits. Its Timescale extension probe supplements the database/index/archive
+proof. Production packaging, coordinated QT archive ownership, dependency-safe
+retention, key escrow and application acceptance remain separate pending work;
+this disposable image is not a production deployment artifact.
+
+A passing run demonstrates reconstruction of the chosen incremental endpoint,
+including historical tables/indexes and unchanged frozen rows, exact archive
+hashes, exclusion of later database writes, rejection of incorrect keys and
+preservation of complete archive snapshots after a forced backup-process crash.
+Small-fixture duration and compressed-byte ratios must not be extrapolated to
+the growing production database.

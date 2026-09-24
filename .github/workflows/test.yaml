@@ -176,6 +176,14 @@ jobs:
       - name: Verify PostgreSQL filesystem namespace
         run: ./scripts/ci/run_test_suite.sh db tests/test_market_data/test_header_namespace_db.py
 
+      - name: Prove encrypted incremental database and archive recovery
+        run: |
+          docker build --file docker/test/incremental-recovery.Dockerfile \
+            --tag qt-incremental-recovery-proof .
+          docker run --rm --network none --cpus 2 --memory 2g --pids-limit 128 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            qt-incremental-recovery-proof
+
       - name: Run PostgreSQL-backed contract tests
         env:
           PG_DSN: postgresql+psycopg2://quanttrad@127.0.0.1:5432/quanttrad_contracts
