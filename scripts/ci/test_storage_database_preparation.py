@@ -282,8 +282,8 @@ def operator_rehearsal_inner(project, image, source_root, history_root, control_
     recipe=json.loads(json.dumps(model));recipe['services']['tsdb']['volumes'].append(
         dict(type='bind',source=str(history_root),target='/qt-history',bind=dict(create_host_path=False)))
     if runtime_images:
-        recovery_secrets=control_root/'recovery-secrets'
-        recovery_secrets.mkdir(mode=0o700);os.chown(recovery_secrets,70,70)
+        recovery_secrets=Path('/dev/shm')/(project+'-recovery-keys')
+        assert recovery_secrets.is_dir() and recovery_secrets.stat().st_uid==70
         socket_name=project+'-recovery-socket'
         recipe['volumes']['storage-recovery-socket']=dict(name=socket_name,external=True)
         recipe['services']['tsdb']['volumes'] += [
@@ -411,8 +411,8 @@ def _activate_fixture_runtime(*, state, project, image, runtime_images, options,
         history=options['request']['resource_limits'],
         recovery=dict(max_bytes=32*1024**2,timeout_seconds=120,
             headroom_bytes={'ssd':1024**2,'hdd':1024**2},max_objects=1000))))
-    recovery_secrets=control_root/'recovery-secrets'
-    recovery_secrets.mkdir(mode=0o700,exist_ok=True)
+    recovery_secrets=Path('/dev/shm')/(project+'-recovery-keys')
+    assert recovery_secrets.is_dir()
     configured={**env,'QT_SERVER_ENV_FILE':str(private),'QT_COMPOSE_PROJECT_NAME':project,
         'QT_RELEASE_REVISION':options['request']['source_revision'],
         'QT_SOURCE_TREE_HASH':options['request']['source_tree_hash'],
@@ -517,6 +517,8 @@ def operator_rehearsal_outer(image, *runtime_images):
     controller=project+'-controller'
     history='/dev/shm/'+project+'-history'
     history_created=False
+    recovery_keys='/dev/shm/'+project+'-recovery-keys'
+    recovery_keys_created=False
     try:
         roots=[]
         for name in ('source','control'):
@@ -531,6 +533,12 @@ def operator_rehearsal_outer(image, *runtime_images):
         run(['docker','run','--rm','--pull','never','--network','none','--ipc','host',
              '--entrypoint','python',image,'-c',prepare_code,history,project],env=env)
         history_created=True
+        if runtime_images:
+            # Docker forces rslave for binds beneath its own data root.
+            # Use an ordinary host path, preserving the production rprivate guard.
+            run(['docker','run','--rm','--pull','never','--network','none','--ipc','host',
+                 '--entrypoint','python',image,'-c',prepare_code,recovery_keys,project],env=env)
+            recovery_keys_created=True
         args=['docker','run','--rm','--pull','never','--name',controller,'--network','none','--ipc','host','--user','0:0',
             '--mount','type=bind,source='+str(ROOT)+',target=/qt-host,readonly',
             # Docker Desktop's raw socket preserves the daemon-volume paths below.
@@ -559,6 +567,9 @@ def operator_rehearsal_outer(image, *runtime_images):
             cleanup_code="import shutil,sys;from pathlib import Path;p=Path(sys.argv[1]);assert p.parent==Path('/dev/shm') and p.resolve(strict=True)==p and not p.is_symlink();assert (p/'.qt-rehearsal-owner').read_text()==sys.argv[2];shutil.rmtree(p)"
             run(['docker','run','--rm','--pull','never','--network','none','--ipc','host',
                  '--entrypoint','python',image,'-c',cleanup_code,history,project],env=env)
+        if recovery_keys_created:
+            run(['docker','run','--rm','--pull','never','--network','none','--ipc','host',
+                 '--entrypoint','python',image,'-c',cleanup_code,recovery_keys,project],env=env)
         for volume in reversed(created):run(['docker','volume','rm',volume],env=env)
         print('Owned held-operator fixture resources removed',flush=True)
 
