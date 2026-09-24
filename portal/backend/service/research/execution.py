@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from market_data.range_evidence import is_complete_range_evidence
 from market_data.frozen import semantic_hash
 from market_data.frozen import normalize_frozen_market_data_read_binding
 from research_science.check import (
@@ -106,7 +107,10 @@ def _assertions(request: CheckRequest) -> list[ScalarAssertionSpec]:
 
 
 def _quality(plan: ResolvedCheckPlan, *, evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    gaps = list((evidence or {}).get("recorded_gaps") or plan.quality_evidence)
+    gaps = [row for row in (
+        evidence["recorded_gaps"] if evidence is not None and "recorded_gaps" in evidence
+        else plan.quality_evidence
+    ) if not is_complete_range_evidence(row)]
     return {
         "status": "degraded" if gaps else "clean",
         "gap_policy": plan.gap_policy,
@@ -178,10 +182,11 @@ def _load_market_inputs(
     }
     if plan.indicator_graph:
         indicator_id = str(scope.get("indicator_id") or "")
-        bound_gaps = list(
-            (resolver.dataset_binding or {}).get("recorded_gaps")
-            or plan.quality_evidence
-        )
+        bound_gaps = [row for row in (
+            resolver.dataset_binding["recorded_gaps"]
+            if resolver.dataset_binding is not None and "recorded_gaps" in resolver.dataset_binding
+            else plan.quality_evidence
+        ) if not is_complete_range_evidence(row)]
         candle_gaps = [
             dict(row)
             for row in bound_gaps

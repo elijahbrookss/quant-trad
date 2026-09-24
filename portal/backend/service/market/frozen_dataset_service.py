@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+from market_data.range_evidence import is_complete_range_evidence
 from market_data.contracts import (
     DATASET_IDENTITY_HASH_VERSION,
     DatasetSeriesRequest,
@@ -507,7 +508,8 @@ def resolve_frozen_dataset_read_binding(
         alias_quality = [
             row
             for row in pinned_quality
-            if row.get("start") is not None
+            if not is_complete_range_evidence(row)
+            and row.get("start") is not None
             and row.get("end") is not None
             and _utc(row["end"], field="quality.end") > required_start
             and _utc(row["start"], field="quality.start") < required_end

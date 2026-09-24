@@ -3235,6 +3235,34 @@ class PostgresMarketDataRepository:
                 )
         return projected
 
+    def _range_evidence_with_session(
+        self, session, *, series_id, start, end, as_of_commit_seq,
+        known_at_lte=None, include_source_identity=False,
+    ):
+        quality = self._gap_evidence_with_session(
+            session, series_id=series_id, start=start, end=end,
+            as_of_commit_seq=as_of_commit_seq, known_at_lte=known_at_lte,
+            include_source_identity=include_source_identity,
+        )
+        fact_type = session.execute(
+            text("SELECT fact_type FROM market.series WHERE id=:series_id"),
+            {"series_id": series_id},
+        ).scalar_one_or_none()
+        if fact_type is None:
+            return quality
+        owner = get_fact_contract(str(fact_type)).range_evidence_owner
+        if owner is not None:
+            from .book_range_evidence import read_book_range_evidence
+            producers = {"book_event_buckets.v1": read_book_range_evidence}
+            if owner not in producers:
+                raise RuntimeError(f"market_range_evidence_owner_unavailable: owner={owner}")
+            quality.extend(producers[owner](
+                session, repository=self, series_id=series_id, start=start, end=end,
+                watermark=as_of_commit_seq, known_at_lte=known_at_lte,
+                object_store=canonical_fact_storage_repository.object_store_factory(),
+            ))
+        return quality
+
     def list_gap_evidence(
         self,
         *,
@@ -3250,7 +3278,7 @@ class PostgresMarketDataRepository:
             watermark = as_of_commit_seq
             if watermark is None:
                 watermark = self._current_commit_seq_with_session(session)
-            return self._gap_evidence_with_session(
+            return self._range_evidence_with_session(
                 session,
                 series_id=request.series_id,
                 start=request.start,
@@ -3784,7 +3812,7 @@ class PostgresMarketDataRepository:
                 series_identity = dict(identity)
                 if not dict(series_identity.get("dimensions") or {}):
                     series_identity.pop("dimensions", None)
-                quality = self._gap_evidence_with_session(
+                quality = self._range_evidence_with_session(
                     session,
                     series_id=item.series_id,
                     start=item.start,
@@ -3792,6 +3820,13 @@ class PostgresMarketDataRepository:
                     as_of_commit_seq=watermark,
                     include_source_identity=True,
                 )
+                for range_row in quality:
+                    for raw_ref in (range_row.get("evidence") or {}).get("archives", []):
+                        archive_refs[str(raw_ref["manifest_id"])] = {
+                            key: str(raw_ref[key]) for key in (
+                                "object_sha256", "content_fingerprint", "object_key", "object_uri"
+                            )
+                        }
                 canonical_trade_history = fact_type in {MARKET_TRADE_FACT_TYPE, TRADE_FLOW_FACT_TYPE} and all(
                     isinstance(record, CanonicalFactRecord) for record in records)
                 trade_records = records

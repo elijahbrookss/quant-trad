@@ -127,7 +127,7 @@ def _canonical_trade(fixture, raw, *, trade_id="same-trade"):
 
 def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=False, replay_features=False,
                       definition_id="book-prefix", instrument_id="storage-fixture", provider_product_id="BTC-USD",
-                      response_window=False):
+                      response_window=False, continuous_sequence=False):
     from data_providers.streams.coinbase import CoinbaseMessageParser
     from data_providers.streams.contracts import ProviderRawMessage
     from market_data.canonical_adapters import canonicalize_l2_snapshot, canonicalize_l2_mutation_batch
@@ -174,14 +174,14 @@ def _raw_book_fixture(storage, tmp_path, monkeypatch, *, trailing_heartbeat=Fals
         timestamp = (event_base + timedelta(seconds=seconds)).isoformat()
         heartbeat = ordinal in (2, 4) and not response_window
         if heartbeat:
-            payload = {"channel": "heartbeats", "timestamp": timestamp, "sequence_num": 0,
-                       "events": [{"current_time": timestamp, "heartbeat_counter": "1"}]}
+            payload = {"channel": "heartbeats", "timestamp": timestamp, "sequence_num": ordinal - 1 if continuous_sequence else 0,
+                       "events": [{"current_time": timestamp, "heartbeat_counter": str(ordinal // 2) if continuous_sequence else "1"}]}
         else:
             levels = [("bid", "99", "10"), ("offer", "101", "11")] if ordinal == 1 else [("bid", "99", "12")]
             if response_window:
                 levels = [("bid", "99.98", "10"), ("offer", "100.02", "11")] if ordinal == 1 else [
                     ("bid", "99.98", {2: "9", 3: "4", 4: "7", 5: "8"}[ordinal])]
-            sequence = ordinal - 1 if response_window else (0 if ordinal == 1 else 1)
+            sequence = ordinal - 1 if response_window or continuous_sequence else (0 if ordinal == 1 else 1)
             # A later received update can refer to an earlier provider event
             # time. Its genuine fenced canonical known-at must not leak into a
             # response whose decision clock precedes receipt.

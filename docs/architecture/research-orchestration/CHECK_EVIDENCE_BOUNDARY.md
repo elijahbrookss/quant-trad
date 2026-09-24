@@ -322,3 +322,14 @@ The disposable DB regression in
 preparation, archived book lineage, freezing, Check execution, and replay, including a mutable revision
 after freezing. The test image verifies its source tree using the same provenance
 attestation as the runtime image; the Check's provenance checks remain active.
+
+## Producer Range Evidence At Admission
+
+Source-bound producer evidence can explain quiet intervals without relaxing
+exact-interval sample selection. Generic planning validates its normalized range
+status, not provider-specific heartbeat or sequence rules. Complete quiet evidence
+is included in pinned quality but excluded from the consumer's recorded gaps.
+Interrupted ranges remain recorded gaps, and unexplained intervals remain admission
+failures. A missing sampled bucket still yields an unavailable sample; quiet
+coverage does not manufacture a value. Frozen replay uses its pinned classification
+and witnesses, preserving older Dataset and Check behavior.
