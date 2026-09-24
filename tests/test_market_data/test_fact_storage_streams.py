@@ -111,3 +111,13 @@ def test_empty_witness_scope_does_not_query():
     session = MagicMock()
     assert not PostgresCanonicalFactStorageRepository().material_witness_exists(session, series_ids=[], material_hash="anything")
     session.execute.assert_not_called()
+
+
+def test_keyed_numeric_witness_keeps_legacy_fallback_and_payload_proof(monkeypatch):
+    storage, session, row, read = _witness_fixture(monkeypatch,
+        provenance={"old_key": {"legacy_material_hash": 777}})
+    session.execute.return_value.scalar_one_or_none.side_effect = [None, "a"]
+    assert storage.material_witness_exists(session, series_ids=[1],
+        material_hash="777", evidence_key="old_key", include_canonical=False)
+    assert session.execute.call_count == 2
+    read.assert_called_once_with(session, ["a"])

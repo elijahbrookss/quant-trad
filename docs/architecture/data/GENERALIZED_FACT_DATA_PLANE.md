@@ -295,6 +295,14 @@ inspection, archive status, and replay reconciliation acquire the lifecycle
 fence before establishing their repeatable snapshot. Replay inspects retained
 canonical events; it does not introduce another book reconstruction engine.
 
+Keyed hot legacy-material witnesses first use JSON containment against the
+existing provenance GIN index, followed by the exact key/value predicate and
+normal payload verification. An unsuccessful fast lookup retains the original
+numeric/other legacy predicate and verified cold lookup; an absent index match
+does not establish missing source evidence. This removes repeated whole-series
+JSON inspection from common typed-feature admission without adding an index,
+changing source scope, or trusting an archive alias alone.
+
 Material-alias indexes are candidate locators, not evidence: the reader verifies
 the selected archived row and its actual source witness before admission. The
 existing generic object-valued legacy witness predicate still applies. If no
