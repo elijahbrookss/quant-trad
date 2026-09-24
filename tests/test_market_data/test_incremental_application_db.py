@@ -97,8 +97,10 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     initial._run(initial._br("stanza-create"))
     initial._run(initial._rs("init"))
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        conn.exec_driver_sql("ALTER SYSTEM SET archive_command = "
-            "'pgbackrest --config=/qt-incremental-secrets/pgbackrest.conf --stanza=qt archive-push %p'")
+        from psycopg2 import sql
+        command = "pgbackrest --config=/qt-incremental-secrets/pgbackrest.conf --stanza=qt archive-push %p"
+        with conn.connection.driver_connection.cursor() as cursor:
+            cursor.execute(sql.SQL("ALTER SYSTEM SET archive_command = {}").format(sql.Literal(command)))
         conn.exec_driver_sql("SELECT pg_reload_conf()")
     objects = FilesystemRawArchiveObjectStore(source_root/"objects", writable=False)
     with storage.database.locked_snapshot_session(shared_lock_name=market_lifecycle._LIFECYCLE_LOCK_NAME) as snapshot:
