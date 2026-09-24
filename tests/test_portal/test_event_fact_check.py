@@ -338,3 +338,61 @@ def test_event_fact_check_rejects_direction_substitution() -> None:
         EventFactEvaluator().evaluate(
             plan=_plan(gap_policy="continue_degraded"), inputs=inputs
         )
+
+
+def _candle_only_inputs():
+    inputs = _inputs()
+    inputs["fact_records_by_alias"] = {}
+    inputs["fact_requirements_by_alias"] = {}
+    inputs["statistics"]["features"]["enriched"] = []
+    return inputs
+
+
+def _candle_evaluator():
+    return EventFactEvaluator(
+        version="5", result_schema_version="event_fact_analysis_result.v5",
+        descriptive_outcomes_enabled=True,
+    )
+
+
+def test_candle_only_summary_uses_eligible_direction_signed_outcomes():
+    result = _candle_evaluator().evaluate(
+        plan=_plan(gap_policy="continue_degraded"), inputs=_candle_only_inputs()
+    )
+    summary = result["descriptive_outcomes"]
+    assert result["sample_count"] == summary["population_count"] == 2
+    assert summary["horizons"]["1"]["mean_direction_signed_return"] == pytest.approx(
+        ((101 / 102 - 1) - (104 / 103 - 1)) / 2
+    )
+    assert summary["horizons"]["1"]["positive_count"] == 0
+    assert summary["horizons"]["2"]["positive_count"] == 1
+    assert summary["inference"] == "descriptive_only_no_significance_or_execution_claim"
+    assert result["analysis_status"] == "completed"
+    assert all(event["fact_references"] == {} for event in result["events"])
+    # Older evaluators must retain their exact payload shape and semantics.
+    old = EventFactEvaluator().evaluate(
+        plan=_plan(gap_policy="continue_degraded"), inputs=_inputs()
+    )
+    assert "descriptive_outcomes" not in old
+
+
+def test_candle_only_summary_excludes_unresolved_population_and_keeps_eligibility_gate():
+    inputs = _candle_only_inputs()
+    inputs["indicator_evidence"]["candles"].pop()
+    inputs["statistics"]["eligibility"]["min_samples"] = 2
+    result = _candle_evaluator().evaluate(
+        plan=_plan(gap_policy="continue_degraded"), inputs=inputs
+    )
+    assert result["candidate_count"] == 2
+    assert result["sample_count"] == result["descriptive_outcomes"]["population_count"] == 1
+    assert result["analysis_status"] == "insufficient_evidence"
+    assert result["descriptive_outcomes"]["horizons"]["1"]["mean_direction_signed_return"] == pytest.approx(101 / 102 - 1)
+
+
+def test_candle_only_empty_population_has_null_summary_not_zero_return():
+    inputs = _candle_only_inputs()
+    inputs["indicator_evidence"]["outputs"] = []
+    result = _candle_evaluator().evaluate(plan=_plan(gap_policy="continue_degraded"), inputs=inputs)
+    assert result["sample_count"] == 0
+    assert result["descriptive_outcomes"]["horizons"]["1"]["mean_direction_signed_return"] is None
+    assert result["analysis_status"] == "insufficient_evidence"

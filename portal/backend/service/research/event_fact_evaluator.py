@@ -1658,6 +1658,42 @@ def _fact_snapshot_outputs(
     return outputs, snapshots
 
 
+def _descriptive_outcomes(
+    population: Sequence[Mapping[str, Any]], horizons: Sequence[int]
+) -> dict[str, Any]:
+    """Describe eligible outcomes without asserting independence or significance."""
+    by_horizon: dict[str, Any] = {}
+    for horizon in horizons:
+        resolved = [
+            row["outcomes"][str(horizon)]
+            for row in population
+            if row["outcomes"].get(str(horizon), {}).get("status") == "resolved"
+        ]
+        returns = [float(row["direction_signed_forward_return"]) for row in resolved]
+        by_horizon[str(horizon)] = {
+            "resolved_count": len(resolved),
+            "unresolved_count": len(population) - len(resolved),
+            "positive_count": sum(value > 0 for value in returns),
+            "mean_direction_signed_return": float(np.mean(returns)) if returns else None,
+            "median_direction_signed_return": float(np.median(returns)) if returns else None,
+            "mean_favorable_excursion": (
+                float(np.mean([row["maximum_favorable_excursion"] for row in resolved]))
+                if resolved else None
+            ),
+            "mean_adverse_excursion": (
+                float(np.mean([row["maximum_adverse_excursion"] for row in resolved]))
+                if resolved else None
+            ),
+        }
+    return {
+        "schema_version": "eligible_population_descriptive.v1",
+        "population": "eligible_events_before_feature_complete_case_filter",
+        "population_count": len(population),
+        "inference": "descriptive_only_no_significance_or_execution_claim",
+        "horizons": by_horizon,
+    }
+
+
 @dataclass(frozen=True)
 class EventFactEvaluator:
     evaluator_id: str = EVENT_FACT_ANALYSIS
@@ -1665,6 +1701,7 @@ class EventFactEvaluator:
     result_schema_version: str = EVENT_FACT_RESULT_VERSION
     fact_snapshot_enabled: bool = True
     availability_trigger_enabled: bool = False
+    descriptive_outcomes_enabled: bool = False
 
     def _validate_trigger(self, detector: Mapping[str, Any]) -> None:
         if (
@@ -3050,6 +3087,10 @@ class EventFactEvaluator:
                 "transitions": gap_transitions,
             },
             "outcome_resolution": outcome_resolution,
+            **(
+                {"descriptive_outcomes": _descriptive_outcomes(population_rows, outcomes["horizons"])}
+                if self.descriptive_outcomes_enabled else {}
+            ),
             "invalidation_resolution": invalidation_summary,
             "statistics": statistical_result,
             "events": event_results,
