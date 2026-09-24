@@ -51,7 +51,8 @@ COPY scripts/db/fact_header_v2_handoff.py \
 
 # The held worker performs only the bounded legacy ownership entry point,
 # then permanently drops to the database UID before opening a connection.
-COPY scripts/automation/storage_host_prepare.py \
+COPY scripts/automation/storage_recovery_prepare.py \
+     scripts/automation/storage_host_prepare.py \
      scripts/automation/storage_device_audit.py /app/scripts/automation/
 
 # The opt-in fixed storage layout uses the database UID. Application scratch

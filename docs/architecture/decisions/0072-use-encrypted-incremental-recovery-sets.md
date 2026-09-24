@@ -10,6 +10,7 @@ tags:
   - storage
 code_paths:
   - portal/backend/service/storage/incremental_recovery.py
+  - scripts/automation/storage_recovery_prepare.py
   - scripts/ci/rehearse_incremental_runtime.py
   - tests/test_market_data/test_incremental_application_db.py
   - docker/test/incremental-application.compose.yml
@@ -144,3 +145,17 @@ then verifies current corrections, frozen revisions and archived book replay
 against the selected encrypted physical recovery point. This is an implemented
 acceptance fixture; its successful CI outcome, not its existence, qualifies the
 application boundary.
+
+
+The explicit storage_recovery_prepare.py operator accepts the existing host
+inventory and canonical PG_DSN, verifies the serving PostgreSQL filesystem/PID
+namespace and storage ownership, then initializes identity-bound repositories
+and a private archiver configuration using independently provisioned keys.
+Re-entry requires the same database, filesystem and keys. It does not generate
+keys, edit PostgreSQL settings, restart services, enable policy or take a backup.
+The runtime rehearsal proves repeated preparation leaves those controls unchanged.
+
+Full QT application acceptance passed at 170f7337: the preserved v1/v2 fixture's
+current corrections, frozen results and archived book replay matched after
+encrypted incremental physical restoration. The later preparation-operator
+integration requires its own exact-head CI result before deployment.

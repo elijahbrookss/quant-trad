@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import subprocess
+import sys
 from time import monotonic, sleep
 
 import pytest
@@ -18,9 +20,9 @@ from core.storage_targets import StorageTarget
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.db.session import Database
 from portal.backend.service.storage.incremental_recovery import (
-    EncryptedRecoveryCopies, IncrementalRecoveryConfig, _PREPARED,
+    EncryptedRecoveryCopies, IncrementalRecoveryConfig,
 )
-from portal.backend.service.storage.recovery_copies import _identity, _json_write, _snapshot_layout
+from portal.backend.service.storage.recovery_copies import _identity, _snapshot_layout
 from portal.backend.service.storage.repos import market_data, market_structure, market_lifecycle
 from portal.backend.service.storage.repos.fact_storage import PostgresCanonicalFactStorageRepository
 from portal.backend.service.market.market_structure_service import MarketStructureService
@@ -65,37 +67,43 @@ def test_encrypted_incremental_restores_qt_cold_current_frozen_and_book_replay(
     for name, key in zip(("database-key", "archive-key"), keys):
         (secrets_root/name).write_text(key)
         (secrets_root/name).chmod(0o600)
-    root = hdd/"recovery-incremental"/hashlib.sha256(identity.encode()).hexdigest()[:32]
-    root.mkdir(mode=0o700, parents=True)
-    root.parent.chmod(0o700)
-    for name in ("database", "archives", "locks", "logs"):
-        (root/name).mkdir(mode=0o700)
-    _json_write(root/"prepared.json", {
-        "schema_version":_PREPARED, "database_identity":identity,
-        "filesystem_uuid":target.filesystem_uuid,
-        "database_key_sha256":hashlib.sha256(keys[0].encode()).hexdigest(),
-        "archive_key_sha256":hashlib.sha256(keys[1].encode()).hexdigest(),
-    })
     config = IncrementalRecoveryConfig(
         Path("/usr/local/bin/pgbackrest"), Path("/usr/local/bin/restic"),
         Path("/qt-source/pgdata"), Path("/var/run/postgresql"),
         secrets_root/"database-key", secrets_root/"archive-key", max_chain_backups=4)
     url = make_url(storage.dsn)
+    limits = dict(target=target, database_identity=identity, max_bytes=128*1024**2,
+                  reserve_bytes=8*1024**2, timeout_seconds=180, max_objects=1000)
     def manager():
-        return EncryptedRecoveryCopies(incremental=config, connection_url=url, target=target,
-            database_identity=identity, max_bytes=128*1024**2, reserve_bytes=8*1024**2,
-            timeout_seconds=180, max_objects=1000)
-    archiver = secrets_root/"pgbackrest.conf"
-    archiver.write_text(
-        f"[global]\nrepo1-path={root/'database'}\nrepo1-cipher-type=aes-256-cbc\n"
-        f"repo1-cipher-pass={keys[0]}\nlock-path={root/'locks'}\n"
-        f"log-path={root/'logs'}\nlog-level-file=off\ncompress-type=zst\n"
-        f"[qt]\npg1-path=/qt-source/pgdata\npg1-socket-path=/var/run/postgresql\n"
-        f"pg1-user={url.username}\npg1-database={url.database}\n")
-    archiver.chmod(0o600)
-    initial = manager()
-    initial._run(initial._br("stanza-create"))
-    initial._run(initial._rs("init"))
+        return EncryptedRecoveryCopies(incremental=config, connection_url=url, **limits)
+    # Execute the packaged operator through its canonical PG_DSN and real
+    # PostgreSQL filesystem/PID attestation, not a bypassed test helper.
+    from dataclasses import asdict
+    inventory = tmp_path/"inventory.json"
+    recent_target = StorageTarget("ssd", "Disposable recent", "uuid-incremental-recent",
+                                 "/qt-source/pgdata", "ssd")
+    source_device = Path(recent_target.root).stat().st_dev
+    (udev/f"b{os.major(source_device)}:{os.minor(source_device)}").write_text(
+        "E:ID_FS_UUID=uuid-incremental-recent\\n".replace("\\n","\n"))
+    inventory.write_text(json.dumps({"schema_version":"qt.storage_inventory.v1",
+                                    "targets":[asdict(recent_target),asdict(target)]}))
+    config_path = secrets_root/"incremental.json"
+    config_path.write_text(json.dumps({key:str(value) if isinstance(value,Path) else value
+                                      for key,value in asdict(config).items()}))
+    config_path.chmod(0o600)
+    command = [sys.executable,"/app/scripts/automation/storage_recovery_prepare.py",
+        "--inventory",str(inventory),"--incremental-config",str(config_path),
+        "--archiver-config",str(secrets_root/"pgbackrest.conf"),
+        "--recent-target","ssd","--backup-target","hdd",
+        "--expected-database-identity",identity,
+        "--pg-controldata","/usr/lib/postgresql/15/bin/pg_controldata",
+        "--max-bytes",str(128*1024**2),"--reserve-bytes",str(8*1024**2),
+        "--recent-free-bytes",str(8*1024**2),"--timeout-seconds","120"]
+    prepared = subprocess.run(command,env={**os.environ,"PG_DSN":storage.dsn},
+                              capture_output=True,text=True,timeout=150)
+    assert prepared.returncode == 0, prepared.stderr
+    preparation = json.loads(prepared.stdout)
+    assert preparation["repositories_initialized"] and not preparation["policy_enabled"]
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         from psycopg2 import sql
         command = "pgbackrest --config=/qt-incremental-secrets/pgbackrest.conf --stanza=qt archive-push %p"

@@ -95,6 +95,20 @@ class IncrementalRecoveryConfig:
         return cls(**paths, max_chain_backups=count)
 
 
+def _keys(config, target_root):
+    # Keys on the archive drive cannot establish independent recovery.
+    for key in (config.database_key_path, config.archive_key_path):
+        if key.resolve(strict=True).is_relative_to(target_root.resolve(strict=True)):
+            raise RuntimeError("incremental_key_must_not_live_on_backup_target")
+    database_key = _private_bytes(config.database_key_path, limit=4096).decode("ascii").strip()
+    archive_key = _private_bytes(config.archive_key_path, limit=4096).decode("ascii").strip()
+    if not all(re.fullmatch(r"[0-9a-f]{64}", key) for key in (database_key, archive_key)):
+        raise ValueError("incremental_requires_independent_256bit_keys")
+    if database_key == archive_key:
+        raise ValueError("incremental_keys_must_differ")
+    return database_key, archive_key
+
+
 class EncryptedRecoveryCopies(LocalRecoveryCopies):
     """Reuse the existing target, ownership, deadline and publication guards."""
 
@@ -112,17 +126,7 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
         self.url = connection_url
         self.free_at_start = self.target.inspect(require_writable=True).available_bytes
         self.peak_allocated_bytes = 0
-        # Key custody is outside this HDD's recovery tree. The independently
-        # recoverable copy is an operator prerequisite, not an inferred backup.
-        for key in (incremental.database_key_path, incremental.archive_key_path):
-            if key.resolve(strict=True).is_relative_to(self.target_root.resolve(strict=True)):
-                raise RuntimeError("incremental_key_must_not_live_on_backup_target")
-        database_key = _private_bytes(incremental.database_key_path, limit=4096).decode("ascii").strip()
-        archive_key = _private_bytes(incremental.archive_key_path, limit=4096).decode("ascii").strip()
-        if not all(re.fullmatch(r"[0-9a-f]{64}", key) for key in (database_key, archive_key)):
-            raise ValueError("incremental_requires_independent_256bit_keys")
-        if database_key == archive_key:
-            raise ValueError("incremental_keys_must_differ")
+        database_key, archive_key = _keys(incremental, self.target_root)
         self.env = {
             "PATH": os.defpath, "LC_ALL": "C", "HOME": str(self.root),
             "PGBACKREST_REPO1_CIPHER_PASS": database_key,
@@ -451,3 +455,95 @@ class EncryptedRecoveryCopies(LocalRecoveryCopies):
             _sync(self.root)
             self._prune(keep_copies)
             return receipt
+
+
+class _RepositoryPreparationGuard(LocalRecoveryCopies):
+    namespace = EncryptedRecoveryCopies.namespace
+    schema_version = EncryptedRecoveryCopies.schema_version
+
+
+def prepare_encrypted_repository(*, incremental, connection_url, archiver_config, **limits):
+    """Explicit operator-only repository initialization; never a runtime fallback.
+
+    Requires already-created independent keys and an identity-attested target.
+    Does not create keys, change PostgreSQL settings, restart services, enable
+    saved policy or create a recovery point. A failed attempt is resumable only
+    with the exact same target/database/key identity.
+    """
+    guard = _RepositoryPreparationGuard(**limits)
+    database_key, archive_key = _keys(incremental, guard.target_root)
+    archiver_config = Path(archiver_config)
+    if (not archiver_config.is_absolute()
+            or archiver_config.parent.resolve(strict=True) != archiver_config.parent
+            or archiver_config.parent != incremental.database_key_path.parent
+            or archiver_config.parent != incremental.archive_key_path.parent
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", archiver_config.name)):
+        raise ValueError("incremental_archiver_config_must_share_private_key_directory")
+    secret_directory = archiver_config.parent.stat()
+    if (secret_directory.st_uid not in (0, os.getuid()) or secret_directory.st_mode & 0o077):
+        raise RuntimeError("incremental_key_directory_not_private")
+    for value in (str(incremental.pg_path), str(incremental.pg_socket_path),
+                  str(guard.root), connection_url.username, connection_url.database):
+        if not value or not re.fullmatch(r"[A-Za-z0-9_./-]+", value):
+            raise ValueError("incremental_archiver_configuration_invalid")
+    expected = {
+        "schema_version": _PREPARED, "database_identity": guard.identity,
+        "filesystem_uuid": guard.target.filesystem_uuid,
+        "database_key_sha256": hashlib.sha256(database_key.encode()).hexdigest(),
+        "archive_key_sha256": hashlib.sha256(archive_key.encode()).hexdigest(),
+    }
+    with guard.lock():
+        marker = guard.root/"prepared.json"
+        if marker.exists():
+            if json.loads(_private_bytes(marker, limit=16384)) != expected:
+                raise RuntimeError("incremental_prepared_repository_identity_mismatch")
+        else:
+            if {p.name for p in guard.root.iterdir()} != {"writer.lock"}:
+                raise RuntimeError("incremental_preparation_requires_empty_owned_directory")
+            # Marker binds ownership, not successful initialization/recoverability.
+            # Runtime still requires native repository identity and a complete pair.
+            _json_write(marker, expected)
+            _sync(guard.root)
+        for name in ("database", "archives", "locks", "logs"):
+            _private_directory(guard.root/name, guard.device, create=True)
+        _sync(guard.root)
+        config_text = (
+            "[global]\n"
+            f"repo1-path={guard.root/'database'}\nrepo1-cipher-type=aes-256-cbc\n"
+            f"repo1-cipher-pass={database_key}\ncompress-type=zst\n"
+            f"lock-path={guard.root/'locks'}\nlog-path={guard.root/'logs'}\n"
+            "log-level-file=off\nlog-level-console=warn\narchive-async=n\n"
+            f"[qt]\npg1-path={incremental.pg_path}\n"
+            f"pg1-socket-path={incremental.pg_socket_path}\n"
+            f"pg1-port={connection_url.port or 5432}\npg1-user={connection_url.username}\n"
+            f"pg1-database={connection_url.database}\n"
+        ).encode()
+        if archiver_config.exists():
+            if _private_bytes(archiver_config, limit=16384) != config_text:
+                raise RuntimeError("incremental_archiver_config_differs")
+        else:
+            fd = os.open(archiver_config, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as output:
+                output.write(config_text)
+                output.flush()
+                os.fsync(output.fileno())
+            _sync(archiver_config.parent)
+        remaining = max(1, int(guard.deadline-monotonic()))
+        options = {**limits, "timeout_seconds": remaining}
+        worker = EncryptedRecoveryCopies(incremental=incremental,
+                                         connection_url=connection_url, **options)
+        worker.deadline = min(worker.deadline, guard.deadline)
+        worker._run(worker._br("stanza-create"))
+        worker._native_backups()
+        if (guard.root/"archives"/"config").exists():
+            worker._run(worker._rs("cat", "config"))
+        else:
+            worker._run(worker._rs("init"))
+        guard.check()
+        return {
+            "schema_version": "qt.encrypted_recovery_preparation.v1",
+            "database_identity": guard.identity, "filesystem_uuid": guard.target.filesystem_uuid,
+            "repository_root": str(guard.root),
+            "archiver_config_sha256": hashlib.sha256(config_text).hexdigest(),
+            "repositories_initialized": True, "backup_created": False, "policy_enabled": False,
+        }

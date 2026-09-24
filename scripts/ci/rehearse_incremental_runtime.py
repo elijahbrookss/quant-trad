@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from dataclasses import replace
 import hashlib
 import json
 import os
@@ -25,9 +24,9 @@ from sqlalchemy.orm import Session
 from core.storage_targets import StorageTarget
 from market_data.archive import FilesystemRawArchiveObjectStore
 from portal.backend.service.storage.incremental_recovery import (
-    EncryptedRecoveryCopies, IncrementalRecoveryConfig, _PREPARED,
+    EncryptedRecoveryCopies, IncrementalRecoveryConfig, prepare_encrypted_repository,
 )
-from portal.backend.service.storage.recovery_copies import _json_write, _identity
+from portal.backend.service.storage.recovery_copies import _identity
 from portal.backend.service.storage.repos.market_lifecycle import _LIFECYCLE_LOCK_NAME
 
 
@@ -99,23 +98,14 @@ def rehearse(*, pg_bin, pgbackrest, restic):
                     root/"database-key", root/"archive-key", max_chain_backups=2)
         target = StorageTarget("hdd", "Disposable", "uuid-incremental-test", str(hdd), "hdd")
         recovery = hdd/"recovery-incremental"/hashlib.sha256(identity.encode()).hexdigest()[:32]
-        recovery.mkdir(mode=0o700, parents=True)
-        recovery.parent.chmod(0o700)
-        for name in ("database", "archives", "locks", "logs"):
-            (recovery/name).mkdir(mode=0o700)
-        _json_write(recovery/"prepared.json", {
-            "schema_version":_PREPARED, "database_identity":identity,
-            "filesystem_uuid":target.filesystem_uuid,
-            "database_key_sha256":hashlib.sha256(keys[0].encode()).hexdigest(),
-            "archive_key_sha256":hashlib.sha256(keys[1].encode()).hexdigest(),
-        })
         archive_config = root/"archiver.conf"
-        archive_config.write_text(
-            f"[global]\nrepo1-path={recovery/'database'}\nrepo1-cipher-type=aes-256-cbc\n"
-            f"repo1-cipher-pass={keys[0]}\nlock-path={recovery/'locks'}\n"
-            f"log-path={recovery/'logs'}\nlog-level-file=off\n"
-            f"[qt]\npg1-path={data}\npg1-socket-path={socket}\npg1-user={username}\n")
-        archive_config.chmod(0o600)
+        limits = dict(target=target, database_identity=identity, max_bytes=256*1024**2,
+                      reserve_bytes=1024**2, timeout_seconds=120, max_objects=100)
+        prepared = prepare_encrypted_repository(incremental=config, connection_url=url,
+                    archiver_config=archive_config, **limits)
+        assert prepared["repositories_initialized"] and not prepared["backup_created"]
+        assert prepare_encrypted_repository(incremental=config, connection_url=url,
+                    archiver_config=archive_config, **limits) == prepared
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             command = f"{pgbackrest} --config={archive_config} --stanza=qt archive-push %p"
             from psycopg2 import sql
@@ -123,20 +113,7 @@ def rehearse(*, pg_bin, pgbackrest, restic):
                 cursor.execute(sql.SQL("ALTER SYSTEM SET archive_command = {}").format(sql.Literal(command)))
             conn.exec_driver_sql("SELECT pg_reload_conf()")
         def manager(cls=EncryptedRecoveryCopies, **overrides):
-            return cls(incremental=config, connection_url=url, target=target,
-                       database_identity=identity, max_bytes=256*1024**2,
-                       reserve_bytes=1024**2, timeout_seconds=120,
-                       max_objects=100, **overrides)
-        class SetupDiagnostics(EncryptedRecoveryCopies):
-            def _run(self, command):
-                try:
-                    return super()._run(command)
-                except RuntimeError as exc:
-                    # Diagnostic re-read only: never replay backup/expiry/restore.
-                    raise RuntimeError(str(exc)+": command="+repr(command)) from exc
-        initial = manager(SetupDiagnostics)
-        initial._run(initial._br("stanza-create"))
-        initial._run(initial._rs("init"))
+            return cls(incremental=config, connection_url=url, **{**limits, **overrides})
         objects = FilesystemRawArchiveObjectStore(root/"objects")
         def add_object(name):
             payload = ("immutable "+name).encode()
@@ -253,6 +230,7 @@ def rehearse(*, pg_bin, pgbackrest, restic):
             "schema_version":"qt.incremental_runtime_rehearsal.v1",
             "production_touched":False,
             "paired_backup_and_restore":True,
+            "explicit_preparation_idempotent_without_backup_or_activation":True,
             "post_fence_archive_admission_preserved":True,
             "archive_expiry_excluded":True,
             "failed_archive_half_preserved_completed_points":True,
