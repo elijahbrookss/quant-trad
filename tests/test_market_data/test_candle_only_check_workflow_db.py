@@ -97,7 +97,7 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
     assert replay["original_plan_hash"] == replay["replayed_plan_hash"]
 
 
-@pytest.mark.parametrize("matched_origin", [False, True])
+@pytest.mark.parametrize("matched_origin", [False, True, "shared_landmark"])
 def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypatch, matched_origin):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
@@ -166,14 +166,20 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
             "origin_event_key_path": "metadata.breakout_event_key",
             "reference_path": "metadata.reference",
         }
+    if matched_origin == "shared_landmark":
+        payload["outcomes"]["shared_landmark"] = {
+            "classification_lag_bars": 1, "sample_lag_bars": 2,
+            "readiness_contract": "market_profile.value_location.v1",
+            "dependence": "leave_one_original_profile_out.v1",
+        }
     prepared = service.prepare_research_check_evidence(payload)
     assert prepared["status"] == "frozen", prepared
     run = service.run_research_check(prepared["next_request"])
     assert run["replayable"] is True
     assert run["evidence"]["input_binding"]["provider_access"] == "disabled"
     evaluated = run["result"]["result"]
-    assert evaluated["schema_version"] == ("event_fact_analysis_result.v6" if matched_origin else "event_fact_analysis_result.v5")
-    assert evaluated["analysis_status"] == "completed"
+    assert evaluated["schema_version"] == ("event_fact_analysis_result.v7" if matched_origin == "shared_landmark" else "event_fact_analysis_result.v6" if matched_origin else "event_fact_analysis_result.v5")
+    assert evaluated["analysis_status"] in ({"completed", "insufficient_evidence"} if matched_origin == "shared_landmark" else {"completed"})
     assert evaluated["sample_count"] > 0
     assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
     assert all(event["fact_references"] == {} for event in evaluated["events"])
@@ -188,6 +194,11 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
         )
         assert observation["observation"]["payload"]["check_id"] == run["check"]["id"]
 
+    if matched_origin == "shared_landmark":
+        shared = evaluated["shared_landmark_comparison"]
+        assert shared["origin_count"] == evaluated["sample_count"]
+        assert shared["classification_counts"].get("confirmed_by_landmark", 0) > 0
+        assert shared["horizons"]["24"]["leave_one_profile_out"]["method"] == "leave_one_original_profile_out.v1"
     replay = service.replay_research_check(run["check"]["id"])
     assert replay["status"] == "matched", replay
     assert replay["matches"] is True

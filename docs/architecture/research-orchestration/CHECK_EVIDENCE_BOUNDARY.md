@@ -22,6 +22,7 @@ code_paths:
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/event_fact_evaluator.py
   - portal/backend/service/research/matched_origin_evaluator.py
+  - portal/backend/service/research/shared_landmark_evaluator.py
   - portal/backend/service/research/service.py
   - portal/backend/service/research/result_reference.py
   - portal/backend/service/market/frozen_dataset_service.py
@@ -415,3 +416,33 @@ Interrupted ranges remain recorded gaps, and unexplained intervals remain admiss
 failures. A missing sampled bucket still yields an unavailable sample; quiet
 coverage does not manufacture a value. Frozen replay uses its pinned classification
 and witnesses, preserving older Dataset and Check behavior.
+
+## Shared-Landmark Groups and Dependence
+
+Definition v8 (evaluator v7, result `event_fact_analysis_result.v7`) additionally
+requires `outcomes.shared_landmark`. Its fixed classification and later sample
+lags preserve each raw origin's original endpoint. The existing registered owner
+reuses the same canonical public Indicator outputs and candles; no engine rerun
+or saved-result analytical input is introduced. Earlier definitions are unchanged.
+
+The initial readiness contract is `market_profile.value_location.v1`: every
+classification bar must have available public context identifying the same opaque
+original profile. A confirmation must match the original reference and be known
+by the fixed cutoff. Complete observation with no such confirmation is a separate
+comparison group, not a claim of failure or no eventual confirmation. Missing or
+late evidence and right-edge censoring remain incomplete; profile/reference
+identity changes remain unresolved. Subsequent events cannot rewrite cutoff labels.
+Only reject-gap candle evidence is admitted. The later close sample must precede
+all original endpoints; known-at clocks and shortened holding durations are explicit.
+
+Outputs separate outside, inside, and boundary-equal samples relative to the
+original directional boundary, not full value-area membership. Each horizon
+includes group distributions, explicit group sample/day eligibility, profile/day
+contributions to means, and positive-duration outcome-window overlaps. Insufficient
+groups retain descriptive results and cannot inherit a sufficient raw-arm status.
+The declared `leave_one_original_profile_out.v1` sensitivity deletes a contributing
+original profile simultaneously from both groups, including its cross-day events.
+It reports undefined empty-group deletions; this is influence analysis, not a
+confidence interval or independence correction. Deterministic chronological,
+median-nearest, adverse, and largest-absolute episodes remain inspectable. The full
+analysis is included in the canonical result hash and provider-free replay.
