@@ -97,7 +97,8 @@ def test_candle_only_check_uses_real_indicator_freeze_and_replay(monkeypatch):
     assert replay["original_plan_hash"] == replay["replayed_plan_hash"]
 
 
-def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypatch):
+@pytest.mark.parametrize("matched_origin", [False, True])
+def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypatch, matched_origin):
     import portal.backend.service.market.runtime_market_data as runtime_market_data
 
     token = uuid.uuid4().hex
@@ -157,17 +158,35 @@ def test_mixed_timeframe_profile_freezes_and_replays_with_delayed_entry(monkeypa
         "inputs": [], "gap_policy": "reject",
         "preparation": {"freeze": True, "name": f"candle-only-{token}"},
     }
+    if matched_origin:
+        payload["outcomes"]["matched_origin"] = {
+            "detector": {"type": "indicator_event", "output_name": "confirmed_balance_breakout",
+                         "event_keys": [{"key": "confirmed_balance_breakout_long", "direction": "long"}]},
+            "origin_time_path": "metadata.breakout_time",
+            "origin_event_key_path": "metadata.breakout_event_key",
+            "reference_path": "metadata.reference",
+        }
     prepared = service.prepare_research_check_evidence(payload)
     assert prepared["status"] == "frozen", prepared
     run = service.run_research_check(prepared["next_request"])
     assert run["replayable"] is True
     assert run["evidence"]["input_binding"]["provider_access"] == "disabled"
     evaluated = run["result"]["result"]
-    assert evaluated["schema_version"] == "event_fact_analysis_result.v5"
+    assert evaluated["schema_version"] == ("event_fact_analysis_result.v6" if matched_origin else "event_fact_analysis_result.v5")
     assert evaluated["analysis_status"] == "completed"
     assert evaluated["sample_count"] > 0
     assert evaluated["descriptive_outcomes"]["population_count"] == evaluated["sample_count"]
     assert all(event["fact_references"] == {} for event in evaluated["events"])
+
+    if matched_origin:
+        attribution = evaluated["matched_origin_attribution"]
+        assert attribution["matched_count"] > 0
+        assert attribution["horizons"]["24"]["common_pair_count"] > 0
+        assert attribution["horizons"]["24"]["followup_population_reconciled"] is True
+        observation = service.create_observation_from_check_evidence(
+            run["check"]["id"], {"title": "Matched origin disposable proof"}
+        )
+        assert observation["observation"]["payload"]["check_id"] == run["check"]["id"]
 
     replay = service.replay_research_check(run["check"]["id"])
     assert replay["status"] == "matched", replay

@@ -21,6 +21,7 @@ code_paths:
   - portal/backend/service/research/planning.py
   - portal/backend/service/research/execution.py
   - portal/backend/service/research/event_fact_evaluator.py
+  - portal/backend/service/research/matched_origin_evaluator.py
   - portal/backend/service/research/service.py
   - portal/backend/service/research/result_reference.py
   - portal/backend/service/market/frozen_dataset_service.py
@@ -227,7 +228,7 @@ outcome tail still resolve and freeze through the existing evidence boundary.
 No dummy reference feed or Strategy is required. Fact-snapshot sampling and
 unbound enriched features remain invalid without their typed inputs.
 
-New candle-only requests select v6; definitions v3/v4/v5 and their evaluator
+New candle-only requests without matched-origin attribution select v6; definitions v3/v4/v5 and their evaluator
 payloads remain unchanged. V6 adds a descriptive per-horizon outcome summary
 from eligible events before the feature complete-case filter: resolved and
 unresolved counts, positive counts, mean/median direction-signed returns and
@@ -237,6 +238,56 @@ from this population. Optional unresolved horizons are counted separately.
 Empty populations report null averages. Eligibility gates remain authoritative;
 a descriptive summary does not grant significance, independent samples,
 execution realism, profitability, or permission to create a validated claim.
+
+## Matched-Origin Descriptive Attribution
+
+Definition v7 (evaluator v6, result `event_fact_analysis_result.v6`) adds an
+explicit `outcomes.matched_origin` configuration to candle-only Indicator Checks.
+It uses the same admitted Indicator graph and public snapshot evidence for both
+origin and follow-up signals. It does not rerun the engine, ingest saved Check
+payloads as inputs, or create inferred price Facts. Existing definitions and their
+hashes/results remain unchanged.
+
+The configuration declares a distinct follow-up `detector` plus
+`origin_time_path`, `origin_event_key_path`, and `reference_path` metadata paths.
+For Market Profile confirmation these are `metadata.breakout_time`,
+`metadata.breakout_event_key`, and `metadata.reference`. Only bar horizons and
+descriptive sample/day eligibility are admitted initially; additional features,
+models, inferential tests, and fold/class thresholds are rejected rather than
+silently reinterpreted.
+
+Matching is exact within the request's single instrument/binding: Indicator ID,
+direction, origin event key/time, and the complete immutable reference must agree.
+Duplicate origins/follow-ups and missing identity fail loud. Changed references
+and absent origins are retained with reasons. Both arms use the original
+half-open evaluation window and unchanged outcome tail. An unmatched origin is
+not proof that it never confirms: follow-ups outside that window are not admitted.
+This is retrospective outcome classification, never a feature available at the
+origin decision.
+
+For each horizon the evaluator reports A (all eligible raw returns), B (raw
+returns on exact pairs), C (confirmed sample prices to the original raw endpoint),
+and D (confirmed prices to their own endpoints). B/C/D use the identical resolved
+pair set. C uses the already bound target candle close, not reconstruction from
+rounded summaries. The reported selection B-A, repricing C-B and extension D-C
+are descriptive accounting, not causal effects. A separate all-follow-up mean
+and its residual against D reconcile unmatched/ineligible confirmations; full
+population reconciliation is explicit. Empty pair means/differences are null.
+
+Per-pair output preserves event identities, open labels, entry close/known-at
+clocks, both endpoint closes, and inside/outside/at-boundary entry state. Positive
+finite prices and contemporaneously available post-decision samples are required
+for every contributing arm row, including unmatched rows. A follow-up sample
+after the common endpoint is unresolved. Existing outcome gap/eligibility rules
+remain in force; shortened-window excursions are not inferred from old extrema.
+
+Eligibility is checked for both arms and the common pairs at each required
+horizon, including distinct origin UTC days. A sufficient raw population cannot
+qualify an insufficient follow-up or paired population. Descriptive values remain
+visible with `insufficient_evidence`; neither replay nor sample thresholds grant
+independence, significance, out-of-sample generality or trading authority.
+The nested follow-up result and attribution are covered by the canonical result
+hash and existing frozen persistence/replay/Observation contract.
 
 ## Gap Ownership
 
