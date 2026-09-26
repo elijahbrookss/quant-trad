@@ -29,7 +29,7 @@ from scripts.db import archive_reference_v2_placement as references
 from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as raw
 from tests.test_market_data.test_fact_storage_tiers_db import storage, BASE, _placement
 from tests.test_market_data.test_fact_book_retention_db import _cold_book_handoff
-from tests.test_market_data.test_fact_header_copy_placement_db import _configure_placement
+from tests.test_market_data.test_fact_header_copy_placement_db import _configure_placement, _assert_disk
 from tests.test_market_data.test_fact_header_copy_db import _insert
 from tests.test_market_data.test_fact_raw_lineage_db import _raw_book_fixture
 from tests.test_market_data.test_archive_reference_placement_db import _options
@@ -324,7 +324,29 @@ def test_archive_copy_resumes_and_serves_frozen_history_from_hdd_only(storage, t
         assert conn.scalar(text(f"SELECT verified_rows FROM {headers.STATE} WHERE id=1")) > 0
         assert conn.scalar(text(f"SELECT count(*) FROM {SCHEMA}.fact_versions")) > 0
         _insert(conn, storage, "collection-between-staging-attempts")
-    staged = handoff.stage_handoff(engine, **staging)
+    # Raw staging must not overlap the full identity copy on SSD. Interrupt
+    # after the committed relocation, then admit a new source record and resume.
+    original_raw_copy = raw.copy_page
+    observed_history = []
+    def interrupt_before_raw_staging(conn, **kwargs):
+        _assert_disk(conn, SCHEMA+".fact_identities", Path("/qt-history"))
+        observed_history.append(headers._inspect_progress(conn)["identity_history_ready"])
+        raise RuntimeError("fixture_interrupt_after_identity_relocation")
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(raw, "copy_page", interrupt_before_raw_staging)
+        with pytest.raises(RuntimeError, match="fixture_interrupt_after_identity_relocation"):
+            handoff.stage_handoff(engine, **staging)
+    assert observed_history == [True]
+    with engine.begin() as conn:
+        assert conn.scalar(text(f"SELECT prepared_at FROM {SCHEMA}.capture WHERE id=1")) == original_attempt
+        _assert_disk(conn, SCHEMA+".fact_identities", Path("/qt-history"))
+        _insert(conn, storage, "collection-after-identity-relocation")
+    def raw_copy_without_identity_overlap(conn, **kwargs):
+        _assert_disk(conn, SCHEMA+".fact_identities", Path("/qt-history"))
+        return original_raw_copy(conn, **kwargs)
+    with monkeypatch.context() as resumed:
+        resumed.setattr(raw, "copy_page", raw_copy_without_identity_overlap)
+        staged = handoff.stage_handoff(engine, **staging)
     assert staged["staging_pass_complete"] and not staged["migration_ready"]
     assert not staged["database_handoff_committed"] and not staged["collection_resume_authorized"]
     assert handoff.stage_handoff(engine, **staging) == staged

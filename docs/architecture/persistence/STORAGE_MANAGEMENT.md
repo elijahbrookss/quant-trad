@@ -1086,3 +1086,12 @@ exercises the explicitly admitted recovery key/socket mounts across database
 preparation and interrupted activation. The separate actual encrypted recovery
 fixture verifies the configured receipt format and stale-generation rejection.
 These disposable tests do not replace physical-drive performance qualification.
+
+The fixed preserving staging sequence relocates the completed identity table and
+indexes to the HDD before starting the raw lookup copy. Their full temporary
+SSD allocations therefore do not overlap. Relocation and its recorded placement
+commit together; an interruption before raw staging retains the source and the
+original attempt clock. Retry verifies the HDD placement, catches up intervening
+source inserts and reuses the committed relocation. Identity mirroring remains
+a later bounded source-fence step. This ordering does not authorize source
+deletion or relax filesystem reserves.

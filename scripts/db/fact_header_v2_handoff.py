@@ -129,6 +129,13 @@ def stage_handoff(engine, *, placement, policy, resource_limits, source_root,
                                               timeout_seconds=step_limits()["movement_timeout_seconds"])
                 if report["caught_up_at_observation"]:
                     break
+            if copier is headers:
+                # Retire the temporary identity allocation before raw lookup
+                # staging adds its own SSD copy. Relocation is transactional
+                # and resumable; source mirroring is still enabled later.
+                with transaction() as (conn, _):
+                    headers.place_identity_on_history(
+                        conn, timeout_seconds=step_limits()["movement_timeout_seconds"])
 
     logger.info("fact_header_staging_started | original_attempt_clock_preserved=true")
     with transaction() as (conn, saved):
