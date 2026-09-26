@@ -30,7 +30,7 @@ pytestmark = [pytest.mark.db, pytest.mark.skipif(os.getenv("QT_STORAGE_DEMO") !=
 
 
 def _prepare(storage, tmp_path, monkeypatch, *, source_directory=None, destination_directory=None,
-             recent_root="/qt-source/pgdata"):
+             recent_root="/qt-source/pgdata", prepare_captures=True):
     assert os.getuid() == 70 and os.getenv("QT_DB_TEST_ISOLATED") == "1"
     source = Path(source_directory) if source_directory else Path(recent_root) / ("archive-online-"+uuid4().hex)
     source.mkdir(exist_ok=source_directory is not None)
@@ -47,15 +47,16 @@ def _prepare(storage, tmp_path, monkeypatch, *, source_directory=None, destinati
                    page_rows=2, max_page_bytes=32*1024**2, **_options(storage))
     options["policy"] = replace(options["policy"], movement_enabled=True, backup_enabled=True)
     engine = storage.database._engine
-    with engine.begin() as conn:
-        headers.prepare_copy(conn, placement=storage.copy_plan)
-        with pytest.raises(RuntimeError, match="raw_shadow_preparation_required"):
-            online.prepare(conn, source_root=options["source_root"], destination_root=destination)
-        online.raw.prepare_copy(conn)
-        assert not online.prepare(conn, source_root=options["source_root"],
+    if prepare_captures:
+        with engine.begin() as conn:
+            headers.prepare_copy(conn, placement=storage.copy_plan)
+            with pytest.raises(RuntimeError, match="raw_shadow_preparation_required"):
+                online.prepare(conn, source_root=options["source_root"], destination_root=destination)
+            online.raw.prepare_copy(conn)
+            assert not online.prepare(conn, source_root=options["source_root"],
+                                      destination_root=destination)["reused"]
+            assert online.prepare(conn, source_root=options["source_root"],
                                   destination_root=destination)["reused"]
-        assert online.prepare(conn, source_root=options["source_root"],
-                              destination_root=destination)["reused"]
     return engine, options, source, book
 
 

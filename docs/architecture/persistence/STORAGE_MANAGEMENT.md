@@ -26,6 +26,7 @@ code_paths:
   - scripts/ci/rehearse_online_worker.py
   - tests/test_storage_online_worker.py
   - scripts/db/fact_header_v2_online.py
+  - tests/test_market_data/test_fact_header_online_prepare_db.py
   - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/archive_root_v2_online.py
   - scripts/db/archive_file_v2_proof.py
@@ -1472,3 +1473,19 @@ deployment exclusion. Completed reentry leaves the receipt unchanged. This is a
 real Docker/PostgreSQL boundary proof using synthetic clients and UUID metadata
 on disposable host directories. It is not a running QT collector, distinct-drive
 admission, packaged complete online handoff or production outage measurement.
+
+### Atomic online capture preparation
+
+fact_header_v2_online.prepare_attempt combines the existing header/raw shadow,
+exact SQL protection and archive capture installation in one resource-watched
+transaction. Fixed roots/placement/recent-window policy are admitted before DDL;
+raw preparation precedes archive trigger binding. NOWAIT writer fences and a
+maximum 60-second transaction bound limit this preparation. Failure rolls back
+all newly installed capture/proof state; retries retain the original attempt
+clock and reject changed bindings or an unprotected populated shadow.
+
+This internal API does not stop clients, move bulk data or grant final-switch
+authority. The host must already have admitted the source runtime, mounts and
+durable intent. Retained-table movement stays explicit before bulk copying.
+The separately committed identity/raw/reference operations and complete
+host-to-recovery handoff still need online orchestration and qualification.

@@ -26,6 +26,7 @@ code_paths:
   - scripts/ci/rehearse_online_worker.py
   - tests/test_storage_online_worker.py
   - scripts/db/fact_header_v2_online.py
+  - tests/test_market_data/test_fact_header_online_prepare_db.py
   - scripts/db/fact_header_v2_online_proof.py
   - scripts/db/archive_root_v2_online.py
   - scripts/db/archive_file_v2_proof.py
@@ -483,3 +484,25 @@ deployment exclusion. Completed reentry leaves the receipt unchanged. This is a
 real Docker/PostgreSQL boundary proof using synthetic clients and UUID metadata
 on disposable host directories. It is not a running QT collector, distinct-drive
 admission, packaged complete online handoff or production outage measurement.
+
+### Atomic online capture preparation
+
+The internal fact_header_v2_online.prepare_attempt initializes the existing
+header and raw shadows, protected exact SQL page guards, and transactional
+archive capture in one bounded, resource-watched transaction. It checks the
+fixed SSD/HDD placement, archive roots and recent-window policy before DDL.
+Raw preparation precedes archive trigger binding. Protection is installed before
+any baseline rows are copied; an older nonempty unprotected shadow is refused.
+
+Preparation may briefly fence source/catalog writers with NOWAIT. It does not
+stop clients, perform bulk copies, relocate retained/reference tables or grant
+switch authority. Transaction failure removes all new capture/proof DDL.
+A retry validates existing identities and preserves the original capture start
+and saved duration, including after a lost COMMIT reply. A new requested duration
+cannot extend an existing attempt. The preparation transaction has its own
+maximum 60-second bound within the original attempt and resource ceiling.
+
+Host admission and durable host intent must precede this internal call. Retained
+relocation remains explicit and must commit and be observed before bulk copying.
+Private identity/raw relocation, reference preparation/validation, combined
+initial-host resumption and final recovery activation remain separate boundaries.

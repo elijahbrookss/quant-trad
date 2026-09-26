@@ -7,6 +7,7 @@ Preparation/relocation and the eventual short switch have separate admission.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from time import monotonic
 
 from sqlalchemy import text
@@ -14,12 +15,75 @@ from sqlalchemy import text
 from portal.backend.service.storage.header_resource_claims import _limits
 from scripts.db import archive_reference_v2_placement as retained
 from scripts.db import fact_header_v2_copy as headers, raw_mapping_v2_copy as raw
-from scripts.db.fact_header_v2_capture import capture_remaining_seconds
+from scripts.db import archive_root_v2_online as archive_online
+from scripts.db import archive_root_v2_copy as archives
+from scripts.db import fact_header_v2_online_proof as protection
+from scripts.db.fact_header_v2_capture import (
+    DEFAULT_ATTEMPT_SECONDS, capture_remaining_seconds, inspect_capture)
+from core.storage_move_budget import MAX_MIGRATION_SECONDS
 from scripts.db.fact_header_v2_handoff import _staging_transaction
 from scripts.db.fact_header_v2_placement import CopyPlacement
 
 logger = logging.getLogger(__name__)
 
+
+
+def prepare_attempt(engine, *, placement, policy, resource_limits, source_root,
+                    destination_root, attempt_seconds=DEFAULT_ATTEMPT_SECONDS,
+                    max_duration_seconds=30, cancelled=None):
+    """Atomically install fixed online captures and exact empty-shadow guards.
+
+    The caller already admits host identity, source runtime and mounts. This
+    short transaction may briefly fence writers, using NOWAIT; it does not stop
+    clients, move tables or copy a baseline. Failure rolls back every new capture.
+    Retry verifies the existing binding/protection and retains its original
+    start and duration, even when a different duration is requested.
+    """
+    limits = _limits(resource_limits, migration=True)
+    if (not isinstance(placement, CopyPlacement)
+            or type(attempt_seconds) is not int
+            or not 1 <= attempt_seconds <= MAX_MIGRATION_SECONDS
+            or type(max_duration_seconds) is not int or not 1 <= max_duration_seconds <= 60
+            or (cancelled is not None and not callable(cancelled))):
+        raise ValueError("fact_header_online_preparation_inputs_invalid")
+    if (policy.archives != policy.history or policy.backups != policy.history
+            or not policy.movement_enabled or not policy.backup_enabled):
+        raise ValueError("fact_header_online_fixed_automatic_policy_required")
+    retained._fixed_inputs(policy, limits, (placement.recent, placement.history))
+    if cancelled is not None and cancelled():
+        raise RuntimeError("storage_move_cancelled")
+    seconds = min(max_duration_seconds, limits["movement_timeout_seconds"])
+    started = monotonic()
+    with _staging_transaction(engine, placement=placement, policy=policy,
+            limits={**limits, "movement_timeout_seconds": seconds},
+            deadline=started+seconds, cancelled=cancelled) as (conn, saved):
+        cutoff = conn.scalar(text(
+            "SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date - :days"),
+            {"days": policy.recent_days})
+        if placement.history_before > cutoff:
+            raise RuntimeError("fact_header_online_recent_window_on_history")
+        archives._root(source_root, saved["recent_device"])
+        destination, _ = archives._root(destination_root, saved["history_device"])
+        if not destination.is_relative_to(Path(placement.history.root).resolve(strict=True)):
+            raise RuntimeError("fact_header_online_archive_outside_fixed_target")
+        headers.prepare_copy(conn, placement=placement, timeout_seconds=seconds,
+                             attempt_seconds=attempt_seconds)
+        # The raw manifest FK must precede archive trigger binding. Integrity
+        # guards must precede the first copied row, including on a retry.
+        raw.prepare_copy(conn, timeout_seconds=seconds)
+        protection.prepare(conn, timeout_seconds=seconds)
+        archive_online.prepare(conn, source_root=source_root,
+                               destination_root=destination_root, timeout_seconds=seconds)
+        attempt = inspect_capture(conn)
+        capture_remaining_seconds(conn)
+    result = {"schema_version": "qt.fact_header_online_preparation.v1",
+              "started_at": attempt["started_at"],
+              "elapsed_seconds": monotonic()-started,
+              "source_authoritative": True, "migration_ready": False,
+              "final_switch_authorized": False}
+    logger.info("fact_header_online_preparation_completed | attempt=%s elapsed_seconds=%.3f",
+                result["started_at"], result["elapsed_seconds"])
+    return result
 
 def _phase(header, lookup):
     # Finish each finite baseline before following an unbounded live tail.
