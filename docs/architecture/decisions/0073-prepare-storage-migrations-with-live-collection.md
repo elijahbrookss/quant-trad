@@ -10,6 +10,9 @@ tags:
   - migration
 code_paths:
   - scripts/automation/storage_online_controller.py
+  - scripts/automation/storage_online_launch.py
+  - scripts/ci/rehearse_online_launch.py
+  - tests/test_storage_online_launch.py
   - tests/test_storage_online_controller.py
   - tests/test_market_data/test_storage_online_controller_db.py
   - scripts/db/fact_header_v2_cancel.py
@@ -332,3 +335,41 @@ recovery activation remain required. The small SSD/HDD fixtures exercise real QT
 publication and database switching, not running collector performance or measured
 production downtime. Original attempt clocks and file/resource limits remain;
 online capacity and production-cardinality metadata costs are still unqualified.
+
+### Explicit online worker launch boundary
+
+`storage_online_launch.launched_online_worker` owns the deployment flock while
+an already prepared controller serves its bounded pipe. It binds exact source
+clients, candidate image/source hash, database identity, request/inventory hashes,
+source directory device/inode, and the original persisted capture deadline.
+An interrupted create can adopt only its exact admitted container; reentry does
+not renew the attempt or reuse a dead process's file proof. A running/uncertain
+worker requires reconciliation rather than blind reattachment. Exit stops only
+the owned background worker when its channel does not finish; no source service
+pause/restart, preparation, ownership change or switch is provided.
+
+The worker entrypoint validates the sealed request and enters the restricted
+read identity before importing application code. Lifecycle output goes to stderr;
+stdout is reserved for protocol. Sole PG_DSN connects through the bound database
+network namespace, and prepared placement must match the fixed SSD/HDD roots.
+Descriptor and memory/swap limits are explicit inputs, not evidence of measured
+production admission. No hidden limit increase occurs.
+
+Physical verification requires PostgreSQL's PID namespace and follows its process
+root. Therefore omitting recovery keys from the worker's own mounts alone does
+NOT exclude them: the peer's mounts can remain reachable through /proc. This
+launcher refuses a database with any mount other than the exact PGDATA and HDD
+roots, including recovery configuration/key/socket mounts. It also refuses source
+write aliases and control path overlaps. The existing recovery-prepared production
+recipe does not meet this restriction. The next host integration must resolve
+that boundary without exposing keys, weakening physical proof, or changing
+permissions beneath live publishers. The launcher is not ready for that recipe.
+
+Disposable native startup qualification admits the actual Docker contract,
+rejects a peer recovery-secret mount, preserves legacy source ownership, and
+reaches a deliberately unavailable database with empty protocol stdout. It does
+not prove successful prepared-controller startup, collection performance, full
+host recovery preparation or a short outage. Unit tests additionally cover
+configuration drift and interruption after create before receipt persistence.
+The complete initial/final host pauses and resource admission remain release
+requirements. No final switch command is exposed on this channel.

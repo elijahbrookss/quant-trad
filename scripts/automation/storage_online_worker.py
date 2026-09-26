@@ -108,3 +108,121 @@ def enter_source_read_identity(source_root, *, expected_device, expected_inode):
             "source_device": expected_device, "source_inode": expected_inode,
             "effective_capabilities": ["DAC_READ_SEARCH"],
             "source_ownership_changed": False, "migration_ready": False}
+
+
+def prepared_controller_main():
+    """Private prepared-attempt entrypoint; never bootstrap, pause or activate."""
+    import contextlib
+    import hashlib
+    import json
+    import sys
+
+    def unique(pairs):
+        values = {}
+        for key, value in pairs:
+            if key in values:
+                raise ValueError("storage_online_request_duplicate_field")
+            values[key] = value
+        return values
+
+    path = Path("/run/qt-online/request.json")
+    # The host pins the immutable request bytes and explicit mounts before start.
+    # Read at most one bounded request, not arbitrary paths from stdin.
+    with path.open("rb") as handle:
+        data = handle.read(65537)
+    if (len(data) > 65536
+            or hashlib.sha256(data).hexdigest() != os.environ.get("QT_ONLINE_REQUEST_SHA256")):
+        raise RuntimeError("storage_online_request_binding_changed")
+    request = json.loads(data, object_pairs_hook=unique)
+    if (not isinstance(request, dict) or set(request) != {
+            "schema_version", "source_revision", "source_tree_hash", "database_identity",
+            "source_device", "source_inode", "expected_started_at", "policy",
+            "resource_limits", "max_page_bytes", "max_objects", "max_bytes",
+            "page_rows", "command_seconds"}
+            or request["schema_version"] != "qt.storage_online_worker.v1"):
+        raise ValueError("storage_online_request_invalid")
+    for key, variable in (("source_revision", "QT_IMAGE_SOURCE_REVISION"),
+                          ("source_tree_hash", "QT_IMAGE_SOURCE_TREE_HASH")):
+        value = request[key]
+        length = 40 if key == "source_revision" else 64
+        if (not isinstance(value, str) or len(value) != length
+                or any(c not in "0123456789abcdef" for c in value)
+                or value != os.environ.get(variable)):
+            raise RuntimeError("storage_online_image_binding_changed")
+    source = Path("/app/logs/market-structure/objects")
+    # The transition precedes every application/SQLAlchemy/controller import.
+    enter_source_read_identity(source, expected_device=request["source_device"],
+                                expected_inode=request["source_inode"])
+    protocol_fd = os.dup(sys.stdout.fileno())
+    try:
+        # Application lifecycle diagnostics stay on stderr. The original stdout
+        # descriptor is exclusively the bounded host protocol.
+        with contextlib.redirect_stdout(sys.stderr):
+            from sqlalchemy import create_engine, text
+            from sqlalchemy.pool import NullPool
+            from core.storage_inventory import read_storage_inventory
+            from core.storage_targets import StoragePolicy
+            from scripts.db import fact_header_v2_copy as headers
+            from scripts.db import fact_header_v2_capture as capture
+            from scripts.db import fact_header_v2_placement as physical
+            from scripts.db import archive_reference_v2_placement as references
+            from scripts.automation.storage_online_controller import OnlineController, serve
+            from portal.backend.service.storage.header_resource_claims import _limits
+
+            policy = StoragePolicy.from_dict(request["policy"])
+            limits = _limits(request["resource_limits"], migration=True)
+            targets = read_storage_inventory(Path("/run/qt-online/inventory.json"))
+            if len(targets) != 2:
+                raise RuntimeError("storage_online_two_targets_required")
+            references._fixed_inputs(policy, limits, targets)
+            if (policy.archives != policy.history or policy.backups != policy.history
+                    or not policy.movement_enabled or not policy.backup_enabled):
+                raise RuntimeError("storage_online_fixed_policy_required")
+            dsn = os.environ.get("PG_DSN")
+            if not dsn:
+                raise RuntimeError("storage_online_pg_dsn_required")
+            engine = create_engine(dsn, poolclass=NullPool,
+                                   connect_args={"connect_timeout": 5})
+            try:
+                with engine.begin() as conn:
+                    conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    conn.exec_driver_sql("SET LOCAL statement_timeout='10s'")
+                    identity = conn.scalar(text(
+                        "SELECT c.system_identifier::text||'/'||d.oid::text "
+                        "FROM pg_control_system() c CROSS JOIN pg_database d "
+                        "WHERE d.datname=current_database()"))
+                    if identity != request["database_identity"]:
+                        raise RuntimeError("storage_online_database_binding_changed")
+                    with capture.migration_step(conn, 10):
+                        saved = headers._inspect_progress(conn)["placement"]
+                        if saved is None:
+                            raise RuntimeError("storage_online_prepared_placement_required")
+                        placement = physical._restore(saved["plan"])
+                        if {t.target_id: t for t in targets} != {
+                                t.target_id: t for t in (placement.recent, placement.history)}:
+                            raise RuntimeError("storage_online_inventory_binding_changed")
+                        if (placement.recent.root != "/var/lib/postgresql/data"
+                                or placement.history.root != "/qt-history"):
+                            raise RuntimeError("storage_online_fixed_roots_required")
+                with OnlineController(engine, placement=placement, policy=policy,
+                        resource_limits=limits, source_root=source,
+                        destination_root=Path("/qt-history/archives/objects"),
+                        **{key: request[key] for key in (
+                            "expected_started_at", "max_page_bytes", "max_objects",
+                            "max_bytes", "page_rows", "command_seconds")}) as controller:
+                    serve(controller, input_fd=sys.stdin.fileno(), output_fd=protocol_fd)
+            finally:
+                engine.dispose()
+    finally:
+        os.close(protocol_fd)
+
+
+if __name__ == "__main__":
+    import sys
+    try:
+        prepared_controller_main()
+    except Exception as exc:
+        # Raw SQL/driver errors may contain private connection material.
+        print("event=storage_online_worker_failed error_type="+type(exc).__name__,
+              file=sys.stderr, flush=True)
+        raise SystemExit(1) from None

@@ -118,6 +118,8 @@ jobs:
 
       - name: Prove online worker reads legacy archives without changing ownership
         run: python3 scripts/ci/rehearse_online_worker.py --image qt-incremental-runtime-proof
+      - name: Prove confined online worker launch and refusal
+        run: python3 -m scripts.ci.rehearse_online_launch --image qt-incremental-runtime-proof
 
       - name: Prove encrypted restore through actual QT current and frozen readers
         run: ./scripts/ci/run_test_suite.sh incremental-recovery
