@@ -41,22 +41,25 @@ def rehearse(image):
         prepare=project+"-prepare";owned.append(prepare)
         code = """
 from pathlib import Path
-import os
+import os,json
 root=Path('/fixture')
 for name in ('pg','history'):
  os.chown(root/name,70,70);os.chmod(root/name,0o700)
 for name in ('working','working/objects'):
  os.chown(root/name,1000,1000);os.chmod(root/name,0o750)
 p=root/'working/objects/private';p.write_bytes(b'preserved fixture');p.chmod(0o600)
+s=(root/'working/objects').stat();print(json.dumps({'device':s.st_dev,'inode':s.st_ino}))
 """
-        run(["run","--name",prepare,"--user","0:0","--network","none","--memory","64m","--cpus","0.25",
+        prepared=run(["run","--name",prepare,"--user","0:0","--network","none","--memory","64m","--cpus","0.25",
              "--label","qt.disposable="+project,"--mount","type=bind,source="+str(root)+",target=/fixture",
              "--entrypoint","python",image_id,"-c",code])
-        info=(root/"working"/"objects").stat()
+        # The CI host need not be UID1000. Observe owned fixture metadata in
+        # its root preparation container, without relaxing legacy permissions.
+        info=json.loads(prepared.stdout)
         request={"schema_version":"qt.storage_online_worker.v1",
             "source_revision":image_env["QT_IMAGE_SOURCE_REVISION"],
             "source_tree_hash":image_env["QT_IMAGE_SOURCE_TREE_HASH"],
-            "database_identity":"1/1","source_device":info.st_dev,"source_inode":info.st_ino,
+            "database_identity":"1/1","source_device":info["device"],"source_inode":info["inode"],
             "expected_started_at":"2026-09-26T00:00:00+00:00",
             "policy":{"recent":["ssd"],"history":["hdd"],"archives":["hdd"],"backups":["hdd"],
                       "movement_enabled":True,"backup_enabled":True},
